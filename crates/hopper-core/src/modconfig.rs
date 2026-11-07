@@ -23,6 +23,24 @@ pub fn files(inst: &Instance, addon: &Addon) -> Vec<String> {
     files_for(&inst.root, &ids)
 }
 
+/// Whether a listing entry is a folder / a file. The listing already knows
+/// (no call per entry, which on a `config/` of thousands of files was most
+/// of the time); only a link is followed, to see what it leads to.
+pub(crate) fn entry_is_dir(e: &std::fs::DirEntry) -> bool {
+    match e.file_type() {
+        Ok(t) if !t.is_symlink() => t.is_dir(),
+        _ => e.path().is_dir(),
+    }
+}
+
+/// See [`entry_is_dir`].
+pub(crate) fn entry_is_file(e: &std::fs::DirEntry) -> bool {
+    match e.file_type() {
+        Ok(t) if !t.is_symlink() => t.is_file(),
+        _ => e.path().is_file(),
+    }
+}
+
 pub(crate) fn files_for(root: &Path, ids: &[String]) -> Vec<String> {
     let ids: Vec<String> = ids.iter().map(|i| squash(i)).filter(|i| i.len() >= 3 && i != "minecraft").collect();
     if ids.is_empty() {
@@ -32,7 +50,7 @@ pub(crate) fn files_for(root: &Path, ids: &[String]) -> Vec<String> {
     let Ok(dir) = std::fs::read_dir(root.join("config")) else { return out };
     for e in dir.flatten() {
         let path = e.path();
-        let is_dir = path.is_dir();
+        let is_dir = entry_is_dir(&e);
         let name = e.file_name().to_string_lossy().to_string();
         if !ids.contains(&owner(&name, is_dir)) {
             continue;

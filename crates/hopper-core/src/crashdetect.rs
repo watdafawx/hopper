@@ -1516,6 +1516,20 @@ pub struct ConfigDiff {
 /// crash names, then whole files. `server_text` reads a file of the server
 /// (relative path), there or through Hopper Server.
 pub fn config_differs(inst_root: &Path, c: &Crash, server_text: impl Fn(&str) -> Option<String>) -> Vec<ConfigDiff> {
+    config_differs_with(inst_root, c, |_| std::collections::HashMap::new(), server_text)
+}
+
+/// [`config_differs`] for a server that is far away (Hopper Server): its
+/// files' content hashes come in one request (`server_hashes`, as
+/// [`crate::hopperd::Client::hashes`]), and the text of a file is asked for
+/// only when its hash differs from the instance's copy. A file the server
+/// has no hash for is read as before. The result is the same either way.
+pub fn config_differs_with(
+    inst_root: &Path,
+    c: &Crash,
+    server_hashes: impl Fn(&[String]) -> std::collections::HashMap<String, String>,
+    server_text: impl Fn(&str) -> Option<String>,
+) -> Vec<ConfigDiff> {
     let norm = |t: &str| t.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
     let mut out: Vec<ConfigDiff> = Vec::new();
     let on = c.switches.iter().map(|s| (s, true));
@@ -1528,15 +1542,26 @@ pub fn config_differs(inst_root: &Path, c: &Crash, server_text: impl Fn(&str) ->
             out.push(ConfigDiff { mod_id: s.mod_id.clone(), file: s.file.clone(), setting: Some((s.clone(), mine, server)) });
         }
     }
+    let mut wanted: Vec<(String, String)> = Vec::new();
     for s in c.suspects.iter().filter(|s| s.certainty <= Certainty::Likely && !s.mod_id.is_empty() && !s.client_only) {
         for rel in crate::modconfig::files_for(inst_root, std::slice::from_ref(&s.mod_id)).into_iter().take(8) {
-            if out.iter().any(|d| d.file == rel) || !crate::configdiff::safe_rel(&rel) {
+            if out.iter().any(|d| d.file == rel) || wanted.iter().any(|w| w.1 == rel) || !crate::configdiff::safe_rel(&rel) {
                 continue;
             }
-            let (Ok(mine), Some(theirs)) = (fs::read_to_string(inst_root.join(&rel)), server_text(&rel)) else { continue };
-            if norm(&mine) != norm(&theirs) {
-                out.push(ConfigDiff { mod_id: s.mod_id.clone(), file: rel, setting: None });
-            }
+            wanted.push((s.mod_id.clone(), rel));
+        }
+    }
+    let rels: Vec<String> = wanted.iter().map(|w| w.1.clone()).collect();
+    let theirs_hash = if rels.is_empty() { Default::default() } else { server_hashes(&rels) };
+    for (mod_id, rel) in wanted {
+        let Ok(mine) = fs::read_to_string(inst_root.join(&rel)) else { continue };
+        // The very same bytes: nothing to read from the server.
+        if theirs_hash.get(&rel).is_some_and(|h| *h == sha1_smol::Sha1::from(mine.as_bytes()).hexdigest()) {
+            continue;
+        }
+        let Some(theirs) = server_text(&rel) else { continue };
+        if norm(&mine) != norm(&theirs) {
+            out.push(ConfigDiff { mod_id, file: rel, setting: None });
         }
     }
     out
@@ -3188,6 +3213,48 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         fs::File::options().write(true).open(root.join("logs/latest.log")).unwrap().set_modified(later).unwrap();
         assert!(server(&root).is_none());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn config_differs_asks_the_server_for_text_only_where_the_hash_differs() {
+        use std::cell::Cell;
+        use std::collections::HashMap;
+        let inst = std::env::temp_dir().join(format!("hopper-cfgdiff-hash-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&inst);
+        fs::create_dir_all(inst.join("config")).unwrap();
+        let mine = "a = 1\nb = 2\n";
+        fs::write(inst.join("config/mymod-common.toml"), mine).unwrap();
+        let c = Crash {
+            suspects: vec![Suspect { mod_id: "mymod".into(), certainty: Certainty::Likely, ..Default::default() }],
+            ..Default::default()
+        };
+        let rel = "config/mymod-common.toml";
+        let sha = |t: &str| sha1_smol::Sha1::from(t.as_bytes()).hexdigest();
+        let reads = Cell::new(0);
+        let text = |t: &'static str| {
+            let reads = &reads;
+            move |_: &str| {
+                reads.set(reads.get() + 1);
+                Some(t.to_string())
+            }
+        };
+        let hashes = |h: String| move |_: &[String]| HashMap::from([(rel.to_string(), h.clone())]);
+
+        // Same hash: same bytes, so no text crosses the wire and no difference.
+        assert!(config_differs_with(&inst, &c, hashes(sha(mine)), text("never")).is_empty());
+        assert_eq!(reads.get(), 0);
+        // Another hash: the text is read and compared (a different value is a difference).
+        let d = config_differs_with(&inst, &c, hashes(sha("x")), text("a = 1\nb = 3\n"));
+        assert_eq!((d.len(), reads.get()), (1, 1));
+        // Another hash but the same words (line endings): read, not a difference.
+        reads.set(0);
+        assert!(config_differs_with(&inst, &c, hashes(sha("x")), text("a = 1\r\nb = 2\r\n")).is_empty());
+        assert_eq!(reads.get(), 1);
+        // No hash for the file (an older server): read as before.
+        reads.set(0);
+        let d = config_differs_with(&inst, &c, |_| HashMap::new(), text("a = 9\n"));
+        assert_eq!((d.len(), reads.get()), (1, 1));
+        let _ = fs::remove_dir_all(&inst);
     }
 
     const TNP_WATCHDOG: &str = include_str!("crashdetect_fixtures/tnp-watchdog-after-stop.txt");
