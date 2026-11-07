@@ -8,7 +8,7 @@ export function followJob(id, onUpdate = () => {}) {
   return new Promise((resolve, reject) => {
     const poll = async () => {
       try {
-        const st = await api(`/jobs/${id}`);
+        const st = await api(`/jobs/${id}`, { poll: true });
         onUpdate(st);
         if (!st.done) {
           setTimeout(poll, 500);

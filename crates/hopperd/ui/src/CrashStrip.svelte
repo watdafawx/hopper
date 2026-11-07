@@ -10,6 +10,8 @@
   import { crashes } from './lib/crashseen.svelte.js';
 
   let { server, seeWhy, hidden = false } = $props();
+  // The live feed hands over a new `server` object every second; effects key on the id.
+  const sid = $derived(server.id);
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
@@ -36,7 +38,7 @@
   }
 
   $effect(() => {
-    server.id;
+    sid;
     back = false;
     if (settled) load();
     else {

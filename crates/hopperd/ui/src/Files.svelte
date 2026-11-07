@@ -204,6 +204,7 @@
 
   // Mods' icons and names beside config files, loaded the first time
   // config/ (or a search) shows any.
+  // loop-safe: `!owners` stops it once the answer is in; one rerun at most
   $effect(() => {
     const want = path === 'config' || path.startsWith('config/') || (found?.hits || []).some((h) => h.path.startsWith('config/'));
     const s = sid;

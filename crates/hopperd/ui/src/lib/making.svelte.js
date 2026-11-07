@@ -15,7 +15,7 @@ export function track(job, name, start = false) {
     const m = find(job);
     if (!m) return;
     try {
-      const st = await api(`/jobs/${job}`);
+      const st = await api(`/jobs/${job}`, { poll: true });
       m.detail = st.detail || '';
       m.progress = st.progress;
       if (!st.done) return setTimeout(poll, 600);

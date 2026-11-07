@@ -13,6 +13,8 @@
   // `items`: settings to send instead of the players' copy compare (the
   // crash card's change), in the same shape: [{ rel, client_rel, diffs }].
   let { server, onClose, items = null } = $props();
+  // The live feed hands over a new `server` object every second; effects key on the id.
+  const sid = $derived(server.id);
 
   const files = $derived((items || cfg.players?.files || []).filter((f) => f.diffs.length));
   const kid = (f, d) => `${f.rel}\u0000${(d.path || []).join('.')}\u0000${d.key}`;
@@ -56,7 +58,7 @@
   }
 
   $effect(() => {
-    api(`/servers/${encodeURIComponent(server.id)}/configs/pushes`).then((r) => (sent = r.pushes.slice(0, 8))).catch(() => {});
+    api(`/servers/${encodeURIComponent(sid)}/configs/pushes`).then((r) => (sent = r.pushes.slice(0, 8))).catch(() => {});
   });
   const STATE = { pending: 'Waiting', applied: 'Applied', dismissed: 'Turned down' };
 </script>

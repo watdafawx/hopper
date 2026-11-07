@@ -8,14 +8,17 @@
   import BrowseRich from './BrowseRich.svelte';
 
   let { server, mod } = $props();
+  // The live feed hands over a new `server` object every second; effects key on the id.
+  const sid = $derived(server.id);
   let page = $state(null);
   let err = $state('');
 
   $effect(() => {
     const file = mod.file;
+    const id = sid;
     page = null;
     err = '';
-    api(`/servers/${encodeURIComponent(server.id)}/mods/source/page?file=${encodeURIComponent(file)}`)
+    api(`/servers/${encodeURIComponent(id)}/mods/source/page?file=${encodeURIComponent(file)}`)
       .then((p) => { if (mod.file === file) page = p; })
       .catch((e) => { if (mod.file === file) err = e.message || String(e); });
   });

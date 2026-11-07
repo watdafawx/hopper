@@ -5,9 +5,11 @@
   import { color } from './lib/format.js';
   let { server, cls = 'ic' } = $props();
   let broken = $state(false);
+  // The live feed hands over a new `server` object every second; key on the icon.
+  const icon = $derived(server.icon);
   // A new icon gets another try.
   $effect(() => {
-    server.icon;
+    icon;
     broken = false;
   });
   const src = $derived(server.icon && !broken ? `/api/v1/servers/${encodeURIComponent(server.id)}/icon?v=${server.icon}` : '');

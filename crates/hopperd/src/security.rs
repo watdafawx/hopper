@@ -39,6 +39,46 @@ type Count = (Instant, u32, u32);
 pub struct Limiter {
     seen: Mutex<HashMap<IpAddr, Count>>,
     proxies: Mutex<HashMap<IpAddr, Count>>,
+    busy: Mutex<HashMap<IpAddr, Tally>>,
+}
+
+/// Where an address stands at 80% of its limit: a loop in a page shows in
+/// the log before it locks the person out. Paths only, never queries,
+/// tokens or bodies.
+const WARN_AT: u32 = LIMIT_ALL / 10 * 8;
+/// Most distinct paths kept per address and minute.
+const TALLY_PATHS: usize = 200;
+
+#[derive(Default)]
+struct Tally {
+    since: Option<Instant>,
+    total: u32,
+    warned: bool,
+    paths: HashMap<String, u32>,
+}
+
+impl Tally {
+    /// Counts one request; returns the warning the first time this minute's
+    /// count reaches [`WARN_AT`], naming the three busiest paths.
+    fn add(&mut self, now: Instant, path: &str) -> Option<String> {
+        if self.since.is_none_or(|s| now.duration_since(s) >= Duration::from_secs(60)) {
+            *self = Tally { since: Some(now), ..Default::default() };
+        }
+        self.total += 1;
+        if let Some(n) = self.paths.get_mut(path) {
+            *n += 1;
+        } else if self.paths.len() < TALLY_PATHS {
+            self.paths.insert(path.to_string(), 1);
+        }
+        if self.warned || self.total < WARN_AT {
+            return None;
+        }
+        self.warned = true;
+        let mut top: Vec<_> = self.paths.iter().collect();
+        top.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let top: Vec<String> = top.iter().take(3).map(|(p, n)| format!("{p} x{n}")).collect();
+        Some(format!("{} requests in under a minute (limit {LIMIT_ALL}); busiest: {}", self.total, top.join(", ")))
+    }
 }
 
 /// Adds a request to `ip`'s count for this minute and returns the count.
@@ -69,6 +109,21 @@ impl Limiter {
             ok &= all <= PROXY_ALL && (!auth || guess <= PROXY_AUTH);
         }
         ok
+    }
+
+    /// Notes an allowed API request; logs one warning per minute when this
+    /// address is close to its limit.
+    pub fn note(&self, client: IpAddr, path: &str) {
+        let warning = {
+            let mut m = self.busy.lock().unwrap();
+            if m.len() > 10_000 {
+                m.retain(|_, t| t.since.is_some_and(|s| s.elapsed() < Duration::from_secs(60)));
+            }
+            m.entry(client).or_default().add(Instant::now(), path)
+        };
+        if let Some(w) = warning {
+            log::warn!("{client}: {w}. A page may be asking in a loop.");
+        }
     }
 }
 
@@ -233,6 +288,9 @@ pub async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Res
     if api && !app.limiter.allow(ip, from, is_guessable(&path)) {
         return deny(StatusCode::TOO_MANY_REQUESTS, "Too many requests. Wait a minute.");
     }
+    if api {
+        app.limiter.note(from, &path);
+    }
 
     // Where the log says a request came from: the person, and the proxy
     // in between when there is one.
@@ -326,6 +384,28 @@ mod tests {
         assert!(!l.allow(ip, ip, true), "sign-ins are limited");
         let other: IpAddr = "8.8.4.4".parse().unwrap();
         assert!(l.allow(other, other, true), "per address");
+    }
+
+    #[test]
+    fn warns_once_a_minute_at_80_percent() {
+        let mut t = Tally::default();
+        let start = Instant::now();
+        let mut warnings = vec![];
+        for i in 0..LIMIT_ALL {
+            let path = if i % 4 == 0 { "/api/v1/hello" } else { "/api/v1/servers/a/address" };
+            warnings.extend(t.add(start, path));
+        }
+        assert_eq!(warnings.len(), 1, "one line, not one per request");
+        assert!(warnings[0].contains("/api/v1/servers/a/address x"), "{}", warnings[0]);
+        assert!(!warnings[0].contains('?'), "paths only");
+        // Next minute: counts start over and it can warn again.
+        let later = start + Duration::from_secs(61);
+        assert!(t.add(later, "/api/v1/hello").is_none());
+        let again = (0..WARN_AT).filter_map(|_| t.add(later, "/api/v1/hello")).count();
+        assert_eq!(again, 1);
+        // Below the line: silent.
+        let mut quiet = Tally::default();
+        assert_eq!((0..WARN_AT - 1).filter_map(|_| quiet.add(start, "/x")).count(), 0);
     }
 
     #[test]

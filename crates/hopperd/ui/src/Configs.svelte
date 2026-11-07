@@ -22,6 +22,8 @@
   import { say } from './lib/toast.svelte.js';
 
   let { server, path = '', go } = $props();
+  // The live feed hands over a new `server` object every second; effects key on the id.
+  const sid = $derived(server.id);
   // A running server reads saved settings when it restarts (as on desktop).
   const running = $derived(['running', 'starting'].includes(server.state));
 
@@ -155,7 +157,7 @@
   const initials = (n) => n.replace(/[^A-Za-z0-9 ]/g, '').split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase() || '?';
 
   // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
-  $effect(() => followConfigs(server.id));
+  $effect(() => followConfigs(sid));
 </script>
 
 <div class="cfgp">

@@ -43,16 +43,17 @@
     }
   }
 
+  const powerState = $derived(server.state);
   // Once per server and power state; faster while Chunky runs.
   $effect(() => {
     sid;
-    server.state;
+    powerState;
     load();
   });
   const pg = $derived(data?.pregen);
   const pgRunning = $derived(pg?.state === 'running');
   let timer = setInterval(() => {
-    if (pgRunning || busy) load();
+    if ((pgRunning || busy) && !document.hidden) load();
   }, 2000);
   onDestroy(() => clearInterval(timer));
 

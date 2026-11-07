@@ -120,7 +120,7 @@
       fileMissing = false;
       fileLoading = true;
       readFile();
-      fileTimer = setInterval(readFile, 5000);
+      fileTimer = setInterval(() => document.hidden || readFile(), 5000);
     }
   }
   onDestroy(stopFile);
