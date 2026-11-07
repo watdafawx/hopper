@@ -27,6 +27,9 @@ const CONTEXT: &str = "Appearance";
 /// enough that sweeping across the list doesn't repaint everything.
 const HOVER_DELAY: Duration = Duration::from_millis(150);
 
+/// Chips per row in the popover.
+const COLUMNS: usize = 2;
+
 /// The popover's own keys, while it is open.
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some(CONTEXT);
@@ -52,19 +55,116 @@ pub fn current_name(s: &hopper::settings::Settings) -> String {
     }
 }
 
+// ---- the preview, as plain state ---------------------------------------------
+
+/// Which theme the app shows while the popover is open: the saved one, or
+/// one being tried. No timers or painting in here; the button asks it what
+/// to do, so the rules can be tested.
+#[derive(Default, Debug)]
+pub(crate) struct Preview {
+    /// What the pointer or arrow keys rest on; None = the saved theme.
+    want: Option<String>,
+    /// What is painted when it isn't the saved theme.
+    shown: Option<String>,
+    /// Bumped whenever `want` changes, so a timer from before does nothing.
+    generation: u64,
+}
+
+impl Preview {
+    /// The pointer or keys moved. Returns the generation to settle after the
+    /// delay, or None when nothing changed.
+    pub fn point(&mut self, want: Option<String>) -> Option<u64> {
+        if self.want == want {
+            return None;
+        }
+        self.want = want;
+        self.generation += 1;
+        Some(self.generation)
+    }
+
+    /// The delay for `generation` ran out. Returns what to paint (Some(None)
+    /// = the saved theme again), or None when it was stale or already shown.
+    pub fn settle(&mut self, generation: u64) -> Option<Option<String>> {
+        if generation != self.generation || self.want == self.shown {
+            return None;
+        }
+        self.shown = self.want.clone();
+        Some(self.want.clone())
+    }
+
+    /// The popover closed (Esc, outside click, the button): what to paint to
+    /// undo a preview, or None when none was on screen.
+    pub fn close(&mut self) -> Option<Option<String>> {
+        self.want = None;
+        self.generation += 1;
+        self.shown.take().map(|_| None)
+    }
+
+    /// A theme was kept: nothing is being tried any more.
+    pub fn keep(&mut self) {
+        self.want = None;
+        self.shown = None;
+        self.generation += 1;
+    }
+
+    pub fn is_previewing(&self) -> bool {
+        self.shown.is_some()
+    }
+}
+
+/// Where an arrow key goes in blocks of chips (`sizes` per block, `COLUMNS`
+/// wide), from the flat position `at`. Left and right walk the list; up and
+/// down keep the column, step to the neighbouring block at its edge, and land
+/// on the last chip of a short row.
+pub(crate) fn grid_move(sizes: &[usize], at: usize, dx: isize, dy: isize) -> usize {
+    let total: usize = sizes.iter().sum();
+    if total == 0 {
+        return 0;
+    }
+    let at = at.min(total - 1);
+    if dy == 0 {
+        return (at as isize + dx).clamp(0, total as isize - 1) as usize;
+    }
+    // Which block, and where in it.
+    let (mut block, mut start) = (0, 0);
+    while at >= start + sizes[block] {
+        start += sizes[block];
+        block += 1;
+    }
+    let i = at - start;
+    let col = i % COLUMNS;
+    if dy < 0 {
+        if i >= COLUMNS {
+            return start + i - COLUMNS;
+        }
+        // The row above is the last row of the nearest non-empty block.
+        let Some(prev) = (0..block).rev().find(|b| sizes[*b] > 0) else { return at };
+        let pstart: usize = sizes[..prev].iter().sum();
+        let last_row = (sizes[prev] - 1) / COLUMNS * COLUMNS;
+        pstart + (last_row + col).min(sizes[prev] - 1)
+    } else {
+        let n = sizes[block];
+        if i + COLUMNS < n {
+            return start + i + COLUMNS;
+        }
+        // A short last row below: its last chip.
+        if i / COLUMNS < (n - 1) / COLUMNS {
+            return start + n - 1;
+        }
+        let Some(next) = (block + 1..sizes.len()).find(|b| sizes[*b] > 0) else { return at };
+        let nstart: usize = sizes[..next].iter().sum();
+        nstart + col.min(sizes[next] - 1)
+    }
+}
+
 pub struct AppearanceButton {
     store: Entity<Store>,
     app: WeakEntity<AppView>,
     pub open: bool,
     /// Where the button was last painted, in window coordinates.
     pub bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// The theme the pointer or the arrow keys rest on; None = the saved one.
-    want: Option<String>,
-    /// The theme on screen right now when it isn't the saved one.
-    shown: Option<String>,
-    /// Bumped on every change of `want`, so a stale timer does nothing.
-    generation: u64,
-    /// The arrow keys' place in the list.
+    preview: Preview,
+    /// The arrow keys' place in the flat list.
     cursor: usize,
     focus: FocusHandle,
 }
@@ -76,16 +176,14 @@ impl AppearanceButton {
             app,
             open: false,
             bounds: Rc::new(Cell::new(None)),
-            want: None,
-            shown: None,
-            generation: 0,
+            preview: Preview::default(),
             cursor: 0,
             focus: cx.focus_handle(),
         }
     }
 
-    fn names() -> Vec<String> {
-        std::iter::once(String::new()).chain(crate::theme::names()).collect()
+    fn flat() -> Vec<String> {
+        crate::theme::sections().into_iter().flat_map(|s| s.names).collect()
     }
 
     pub fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -94,7 +192,7 @@ impl AppearanceButton {
             return;
         }
         let current = current_name(self.store.read(cx).settings());
-        self.cursor = Self::names().iter().position(|n| *n == current).unwrap_or(0);
+        self.cursor = Self::flat().iter().position(|n| *n == current).unwrap_or(0);
         self.open = true;
         window.focus(&self.focus, cx);
         cx.notify();
@@ -102,39 +200,30 @@ impl AppearanceButton {
 
     /// Closes and puts the saved theme back if one was being previewed.
     fn close(&mut self, cx: &mut Context<Self>) {
-        self.want = None;
-        self.generation += 1;
-        self.sync(cx);
+        if let Some(paint) = self.preview.close() {
+            self.paint(paint, cx);
+        }
         self.open = false;
         cx.notify();
     }
 
-    /// Puts on screen what `want` says (the saved theme when it is None).
-    fn sync(&mut self, cx: &mut Context<Self>) {
-        if self.want == self.shown {
-            return;
-        }
+    /// Puts a theme on screen (None = the saved one) without saving it.
+    fn paint(&mut self, name: Option<String>, cx: &mut Context<Self>) {
         let s = self.store.read(cx).settings();
-        let name = self.want.clone().unwrap_or_else(|| current_name(s));
+        let name = name.unwrap_or_else(|| current_name(s));
         let zoom = s.zoom;
         crate::theme::apply(&name, 0, zoom, cx);
-        self.shown = self.want.clone();
         cx.notify();
     }
 
     /// What the pointer rests on changed: show it once it has rested.
-    fn set_want(&mut self, want: Option<String>, cx: &mut Context<Self>) {
-        if self.want == want {
-            return;
-        }
-        self.want = want;
-        self.generation += 1;
-        let g = self.generation;
+    fn point(&mut self, want: Option<String>, cx: &mut Context<Self>) {
+        let Some(g) = self.preview.point(want) else { return };
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(HOVER_DELAY).await;
             let _ = this.update(cx, |t, cx| {
-                if t.generation == g {
-                    t.sync(cx);
+                if let Some(paint) = t.preview.settle(g) {
+                    t.paint(paint, cx);
                 }
             });
         })
@@ -142,7 +231,7 @@ impl AppearanceButton {
     }
 
     fn commit(&mut self, name: String, cx: &mut Context<Self>) {
-        self.generation += 1;
+        self.preview.keep();
         self.store.update(cx, |s, cx| {
             s.update_settings(
                 |st| {
@@ -154,17 +243,16 @@ impl AppearanceButton {
         });
         let zoom = self.store.read(cx).settings().zoom;
         crate::theme::apply(&name, 0, zoom, cx);
-        self.want = None;
-        self.shown = None;
         cx.notify();
     }
 
-    /// Moves the arrow keys' place by `by` and previews what is there.
-    fn step(&mut self, by: isize, cx: &mut Context<Self>) {
-        let names = Self::names();
-        let last = names.len() as isize - 1;
-        self.cursor = (self.cursor as isize + by).clamp(0, last) as usize;
-        self.set_want(Some(names[self.cursor].clone()), cx);
+    /// Moves the arrow keys' place and previews what is there.
+    fn step(&mut self, dx: isize, dy: isize, cx: &mut Context<Self>) {
+        let sizes: Vec<usize> = crate::theme::sections().iter().map(|s| s.names.len()).collect();
+        self.cursor = grid_move(&sizes, self.cursor, dx, dy);
+        if let Some(n) = Self::flat().get(self.cursor) {
+            self.point(Some(n.clone()), cx);
+        }
         cx.notify();
     }
 
@@ -180,18 +268,19 @@ impl AppearanceButton {
         let current = current_name(&s);
         let place = widgets::anchored_popover(b, window);
         let rem = window.rem_size();
-        let names = Self::names();
-        let this = cx.entity();
-        let bounds = self.bounds.clone();
+        let cursor = self.cursor;
+        let moved = self.preview.want.is_some();
 
-        let chips = names.iter().enumerate().map(|(ix, name)| {
-            let saved = *name == current;
-            let at_cursor = ix == self.cursor && self.want.is_some();
-            let (n_hover, n_click) = (name.clone(), name.clone());
-            div()
-                .w_1_2()
-                .p_0p5()
-                .child(
+        // The chips, block by block, with a heading over each but the first.
+        let mut flat_ix = 0;
+        let blocks = crate::theme::sections().into_iter().enumerate().map(|(si, sec)| {
+            let chips = sec.names.iter().map(|name| {
+                let ix = flat_ix;
+                flat_ix += 1;
+                let saved = *name == current;
+                let at_cursor = ix == cursor && moved;
+                let (n_hover, n_click) = (name.clone(), name.clone());
+                div().w_1_2().p_0p5().child(
                     h_flex()
                         .id(("theme-chip", ix))
                         .gap_1()
@@ -203,17 +292,32 @@ impl AppearanceButton {
                         .hover(|st| widgets::row_hover(st, cx))
                         .when(at_cursor, |r| widgets::row_hover(r, cx))
                         .when(saved, |r| widgets::row_selected(r, cx))
-                        .child(div().flex_1().min_w_0().overflow_hidden().child(crate::settings_page::theme_row(name, cx)))
+                        .child(div().flex_1().min_w_0().child(crate::settings_page::theme_row(name, cx)))
                         .when(saved, |r| r.child(Icon::new(IconName::Check).xsmall().text_color(theme.primary)))
                         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                             if *hovered {
-                                this.set_want(Some(n_hover.clone()), cx);
-                            } else if this.want.as_deref() == Some(n_hover.as_str()) {
-                                this.set_want(None, cx);
+                                this.point(Some(n_hover.clone()), cx);
+                            } else if this.preview.want.as_deref() == Some(n_hover.as_str()) {
+                                this.point(None, cx);
                             }
                         }))
                         .on_click(cx.listener(move |this, _, _, cx| this.commit(n_click.clone(), cx))),
                 )
+            });
+            v_flex()
+                .when(si > 0, |v| {
+                    v.child(
+                        div()
+                            .px_2()
+                            .pt_2()
+                            .pb_0p5()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(theme.muted_foreground)
+                            .child(sec.title.to_uppercase()),
+                    )
+                })
+                .child(h_flex().flex_wrap().children(chips))
         });
 
         let zoom = s.zoom;
@@ -232,17 +336,17 @@ impl AppearanceButton {
             )
         };
         let app = self.app.clone();
+        let bounds = self.bounds.clone();
         let panel = v_flex()
             .id("appearance-popover")
             .key_context(CONTEXT)
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &Up, _, cx| this.step(-2, cx)))
-            .on_action(cx.listener(|this, _: &Down, _, cx| this.step(2, cx)))
-            .on_action(cx.listener(|this, _: &Left, _, cx| this.step(-1, cx)))
-            .on_action(cx.listener(|this, _: &Right, _, cx| this.step(1, cx)))
+            .on_action(cx.listener(|this, _: &Up, _, cx| this.step(0, -1, cx)))
+            .on_action(cx.listener(|this, _: &Down, _, cx| this.step(0, 1, cx)))
+            .on_action(cx.listener(|this, _: &Left, _, cx| this.step(-1, 0, cx)))
+            .on_action(cx.listener(|this, _: &Right, _, cx| this.step(1, 0, cx)))
             .on_action(cx.listener(|this, _: &Pick, _, cx| {
-                let names = Self::names();
-                if let Some(n) = names.get(this.cursor) {
+                if let Some(n) = Self::flat().get(this.cursor) {
                     this.commit(n.clone(), cx);
                 }
             }))
@@ -274,7 +378,7 @@ impl AppearanceButton {
                             .ghost()
                             .xsmall()
                             .icon(IconName::FolderOpen)
-                            .tooltip("Your own themes: gpui-component theme .json files go here")
+                            .tooltip("Open your theme folder: gpui-component theme .json files go here")
                             .on_click(|_, _, _| {
                                 if let Some(d) = crate::theme::custom_dir() {
                                     let _ = std::fs::create_dir_all(&d);
@@ -287,7 +391,7 @@ impl AppearanceButton {
                             .ghost()
                             .xsmall()
                             .icon(IconName::RefreshCw)
-                            .tooltip("Read the theme folder again")
+                            .tooltip("Reload themes from the folder")
                             .on_click(cx.listener(|_, _, window, cx| {
                                 let n = crate::theme::reload_custom();
                                 window.push_notification(
@@ -301,10 +405,10 @@ impl AppearanceButton {
             .child(
                 div()
                     .id("appearance-themes")
-                    .h((rem * 15.).min(place.max_h - rem * 12.).max(rem * 6.))
+                    .h((rem * 18.).min(place.max_h - rem * 12.).max(rem * 6.))
                     .px_1p5()
                     .overflow_y_scrollbar()
-                    .child(h_flex().flex_wrap().children(chips)),
+                    .child(v_flex().children(blocks)),
             )
             .child(
                 v_flex()
@@ -342,7 +446,6 @@ impl AppearanceButton {
                         })),
                 ),
             );
-        let _ = this;
         // 23-26rem: wide enough for "Catppuccin Macchiato" in a column.
         Some(
             place
@@ -373,5 +476,134 @@ impl Render for AppearanceButton {
                     .on_click(cx.listener(|this, _, window, cx| this.toggle(window, cx))),
             )
             .child(canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {}).absolute().size_full())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(n: &str) -> Option<String> {
+        Some(n.to_string())
+    }
+
+    #[::core::prelude::v1::test]
+    fn resting_on_a_theme_shows_it_only_after_the_delay_runs_out() {
+        let mut p = Preview::default();
+        let g = p.point(s("Nord")).expect("a change");
+        // Nothing on screen yet: the timer hasn't fired.
+        assert!(!p.is_previewing());
+        assert_eq!(p.settle(g), Some(s("Nord")));
+        assert!(p.is_previewing());
+        // Settling the same generation twice paints once.
+        assert_eq!(p.settle(g), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn sweeping_across_themes_paints_only_where_the_pointer_stops() {
+        let mut p = Preview::default();
+        let a = p.point(s("Nord")).unwrap();
+        let b = p.point(s("Dracula")).unwrap();
+        let c = p.point(s("Kanagawa")).unwrap();
+        // The timers of the themes it moved past do nothing.
+        assert_eq!(p.settle(a), None);
+        assert_eq!(p.settle(b), None);
+        assert_eq!(p.settle(c), Some(s("Kanagawa")));
+        // The same theme again is no change at all.
+        assert_eq!(p.point(s("Kanagawa")), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn leaving_the_list_puts_the_saved_theme_back_after_the_delay() {
+        let mut p = Preview::default();
+        let g = p.point(s("Nord")).unwrap();
+        p.settle(g);
+        let leave = p.point(None).unwrap();
+        // Still showing Nord until the delay, so moving to a neighbour in
+        // between never flashes the old theme.
+        assert!(p.is_previewing());
+        assert_eq!(p.settle(leave), Some(None));
+        assert!(!p.is_previewing());
+    }
+
+    #[::core::prelude::v1::test]
+    fn leaving_and_coming_back_quickly_changes_nothing() {
+        let mut p = Preview::default();
+        let g = p.point(s("Nord")).unwrap();
+        p.settle(g);
+        let leave = p.point(None).unwrap();
+        let back = p.point(s("Nord")).unwrap();
+        assert_eq!(p.settle(leave), None);
+        // Nord is still the one shown, so there is nothing to repaint.
+        assert_eq!(p.settle(back), None);
+        assert!(p.is_previewing());
+    }
+
+    #[::core::prelude::v1::test]
+    fn closing_undoes_a_preview_and_cancels_a_pending_one() {
+        // Esc or an outside click while a preview is on screen.
+        let mut p = Preview::default();
+        let g = p.point(s("Nord")).unwrap();
+        p.settle(g);
+        assert_eq!(p.close(), Some(None));
+        assert!(!p.is_previewing());
+        // Closing before the delay ran out: nothing was painted, nothing to undo,
+        // and the late timer does nothing.
+        let g = p.point(s("Dracula")).unwrap();
+        assert_eq!(p.close(), None);
+        assert_eq!(p.settle(g), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn keeping_a_theme_ends_the_preview_without_a_revert() {
+        let mut p = Preview::default();
+        let g = p.point(s("Nord")).unwrap();
+        p.settle(g);
+        p.keep();
+        assert!(!p.is_previewing());
+        // Closing afterwards must not repaint the old saved theme over it.
+        assert_eq!(p.close(), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn arrow_keys_walk_the_blocks_like_the_grid_looks() {
+        // System 1, Dark 5 (2 columns: 2+2+1), Light 4, Yours 1.
+        let sizes = [1, 5, 4, 1];
+        // Flat positions: System 0 | Dark 1..=5 | Light 6..=9 | Yours 10.
+        assert_eq!(grid_move(&sizes, 0, 1, 0), 1);
+        assert_eq!(grid_move(&sizes, 0, -1, 0), 0);
+        assert_eq!(grid_move(&sizes, 10, 1, 0), 10);
+        // Down from System goes to the top of Dark in the same column.
+        assert_eq!(grid_move(&sizes, 0, 0, 1), 1);
+        // Inside Dark, down keeps the column: first chip -> third.
+        assert_eq!(grid_move(&sizes, 1, 0, 1), 3);
+        // The short last row (one chip) is reached from either column.
+        assert_eq!(grid_move(&sizes, 4, 0, 1), 5);
+        assert_eq!(grid_move(&sizes, 3, 0, 1), 5);
+        // Down from the last Dark chip enters Light's first row.
+        assert_eq!(grid_move(&sizes, 5, 0, 1), 6);
+        // Up from Light's top row lands in Dark's last (short) row.
+        assert_eq!(grid_move(&sizes, 6, 0, -1), 5);
+        assert_eq!(grid_move(&sizes, 7, 0, -1), 5);
+        // Up from the very top stays; down from the very bottom stays.
+        assert_eq!(grid_move(&sizes, 0, 0, -1), 0);
+        assert_eq!(grid_move(&sizes, 10, 0, 1), 10);
+        // Yours has one chip, in the left column: up lands on Light's last
+        // row, left column.
+        assert_eq!(grid_move(&sizes, 10, 0, -1), 8);
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_saved_name_follows_the_old_dark_light_setting() {
+        let mut st = hopper::settings::Settings::default();
+        st.theme_name = String::new();
+        st.theme = 0;
+        assert_eq!(current_name(&st), "");
+        st.theme = 1;
+        assert_eq!(current_name(&st), crate::theme::HOPPER_DARK);
+        st.theme = 2;
+        assert_eq!(current_name(&st), crate::theme::HOPPER_LIGHT);
+        st.theme_name = "Nord".to_string();
+        assert_eq!(current_name(&st), "Nord");
     }
 }

@@ -156,6 +156,32 @@ pub fn names() -> Vec<String> {
         .collect()
 }
 
+/// One block of the appearance menu.
+pub struct Section {
+    pub title: &'static str,
+    /// Theme names; "" is Follow Windows.
+    pub names: Vec<String>,
+}
+
+/// The menu's blocks: Follow Windows, Dark (Hopper Dark first), Light, then
+/// the user's own theme files when there are any.
+fn sections_of(custom: &[String]) -> Vec<Section> {
+    let named = |dark: bool| PALETTES.iter().filter(move |p| p.dark == dark).map(|p| p.name.to_string());
+    let mut out = vec![
+        Section { title: "System", names: vec![String::new()] },
+        Section { title: "Dark", names: std::iter::once(HOPPER_DARK.to_string()).chain(named(true)).collect() },
+        Section { title: "Light", names: named(false).collect() },
+    ];
+    if !custom.is_empty() {
+        out.push(Section { title: "Yours", names: custom.to_vec() });
+    }
+    out
+}
+
+pub fn sections() -> Vec<Section> {
+    sections_of(&custom().iter().map(|c| c.name.to_string()).collect::<Vec<_>>())
+}
+
 /// A theme's look in four colors: page, panel, accent, text.
 pub fn swatch(name: &str) -> [Hsla; 4] {
     let c = |hex: &str| {
@@ -586,6 +612,76 @@ mod tests {
             .map(|(n, c)| format!("{n} {c:.2}"))
             .collect();
         assert!(low.is_empty(), "primary_foreground on primary under 4.5:1: {low:?}");
+    }
+
+    #[::core::prelude::v1::test]
+    fn menu_sections_group_dark_and_light() {
+        let s = sections_of(&[]);
+        let titles: Vec<_> = s.iter().map(|s| s.title).collect();
+        assert_eq!(titles, ["System", "Dark", "Light"]);
+        // Follow Windows is first, alone.
+        assert_eq!(s[0].names, [""]);
+        // Hopper Dark leads the dark ones; every dark palette is there once.
+        assert_eq!(s[1].names[0], HOPPER_DARK);
+        assert_eq!(s[1].names.len(), 1 + PALETTES.iter().filter(|p| p.dark).count());
+        assert_eq!(s[2].names[0], HOPPER_LIGHT);
+        assert!(s[2].names.iter().all(|n| !PALETTES.iter().any(|p| p.name == n.as_str() && p.dark)));
+        // Nothing is listed twice, and nothing is missing from `names()`.
+        let mut all: Vec<_> = s.iter().flat_map(|s| s.names.iter().cloned()).filter(|n| !n.is_empty()).collect();
+        let mut menu = names();
+        all.sort();
+        menu.sort();
+        assert_eq!(all, menu);
+        // The user's own themes get a block of their own, last.
+        let s = sections_of(&["Mine".to_string()]);
+        assert_eq!(s.last().map(|s| (s.title, s.names.clone())), Some(("Yours", vec!["Mine".to_string()])));
+    }
+
+    /// Hopper Server's web UI reads its themes from this file, so the two
+    /// apps cannot drift apart. `UPDATE_THEMES=1 cargo test` rewrites it.
+    #[::core::prelude::v1::test]
+    fn web_theme_file_matches_the_palettes() {
+        let row = |n: &str, dark: bool, c: [&str; 13]| {
+            serde_json::json!({
+                "name": n, "dark": dark, "bg": c[0], "panel": c[1], "surface": c[2], "raised": c[3], "border": c[4],
+                "text": c[5], "muted": c[6], "accent": c[7], "onAccent": c[8], "success": c[9], "info": c[10],
+                "warning": c[11], "danger": c[12],
+            })
+        };
+        let mut rows = vec![row(
+            HOPPER_DARK,
+            true,
+            ["#121214", "#0e0e10", "#1f1f23", "#28282d", "#26262b", "#ededef", "#9a9aa3", "#f97316", "#1c0d02", "#22c55e", "#38bdf8", "#facc15", "#ef4444"],
+        )];
+        // Dark ones first, as in the menu.
+        for dark in [true, false] {
+            for p in PALETTES.iter().filter(|p| p.dark == dark) {
+                rows.push(row(
+                    p.name,
+                    p.dark,
+                    [p.bg, p.panel, p.surface, p.raised, p.border, p.fg, p.muted, p.accent, p.accent_fg, p.success, p.info, p.warning, p.danger],
+                ));
+            }
+        }
+        let want = serde_json::to_string_pretty(&rows).unwrap() + "\n";
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/hopperd/ui/src/lib/themes.json");
+        if std::env::var_os("UPDATE_THEMES").is_some() {
+            std::fs::write(&path, &want).unwrap();
+        }
+        let have = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+        assert_eq!(have, want, "crates/hopperd/ui/src/lib/themes.json is out of date: run UPDATE_THEMES=1 cargo test web_theme_file");
+    }
+
+    /// The Hopper Dark row above is theme.json's colours.
+    #[::core::prelude::v1::test]
+    fn hopper_dark_row_matches_theme_json() {
+        let c = hopper_dark().expect("theme.json").colors;
+        let get = |v: Option<gpui_kit::SharedString>| v.map(|s| s.to_string()).unwrap_or_default();
+        assert_eq!(get(c.background), "#121214");
+        assert_eq!(get(c.sidebar), "#0e0e10");
+        assert_eq!(get(c.foreground), "#ededef");
+        assert_eq!(get(c.primary), "#f97316");
+        assert_eq!(get(c.border), "#26262b");
     }
 
     #[::core::prelude::v1::test]

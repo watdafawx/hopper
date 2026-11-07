@@ -41,6 +41,16 @@ gpui_kit::actions!(
     ]
 );
 
+/// The next zoom step above `z` (the last one when there is none).
+pub(crate) fn zoom_next(z: u16) -> u16 {
+    AppView::ZOOMS.iter().copied().find(|s| *s > z).unwrap_or(*AppView::ZOOMS.last().unwrap_or(&200))
+}
+
+/// The next zoom step below `z` (the first one when there is none).
+pub(crate) fn zoom_prev(z: u16) -> u16 {
+    AppView::ZOOMS.iter().rev().copied().find(|s| *s < z).unwrap_or(AppView::ZOOMS[0])
+}
+
 /// Where the window opens: where it was last, if that is still on a
 /// display, else centered.
 pub fn start_bounds(saved: Option<hopper::settings::SavedWindow>, cx: &App) -> WindowBounds {
@@ -693,14 +703,12 @@ impl AppView {
 
     fn zoom_in(&mut self, _: &ZoomIn, window: &mut Window, cx: &mut Context<Self>) {
         let z = self.store.read(cx).settings().zoom;
-        let next = Self::ZOOMS.iter().copied().find(|s| *s > z).unwrap_or(200);
-        self.zoom_to(next, window, cx);
+        self.zoom_to(zoom_next(z), window, cx);
     }
 
     fn zoom_out(&mut self, _: &ZoomOut, window: &mut Window, cx: &mut Context<Self>) {
         let z = self.store.read(cx).settings().zoom;
-        let next = Self::ZOOMS.iter().rev().copied().find(|s| *s < z).unwrap_or(67);
-        self.zoom_to(next, window, cx);
+        self.zoom_to(zoom_prev(z), window, cx);
     }
 
     fn zoom_reset(&mut self, _: &ZoomReset, window: &mut Window, cx: &mut Context<Self>) {
@@ -1558,4 +1566,28 @@ fn quit_ok(window: &mut Window, cx: &mut App) -> bool {
             })
     });
     false
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::{zoom_next, zoom_prev};
+
+    #[::core::prelude::v1::test]
+    fn zoom_steps_up_and_down_and_stops_at_the_ends() {
+        assert_eq!(zoom_next(100), 110);
+        assert_eq!(zoom_prev(100), 90);
+        // Off the table (an old setting) still lands on a step.
+        assert_eq!(zoom_next(101), 110);
+        assert_eq!(zoom_prev(101), 100);
+        assert_eq!(zoom_next(200), 200);
+        assert_eq!(zoom_prev(67), 67);
+        // Walking up from the bottom visits every step once.
+        let mut z = 67;
+        let mut seen = vec![z];
+        while zoom_next(z) != z {
+            z = zoom_next(z);
+            seen.push(z);
+        }
+        assert_eq!(seen, crate::app::AppView::ZOOMS);
+    }
 }
