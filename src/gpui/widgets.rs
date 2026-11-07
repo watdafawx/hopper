@@ -860,6 +860,7 @@ fn rail_view(
     let theme = cx.theme();
     let (fg, muted, wash, primary) = (theme.foreground, theme.muted_foreground, theme.list_hover, theme.primary);
     let on_primary = theme.primary_foreground;
+    let rem: f32 = theme.font_size.into();
     let tint = primary.opacity(alpha::SELECTED);
     let track = fg.opacity(0.06);
     let n = items.len();
@@ -897,11 +898,11 @@ fn rail_view(
                         el.child(div().relative().child(Icon::new(icon.unwrap()).small()).when(badge && !on && count.is_some_and(|c| c > 0), |d| {
                             // Anchored by its left edge so more digits grow to the
                             // right; the button's right padding (below) makes room.
-                            d.child(count_badge(count.unwrap_or(0).to_string(), primary, on_primary).absolute().top(px(-7.)).left(px(9.)))
+                            d.child(count_badge(count.unwrap_or(0).to_string(), primary, on_primary, cx).absolute().top(px((RAIL_BADGE_TOP * rem).round())).left(px((RAIL_BADGE_LEFT * rem).round())))
                         }))
                     })
                     .when(badge && !on && count.is_some_and(|c| c > 0), |el| {
-                        el.pr(px(7. + rail_badge_extra(count.unwrap_or(0))))
+                        el.pr(px(7. + rail_badge_extra(count.unwrap_or(0), rem)))
                     })
                     .when(on, |el| {
                         // The label and count fade in when the option opens.
@@ -945,44 +946,99 @@ fn rail_view(
     )
 }
 
+/// Pixel sizes of a [`count_badge`], all derived from the rem so the badge
+/// scales with the zoom exactly like its digits (0.75 rem). A fixed pixel box
+/// stops fitting the digits as soon as the zoom is not 100%. Whole pixels
+/// only: a half-pixel box blurs the pill's edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BadgeMetrics {
+    /// Pill height (and minimum width: one digit is a circle).
+    pub h: f32,
+    /// Padding left and right of the digits.
+    pub pad: f32,
+    /// Width one more digit adds (the UI font's digits are all this wide).
+    pub digit: f32,
+}
+
+pub fn badge_metrics(rem: f32) -> BadgeMetrics {
+    // The digits are about 0.54 rem tall; the pill leaves an equal gap above
+    // and below them, so its height has the same parity as the digits.
+    let digits = (rem * BADGE_DIGIT_H).round();
+    let gap = ((rem * BADGE_H - digits) / 2.).round().max(2.);
+    BadgeMetrics { h: digits + 2. * gap, pad: (rem * BADGE_PAD).round().max(3.), digit: rem * BADGE_ADV }
+}
+const BADGE_DIGIT_H: f32 = 0.54;
+const BADGE_H: f32 = 0.9333;
+const BADGE_PAD: f32 = 0.2667;
+const BADGE_ADV: f32 = 0.41;
+
 /// A small solid count badge (the orange number on an icon): one digit is a
 /// circle, more digits widen it into a pill. Never wraps, never shrinks, so
 /// a count of any length stays on one line. Callers position it. `on_fill` is
 /// the theme's own text colour for the fill (`primary_foreground` on
 /// `primary`): a light theme colour gets dark digits, a dark one white, as the
 /// theme's filled buttons do, so the number is readable in every theme.
-pub fn count_badge(text: impl Into<SharedString>, fill: Hsla, on_fill: Hsla) -> Div {
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .whitespace_nowrap()
-        // The same size as the History button's badge (14px, 12px digits), so
-        // the numbers read alike on every icon.
-        .min_w(px(14.))
-        .h(px(14.))
-        .px(px(4.))
-        .rounded_full()
-        .bg(fill)
-        .text_color(on_fill)
-        .text_xs()
-        // The UI font's tall ascent leaves digits low when centred; 3px (measured: 3 above, 3 below, like History) lifts them.
-        .pb(px(3.))
-        .font_weight(FontWeight::BOLD)
-        .child(text.into())
+/// Used by the rail's Updates icon and the History button, so both read alike
+/// at every zoom.
+///
+/// It is painted by hand, not laid out: a layout puts the pill and the text
+/// at whatever fractional pixel its parents land on, and the font's own
+/// ascent then leaves the digits a pixel high or low depending on the zoom
+/// and the place. Here the pill snaps to whole pixels and the digits' top and
+/// bottom are placed from the font's cap height, so the gap above and below
+/// is the same everywhere.
+pub fn count_badge(text: impl Into<SharedString>, fill: Hsla, on_fill: Hsla, cx: &App) -> Div {
+    let rem: f32 = cx.theme().font_size.into();
+    let m = badge_metrics(rem);
+    let text: SharedString = text.into();
+    let n = text.chars().count();
+    let w = count_badge_width(n, rem);
+    let font_size = px(rem * 0.75);
+    div().flex_none().w(px(w)).h(px(m.h)).child(
+        canvas(
+            |_, _, _| {},
+            move |bounds, _, window, cx| {
+                let s = window.scale_factor();
+                let snap = |v: Pixels| px((f32::from(v) * s).round() / s);
+                let origin = point(snap(bounds.origin.x), snap(bounds.origin.y));
+                let size = size(px(w), px(m.h));
+                window.paint_quad(PaintQuad { corner_radii: (px(m.h / 2.)).into(), ..gpui::fill(Bounds { origin, size }, fill) });
+                let mut font = window.text_style().font();
+                font.weight = FontWeight::BOLD;
+                let ts = window.text_system().clone();
+                let cap = ts.cap_height(ts.resolve_font(&font), font_size);
+                let run = TextRun { len: text.len(), font, color: on_fill, background_color: None, underline: None, strikethrough: None };
+                let line = ts.shape_line(text.clone(), font_size, &[run], None);
+                // Digit ink: `cap` rows tall, standing on the baseline. Put
+                // the same number of rows above and below it (the extra row
+                // of an odd gap goes below, where the eye forgives it).
+                let cap_px = (f32::from(cap) * s).round() / s;
+                let top_gap = ((m.h - cap_px) / 2.).floor();
+                let baseline = origin.y + px(top_gap + cap_px);
+                let x = origin.x + (px(w) - line.width) / 2.;
+                // Line height = ascent + descent, so the baseline sits `ascent` below the origin.
+                let _ = line.paint(point(x, baseline - line.ascent), line.ascent + line.descent, TextAlign::default(), None, window, cx);
+            },
+        )
+        .size_full(),
+    )
 }
 
-/// Width of a [`count_badge`] holding `n` (12px bold digits, 4px each side).
-fn count_badge_width(n: usize) -> f32 {
-    let digits = n.max(1).to_string().len() as f32;
-    (digits * 7. + 8.).max(14.)
+/// Width of a [`count_badge`] holding `n` digits.
+fn count_badge_width(n: usize, rem: f32) -> f32 {
+    let m = badge_metrics(rem);
+    let digits = n.max(1) as f32;
+    (digits * m.digit + 2. * m.pad).round().max(m.h)
 }
 
-/// Extra right padding a rail button needs so its badge (starting 9px into
-/// the 16px icon) doesn't reach the next button.
-pub fn rail_badge_extra(n: usize) -> f32 {
-    (9. + count_badge_width(n) - 16. - 7.).max(0.)
+/// Where a rail badge starts, from its icon's left edge and top (in rems).
+const RAIL_BADGE_LEFT: f32 = 0.6;
+const RAIL_BADGE_TOP: f32 = -0.4667;
+
+/// Extra right padding a rail button needs so its badge (starting 0.6 rem into
+/// the 1 rem icon) doesn't reach the next button.
+pub fn rail_badge_extra(n: usize, rem: f32) -> f32 {
+    (RAIL_BADGE_LEFT * rem + count_badge_width(n, rem) - rem - rem * 0.4667).max(0.)
 }
 
 /// Buttons inside a clickable header that opens and closes its section
@@ -2870,16 +2926,33 @@ impl Anchored {
 
 #[cfg(test)]
 mod tests {
-    use super::{count_badge_width, job_label, rail_badge_extra};
+    use super::{badge_metrics, count_badge_width, job_label, rail_badge_extra};
 
     #[test]
     fn rail_badge_makes_room_as_digits_grow() {
-        // One digit fits in the button's own padding; more push it wider.
-        assert!(rail_badge_extra(1) <= 1.5);
-        assert!(rail_badge_extra(99) < rail_badge_extra(175));
-        assert!(rail_badge_extra(175) > 0.);
-        assert!(rail_badge_extra(12345) > rail_badge_extra(1234));
-        assert!(count_badge_width(1) >= 14.);
+        for rem in [15., 18.75, 30.] {
+            // One digit fits in the button's own padding; more push it wider.
+            assert!(rail_badge_extra(1, rem) <= 0.1 * rem);
+            assert!(rail_badge_extra(99, rem) < rail_badge_extra(175, rem));
+            assert!(rail_badge_extra(175, rem) > 0.);
+            assert!(rail_badge_extra(12345, rem) > rail_badge_extra(1234, rem));
+            assert!(count_badge_width(1, rem) >= badge_metrics(rem).h);
+        }
+    }
+
+    #[test]
+    fn badge_is_whole_pixels_with_a_balanced_gap_at_every_zoom() {
+        for zoom in [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200] {
+            let rem = 15. * zoom as f32 / 100.;
+            let m = badge_metrics(rem);
+            assert_eq!(m.h.fract(), 0., "height at {zoom}%");
+            // The same look as before at 100%: 14px pill, 4px sides.
+            if zoom == 100 {
+                assert_eq!((m.h, m.pad), (14., 4.));
+            }
+            // Grows with the zoom, never shrinks the pill below the digits.
+            assert!(m.h >= (rem * 0.75 * 0.7).floor());
+        }
     }
 
     #[test]
