@@ -507,12 +507,19 @@ impl Hub {
             std::thread::Builder::new()
                 .name("peer-http".into())
                 .spawn(move || {
-                    for req in server.incoming_requests() {
-                        if hub.stop.load(Ordering::Relaxed) {
-                            break;
+                    // Poll with a timeout so `stop()` needs no wake-up request. The
+                    // old wake-up GET could be orphaned: if another request reached
+                    // this loop first, the loop broke on that one and the wake-up
+                    // sat unanswered, and `stop()` never returned.
+                    while !hub.stop.load(Ordering::Relaxed) {
+                        match server.recv_timeout(Duration::from_millis(200)) {
+                            Ok(Some(req)) => {
+                                let hub = hub.clone();
+                                std::thread::spawn(move || hub.handle(req));
+                            }
+                            Ok(None) => {}
+                            Err(_) => break,
                         }
-                        let hub = hub.clone();
-                        std::thread::spawn(move || hub.handle(req));
                     }
                 })?;
         }
@@ -583,9 +590,8 @@ impl Hub {
     }
 
     pub fn stop(&self) {
+        // The HTTP loop polls this flag (see `start_as`).
         self.stop.store(true, Ordering::Relaxed);
-        // Wake the HTTP loop so it sees the flag.
-        let _ = ureq::get(&format!("http://127.0.0.1:{}/hello", self.port)).call();
     }
 
     pub fn set_shared(
@@ -1347,6 +1353,43 @@ mod tests {
                 ("a.jar".to_string(), Status::Same),
             ]
         );
+    }
+
+    /// `stop()` used to send one wake-up request; when another request got to
+    /// the accept loop first, the wake-up was never answered and `stop()`
+    /// blocked forever (the test hung only when a probe landed at that moment).
+    #[test]
+    fn stop_returns_while_requests_are_arriving() {
+        for _ in 0..15 {
+            let hub = Hub::start_as(crate::waker::noop(), "c".repeat(32), true).unwrap();
+            let port = hub.port;
+            let going = Arc::new(AtomicBool::new(true));
+            let hammer: Vec<_> = (0..3)
+                .map(|_| {
+                    let going = going.clone();
+                    std::thread::spawn(move || {
+                        while going.load(Ordering::Relaxed) {
+                            let _ = ureq::get(&format!("http://127.0.0.1:{port}/hello"))
+                                .config()
+                                .timeout_global(Some(Duration::from_millis(300)))
+                                .build()
+                                .call();
+                        }
+                    })
+                })
+                .collect();
+            std::thread::sleep(Duration::from_millis(5));
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                hub.stop();
+                let _ = tx.send(());
+            });
+            assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok(), "stop() hung");
+            going.store(false, Ordering::Relaxed);
+            for h in hammer {
+                let _ = h.join();
+            }
+        }
     }
 
     #[test]
