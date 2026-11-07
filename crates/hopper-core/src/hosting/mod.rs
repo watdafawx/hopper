@@ -10,6 +10,7 @@ pub mod chunkstore;
 pub mod clone;
 pub mod create;
 pub mod files;
+pub mod fsmove;
 pub mod jvm;
 pub mod local_api;
 pub mod local_panel;

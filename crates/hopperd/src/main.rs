@@ -474,6 +474,15 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: tls::OwnCert, shutdown: Shu
 
     webhooks::watch(app.clone());
     changes::watch(app.clone());
+    // A permanent delete that stopped half way leaves .hopper-deleting-*.
+    if let Some(root) = cfg.servers_root.clone() {
+        let _ = std::thread::Builder::new().name("sweep-deleting".into()).spawn(move || {
+            let n = hopper_core::hosting::fsmove::sweep_deleting(&root);
+            if n > 0 {
+                log::info!("cleaned up {n} folder(s) left over from deleting servers");
+            }
+        });
+    }
     rules::start(app.clone());
     router::start(app.clone());
     if cfg.sftp_port != 0 {

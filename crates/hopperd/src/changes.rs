@@ -59,15 +59,44 @@ pub struct Change {
 pub struct Changes {
     ring: Mutex<VecDeque<Change>>,
     rev: watch::Sender<u64>,
+    /// The file watcher's inbox, so a folder can be let go before it is moved.
+    ctl: Mutex<Option<std::sync::mpsc::Sender<Msg>>>,
+}
+
+/// What the file watcher's thread hears: file events, and asks to let a
+/// server folder go (or watch it again).
+enum Msg {
+    Event(notify::Result<notify::Event>),
+    Release(PathBuf, std::sync::mpsc::Sender<()>),
+    Resume(PathBuf),
 }
 
 impl Default for Changes {
     fn default() -> Self {
-        Changes { ring: Mutex::new(VecDeque::new()), rev: watch::channel(0).0 }
+        Changes { ring: Mutex::new(VecDeque::new()), rev: watch::channel(0).0, ctl: Mutex::new(None) }
     }
 }
 
 impl Changes {
+    /// Stops watching `root` and everything under it, and waits (a couple of
+    /// seconds at most) until the watcher says it let go. A watched folder
+    /// can't be renamed on Windows: the watch holds it open.
+    pub fn release(&self, root: &Path) {
+        let tx = self.ctl.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(tx) = tx else { return };
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        if tx.send(Msg::Release(root.to_path_buf(), ack_tx)).is_ok() {
+            let _ = ack_rx.recv_timeout(Duration::from_secs(2));
+        }
+    }
+
+    /// Watches `root` again (the move that needed it free didn't happen).
+    pub fn resume(&self, root: &Path) {
+        if let Some(tx) = self.ctl.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            let _ = tx.send(Msg::Resume(root.to_path_buf()));
+        }
+    }
+
     /// Records a change and wakes everyone waiting.
     pub fn emit(&self, server: Option<&str>, areas: &[&str], by: Option<String>) {
         if areas.is_empty() {
@@ -258,8 +287,11 @@ const WATCHED: &[(&str, bool)] = &[("", false), ("mods", false), ("config", true
 /// removed.
 pub fn watch(app: Arc<App>) {
     use notify::{RecursiveMode, Watcher};
-    let (tx, rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
-    let mut watcher = match notify::recommended_watcher(tx) {
+    let (tx, rx) = std::sync::mpsc::channel::<Msg>();
+    *app.changes.ctl.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx.clone());
+    let mut watcher = match notify::recommended_watcher(move |res| {
+        let _ = tx.send(Msg::Event(res));
+    }) {
         Ok(w) => w,
         Err(e) => {
             log::warn!("change watcher off: {e}");
@@ -268,6 +300,8 @@ pub fn watch(app: Arc<App>) {
     };
     let _ = std::thread::Builder::new().name("change-watch".into()).spawn(move || {
         let mut watched: Vec<PathBuf> = Vec::new();
+        // Server folders being moved or deleted: not watched until resumed.
+        let mut released: Vec<PathBuf> = Vec::new();
         let mut roots: Vec<(PathBuf, String)> = Vec::new();
         let mut pending: BTreeSet<(String, &'static str)> = BTreeSet::new();
         let mut last_scan = std::time::Instant::now() - Duration::from_secs(60);
@@ -275,7 +309,8 @@ pub fn watch(app: Arc<App>) {
             // Servers come and go: re-check the folders every few seconds.
             if last_scan.elapsed() > Duration::from_secs(5) {
                 last_scan = std::time::Instant::now();
-                let now: Vec<(PathBuf, String)> = app.servers.list().iter().map(|e| (e.root.clone(), e.id.clone())).collect();
+                let now: Vec<(PathBuf, String)> =
+                    app.servers.list().iter().map(|e| (e.root.clone(), e.id.clone())).filter(|(r, _)| !released.contains(r)).collect();
                 let want: Vec<PathBuf> = now
                     .iter()
                     .flat_map(|(root, _)| WATCHED.iter().map(move |(d, _)| if d.is_empty() { root.clone() } else { root.join(d) }))
@@ -296,7 +331,22 @@ pub fn watch(app: Arc<App>) {
             }
             let wait = if pending.is_empty() { Duration::from_secs(5) } else { Duration::from_millis(300) };
             match rx.recv_timeout(wait) {
-                Ok(Ok(ev)) => {
+                Ok(Msg::Release(root, ack)) => {
+                    for p in watched.iter().filter(|p| p.starts_with(&root)) {
+                        let _ = watcher.unwatch(p);
+                    }
+                    watched.retain(|p| !p.starts_with(&root));
+                    roots.retain(|(r, _)| *r != root);
+                    if !released.contains(&root) {
+                        released.push(root);
+                    }
+                    let _ = ack.send(());
+                }
+                Ok(Msg::Resume(root)) => {
+                    released.retain(|r| *r != root);
+                    last_scan = std::time::Instant::now() - Duration::from_secs(60);
+                }
+                Ok(Msg::Event(Ok(ev))) => {
                     if matches!(ev.kind, notify::EventKind::Access(_)) {
                         continue;
                     }
@@ -309,7 +359,7 @@ pub fn watch(app: Arc<App>) {
                         }
                     }
                 }
-                Ok(Err(e)) => log::debug!("change watcher: {e}"),
+                Ok(Msg::Event(Err(e))) => log::debug!("change watcher: {e}"),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // Quiet for a moment: report what piled up, one
                     // event per server.

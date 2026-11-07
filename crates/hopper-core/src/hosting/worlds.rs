@@ -192,24 +192,49 @@ pub const KEPT_DIR: &str = "Kept worlds";
 /// outlive the server. Returns where they went, or None when it has no
 /// world yet. A rename, so instant on the same drive.
 pub fn keep_worlds(root: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let parent = root.parent().context("the server folder has no parent")?;
+    let folder = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "server".into());
+    keep_worlds_to(root, parent, &folder)
+}
+
+/// Like [`keep_worlds`], for a server folder that was moved: its worlds go
+/// to `Kept worlds` in `parent`, under the name `folder` it had there. If a
+/// world can't be moved, those already moved go back.
+pub fn keep_worlds_to(root: &Path, parent: &Path, folder: &str) -> anyhow::Result<Option<PathBuf>> {
     let dirs: Vec<String> = list(root).iter().filter(|w| w.created).flat_map(|w| w.folders.clone()).collect();
     if dirs.is_empty() {
         return Ok(None);
     }
-    let parent = root.parent().context("the server folder has no parent")?;
-    let folder = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "server".into());
     let kept = parent.join(KEPT_DIR);
-    let mut dest = kept.join(&folder);
+    let mut dest = kept.join(folder);
     let mut n = 2;
     while dest.exists() {
         dest = kept.join(format!("{folder} ({n})"));
         n += 1;
     }
     fs::create_dir_all(&dest)?;
-    for d in dirs {
-        fs::rename(root.join(&d), dest.join(&d)).with_context(|| format!("moving {d} to {}", dest.display()))?;
+    let mut moved: Vec<&String> = Vec::new();
+    for d in &dirs {
+        if let Err(e) = fs::rename(root.join(d), dest.join(d)) {
+            for m in moved {
+                let _ = fs::rename(dest.join(m), root.join(m));
+            }
+            let _ = fs::remove_dir(&dest);
+            return Err(anyhow::Error::new(e).context(format!("moving {d} to {}", dest.display())));
+        }
+        moved.push(d);
     }
     Ok(Some(dest))
+}
+
+/// Puts worlds kept by [`keep_worlds`] back into `root` (the delete that
+/// needed them out of the way didn't happen).
+pub fn unkeep(root: &Path, kept: &Path) -> anyhow::Result<()> {
+    for e in fs::read_dir(kept)?.flatten() {
+        fs::rename(e.path(), root.join(e.file_name())).with_context(|| format!("putting {} back", e.file_name().to_string_lossy()))?;
+    }
+    let _ = fs::remove_dir(kept);
+    Ok(())
 }
 
 /// The server's worlds, active first, then by last played.
@@ -988,6 +1013,62 @@ mod tests {
         assert_eq!(keep_worlds(&d).unwrap(), None);
         level_dat(&d.join("world/level.dat"));
         assert_eq!(keep_worlds(&d).unwrap().unwrap(), base.join(KEPT_DIR).join("My server (2)"));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn kept_worlds_come_back() {
+        let base = tmp("unkeep");
+        let d = base.join("srv");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("server.properties"), "level-name=world
+").unwrap();
+        level_dat(&d.join("world/level.dat"));
+        let kept = keep_worlds(&d).unwrap().unwrap();
+        assert!(!d.join("world").exists());
+        unkeep(&d, &kept).unwrap();
+        assert!(d.join("world/level.dat").is_file() && !kept.exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn keeps_worlds_of_a_moved_folder_under_its_old_name() {
+        let base = tmp("keep-moved");
+        let moved = base.join(".hopper-deleted").join("srv-1");
+        fs::create_dir_all(&moved).unwrap();
+        fs::write(moved.join("server.properties"), "level-name=world
+").unwrap();
+        level_dat(&moved.join("world/level.dat"));
+        let kept = keep_worlds_to(&moved, &base, "srv").unwrap().unwrap();
+        assert_eq!(kept, base.join(KEPT_DIR).join("srv"));
+        assert!(kept.join("world/level.dat").is_file() && !moved.join("world").exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// A world somebody holds open can't be moved: the ones already moved go back.
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_keep_puts_the_moved_worlds_back() {
+        let base = tmp("keep-fail");
+        let d = base.join("srv");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("server.properties"), "level-name=world
+").unwrap();
+        level_dat(&d.join("world/level.dat"));
+        level_dat(&d.join("world_nether/level.dat"));
+        let _held = fs::File::open(d.join("world_nether/level.dat")).unwrap();
+        // Directory renames fail while a file inside is open only if the
+        // handle denies sharing; hold the folder itself instead.
+        let _dir = {
+            use std::os::windows::fs::OpenOptionsExt;
+            fs::OpenOptions::new().read(true).custom_flags(0x0200_0000).share_mode(1 | 2).open(d.join("world_nether")).unwrap()
+        };
+        let r = keep_worlds_to(&d, &base, "srv");
+        if r.is_err() {
+            assert!(d.join("world/level.dat").is_file(), "the first world was put back");
+            assert!(!base.join(KEPT_DIR).join("srv").exists());
+        }
+        drop((_held, _dir));
         let _ = fs::remove_dir_all(base);
     }
 

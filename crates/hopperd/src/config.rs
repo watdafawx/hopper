@@ -27,6 +27,9 @@ pub struct Config {
     /// Server folders in `servers_root` the panel leaves out (removed from
     /// the panel, the folder kept).
     pub hidden: Vec<PathBuf>,
+    /// The delete dialog starts on "Delete permanently" instead of moving
+    /// the folder to .hopper-deleted for 30 days.
+    pub delete_permanently: bool,
     /// Announce the panel on the LAN (mDNS).
     pub discovery: bool,
     /// Plain HTTP from the LAN and Tailscale too is refused (it always is
@@ -92,6 +95,7 @@ impl Default for Config {
             servers_root: None,
             servers: Vec::new(),
             hidden: Vec::new(),
+            delete_permanently: false,
             discovery: true,
             require_tls: false,
             public_names: Vec::new(),

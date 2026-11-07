@@ -36,6 +36,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/host/browse", get(browse_dirs))
         .route("/api/v1/host/scan", get(scan))
         .route("/api/v1/settings/servers-folder", get(folder_get).put(folder_set))
+        .route("/api/v1/settings/delete-default", axum::routing::put(delete_default_set))
         .route("/api/v1/servers/import-folder", post(import_folder))
         .route("/api/v1/incoming/uploads", post(upload_start))
         // Chunks as big as the file routes take (axum's own limit is 2 MB).
@@ -240,7 +241,20 @@ async fn folder_get(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
     require_owner(&app, &headers, &method)?;
     let c = app.cfg.read().unwrap().clone();
     let deleted = c.servers_root.as_deref().map(deleted_list).unwrap_or_default();
-    Ok(Json(json!({ "home": c.home, "path": c.servers_root, "extra": c.servers, "hidden": c.hidden, "deleted": deleted })))
+    Ok(Json(json!({ "home": c.home, "path": c.servers_root, "extra": c.servers, "hidden": c.hidden, "deleted": deleted, "delete_permanently": c.delete_permanently })))
+}
+
+#[derive(Deserialize)]
+struct DeleteDefaultBody {
+    permanently: bool,
+}
+
+/// Which choice the delete dialog starts on.
+async fn delete_default_set(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<DeleteDefaultBody>) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    app.cfg.write().unwrap().delete_permanently = b.permanently;
+    save_cfg(&app)?;
+    Ok(Json(json!({ "permanently": b.permanently })))
 }
 
 #[derive(Deserialize)]
@@ -881,11 +895,15 @@ async fn port_check(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
 struct RemoveBody {
     /// "remove" (the panel forgets it, the folder stays) or "delete".
     mode: String,
-    /// Old clients send the server's name typed to confirm; not needed
-    /// (a deleted server can be restored for 30 days).
+    /// The server's name, typed. Needed only for `permanent` (a moved server
+    /// can be restored for 30 days, so old clients and the default don't
+    /// send it).
     #[serde(default)]
-    #[allow(dead_code)]
     confirm: String,
+    /// Delete only: delete the folder for good instead of moving it to
+    /// `.hopper-deleted`. Can't be undone. Off unless asked.
+    #[serde(default)]
+    permanent: bool,
     /// Delete only: move its worlds to `Kept worlds` first.
     #[serde(default)]
     keep_world: bool,
@@ -922,23 +940,92 @@ async fn remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
             }
             let root = root_dir.expect("in_root");
             let folder = e.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let dest = root.join(DELETED_DIR).join(format!("{folder}-{}", now()));
             let (src, name, keep) = (e.root.clone(), e.name.clone(), b.keep_world);
-            kept = blocking(move || {
-                let kept = if keep { hopper_core::hosting::worlds::keep_worlds(&src)? } else { None };
-                std::fs::create_dir_all(dest.parent().unwrap())?;
-                std::fs::rename(&src, &dest).map_err(|err| anyhow::anyhow!("moving {} to {}: {err}", src.display(), dest.display()))?;
-                std::fs::write(dest.join(".hopper-deleted.json"), serde_json::to_vec(&json!({ "name": name, "from": src, "at": now() }))?)?;
-                Ok(kept)
-            })
-            .await?;
-            log::info!("{} deleted (kept {KEEP_DELETED_DAYS} days in {DELETED_DIR})", e.name);
+            let app2 = app.clone();
+            // Lets go of everything the panel itself holds in the folder
+            // (its file watcher); run before every try of the move.
+            let release = {
+                let (app, src) = (app.clone(), src.clone());
+                move || app.changes.release(&src)
+            };
+            if b.permanent {
+                if b.confirm.trim() != e.name.trim() || e.name.trim().is_empty() {
+                    return Err(bad(format!("To delete {} for good, type its name.", e.name)));
+                }
+                let tmp = root.join(format!("{}{}-{folder}", hopper_core::hosting::fsmove::DELETING_PREFIX, now()));
+                let r2 = root.clone();
+                let (k, removed) = blocking(move || {
+                    let target = hopper_core::hosting::fsmove::permanent_target(&r2, &src).map_err(anyhow::Error::msg)?;
+                    // Renamed first: a folder someone has open fails here,
+                    // before anything is removed.
+                    if let Err(err) = hopper_core::hosting::fsmove::move_folder(&name, &target, &tmp, &release) {
+                        app2.changes.resume(&target);
+                        return Err(err);
+                    }
+                    let kept = if keep {
+                        match hopper_core::hosting::worlds::keep_worlds_to(&tmp, &r2, &folder) {
+                            Ok(k) => k,
+                            Err(err) => {
+                                // Put the server back as it was.
+                                return Err(match std::fs::rename(&tmp, &target) {
+                                    Ok(()) => {
+                                        app2.changes.resume(&target);
+                                        err.context(format!("Couldn't keep the world of {name}. Nothing was deleted"))
+                                    }
+                                    Err(e2) => err.context(format!("Couldn't keep the world of {name}, and couldn't put the folder back ({e2}). It is at {}", tmp.display())),
+                                });
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    Ok((kept, hopper_core::hosting::fsmove::remove_tree(&tmp)))
+                })
+                .await?;
+                kept = k;
+                log::warn!(
+                    "{} deleted permanently (can't be undone){}",
+                    e.name,
+                    kept.as_ref().map(|k| format!("; its world is kept in {}", k.display())).unwrap_or_default()
+                );
+                if let Err(msg) = removed {
+                    app.rescan();
+                    app.refresh.notify_one();
+                    return Err(bad(format!("{} is gone from the panel, but not all of its files could be deleted: {msg} Hopper Server cleans up what is left at its next start.", e.name)));
+                }
+            } else {
+                let dest = root.join(DELETED_DIR).join(format!("{folder}-{}", now()));
+                kept = blocking(move || {
+                    std::fs::create_dir_all(dest.parent().unwrap())?;
+                    if let Err(err) = hopper_core::hosting::fsmove::move_folder(&name, &src, &dest, &release) {
+                        app2.changes.resume(&src);
+                        return Err(err);
+                    }
+                    // Anything after the move that fails puts the folder back.
+                    let undo = |why: anyhow::Error| match std::fs::rename(&dest, &src) {
+                        Ok(()) => {
+                            app2.changes.resume(&src);
+                            why.context(format!("Couldn't finish deleting {name}. Nothing was deleted"))
+                        }
+                        Err(e2) => why.context(format!("Couldn't finish deleting {name}, and couldn't put the folder back ({e2}). It is at {}", dest.display())),
+                    };
+                    if let Err(err) = std::fs::write(dest.join(".hopper-deleted.json"), serde_json::to_vec(&json!({ "name": name, "from": src, "at": now() }))?) {
+                        return Err(undo(err.into()));
+                    }
+                    if keep {
+                        return hopper_core::hosting::worlds::keep_worlds_to(&dest, &root, &folder).map_err(undo);
+                    }
+                    Ok(None)
+                })
+                .await?;
+                log::info!("{} deleted (kept {KEEP_DELETED_DAYS} days in {DELETED_DIR})", e.name);
+            }
         }
         _ => return Err(bad("remove or delete?")),
     }
     app.rescan();
     app.refresh.notify_one();
-    Ok(Json(json!({ "ok": true, "kept_world": kept, "keep_days": KEEP_DELETED_DAYS })))
+    Ok(Json(json!({ "ok": true, "kept_world": kept, "keep_days": KEEP_DELETED_DAYS, "permanent": b.permanent && b.mode == "delete" })))
 }
 
 fn deleted_dir(app: &App, name: &str) -> ApiResult<PathBuf> {

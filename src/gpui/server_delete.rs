@@ -7,6 +7,7 @@ use crate::store::Store;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -34,14 +35,19 @@ struct DeleteForm {
     may: Option<bool>,
     /// The server's Settings › General page in the panel, where its owner deletes it.
     web: Option<String>,
+    /// Delete for good instead of the Recycle Bin / the panel's 30 days.
+    /// Asks for the server's name.
+    permanent: bool,
+    name_input: Entity<InputState>,
 }
 
 impl DeleteForm {
     fn ready(&self, cx: &App) -> bool {
         let _ = cx;
-        // No typing the name: a deleted server can be restored (panel: 30
-        // days in its deleted servers; this PC: the Recycle Bin).
-        self.may != Some(false)
+        // No typing the name while a deleted server can be restored (panel:
+        // 30 days in its deleted servers; this PC: the Recycle Bin). Deleting
+        // for good asks for it.
+        self.may != Some(false) && (!self.permanent || self.name_input.read(cx).value().trim() == self.name.trim())
     }
 }
 
@@ -90,9 +96,20 @@ impl Render for DeleteForm {
                 })
                 .into_any_element();
         }
+        let choice = v_flex().gap_1().child(
+            crate::widgets::Segmented::new("delete-how")
+                .selected_index(usize::from(self.permanent))
+                .child(crate::widgets::SegItem::new().label(if self.panel.is_some() { "Move for 30 days" } else { "Recycle Bin" }))
+                .child(crate::widgets::SegItem::new().label("Delete permanently"))
+                .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                    this.permanent = *ix == 1;
+                    cx.notify();
+                })),
+        );
         let kept_where = format!("Kept worlds\\{}", self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         v_flex()
             .gap_3()
+            .child(choice)
             .child(div().text_sm().text_color(theme.muted_foreground).child(format!("On {host}. This deletes:")))
             .child(
                 v_flex()
@@ -125,10 +142,19 @@ impl Render for DeleteForm {
                         ),
                 )
             })
-            .child(div().text_xs().text_color(theme.muted_foreground).child(match &self.panel {
-                Some(p) => format!("{p} keeps deleted servers for 30 days: restore one from the panel's Settings › Panel folder."),
-                None => "The rest of the folder goes to the Recycle Bin, where you can restore it.".into(),
+            .child(div().text_xs().text_color(if self.permanent { theme.danger } else { theme.muted_foreground }).child(match (&self.panel, self.permanent) {
+                (_, true) => "The rest of the folder is deleted for good. This can't be undone.".to_string(),
+                (Some(p), _) => format!("{p} keeps deleted servers for 30 days: restore one from the panel's Settings › Panel folder."),
+                (None, _) => "The rest of the folder goes to the Recycle Bin, where you can restore it.".into(),
             }))
+            .when(self.permanent, |c| {
+                c.child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_sm().child(format!("Type {} to delete it for good", self.name)))
+                        .child(Input::new(&self.name_input).small()),
+                )
+            })
             .into_any_element()
     }
 }
@@ -180,10 +206,19 @@ pub fn open(store: Entity<Store>, root: PathBuf, running: bool, window: &mut Win
             .detach();
         }
         let may = if panel.is_some() { None } else { Some(true) };
-        DeleteForm { store: store.clone(), root: root.clone(), name: srv.name.clone(), panel, worlds, backups, keep_world: true, may, web }
+        let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Server name"));
+        cx.subscribe_in(&name_input, window, |_, _, e: &InputEvent, window, cx| {
+            if matches!(e, InputEvent::Change) {
+                cx.notify();
+                window.refresh();
+            }
+        })
+        .detach();
+        DeleteForm { store: store.clone(), root: root.clone(), name: srv.name.clone(), panel, worlds, backups, keep_world: true, may, web, permanent: false, name_input }
     });
     window.open_dialog(cx, move |dialog, window, cx| {
         let ready = form.read(cx).ready(cx);
+        let permanent = form.read(cx).permanent;
         let f = form.clone();
         dialog
             .title(format!("Delete {}?", form.read(cx).name))
@@ -194,12 +229,44 @@ pub fn open(store: Entity<Store>, root: PathBuf, running: bool, window: &mut Win
                     .child(DialogClose::new().child(Button::new("dialog-cancel").outline().label("Cancel")))
                     .child(
                         DialogAction::new().child(
-                            Button::new("dialog-ok").danger().label("Delete server").disabled(!ready),
+                            if permanent {
+                                Button::new("dialog-ok").danger().label("Delete permanently").disabled(!ready)
+                            } else {
+                                Button::new("dialog-ok").outline().label("Delete server").disabled(!ready)
+                            },
                         ),
                     ),
             )
             .on_ok(move |_, window, cx| delete(&f, window, cx))
     });
+}
+
+/// Takes the folder of a server on this PC to the Recycle Bin, or deletes
+/// it for good. A folder somebody has open is refused with the program's
+/// name; for good, the folder is renamed away first so a locked one fails
+/// before anything is removed.
+fn delete_local(name: &str, root: &std::path::Path, permanent: bool) -> anyhow::Result<()> {
+    use hopper::hosting::fsmove;
+    if !permanent {
+        return trash::delete(root).map_err(|e| {
+            let who = fsmove::holders(root);
+            if who.is_empty() {
+                anyhow::anyhow!("Couldn't move {name} to the Recycle Bin: {e}. Nothing was deleted.")
+            } else {
+                anyhow::anyhow!(fsmove::locked_message(name, &who, &std::io::Error::from_raw_os_error(5)))
+            }
+        });
+    }
+    let parent = root.parent().ok_or_else(|| anyhow::anyhow!("{} has no parent folder", root.display()))?;
+    let meta = std::fs::symlink_metadata(root)?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        anyhow::bail!("{} is a link, not a folder: Hopper won't delete it for good.", root.display());
+    }
+    let folder = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let tmp = parent.join(format!("{}{stamp}-{folder}", fsmove::DELETING_PREFIX));
+    fsmove::move_folder(name, root, &tmp, &|| {})?;
+    fsmove::remove_tree(&tmp).map_err(|msg| anyhow::anyhow!("{name} is gone from Hopper, but not all of its files could be deleted: {msg}"))
 }
 
 /// Deletes it in a job (Tasks shows it), then lists the servers again.
@@ -208,7 +275,7 @@ fn delete(form: &Entity<DeleteForm>, window: &mut Window, cx: &mut App) -> bool 
     if !f.ready(cx) {
         return false;
     }
-    let (root, name, keep) = (f.root.clone(), f.name.clone(), f.keep_world);
+    let (root, name, keep, permanent) = (f.root.clone(), f.name.clone(), f.keep_world, f.permanent);
     let store = f.store.clone();
     let s = store.read(cx);
     let remote = s.servers().iter().find(|x| x.root == root).and_then(|x| x.remote.clone());
@@ -231,15 +298,26 @@ fn delete(form: &Entity<DeleteForm>, window: &mut Window, cx: &mut App) -> bool 
                             let v = c.post(
                                 &hopper::hopperd::Client::server_path(&rm.id, "/remove"),
                                 // Older panels still want the name typed to confirm.
-                                serde_json::json!({ "mode": "delete", "confirm": name, "keep_world": keep }),
+                                serde_json::json!({ "mode": "delete", "confirm": name, "keep_world": keep, "permanent": permanent }),
                             )?;
+                            if permanent && v["permanent"] != true {
+                                job.note("This panel is too old to delete for good: it moved the server to its deleted servers (kept 30 days) instead.");
+                            }
                             Ok(v["kept_world"].as_str().map(str::to_string))
                         }
                         _ => {
                             local.remove(&root)?;
                             let kept = if keep { hopper::hosting::worlds::keep_worlds(&root)? } else { None };
-                            job.detail("Moving the folder to the Recycle Bin");
-                            trash::delete(&root).map_err(|e| anyhow::anyhow!("moving {} to the Recycle Bin: {e}", root.display()))?;
+                            job.detail(if permanent { "Deleting the folder" } else { "Moving the folder to the Recycle Bin" });
+                            if let Err(err) = delete_local(&name, &root, permanent) {
+                                // Nothing is deleted: the worlds go back.
+                                if let Some(k) = &kept {
+                                    if let Err(e2) = hopper::hosting::worlds::unkeep(&root, k) {
+                                        return Err(err.context(format!("The world couldn't be put back either ({e2}); it is in {}", k.display())));
+                                    }
+                                }
+                                return Err(err);
+                            }
                             Ok(kept.map(|p| p.display().to_string()))
                         }
                     }
