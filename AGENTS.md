@@ -33,7 +33,13 @@ servers. A change to a flow in one usually belongs in the other too (see
 2. **Read the code you're changing and its neighbours** before writing.
    Reuse the shared helpers (`src/gpui/widgets.rs`, `crates/hopper-core`,
    `crates/hopperd/ui/src/lib/`) instead of writing a second copy.
-3. **UI changes start as a mock-up.** Before changing the UI, put two or
+3. **Check gpui-kit before building a desktop component.** Hopper's desktop
+   UI uses `gpui-kit` (GPUI + gpui-component). Before writing a new widget
+   (badge, tag, switch, popover, tooltip, menu, tabs...), look in the kit's
+   source for one that does the job, and use it. Only build our own if the
+   kit has none or it fails a measured check (say which in the PR). A
+   hand-built box with fixed `px()` sizes breaks at other zoom levels.
+4. **UI changes start as a mock-up.** Before changing the UI, put two or
    three options in a small HTML file (attach it or screenshots to the PR or
    issue), say which you'd pick and why, and build the agreed one.
 
