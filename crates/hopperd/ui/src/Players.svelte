@@ -66,7 +66,7 @@
   });
   $effect(() => {
     sid;
-    const t = setInterval(load, 5000);
+    const t = setInterval(() => document.hidden || load(), 5000);
     return () => clearInterval(t);
   });
 

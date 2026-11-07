@@ -55,7 +55,7 @@
   onMount(() => {
     load();
     // Follows a certificate being fetched.
-    timer = setInterval(() => s?.enabled && load(), 5000);
+    timer = setInterval(() => !document.hidden && s?.enabled && load(), 5000);
   });
   onDestroy(() => clearInterval(timer));
 </script>

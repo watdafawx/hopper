@@ -11,6 +11,8 @@
   import { say } from './lib/toast.svelte.js';
 
   let { server, openFiles, reloadKey = 0 } = $props();
+  // The live feed hands over a new `server` object every second; effects key on the id.
+  const sid = $derived(server.id);
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
 
   let data = $state(null);
@@ -29,7 +31,7 @@
     }
   }
   $effect(() => {
-    server.id;
+    sid;
     reloadKey;
     load();
   });
@@ -132,7 +134,7 @@
   }
 
   // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
-  $effect(() => onChange(server.id, ['worlds', 'mods'], load));
+  $effect(() => onChange(sid, ['worlds', 'mods'], load));
 </script>
 
 <svelte:window onclick={() => (menu = '')} onkeydown={(e) => e.key === 'Escape' && menu && (menu = '')} />

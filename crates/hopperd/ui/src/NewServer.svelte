@@ -232,6 +232,7 @@
     }
   }
 
+  // loop-safe: loadLoaders steps `mc` back at most 5 releases (i < 5), then stops
   $effect(() => {
     mc;
     loadLoaders();

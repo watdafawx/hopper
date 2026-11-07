@@ -14,10 +14,12 @@
 
   const shownRels = $derived(rels.filter((r) => side === 'all' || (cfg.files[r]?.side || fileRow(r)?.side) === side));
   let loading = $state(false);
+  // The live feed hands over a new `server` object every second; key on the id.
+  const serverId = $derived(server.id);
 
   $effect(() => {
     const want = rels;
-    const sid = server.id;
+    const sid = serverId;
     if (!want.length) return;
     untrack(() => {
       loading = true;

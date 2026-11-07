@@ -173,8 +173,9 @@
   // "Restart to load": only once mods changed while it runs (the panel
   // compares with what it started with). Closed until the next change.
   let restartClosed = $state(false);
+  const changedSince = $derived(server.changed_since_start);
   $effect(() => {
-    if (!server.changed_since_start) restartClosed = false;
+    if (!changedSince) restartClosed = false;
   });
   const mods = $derived(data?.mods || []);
   // "Added by you" only means something on a server made from a pack.

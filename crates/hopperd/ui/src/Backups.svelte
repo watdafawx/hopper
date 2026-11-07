@@ -328,7 +328,7 @@
   // Copies run in the background: look again now and then while some wait.
   $effect(() => {
     if (!onTargets.some((t) => t.pending || t.working)) return;
-    const t = setInterval(load, 5000);
+    const t = setInterval(() => document.hidden || load(), 5000);
     return () => clearInterval(t);
   });
 

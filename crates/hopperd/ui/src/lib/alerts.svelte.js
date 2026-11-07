@@ -20,7 +20,7 @@ export function watchAlerts() {
   users++;
   if (users === 1) {
     refreshAlerts();
-    timer = setInterval(refreshAlerts, 15000);
+    timer = setInterval(() => document.hidden || refreshAlerts(), 15000);
   }
   return () => {
     users--;

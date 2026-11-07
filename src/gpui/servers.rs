@@ -1396,10 +1396,21 @@ impl ServersView {
         if self.tab == TAB_LOGS {
             self.logs.update(cx, |v, cx| v.hidden(cx));
         }
+        // The server's stats poll (3 requests every 1-2 s) slows to its idle
+        // pace instead of running for as long as the app is open.
+        self.control.update(cx, |c, cx| {
+            c.set_console_open(false, cx);
+            c.set_active(false, cx);
+        });
     }
 
     /// Back in view: an open Sync tab compares again.
     pub(crate) fn shown(&mut self, cx: &mut Context<Self>) {
+        let console = self.tab == TAB_CONSOLE;
+        self.control.update(cx, |c, cx| {
+            c.set_active(true, cx);
+            c.set_console_open(console, cx);
+        });
         if std::mem::take(&mut self.sync_away)
             && self.tab == TAB_SYNC
             && let Some(r) = self.picked.clone()

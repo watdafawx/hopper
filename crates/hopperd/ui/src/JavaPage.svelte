@@ -51,6 +51,7 @@
 
   // Typing and dragging update the preview after a short pause.
   let timer;
+  // loop-safe: flagsText is only set when a flag was picked, and that preview has no pick, so it ends there
   $effect(() => {
     xms; xmx; flagsText;
     clearTimeout(timer);

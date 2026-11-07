@@ -107,7 +107,7 @@
   $effect(() => {
     if (!alive || !visible || path.endsWith('.gz')) return;
     read();
-    const t = setInterval(read, 2000);
+    const t = setInterval(() => document.hidden || read(), 2000);
     return () => clearInterval(t);
   });
 

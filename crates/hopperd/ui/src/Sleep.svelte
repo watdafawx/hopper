@@ -98,8 +98,10 @@
   // A wake or a start changes what the card says (failure, last woken).
   // Only the state is watched: reading `info` here would re-run this each time
   // load() sets it, an endless loop of requests that also wiped unsaved edits.
+  // `server` itself is a new object every second, so watch a derived value.
+  const powerState = $derived(server.state);
   $effect(() => {
-    server.state;
+    powerState;
     untrack(() => {
       if (info && !dirty) load();
     });

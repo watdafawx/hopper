@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "check": "svelte-check"
+    "build": "node scripts/check-effects.mjs && vite build",
+    "lint:loops": "node scripts/check-effects.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "node scripts/check-effects.mjs && node --test tests/*.test.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.3",

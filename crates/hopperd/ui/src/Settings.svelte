@@ -217,7 +217,7 @@
   $effect(() => {
     sid;
     load();
-    const off = onUploaded((s, folder) => s === server.id && folder === '' && say('Server icon changed. The server list shows it after a restart.'));
+    const off = onUploaded((s, folder) => s === sid && folder === '' && say('Server icon changed. The server list shows it after a restart.'));
     return () => off();
   });
 
