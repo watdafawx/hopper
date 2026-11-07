@@ -74,9 +74,13 @@ pub fn start(window: &mut Window, cx: &mut Context<AppView>) {
     cx.spawn_in(window, async move |this, cx| {
         let mut applied: Option<(bool, u16, bool, bool)> = None;
         loop {
+            let slept = std::time::Instant::now();
             cx.background_executor()
                 .timer(Duration::from_millis(30))
                 .await;
+            // How late the timer fired is how long the UI thread was busy
+            // (drawing, loading) since the last tick: see `probe`.
+            probe::tick(slept.elapsed().saturating_sub(Duration::from_millis(30)));
             // Settings changes take effect within a tick.
             let Ok(want) = this.update(cx, |this, cx| {
                 let s = this.store.read(cx).settings();
@@ -125,7 +129,9 @@ fn answer(app: &mut AppView, cmd: Command, window: &mut Window, cx: &mut Context
             serde_json::to_string_pretty(&state(app, window, cx)).unwrap_or_default(),
         )]),
         Command::Navigate(v) => {
+            probe::begin(&v);
             navigate(app, &v, window, cx);
+            probe::handled();
             Ok(vec![text("ok")])
         }
         _ => Err("not a view command".into()),
@@ -397,10 +403,85 @@ fn state(app: &AppView, window: &Window, cx: &App) -> Value {
             "port": s.port(),
             "loader": s.loader,
         })).collect::<Vec<_>>(),
+        "nav_timing": probe::report(),
         "jobs": store.jobs().snapshot().iter().map(|j| json!({
             "title": j.title, "detail": j.detail, "done": j.done, "error": j.error,
         })).collect::<Vec<_>>(),
     })
+}
+
+/// Timing for the screen a `navigate` just opened, read back through
+/// `state` ("nav_timing"). The MCP loop wakes every 30 ms; each tick that
+/// fires late marks a stretch the UI thread was busy (building the screen,
+/// drawing it), so the stalls after a navigate show how long it took to
+/// become usable and when the last data arrived. Nothing is logged unless
+/// a client navigates, and no names or paths are kept.
+mod probe {
+    use serde_json::{Value, json};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    struct Probe {
+        t0: Instant,
+        what: String,
+        /// Time spent inside the navigate call itself.
+        sync_ms: f64,
+        /// (start ms after the call, length ms) of each stall over 8 ms.
+        stalls: Vec<(f64, f64)>,
+    }
+
+    static LAST: Mutex<Option<Probe>> = Mutex::new(None);
+
+    pub fn begin(v: &Value) {
+        let what = ["tab", "view", "settings", "search", "server_tab"]
+            .iter()
+            .filter_map(|k| v[*k].as_str().map(|s| format!("{k}={s}")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let Ok(mut l) = LAST.lock() {
+            *l = Some(Probe { t0: Instant::now(), what, sync_ms: 0., stalls: vec![] });
+        }
+    }
+
+    pub fn handled() {
+        if let Ok(mut l) = LAST.lock()
+            && let Some(p) = l.as_mut()
+        {
+            p.sync_ms = p.t0.elapsed().as_secs_f64() * 1000.;
+        }
+    }
+
+    pub fn tick(late: Duration) {
+        if late < Duration::from_millis(8) {
+            return;
+        }
+        if let Ok(mut l) = LAST.lock()
+            && let Some(p) = l.as_mut()
+            && p.stalls.len() < 200
+        {
+            let end = p.t0.elapsed().as_secs_f64() * 1000.;
+            let len = late.as_secs_f64() * 1000.;
+            p.stalls.push((end - len, len));
+        }
+    }
+
+    pub fn report() -> Value {
+        let l = LAST.lock().ok();
+        let Some(p) = l.as_ref().and_then(|l| l.as_ref()) else {
+            return Value::Null;
+        };
+        let r = |x: f64| (x * 10.).round() / 10.;
+        let busy: f64 = p.stalls.iter().map(|s| s.1).sum();
+        let last_end = p.stalls.iter().map(|s| s.0 + s.1).fold(0., f64::max);
+        json!({
+            "what": p.what,
+            "age_ms": r(p.t0.elapsed().as_secs_f64() * 1000.),
+            "navigate_call_ms": r(p.sync_ms),
+            "stalls": p.stalls.iter().map(|s| json!([r(s.0), r(s.1)])).collect::<Vec<_>>(),
+            "busy_ms": r(busy),
+            "settled_ms": r(last_end),
+        })
+    }
 }
 
 fn theme_state(_: &Window, cx: &App) -> Value {
