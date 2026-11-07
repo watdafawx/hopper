@@ -67,6 +67,15 @@ on screen, not just the tests:
   <scratch folder>`, and `HOPPERD_SERVICE=hopperd-test` so it never touches
   a real install) and use it in a browser.
 - Put before / after screenshots in the PR for anything visible.
+- **Prove visual claims by measuring, never by reading your own diff.** If
+  you say something is centred, aligned, readable, fixed or not clipped,
+  take a screenshot of the running app and measure the pixels (gaps on each
+  side within 1 px; contrast ratios from sampled pixels; the element's width
+  against its container's), in the worst case (longest text, biggest number,
+  narrowest window, a light and a dark theme). When the measurement and the
+  code disagree, the screenshot wins; fix and measure again. Put the numbers
+  in the PR. `.claude/skills/hopper-design/measure_shot.py` does the pixel
+  gaps; the `hopper-design` skill has the full checklist.
 
 ## Rules
 
