@@ -13,6 +13,7 @@ mod img_log;
 mod drop_conflicts;
 mod incoming_sources;
 mod anim;
+mod appearance;
 mod app;
 mod brand;
 mod browse;
@@ -151,6 +152,7 @@ fn main() {
             addons::bind_keys(cx);
             browse::bind_keys(cx);
             palette::bind_keys(cx);
+            appearance::bind_keys(cx);
             let saved = hopper::settings::Settings::load();
             let (name, mode, zoom) = saved
                 .as_ref()

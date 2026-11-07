@@ -25,6 +25,7 @@
   import PanelSettings, { catsFor } from './PanelSettings.svelte';
   import ServerList from './ServerList.svelte';
   import Tasks from './Tasks.svelte';
+  import Appearance from './Appearance.svelte';
   import Palette from './Palette.svelte';
   import NewServer from './NewServer.svelte';
   import { session, ownerLike, roleLabel } from './lib/me.svelte.js';
@@ -374,6 +375,7 @@
         <!-- Help sits with the tools, as in desktop: report a problem, or the project page. -->
         <a class="btn ghost icon" href={issueUrl()} target="_blank" rel="noopener" title="Report a problem on GitHub" aria-label="Report a problem on GitHub"><Bug size={14} /></a>
         <a class="btn ghost icon" href={REPO_URL} target="_blank" rel="noopener" title="Hopper on GitHub" aria-label="Hopper on GitHub"><GithubMark size={14} /></a>
+        <Appearance onSettings={() => go('/settings')} />
         <button class="btn ghost icon" class:on={page === 'settings'} title="Settings (Ctrl+,)" onclick={() => go('/settings')}>
           <Gear size={14} />{#if pending.length}<span class="pdot"></span>{/if}
         </button>

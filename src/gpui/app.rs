@@ -33,6 +33,7 @@ gpui_kit::actions!(
         NextInstance,
         CommandPalette,
         OpenSettings,
+        ToggleAppearance,
         OpenCfKey,
         GoBack,
         GoForward,
@@ -78,6 +79,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-k", CommandPalette, None),
         KeyBinding::new("ctrl-p", CommandPalette, None),
         KeyBinding::new("ctrl-,", OpenSettings, None),
+        KeyBinding::new("ctrl-shift-a", ToggleAppearance, None),
         KeyBinding::new("alt-left", GoBack, None),
         KeyBinding::new("alt-right", GoForward, None),
         // Inputs, dialogs and the palette take Esc first.
@@ -160,6 +162,7 @@ pub struct AppView {
     focus: FocusHandle,
     /// The tasks button and its popover.
     tasks: Entity<crate::tasks::TasksButton>,
+    appearance: Entity<crate::appearance::AppearanceButton>,
     /// Saves the window's place once it settles.
     _save_bounds: Option<Task<()>>,
     /// Restarts into a downloaded update once nothing is going on.
@@ -184,6 +187,8 @@ impl AppView {
         let servers = cx.new(|cx| ServersView::new(store.clone(), window, cx));
         let settings = cx.new(|cx| SettingsPage::new(store.clone(), window, cx));
         let tasks = cx.new(|cx| crate::tasks::TasksButton::new(store.clone(), cx));
+        let me = cx.entity().downgrade();
+        let appearance = cx.new(|cx| crate::appearance::AppearanceButton::new(store.clone(), me, cx));
         let peek = library.read(cx).peek_view(cx);
         let subs = vec![
             // Each page notifies when it moves: back and forward note it.
@@ -407,6 +412,7 @@ impl AppView {
             settings,
             focus: cx.focus_handle(),
             tasks,
+            appearance,
             _save_bounds: None,
             told_jobs: Default::default(),
             told_crashes: Default::default(),
@@ -958,6 +964,10 @@ impl AppView {
     }
 
     /// Ctrl+K: opens the command palette, or closes it.
+    fn toggle_appearance(&mut self, _: &ToggleAppearance, window: &mut Window, cx: &mut Context<Self>) {
+        self.appearance.update(cx, |a, cx| a.toggle(window, cx));
+    }
+
     fn toggle_palette(&mut self, _: &CommandPalette, window: &mut Window, cx: &mut Context<Self>) {
         match self.palette.take() {
             Some(open) => open.close(window, cx),
@@ -1378,6 +1388,7 @@ impl AppView {
                                         .when(!dialog, |b| b.tooltip("Hopper on GitHub"))
                                         .on_click(|_, _, cx| cx.open_url(hopper::report::REPO_URL)),
                                 )
+                                .child(self.appearance.clone())
                                 .child(
                                     Button::new("open-settings")
                                         .ghost()
@@ -1415,6 +1426,7 @@ impl Render for AppView {
         };
         let title = self.title_bar(window, cx);
         let overlay = self.tasks.update(cx, |t, cx| t.overlay(window, cx));
+        let appearance_pop = self.appearance.update(cx, |t, cx| t.overlay(window, cx));
         let theme = cx.theme();
         let ring = theme.primary;
         v_flex()
@@ -1427,6 +1439,7 @@ impl Render for AppView {
             .on_action(cx.listener(Self::zoom_reset))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::toggle_appearance))
             .on_action(cx.listener(|this, _: &OpenCfKey, _, cx| this.open_settings_at("cf-key", cx)))
             .on_action(cx.listener(|this, _: &GoLibrary, _, cx| this.go(Page::Library, cx)))
             .on_action(cx.listener(|this, _: &GoBack, window, cx| this.nav_step(true, window, cx)))
@@ -1477,6 +1490,7 @@ impl Render for AppView {
                 div().size_full().child(page),
             )))
             .children(overlay)
+            .children(appearance_pop)
             .children(widgets::link_menu_overlay(window, cx))
             .children(self.palette.as_ref().map(|p| p.view()))
             // A playing video's window hides under the palette and dialogs.
