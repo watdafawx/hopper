@@ -42,6 +42,15 @@
     }
   }
 
+  async function setDeleteDefault(permanently) {
+    try {
+      await api('/settings/delete-default', { method: 'PUT', body: { permanently } });
+      info.delete_permanently = permanently;
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
+
   async function pick(p) {
     picking = false;
     busy = 'Looking in the folder';
@@ -173,6 +182,19 @@
     {/if}
   </div>
 
+  {#if info?.path}
+    <h2 class="lbl">When deleting a server</h2>
+    <div class="card col">
+      <div class="row wrapx">
+        <div class="seg" role="group" aria-label="When deleting a server">
+          <button class:on={!info.delete_permanently} aria-pressed={!info.delete_permanently} onclick={() => setDeleteDefault(false)}>Move to .hopper-deleted for 30 days</button>
+          <button class:on={!!info.delete_permanently} aria-pressed={!!info.delete_permanently} onclick={() => setDeleteDefault(true)}>Delete permanently</button>
+        </div>
+      </div>
+      <div class="small muted">Which choice the delete dialog starts on. You can switch it for each delete. Deleting for good is a tick box in that dialog.</div>
+    </div>
+  {/if}
+
   {#if info?.deleted?.length}
     <h2 class="lbl">Deleted servers</h2>
     <div class="card col">
@@ -189,6 +211,11 @@
 </div>
 
 <style>
+  .wrapx { flex-wrap: wrap; }
+  .seg { display: flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; }
+  .seg button { padding: 5px 11px; font-size: 12.5px; color: var(--subtle); }
+  .seg button + button { border-left: 1px solid var(--line2); }
+  .seg button.on { background: var(--acc); color: #1a1a1f; font-weight: 600; }
   .page { display: flex; flex-direction: column; gap: 12px; }
   /* Section titles like desktop Settings: small, uppercase, muted. */
   .page h2 { margin: 8px 4px 0; }
