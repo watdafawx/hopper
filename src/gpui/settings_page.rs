@@ -2323,7 +2323,7 @@ impl SettingsPage {
                     .tooltip("Read the theme folder again")
                     .on_click(cx.listener(|_, _, window, cx| {
                         let n = crate::theme::reload_custom();
-                        window.push_notification(Notification::info(format!("{n} themes of your own.")), cx);
+                        window.push_notification(Notification::info(crate::theme::own_themes_text(n)), cx);
                         cx.notify();
                     })),
             );

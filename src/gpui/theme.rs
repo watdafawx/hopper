@@ -156,6 +156,15 @@ pub fn names() -> Vec<String> {
         .collect()
 }
 
+/// What reloading the theme folder tells the player.
+pub fn own_themes_text(n: usize) -> String {
+    match n {
+        0 => "No themes of your own.".to_string(),
+        1 => "1 theme of your own.".to_string(),
+        n => format!("{n} themes of your own."),
+    }
+}
+
 /// One block of the appearance menu.
 pub struct Section {
     pub title: &'static str,
@@ -612,6 +621,13 @@ mod tests {
             .map(|(n, c)| format!("{n} {c:.2}"))
             .collect();
         assert!(low.is_empty(), "primary_foreground on primary under 4.5:1: {low:?}");
+    }
+
+    #[::core::prelude::v1::test]
+    fn reloading_says_how_many_themes_are_yours() {
+        assert_eq!(own_themes_text(0), "No themes of your own.");
+        assert_eq!(own_themes_text(1), "1 theme of your own.");
+        assert_eq!(own_themes_text(3), "3 themes of your own.");
     }
 
     #[::core::prelude::v1::test]

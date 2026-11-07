@@ -292,8 +292,17 @@ impl AppearanceButton {
                         .hover(|st| widgets::row_hover(st, cx))
                         .when(at_cursor, |r| widgets::row_hover(r, cx))
                         .when(saved, |r| widgets::row_selected(r, cx))
+                        // The arrow keys' place gets the keyboard focus ring (keeping
+                        // the picked row's bar).
+                        .when(at_cursor, |r| {
+                            let mut ring = widgets::focus_shadow(cx);
+                            if saved {
+                                ring.push(BoxShadow::new(px(3.), px(0.), theme.primary).inset());
+                            }
+                            r.shadow(ring)
+                        })
                         .child(div().flex_1().min_w_0().child(crate::settings_page::theme_row(name, cx)))
-                        .when(saved, |r| r.child(Icon::new(IconName::Check).xsmall().text_color(theme.primary)))
+                        .when(saved, |r| r.child(Icon::new(IconName::Check).xsmall().text_color(theme.foreground)))
                         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                             if *hovered {
                                 this.point(Some(n_hover.clone()), cx);
@@ -313,7 +322,7 @@ impl AppearanceButton {
                             .pb_0p5()
                             .text_xs()
                             .font_semibold()
-                            .text_color(theme.muted_foreground)
+                            .text_color(theme.foreground)
                             .child(sec.title.to_uppercase()),
                     )
                 })
@@ -395,7 +404,7 @@ impl AppearanceButton {
                             .on_click(cx.listener(|_, _, window, cx| {
                                 let n = crate::theme::reload_custom();
                                 window.push_notification(
-                                    gpui_kit::component::notification::Notification::info(format!("{n} themes of your own.")),
+                                    gpui_kit::component::notification::Notification::info(crate::theme::own_themes_text(n)),
                                     cx,
                                 );
                                 cx.notify();
@@ -437,7 +446,7 @@ impl AppearanceButton {
             .child(
                 h_flex().px_3().py_1p5().border_t_1().border_color(theme.border).child(
                     Button::new("appearance-all")
-                        .link()
+                        .ghost()
                         .xsmall()
                         .label("All appearance settings")
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -446,10 +455,11 @@ impl AppearanceButton {
                         })),
                 ),
             );
-        // 23-26rem: wide enough for "Catppuccin Macchiato" in a column.
+        // 27-30rem: "Catppuccin Macchiato" and a check fit a column with room
+        // to spare (measured at 23 rem it touched the column's edge).
         Some(
             place
-                .apply(panel, 23., 26., window)
+                .apply(panel, 27., 30., window)
                 .with_animation(
                     "appearance-pop",
                     Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),

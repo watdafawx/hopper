@@ -104,7 +104,7 @@
           <button class="ap-row row-hover" class:sel={theme.saved === FOLLOW} role="radio" aria-checked={theme.saved === FOLLOW}
             onpointerenter={() => want(FOLLOW)} onfocus={() => want(FOLLOW)} onclick={() => pick(FOLLOW)}>
             <span class="sw"><i style="background:#0e0e10"></i><i style="background:#fafafa"></i></span>
-            <span class="nm">Follow system</span>{#if theme.saved === FOLLOW}<Check size={13} color="var(--acc)" />{/if}
+            <span class="nm">Follow system</span>{#if theme.saved === FOLLOW}<Check size={13} color="var(--text)" />{/if}
           </button>
         </div>
         {#each groups as g (g.title)}
@@ -115,7 +115,7 @@
               <button class="ap-row row-hover" class:sel={theme.saved === t.name} role="radio" aria-checked={theme.saved === t.name}
                 onpointerenter={() => want(t.name)} onfocus={() => want(t.name)} onclick={() => pick(t.name)}>
                 <span class="sw"><i style="background:{t.panel}"></i><i class="mid" style="background:{t.bg}"><b style="background:{t.accent}"></b><u style="background:{t.text}"></u></i></span>
-                <span class="nm">{t.name}</span>{#if theme.saved === t.name}<Check size={13} color="var(--acc)" />{/if}
+                <span class="nm">{t.name}</span>{#if theme.saved === t.name}<Check size={13} color="var(--text)" />{/if}
               </button>
             {/each}
           </div>
@@ -131,7 +131,7 @@
   .ap-pop { position: absolute; top: calc(100% + 6px); right: -40px; z-index: 60; width: 340px; display: flex; flex-direction: column; }
   .ap-h { padding: 10px 12px 4px; font-size: 13px; }
   .ap-list { max-height: min(60vh, 420px); overflow-y: auto; padding: 0 6px 6px; }
-  .ap-sec { padding: 8px 6px 2px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .ap-sec { padding: 8px 6px 2px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--text); font-weight: 600; }
   .ap-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px; }
   .ap-row { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px; border-radius: var(--radius); text-align: left; font-size: 12.5px; min-width: 0; }
   .ap-row.sel { background: var(--sel); box-shadow: inset 3px 0 0 var(--acc); }
@@ -143,5 +143,6 @@
   .sw .mid b { width: 5px; height: 5px; border-radius: 50%; }
   .sw .mid u { width: 8px; height: 2px; border-radius: 2px; }
   .ap-f { border-top: 1px solid var(--line); padding: 8px 12px; font-size: 12px; }
-  .link { display: inline-flex; align-items: center; gap: 4px; color: var(--acc); font-weight: 500; }
+  .link { display: inline-flex; align-items: center; gap: 4px; color: var(--text); font-weight: 500; }
+  .link:hover { text-decoration: underline; }
 </style>
