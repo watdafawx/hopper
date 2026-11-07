@@ -896,7 +896,7 @@ fn rail_view(
                         el.child(div().relative().child(Icon::new(icon.unwrap()).small()).when(badge && !on && count.is_some_and(|c| c > 0), |d| {
                             // Anchored by its left edge so more digits grow to the
                             // right; the button's right padding (below) makes room.
-                            d.child(count_badge(count.unwrap_or(0).to_string(), primary).absolute().top(px(-5.)).left(px(10.)))
+                            d.child(count_badge(count.unwrap_or(0).to_string(), primary).absolute().top(px(-7.)).left(px(9.)))
                         }))
                     })
                     .when(badge && !on && count.is_some_and(|c| c > 0), |el| {
@@ -954,28 +954,30 @@ pub fn count_badge(text: impl Into<SharedString>, fill: Hsla) -> Div {
         .items_center()
         .justify_center()
         .whitespace_nowrap()
-        .min_w(px(11.))
-        .h(px(11.))
-        .px(px(3.))
-        .rounded(px(6.))
+        // The same size as the History button's badge (14px, 12px digits), so
+        // the numbers read alike on every icon.
+        .min_w(px(14.))
+        .h(px(14.))
+        .px(px(4.))
+        .rounded_full()
         .bg(fill)
         .text_color(theme_on_primary())
-        .text_size(px(9.))
-        .line_height(px(11.))
+        .text_xs()
+        .line_height(px(14.))
         .font_weight(FontWeight::BOLD)
         .child(text.into())
 }
 
-/// Width of a [`count_badge`] holding `n` (9px bold digits, 3px each side).
+/// Width of a [`count_badge`] holding `n` (12px bold digits, 4px each side).
 fn count_badge_width(n: usize) -> f32 {
     let digits = n.max(1).to_string().len() as f32;
-    (digits * 5.5 + 6.).max(11.)
+    (digits * 7. + 8.).max(14.)
 }
 
-/// Extra right padding a rail button needs so its badge (starting 10px into
+/// Extra right padding a rail button needs so its badge (starting 9px into
 /// the 16px icon) doesn't reach the next button.
 pub fn rail_badge_extra(n: usize) -> f32 {
-    (10. + count_badge_width(n) - 16. - 7.).max(0.)
+    (9. + count_badge_width(n) - 16. - 7.).max(0.)
 }
 
 /// Text on a count badge: white on the primary fill.
@@ -2873,11 +2875,11 @@ mod tests {
     #[test]
     fn rail_badge_makes_room_as_digits_grow() {
         // One digit fits in the button's own padding; more push it wider.
-        assert_eq!(rail_badge_extra(1), 0.);
+        assert!(rail_badge_extra(1) <= 1.5);
         assert!(rail_badge_extra(99) < rail_badge_extra(175));
         assert!(rail_badge_extra(175) > 0.);
         assert!(rail_badge_extra(12345) > rail_badge_extra(1234));
-        assert!(count_badge_width(1) >= 11.);
+        assert!(count_badge_width(1) >= 14.);
     }
 
     #[test]

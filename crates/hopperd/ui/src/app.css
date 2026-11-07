@@ -128,11 +128,12 @@ mark.hit { background: color-mix(in srgb, var(--acc) 30%, transparent); color: v
 .seg.icons .lbw > span { overflow: hidden; min-width: 0; display: inline-flex; align-items: center; gap: 6px; opacity: 0; transition: opacity .16s; }
 .seg.icons .si[aria-pressed='true'] .lbw > span { opacity: 1; padding-left: 6px; }
 .seg.icons .ct { font-size: 11px; color: var(--muted); font-weight: 400; }
-.seg.icons .bdg { position: absolute; top: -3px; left: 9px; }
+.seg.icons .bdg { position: absolute; top: -5px; left: 8px; }
 /* The button grows on the right so a wide badge never reaches the next icon (--bw = digits). */
-.seg.icons .si:has(.bdg) { padding-right: calc(7px + max(0px, (var(--bw, 1) - 1) * 6px)); }
-/* A solid count badge (orange number): a circle for one digit, a pill for more; never wraps, shrinks or clips. */
-.cbadge, .seg.icons .bdg { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 14px; height: 14px; padding: 0 4px; box-sizing: border-box; border-radius: 7px; background: var(--acc); color: #1c0d02; font-size: 9.5px; font-weight: 700; line-height: 1; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.seg.icons .si:has(.bdg) { padding-right: calc(8px + max(0px, (var(--bw, 1) - 1) * 6px)); }
+/* A solid count badge: a circle for one digit, a pill for more; never wraps, shrinks or clips. Same size and
+   colours as the History button's badge (white digits, 15px) so numbers read alike on every icon. */
+.cbadge, .seg.icons .bdg { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 15px; height: 15px; padding: 0 4px; box-sizing: border-box; border-radius: 999px; background: var(--acc); color: #fff; font-size: 10.5px; font-weight: 700; line-height: 15px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .seg.icons .si[aria-pressed='true'] .bdg { display: none; }
 .seg.icons .si:not([aria-pressed='true'])[data-tip]:is(:hover, :focus-visible)::after { content: attr(data-tip); position: absolute; z-index: 80; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); padding: 4px 8px; border-radius: var(--radius); background: var(--popover); border: 1px solid var(--line2); color: var(--text); font-size: 12px; font-weight: 400; box-shadow: 0 8px 24px #0009; pointer-events: none; }
 /* The muted label in front of a group of filters ("Filter"). */
