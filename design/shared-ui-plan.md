@@ -49,5 +49,8 @@ A script that compares a desktop screenshot and a web screenshot of the same sta
 - Spec rot: a spec the cards don't measure against is dead; the release gate checks for the table.
 - Build time: the generators must run in seconds and only when their inputs change.
 
+## Open question: UI framework (decide before phase 1 grows)
+2026-11-07: the user would rather not use web tech (size and memory), and GPUI has no live edit. Candidates: Slint (live preview, 1.x), Iced (software renderer, hot reload to verify), egui, Makepad, Raven (pre-1.0, ~1.3 MB), Tauri+Svelte (rejected for memory). Do a written study first (widget reuse, text/IME for foreign-language names, zoom, live edit, idle RAM, start-up), then at most one spike per finalist in its own branch with no release. Until decided, keep fixing GPUI through shared helpers and check gpui-kit first.
+
 ## Not doing
 GPUI to WebAssembly; WebAssembly builds of `hopper-core` for the panel (the server already answers); a rewrite of the web UI in a Rust framework.
