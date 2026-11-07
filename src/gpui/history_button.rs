@@ -9,7 +9,7 @@
 use crate::store::Store;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashMap;
@@ -196,26 +196,14 @@ impl Render for HistoryButton {
             )
             .when(count > 0, |d| {
                 let label = if count > 99 { "99+".to_string() } else { count.to_string() };
+                let rem: f32 = theme.font_size.into();
+                // The same badge as the Updates icon in the Mods rail, tucked
+                // into the button's top-right corner.
                 d.child(
-                    div()
+                    crate::widgets::count_badge(label, primary, theme.primary_foreground, cx)
                         .absolute()
-                        .top(px(1.))
-                        .right(px(-2.))
-                        .min_w(px(14.))
-                        .pb(px(1.))
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .h(px(14.))
-                        .px(px(3.))
-                        .rounded_full()
-                        .bg(primary)
-                        .text_color(theme.primary_foreground)
-                        .text_xs()
-                        .font_semibold()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(label),
+                        .top(px((rem * 0.0667).round()))
+                        .right(px((rem * -0.1333).round())),
                 )
             })
             // A ring that swells and fades with the turn.

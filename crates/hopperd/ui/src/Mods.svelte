@@ -839,7 +839,7 @@
         {#each rail as r, i (r.k)}
           {#if r.tog && !rail[i - 1]?.tog}<span class="sep"></span>{/if}
           <button class="si" class:tog={r.tog} style:--bw={String(r.n ?? 0).length} aria-pressed={r.on} aria-label="{r.label}, {r.n}" data-tip="{r.label} · {r.n}" onclick={() => railPick(r.k)}>
-            <span class="ico"><r.icon size={14} />{#if r.k === 'updates' && r.n && !r.on}<span class="bdg">{r.n}</span>{/if}</span><span class="lbw"><span>{r.label}<span class="ct">{r.n}</span></span></span>
+            <span class="ico"><r.icon size={14} />{#if r.k === 'updates' && r.n && !r.on}<span class="bdg"><i>{r.n}</i></span>{/if}</span><span class="lbw"><span>{r.label}<span class="ct">{r.n}</span></span></span>
           </button>
         {/each}
       </div>

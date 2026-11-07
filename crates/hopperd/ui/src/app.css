@@ -133,7 +133,10 @@ mark.hit { background: color-mix(in srgb, var(--acc) 30%, transparent); color: v
 .seg.icons .si:has(.bdg) { padding-right: calc(8px + max(0px, (var(--bw, 1) - 1) * 6px)); }
 /* A solid count badge: a circle for one digit, a pill for more; never wraps, shrinks or clips. Same size as the
    History button's badge (15px); dark digits on the orange (white on it is only 2.8:1) so it reads clearly. */
-.cbadge, .seg.icons .bdg { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 15px; height: 15px; padding: 0 4px 1px; box-sizing: border-box; border-radius: 999px; background: var(--acc); color: #1c0d02; font-size: 10.5px; font-weight: 700; line-height: 15px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cbadge, .seg.icons .bdg { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 15px; height: 15px; padding: 0 4px; box-sizing: border-box; border-radius: 999px; background: var(--acc); color: #1c0d02; font-size: 10.5px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* The digits' box is trimmed to the cap height so the pill centres the digits themselves at every page zoom
+   (a line box centres the font's ascent, which leaves them a pixel off at some zooms). */
+.cbadge > i, .seg.icons .bdg > i { display: block; font-style: normal; line-height: 1; text-box: trim-both cap alphabetic; }
 .seg.icons .si[aria-pressed='true'] .bdg { display: none; }
 .seg.icons .si:not([aria-pressed='true'])[data-tip]:is(:hover, :focus-visible)::after { content: attr(data-tip); position: absolute; z-index: 80; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); padding: 4px 8px; border-radius: var(--radius); background: var(--popover); border: 1px solid var(--line2); color: var(--text); font-size: 12px; font-weight: 400; box-shadow: 0 8px 24px #0009; pointer-events: none; }
 /* The muted label in front of a group of filters ("Filter"). */

@@ -27,7 +27,7 @@
 
 <button class="btn icon ghost hist" title={count ? `History (${count} new)` : 'History'} aria-label="History" onclick={onOpen}>
   {#key pulse}<span class="ico" class:turn={pulse > 0}><History size={15} /></span>{/key}
-  {#if count}<span class="badge">{count > 99 ? '99+' : count}</span>{/if}
+  {#if count}<span class="badge"><i>{count > 99 ? '99+' : count}</i></span>{/if}
 </button>
 
 <style>
@@ -36,9 +36,12 @@
   .ico.turn { animation: turn 550ms cubic-bezier(0.22, 1, 0.36, 1) 1; }
   @keyframes turn { from { transform: rotate(360deg); } to { transform: rotate(0); } }
   .badge {
-    position: absolute; top: -4px; right: -4px; min-width: 15px; height: 15px; padding: 0 4px 1px;
+    position: absolute; top: -4px; right: -4px; min-width: 15px; height: 15px; padding: 0 4px;
     border-radius: 999px; background: var(--acc); color: #fff; font-size: 10px; font-weight: 600;
-    line-height: 15px; text-align: center; white-space: nowrap; box-sizing: border-box;
+    display: inline-flex; align-items: center; justify-content: center; white-space: nowrap; box-sizing: border-box;
   }
+  /* The digits' box is trimmed to the cap height, so the pill centres the digits themselves, not the font's
+     line box (which leaves them a pixel off at some page zooms). Browsers without text-box-trim keep the line box. */
+  .badge > i { display: block; font-style: normal; line-height: 1; text-box: trim-both cap alphabetic; }
   @media (prefers-reduced-motion: reduce) { .ico.turn { animation: none; } }
 </style>
