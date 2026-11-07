@@ -263,6 +263,13 @@ fn step_row(cur: Option<usize>, step: isize, len: usize) -> Option<usize> {
     Some(at.saturating_add(step).clamp(0, len as isize - 1) as usize)
 }
 
+/// Whether a page that gave `got` results (`fetched` so far, of `total`)
+/// and still left the key's wanted row missing should be followed by
+/// another request: only while the server still has more and gave some.
+fn reload_for_key(got: usize, fetched: usize, total: u32) -> bool {
+    got > 0 && (fetched as u32) < total.min(10_000)
+}
+
 /// The sort a fresh Browse starts on: the one set in Settings, else the
 /// one picked last.
 fn start_sort(st: &hopper::settings::Settings) -> SortField {
@@ -313,6 +320,11 @@ pub struct BrowseView {
     /// A key move past the last result asked for the next page: the row
     /// to pick once it arrives.
     key_want: Option<usize>,
+    /// How many results the server has handed over for this query: where
+    /// the next page starts. Not `results.len()`, which loses rows that
+    /// were already listed (a page of repeats must still move on) and
+    /// gains the "new" ones put on top.
+    fetched: usize,
     detail: HashMap<u64, Load<Detail>>,
     /// Each project's files, asked apart from its page (there can be a
     /// thousand, 50 a request), so the description doesn't wait for them.
@@ -515,6 +527,7 @@ impl BrowseView {
             selected: None,
             list_focus: cx.focus_handle(),
             key_want: None,
+            fetched: 0,
             detail: HashMap::new(),
             file_lists: HashMap::new(),
             pages: HashMap::new(),
@@ -715,6 +728,7 @@ impl BrowseView {
             self.results_key = m.key;
             self.searched_text = self.text.clone();
             self.results = m.results;
+            self.fetched = self.results.len();
             self.total = m.total;
             self.scroll_after.set(Some(m.scroll));
             self.load_categories(cx);
@@ -1190,13 +1204,14 @@ impl BrowseView {
             self.query_gen += 1;
             self.fresh.clear();
             self._check = None;
+            self.key_want = None;
             self.list.scroll_to(ListOffset::default());
             self.scroll_after.set(Some(ListOffset::default()));
             self.results_key = self.query_key();
             self.searched_text = self.text.clone();
         }
         let s = cf::Search {
-            index: if append { self.results.len() as u32 } else { 0 },
+            index: if append { self.fetched as u32 } else { 0 },
             ..self.search_params()
         };
         let modrinth = self.modrinth;
@@ -1211,6 +1226,7 @@ impl BrowseView {
                 this.loading = false;
                 match r {
                     Ok((mods, page)) => {
+                        let got = mods.len();
                         let urls: Vec<String> = mods
                             .iter()
                             .filter_map(|m| m.icon().map(str::to_string))
@@ -1222,8 +1238,10 @@ impl BrowseView {
                                 .filter(|m| !this.results.iter().any(|r| r.id == m.id))
                                 .collect();
                             this.results.extend(mods);
+                            this.fetched += got;
                         } else {
                             this.results = mods;
+                            this.fetched = got;
                             this.fuzzy_results(cx);
                             // The new list starts at the top.
                             this.scroll_after.set(Some(ListOffset::default()));
@@ -1236,13 +1254,21 @@ impl BrowseView {
                             this.open_detail(m, cx);
                         }
                         if let Some(ix) = this.key_want.take().filter(|_| append) {
-                            this.key_pick(ix.min(this.results.len().saturating_sub(1)), cx);
+                            if ix < this.results.len() {
+                                this.key_pick(ix, cx);
+                            } else if reload_for_key(got, this.fetched, page.total_count) {
+                                // The page held only rows already listed:
+                                // the key is still waiting, ask for the next.
+                                this.key_want = Some(ix);
+                                this.run_search(true, cx);
+                            }
                         }
                         this.store
                             .update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
                         this.want_server_files(cx);
                     }
                     Err(e) => {
+                        this.key_want = None;
                         this.error = Some(cf::explain(&e, |e| {
                             format!("Couldn't load results. Check your connection and try again. ({e:#})")
                         }))
@@ -1621,6 +1647,7 @@ impl BrowseView {
             self.results_key = snap.key;
             self.searched_text = p.text;
             self.results = snap.results;
+            self.fetched = self.results.len();
             self.total = snap.total;
             self.scroll_after.set(Some(snap.scroll));
             self.load_categories(cx);
@@ -5566,7 +5593,7 @@ fn total_label(n: u32) -> String {
 
 #[cfg(test)]
 mod key_tests {
-    use super::step_row;
+    use super::{reload_for_key, step_row};
 
     #[test]
     fn step_row_stays_in_the_list() {
@@ -5577,6 +5604,48 @@ mod key_tests {
         assert_eq!(step_row(Some(2), 5, 5), Some(4));
         assert_eq!(step_row(Some(3), -5, 5), Some(0));
         assert_eq!(step_row(Some(1), isize::MAX, 5), Some(4));
+    }
+
+    /// Down at the last row asks for pages until a row it can pick turns
+    /// up, even when whole pages repeat rows already listed.
+    #[test]
+    fn key_move_walks_through_pages_of_repeats() {
+        // ids per page, as the server returns them (page 2 and 3 repeat).
+        let pages: Vec<Vec<u32>> = vec![
+            (0..4).collect(),
+            (0..4).collect(),
+            (2..6).collect(),
+            (6..10).collect(),
+        ];
+        let total = 40u32;
+        let (mut shown, mut fetched, mut asked) = (pages[0].clone(), pages[0].len(), 1);
+        let want = shown.len(); // Down at the last row of page one
+        loop {
+            // The next page starts after what was fetched, not after
+            // what is listed: the same page is never asked twice.
+            let page = &pages[asked];
+            asked += 1;
+            fetched += page.len();
+            let before = shown.len();
+            let new: Vec<u32> = page.iter().copied().filter(|id| !shown.contains(id)).collect();
+            shown.extend(new);
+            if want < shown.len() {
+                break;
+            }
+            assert_eq!(shown.len(), before);
+            assert!(reload_for_key(page.len(), fetched, total));
+        }
+        assert_eq!(asked, 3);
+        assert_eq!(shown, (0..6).collect::<Vec<_>>());
+        assert_eq!(fetched, 12);
+    }
+
+    #[test]
+    fn reload_for_key_stops_at_the_end() {
+        assert!(reload_for_key(40, 40, 100));
+        assert!(!reload_for_key(0, 40, 100));
+        assert!(!reload_for_key(40, 100, 100));
+        assert!(!reload_for_key(40, 10_000, 50_000));
     }
 }
 
