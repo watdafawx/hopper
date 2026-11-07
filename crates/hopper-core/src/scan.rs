@@ -104,6 +104,7 @@ pub fn scan_folder(dir: &Path) -> anyhow::Result<Vec<ModInfo>> {
     });
 
     if !misses.is_empty() {
+        let started = std::time::Instant::now();
         let next = AtomicUsize::new(0);
         let read: Vec<(usize, ModInfo)> = std::thread::scope(|s| {
             let workers: Vec<_> = (0..SCAN_THREADS.min(misses.len()))
@@ -136,6 +137,7 @@ pub fn scan_folder(dir: &Path) -> anyhow::Result<Vec<ModInfo>> {
             mods[i] = m;
         }
         save_cache();
+        crate::synctiming::add("jar reads (not in cache)", "jars", started.elapsed(), misses.len() as u64, false);
     }
 
     mods.sort_by_key(|m| m.mod_name.to_lowercase());

@@ -557,6 +557,9 @@ impl SyncPanel {
         };
         self.comparing = true;
         let anyway = self.store.read(cx).settings().sync_anyway.clone();
+        // One timing line per comparison (see `synctiming`): from here, so it
+        // covers the wait for a free thread too.
+        hopper::synctiming::begin();
         self._task = Some(cx.spawn(async move |this, cx| {
             let root = server.root.clone();
             let (diff, (crash, crash_configs), server_nf, marker) = cx
@@ -566,21 +569,24 @@ impl SyncPanel {
                     // on a disk or a Hopper Server, so they run together.
                     std::thread::scope(|s| {
                         let (inst, server, anyway) = (&inst, &server, &anyway);
+                        use hopper::synctiming::time;
                         let crash = s.spawn(move || {
-                            let crash = hopper::crashscan::last_crash(&server.root);
-                            // The crash's mods' configs, against the pack's: read on
-                            // the server (through Hopper Server when it has it).
-                            let configs = crash.as_ref().map_or_else(Vec::new, |c| {
-                                let panel = hopper::hopperd::locate(&server.root).and_then(Result::ok);
-                                hopper::crashdetect::config_differs(&inst.root, c, |rel| match &panel {
-                                    Some((client, id, _)) => client.read_text(id, rel).ok(),
-                                    None => std::fs::read_to_string(server.root.join(rel)).ok(),
-                                })
-                            });
-                            (crash, configs)
+                            time("crash and config reads", "", 0, || {
+                                let crash = hopper::crashscan::last_crash(&server.root);
+                                // The crash's mods' configs, against the pack's: read on
+                                // the server (through Hopper Server when it has it).
+                                let configs = crash.as_ref().map_or_else(Vec::new, |c| {
+                                    let panel = hopper::hopperd::locate(&server.root).and_then(Result::ok);
+                                    hopper::crashdetect::config_differs(&inst.root, c, |rel| match &panel {
+                                        Some((client, id, _)) => client.read_text(id, rel).ok(),
+                                        None => std::fs::read_to_string(server.root.join(rel)).ok(),
+                                    })
+                                });
+                                (crash, configs)
+                            })
                         });
-                        let nf = s.spawn(move || hopper::server_update::server_neoforge(&server.root));
-                        let marker = s.spawn(move || hopper::server_pack_update::recorded_on(server));
+                        let nf = s.spawn(move || time("NeoForge read", "", 0, || hopper::server_update::server_neoforge(&server.root)));
+                        let marker = s.spawn(move || time("pack marker read", "", 0, || hopper::server_pack_update::recorded_on(server)));
                         let diff = rigsync::compare(inst, server, anyway);
                         (
                             diff,
@@ -591,6 +597,8 @@ impl SyncPanel {
                     })
                 })
                 .await;
+            // Everything is read: this is click-to-result for the data.
+            hopper::synctiming::finish_to_file();
             this.update(cx, |this, cx| {
                 if this.server.as_ref() != Some(&root) {
                     return;

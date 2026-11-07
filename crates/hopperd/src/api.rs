@@ -628,13 +628,27 @@ async fn mods(
     // `off=1`: the jars turned off too (marked `off`), for Hopper's Sync.
     let off = q.get("off").is_some_and(|v| v == "1");
     let mods = tokio::task::spawn_blocking(move || {
-        if !dir.is_dir() {
+        // Sync's request: one line in this panel's log with where the time
+        // went (counts and times only), to set beside the desktop's line.
+        let timed = off;
+        if timed {
+            hopper_core::synctiming::begin();
+        }
+        let t = std::time::Instant::now();
+        let r = if !dir.is_dir() {
             Ok(Vec::new())
         } else if off {
             hopper_core::rigsync::mods_with_off(&dir)
         } else {
             hopper_core::scan::scan_folder(&dir)
+        };
+        if timed {
+            let n = r.as_ref().map_or(0, Vec::len);
+            if let Some(line) = hopper_core::synctiming::finish() {
+                log::info!("{} (server side, {n} jars, {} ms)", line.replacen("sync compare", "sync mods read", 1), t.elapsed().as_millis());
+            }
         }
+        r
     })
     .await
     .map_err(bad)?
