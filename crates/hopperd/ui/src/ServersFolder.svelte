@@ -191,7 +191,7 @@
           <button class:on={!!info.delete_permanently} aria-pressed={!!info.delete_permanently} onclick={() => setDeleteDefault(true)}>Delete permanently</button>
         </div>
       </div>
-      <div class="small muted">Which choice the delete dialog starts on. You can switch it for each delete. Deleting for good always asks you to type the server's name.</div>
+      <div class="small muted">Which choice the delete dialog starts on. You can switch it for each delete. Deleting for good is a tick box in that dialog.</div>
     </div>
   {/if}
 

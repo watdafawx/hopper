@@ -895,10 +895,9 @@ async fn port_check(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
 struct RemoveBody {
     /// "remove" (the panel forgets it, the folder stays) or "delete".
     mode: String,
-    /// The server's name, typed. Needed only for `permanent` (a moved server
-    /// can be restored for 30 days, so old clients and the default don't
-    /// send it).
+    /// Old clients send the server's name typed to confirm; not used.
     #[serde(default)]
+    #[allow(dead_code)]
     confirm: String,
     /// Delete only: delete the folder for good instead of moving it to
     /// `.hopper-deleted`. Can't be undone. Off unless asked.
@@ -949,9 +948,6 @@ async fn remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
                 move || app.changes.release(&src)
             };
             if b.permanent {
-                if b.confirm.trim() != e.name.trim() || e.name.trim().is_empty() {
-                    return Err(bad(format!("To delete {} for good, type its name.", e.name)));
-                }
                 let tmp = root.join(format!("{}{}-{folder}", hopper_core::hosting::fsmove::DELETING_PREFIX, now()));
                 let r2 = root.clone();
                 let (k, removed) = blocking(move || {

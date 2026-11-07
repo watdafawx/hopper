@@ -7,7 +7,6 @@ use crate::store::Store;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -36,18 +35,16 @@ struct DeleteForm {
     /// The server's Settings › General page in the panel, where its owner deletes it.
     web: Option<String>,
     /// Delete for good instead of the Recycle Bin / the panel's 30 days.
-    /// Asks for the server's name.
     permanent: bool,
-    name_input: Entity<InputState>,
 }
 
 impl DeleteForm {
     fn ready(&self, cx: &App) -> bool {
         let _ = cx;
-        // No typing the name while a deleted server can be restored (panel:
-        // 30 days in its deleted servers; this PC: the Recycle Bin). Deleting
-        // for good asks for it.
-        self.may != Some(false) && (!self.permanent || self.name_input.read(cx).value().trim() == self.name.trim())
+        // No typing the name: the tick box is the deliberate step for
+        // deleting for good; otherwise a deleted server can be restored
+        // (panel: 30 days in its deleted servers; this PC: the Recycle Bin).
+        self.may != Some(false)
     }
 }
 
@@ -96,20 +93,9 @@ impl Render for DeleteForm {
                 })
                 .into_any_element();
         }
-        let choice = v_flex().gap_1().child(
-            crate::widgets::Segmented::new("delete-how")
-                .selected_index(usize::from(self.permanent))
-                .child(crate::widgets::SegItem::new().label(if self.panel.is_some() { "Move for 30 days" } else { "Recycle Bin" }))
-                .child(crate::widgets::SegItem::new().label("Delete permanently"))
-                .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                    this.permanent = *ix == 1;
-                    cx.notify();
-                })),
-        );
         let kept_where = format!("Kept worlds\\{}", self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         v_flex()
             .gap_3()
-            .child(choice)
             .child(div().text_sm().text_color(theme.muted_foreground).child(format!("On {host}. This deletes:")))
             .child(
                 v_flex()
@@ -143,18 +129,19 @@ impl Render for DeleteForm {
                 )
             })
             .child(div().text_xs().text_color(if self.permanent { theme.danger } else { theme.muted_foreground }).child(match (&self.panel, self.permanent) {
-                (_, true) => "The rest of the folder is deleted for good. This can't be undone.".to_string(),
+                (_, true) => "The folder is deleted for good and can't be restored.".to_string(),
                 (Some(p), _) => format!("{p} keeps deleted servers for 30 days: restore one from the panel's Settings › Panel folder."),
                 (None, _) => "The rest of the folder goes to the Recycle Bin, where you can restore it.".into(),
             }))
-            .when(self.permanent, |c| {
-                c.child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(format!("Type {} to delete it for good", self.name)))
-                        .child(Input::new(&self.name_input).small()),
-                )
-            })
+            .child(
+                Checkbox::new("delete-permanent")
+                    .label("Delete permanently (can't be undone)")
+                    .checked(self.permanent)
+                    .on_change(cx.listener(|this, v: &bool, _, cx| {
+                        this.permanent = *v;
+                        cx.notify();
+                    })),
+            )
             .into_any_element()
     }
 }
@@ -206,15 +193,7 @@ pub fn open(store: Entity<Store>, root: PathBuf, running: bool, window: &mut Win
             .detach();
         }
         let may = if panel.is_some() { None } else { Some(true) };
-        let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Server name"));
-        cx.subscribe_in(&name_input, window, |_, _, e: &InputEvent, window, cx| {
-            if matches!(e, InputEvent::Change) {
-                cx.notify();
-                window.refresh();
-            }
-        })
-        .detach();
-        DeleteForm { store: store.clone(), root: root.clone(), name: srv.name.clone(), panel, worlds, backups, keep_world: true, may, web, permanent: false, name_input }
+        DeleteForm { store: store.clone(), root: root.clone(), name: srv.name.clone(), panel, worlds, backups, keep_world: true, may, web, permanent: false }
     });
     window.open_dialog(cx, move |dialog, window, cx| {
         let ready = form.read(cx).ready(cx);
@@ -229,11 +208,7 @@ pub fn open(store: Entity<Store>, root: PathBuf, running: bool, window: &mut Win
                     .child(DialogClose::new().child(Button::new("dialog-cancel").outline().label("Cancel")))
                     .child(
                         DialogAction::new().child(
-                            if permanent {
-                                Button::new("dialog-ok").danger().label("Delete permanently").disabled(!ready)
-                            } else {
-                                Button::new("dialog-ok").outline().label("Delete server").disabled(!ready)
-                            },
+                            Button::new("dialog-ok").danger().label(if permanent { "Delete permanently" } else { "Delete server" }).disabled(!ready),
                         ),
                     ),
             )

@@ -35,17 +35,15 @@
   }
 
   // Delete opens its own dialog with two choices. Moving is the default (30
-  // days to change your mind, no typing); deleting for good needs the
-  // server's name typed. Settings › Panel folder sets which one it starts on.
-  let dlg = $state(null); // { permanent, keep, typed, busy }
-  const nameOk = $derived(!!dlg && dlg.typed.trim() === server.name.trim());
+  // days to change your mind); deleting for good is one tick box. Settings › Panel folder sets which one it starts on.
+  let dlg = $state(null); // { permanent, keep, busy }
 
   function openDelete() {
-    dlg = { permanent: !!startPermanent, keep: true, typed: '', busy: false };
+    dlg = { permanent: !!startPermanent, keep: true, busy: false };
   }
 
   async function del() {
-    if (!dlg || dlg.busy || (dlg.permanent && !nameOk)) return;
+    if (!dlg || dlg.busy) return;
     dlg.busy = true;
     const permanent = dlg.permanent;
     try {
@@ -53,7 +51,6 @@
         mode: 'delete',
         keep_world: dlg.keep,
         permanent,
-        confirm: permanent ? dlg.typed.trim() : '',
       });
       const world = r?.kept_world ? `Its world is kept in ${r.kept_world}. ` : '';
       say(permanent ? `${server.name} deleted for good. ${world}` : `${server.name} deleted. ${world}Restore the server within 30 days from Settings › Panel folder.`);
@@ -94,28 +91,16 @@
     <div class="box popover" role="dialog" aria-modal="true" aria-label="Delete {server.name}">
       <form class="f" onsubmit={(e) => (e.preventDefault(), del())}>
         <h3>Delete {server.name}?</h3>
-        <div class="seg" role="group" aria-label="What happens to the folder">
-          <button type="button" class:on={!dlg.permanent} aria-pressed={!dlg.permanent} disabled={dlg.busy} onclick={() => (dlg.permanent = false)}>Move for 30 days</button>
-          <button type="button" class:on={dlg.permanent} aria-pressed={dlg.permanent} disabled={dlg.busy} onclick={() => (dlg.permanent = true)}>Delete permanently</button>
-        </div>
+        <label class="row small"><input type="checkbox" bind:checked={dlg.keep} disabled={dlg.busy} />Keep the world (moved to Kept worlds in the servers folder)</label>
+        <label class="row small"><input type="checkbox" bind:checked={dlg.permanent} disabled={dlg.busy} />Delete permanently (can't be undone)</label>
         {#if dlg.permanent}
-          <p class="small warn-text">Its folder and everything in it is deleted for good. This can't be undone{dlg.keep ? ', except for the world, which is kept' : ''}.</p>
+          <p class="small warn-text">The folder is deleted for good and can't be restored.</p>
         {:else}
           <p class="small subtle">Its folder moves to .hopper-deleted in the servers folder for 30 days: restore it from Settings › Panel folder.</p>
         {/if}
-        <label class="row small"><input type="checkbox" bind:checked={dlg.keep} disabled={dlg.busy} />Keep the world (moved to Kept worlds in the servers folder)</label>
-        {#if dlg.permanent}
-          <label class="small col2"><span>Type <b class="mono">{server.name}</b> to delete it for good</span>
-            <div class="input"><input bind:value={dlg.typed} placeholder={server.name} spellcheck="false" autocomplete="off" disabled={dlg.busy} /></div>
-          </label>
-        {/if}
         <div class="row end">
           <button type="button" class="btn" disabled={dlg.busy} onclick={() => (dlg = null)}>Cancel</button>
-          {#if dlg.permanent}
-            <button class="btn danger" disabled={!nameOk || dlg.busy}>{dlg.busy ? 'Deleting…' : 'Delete permanently'}</button>
-          {:else}
-            <button class="btn bad" disabled={dlg.busy}>{dlg.busy ? 'Moving…' : 'Move to .hopper-deleted'}</button>
-          {/if}
+          <button class="btn danger" disabled={dlg.busy}>{dlg.busy ? 'Deleting…' : dlg.permanent ? 'Delete permanently' : 'Delete server'}</button>
         </div>
       </form>
     </div>
@@ -132,10 +117,5 @@
   .f { display: flex; flex-direction: column; gap: 12px; }
   .box h3 { margin: 0; font-size: 15px; font-weight: 600; }
   .end { justify-content: flex-end; }
-  .col2 { display: flex; flex-direction: column; gap: 6px; }
   .warn-text { color: var(--danger-text, #f87171); margin: 0; }
-  .seg { display: flex; align-self: flex-start; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; }
-  .seg button { padding: 5px 11px; font-size: 12.5px; color: var(--subtle); }
-  .seg button + button { border-left: 1px solid var(--line2); }
-  .seg button.on { background: var(--acc); color: #1a1a1f; font-weight: 600; }
 </style>
