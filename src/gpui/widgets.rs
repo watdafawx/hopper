@@ -474,6 +474,7 @@ pub fn pill(text: impl Into<SharedString>, color: Hsla, dot: bool) -> Div {
         .flex()
         .flex_none()
         .items_center()
+        .whitespace_nowrap()
         .gap_1p5()
         .h(rems(1.375))
         .px_2p5()
@@ -648,6 +649,7 @@ pub fn underline_tabs(
             .font_weight(FontWeight::MEDIUM)
             .clickable(cx)
             .map(|t| if i == selected { tab_selected(t, cx) } else { t.text_color(muted).hover(move |s| s.text_color(fg)) })
+            .whitespace_nowrap()
             .child(label)
             .when_some(count, |t, n| t.child(div().text_xs().text_color(muted).child(n.to_string())))
             .on_click(move |_, window, cx| pick(&i, window, cx))
@@ -892,21 +894,13 @@ fn rail_view(
                     .when(disabled, |el| el.text_color(muted).opacity(0.5))
                     .when(icon.is_some(), |el| {
                         el.child(div().relative().child(Icon::new(icon.unwrap()).small()).when(badge && !on && count.is_some_and(|c| c > 0), |d| {
-                            d.child(
-                                div()
-                                    .absolute()
-                                    .top(px(-5.))
-                                    .right(px(-8.))
-                                    .px(px(3.))
-                                    .rounded(px(6.))
-                                    .bg(primary)
-                                    .text_color(theme_on_primary())
-                                    .text_size(px(9.))
-                                    .line_height(px(11.))
-                                    .font_weight(FontWeight::BOLD)
-                                    .child(count.unwrap_or(0).to_string()),
-                            )
+                            // Anchored by its left edge so more digits grow to the
+                            // right; the button's right padding (below) makes room.
+                            d.child(count_badge(count.unwrap_or(0).to_string(), primary).absolute().top(px(-5.)).left(px(10.)))
                         }))
+                    })
+                    .when(badge && !on && count.is_some_and(|c| c > 0), |el| {
+                        el.pr(px(7. + rail_badge_extra(count.unwrap_or(0))))
                     })
                     .when(on, |el| {
                         // The label and count fade in when the option opens.
@@ -948,6 +942,40 @@ fn rail_view(
                 [sep, Some(el.into_any_element())].into_iter().flatten()
             })),
     )
+}
+
+/// A small solid count badge (the orange number on an icon): one digit is a
+/// circle, more digits widen it into a pill. Never wraps, never shrinks, so
+/// a count of any length stays on one line. Callers position it.
+pub fn count_badge(text: impl Into<SharedString>, fill: Hsla) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .whitespace_nowrap()
+        .min_w(px(11.))
+        .h(px(11.))
+        .px(px(3.))
+        .rounded(px(6.))
+        .bg(fill)
+        .text_color(theme_on_primary())
+        .text_size(px(9.))
+        .line_height(px(11.))
+        .font_weight(FontWeight::BOLD)
+        .child(text.into())
+}
+
+/// Width of a [`count_badge`] holding `n` (9px bold digits, 3px each side).
+fn count_badge_width(n: usize) -> f32 {
+    let digits = n.max(1).to_string().len() as f32;
+    (digits * 5.5 + 6.).max(11.)
+}
+
+/// Extra right padding a rail button needs so its badge (starting 10px into
+/// the 16px icon) doesn't reach the next button.
+pub fn rail_badge_extra(n: usize) -> f32 {
+    (10. + count_badge_width(n) - 16. - 7.).max(0.)
 }
 
 /// Text on a count badge: white on the primary fill.
@@ -1000,6 +1028,8 @@ pub fn chip(color: Hsla) -> gpui_kit::component::tag::Tag {
     gpui_kit::component::tag::Tag::custom(color.opacity(alpha::TINT), color, gpui_kit::transparent_black())
         .xsmall()
         .flex_none()
+        // A count or label in a chip stays on one line, however long.
+        .whitespace_nowrap()
         .rounded(crate::theme::radius_sm())
         .map(chip_pad)
 }
@@ -1014,7 +1044,7 @@ pub fn chip_pad<E: Styled>(el: E) -> E {
 /// A hand-built chip sized by its text (no vertical padding of its own):
 /// the same height as `chip`, its label lifted to the middle like it.
 pub fn chip_lift<E: Styled>(el: E) -> E {
-    el.h(rems(1.2)).pb(px(2.))
+    el.h(rems(1.2)).pb(px(2.)).whitespace_nowrap()
 }
 
 /// CurseForge's pick for a project ("Hidden gem", "Popular", "Sponsored",
@@ -2838,7 +2868,17 @@ impl Anchored {
 
 #[cfg(test)]
 mod tests {
-    use super::job_label;
+    use super::{count_badge_width, job_label, rail_badge_extra};
+
+    #[test]
+    fn rail_badge_makes_room_as_digits_grow() {
+        // One digit fits in the button's own padding; more push it wider.
+        assert_eq!(rail_badge_extra(1), 0.);
+        assert!(rail_badge_extra(99) < rail_badge_extra(175));
+        assert!(rail_badge_extra(175) > 0.);
+        assert!(rail_badge_extra(12345) > rail_badge_extra(1234));
+        assert!(count_badge_width(1) >= 11.);
+    }
 
     #[test]
     fn job_label_shortens_job_details() {

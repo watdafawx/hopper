@@ -452,6 +452,8 @@ impl Render for TasksButton {
                         .top(px(0.))
                         .right(px(-5.))
                         .min_w(px(13.))
+                        .flex_none()
+                        .whitespace_nowrap()
                         .h(px(13.))
                         .px(px(3.))
                         .rounded_full()

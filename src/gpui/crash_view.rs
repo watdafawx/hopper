@@ -336,7 +336,7 @@ pub fn what_happened(c: &Crash, st: &Stopped, changed: Option<(&Changed, &str)>,
             .child(
                 div()
                     .flex_none()
-                    .size_5()
+                    .min_w(rems(1.25)).h(rems(1.25)).px_1().whitespace_nowrap()
                     .rounded_full()
                     .flex()
                     .items_center()
