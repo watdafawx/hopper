@@ -561,22 +561,34 @@ impl SyncPanel {
             let root = server.root.clone();
             let (diff, (crash, crash_configs), server_nf, marker) = cx
                 .background_spawn(async move {
-                    let crash = hopper::crashscan::last_crash(&server.root);
-                    // The crash's mods' configs, against the pack's: read on
-                    // the server (through Hopper Server when it has it).
-                    let configs = crash.as_ref().map_or_else(Vec::new, |c| {
-                        let panel = hopper::hopperd::locate(&server.root).and_then(Result::ok);
-                        hopper::crashdetect::config_differs(&inst.root, c, |rel| match &panel {
-                            Some((client, id, _)) => client.read_text(id, rel).ok(),
-                            None => std::fs::read_to_string(server.root.join(rel)).ok(),
-                        })
-                    });
-                    (
-                        rigsync::compare(&inst, &server, &anyway),
-                        (crash, configs),
-                        hopper::server_update::server_neoforge(&server.root),
-                        hopper::server_pack_update::recorded_on(&server),
-                    )
+                    // Four independent reads (the comparison, the last crash,
+                    // the server's NeoForge, the pack marker): each can wait
+                    // on a disk or a Hopper Server, so they run together.
+                    std::thread::scope(|s| {
+                        let (inst, server, anyway) = (&inst, &server, &anyway);
+                        let crash = s.spawn(move || {
+                            let crash = hopper::crashscan::last_crash(&server.root);
+                            // The crash's mods' configs, against the pack's: read on
+                            // the server (through Hopper Server when it has it).
+                            let configs = crash.as_ref().map_or_else(Vec::new, |c| {
+                                let panel = hopper::hopperd::locate(&server.root).and_then(Result::ok);
+                                hopper::crashdetect::config_differs(&inst.root, c, |rel| match &panel {
+                                    Some((client, id, _)) => client.read_text(id, rel).ok(),
+                                    None => std::fs::read_to_string(server.root.join(rel)).ok(),
+                                })
+                            });
+                            (crash, configs)
+                        });
+                        let nf = s.spawn(move || hopper::server_update::server_neoforge(&server.root));
+                        let marker = s.spawn(move || hopper::server_pack_update::recorded_on(server));
+                        let diff = rigsync::compare(inst, server, anyway);
+                        (
+                            diff,
+                            crash.join().unwrap_or_default(),
+                            nf.join().ok().flatten(),
+                            marker.join().ok().flatten(),
+                        )
+                    })
                 })
                 .await;
             this.update(cx, |this, cx| {

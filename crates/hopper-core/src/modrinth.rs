@@ -757,9 +757,13 @@ pub fn sides_of(paths: &[std::path::PathBuf]) -> HashMap<String, String> {
             .unwrap_or_default()
     });
     let mut dirty = false;
-    let hashed: Vec<(String, String)> = paths
+    // (name, cache key) of each jar that can be read; hashes not in the cache
+    // are worked out together on several threads (sha1 of a whole jar is the
+    // slow part, 1,200 jars took about a second one by one).
+    let keyed: Vec<(usize, String, String)> = paths
         .iter()
-        .filter_map(|p| {
+        .enumerate()
+        .filter_map(|(i, p)| {
             let md = std::fs::metadata(p).ok()?;
             let mtime = md
                 .modified()
@@ -768,18 +772,24 @@ pub fn sides_of(paths: &[std::path::PathBuf]) -> HashMap<String, String> {
                 .ok()?
                 .as_secs();
             let name = p.file_name()?.to_string_lossy().into_owned();
-            let key = format!("{name}|{}|{mtime}", md.len());
-            let h = match cache.hashes.get(&key) {
-                Some(h) => h.clone(),
-                None => {
-                    let h = sha1(&std::fs::read(p).ok()?);
-                    cache.hashes.insert(key, h.clone());
-                    dirty = true;
-                    h
-                }
-            };
-            Some((name, h))
+            Some((i, name.clone(), format!("{name}|{}|{mtime}", md.len())))
         })
+        .collect();
+    let todo: Vec<&(usize, String, String)> = keyed.iter().filter(|(_, _, k)| !cache.hashes.contains_key(k)).collect();
+    let fresh = crate::configindex::par_map(&todo, |(i, _, _)| std::fs::read(&paths[*i]).ok().map(|b| sha1(&b)));
+    // `par_map` leaves out an item that panicked, so match them by position
+    // only when all came back.
+    if fresh.len() == todo.len() {
+        for ((_, _, k), h) in todo.iter().zip(fresh) {
+            if let Some(h) = h {
+                cache.hashes.insert(k.clone(), h);
+                dirty = true;
+            }
+        }
+    }
+    let hashed: Vec<(String, String)> = keyed
+        .into_iter()
+        .filter_map(|(_, name, k)| cache.hashes.get(&k).map(|h| (name, h.clone())))
         .collect();
     let missing: Vec<String> = hashed
         .iter()

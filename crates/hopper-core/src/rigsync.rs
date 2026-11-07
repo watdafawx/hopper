@@ -55,8 +55,16 @@ pub fn compare(
     server: &ServerInfo,
     sync_anyway: &HashSet<u64>,
 ) -> Result<(Vec<DiffEntry>, Annotation), String> {
-    let (client, note) = client_mods(inst, sync_anyway).map_err(|e| format!("client: {e:#}"))?;
-    let theirs = server_mods_with_off(server).map_err(|e| format!("server: {e:#}"))?;
+    // The pack's side (jar reads, Modrinth lookups) and the server's (its
+    // folder or a Hopper Server's answer) don't depend on each other: they
+    // run at the same time. The client's error still wins when both fail.
+    let (client, theirs) = std::thread::scope(|s| {
+        let theirs = s.spawn(|| server_mods_with_off(server));
+        let client = client_mods(inst, sync_anyway);
+        (client, theirs.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the server scan stopped"))))
+    });
+    let (client, note) = client.map_err(|e| format!("client: {e:#}"))?;
+    let theirs = theirs.map_err(|e| format!("server: {e:#}"))?;
     Ok((diff_mods(&client, &theirs), note))
 }
 
@@ -64,20 +72,30 @@ pub fn compare(
 /// as `foo.jar` with `off` set, unless the same jar is there on too.
 pub fn mods_with_off(dir: &Path) -> anyhow::Result<Vec<ModInfo>> {
     let mut mods = crate::scan::scan_folder(dir)?;
+    let mut on: HashSet<String> = mods.iter().map(|m| m.file_name.to_ascii_lowercase()).collect();
+    let mut off: Vec<(std::path::PathBuf, String)> = Vec::new();
     for e in std::fs::read_dir(dir)?.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let Some(jar) = name.strip_suffix(".disabled").filter(|j| j.to_ascii_lowercase().ends_with(".jar")) else { continue };
         // Both copies there: the one that's on wins.
-        if mods.iter().any(|m| m.file_name.eq_ignore_ascii_case(jar)) || !e.path().is_file() {
+        if on.contains(&jar.to_ascii_lowercase()) || !e.path().is_file() {
             continue;
         }
-        let mut m = crate::scan::scan_file(&e.path());
-        m.file_name = jar.to_string();
-        if m.mod_name.is_empty() || m.mod_name.to_ascii_lowercase().contains(".disabled") {
-            m.mod_name = crate::scan::strip_version_suffix(jar);
+        on.insert(jar.to_ascii_lowercase());
+        off.push((e.path(), jar.to_string()));
+    }
+    // Turned-off jars aren't in the scan cache; opening them one by one was
+    // slow with a few hundred. Same order as the folder listing.
+    let scanned = crate::configindex::par_map(&off, |(path, _)| crate::scan::scan_file(path));
+    if scanned.len() == off.len() {
+        for ((_, jar), mut m) in off.iter().zip(scanned) {
+            m.file_name = jar.clone();
+            if m.mod_name.is_empty() || m.mod_name.to_ascii_lowercase().contains(".disabled") {
+                m.mod_name = crate::scan::strip_version_suffix(jar);
+            }
+            m.off = true;
+            mods.push(m);
         }
-        m.off = true;
-        mods.push(m);
     }
     Ok(mods)
 }
@@ -890,6 +908,50 @@ pub fn sync_help(add: usize, update: usize, remove: usize, kept_in: &str) -> Str
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn jar(path: &std::path::Path, id: &str, version: &str, pad: usize) {
+        use std::io::Write;
+        let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let o = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        z.start_file("META-INF/neoforge.mods.toml", o).unwrap();
+        write!(z, "[[mods]]\nmodId=\"{id}\"\nversion=\"{version}\"\ndisplayName=\"Mod {id}\"\n").unwrap();
+        z.start_file("pad.bin", o).unwrap();
+        z.write_all(&vec![7u8; pad]).unwrap();
+        z.finish().unwrap();
+    }
+
+    #[test]
+    fn mods_with_off_lists_on_and_off_jars_and_sees_changes() {
+        let dir = std::env::temp_dir().join(format!("hopper-modsoff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        jar(&dir.join("a-1.0.jar"), "a", "1.0", 10);
+        jar(&dir.join("b-1.0.jar"), "b", "1.0", 10);
+        jar(&dir.join("b-1.0.jar.disabled"), "b", "1.0", 10); // on wins
+        for i in 0..30 {
+            jar(&dir.join(format!("off{i:02}-2.{i}.jar.disabled")), &format!("off{i:02}"), &format!("2.{i}"), 10 + i);
+        }
+        std::fs::write(dir.join("notes.txt.disabled"), b"x").unwrap();
+
+        let got = mods_with_off(&dir).unwrap();
+        let on: Vec<&str> = got.iter().filter(|m| !m.off).map(|m| m.file_name.as_str()).collect();
+        assert_eq!(on, ["a-1.0.jar", "b-1.0.jar"]);
+        let mut off: Vec<(&str, &str, &str)> =
+            got.iter().filter(|m| m.off).map(|m| (m.file_name.as_str(), m.mod_id.as_str(), m.version.as_str())).collect();
+        off.sort();
+        assert_eq!(off.len(), 30);
+        assert_eq!(off[0], ("off00-2.0.jar", "off00", "2.0"));
+        assert_eq!(off[29], ("off29-2.29.jar", "off29", "2.29"));
+
+        // A jar rewritten with another size is read again, not served from
+        // the cache.
+        jar(&dir.join("a-1.0.jar"), "a", "9.9", 5000);
+        let again = mods_with_off(&dir).unwrap();
+        assert_eq!(again.iter().find(|m| m.file_name == "a-1.0.jar").unwrap().version, "9.9");
+        assert_eq!(again.len(), got.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn never_sync_mods_drop_out_of_a_full_sync() {
