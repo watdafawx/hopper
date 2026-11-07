@@ -60,12 +60,13 @@ pub fn compare(
     // run at the same time. The client's error still wins when both fail.
     let (client, theirs) = std::thread::scope(|s| {
         let theirs = s.spawn(|| server_mods_with_off(server));
-        let client = client_mods(inst, sync_anyway);
+        let client = crate::synctiming::time("pack scan", "", 0, || client_mods(inst, sync_anyway));
         (client, theirs.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the server scan stopped"))))
     });
     let (client, note) = client.map_err(|e| format!("client: {e:#}"))?;
     let theirs = theirs.map_err(|e| format!("server: {e:#}"))?;
-    Ok((diff_mods(&client, &theirs), note))
+    let diff = crate::synctiming::time("diff", "", 0, || diff_mods(&client, &theirs));
+    Ok((diff, note))
 }
 
 /// The jars in `dir`, on and off: an off one (`foo.jar.disabled`) is listed
@@ -86,7 +87,9 @@ pub fn mods_with_off(dir: &Path) -> anyhow::Result<Vec<ModInfo>> {
     }
     // Turned-off jars aren't in the scan cache; opening them one by one was
     // slow with a few hundred. Same order as the folder listing.
-    let scanned = crate::configindex::par_map(&off, |(path, _)| crate::scan::scan_file(path));
+    let scanned = crate::synctiming::time("turned-off jar scan", "jars", off.len() as u64, || {
+        crate::configindex::par_map(&off, |(path, _)| crate::scan::scan_file(path))
+    });
     if scanned.len() == off.len() {
         for ((_, jar), mut m) in off.iter().zip(scanned) {
             m.file_name = jar.clone();
@@ -107,7 +110,9 @@ pub const TURNED_OFF: &str = "Turned off in this pack";
 /// server), marked with what shouldn't sync.
 pub fn client_mods(inst: &Instance, sync_anyway: &HashSet<u64>) -> anyhow::Result<(Vec<ModInfo>, Annotation)> {
     let mut client = mods_with_off(&inst.mods_dir())?;
-    let note = crate::serverpack::annotate(&mut client, inst, sync_anyway);
+    let note = crate::synctiming::time("side tagging (includes the sha1 and Modrinth stages)", "mods", client.len() as u64, || {
+        crate::serverpack::annotate(&mut client, inst, sync_anyway)
+    });
     for m in client.iter_mut().filter(|m| m.off) {
         m.wont_sync = Some(TURNED_OFF.into());
     }
@@ -170,11 +175,18 @@ pub fn is_off_here(d: &DiffEntry) -> bool {
 /// the ones that are on.
 pub fn server_mods_with_off(server: &ServerInfo) -> anyhow::Result<Vec<crate::model::ModInfo>> {
     match &server.remote {
-        Some(r) => crate::hopperd::Client::for_remote(r)?.mods_with_off(&r.id),
-        None => {
+        // One request to the Hopper Server, which reads its jars itself: the
+        // time is the wait for it, the entries are what came back.
+        Some(r) => {
+            let t = std::time::Instant::now();
+            let got = crate::hopperd::Client::for_remote(r).and_then(|c| c.mods_with_off(&r.id));
+            crate::synctiming::add("server fetch (1 request to Hopper Server)", "entries", t.elapsed(), got.as_ref().map_or(0, |m| m.len() as u64), got.is_err());
+            got
+        }
+        None => crate::synctiming::time("server scan", "", 0, || {
             crate::remotefs::refresh_path(&server.root)?;
             mods_with_off(&server.mods_dir())
-        }
+        }),
     }
 }
 

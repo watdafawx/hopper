@@ -776,7 +776,9 @@ pub fn sides_of(paths: &[std::path::PathBuf]) -> HashMap<String, String> {
         })
         .collect();
     let todo: Vec<&(usize, String, String)> = keyed.iter().filter(|(_, _, k)| !cache.hashes.contains_key(k)).collect();
-    let fresh = crate::configindex::par_map(&todo, |(i, _, _)| std::fs::read(&paths[*i]).ok().map(|b| sha1(&b)));
+    let fresh = crate::synctiming::time("sha1 of unknown jars", "jars", todo.len() as u64, || {
+        crate::configindex::par_map(&todo, |(i, _, _)| std::fs::read(&paths[*i]).ok().map(|b| sha1(&b)))
+    });
     // `par_map` leaves out an item that panicked, so match them by position
     // only when all came back.
     if fresh.len() == todo.len() {
@@ -796,16 +798,20 @@ pub fn sides_of(paths: &[std::path::PathBuf]) -> HashMap<String, String> {
         .filter(|(_, h)| !cache.sides.contains_key(h))
         .map(|(_, h)| h.clone())
         .collect();
-    if !missing.is_empty()
-        && let Ok(versions) = versions_by_sha1(&missing)
-    {
+    // Only jars Modrinth hasn't answered for before are asked about.
+    let asked = std::time::Instant::now();
+    let found = if missing.is_empty() { None } else { Some(versions_by_sha1(&missing)) };
+    if !missing.is_empty() {
+        crate::synctiming::add("Modrinth side lookups", "jars", asked.elapsed(), missing.len() as u64, matches!(found, Some(Err(_))));
+    }
+    if let Some(Ok(versions)) = found {
         let ids: Vec<String> = versions
             .values()
             .map(|v| v.project_id.clone())
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
-        let sides: HashMap<String, &'static str> = projects(&ids)
+        let sides: HashMap<String, &'static str> = crate::synctiming::time_res("Modrinth project lookups", "projects", ids.len() as u64, || projects(&ids))
             .unwrap_or_default()
             .iter()
             .map(|p| (p.id.clone(), env(&p.client_side, &p.server_side)))
@@ -860,9 +866,12 @@ pub fn sides_by_slug(mods: &[(String, String)]) -> HashMap<String, String> {
         .filter(|(s, n)| !s.is_empty() && !cache.contains_key(&key(s, n)))
         .collect();
     let slugs: Vec<String> = missing.iter().map(|(s, _)| s.clone()).collect();
-    if !slugs.is_empty()
-        && let Ok(found) = projects(&slugs)
-    {
+    let asked = std::time::Instant::now();
+    let found = if slugs.is_empty() { None } else { Some(projects(&slugs)) };
+    if !slugs.is_empty() {
+        crate::synctiming::add("Modrinth slug lookups", "mods", asked.elapsed(), slugs.len() as u64, matches!(found, Some(Err(_))));
+    }
+    if let Some(Ok(found)) = found {
         for (slug, name) in &missing {
             let side = found
                 .iter()

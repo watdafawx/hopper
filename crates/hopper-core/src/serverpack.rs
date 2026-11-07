@@ -103,7 +103,7 @@ pub fn annotate(
 ) -> Annotation {
     let mut out = Annotation::default();
     let matcher = match &inst.pack {
-        Some(p) if p.server_pack_file_id != 0 => match get(p.project_id, p.server_pack_file_id) {
+        Some(p) if p.server_pack_file_id != 0 => match crate::synctiming::time_res("server pack list", "", 0, || get(p.project_id, p.server_pack_file_id)) {
             Ok(set) => {
                 out.server_pack_jars = Some(set.jars.len());
                 Some(Matcher::new(set))
