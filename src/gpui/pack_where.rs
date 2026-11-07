@@ -809,7 +809,7 @@ impl AddonsView {
             .when_some(rank, |c, n| {
                 c.child(
                     div()
-                        .size_5()
+                        .min_w(rems(1.25)).h(rems(1.25)).px_1().whitespace_nowrap()
                         .flex_none()
                         .flex()
                         .items_center()

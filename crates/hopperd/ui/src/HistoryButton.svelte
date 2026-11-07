@@ -38,7 +38,7 @@
   .badge {
     position: absolute; top: -4px; right: -4px; min-width: 15px; height: 15px; padding: 0 4px;
     border-radius: 999px; background: var(--acc); color: #fff; font-size: 10px; font-weight: 600;
-    line-height: 15px; text-align: center;
+    line-height: 15px; text-align: center; white-space: nowrap; box-sizing: border-box;
   }
   @media (prefers-reduced-motion: reduce) { .ico.turn { animation: none; } }
 </style>
