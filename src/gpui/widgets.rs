@@ -859,6 +859,7 @@ fn rail_view(
 ) -> impl IntoElement {
     let theme = cx.theme();
     let (fg, muted, wash, primary) = (theme.foreground, theme.muted_foreground, theme.list_hover, theme.primary);
+    let on_primary = theme.primary_foreground;
     let tint = primary.opacity(alpha::SELECTED);
     let track = fg.opacity(0.06);
     let n = items.len();
@@ -896,7 +897,7 @@ fn rail_view(
                         el.child(div().relative().child(Icon::new(icon.unwrap()).small()).when(badge && !on && count.is_some_and(|c| c > 0), |d| {
                             // Anchored by its left edge so more digits grow to the
                             // right; the button's right padding (below) makes room.
-                            d.child(count_badge(count.unwrap_or(0).to_string(), primary).absolute().top(px(-7.)).left(px(9.)))
+                            d.child(count_badge(count.unwrap_or(0).to_string(), primary, on_primary).absolute().top(px(-7.)).left(px(9.)))
                         }))
                     })
                     .when(badge && !on && count.is_some_and(|c| c > 0), |el| {
@@ -946,8 +947,11 @@ fn rail_view(
 
 /// A small solid count badge (the orange number on an icon): one digit is a
 /// circle, more digits widen it into a pill. Never wraps, never shrinks, so
-/// a count of any length stays on one line. Callers position it.
-pub fn count_badge(text: impl Into<SharedString>, fill: Hsla) -> Div {
+/// a count of any length stays on one line. Callers position it. `on_fill` is
+/// the theme's own text colour for the fill (`primary_foreground` on
+/// `primary`): a light theme colour gets dark digits, a dark one white, as the
+/// theme's filled buttons do, so the number is readable in every theme.
+pub fn count_badge(text: impl Into<SharedString>, fill: Hsla, on_fill: Hsla) -> Div {
     div()
         .flex()
         .flex_none()
@@ -961,7 +965,7 @@ pub fn count_badge(text: impl Into<SharedString>, fill: Hsla) -> Div {
         .px(px(4.))
         .rounded_full()
         .bg(fill)
-        .text_color(theme_on_primary())
+        .text_color(on_fill)
         .text_xs()
         .line_height(px(14.))
         .font_weight(FontWeight::BOLD)
@@ -978,11 +982,6 @@ fn count_badge_width(n: usize) -> f32 {
 /// the 16px icon) doesn't reach the next button.
 pub fn rail_badge_extra(n: usize) -> f32 {
     (9. + count_badge_width(n) - 16. - 7.).max(0.)
-}
-
-/// Text on a count badge: white on the primary fill.
-fn theme_on_primary() -> Hsla {
-    gpui_kit::white()
 }
 
 /// Buttons inside a clickable header that opens and closes its section
