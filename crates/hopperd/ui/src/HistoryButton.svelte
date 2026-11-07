@@ -36,7 +36,7 @@
   .ico.turn { animation: turn 550ms cubic-bezier(0.22, 1, 0.36, 1) 1; }
   @keyframes turn { from { transform: rotate(360deg); } to { transform: rotate(0); } }
   .badge {
-    position: absolute; top: -4px; right: -4px; min-width: 15px; height: 15px; padding: 0 4px;
+    position: absolute; top: -4px; right: -4px; min-width: 15px; height: 15px; padding: 0 4px 1px;
     border-radius: 999px; background: var(--acc); color: #fff; font-size: 10px; font-weight: 600;
     line-height: 15px; text-align: center; white-space: nowrap; box-sizing: border-box;
   }

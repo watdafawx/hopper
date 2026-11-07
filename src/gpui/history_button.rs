@@ -202,6 +202,7 @@ impl Render for HistoryButton {
                         .top(px(1.))
                         .right(px(-2.))
                         .min_w(px(14.))
+                        .pb(px(1.))
                         .flex_none()
                         .whitespace_nowrap()
                         .h(px(14.))
