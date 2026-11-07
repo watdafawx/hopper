@@ -72,6 +72,10 @@ export function choose(name) {
 
 // On load, before the first screen, and when the OS flips while following it.
 paint(theme.saved);
-window.matchMedia?.('(prefers-color-scheme: light)').addEventListener('change', () => {
+// The OS flipping while following it. The focus check covers a browser that
+// doesn't send the change event to a page that was in the background.
+function follow() {
   if (theme.saved === FOLLOW && theme.shown === null) paint(FOLLOW);
-});
+}
+window.matchMedia?.('(prefers-color-scheme: light)').addEventListener('change', follow);
+window.addEventListener('focus', follow);

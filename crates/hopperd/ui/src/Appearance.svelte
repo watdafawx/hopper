@@ -18,6 +18,8 @@
   let open = $state(false);
   let root = $state();
   let list = $state();
+  let pop = $state();
+  let btn = $state();
   let timer;
 
   const dark = THEMES.filter((t) => t.dark);
@@ -39,7 +41,22 @@
     if (open) return close();
     open = true;
     await tick();
+    place();
     (list?.querySelector('[aria-checked="true"]') ?? list?.querySelector('button'))?.focus({ preventScroll: false });
+  }
+
+  // Under the button, its right edge near the button's, and always inside the
+  // window. Fixed, so the title bar's own scrolling (narrow windows) can't clip
+  // or carry it away.
+  function place() {
+    if (!pop || !btn) return;
+    const b = btn.getBoundingClientRect();
+    const w = Math.min(440, window.innerWidth - 16);
+    const left = Math.max(8, Math.min(b.right + 40 - w, window.innerWidth - w - 8));
+    pop.style.width = `${w}px`;
+    pop.style.left = `${left}px`;
+    pop.style.top = `${b.bottom + 6}px`;
+    pop.style.maxHeight = `${window.innerHeight - b.bottom - 14}px`;
   }
 
   function close() {
@@ -61,17 +78,49 @@
       root?.querySelector('.pal-btn')?.focus();
       return;
     }
-    const arrows = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -2, ArrowDown: 2 };
+    const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
     if (!(e.key in arrows)) return;
     const all = [...list.querySelectorAll('button[role=radio]')];
     const i = all.indexOf(document.activeElement);
     if (i < 0) return;
     e.preventDefault();
-    all[Math.max(0, Math.min(all.length - 1, i + arrows[e.key]))].focus();
+    const sizes = [...list.querySelectorAll('.ap-grid')].map((g) => g.children.length);
+    all[gridMove(sizes, i, ...arrows[e.key])].focus();
+  }
+
+  // Where an arrow key goes in blocks of chips, two to a row (the same rule as
+  // grid_move in src/gpui/appearance.rs): left and right walk the list; up and
+  // down keep the column, cross into the next block at its edge, and land on
+  // the last chip of a short row.
+  function gridMove(sizes, at, dx, dy) {
+    const total = sizes.reduce((a, b) => a + b, 0);
+    at = Math.min(at, total - 1);
+    if (dy === 0) return Math.max(0, Math.min(total - 1, at + dx));
+    let block = 0, start = 0;
+    while (at >= start + sizes[block]) { start += sizes[block]; block++; }
+    const i = at - start, col = i % 2, n = sizes[block];
+    const before = (b) => sizes.slice(0, b).reduce((a, c) => a + c, 0);
+    if (dy < 0) {
+      if (i >= 2) return start + i - 2;
+      let prev = block - 1;
+      while (prev >= 0 && sizes[prev] === 0) prev--;
+      if (prev < 0) return at;
+      return before(prev) + Math.min(Math.floor((sizes[prev] - 1) / 2) * 2 + col, sizes[prev] - 1);
+    }
+    if (i + 2 < n) return start + i + 2;
+    if (Math.floor(i / 2) < Math.floor((n - 1) / 2)) return start + n - 1;
+    let next = block + 1;
+    while (next < sizes.length && sizes[next] === 0) next++;
+    if (next >= sizes.length) return at;
+    return before(next) + Math.min(col, sizes[next] - 1);
   }
 
   function outside(e) {
     if (open && root && !root.contains(e.target)) close();
+  }
+
+  function replace() {
+    if (open) place();
   }
 
   function shortcut(e) {
@@ -84,19 +133,21 @@
   onMount(() => {
     window.addEventListener('pointerdown', outside, true);
     window.addEventListener('keydown', shortcut);
+    window.addEventListener('resize', replace);
   });
   onDestroy(() => {
     clearTimeout(timer);
     window.removeEventListener('pointerdown', outside, true);
     window.removeEventListener('keydown', shortcut);
+    window.removeEventListener('resize', replace);
   });
 </script>
 
 <div class="ap" bind:this={root}>
-  <button class="btn ghost icon pal-btn" class:on={open} aria-expanded={open} aria-haspopup="true" aria-label="Appearance" title="Appearance: theme (Ctrl+Shift+A)" onclick={toggle}><Palette size={14} /></button>
+  <button bind:this={btn} class="btn ghost icon pal-btn" class:on={open} aria-expanded={open} aria-haspopup="true" aria-label="Appearance" title="Appearance: theme (Ctrl+Shift+A)" onclick={toggle}><Palette size={14} /></button>
   {#if open}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div class="popover ap-pop" role="dialog" aria-label="Appearance" tabindex="-1" onkeydown={key}>
+    <div class="popover ap-pop" bind:this={pop} role="dialog" aria-label="Appearance" tabindex="-1" onkeydown={key}>
       <div class="ap-h"><b>Theme</b></div>
       <div class="ap-list" bind:this={list} role="radiogroup" aria-label="Theme" onpointerleave={() => want(null)}>
         <div class="ap-grid">
@@ -128,9 +179,9 @@
 
 <style>
   .ap { position: relative; display: inline-flex; }
-  .ap-pop { position: absolute; top: calc(100% + 6px); right: -40px; z-index: 60; width: 340px; display: flex; flex-direction: column; }
+  .ap-pop { position: fixed; z-index: 60; width: 440px; max-width: calc(100vw - 16px); display: flex; flex-direction: column; }
   .ap-h { padding: 10px 12px 4px; font-size: 13px; }
-  .ap-list { max-height: min(60vh, 420px); overflow-y: auto; padding: 0 6px 6px; }
+  .ap-list { flex: 1; min-height: 0; max-height: min(60vh, 420px); overflow-y: auto; padding: 0 6px 6px; }
   .ap-sec { padding: 8px 6px 2px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--text); font-weight: 600; }
   .ap-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px; }
   .ap-row { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px; border-radius: var(--radius); text-align: left; font-size: 12.5px; min-width: 0; }

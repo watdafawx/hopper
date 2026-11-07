@@ -107,6 +107,7 @@ impl Preview {
         self.generation += 1;
     }
 
+    #[cfg(test)]
     pub fn is_previewing(&self) -> bool {
         self.shown.is_some()
     }
