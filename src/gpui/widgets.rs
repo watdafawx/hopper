@@ -967,7 +967,8 @@ pub fn count_badge(text: impl Into<SharedString>, fill: Hsla, on_fill: Hsla) -> 
         .bg(fill)
         .text_color(on_fill)
         .text_xs()
-        .line_height(px(14.))
+        // The UI font's tall ascent leaves digits low when centred; 3px (measured: 3 above, 3 below, like History) lifts them.
+        .pb(px(3.))
         .font_weight(FontWeight::BOLD)
         .child(text.into())
 }

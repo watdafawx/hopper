@@ -139,12 +139,12 @@ pub const PALETTES: &[Palette] = &[
     Palette { bg: "#282c34", panel: "#21252b", surface: "#2c313a", raised: "#3a3f4b", border: "#3a3f4b", fg: "#abb2bf", muted: "#8b92a0", accent: "#61afef", accent_fg: "#1e2127", success: "#98c379", warning: "#e5c07b", danger: "#e06c75", info: "#56b6c2", ..dark("One Dark") },
     Palette { bg: "#2c2525", panel: "#211c1c", surface: "#352e2e", raised: "#403838", border: "#403838", fg: "#fff1f3", muted: "#c3b7b8", accent: "#f9cc6c", accent_fg: "#2c2525", success: "#adda78", warning: "#f38d70", danger: "#fd6883", info: "#85dacc", ..dark("Ristretto") },
     Palette { bg: "#1f1f28", panel: "#16161d", surface: "#2a2a37", raised: "#363646", border: "#363646", fg: "#dcd7ba", muted: "#a09c8c", accent: "#7e9cd8", accent_fg: "#1f1f28", success: "#98bb6c", warning: "#e6c384", danger: "#e46876", info: "#7fb4ca", ..dark("Kanagawa") },
-    Palette { bg: "#fafafa", panel: "#f1f1f3", surface: "#f4f4f5", raised: "#e7e7ea", border: "#e4e4e7", fg: "#18181b", muted: "#6b6b75", accent: "#ea580c", accent_fg: "#ffffff", success: "#16a34a", warning: "#ca8a04", danger: "#dc2626", info: "#0284c7", ..light(HOPPER_LIGHT) },
+    Palette { bg: "#fafafa", panel: "#f1f1f3", surface: "#f4f4f5", raised: "#e7e7ea", border: "#e4e4e7", fg: "#18181b", muted: "#6b6b75", accent: "#ea580c", accent_fg: "#141414", success: "#16a34a", warning: "#ca8a04", danger: "#dc2626", info: "#0284c7", ..light(HOPPER_LIGHT) },
     Palette { bg: "#eff1f5", panel: "#e6e9ef", surface: "#e6e9ef", raised: "#ccd0da", border: "#ccd0da", fg: "#4c4f69", muted: "#6c6f85", accent: "#8839ef", accent_fg: "#eff1f5", success: "#40a02b", warning: "#df8e1d", danger: "#d20f39", info: "#04a5e5", ..light("Catppuccin Latte") },
-    Palette { bg: "#faf4ed", panel: "#f2e9e1", surface: "#fffaf3", raised: "#dfdad9", border: "#dfdad9", fg: "#575279", muted: "#797593", accent: "#d7827e", accent_fg: "#faf4ed", success: "#56949f", warning: "#ea9d34", danger: "#b4637a", info: "#907aa9", ..light("Rosé Pine Dawn") },
-    Palette { bg: "#e1e2e7", panel: "#d0d5e3", surface: "#e9e9ed", raised: "#c4c8da", border: "#c4c8da", fg: "#3760bf", muted: "#6172b0", accent: "#2e7de9", accent_fg: "#ffffff", success: "#587539", warning: "#8c6c3e", danger: "#f52a65", info: "#007197", ..light("Tokyo Night Day") },
+    Palette { bg: "#faf4ed", panel: "#f2e9e1", surface: "#fffaf3", raised: "#dfdad9", border: "#dfdad9", fg: "#575279", muted: "#797593", accent: "#d7827e", accent_fg: "#141414", success: "#56949f", warning: "#ea9d34", danger: "#b4637a", info: "#907aa9", ..light("Rosé Pine Dawn") },
+    Palette { bg: "#e1e2e7", panel: "#d0d5e3", surface: "#e9e9ed", raised: "#c4c8da", border: "#c4c8da", fg: "#3760bf", muted: "#6172b0", accent: "#2e7de9", accent_fg: "#141414", success: "#587539", warning: "#8c6c3e", danger: "#f52a65", info: "#007197", ..light("Tokyo Night Day") },
     Palette { bg: "#fbf1c7", panel: "#f2e5bc", surface: "#f9f5d7", raised: "#ebdbb2", border: "#d5c4a1", fg: "#3c3836", muted: "#7c6f64", accent: "#af3a03", accent_fg: "#fbf1c7", success: "#79740e", warning: "#b57614", danger: "#9d0006", info: "#076678", ..light("Gruvbox Light") },
-    Palette { bg: "#fdf6e3", panel: "#eee8d5", surface: "#f5efdc", raised: "#e4ddc8", border: "#e0d8c0", fg: "#475b62", muted: "#657b83", accent: "#268bd2", accent_fg: "#fdf6e3", success: "#859900", warning: "#b58900", danger: "#dc322f", info: "#2aa198", ..light("Solarized Light") },
+    Palette { bg: "#fdf6e3", panel: "#eee8d5", surface: "#f5efdc", raised: "#e4ddc8", border: "#e0d8c0", fg: "#475b62", muted: "#657b83", accent: "#268bd2", accent_fg: "#141414", success: "#859900", warning: "#b58900", danger: "#dc322f", info: "#2aa198", ..light("Solarized Light") },
 ];
 
 /// Every theme's name, in menu order: Hopper's, the built-in ones, then
@@ -573,6 +573,19 @@ mod tests {
             assert!(config(p).is_some(), "{}", p.name);
         }
         assert!(hopper_dark().is_some());
+    }
+
+    /// Text on the primary fill (count badges, filled buttons) must be
+    /// readable in every theme: WCAG AA for normal text.
+    #[::core::prelude::v1::test]
+    fn text_on_primary_is_readable_in_every_palette() {
+        let low: Vec<String> = PALETTES
+            .iter()
+            .map(|p| (p.name, contrast(p.accent, p.accent_fg)))
+            .filter(|(_, c)| *c < 4.5)
+            .map(|(n, c)| format!("{n} {c:.2}"))
+            .collect();
+        assert!(low.is_empty(), "primary_foreground on primary under 4.5:1: {low:?}");
     }
 
     #[::core::prelude::v1::test]
