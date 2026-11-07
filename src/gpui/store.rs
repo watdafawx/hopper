@@ -73,6 +73,9 @@ pub enum Msg {
     Running(HashMap<PathBuf, Running>),
     /// Categories looked up for installed projects, by [`hopper::modmeta::key`].
     Categories(HashMap<String, Vec<String>>),
+    /// Which of a long list of image keys are in the disk cache already
+    /// (see [`Store::want_images_spread`]).
+    ImagesProbed(Vec<(String, Option<PathBuf>)>),
     Image {
         url: String,
         path: Option<PathBuf>,
@@ -1181,6 +1184,25 @@ impl Store {
                 }
                 self.cats.get_or_insert_default().extend(found);
             }
+            Msg::ImagesProbed(found) => {
+                for (url, path) in found {
+                    // Only the keys held back for this lookup.
+                    if !matches!(self.images.get(&url), Some(Image::Loading)) {
+                        continue;
+                    }
+                    match path.filter(|p| !hopper::imgcache::maybe_animated(p)) {
+                        Some(p) => {
+                            crate::img_log::mark("disk", &url);
+                            hopper::imgcache::touch(&p);
+                            self.images.insert(url, Image::Ready(p));
+                        }
+                        None => {
+                            self.images.remove(&url);
+                            self.want_image(&url);
+                        }
+                    }
+                }
+            }
             Msg::Image { url, path } => {
                 let ok = path.is_some();
                 crate::img_log::mark(if ok { "ready" } else { "failed" }, &url);
@@ -2015,6 +2037,47 @@ impl Store {
                 .flatten()
                 .map(Arc::new);
             Msg::Anim { key, clip }
+        });
+    }
+
+    /// [`Self::want_image`] for a long list in the order it is shown. Each
+    /// look into the disk cache costs about 0.1 ms, which added up to a
+    /// frozen window when a 1,000-mod pack's list opened: the first screenful
+    /// is looked up now, the rest on other threads (their keys wait as
+    /// loading until the answer comes, a few ms later).
+    pub fn want_images_spread(&mut self, urls: &[String]) {
+        const NOW: usize = 60;
+        let mut rest: Vec<String> = Vec::new();
+        for (i, url) in urls.iter().enumerate() {
+            if i < NOW || url.is_empty() || self.images.contains_key(url.as_str()) {
+                self.want_image(url);
+            } else {
+                // A held-back key, so the same one isn't looked up twice.
+                self.images.insert(url.clone(), Image::Loading);
+                rest.push(url.clone());
+            }
+        }
+        if rest.is_empty() {
+            return;
+        }
+        self.spawn(move || {
+            let threads = rest.len().div_ceil(64).clamp(1, 8);
+            let size = rest.len().div_ceil(threads);
+            let mut found = Vec::with_capacity(rest.len());
+            std::thread::scope(|scope| {
+                let jobs: Vec<_> = rest
+                    .chunks(size)
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            chunk.iter().map(|u| (u.clone(), hopper::imgcache::cached(u))).collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                for job in jobs {
+                    found.extend(job.join().unwrap_or_default());
+                }
+            });
+            Msg::ImagesProbed(found)
         });
     }
 

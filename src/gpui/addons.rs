@@ -1286,13 +1286,26 @@ impl AddonsView {
             return;
         };
         let loose: Vec<String> = self.loose.1.iter().filter_map(|f| self.loose_icon(f)).collect();
+        // The rows shown first: those are the icons wanted now.
+        let mut urls: Vec<String> = Vec::new();
+        let mut seen = HashSet::new();
+        for r in self.table.rows.iter() {
+            if let Row::Addon(i) = r
+                && let Some(a) = inst.addons.get(*i)
+                && in_class(a, class)
+                && seen.insert(*i)
+            {
+                urls.push(a.icon.clone());
+            }
+        }
+        for (i, a) in inst.addons.iter().enumerate() {
+            if in_class(a, class) && !seen.contains(&i) {
+                urls.push(a.icon.clone());
+            }
+        }
+        urls.extend(loose);
         self.store.update(cx, |s, _| {
-            for a in inst.addons.iter().filter(|a| in_class(a, class)) {
-                s.want_image(&a.icon);
-            }
-            for f in &loose {
-                s.want_image(f);
-            }
+            s.want_images_spread(&urls);
             s.want_categories(inst.addons.iter().filter(|a| in_class(a, class)));
         });
     }

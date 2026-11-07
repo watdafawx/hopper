@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// The instance's own folder's location key.
 pub const INSTANCE: &str = "instance";
@@ -242,14 +243,45 @@ pub fn set_paxi_order(inst: &Instance, class: u32, names: &[String]) -> anyhow::
 /// slashes): CurseForge's `modpackOverrides`, else the cached pack zip's
 /// overrides. `None` when neither says.
 pub fn shipped(inst: &Instance) -> Option<HashSet<String>> {
-    let doc: Option<serde_json::Value> = fs::read_to_string(inst.root.join("minecraftinstance.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok());
-    let from_doc = doc.as_ref().and_then(|d| d.get("modpackOverrides")?.as_array().cloned()).map(|a| {
-        a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect::<Vec<_>>()
-    });
-    let list = from_doc.or_else(|| crate::modpack::cached_override_files(inst.pack.as_ref()?.file_id))?;
-    Some(list.into_iter().map(|p| p.replace('\\', "/").to_lowercase()).collect())
+    // minecraftinstance.json is several MB for a big pack and this runs each
+    // time the pack tabs build their list: an answer read from it is kept
+    // until the file changes. (The pack zip fallback is not kept: that
+    // file can turn up at any time.)
+    type Kept = (PathBuf, (std::time::SystemTime, u64), HashSet<String>);
+    static LAST: Mutex<Option<Kept>> = Mutex::new(None);
+    let path = inst.root.join("minecraftinstance.json");
+    let stamp = fs::metadata(&path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
+    if let Some(stamp) = stamp {
+        let g = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((p, s, set)) = g.as_ref()
+            && *p == path
+            && *s == stamp
+        {
+            return Some(set.clone());
+        }
+    }
+    let (set, from_doc) = read_shipped(inst, &path);
+    if let (Some(stamp), Some(set), true) = (stamp, set.as_ref(), from_doc) {
+        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some((path, stamp, set.clone()));
+    }
+    set
+}
+
+/// [`shipped`] read from disk; true when the file itself had the list.
+fn read_shipped(inst: &Instance, path: &Path) -> (Option<HashSet<String>>, bool) {
+    /// Only the field wanted: the rest of the file is skipped, not built.
+    #[derive(serde::Deserialize)]
+    struct Doc {
+        #[serde(rename = "modpackOverrides")]
+        overrides: Option<Vec<serde_json::Value>>,
+    }
+    let doc: Option<Doc> = fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok());
+    let from_doc = doc
+        .and_then(|d| d.overrides)
+        .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect::<Vec<_>>());
+    let in_doc = from_doc.is_some();
+    let list = from_doc.or_else(|| inst.pack.as_ref().and_then(|p| crate::modpack::cached_override_files(p.file_id)));
+    (list.map(|l| l.into_iter().map(|p| p.replace('\\', "/").to_lowercase()).collect()), in_doc)
 }
 
 /// Whether a copy came with the modpack: its file (or, for a folder pack,
@@ -561,6 +593,26 @@ mod tests {
     fn touch(p: &Path) {
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, b"x").unwrap();
+    }
+
+    #[test]
+    fn shipped_reads_the_overrides_and_notices_a_changed_file() {
+        let i = tmp("shipped");
+        let f = i.root.join("minecraftinstance.json");
+        // Other fields (and their size) don't matter, a non-string entry is skipped.
+        fs::write(&f, r#"{"installedAddons":[{"a":1},{"b":2}],"modpackOverrides":["Config\\A.toml","resourcepacks/X.zip",7]}"#)
+            .unwrap();
+        let first = shipped(&i).unwrap();
+        assert_eq!(first, HashSet::from(["config/a.toml".to_string(), "resourcepacks/x.zip".to_string()]));
+        // Read again from the kept answer: the same.
+        assert_eq!(shipped(&i).unwrap(), first);
+        // A different file (another length) is read afresh.
+        fs::write(&f, r#"{"modpackOverrides":["only.txt"]}"#).unwrap();
+        assert_eq!(shipped(&i).unwrap(), HashSet::from(["only.txt".to_string()]));
+        // No list in the file and no pack to fall back on: nothing says.
+        fs::write(&f, r#"{"modpackOverrides":"nope"}"#).unwrap();
+        assert_eq!(shipped(&i), None);
+        let _ = fs::remove_dir_all(&i.root);
     }
 
     fn opts(i: &Instance, packs: &[&str]) {
