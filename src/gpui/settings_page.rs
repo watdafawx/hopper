@@ -2323,7 +2323,7 @@ impl SettingsPage {
                     .tooltip("Read the theme folder again")
                     .on_click(cx.listener(|_, _, window, cx| {
                         let n = crate::theme::reload_custom();
-                        window.push_notification(Notification::info(format!("{n} themes of your own.")), cx);
+                        window.push_notification(Notification::info(crate::theme::own_themes_text(n)), cx);
                         cx.notify();
                     })),
             );
@@ -2844,13 +2844,7 @@ impl SettingsPage {
     /// The theme menu: each with a strip of its colors.
     fn theme_picker(&self, s: &hopper::settings::Settings, rem: Pixels) -> impl IntoElement + use<> {
         use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
-        let current = if s.theme_name.is_empty() && s.theme == 1 {
-            crate::theme::HOPPER_DARK.to_string()
-        } else if s.theme_name.is_empty() && s.theme == 2 {
-            crate::theme::HOPPER_LIGHT.to_string()
-        } else {
-            s.theme_name.clone()
-        };
+        let current = crate::appearance::current_name(s);
         let label = if current.is_empty() { "Follow Windows".to_string() } else { current.clone() };
         let store = self.store.clone();
         Button::new("theme")
@@ -3347,7 +3341,7 @@ pub fn restart(cx: &mut App) {
 }
 
 /// One theme in the menu: its colors, its name, and whether it's glass.
-fn theme_row(name: &str, cx: &App) -> AnyElement {
+pub(crate) fn theme_row(name: &str, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let swatch: AnyElement = if name.is_empty() {
         // Follow Windows: Hopper Dark beside Hopper Light.

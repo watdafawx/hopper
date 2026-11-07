@@ -777,6 +777,31 @@ mod tests {
         d
     }
 
+    /// What the appearance popover changes survives a restart: it goes
+    /// through the settings file and comes back the same.
+    #[test]
+    fn appearance_choices_are_saved_and_loaded() {
+        let d = temp("appearance");
+        let file = d.join("settings.json");
+        let s = Settings {
+            theme_name: "Catppuccin Macchiato".into(),
+            zoom: 125,
+            still_header: true,
+            smooth_scroll: false,
+            ..Settings::default()
+        };
+        std::fs::write(&file, serde_json::to_vec_pretty(&s).unwrap()).unwrap();
+        let back = Settings::load_from(&file).expect("loads");
+        assert_eq!(back.theme_name, "Catppuccin Macchiato");
+        assert_eq!(back.zoom, 125);
+        assert!(back.still_header);
+        assert!(!back.smooth_scroll);
+        // Settings from before these existed keep the defaults.
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!((old.zoom, old.still_header, old.smooth_scroll), (100, false, true));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
     #[test]
     fn panel_widths_load_and_round_trip() {
         // Settings from before panel widths existed still load.
