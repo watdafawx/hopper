@@ -85,6 +85,25 @@ pub fn cached(url: &str) -> Option<PathBuf> {
     path_for(url).filter(|p| p.is_file())
 }
 
+/// [`cached`] for many keys at once, on several threads, in the order
+/// given. One look costs about 0.1 ms on a big cache folder, so a
+/// 1,000-icon list is worth spreading.
+pub fn cached_many(urls: &[String]) -> Vec<(String, Option<PathBuf>)> {
+    let threads = urls.len().div_ceil(64).clamp(1, 8);
+    let size = urls.len().div_ceil(threads).max(1);
+    let mut found = Vec::with_capacity(urls.len());
+    std::thread::scope(|scope| {
+        let jobs: Vec<_> = urls
+            .chunks(size)
+            .map(|chunk| scope.spawn(move || chunk.iter().map(|u| (u.clone(), cached(u))).collect::<Vec<_>>()))
+            .collect();
+        for job in jobs {
+            found.extend(job.join().unwrap_or_default());
+        }
+    });
+    found
+}
+
 /// The most of an animated image that is downloaded; the rest is cut off.
 const ANIMATED_MAX: u64 = 64 << 20;
 
@@ -413,6 +432,25 @@ mod tests {
         assert_eq!(path_for(r"C:\x\icon.png"), Some(PathBuf::from(r"C:\x\icon.png")));
         assert_eq!(path_for("file:///C:/x/i.png"), Some(PathBuf::from("C:/x/i.png")));
         assert_eq!(path_for(""), None);
+    }
+
+    #[test]
+    fn cached_many_keeps_the_order_and_finds_only_files() {
+        let dir = std::env::temp_dir().join(format!("hopper-many-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Enough keys to use several threads; every third one is a real file.
+        let urls: Vec<String> = (0..300).map(|i| dir.join(format!("i{i}.png")).display().to_string()).collect();
+        for i in (0..300).step_by(3) {
+            std::fs::write(dir.join(format!("i{i}.png")), b"x").unwrap();
+        }
+        let found = cached_many(&urls);
+        assert_eq!(found.len(), 300);
+        for (i, (url, path)) in found.iter().enumerate() {
+            assert_eq!(url, &urls[i]);
+            assert_eq!(path.is_some(), i % 3 == 0, "{i}");
+        }
+        assert!(cached_many(&[]).is_empty());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

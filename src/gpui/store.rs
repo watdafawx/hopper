@@ -2060,25 +2060,7 @@ impl Store {
         if rest.is_empty() {
             return;
         }
-        self.spawn(move || {
-            let threads = rest.len().div_ceil(64).clamp(1, 8);
-            let size = rest.len().div_ceil(threads);
-            let mut found = Vec::with_capacity(rest.len());
-            std::thread::scope(|scope| {
-                let jobs: Vec<_> = rest
-                    .chunks(size)
-                    .map(|chunk| {
-                        scope.spawn(move || {
-                            chunk.iter().map(|u| (u.clone(), hopper::imgcache::cached(u))).collect::<Vec<_>>()
-                        })
-                    })
-                    .collect();
-                for job in jobs {
-                    found.extend(job.join().unwrap_or_default());
-                }
-            });
-            Msg::ImagesProbed(found)
-        });
+        self.spawn(move || Msg::ImagesProbed(hopper::imgcache::cached_many(&rest)));
     }
 
     /// Starts caching `url` unless it is cached or on its way.
