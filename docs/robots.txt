@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://watdafawx.github.io/hopper/sitemap.xml

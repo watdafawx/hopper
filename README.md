@@ -1,7 +1,9 @@
 # Hopper
 
-A fast, native Minecraft modpack launcher for Windows, in Rust on
-[GPUI](https://www.gpui.rs/), plus **Hopper Server**: a self-hosted server
+A free, open source Minecraft modpack launcher and mod manager for Windows
+(CurseForge and Modrinth packs): fast and native, in Rust on
+[GPUI](https://www.gpui.rs/). It keeps hundreds of mods up to date, explains
+crashes and keeps servers in step with their pack. Plus **Hopper Server**: a self-hosted Minecraft server
 panel you use from any browser, on Windows, Linux (x64 and ARM64) or Docker.
 Hopper is built for playing packs fast, and keeps your Minecraft servers in
 step with them.

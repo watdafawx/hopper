@@ -3,16 +3,30 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hopper · Minecraft modpack launcher and server panel</title>
-<meta name="description" content="Hopper is a fast, native Minecraft modpack launcher for Windows. Hopper Server is a self-hosted server panel you use from any browser, on Windows, Linux or Docker. Built in Rust.">
-<meta property="og:title" content="Hopper">
-<meta property="og:description" content="A fast, native Minecraft modpack launcher for Windows, plus Hopper Server: a self-hosted server panel for Windows, Linux and Docker.">
-<meta property="og:image" content="https://watdafawx.github.io/hopper/screenshots/overview.png">
+<title>Hopper: Minecraft modpack launcher for CurseForge and Modrinth</title>
+<meta name="description" content="Free, open source Minecraft modpack launcher for Windows. Play CurseForge and Modrinth packs, update mods in one click, find crash causes. Plus Hopper Server.">
+<link rel="canonical" href="https://watdafawx.github.io/hopper/">
+<meta property="og:title" content="Hopper: Minecraft modpack launcher for CurseForge and Modrinth">
+<meta property="og:description" content="A native Windows launcher for CurseForge and Modrinth modpacks with one-click mod updates and crash analysis, plus Hopper Server, a self-hosted Minecraft server panel.">
+<meta property="og:image" content="https://watdafawx.github.io/hopper/og-image.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Hopper, a Minecraft modpack launcher for CurseForge and Modrinth, showing a modpack instance">
 <meta property="og:type" content="website">
+<meta property="og:url" content="https://watdafawx.github.io/hopper/">
+<meta property="og:site_name" content="Hopper">
+<meta property="og:locale" content="en_US">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Hopper: Minecraft modpack launcher for CurseForge and Modrinth">
+<meta name="twitter:description" content="A native Windows launcher for CurseForge and Modrinth modpacks with one-click mod updates and crash analysis, plus Hopper Server, a self-hosted Minecraft server panel.">
+<meta name="twitter:image" content="https://watdafawx.github.io/hopper/og-image.jpg">
 <meta name="theme-color" content="#121214">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Hopper","description":"A native Minecraft modpack launcher and mod manager for CurseForge and Modrinth packs. Keeps mods up to date, explains crashes and syncs an instance with a server.","applicationCategory":"GameApplication","operatingSystem":"Windows","url":"https://watdafawx.github.io/hopper/","downloadUrl":"https://github.com/watdafawx/hopper/releases/latest","image":"https://watdafawx.github.io/hopper/og-image.jpg","license":"https://opensource.org/licenses/MIT","isAccessibleForFree":true,"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"author":{"@type":"Person","name":"watdafawx","url":"https://github.com/watdafawx"},"publisher":{"@type":"Organization","name":"Hopper","url":"https://watdafawx.github.io/hopper/","logo":"https://watdafawx.github.io/hopper/hopper.png"},"sameAs":["https://github.com/watdafawx/hopper"]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Hopper Server","description":"A self-hosted Minecraft server panel with a web UI: console, files, mods, players, backups and schedules.","applicationCategory":"UtilitiesApplication","operatingSystem":"Windows, Linux, Docker","url":"https://watdafawx.github.io/hopper/#server","downloadUrl":"https://github.com/watdafawx/hopper/releases?q=hopperd&expanded=true","image":"https://watdafawx.github.io/hopper/og-image.jpg","license":"https://opensource.org/licenses/MIT","isAccessibleForFree":true,"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"author":{"@type":"Person","name":"watdafawx","url":"https://github.com/watdafawx"},"publisher":{"@type":"Organization","name":"Hopper","url":"https://watdafawx.github.io/hopper/","logo":"https://watdafawx.github.io/hopper/hopper.png"},"sameAs":["https://github.com/watdafawx/hopper"]}</script>
 <link rel="icon" href="favicon.png">
 <script>document.documentElement.className="js"</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -249,7 +263,7 @@ html:not(.js) .ppane{display:block}
       </a>
     </div>
     <p class="fine">Free and open source (MIT) · One exe, no admin rights · Both update themselves</p>
-    <div class="shot rv"><img src="screenshots/overview.png" width="1440" height="900" alt="Hopper showing an All the Mods 10 instance with its pack page, playtime, mod count and a pack update"></div>
+    <div class="shot rv"><img src="screenshots/overview.webp" width="1440" height="900" alt="Hopper showing an All the Mods 10 instance with its pack page, playtime, mod count and a pack update" fetchpriority="high" decoding="async"></div>
 
     <div class="strip rv">
       <div><b>Native</b><span>Rust on GPUI. No Electron, no browser inside.</span></div>
@@ -301,7 +315,7 @@ html:not(.js) .ppane{display:block}
 <div class="spot" id="mods">
   <div class="txt rv">
     <div class="eyebrow">Mods</div>
-    <h2>Hundreds of updates, one click</h2>
+    <h2>Hundreds of mod updates, one click</h2>
     <p class="sub">See every mod with its file, author, side and the version it moves to, and read what changed before you update.</p>
     <ul>
       <li>Updates shown old → new, with a review that sorts small fixes from bigger jumps</li>
@@ -311,7 +325,7 @@ html:not(.js) .ppane{display:block}
       <li>Lock a mod to its version, switch it between CurseForge and Modrinth, or edit its config</li>
     </ul>
   </div>
-  <div class="frame rv"><img src="screenshots/mods.png" width="1440" height="900" alt="Mods tab for All the Mods 10 with updates shown old to new and a warning about a mod that is in twice" loading="lazy"></div>
+  <div class="frame rv"><img src="screenshots/mods.webp" width="1440" height="900" alt="Mods tab for All the Mods 10 with updates shown old to new and a warning about a mod that is in twice" loading="lazy" decoding="async"></div>
 </div>
 
 <div class="spot flip" id="packs">
@@ -326,13 +340,13 @@ html:not(.js) .ppane{display:block}
       <li>Close the window and it keeps going. Replaced files go to the instance's backups folder</li>
     </ul>
   </div>
-  <div class="frame rv"><img src="screenshots/pack-update.png" width="1440" height="900" alt="Pack update window for All the Mods 10 showing what changes and what stays" loading="lazy"></div>
+  <div class="frame rv"><img src="screenshots/pack-update.webp" width="1440" height="900" alt="Pack update window for All the Mods 10 showing what changes and what stays" loading="lazy" decoding="async"></div>
 </div>
 
 <div class="spot" id="logs">
   <div class="txt rv">
     <div class="eyebrow">Logs &amp; crashes</div>
-    <h2>A crash, explained</h2>
+    <h2>A Minecraft crash, explained</h2>
     <p class="sub">Hopper reads the crash report and the game's logs, and tells you which mod is behind it and what to do.</p>
     <ul>
       <li>Mods graded certain, likely or possible, with the reason and what happened in order</li>
@@ -342,13 +356,13 @@ html:not(.js) .ppane{display:block}
       <li><span>Optional: install <a href="https://modrinth.com/mod/crash-assistant">Crash Assistant</a>, KostromDan's mod that explains crashes in game</span></li>
     </ul>
   </div>
-  <div class="frame rv"><img src="screenshots/logs.png" width="1600" height="900" alt="Crash help naming the mod that stopped the game from loading, with a button to put the older version back" loading="lazy"></div>
+  <div class="frame rv"><img src="screenshots/logs.webp" width="1600" height="900" alt="Crash help naming the mod that stopped the game from loading, with a button to put the older version back" loading="lazy" decoding="async"></div>
 </div>
 
 <div class="spot flip" id="sync">
   <div class="txt rv">
     <div class="eyebrow">Server sync</div>
-    <h2>Server and pack, always in step</h2>
+    <h2>Minecraft server and pack, always in step</h2>
     <p class="sub">Update the pack, then update the server to match. Hopper knows which mods belong on a server and which don't.</p>
     <ul>
       <li>Mod by mod: in sync, update, client only, server only</li>
@@ -356,17 +370,17 @@ html:not(.js) .ppane{display:block}
       <li>Over the network with Hopper Server, or straight to a folder on this PC or a share</li>
     </ul>
   </div>
-  <div class="frame rv"><img src="screenshots/sync.png" width="1782" height="1172" alt="Server sync comparing a server's mods with its pack" loading="lazy"></div>
+  <div class="frame rv"><img src="screenshots/sync.webp" width="1600" height="1052" alt="Server sync comparing a server's mods with its pack" loading="lazy" decoding="async"></div>
 </div>
 
 <section id="server">
   <div class="head center rv">
     <div class="eyebrow">Hopper Server</div>
-    <h2>Your own server panel, in any browser</h2>
+    <h2>Your own Minecraft server panel, in any browser</h2>
     <p class="sub">Hopper Server runs your Minecraft servers on a Windows PC, a Linux box or VPS, or in Docker. Open its panel from any browser, share it with friends, and pair it with Hopper so your servers follow your packs. You don't need Hopper to use it.</p>
     <div class="chips"><span>Windows</span><span>Linux x64</span><span>Linux ARM64</span><span>Docker (amd64, arm64)</span></div>
   </div>
-  <div class="shot rv" style="margin-top:0"><img src="screenshots/panel-console.png" width="1440" height="900" alt="Hopper Server's web panel showing a running server's live console, memory and players" loading="lazy"></div>
+  <div class="shot rv" style="margin-top:0"><img src="screenshots/panel-console.webp" width="1440" height="900" alt="Hopper Server's web panel showing a running server's live console, memory and players" loading="lazy" decoding="async"></div>
   <div class="grid" style="margin-top:40px">
     <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg></div><h3>Console and files</h3><p>A live console with history and filters. A file explorer with an editor that checks configs before saving, earlier versions of every file, search inside files, and SFTP.</p></div>
     <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h13l-3-3M20 17H7l3 3"/></svg></div><h3>Mods in step with the pack</h3><p>The same Mods table as Hopper: updates with changelogs, locks, profiles. Browse CurseForge and Modrinth, and update a server from its pack with a review of every change.</p></div>
@@ -390,7 +404,7 @@ html:not(.js) .ppane{display:block}
         <li>Pair as many panels and PCs as you like</li>
       </ul>
     </div>
-    <div class="frame rv"><img src="screenshots/panel-mods.png" width="1440" height="900" alt="A server's Mods tab in Hopper Server's panel" loading="lazy"></div>
+    <div class="frame rv"><img src="screenshots/panel-mods.webp" width="1440" height="900" alt="A server's Mods tab in Hopper Server's panel" loading="lazy" decoding="async"></div>
   </div>
 </section>
 
@@ -449,14 +463,14 @@ cargo run --bin hopper</pre></div>
     <h2>A closer look</h2>
   </div>
   <div class="gallery">
-    <figure class="rv"><img src="screenshots/config.png" alt="A mod's config shown as switches and fields with the mod's own descriptions" loading="lazy"><figcaption><b>Config editor</b>: switches and fields with each mod's own descriptions</figcaption></figure>
-    <figure class="rv"><img src="screenshots/panel-overview.png" alt="Hopper Server's overview with the PC's CPU, memory and disk and every server" loading="lazy"><figcaption><b>Hopper Server</b>: every server and the PC it runs on, at a glance</figcaption></figure>
-    <figure class="rv"><img src="screenshots/changelogs.png" alt="Versions and changelogs for a mod three versions behind, over the mod list" loading="lazy"><figcaption><b>Changelogs</b>: every version since yours, then update or roll back</figcaption></figure>
-    <figure class="rv"><img src="screenshots/panel-access.png" alt="People and roles in Hopper Server's Access and devices page" loading="lazy"><figcaption><b>People and roles</b>: give friends their own sign-in</figcaption></figure>
-    <figure class="rv"><img src="screenshots/accounts.png" alt="Accounts dialog with an animated 3D skin preview" loading="lazy"><figcaption><b>3D skins</b>: walk, run, swim or dance before you apply</figcaption></figure>
-    <figure class="rv"><img src="screenshots/browse.png" alt="Browsing CurseForge modpacks" loading="lazy"><figcaption><b>Browse</b> CurseForge and Modrinth</figcaption></figure>
-    <figure class="rv"><img src="screenshots/servers.png" alt="A running server managed through Crafty, with CPU, memory and players" loading="lazy"><figcaption><b>Servers</b>: a server run by Crafty, controlled from Hopper</figcaption></figure>
-    <figure class="rv"><img src="screenshots/palette.png" alt="Ctrl+K command palette" loading="lazy"><figcaption><b>Ctrl+K</b> jumps to any instance, tab, server or mod</figcaption></figure>
+    <figure class="rv"><img src="screenshots/config.webp" alt="A mod's config shown as switches and fields with the mod's own descriptions" loading="lazy" decoding="async"><figcaption><b>Config editor</b>: switches and fields with each mod's own descriptions</figcaption></figure>
+    <figure class="rv"><img src="screenshots/panel-overview.webp" alt="Hopper Server's overview with the PC's CPU, memory and disk and every server" loading="lazy" decoding="async"><figcaption><b>Hopper Server</b>: every server and the PC it runs on, at a glance</figcaption></figure>
+    <figure class="rv"><img src="screenshots/changelogs.webp" alt="Versions and changelogs for a mod three versions behind, over the mod list" loading="lazy" decoding="async"><figcaption><b>Changelogs</b>: every version since yours, then update or roll back</figcaption></figure>
+    <figure class="rv"><img src="screenshots/panel-access.webp" alt="People and roles in Hopper Server's Access and devices page" loading="lazy" decoding="async"><figcaption><b>People and roles</b>: give friends their own sign-in</figcaption></figure>
+    <figure class="rv"><img src="screenshots/accounts.webp" alt="Accounts dialog with an animated 3D skin preview" loading="lazy" decoding="async"><figcaption><b>3D skins</b>: walk, run, swim or dance before you apply</figcaption></figure>
+    <figure class="rv"><img src="screenshots/browse.webp" alt="Browsing CurseForge modpacks" loading="lazy" decoding="async"><figcaption><b>Browse</b> CurseForge and Modrinth</figcaption></figure>
+    <figure class="rv"><img src="screenshots/servers.webp" alt="A running server managed through Crafty, with CPU, memory and players" loading="lazy" decoding="async"><figcaption><b>Servers</b>: a server run by Crafty, controlled from Hopper</figcaption></figure>
+    <figure class="rv"><img src="screenshots/palette.webp" alt="Ctrl+K command palette" loading="lazy" decoding="async"><figcaption><b>Ctrl+K</b> jumps to any instance, tab, server or mod</figcaption></figure>
   </div>
 </section>
 
