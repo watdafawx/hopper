@@ -28,7 +28,7 @@ use hopper::cf::{self, Loader, SortField};
 use hopper::install::Plan;
 use hopper::instances::Instance;
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -319,6 +319,8 @@ pub struct BrowseView {
     file_lists: HashMap<u64, Load<Vec<cf::File>>>,
     /// Pages asked for, by project, with when (see [`Self::want_page`]).
     pages: HashMap<u64, (std::time::Instant, PageLoad)>,
+    /// Slim projects (bookmarks) whose full record was asked for this run.
+    looked_up: HashSet<u64>,
     /// Pictures the open peek queued, called off when it closes or moves on.
     peek_images: Vec<String>,
     /// The peek whose full-size pictures were queued ahead, and whether its
@@ -516,6 +518,7 @@ impl BrowseView {
             detail: HashMap::new(),
             file_lists: HashMap::new(),
             pages: HashMap::new(),
+            looked_up: HashSet::new(),
             peek_images: Vec::new(),
             warmed: None,
             deps: HashMap::new(),
@@ -1715,6 +1718,62 @@ impl BrowseView {
             .detach();
         }
         self.author = None;
+        // A bookmark is only a short record: ask for the full project (dates,
+        // categories, versions, loaders, license, gallery) and fill the same
+        // peek in. Offline, the saved fields stay.
+        if hopper::bookmarks::is_slim(&m)
+            && !hopper::sources::is_src(id)
+            && self.looked_up.insert(id)
+        {
+            let saved = m.clone();
+            cx.spawn(async move |this, cx| {
+                let merged = cx
+                    .background_spawn(async move {
+                        let r = hopper::source::get_mod(id);
+                        hopper::bookmarks::merge_lookup(&saved, r)
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    if hopper::bookmarks::is_slim(&merged) {
+                        // Failed: asked again the next time it opens.
+                        this.looked_up.remove(&id);
+                        return;
+                    }
+                    // The saved list shows the fresh count and author next time.
+                    let _ = hopper::bookmarks::with(|b| b.refresh(&merged));
+                    let urls: Vec<String> = merged
+                        .screenshots
+                        .iter()
+                        .map(|s| s.thumb().to_string())
+                        .chain(merged.icon().map(str::to_string))
+                        .collect();
+                    if let Some(h) = this.hist_projects.get_mut(&id) {
+                        *h = merged.clone();
+                    }
+                    if this.selected_id() == Some(id) {
+                        // The page may have brought a fuller gallery already.
+                        let shots = this.selected.as_ref().map(|s| s.screenshots.clone()).unwrap_or_default();
+                        let mut merged = merged;
+                        if shots.len() > merged.screenshots.len() {
+                            merged.screenshots = shots;
+                        }
+                        let mut mine = Vec::new();
+                        this.store.update(cx, |s, _| {
+                            for u in &urls {
+                                if s.want_image_in(u, crate::store::Lane::Now) {
+                                    mine.push(u.clone());
+                                }
+                            }
+                        });
+                        this.peek_images.extend(mine);
+                        this.selected = Some(merged);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
         self.selected = Some(m);
         // Shown before (Back to it): keep its page while it's asked again,
         // so the panel can scroll back to where it was.

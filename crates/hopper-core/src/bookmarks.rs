@@ -90,6 +90,51 @@ impl Bookmark {
     }
 }
 
+/// Whether `m` is only a short record (a saved bookmark, a mod built from an
+/// instance's list): no dates and no categories, so its peek would be thin
+/// until the full project is looked up.
+pub fn is_slim(m: &cf::Mod) -> bool {
+    m.date_created.is_empty() && m.date_modified.is_empty() && m.categories.is_empty()
+}
+
+/// The peek's project once `looked_up` came back: the full record, with
+/// whatever it left empty filled from `saved`. A failed lookup (offline)
+/// leaves `saved` as it was.
+pub fn merge_lookup(saved: &cf::Mod, looked_up: anyhow::Result<cf::Mod>) -> cf::Mod {
+    let Ok(mut full) = looked_up else { return saved.clone() };
+    if full.name.is_empty() {
+        full.name = saved.name.clone();
+    }
+    if full.slug.is_empty() {
+        full.slug = saved.slug.clone();
+    }
+    if full.summary.is_empty() {
+        full.summary = saved.summary.clone();
+    }
+    if full.logo.is_none() {
+        full.logo = saved.logo.clone();
+    }
+    if full.authors.is_empty() {
+        full.authors = saved.authors.clone();
+    }
+    if full.links.website_url.is_empty() {
+        full.links.website_url = saved.links.website_url.clone();
+    }
+    if full.download_count == 0.0 {
+        full.download_count = saved.download_count;
+    }
+    if full.class_id.is_none() {
+        full.class_id = saved.class_id;
+    }
+    if full.screenshots.is_empty() {
+        full.screenshots = saved.screenshots.clone();
+    }
+    if full.modrinth.is_none() {
+        full.modrinth = saved.modrinth.clone();
+    }
+    full
+}
+
 /// Whether `b` is project `m`.
 fn same(b: &Bookmark, m: &cf::Mod) -> bool {
     match &m.modrinth {
@@ -135,6 +180,37 @@ impl Bookmarks {
         Ok(saved)
     }
 
+    /// Brings the saved fields of `m` up to date from a looked-up project
+    /// (download count, author, summary...), keeping the date it was saved.
+    /// Nothing happens when `m` isn't saved; empty fields never overwrite.
+    pub fn refresh(&mut self, m: &cf::Mod) -> anyhow::Result<()> {
+        let Some(b) = self.list.iter_mut().find(|b| same(b, m)) else { return Ok(()) };
+        let new = Bookmark::of(m, b.class);
+        let before = b.clone();
+        if !new.name.is_empty() {
+            b.name = new.name;
+        }
+        if !new.slug.is_empty() {
+            b.slug = new.slug;
+        }
+        if !new.icon.is_empty() {
+            b.icon = new.icon;
+        }
+        if !new.author.is_empty() {
+            b.author = new.author;
+        }
+        if !new.summary.is_empty() {
+            b.summary = new.summary;
+        }
+        if !new.page.is_empty() {
+            b.page = new.page;
+        }
+        if new.downloads > 0.0 {
+            b.downloads = new.downloads;
+        }
+        if *b != before { self.save() } else { Ok(()) }
+    }
+
     fn save(&self) -> anyhow::Result<()> {
         if let Some(d) = self.path.parent() {
             std::fs::create_dir_all(d)?;
@@ -172,6 +248,52 @@ mod tests {
         let d = std::env::temp_dir().join(format!("hopper-bookmarks-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d.join("bookmarks.json")
+    }
+
+    #[test]
+    fn lookup_fills_a_slim_bookmark_and_failure_keeps_it() {
+        let saved = Bookmark {
+            id: 7,
+            name: "Ares HUD".into(),
+            summary: "saved summary".into(),
+            author: "someone".into(),
+            downloads: 5.0,
+            class: cf::CLASS_MODS,
+            ..Default::default()
+        }
+        .to_mod();
+        assert!(is_slim(&saved));
+
+        let found = cf::Mod {
+            id: 7,
+            name: "Ares HUD".into(),
+            date_created: "2026-01-01T00:00:00Z".into(),
+            categories: vec![cf::Category { id: 1, name: "Cosmetic".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let m = merge_lookup(&saved, Ok(found));
+        assert!(!is_slim(&m));
+        // What the lookup left empty comes from the saved record.
+        assert_eq!(m.summary, "saved summary");
+        assert_eq!(m.author(), "someone");
+        assert_eq!(m.download_count, 5.0);
+        assert_eq!(m.class_id, Some(cf::CLASS_MODS));
+
+        let kept = merge_lookup(&saved, Err(anyhow::anyhow!("offline")));
+        // Refreshing a saved bookmark updates its fields, keeps `added`.
+        let p = std::env::temp_dir().join(format!("hopper-bookmarks-refresh-{}", std::process::id())).join("b.json");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+        let mut b = Bookmarks::at(p.clone());
+        b.toggle(&saved, cf::CLASS_MODS).unwrap();
+        let added = b.list()[0].added;
+        let mut fresh = m.clone();
+        fresh.download_count = 99.0;
+        b.refresh(&fresh).unwrap();
+        let again = Bookmarks::at(p.clone());
+        assert_eq!((again.list()[0].downloads, again.list()[0].added), (99.0, added));
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+        assert!(is_slim(&kept));
+        assert_eq!((kept.name.as_str(), kept.summary.as_str()), ("Ares HUD", "saved summary"));
     }
 
     #[test]
