@@ -25,6 +25,8 @@ pub struct Stage {
 
 struct Run {
     started: Instant,
+    /// When the mod comparison was first shown (click to list).
+    first: Option<Duration>,
     stages: Vec<Stage>,
 }
 
@@ -40,7 +42,15 @@ fn with_run(f: impl FnOnce(&mut Run)) {
 /// Starts a run: what was timed before is dropped.
 pub fn begin() {
     let mut g = RUN.lock().unwrap_or_else(|e| e.into_inner());
-    *g = Some(Run { started: Instant::now(), stages: Vec::new() });
+    *g = Some(Run { started: Instant::now(), first: None, stages: Vec::new() });
+}
+
+/// The comparison is ready to show: notes how long since `begin()` (the
+/// first call counts). The rest (the last crash, configs) may come later.
+pub fn first_result() {
+    with_run(|r| {
+        r.first.get_or_insert_with(|| r.started.elapsed());
+    });
 }
 
 /// Adds `spent` to a stage (made on first use).
@@ -98,6 +108,16 @@ fn num(n: u64) -> String {
 /// order it was first timed. A stage that didn't happen (no remote server,
 /// no unknown jars) is left out.
 pub fn format_line(total: Duration, stages: &[Stage]) -> String {
+    format_line_first(total, None, stages)
+}
+
+/// [`format_line`] with the time the comparison was first shown, when the
+/// rest of the run (crash, configs) went on after it.
+pub fn format_line_first(total: Duration, first: Option<Duration>, stages: &[Stage]) -> String {
+    let head = match first {
+        Some(f) => format!("total {} ms, first result after {} ms", ms(total), ms(f)),
+        None => format!("total {} ms", ms(total)),
+    };
     let parts: Vec<String> = stages
         .iter()
         .map(|s| {
@@ -115,18 +135,18 @@ pub fn format_line(total: Duration, stages: &[Stage]) -> String {
         })
         .collect();
     if parts.is_empty() {
-        format!("sync compare: total {} ms", ms(total))
+        format!("sync compare: {head}")
     } else {
         // The pack's and the server's reads run side by side, so the stages
         // can add up to more than the total.
-        format!("sync compare: total {} ms ({}; stages overlap)", ms(total), parts.join(", "))
+        format!("sync compare: {head} ({}; stages overlap)", parts.join(", "))
     }
 }
 
 /// Ends the run and returns its line; `None` when no run was started.
 pub fn finish() -> Option<String> {
     let run = RUN.lock().unwrap_or_else(|e| e.into_inner()).take()?;
-    Some(format_line(run.started.elapsed(), &run.stages))
+    Some(format_line_first(run.started.elapsed(), run.first, &run.stages))
 }
 
 /// [`finish`], appended to `sync-timing.log` in Hopper's data folder (with
@@ -167,6 +187,17 @@ mod tests {
             l,
             "sync compare: total 1840 ms (pack scan 83 ms for 1,158 jars, server fetch 380 ms for 1,158 entries, Modrinth lookups 1200 ms for 37 jars in 2 calls, 1 failed; stages overlap)"
         );
+    }
+
+    #[test]
+    fn line_says_when_the_comparison_was_first_shown() {
+        let l = format_line_first(
+            Duration::from_millis(900),
+            Some(Duration::from_millis(210)),
+            &[st("pack scan", "jars", 83, 1, 1158, 0), st("crash read", "", 640, 1, 0, 0)],
+        );
+        assert_eq!(l, "sync compare: total 900 ms, first result after 210 ms (pack scan 83 ms for 1,158 jars, crash read 640 ms; stages overlap)");
+        assert_eq!(format_line_first(Duration::from_millis(5), Some(Duration::from_millis(5)), &[]), "sync compare: total 5 ms, first result after 5 ms");
     }
 
     #[test]

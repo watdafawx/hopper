@@ -192,7 +192,7 @@ pub fn files_of(root: &Path, id: &str, server: bool) -> Vec<String> {
     // Mixin options files (`modernfix-mixins.properties`,
     // `ferritecore-mixin.toml`) aren't tied to their mod by name elsewhere.
     if let Ok(rd) = fs::read_dir(root.join("config")) {
-        for e in rd.flatten().filter(|e| e.path().is_file()) {
+        for e in rd.flatten().filter(crate::modconfig::entry_is_file) {
             let name = e.file_name().to_string_lossy().to_lowercase();
             let stem = name.split('.').next().unwrap_or("");
             let mod_part = ["-mixins", "_mixins", "-mixin", "_mixin"].iter().find_map(|s| stem.strip_suffix(s));

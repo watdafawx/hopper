@@ -184,6 +184,17 @@ pub struct SyncPanel {
     running: bool,
     /// A comparison runs.
     comparing: bool,
+    /// The last crash and its configs are still being read. They come after
+    /// the mod list (a Hopper Server reads them on its PC, which takes a
+    /// second on a big pack), so the list isn't held up.
+    checking_crash: bool,
+    /// Which rescan the running reads belong to: an older one's answer is
+    /// dropped.
+    scan_gen: u64,
+    /// Reads of the running rescan not done yet; the timing line is written
+    /// when the last one is.
+    scan_left: u8,
+    _crash_task: Option<Task<()>>,
     /// Rows whose own action runs now, by row key: (word while busy, word
     /// when done).
     acting: HashMap<String, (&'static str, &'static str)>,
@@ -312,6 +323,10 @@ impl SyncPanel {
             items: Vec::new(),
             running: false,
             comparing: false,
+            checking_crash: false,
+            scan_gen: 0,
+            scan_left: 0,
+            _crash_task: None,
             acting: HashMap::new(),
             acted: HashMap::new(),
             leaving: None,
@@ -401,7 +416,7 @@ impl SyncPanel {
     /// The last start's crash of `root`, once this panel has compared it
     /// (Some(None): no crash).
     pub fn crash_of(&self, root: &Path) -> Option<Option<&ServerCrash>> {
-        (self.server.as_deref() == Some(root) && self.diff.is_some()).then_some(self.crash.as_ref())
+        (self.server.as_deref() == Some(root) && self.diff.is_some() && !self.checking_crash).then_some(self.crash.as_ref())
     }
 
     /// The Mods list on what needs syncing.
@@ -490,6 +505,9 @@ impl SyncPanel {
             };
             self.result = None;
             self.diff = None;
+            // Another server's crash isn't this one's.
+            self.crash = None;
+            self.crash_configs.clear();
             self.drift = None;
             self.server_nf = None;
             self.show = None;
@@ -552,61 +570,64 @@ impl SyncPanel {
 
     fn rescan(&mut self, cx: &mut Context<Self>) {
         let Some((server, inst)) = self.pair(cx) else {
+            self.checking_crash = false;
             cx.notify();
             return;
         };
         self.comparing = true;
+        self.checking_crash = true;
+        self.scan_gen += 1;
+        self.scan_left = 2;
+        let scan = self.scan_gen;
         let anyway = self.store.read(cx).settings().sync_anyway.clone();
         // One timing line per comparison (see `synctiming`): from here, so it
         // covers the wait for a free thread too.
         hopper::synctiming::begin();
-        self._task = Some(cx.spawn(async move |this, cx| {
-            let root = server.root.clone();
-            let (diff, (crash, crash_configs), server_nf, marker) = cx
-                .background_spawn(async move {
-                    // Four independent reads (the comparison, the last crash,
-                    // the server's NeoForge, the pack marker): each can wait
-                    // on a disk or a Hopper Server, so they run together.
-                    std::thread::scope(|s| {
-                        let (inst, server, anyway) = (&inst, &server, &anyway);
-                        use hopper::synctiming::time;
-                        let crash = s.spawn(move || {
-                            time("crash and config reads", "", 0, || {
-                                let crash = hopper::crashscan::last_crash(&server.root);
-                                // The crash's mods' configs, against the pack's: read on
-                                // the server (through Hopper Server when it has it).
-                                let configs = crash.as_ref().map_or_else(Vec::new, |c| {
-                                    let panel = hopper::hopperd::locate(&server.root).and_then(Result::ok);
-                                    hopper::crashdetect::config_differs(&inst.root, c, |rel| match &panel {
-                                        Some((client, id, _)) => client.read_text(id, rel).ok(),
-                                        None => std::fs::read_to_string(server.root.join(rel)).ok(),
-                                    })
-                                });
-                                (crash, configs)
-                            })
-                        });
-                        let nf = s.spawn(move || time("NeoForge read", "", 0, || hopper::server_update::server_neoforge(&server.root)));
-                        let marker = s.spawn(move || time("pack marker read", "", 0, || hopper::server_pack_update::recorded_on(server)));
-                        let diff = rigsync::compare(inst, server, anyway);
-                        (
-                            diff,
-                            crash.join().unwrap_or_default(),
-                            nf.join().ok().flatten(),
-                            marker.join().ok().flatten(),
-                        )
-                    })
-                })
-                .await;
-            // Everything is read: this is click-to-result for the data.
-            hopper::synctiming::finish_to_file();
+        // The last crash and its configs: read beside the comparison, but
+        // shown when they're ready, not waited for. On a big pack they were
+        // the slowest read by far (a second), and the whole list waited.
+        let (crash_server, crash_inst) = (server.clone(), inst.clone());
+        self._crash_task = Some(cx.spawn(async move |this, cx| {
+            let root = crash_server.root.clone();
+            let (crash, crash_configs) = cx.background_spawn(async move { read_crash(&crash_inst, &crash_server) }).await;
             this.update(cx, |this, cx| {
-                if this.server.as_ref() != Some(&root) {
+                if this.scan_gen != scan || this.server.as_ref() != Some(&root) {
                     return;
                 }
-                this.comparing = false;
+                this.checking_crash = false;
                 this.crash = crash;
                 this.crash_configs = crash_configs;
                 cx.emit(SyncEvent::Crash);
+                this.scan_read_done();
+                cx.notify();
+            })
+            .ok();
+        }));
+        self._task = Some(cx.spawn(async move |this, cx| {
+            let root = server.root.clone();
+            let (diff, server_nf, marker) = cx
+                .background_spawn(async move {
+                    // Three independent reads (the comparison, the server's
+                    // NeoForge, the pack marker): each can wait on a disk or
+                    // a Hopper Server, so they run together.
+                    std::thread::scope(|s| {
+                        let (inst, server, anyway) = (&inst, &server, &anyway);
+                        use hopper::synctiming::time;
+                        let nf = s.spawn(move || time("NeoForge read", "", 0, || hopper::server_update::server_neoforge(&server.root)));
+                        let marker = s.spawn(move || time("pack marker read", "", 0, || hopper::server_pack_update::recorded_on(server)));
+                        let diff = rigsync::compare(inst, server, anyway);
+                        (diff, nf.join().ok().flatten(), marker.join().ok().flatten())
+                    })
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.scan_gen != scan || this.server.as_ref() != Some(&root) {
+                    return;
+                }
+                // The list is ready: this is click-to-result for the person.
+                hopper::synctiming::first_result();
+                this.scan_read_done();
+                this.comparing = false;
                 if let Ok((d, _)) = &diff {
                     this.check_drift(d, cx);
                 }
@@ -643,6 +664,15 @@ impl SyncPanel {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// One of the rescan's two reads is in; the timing line is written when
+    /// both are.
+    fn scan_read_done(&mut self) {
+        self.scan_left = self.scan_left.saturating_sub(1);
+        if self.scan_left == 0 {
+            hopper::synctiming::finish_to_file();
+        }
     }
 
     /// Looks for global datapacks and configs of the server's mods that
@@ -1317,6 +1347,9 @@ impl SyncPanel {
                     .when(!word.is_empty(), |r| {
                         r.child(widgets::caption(format!("· {word}"), cx).text_xs().flex_none().text_color(dot))
                     })
+                    // The last crash is still being read (it comes after the
+                    // list): said in place, on the row, so nothing moves.
+                    .when(self.checking_crash, |r| r.child(Spinner::new().small()))
                     .child(div().flex_1())
                     .child(
                         Button::new("rescan")
@@ -3197,6 +3230,35 @@ pub(crate) fn crash_addon<'a>(addons: &'a [hopper::instances::Addon], file: &str
 /// "A, B and C failed to load", "fancymenu is client-only"), else the likely
 /// ones, else the crash's headline (`crashdetect::verdict`, as Hopper
 /// Server's crash list says it).
+/// The server's last crash and, for the mods it names, the configs that
+/// differ from the pack's (read on the server, through Hopper Server when
+/// it has one: one request for the files' hashes, then the text of only the
+/// files that differ). Each part is timed for `sync-timing.log`.
+fn read_crash(inst: &Instance, server: &ServerInfo) -> (Option<ServerCrash>, Vec<hopper::crashdetect::ConfigDiff>) {
+    let crash = hopper::synctiming::time("crash read", "", 0, || hopper::crashscan::last_crash(&server.root));
+    let Some(c) = crash.as_ref() else { return (crash, Vec::new()) };
+    let at = std::time::Instant::now();
+    let reads = std::cell::Cell::new(0u64);
+    let panel = hopper::hopperd::locate(&server.root).and_then(Result::ok);
+    let configs = hopper::crashdetect::config_differs_with(
+        &inst.root,
+        c,
+        |rels| match &panel {
+            Some((client, id, _)) => client.hashes(id, rels).unwrap_or_default(),
+            None => Default::default(),
+        },
+        |rel| {
+            reads.set(reads.get() + 1);
+            match &panel {
+                Some((client, id, _)) => client.read_text(id, rel).ok(),
+                None => std::fs::read_to_string(server.root.join(rel)).ok(),
+            }
+        },
+    );
+    hopper::synctiming::add("config diff", "files read", at.elapsed(), reads.get(), false);
+    (crash, configs)
+}
+
 pub(crate) fn crash_reason(c: &ServerCrash) -> String {
     let name = |s: &hopper::crashdetect::Suspect| {
         let file = s.file_name.trim_end_matches(".disabled").trim_end_matches(".jar");
