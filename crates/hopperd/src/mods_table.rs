@@ -117,9 +117,9 @@ async fn changelogs(
             .map(|en| {
                 let md = richtext::to_markdown(&en.blocks);
                 // The same text as a newer card: say so, don't repeat it.
-                let same = (!md.trim().is_empty())
-                    .then(|| md_seen.iter().find(|(_, m)| *m == md).map(|(n, _)| n.clone()))
-                    .flatten();
+                let same = hopper_core::changelog_trim::same_notes(&md, md_seen.iter().map(|(n, m)| (n.as_str(), m.as_str())));
+                // Nothing to read (the "No changelog" placeholder, blank markup): send none, the card says so.
+                let md = if hopper_core::changelog_trim::has_visible_text(&md) { md } else { String::new() };
                 md_seen.push((en.name.clone(), md.clone()));
                 let f = all.iter().find(|f| f.display_name == en.name);
                 json!({

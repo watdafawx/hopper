@@ -1460,7 +1460,7 @@ pub fn changelogs(
                 }
             }
             if blocks.is_empty() {
-                blocks = crate::richtext::parse("<p><i>No changelog for this version.</i></p>");
+                blocks = crate::richtext::parse(&format!("<p><i>{}</i></p>", crate::changelog_trim::NO_CHANGELOG));
             }
             ChangelogEntry {
                 name: f.display_name.clone(),

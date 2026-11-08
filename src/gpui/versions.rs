@@ -248,8 +248,8 @@ pub(crate) fn changelog_view(
     on_link: impl Fn(&str, &mut Window, &mut App) + Send + Sync + 'static,
     cx: &App,
 ) -> AnyElement {
-    if md.trim().is_empty() {
-        return widgets::caption("No changelog for this version.", cx)
+    if !hopper::changelog_trim::has_visible_text(&md) {
+        return widgets::caption(hopper::changelog_trim::NO_CHANGELOG, cx)
             .italic()
             .into_any_element();
     }
@@ -365,9 +365,7 @@ impl Render for VersionsView {
                 let cards = entries.iter().enumerate().map(|(i, (e, md))| {
                     let target = i == 0 && !e.installed;
                     // The same text as a newer card: say so, don't repeat it.
-                    let same = (!md.trim().is_empty())
-                        .then(|| entries[..i].iter().find(|(_, m)| m == md).map(|(n, _)| n.name.clone()))
-                        .flatten();
+                    let same = hopper::changelog_trim::same_notes(md, entries[..i].iter().map(|(n, m)| (n.name.as_str(), m.as_ref())));
                     let is_same = same.is_some();
                     let file = self.all.iter().find(|f| f.display_name == e.name).cloned();
                     let view = cx.entity();
@@ -870,7 +868,7 @@ impl Render for FileLog {
                 .child(widgets::caption("Loading the changelog", cx))
                 .into_any_element(),
             Some(Err(e)) => div().text_sm().text_color(cx.theme().danger).child(e.clone()).into_any_element(),
-            Some(Ok(md)) if md.trim().is_empty() => widgets::caption("No changelog for this version.", cx)
+            Some(Ok(md)) if !hopper::changelog_trim::has_visible_text(md) => widgets::caption(hopper::changelog_trim::NO_CHANGELOG, cx)
                 .italic()
                 .into_any_element(),
             Some(Ok(md)) => {
