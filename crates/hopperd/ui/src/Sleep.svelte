@@ -119,16 +119,19 @@
     {/if}
     <label class="row small"><input type="checkbox" bind:checked={sleepOn} />Sleep when empty for
       <span class="input mins"><input type="number" min="1" max="1440" bind:value={minutes} disabled={!sleepOn} /></span>min</label>
-    {#if !sleepOn}
-      <div class="tiny muted">Off: it runs until someone stops it.</div>
-    {:else}
-      <label class="row small"><input type="checkbox" bind:checked={wake} />Wake when someone joins</label>
+    <!-- Always drawn so people can see wake-on-join exists; greyed and disabled
+         while sleep is off. Values are kept and saved as they are. -->
+    <div class="wakes col" class:off={!sleepOn} aria-disabled={!sleepOn}>
+      <label class="row small"><input type="checkbox" bind:checked={wake} disabled={!sleepOn} />Wake when someone joins</label>
+      {#if !sleepOn}
+        <div class="tiny muted note">Turn on sleep above to use these: a server that sleeps wakes when someone joins.</div>
+      {/if}
       {#if wake}
         <!-- Waking goes through the address router: say so when there's no address to join. -->
-        <div class="tiny muted">{info.addresses?.length ? "Joining from Minecraft's server list starts it again. The first join takes about a minute." : 'Players wake it by joining its address, and it has none yet. Add one in Network & address.'}</div>
+        {#if sleepOn}<div class="tiny muted note">{info.addresses?.length ? "Joining from Minecraft's server list starts it again. The first join takes about a minute." : 'Players wake it by joining its address, and it has none yet. Add one in Network & address.'}</div>{/if}
         <div class="f small"><span class="k">Who can wake it</span>
           <div class="seg" role="group" aria-label="Who can wake it">
-            {#each WHO as [v, label] (v)}<button class:on={who === v} aria-pressed={who === v} onclick={() => (who = v)}>{label}</button>{/each}
+            {#each WHO as [v, label] (v)}<button class:on={who === v} aria-pressed={who === v} disabled={!sleepOn} onclick={() => (who = v)}>{label}</button>{/each}
           </div>
         </div>
         <div class="tiny muted hint">
@@ -137,7 +140,7 @@
         </div>
         <div class="f small"><span class="k">While it starts</span>
           <div class="seg" role="group" aria-label="While it starts">
-            {#each STARTING as [v, label] (v)}<button class:on={starting === v} aria-pressed={starting === v} onclick={() => (starting = v)}>{label}</button>{/each}
+            {#each STARTING as [v, label] (v)}<button class:on={starting === v} aria-pressed={starting === v} disabled={!sleepOn} onclick={() => (starting = v)}>{label}</button>{/each}
           </div>
         </div>
         <div class="tiny muted hint">
@@ -146,23 +149,24 @@
         </div>
         <div class="f small"><span class="k">After a failed start</span>
           <div class="seg" role="group" aria-label="After a failed start">
-            {#each RETRY as [v, label] (v)}<button class:on={Number(retry) === v} aria-pressed={Number(retry) === v} onclick={() => (retry = v)}>{label}</button>{/each}
+            {#each RETRY as [v, label] (v)}<button class:on={Number(retry) === v} aria-pressed={Number(retry) === v} disabled={!sleepOn} onclick={() => (retry = v)}>{label}</button>{/each}
           </div>
         </div>
         <div class="f small"><label class="k" for="sleep-msg">Server list message</label>
-          <div class="input grow"><input id="sleep-msg" maxlength="80" bind:value={message} placeholder={info.default_sleep_message} /></div>
+          <div class="input grow"><input id="sleep-msg" maxlength="80" bind:value={message} placeholder={info.default_sleep_message} disabled={!sleepOn} /></div>
         </div>
-        <!-- How players see it in their server list while it sleeps. -->
+        <!-- How players see it in their server list while it sleeps. Stays visible
+             (dimmed) with sleep off: it shows what turning sleep on gives them. -->
         <div class="mc" aria-label="Server list preview">
           <div class="mc-top"><span>{server.name}</span><span class="sp"></span><span class="mc-g">0/{server.max_players || 20}</span></div>
           <div class="mc-w">{server.name}</div>
           <div><span class="mc-y">{shown}</span><span class="mc-g">{` (${info.wake_estimate})`}</span></div>
         </div>
         {#if info.last_wake}<div class="tiny muted">Last woken by {info.last_wake.by}, {when(info.last_wake.at)}. The console notes each wake.</div>{/if}
-      {:else}
-        <div class="tiny muted">Joining doesn't start it: players see "Offline" until someone starts it here.</div>
+      {:else if sleepOn}
+        <div class="tiny muted note">Joining doesn't start it: players see "Offline" until someone starts it here.</div>
       {/if}
-    {/if}
+    </div>
   {/if}
 </div>
 
@@ -171,6 +175,12 @@
   .side h3 { margin-bottom: 2px; }
   .mins { width: 64px; padding: 2px 6px; display: inline-flex; }
   .unsaved { color: var(--gold); font-size: 11.5px; font-weight: 600; }
+  .wakes { gap: 8px; }
+  .wakes.off .seg button, .wakes.off .seg button:hover { cursor: default; background: none; color: var(--muted); }
+  .wakes.off .seg button.on { background: var(--hover); color: var(--muted); }
+  .wakes.off .mc { opacity: .6; }
+  .wakes.off :is(label.row, .k) { color: var(--muted); }
+  .wakes.off input:disabled { opacity: .6; cursor: default; }
   .f { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .k { width: 136px; flex: none; }
   .hint { margin-left: 144px; }
