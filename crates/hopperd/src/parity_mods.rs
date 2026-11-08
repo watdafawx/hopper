@@ -63,6 +63,11 @@ async fn as_instance(
         // The desktop table reads `from_pack` for "Added by you"; a server
         // set up from a server pack has no marks of its own (view only).
         hopper_core::modpack::mark_pack_mods(&mut inst);
+        // The web table lists only entries whose jar is still in the folder.
+        // Jars swapped on disk (a sync, SFTP, a job) leave their old entry in
+        // hopper.json: shown here, desktop would list the old file with its
+        // old update offer next to the panel's own, newer list.
+        drop_missing_jars(&mut inst.addons, &inst.root.join("mods"));
         for a in &mut inst.addons {
             a.icon = crate::mods_api::icon_url(&a.icon);
         }
@@ -304,4 +309,43 @@ async fn undo_remove(
     .map_err(|e| bad(format!("{e:#}")))?;
     crate::mods_api::forget_updates(&id);
     Ok(Json(json!({ "restored": back, "restart_needed": running && back > 0 })))
+}
+
+/// Takes out the mods-folder entries whose jar is in neither `dir` nor off
+/// there (`.disabled`). Entries of other folders stay.
+fn drop_missing_jars(addons: &mut Vec<Addon>, dir: &FsPath) {
+    let names: std::collections::HashSet<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|f| f.file_name().to_string_lossy().to_lowercase().trim_end_matches(".disabled").to_string())
+        .collect();
+    addons.retain(|a| a.folder() != "mods" || names.contains(a.file_name.to_lowercase().trim_end_matches(".disabled")));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addon(file: &str, class_id: u32) -> Addon {
+        Addon { file_name: file.into(), class_id, ..Default::default() }
+    }
+
+    #[test]
+    fn entries_without_a_jar_are_dropped() {
+        let dir = std::env::temp_dir().join(format!("hopperd-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("new-1.1.jar"), b"x").unwrap();
+        std::fs::write(dir.join("off-1.0.jar.disabled"), b"x").unwrap();
+        let mut list = vec![
+            addon("new-1.1.jar", 6),
+            addon("old-1.0.jar", 6),
+            addon("OFF-1.0.jar.disabled", 6),
+            addon("pack.zip", hopper_core::cf::CLASS_RESOURCE_PACKS),
+        ];
+        drop_missing_jars(&mut list, &dir);
+        let names: Vec<&str> = list.iter().map(|a| a.file_name.as_str()).collect();
+        assert_eq!(names, ["new-1.1.jar", "OFF-1.0.jar.disabled", "pack.zip"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

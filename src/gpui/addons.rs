@@ -2609,6 +2609,13 @@ impl AddonsView {
 
     // ---- rendering -----------------------------------------------------
 
+    /// Jars in the mods folder that no entry tracks. On a Hopper Server only the
+    /// panel can read its folder: it sent them with the list (the table shows
+    /// them), so count those, as the web table's total does.
+    fn loose_count(&self, inst: &Instance) -> usize {
+        if self.remote { self.loose.1.len() } else { hopper::install::loose_jars(inst).len() }
+    }
+
     fn toolbar(
         &self,
         inst: &Instance,
@@ -2636,7 +2643,7 @@ impl AddonsView {
         };
         use hopper::pack_where::Group as G;
         let n_arch = of_class().filter(|a| self.table.archived.contains(&a.project_id)).count();
-        let mut rail: Vec<RailItem> = vec![RailItem::show(Show::All, "All", IconName::Layers, Some(of_class().count() + if self.class == cf::CLASS_MODS { hopper::install::loose_jars(inst).len() } else { 0 }))];
+        let mut rail: Vec<RailItem> = vec![RailItem::show(Show::All, "All", IconName::Layers, Some(of_class().count() + if self.class == cf::CLASS_MODS { self.loose_count(inst) } else { 0 }))];
         if packs {
             let dp = self.class == cf::CLASS_DATAPACKS;
             rail.push(RailItem::show(
@@ -2829,7 +2836,7 @@ impl AddonsView {
                     .then(|| {
                         let inst = self.store.read(cx).instance(&inst.root)?;
                         let n = inst.addons.iter().filter(|a| a.project_id == 0 && a.source.is_none() && a.folder() == "mods").count()
-                            + hopper::install::loose_jars(inst).len();
+                            + self.loose_count(inst);
                         (n > 0).then_some(n)
                     })
                     .flatten(),

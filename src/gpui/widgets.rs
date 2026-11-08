@@ -1035,8 +1035,10 @@ const RAIL_BADGE_TOP: f32 = -0.4667;
 
 /// Extra right padding a rail button needs so its badge (starting 0.6 rem into
 /// the 1 rem icon) doesn't reach the next button.
-pub fn rail_badge_extra(n: usize, rem: f32) -> f32 {
-    (RAIL_BADGE_LEFT * rem + count_badge_width(n, rem) - rem - rem * 0.4667).max(0.)
+pub fn rail_badge_extra(count: usize, rem: f32) -> f32 {
+    // The badge is as wide as the count has digits, not as the count is big.
+    let digits = count.to_string().len();
+    (RAIL_BADGE_LEFT * rem + count_badge_width(digits, rem) - rem - rem * 0.4667).max(0.)
 }
 
 /// Buttons inside a clickable header that opens and closes its section
@@ -2934,6 +2936,9 @@ mod tests {
             assert!(rail_badge_extra(99, rem) < rail_badge_extra(175, rem));
             assert!(rail_badge_extra(175, rem) > 0.);
             assert!(rail_badge_extra(12345, rem) > rail_badge_extra(1234, rem));
+            // 16 updates is a 2-digit badge: same room as 99, not 16 digits' worth.
+            assert_eq!(rail_badge_extra(16, rem), rail_badge_extra(99, rem));
+            assert!(rail_badge_extra(16, rem) < 1.5 * rem);
             assert!(count_badge_width(1, rem) >= badge_metrics(rem).h);
         }
     }

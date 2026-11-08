@@ -38,6 +38,12 @@ pub fn remote(root: &Path) -> Option<Remote> {
     hopper::hopperd::remote_of(root).filter(|(r, _)| r == root).map(|(_, r)| r)
 }
 
+/// Both lists hold the same jars (turning one on or off doesn't count).
+fn same_files(a: &[hopper::instances::Addon], b: &[hopper::instances::Addon]) -> bool {
+    let set = |l: &[hopper::instances::Addon]| -> HashSet<String> { l.iter().map(|a| a.file_name.trim_end_matches(".disabled").to_lowercase()).collect() };
+    set(a) == set(b)
+}
+
 /// File names as the panel takes them (without `.disabled`).
 fn bases(files: &[String]) -> Vec<String> {
     files.iter().map(|f| f.trim_end_matches(".disabled").to_string()).collect()
@@ -178,7 +184,14 @@ impl Store {
                 if !self.is_server_list(&root) {
                     self.server_insts.push(Instance { root: root.clone(), ..Default::default() });
                 }
+                let changed = remote(&root).is_some() && self.instance(&root).is_some_and(|old| !same_files(&old.addons, &inst.addons));
                 self.put_instance(inst);
+                // Jars changed on the panel (a sync, an update there): its own
+                // offers moved with them, and the desktop's copy is up to 30
+                // minutes old. The panel answers from its cache, so this is cheap.
+                if changed && let Some(r) = remote(&root) {
+                    self.check_remote_updates(&root, r, false);
+                }
             }
             Err(e) => {
                 log::warn!("mods of {}: {e}", root.display());
@@ -697,5 +710,22 @@ impl Store {
             return Ok(());
         }
         c.trash(&r.id, &rels)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_files;
+    use hopper::instances::Addon;
+
+    fn a(f: &str) -> Addon {
+        Addon { file_name: f.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_swapped_jar_is_a_change_a_toggle_is_not() {
+        assert!(same_files(&[a("x-1.0.jar"), a("y.jar")], &[a("X-1.0.jar.disabled"), a("y.jar")]));
+        assert!(!same_files(&[a("x-1.0.jar")], &[a("x-1.1.jar")]));
+        assert!(!same_files(&[a("x-1.0.jar")], &[a("x-1.0.jar"), a("z.jar")]));
     }
 }
