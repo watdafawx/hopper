@@ -21,8 +21,17 @@ struct Holder(Entity<Store>);
 impl gpui_kit::Global for Holder {}
 
 pub fn enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("HOPPER_MEMLOG").is_ok_and(|v| v == "1"))
+    level() >= 1
+}
+
+/// 1: the log. 2: also the allocator report (needs the `memprof` build).
+fn level() -> u8 {
+    static ON: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("HOPPER_MEMLOG").as_deref() {
+        Ok("1") => 1,
+        Ok("2") => 2,
+        _ => 0,
+    })
 }
 
 /// Starts the timer (when the log is on).
@@ -32,6 +41,9 @@ pub fn start(store: Entity<Store>, cx: &mut App) {
     }
     cx.set_global(Holder(store));
     write("start", cx);
+    if level() >= 2 {
+        profile_thread();
+    }
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor().timer(EVERY).await;
@@ -99,4 +111,44 @@ fn write(why: &str, cx: &mut App) {
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// With `HOPPER_MEMLOG=2`: the process's threads (count, CPU by name) and
+/// memory by kind at 5, 15, 30, 60 s and then every 30 s for 10 minutes, to
+/// `memprof.txt` next to the log. With the `memprof` build it adds the heap
+/// by allocating call stack (names are resolved at 120 s and 600 s only:
+/// loading the symbols costs hundreds of MB).
+fn profile_thread() {
+    let Some(dir) = hopper::paths::dirs().map(|d| d.data_dir().to_path_buf()) else { return };
+    std::thread::Builder::new()
+        .name("memprof".into())
+        .spawn(move || {
+            let start = std::time::Instant::now();
+            let mut times: Vec<u64> = vec![5, 15, 30, 60];
+            times.extend((120..=600).step_by(30));
+            for at in times {
+                std::thread::sleep(Duration::from_secs(at).saturating_sub(start.elapsed()));
+                let (ws, private) = process_bytes().unwrap_or_default();
+                let mut text = format!("===== +{at} s  ws={}MB private={}MB", mb(ws), mb(private));
+                #[cfg(feature = "memprof")]
+                {
+                    let (live, peak) = crate::memprof::live_and_peak();
+                    text.push_str(&format!("  rust heap live {:.1}MB peak {:.1}MB", live as f64 / 1048576.0, peak as f64 / 1048576.0));
+                }
+                text.push_str("
+");
+                text.push_str(&crate::procinfo::windows_memory());
+                text.push_str(&crate::procinfo::threads());
+                #[cfg(feature = "memprof")]
+                if at == 120 || at == 600 {
+                    text.push_str(&crate::memprof::report(45));
+                }
+                text.push_str("
+");
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("memprof.txt")) {
+                    let _ = f.write_all(text.as_bytes());
+                }
+            }
+        })
+        .ok();
 }

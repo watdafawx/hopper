@@ -480,16 +480,30 @@ pub fn needs_newer(path: &Path, id: &str, have: &str) -> bool {
     })
 }
 
+/// How many threads read jars at once. Each holds whole nested jars in
+/// memory while it works, so a pack's first scan costs this many times a
+/// big jar at its peak: 3 keep that to a third of what 8 did, and the
+/// scan still runs in the background.
+const JAR_THREADS: usize = 3;
+
 /// Reads jars on a few threads.
 fn read_all(list: &[&PathBuf]) -> Vec<(PathBuf, Arc<JarInfo>)> {
-    let chunk = list.len().div_ceil(8).max(1);
-    std::thread::scope(|s| {
+    let chunk = list.len().div_ceil(JAR_THREADS).max(1);
+    let out = std::thread::scope(|s| {
         let parts: Vec<_> = list
             .chunks(chunk)
-            .map(|part| s.spawn(move || part.iter().filter_map(|p| jar(p).map(|j| ((*p).clone(), j))).collect::<Vec<_>>()))
+            .map(|part| {
+                std::thread::Builder::new()
+                    .name("jar-scan".into())
+                    .spawn_scoped(s, move || part.iter().filter_map(|p| jar(p).map(|j| ((*p).clone(), j))).collect::<Vec<_>>())
+                    .expect("a thread for reading jars")
+            })
             .collect();
         parts.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
-    })
+    });
+    // The scan's buffers are free now: give their pages back.
+    crate::heap::trim_soon();
+    out
 }
 
 /// The pack's NeoForge dependency overrides (`config/fml.toml` beside the

@@ -49,7 +49,12 @@ rust-version.workspace = true
 license.workspace = true
 description = "A native Minecraft modpack and server manager"
 
+[features]
+# A profiling allocator for HOPPER_MEMLOG=2; not in shipped builds.
+memprof = ["dep:backtrace"]
+
 [dependencies]
+backtrace = { version = "0.3", optional = true }
 # Imported as `hopper` so the app's `hopper::...` paths stay as they were.
 hopper = { path = "crates/hopper-core", package = "hopper-core", features = ["translate"] }
 anyhow.workspace = true
@@ -82,6 +87,9 @@ windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
     "Win32_Storage_Xps",
     "Win32_System_LibraryLoader",
     "Win32_System_ProcessStatus",
@@ -130,6 +138,13 @@ strip = true
 inherits = "release"
 codegen-units = 16
 incremental = true
+
+# A profiling build for `HOPPER_MEMLOG=2` (see src/gpui/memprof.rs): symbols
+# kept so reports can name functions. Never shipped.
+[profile.memprof]
+inherits = "local"
+strip = false
+debug = "line-tables-only"
 
 [profile.fast]
 inherits = "release"

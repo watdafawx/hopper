@@ -193,6 +193,12 @@ impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store = cx.new(Store::new);
         crate::memlog::start(store.clone(), cx);
+        // The start-up scans are done by now: give their free heap pages back.
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(25)).await;
+            hopper::heap::trim_soon();
+        })
+        .detach();
         let library = cx.new(|cx| LibraryView::new(store.clone(), window, cx));
         let browse = cx.new(|cx| BrowseView::new(store.clone(), window, cx));
         let servers = cx.new(|cx| ServersView::new(store.clone(), window, cx));

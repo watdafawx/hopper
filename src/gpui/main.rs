@@ -87,6 +87,12 @@ mod store;
 mod stuck;
 mod theme;
 mod memlog;
+mod procinfo;
+#[cfg(feature = "memprof")]
+mod memprof;
+#[cfg(feature = "memprof")]
+#[global_allocator]
+static ALLOC: memprof::Alloc = memprof::Alloc;
 mod thumbs;
 mod tasks;
 mod translation;

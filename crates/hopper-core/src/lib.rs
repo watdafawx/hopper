@@ -114,6 +114,7 @@ pub mod sources;
 pub mod stampcache;
 pub mod stuckstart;
 pub mod sync;
+pub mod heap;
 pub mod time;
 pub mod tls;
 #[cfg(feature = "translate")]
