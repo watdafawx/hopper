@@ -2,6 +2,7 @@
 //! to the newest version, the installed one, and every other version to
 //! switch to.
 
+use crate::files_changes;
 use crate::store::Store;
 use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
@@ -233,6 +234,31 @@ impl VersionsView {
             .into_any_element()
     }
 
+    /// What a card with no changelog needs to compare its version's files.
+    fn files_ctx(&self, f: &cf::File, cx: &App) -> files_changes::Ctx {
+        let installed = self.store.read(cx).instance(&self.root).and_then(|inst| {
+            inst.addons.iter().find(|a| a.project_id == self.project_id).map(|a| (a.file_id, inst.addon_path(a)))
+        });
+        files_changes::Ctx {
+            store: self.store.clone(),
+            project_id: self.project_id,
+            file: f.clone(),
+            all: self.all.clone(),
+            root: Some(self.root.clone()),
+            installed,
+        }
+    }
+
+    /// A version's changelog; with none (a mod's version), the notice or the
+    /// files' changes in its place.
+    fn changelog_for(&self, id: ElementId, md: SharedString, file: Option<&cf::File>, shown: &HashMap<u64, bool>, cx: &App) -> AnyElement {
+        if let Some(f) = file.filter(|_| !self.pack && !hopper::changelog_trim::has_visible_text(&md)) {
+            let ctx = self.files_ctx(f, cx);
+            return files_changes::card(&ctx, shown.get(&f.id).copied().unwrap_or(false), id, cx);
+        }
+        self.changelog(id, md, cx)
+    }
+
     fn changelog(&self, id: ElementId, md: SharedString, cx: &App) -> AnyElement {
         let (store, root) = (self.store.clone(), self.root.clone());
         changelog_view(id, md, &self.store, move |url, window, cx| open_link(&store, &root, url, window, cx), cx)
@@ -309,6 +335,33 @@ pub(crate) fn changelog_view(
 
 impl Render for VersionsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Versions with no changelog: compare their files when the setting is
+        // on (a few per open dialog), else the card offers to.
+        let mut files_shown: HashMap<u64, bool> = HashMap::new();
+        if !self.pack {
+            let mut used = 0;
+            let mut want: Vec<cf::File> = Vec::new();
+            if let Some(Ok(entries)) = &self.entries {
+                for (e, md) in entries {
+                    if !hopper::changelog_trim::has_visible_text(md)
+                        && let Some(f) = self.all.iter().find(|f| f.display_name == e.name)
+                    {
+                        want.push(f.clone());
+                    }
+                }
+            }
+            for f in self.all.iter() {
+                if let Some(Some(Ok(t))) = self.others.get(&f.id)
+                    && !hopper::changelog_trim::has_visible_text(&t.newer)
+                {
+                    want.push(f.clone());
+                }
+            }
+            for f in want {
+                let ctx = self.files_ctx(&f, cx);
+                files_shown.insert(f.id, files_changes::ensure(&ctx, &mut used, cx));
+            }
+        }
         // The list scrolls inside what's left of the window under the
         // dialog's title and this header, so every version can be reached.
         let total_h = dialog_room(window).max(window.rem_size() * 16.);
@@ -497,9 +550,11 @@ impl Render for VersionsView {
                             Some(n) => widgets::caption(format!("Same notes as {n}"), cx)
                                 .italic()
                                 .into_any_element(),
-                            None => self.changelog(
+                            None => self.changelog_for(
                                 ElementId::Name(format!("cl:{}", e.name).into()),
                                 md.clone(),
+                                file.as_ref(),
+                                &files_shown,
                                 cx,
                             ),
                         })
@@ -529,9 +584,11 @@ impl Render for VersionsView {
                             .into_any_element(),
                         Some(Ok(t)) => v_flex()
                             .gap_2()
-                            .child(self.changelog(
+                            .child(self.changelog_for(
                                 ElementId::Name(format!("other-cl:{}", f.id).into()),
                                 t.newer.clone().into(),
+                                Some(&f),
+                                &files_shown,
                                 cx,
                             ))
                             .when(t.earlier_count > 0, |c| c.child(self.earlier_row(format!("other:{}", f.id), t, cx)))
@@ -883,6 +940,25 @@ struct FileLog {
 impl Render for FileLog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let h = dialog_room(window).clamp(window.rem_size() * 10., window.rem_size() * 32.);
+        // A mod file with no changelog: its changes in the files, or the offer.
+        let files = matches!(&self.md, Some(Ok(md)) if !hopper::changelog_trim::has_visible_text(md))
+            && self.file.file_name.to_ascii_lowercase().ends_with(".jar");
+        let files_ctx = files.then(|| {
+            let installed = self.root.as_ref().and_then(|root| {
+                let inst = self.store.read(cx).instance(root)?;
+                let a = inst.addons.iter().find(|a| a.project_id == self.file.mod_id)?;
+                Some((a.file_id, inst.addon_path(a)))
+            });
+            files_changes::Ctx {
+                store: self.store.clone(),
+                project_id: self.file.mod_id,
+                file: self.file.clone(),
+                all: Vec::new(),
+                root: self.root.clone(),
+                installed,
+            }
+        });
+        let files_shown = files_ctx.as_ref().is_some_and(|c| files_changes::ensure(c, &mut 0, cx));
         let body: AnyElement = match &self.md {
             None => h_flex()
                 .gap_2()
@@ -891,6 +967,9 @@ impl Render for FileLog {
                 .into_any_element(),
             Some(Err(e)) => div().text_sm().text_color(cx.theme().danger).child(e.clone()).into_any_element(),
             // The renderer, empty text and links of every changelog list.
+            Some(Ok(_)) if files_ctx.is_some() => {
+                files_changes::card(files_ctx.as_ref().unwrap(), files_shown, ElementId::Name("file-log-files".into()), cx)
+            }
             Some(Ok(md)) => {
                 let (store, root) = (self.store.clone(), self.root.clone());
                 changelog_view(

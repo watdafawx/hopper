@@ -28,6 +28,7 @@ mod datapacks;
 mod dialogs;
 mod discord;
 mod drag_pick;
+mod files_changes;
 mod fetch_progress;
 #[cfg(windows)]
 mod fetch_window;
@@ -147,6 +148,13 @@ fn main() {
     gpui_kit::application()
         .with_assets(brand::Assets)
         .run(move |cx| {
+            // Old "changes in the files" results and any jar left in the scan temp folder.
+            std::thread::spawn(hopper::changelog_files::tidy);
+            cx.on_app_quit(|_| {
+                hopper::changelog_files::clear_temp();
+                async {}
+            })
+            .detach();
             gpui_kit::init(cx);
             gpui_kit::component::set_locale("en");
             app::bind_keys(cx);

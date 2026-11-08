@@ -38,8 +38,15 @@ pub fn dismiss_key(project_id: u64) -> String {
 /// The version released just before `f` among `all` (any order): the one a
 /// scan compares it with. `None` for the oldest.
 pub fn previous_of<'a>(all: &'a [cf::File], f: &cf::File) -> Option<&'a cf::File> {
+    // Same loader: a Fabric file is not the version before a NeoForge one.
+    const LOADERS: [&str; 4] = ["NeoForge", "Forge", "Fabric", "Quilt"];
+    let loaders = |x: &cf::File| -> Vec<&'static str> {
+        LOADERS.into_iter().filter(|l| x.game_versions.iter().any(|g| g.eq_ignore_ascii_case(l))).collect()
+    };
+    let mine = loaders(f);
     all.iter()
         .filter(|o| o.id != f.id && o.is_server_pack != Some(true) && o.file_date < f.file_date)
+        .filter(|o| mine.is_empty() || loaders(o).iter().any(|l| mine.contains(l)))
         .max_by(|a, b| a.file_date.cmp(&b.file_date).then(a.id.cmp(&b.id)))
 }
 
@@ -208,6 +215,31 @@ pub fn local_candidates(root: &Path, installed: Option<&Path>, f: &cf::File) -> 
         }
     }
     out
+}
+
+/// [`scan`] for two listed versions of a project: looks for each file in the
+/// installed jar (`installed`: its file id and path) and in History, then
+/// downloads what's missing. Run it on a background thread.
+pub fn scan_versions(
+    root: Option<&Path>,
+    project_id: u64,
+    installed: Option<(u64, &Path)>,
+    old: &cf::File,
+    new: &cf::File,
+) -> anyhow::Result<JarChanges> {
+    let local = |f: &cf::File| -> Vec<PathBuf> {
+        let inst = installed.filter(|(id, _)| *id == f.id).map(|(_, p)| p);
+        match root {
+            Some(r) => local_candidates(r, inst, f),
+            None => inst.map(Path::to_path_buf).into_iter().collect(),
+        }
+    };
+    scan(&Request { project_id, old, new, old_local: local(old), new_local: local(new) })
+}
+
+/// The cached result for two versions, if there is one.
+pub fn cached_versions(project_id: u64, old: &cf::File, new: &cf::File) -> Option<JarChanges> {
+    cached(&Request { project_id, old, new, old_local: Vec::new(), new_local: Vec::new() })
 }
 
 /// What a scan needs: the project, the two versions, and where their files

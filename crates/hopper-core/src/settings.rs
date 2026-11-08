@@ -229,6 +229,11 @@ pub struct Settings {
     /// PC. Off until the user turns it on: nothing is detected, shown or
     /// downloaded before.
     pub translate: bool,
+    /// For a mod version whose author wrote no changelog, show what changed
+    /// in the files (compared by [`crate::jar_changes`]). Off until the user
+    /// turns it on, here or from the notice on the changelog; off, nothing
+    /// is compared or downloaded.
+    pub files_changes: bool,
     /// Keep the instance and server header still (the blurred art) instead
     /// of the slow color drift.
     pub still_header: bool,
@@ -561,6 +566,7 @@ impl Default for Settings {
             dismissed_notices: Vec::new(),
             update_holds: Vec::new(),
             translate: false,
+            files_changes: false,
             still_header: false,
             smooth_scroll: true,
             translate_always: Vec::new(),
