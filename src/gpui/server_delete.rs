@@ -76,9 +76,7 @@ impl Render for DeleteForm {
             let web = self.web.clone();
             return v_flex()
                 .gap_3()
-                .child(div().text_sm().child(format!(
-                    "{host} lets only its owner or a manager delete servers, and this PC is paired as a device. Delete it in the panel: Settings › General › Delete server."
-                )))
+                .child(div().text_sm().child(hopper::hopperd::cant_manage_text(&host, "delete")))
                 .when_some(web, |c, url| {
                     c.child(
                         h_flex().child(
@@ -182,7 +180,7 @@ pub fn open(store: Entity<Store>, root: PathBuf, running: bool, window: &mut Win
         if let Some(c) = client {
             cx.spawn(async move |this: WeakEntity<DeleteForm>, cx: &mut AsyncApp| {
                 let role = cx.background_spawn(async move { c.get("/auth/me").ok() }).await;
-                let may = role.map(|v| matches!(v["role"].as_str(), Some("owner" | "manager")));
+                let may = role.map(|v| hopper::hopperd::may_manage(&v));
                 this.update(cx, |this, cx| {
                     // Unknown (an old panel): offer it; the panel still checks.
                     this.may = Some(may.unwrap_or(true));

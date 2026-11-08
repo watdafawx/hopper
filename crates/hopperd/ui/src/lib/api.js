@@ -56,4 +56,5 @@ async function send(path, method, body) {
 }
 
 export const post = (path, body = {}) => api(path, { method: 'POST', body });
+export const put = (path, body = {}) => api(path, { method: 'PUT', body });
 export const del = (path) => api(path, { method: 'DELETE' });

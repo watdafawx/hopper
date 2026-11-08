@@ -91,7 +91,12 @@ pub(crate) fn require_owner_who(app: &App, headers: &HeaderMap, method: &Method)
     if who.owner_level() {
         Ok(who)
     } else {
-        Err(ApiError(StatusCode::FORBIDDEN, "Only the owner or a manager can do that.".into()))
+        let msg = if matches!(who, Who::Device { .. }) {
+            "This PC can't do that. In the panel, open Settings › Access & devices and allow this PC to manage it, or do it there."
+        } else {
+            "Only the owner or a manager can do that."
+        };
+        Err(ApiError(StatusCode::FORBIDDEN, msg.into()))
     }
 }
 
@@ -137,6 +142,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/pair/{id}/answer", post(pair_answer))
         .route("/api/v1/devices", get(devices))
         .route("/api/v1/devices/me", axum::routing::delete(unpair_self))
+        .route("/api/v1/devices/{id}/manage", axum::routing::put(device_manage))
         .route("/api/v1/devices/{id}", axum::routing::delete(forget_device))
         .route("/api/v1/host", get(host))
         .route("/api/v1/servers", get(servers))
@@ -481,7 +487,7 @@ async fn me(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> 
             let c = app.cfg.read().unwrap();
             json!({ "role": "owner", "min_password": MIN_PASSWORD, "panel_folder": c.home, "servers_folder": c.servers_root })
         }
-        Who::Device { id, name } => json!({ "role": "device", "id": id, "name": name }),
+        Who::Device { id, name, manage } => json!({ "role": "device", "id": id, "name": name, "manage": manage }),
         Who::Token { id, name, read_only, servers } => json!({ "role": "token", "id": id, "name": name, "read_only": read_only, "servers": servers }),
         Who::User { id, name, role: crate::auth::Role::Manager, servers } => json!({
             "role": "manager", "user": true, "id": id, "name": name, "servers": servers,
@@ -529,6 +535,9 @@ async fn pair_pending(State(app): State<Arc<App>>, headers: HeaderMap, method: M
 #[derive(Deserialize)]
 struct AnswerBody {
     allow: bool,
+    /// Let the new device manage the panel. Only the true owner may ask.
+    #[serde(default)]
+    manage: bool,
 }
 
 async fn pair_answer(
@@ -537,10 +546,52 @@ async fn pair_answer(
     method: Method,
     Path(id): Path<String>,
     Json(b): Json<AnswerBody>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Response> {
     let who = require_owner_who(&app, &headers, &method)?;
-    app.auth.answer(&id, b.allow, who.account().flatten()).map_err(bad)?;
-    Ok(Json(json!({ "ok": true })))
+    // A paired PC that may manage the panel still can't let other devices in.
+    if matches!(who, Who::Device { .. }) {
+        return Err(only_owner("Only the owner or a manager can allow a PC."));
+    }
+    let manage = b.allow && b.manage;
+    if manage && !who.is_owner() {
+        return Err(only_owner(MANAGE_OWNER_ONLY));
+    }
+    app.auth.answer(&id, b.allow, who.account().flatten(), manage).map_err(bad)?;
+    let mut res = Json(json!({ "ok": true })).into_response();
+    if manage {
+        res.extensions_mut().insert(crate::security::AuditNote("allowed to manage the panel".into()));
+    }
+    Ok(res)
+}
+
+const MANAGE_OWNER_ONLY: &str = "Only the owner can let a PC manage the panel.";
+
+#[derive(Deserialize)]
+struct ManageBody {
+    manage: bool,
+}
+
+/// The owner lets a paired PC manage the panel, or takes that away again.
+/// Only the true owner: not a manager, and not a device (not even one that
+/// may manage), so a device can never widen its own or another's rights.
+async fn device_manage(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<ManageBody>,
+) -> ApiResult<Response> {
+    let who = require(&app, &headers, &method)?;
+    if !who.is_owner() {
+        return Err(only_owner(MANAGE_OWNER_ONLY));
+    }
+    if !app.auth.set_device_manage(&id, b.manage) {
+        return Err(not_found("device"));
+    }
+    let mut res = Json(json!({ "ok": true })).into_response();
+    let note = if b.manage { "allowed to manage the panel" } else { "no longer allowed to manage the panel" };
+    res.extensions_mut().insert(crate::security::AuditNote(note.into()));
+    Ok(res)
 }
 
 async fn devices(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {

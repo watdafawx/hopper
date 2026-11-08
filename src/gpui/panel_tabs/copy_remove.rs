@@ -128,7 +128,7 @@ fn ask_remove(t: Target, store: Entity<Store>, name: String, window: &mut Window
     cx.spawn(async move |cx| {
         let role = cx.background_spawn(async move { client.get("/auth/me").ok() }).await;
         // Unknown (an old panel): offer it; the panel still checks.
-        let may = role.is_none_or(|v| matches!(v["role"].as_str(), Some("owner" | "manager")));
+        let may = role.is_none_or(|v| hopper::hopperd::may_manage(&v));
         handle
             .update(cx, |_, window, cx| {
                 if may {
@@ -139,7 +139,7 @@ fn ask_remove(t: Target, store: Entity<Store>, name: String, window: &mut Window
                         window,
                         cx,
                         format!("Remove {name} in the panel"),
-                        format!("{panel} lets only its owner or a manager remove servers, and this PC is paired as a device. Remove it in the panel: Settings › General › Remove from panel."),
+                        hopper::hopperd::cant_manage_text(&panel, "remove"),
                         "Open in browser",
                         false,
                         move |_, cx| cx.open_url(&url),

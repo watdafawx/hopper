@@ -109,6 +109,10 @@ pub struct Device {
     /// paired before managers existed). A manager can't remove the owner's.
     #[serde(default)]
     pub by: Option<String>,
+    /// The owner let this PC manage the panel (like a manager: delete
+    /// servers, change users). Off unless the owner turned it on.
+    #[serde(default)]
+    pub manage: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -318,7 +322,7 @@ pub enum PairStatus {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Who {
     Owner,
-    Device { id: String, name: String },
+    Device { id: String, name: String, manage: bool },
     Token { id: String, name: String, read_only: bool, servers: Vec<String> },
     User { id: String, name: String, role: Role, servers: Vec<String> },
 }
@@ -343,7 +347,13 @@ impl Who {
 
     /// The owner or a manager: what owner-only routes (`require_owner`) allow.
     pub fn owner_level(&self) -> bool {
-        matches!(self, Who::Owner | Who::User { role: Role::Manager, .. })
+        matches!(self, Who::Owner | Who::User { role: Role::Manager, .. } | Who::Device { manage: true, .. })
+    }
+
+    /// The true owner (not a manager, not a device): the only one who may
+    /// let a paired PC manage the panel.
+    pub fn is_owner(&self) -> bool {
+        matches!(self, Who::Owner)
     }
 
     /// The role shown in the audit log.
@@ -363,7 +373,7 @@ impl Who {
     pub fn may_manage_user(&self, before: Option<Role>, after: Option<Role>) -> bool {
         match self {
             Who::Owner => true,
-            Who::User { role: Role::Manager, .. } => before != Some(Role::Manager) && after != Some(Role::Manager),
+            Who::User { role: Role::Manager, .. } | Who::Device { manage: true, .. } => before != Some(Role::Manager) && after != Some(Role::Manager),
             _ => false,
         }
     }
@@ -577,7 +587,7 @@ impl Auth {
         if let Some(d) = s.devices.iter_mut().find(|x| x.hash == h) {
             let stale = t.saturating_sub(d.last_seen) > 60;
             d.last_seen = t;
-            let who = Who::Device { id: d.id.clone(), name: d.name.clone() };
+            let who = Who::Device { id: d.id.clone(), name: d.name.clone(), manage: d.manage };
             if stale {
                 self.save(&s);
             }
@@ -841,6 +851,16 @@ impl Auth {
         self.stored.lock().unwrap().devices.clone()
     }
 
+    /// The owner turns "manage the panel" on or off for a paired device.
+    /// Returns false when there is no such device.
+    pub fn set_device_manage(&self, id: &str, manage: bool) -> bool {
+        let mut s = self.stored.lock().unwrap();
+        let Some(d) = s.devices.iter_mut().find(|d| d.id == id) else { return false };
+        d.manage = manage;
+        self.save(&s);
+        true
+    }
+
     pub fn forget_device(&self, id: &str) -> bool {
         let mut s = self.stored.lock().unwrap();
         let before = s.devices.len();
@@ -889,7 +909,9 @@ impl Auth {
     }
 
     /// The owner (`by` = `None`) or a manager allows or refuses a request.
-    pub fn answer(&self, id: &str, allow: bool, by: Option<&str>) -> anyhow::Result<()> {
+    /// `manage` lets the new device manage the panel; the caller has checked
+    /// that only the true owner asked for it.
+    pub fn answer(&self, id: &str, allow: bool, by: Option<&str>, manage: bool) -> anyhow::Result<()> {
         let mut p = self.pairs.lock().unwrap();
         let Some(r) = p.iter_mut().find(|r| r.id == id && r.answer.is_none() && r.at.elapsed() < PAIR_TTL) else {
             bail!("That pairing request has expired.");
@@ -906,6 +928,7 @@ impl Auth {
             created: now(),
             last_seen: now(),
             by: by.map(str::to_string),
+            manage,
         };
         r.answer = Some(Ok(format!("{}:{token}", device.id)));
         drop(p);
@@ -1130,7 +1153,7 @@ mod tests {
         let user = |role| Who::User { id: "u".into(), name: "u".into(), role, servers: vec![] };
         let owner = Who::Owner;
         let co = user(Role::Manager);
-        let others = [user(Role::Admin), user(Role::Operator), user(Role::Viewer), Who::Device { id: "d".into(), name: "d".into() }];
+        let others = [user(Role::Admin), user(Role::Operator), user(Role::Viewer), Who::Device { id: "d".into(), name: "d".into(), manage: false }];
         // Owner-only routes (`require_owner`): owner and managers.
         assert!(owner.owner_level() && co.owner_level());
         assert!(others.iter().all(|w| !w.owner_level()));
@@ -1154,6 +1177,55 @@ mod tests {
         assert_eq!(owner.role_name(), "owner");
         assert_eq!(co.role_name(), "manager");
         assert_eq!(user(Role::Viewer).role_name(), "viewer");
+    }
+
+    #[test]
+    fn device_manage_flag() {
+        let dir = temp();
+        let a = Auth::load(&dir).unwrap();
+        let pair = |manage| {
+            let (id, secret, _) = a.pair_request("Hopper on FOX", IP, "AA:BB").unwrap();
+            a.answer(&id, true, None, manage).unwrap();
+            let PairStatus::Approved { token, device_id } = a.pair_status(&id, &secret) else { panic!() };
+            (token, device_id)
+        };
+        // Off by default: a plain device is not owner-level and manages no users.
+        let (tok, dev) = pair(false);
+        let who = a.check(&tok).unwrap();
+        assert!(!who.owner_level() && !who.is_owner());
+        assert!(!who.may_manage_user(None, Some(Role::Admin)));
+        // Ticked at approval: owner-level like a manager, but not the owner.
+        let (tok2, dev2) = pair(true);
+        let who2 = a.check(&tok2).unwrap();
+        assert!(who2.owner_level() && !who2.is_owner());
+        assert_eq!(who2.role_name(), "device");
+        assert!(who2.may_manage_user(None, Some(Role::Admin)));
+        // Never managers, never the owner's devices.
+        assert!(!who2.may_manage_user(None, Some(Role::Manager)));
+        assert!(!who2.may_forget_device(None) && !who2.may_forget_device(Some("u")));
+        // The first device is untouched by the second's flag.
+        assert!(!a.check(&tok).unwrap().owner_level());
+        // Turned on later, then off again; takes effect on the next request.
+        assert!(a.set_device_manage(&dev, true));
+        assert!(a.check(&tok).unwrap().owner_level());
+        assert!(a.set_device_manage(&dev, false));
+        assert!(!a.check(&tok).unwrap().owner_level());
+        assert!(a.set_device_manage(&dev2, false));
+        assert!(!a.check(&tok2).unwrap().owner_level());
+        assert!(!a.set_device_manage("nope", true));
+        // Survives a restart; an old file without the field loads as off.
+        assert!(a.set_device_manage(&dev, true));
+        let b = Auth::load(&dir).unwrap();
+        assert!(b.check(&tok).unwrap().owner_level());
+        assert!(!b.check(&tok2).unwrap().owner_level());
+        // Other roles are unchanged.
+        let user = |role| Who::User { id: "u".into(), name: "u".into(), role, servers: vec![] };
+        assert!(user(Role::Manager).owner_level() && !user(Role::Manager).is_owner());
+        assert!(!user(Role::Admin).owner_level());
+        assert!(Who::Owner.owner_level() && Who::Owner.is_owner());
+        let tk = Who::Token { id: "t".into(), name: "t".into(), read_only: false, servers: vec![] };
+        assert!(!tk.owner_level() && !tk.is_owner());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1239,19 +1311,19 @@ mod tests {
         assert_eq!(a.pair_status(&id, &secret), PairStatus::Waiting);
         assert_eq!(a.pair_status(&id, "wrong"), PairStatus::Unknown);
         assert_eq!(a.pending().len(), 1);
-        a.answer(&id, true, None).unwrap();
+        a.answer(&id, true, None, false).unwrap();
         let PairStatus::Approved { token, device_id } = a.pair_status(&id, &secret) else { panic!() };
-        assert_eq!(a.check(&token), Some(Who::Device { id: device_id.clone(), name: "Hopper on FOX".into() }));
+        assert_eq!(a.check(&token), Some(Who::Device { id: device_id.clone(), name: "Hopper on FOX".into(), manage: false }));
         // Asking again (the first reply lost on the way) gets the same
         // token; the wrong secret still gets nothing.
         assert_eq!(a.pair_status(&id, &secret), PairStatus::Approved { token: token.clone(), device_id: device_id.clone() });
         assert_eq!(a.pair_status(&id, "wrong"), PairStatus::Unknown);
         assert!(a.pending().is_empty());
-        assert!(a.answer(&id, true, None).is_err(), "answered once");
+        assert!(a.answer(&id, true, None, false).is_err(), "answered once");
         assert!(a.forget_device(&device_id));
         assert_eq!(a.check(&token), None);
         let (id2, s2, _) = a.pair_request("Phone", IP, "AA:BB").unwrap();
-        a.answer(&id2, false, None).unwrap();
+        a.answer(&id2, false, None, false).unwrap();
         assert_eq!(a.pair_status(&id2, &s2), PairStatus::Denied);
         assert_eq!(a.pair_status(&id2, &s2), PairStatus::Denied);
         assert!(a.pair_request("", IP, "AA:BB").is_err());

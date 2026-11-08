@@ -104,6 +104,26 @@ pub fn host_name(base: &str) -> String {
     host.trim_matches(['[', ']']).to_string()
 }
 
+/// Whether the panel's `/auth/me` answer says this PC may delete or remove
+/// servers there: the owner, a manager, or a paired PC the owner let manage
+/// the panel. An answer without a role (an old panel) counts as yes; the
+/// panel still checks.
+pub fn may_manage(me: &Value) -> bool {
+    match me["role"].as_str() {
+        Some("owner" | "manager") | None => true,
+        Some("device") => me["manage"].as_bool().unwrap_or(false),
+        Some(_) => false,
+    }
+}
+
+/// What a plain paired PC is told when it can't delete or remove servers
+/// (`verb`: "delete" or "remove"). The panel says the same when asked.
+pub fn cant_manage_text(host: &str, verb: &str) -> String {
+    format!(
+        "This PC can't {verb} servers on {host}. In {host}'s panel, open Settings › Access & devices and allow this PC to manage it, or {verb} the server there."
+    )
+}
+
 pub fn is_remote_root(p: &Path) -> bool {
     p.to_string_lossy().starts_with("hopperd:")
 }
@@ -1615,6 +1635,22 @@ pub fn device_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn who_may_manage_a_panel() {
+        let me = |v: Value| may_manage(&v);
+        assert!(me(json!({ "role": "owner" })) && me(json!({ "role": "manager" })));
+        assert!(me(json!({ "role": "device", "manage": true })));
+        // A plain device (and an old panel's answer without the flag) can't.
+        assert!(!me(json!({ "role": "device" })) && !me(json!({ "role": "device", "manage": false })));
+        assert!(!me(json!({ "role": "admin" })) && !me(json!({ "role": "token" })));
+        // Nothing known (an old panel): offered; the panel still checks.
+        assert!(me(json!({})));
+        assert_eq!(
+            cant_manage_text("rig", "delete"),
+            "This PC can't delete servers on rig. In rig's panel, open Settings › Access & devices and allow this PC to manage it, or delete the server there."
+        );
+    }
 
     /// Against the real panel and share named in `HOPPER_TWIN_ROOT`: read
     /// only (lists servers, hashes server.properties).

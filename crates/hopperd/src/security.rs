@@ -131,6 +131,11 @@ impl Limiter {
 #[derive(Clone)]
 pub struct SignedIn(pub String, pub String);
 
+/// A handler adds this to its response to say what a change did when the
+/// path alone doesn't (shown after the path in the audit log).
+#[derive(Clone)]
+pub struct AuditNote(pub String);
+
 /// A line of the audit log.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Event {
@@ -329,6 +334,10 @@ pub async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Res
         let (who_name, role) = who.as_ref().map(|w| (w.name(), w.role_name().to_string())).unwrap_or_else(|| {
             res.extensions().get::<SignedIn>().map(|s| (s.0.clone(), s.1.clone())).unwrap_or_else(|| ("-".into(), String::new()))
         });
+        let path = match res.extensions().get::<AuditNote>() {
+            Some(n) => format!("{path} ({})", n.0),
+            None => path,
+        };
         app.audit.record(&Event { at: now(), who: who_name, role, ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status });
     }
     res
