@@ -153,6 +153,9 @@
   let sort = $state(pref('sort', { col: 'added', desc: true }));
   $effect(() => keep('yours', onlyYours));
   $effect(() => keep('updates-first', updatesFirst));
+  // The player's own mods lead (after updates); same toggle as desktop's sort menu.
+  let yoursFirst = $state(pref('yours-first', false));
+  $effect(() => keep('yours-first', yoursFirst));
   $effect(() => keep('sort', sort));
 
   // The table's movable columns, as desktop's: drag a header onto another
@@ -236,10 +239,10 @@
     const rows = base0.filter((m) => fits[chip](m) && (!onlyCfg || cfgChanged(m)) && (!q || wordsMatch(q, [m.name, m.file, m.author])));
     const cmp = by[sort.col] || by.name;
     rows.sort((a, b) => {
-      if (updatesFirst) {
-        const d = Number(pending(b)) - Number(pending(a));
-        if (d) return d;
-      }
+      // Lead groups, as hopper-core's `listorder`: updates, then yours, then the rest.
+      const g = (m) => (updatesFirst && pending(m) ? 0 : yoursFirst && yours(m) ? 1 : 2);
+      const d = g(a) - g(b);
+      if (d) return d;
       const c = cmp(a, b);
       return (sort.desc ? -c : c) || by.name(a, b);
     });
@@ -843,7 +846,7 @@
           </button>
         {/each}
       </div>
-      <SortMenu choices={SORTS} {sort} bind:updatesFirst onSort={setSort} />
+      <SortMenu choices={SORTS} {sort} bind:updatesFirst bind:yoursFirst {hasPack} onSort={setSort} />
       <span class="sp"></span>
       {#if counts.unknown}<button class="btn sm ghost" disabled={!!identifying} onclick={() => identify(false)} title="Look jars up on CurseForge and Modrinth"><ScanSearch size={13} />Identify {counts.unknown}</button>{/if}
       {#if srcOn && counts.unknown}<button class="btn sm ghost" onclick={() => (finding = true)} title="Jars that link to their GitHub repo can follow it for updates"><Link size={13} />Find sources for {counts.unknown} unknown mod{counts.unknown === 1 ? '' : 's'}</button>{/if}

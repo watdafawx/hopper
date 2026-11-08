@@ -411,6 +411,7 @@ pub(crate) struct RowsKey {
     /// The "also in" map changed (copies to fold).
     also: usize,
     updates_first: bool,
+    yours_first: bool,
     sort: (SortCol, bool),
 }
 
@@ -737,6 +738,8 @@ pub struct AddonsView {
     /// Only mods whose config has settings not at their default.
     cfg_changed_only: bool,
     updates_first: bool,
+    /// "Added by you first": the player's own mods lead (after updates).
+    yours_first: bool,
     sort: (SortCol, bool),
     pub(crate) selected: HashSet<String>,
     /// Resource packs Paxi (or another global folder) also has: shown,
@@ -909,6 +912,7 @@ impl AddonsView {
             cfg_changed_only: false,
             show_copies: false,
             updates_first: true,
+            yours_first: false,
             sort: (SortCol::Added, false),
             selected: HashSet::new(),
             pick: PickState::default(),
@@ -1198,6 +1202,7 @@ impl AddonsView {
             show_copies: self.show_copies,
             also: self.table.also.len(),
             updates_first: self.updates_first,
+            yours_first: self.yours_first,
             sort: self.sort,
         }
     }
@@ -1556,15 +1561,18 @@ impl AddonsView {
             })
             .map(|(i, a)| (i, a.name.to_lowercase()))
             .collect();
-        let ((col, asc), first) = (self.sort, self.updates_first);
+        let ((col, asc), lead) = (
+            self.sort,
+            hopper::listorder::Lead { updates_first: self.updates_first, yours_first: self.yours_first },
+        );
+        let has_pack = inst.pack.is_some();
         rows.sort_by(|(ia, na), (ib, nb)| {
             let (a, b) = (&inst.addons[*ia], &inst.addons[*ib]);
-            let up = |x: &Addon| updates.contains_key(&x.project_id);
-            let lead = if first {
-                up(b).cmp(&up(a))
-            } else {
-                std::cmp::Ordering::Equal
+            let facts = |x: &Addon| hopper::listorder::Facts {
+                update: updates.contains_key(&x.project_id),
+                yours: has_pack && !x.from_pack,
             };
+            let lead = lead.cmp(facts(a), facts(b));
             let ord = match col {
                 SortCol::Name => na.cmp(nb),
                 SortCol::Author => a.author.to_lowercase().cmp(&b.author.to_lowercase()),
@@ -2515,19 +2523,26 @@ impl AddonsView {
 
     /// The toolbar's Sort button: shows the current order and opens a menu
     /// that sets the same order the column headers do.
-    fn sort_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn sort_button(&self, has_pack: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (sort, asc) = self.sort;
         let first = self.updates_first;
+        // Only a list with a pack has mods to tell apart.
+        let yours = has_pack && self.yours_first;
         let choices = self.sort_choices();
         let name = choices.iter().find(|(c, _)| *c == sort).map_or("Name", |(_, l)| *l);
         // Arrows are icons: the UI font has no clean ↑ ↓.
         let arrow = |up: bool| Icon::new(if up { IconName::ArrowUp } else { IconName::ArrowDown }).xsmall();
-        let order = if first { format!("Updates first, then {name}") } else { name.to_string() };
+        let order = match (first, yours) {
+            (true, true) => format!("Updates, yours first, then {name}"),
+            (true, false) => format!("Updates first, then {name}"),
+            (false, true) => format!("Added by you first, then {name}"),
+            (false, false) => name.to_string(),
+        };
         let muted = cx.theme().muted_foreground;
         let view = cx.entity();
         // Icon only while the order is the default; it names itself once
         // changed, so a different order is never a surprise.
-        let is_default = first && (sort, asc) == (SortCol::Added, false);
+        let is_default = first && !yours && (sort, asc) == (SortCol::Added, false);
         Button::new("sort")
             .small()
             .outline()
@@ -2562,14 +2577,23 @@ impl AddonsView {
                     );
                 }
                 let v = view.clone();
-                menu.separator()
-                    .item(PopupMenuItem::new("Updates first").checked(first).on_click(move |_, _, cx| {
+                menu = menu.separator().item(PopupMenuItem::new("Updates first").checked(first).on_click(move |_, _, cx| {
+                    v.update(cx, |this, cx| {
+                        this.updates_first = !first;
+                        cx.notify();
+                    })
+                }));
+                if has_pack {
+                    let v = view.clone();
+                    let on = yours;
+                    menu = menu.item(PopupMenuItem::new("Added by you first").checked(on).on_click(move |_, _, cx| {
                         v.update(cx, |this, cx| {
-                            this.updates_first = !first;
+                            this.yours_first = !on;
                             cx.notify();
                         })
-                    }))
-                    .label("Clicking a column header changes this too.")
+                    }));
+                }
+                menu.label("Clicking a column header changes this too.")
             })
     }
 
@@ -2887,7 +2911,7 @@ impl AddonsView {
             .child(second)
             // No divider before Sort: when the bar wraps, it would be left
             // hanging at the end of a line.
-            .child(self.sort_button(cx))
+            .child(self.sort_button(inst.pack.is_some(), cx))
             .when(hint, |r| r.child(self.collapse_hint(cx)))
             .child(div().flex_1())
             .when(self.class == cf::CLASS_MODS, |r| r.child(self.profiles_button(inst, cx)))
