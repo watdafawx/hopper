@@ -162,7 +162,7 @@ async fn put_snapshot(
     Json(b): Json<SnapshotBody>,
 ) -> ApiResult<Json<Value>> {
     let who = require(&app, &headers, &method)?;
-    let Who::Device { id: device, name } = &who else { return Err(forbidden("Only a paired Hopper sends its copy of the configs.")) };
+    let Who::Device { id: device, name, .. } = &who else { return Err(forbidden("Only a paired Hopper sends its copy of the configs.")) };
     server_of(&app, &who, &id)?;
     let mut files = BTreeMap::new();
     let mut total = 0;

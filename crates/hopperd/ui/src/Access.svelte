@@ -9,13 +9,15 @@
   import { pathKind } from './lib/format.js';
 
   const kindOf = (url) => pathKind((url.split('://')[1] ?? url).split(/[:/]/)[0].replace(/^\[|\]$/g, ''));
-  import { api, post, del } from './lib/api.js';
+  import { api, post, put, del } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { session, ownerLike, roleLabel } from './lib/me.svelte.js';
 
   let { hello, me, pending = $bindable([]) } = $props();
   const owner = $derived(ownerLike(me));
   let devices = $state([]);
+  // Per pairing request: let that PC manage the panel. Off unless ticked.
+  let manageTick = $state({});
 
   async function loadDevices() {
     try {
@@ -27,13 +29,23 @@
 
   async function answer(r, allow) {
     try {
-      await post(`/pair/${r.id}/answer`, { allow });
+      await post(`/pair/${r.id}/answer`, { allow, manage: allow && session.trueOwner && !!manageTick[r.id] });
       pending = pending.filter((p) => p.id !== r.id);
       say(allow ? `${r.device} can now use this panel.` : `Refused ${r.device}.`);
       loadDevices();
     } catch (e) {
       say(e.message, true);
     }
+  }
+
+  async function setManage(d, manage) {
+    try {
+      await put(`/devices/${d.id}/manage`, { manage });
+      say(manage ? `${d.name} can now manage this panel.` : `${d.name} can no longer manage this panel.`);
+    } catch (e) {
+      say(e.message, true);
+    }
+    loadDevices();
   }
 
   async function forget(d) {
@@ -65,6 +77,9 @@
         <div class="req">
           <div class="small subtle"><b class="txt">{r.device}</b> wants to connect from <span class="mono">{r.ip}</span>. Check it shows the same code.</div>
           <div class="code">{#each r.code.split('') as c, i (i)}<span>{c}</span>{/each}</div>
+          {#if session.trueOwner}
+            <label class="row small manage"><input type="checkbox" bind:checked={manageTick[r.id]} />Let this PC manage the panel (delete servers, change users)</label>
+          {/if}
           <div class="row center">
             <button class="btn" onclick={() => answer(r, false)}><X size={14} />Refuse</button>
             <button class="btn pri" onclick={() => answer(r, true)}><Check size={14} />Allow {r.device}</button>
@@ -113,6 +128,9 @@
             <div class="tiny muted">Paired {when(d.created)} · last used {when(d.last_seen)}</div>
           </div>
           <span class="sp"></span>
+          {#if session.trueOwner}
+            <div class="row small mg" title="Delete servers and change users from this PC, like a manager."><span class="muted">Can manage the panel</span><label class="switch"><input type="checkbox" checked={d.manage} onchange={(e) => setManage(d, e.target.checked)} /><span></span></label></div>
+          {:else if d.manage}<span class="chip" title="The owner let this PC manage the panel.">Can manage</span>{/if}
           {#if session.trueOwner || d.by}<button class="btn sm ghost icon" title="Remove" onclick={() => forget(d)}><Trash2 size={13} /></button>
           {:else}<span class="tiny muted" title="Only the owner can remove the owner's devices.">Owner's</span>{/if}
         </div>
@@ -139,6 +157,8 @@
   .fp { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; color: var(--green); word-break: break-all; }
   .note { margin-top: 10px; }
   .fp.sftp { color: var(--blue); }
+  .manage { margin: 10px 0 0; justify-content: center; }
+  .mg { gap: 8px; margin-right: 12px; }
   .dev { padding: 8px 0; border-bottom: 1px solid var(--line); }
   .dev:last-child { border: 0; }
 </style>
