@@ -36,6 +36,9 @@ pub struct Settings {
     /// Java arguments and executable for instances that leave theirs empty.
     pub default_java_args: String,
     pub default_java_path: String,
+    /// How the game's window opens for instances without their own setting;
+    /// None until the player sets one (then the stock 1280 × 720 window).
+    pub default_window: Option<crate::instances::WindowSetting>,
     /// Java argument presets the user saved, in the order they were made.
     pub java_presets: Vec<JavaPreset>,
     /// Library order: false = name, true = last played.
@@ -479,6 +482,7 @@ impl Default for Settings {
             browse_modrinth: false,
             default_java_args: String::new(),
             default_java_path: String::new(),
+            default_window: None,
             java_presets: Vec::new(),
             library_by_recent: false,
             groups: HashMap::new(),

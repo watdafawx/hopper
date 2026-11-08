@@ -211,6 +211,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Java, "minimize", "Minimize while playing", "Hide Hopper while a game runs, and bring it back when it closes.", "minimize window hide"),
     e(C::Java, "record", "Record how games run", "FPS, frame times, CPU, RAM, GPU and GC pauses of each run, to compare Java arguments. See an instance's Performance tab.", "performance fps stats gc record benchmark"),
     e(C::Java, "stuck", "Stuck start check", "When a game or server makes no progress and uses almost no CPU for this long while it starts, Hopper says so, reads what it's waiting on and names the mods.", "hang hung frozen freeze stuck loading deadlock thread dump jcmd"),
+    e(C::Java, "window", "Window", "The window size new instances start with. An instance's own setting wins.", "size resolution width height fullscreen maximized screen"),
     e(C::Java, "memory", "Memory", "For instances that don't set their own.", "ram xmx gb heap"),
     e(C::Java, "java", "Java", "The Java instances use unless they pick one.", "jdk jre runtime path"),
     e(C::Java, "java-args", "Java arguments", "Extra arguments for instances that leave theirs blank.", "jvm flags aikar g1 zgc generator presets xms xmx graalvm"),
@@ -519,6 +520,7 @@ pub struct SettingsPage {
     cf_testing: bool,
     installing: bool,
     java: Entity<JavaForm>,
+    window_form: Entity<crate::window_form::WindowForm>,
     launchers: Entity<crate::launchers_list::LaunchersList>,
     mc: minecraft::Mc,
     /// The image cache's files and bytes, and when they were counted.
@@ -607,8 +609,20 @@ impl SettingsPage {
                 cx,
             )
         });
+        let window_form = cx.new(|cx| crate::window_form::WindowForm::new(window, cx));
+        window_form.update(cx, |f, cx| f.set(s.default_window.unwrap_or_default(), window, cx));
         let site_form = sites::SiteForm::new(window, cx);
         let mut subs = vec![
+            // The window default applies as it changes; showing the stock
+            // window (nothing set) saves nothing.
+            cx.observe(&window_form, |this, form, cx| {
+                let v = form.read(cx).value(cx);
+                let now = this.store.read(cx).settings().default_window.unwrap_or_default();
+                if v != now {
+                    this.store.update(cx, |s, cx| s.update_settings(|st| st.default_window = Some(v), cx));
+                }
+                cx.notify();
+            }),
             // Java defaults apply as they change.
             cx.observe(&java, |this, java, cx| {
                 let (mem, path, args) = java.read(cx).values();
@@ -737,6 +751,7 @@ impl SettingsPage {
             installing: false,
             launchers,
             java,
+            window_form,
             mc: minecraft::Mc::new(&s, cx),
             img_usage: None,
             img_counting: Default::default(),
@@ -1482,6 +1497,25 @@ impl SettingsPage {
                         cx,
                     )),
                     Row::new("stuck").control(self.stuck_picker(s.stuck_start_secs, rem)),
+                    Row::new("window").below(
+                        v_flex()
+                            .gap_1p5()
+                            .child(self.window_form.clone())
+                            .when(s.default_window.is_some(), |c| {
+                                c.child(
+                                    h_flex().child(
+                                        Button::new("window-reset")
+                                            .ghost()
+                                            .xsmall()
+                                            .label("Reset")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.store.update(cx, |s, cx| s.update_settings(|st| st.default_window = None, cx));
+                                                this.window_form.update(cx, |f, cx| f.set(Default::default(), window, cx));
+                                            })),
+                                    ),
+                                )
+                            }),
+                    ),
                 ],
             ),
             Block::card(

@@ -127,6 +127,8 @@ pub struct Defaults {
     /// Have Java write a GC log for the session record
     /// ([`crate::perf::gc_log_arg`]).
     pub gc_log: bool,
+    /// The window default from Settings (None: none set).
+    pub window: Option<crate::instances::WindowSetting>,
 }
 
 pub fn write_profile(
@@ -168,6 +170,7 @@ pub fn write_profile(
         java_args = format!("{java_args} {}", crate::perf::gc_log_arg());
     }
     let now = crate::time::now_iso();
+    let win = inst.settings.effective_window(defaults.window);
     let mut profile = serde_json::json!({
         "created": now,
         "gameDir": inst.root.to_string_lossy(),
@@ -176,7 +179,7 @@ pub fn write_profile(
         "lastUsed": now,
         "lastVersionId": version,
         "name": inst.name,
-        "resolution": { "width": inst.settings.width, "height": inst.settings.height },
+        "resolution": { "width": win.width, "height": win.height },
         "type": "custom",
     });
     let java = if inst.settings.java_path.trim().is_empty() {

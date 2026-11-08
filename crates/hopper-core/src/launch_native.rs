@@ -492,6 +492,7 @@ pub fn command(
     defaults: &Defaults,
 ) -> Vec<String> {
     let v = &p.version;
+    let win = inst.settings.effective_window(defaults.window);
     let cp_sep = os::CP_SEP;
     let classpath = p
         .classpath
@@ -538,8 +539,8 @@ pub fn command(
             "version_type",
             v["type"].as_str().unwrap_or("release").into(),
         ),
-        ("resolution_width", inst.settings.width.to_string()),
-        ("resolution_height", inst.settings.height.to_string()),
+        ("resolution_width", win.width.to_string()),
+        ("resolution_height", win.height.to_string()),
         ("user_properties", "{}".into()),
     ]);
     let sub = |s: &str| {
@@ -607,7 +608,7 @@ pub fn command(
     } else if let Some(s) = v["minecraftArguments"].as_str() {
         args.extend(s.split_whitespace().map(&sub));
     }
-    if inst.settings.window == crate::instances::WindowMode::Fullscreen
+    if win.mode == crate::instances::WindowMode::Fullscreen
         && !args.iter().any(|a| a == "--fullscreen")
     {
         args.push("--fullscreen".into());
@@ -638,7 +639,7 @@ pub fn launch(
         .stderr(Stdio::from(log))
         .spawn()
         .with_context(|| format!("starting {}", p.java.display()))?;
-    if inst.settings.window == crate::instances::WindowMode::Maximized {
+    if inst.settings.effective_window(defaults.window).mode == crate::instances::WindowMode::Maximized {
         maximize_when_shown(child.id());
     }
     Ok(child)

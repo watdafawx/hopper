@@ -2427,6 +2427,7 @@ impl Store {
             java_args: self.settings.default_java_args.clone(),
             java_path: self.settings.default_java_path.clone(),
             gc_log: self.settings.record_sessions,
+            window: self.settings.default_window,
         }
     }
 
@@ -2477,7 +2478,7 @@ impl Store {
                 return Err("Sign in with Microsoft in Settings first.".into());
             }
             self.spawn_launch(root.to_path_buf(), format!("Starting {}", full.name), move |job| {
-                apply_mc_options(&mut full, mc.as_ref(), job);
+                apply_mc_options(&mut full, mc.as_ref(), defaults.window, job);
                 job.detail("Signing in");
                 let session = hopper::msauth::session_from_saved()?;
                 let player = hopper::launch_native::Player::from_session(&session);
@@ -2489,7 +2490,7 @@ impl Store {
             });
         } else {
             self.spawn_launch(root.to_path_buf(), format!("Launching {}", full.name), move |job| {
-                apply_mc_options(&mut full, mc.as_ref(), job);
+                apply_mc_options(&mut full, mc.as_ref(), defaults.window, job);
                 hopper::launch::launch(&full, &dir, &defaults, job)?;
                 full.last_played = Some(hopper::time::now_iso());
                 full.save()?;
@@ -4422,7 +4423,12 @@ pub(crate) fn sync_cf_pack(inst: &mut hopper::instances::Instance, job: &Job) ->
 /// Writes the player's Minecraft settings (Settings > Minecraft) into the
 /// instance's options.txt before it starts. A failure only goes to the
 /// log: the game should still start with the pack's own options.
-fn apply_mc_options(inst: &mut hopper::instances::Instance, opts: Option<&hopper::mcoptions::McOptions>, job: &Job) {
+fn apply_mc_options(
+    inst: &mut hopper::instances::Instance,
+    opts: Option<&hopper::mcoptions::McOptions>,
+    window: Option<hopper::instances::WindowSetting>,
+    job: &Job,
+) {
     if let Some(opts) = opts {
         match hopper::mcoptions::apply(&inst.root, &inst.game_version, &inst.loader, opts, &mut inst.applied_options) {
             Ok(r) if r.written > 0 => {
@@ -4435,9 +4441,9 @@ fn apply_mc_options(inst: &mut hopper::instances::Instance, opts: Option<&hopper
             Err(e) => log::warn!("Minecraft settings for {}: {e:#}", inst.name),
         }
     }
-    // The instance's Window setting, with or without the player's options;
+    // The instance's Window setting (or the default from Settings), with or without the player's options;
     // after them, so a freshly made options.txt gets it too.
-    if let Err(e) = hopper::mcoptions::apply_window(&inst.root, inst.settings.window, &mut inst.applied_options) {
+    if let Err(e) = hopper::mcoptions::apply_window(&inst.root, inst.settings.effective_window(window).mode, &mut inst.applied_options) {
         log::warn!("window setting for {}: {e:#}", inst.name);
     }
 }

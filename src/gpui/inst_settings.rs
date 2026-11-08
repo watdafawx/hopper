@@ -2,6 +2,7 @@
 //! how the game's window opens and which updates to offer.
 
 use crate::java_form::{FIELD_W, FORM_W, JavaForm, settings_form};
+use crate::window_form::WindowForm;
 use crate::store::{Msg, Store, loader_label, open_path};
 use crate::widgets;
 use gpui_kit::assets::IconName;
@@ -33,9 +34,12 @@ pub struct InstanceSettings {
     /// An instance to load on the next frame (loading needs the window).
     pending: Option<PathBuf>,
     name: Entity<InputState>,
-    width: Entity<InputState>,
-    height: Entity<InputState>,
-    window_mode: hopper::instances::WindowMode,
+    window_form: Entity<WindowForm>,
+    /// The window setting is this instance's own (not the default from Settings).
+    window_own: bool,
+    /// Whether it was its own when loaded, and what the form showed then.
+    window_own_loaded: bool,
+    window_base: hopper::instances::WindowSetting,
     java: Entity<JavaForm>,
     game_version: String,
     loader: String,
@@ -58,12 +62,11 @@ pub struct InstanceSettings {
 impl InstanceSettings {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx));
-        let width = cx.new(|cx| InputState::new(window, cx));
-        let height = cx.new(|cx| InputState::new(window, cx));
+        let window_form = cx.new(|cx| WindowForm::new(window, cx));
         let default_mem = store.read(cx).settings().default_memory_mb;
         let java = cx.new(|cx| JavaForm::new(store.clone(), Some(default_mem), window, cx));
         let mut subs = Vec::new();
-        for input in [&name, &width, &height] {
+        for input in [&name] {
             subs.push(cx.subscribe(input, |_, _, e: &InputEvent, cx| {
                 if matches!(e, InputEvent::Change) {
                     cx.notify();
@@ -71,14 +74,21 @@ impl InstanceSettings {
             }));
         }
         subs.push(cx.observe(&java, |_, _, cx| cx.notify()));
+        // Changing the window makes it this instance's own.
+        subs.push(cx.observe(&window_form, |this, form, cx| {
+            let v = form.read(cx).value(cx);
+            this.window_own = this.window_own_loaded || v != this.window_base;
+            cx.notify();
+        }));
         let view = Self {
             store,
             root: None,
             pending: None,
             name,
-            width,
-            height,
-            window_mode: Default::default(),
+            window_form,
+            window_own: false,
+            window_own_loaded: false,
+            window_base: Default::default(),
             java,
             game_version: String::new(),
             loader: String::new(),
@@ -118,10 +128,13 @@ impl InstanceSettings {
         };
         self.root = Some(root);
         let s = &inst.settings;
-        let (name, w, h) = (inst.name.clone(), s.width.to_string(), s.height.to_string());
+        let name = inst.name.clone();
         self.name.update(cx, |i, cx| i.set_value(name, window, cx));
-        self.width.update(cx, |i, cx| i.set_value(w, window, cx));
-        self.height.update(cx, |i, cx| i.set_value(h, window, cx));
+        let shown = s.effective_window(self.store.read(cx).settings().default_window);
+        self.window_own = s.own_window().is_some();
+        self.window_own_loaded = self.window_own;
+        self.window_base = shown;
+        self.window_form.update(cx, |f, cx| f.set(shown, window, cx));
         let (mem, path, args, gv) = (
             s.memory_mb,
             s.java_path.clone(),
@@ -134,7 +147,6 @@ impl InstanceSettings {
         self.loader = inst.loader.clone();
         self.channel = s.release_channel;
         self.use_my_options = s.use_my_options;
-        self.window_mode = s.window;
         self.has_pack = inst.pack.is_some();
         self.want_loaders(cx);
         self.check_cf(inst, cx);
@@ -386,26 +398,27 @@ impl InstanceSettings {
     /// The instance as the form would save it.
     fn edited(&self, cx: &App) -> Option<hopper::instances::Instance> {
         let mut inst = self.store.read(cx).instance(self.root.as_ref()?)?.clone();
-        let num = |e: &Entity<InputState>, cx: &App, lo: u32, hi: u32, fallback: u32| {
-            e.read(cx)
-                .value()
-                .trim()
-                .parse::<u32>()
-                .map_or(fallback, |v| v.clamp(lo, hi))
-        };
         let name = self.name.read(cx).value().trim().to_string();
         if !name.is_empty() {
             inst.name = name;
         }
-        inst.settings.width = num(&self.width, cx, 640, 7680, inst.settings.width);
-        inst.settings.height = num(&self.height, cx, 480, 4320, inst.settings.height);
         let (mem, path, args) = self.java.read(cx).values();
         inst.settings.memory_mb = mem;
         inst.settings.java_path = path;
         inst.settings.java_args = args;
         inst.settings.release_channel = self.channel;
         inst.settings.use_my_options = self.use_my_options;
-        inst.settings.window = self.window_mode;
+        // Only an instance with its own window setting keeps the form's
+        // values; one that follows the default keeps what it had.
+        if self.window_own {
+            let w = self.window_form.read(cx).value(cx);
+            inst.settings.window = w.mode;
+            inst.settings.width = w.width;
+            inst.settings.height = w.height;
+            inst.settings.window_own = Some(true);
+        } else if inst.settings.own_window().is_some() {
+            inst.settings.window_own = Some(false);
+        }
         if !self.has_pack {
             inst.game_version = self.game_version.clone();
         }
@@ -427,8 +440,8 @@ impl InstanceSettings {
         edited.name != saved.name
             || edited.game_version != saved.game_version
             || edited.loader != saved.loader
-            || (a.memory_mb, a.width, a.height, a.window, a.release_channel, a.use_my_options)
-                != (b.memory_mb, b.width, b.height, b.window, b.release_channel, b.use_my_options)
+            || (a.memory_mb, a.release_channel, a.use_my_options) != (b.memory_mb, b.release_channel, b.use_my_options)
+            || a.own_window() != b.own_window()
             || a.java_path != b.java_path
             || a.java_args.trim() != b.java_args.trim()
     }
@@ -636,41 +649,45 @@ impl Render for InstanceSettings {
             .child(Field::new().label("Minecraft").child(minecraft))
             .child(Field::new().label("Loader").items_start().child(loader));
         let bottom = settings_form(rem)
-            .child({
-                use hopper::instances::WindowMode as W;
-                const MODES: [W; 3] = [W::Window, W::Maximized, W::Fullscreen];
-                let mode = self.window_mode;
-                let hint = match mode {
-                    W::Window => "Minecraft opens in a window this size.",
-                    W::Maximized => "Minecraft opens filling the screen, with the taskbar showing.",
-                    W::Fullscreen => "Minecraft opens fullscreen. F11 switches to a window.",
-                };
+            .child(
                 Field::new().label("Window").items_start().child(
                     v_flex()
                         .gap_1p5()
+                        .child(self.window_form.clone())
                         .child(
-                            widgets::Segmented::new("window-mode")
-                                .selected_index(MODES.iter().position(|m| *m == mode).unwrap_or(0))
-                                .child(widgets::SegItem::new().label("Window"))
-                                .child(widgets::SegItem::new().label("Maximized"))
-                                .child(widgets::SegItem::new().label("Fullscreen"))
-                                .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                                    this.window_mode = MODES[*ix];
-                                    cx.notify();
-                                })),
-                        )
-                        .when(mode == W::Window, |c| {
-                            c.child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(div().w_24().child(Input::new(&self.width)))
-                                    .child(widgets::caption("×", cx))
-                                    .child(div().w_24().child(Input::new(&self.height))),
-                            )
-                        })
-                        .child(widgets::caption(hint, cx).text_xs()),
-                )
-            })
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    widgets::caption(
+                                        if self.window_own {
+                                            "This instance's own setting."
+                                        } else {
+                                            "Using the default from Settings."
+                                        },
+                                        cx,
+                                    )
+                                    .text_xs(),
+                                )
+                                .when(self.window_own, |r| {
+                                    r.child(
+                                        Button::new("window-use-default")
+                                            .ghost()
+                                            .xsmall()
+                                            .label("Use default")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                let d = this.store.read(cx).settings().default_window.unwrap_or_default();
+                                                this.window_own = false;
+                                                this.window_own_loaded = false;
+                                                this.window_base = d;
+                                                this.window_form.update(cx, |f, cx| f.set(d, window, cx));
+                                                cx.notify();
+                                            })),
+                                    )
+                                }),
+                        ),
+                ),
+            )
             .child(
                 Field::new()
                     .label("Updates")

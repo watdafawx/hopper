@@ -188,6 +188,51 @@ pub struct LaunchSettings {
     pub release_channel: u32,
     /// Apply the player's Minecraft settings (Settings > Minecraft) here.
     pub use_my_options: bool,
+    /// Whether `window`, `width` and `height` are this instance's own
+    /// (`true`) or follow the default from Settings (`false`). Missing in
+    /// older files: see [`LaunchSettings::own_window`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_own: Option<bool>,
+}
+
+/// How the game's window opens: the mode and, as a window, its size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowSetting {
+    pub mode: WindowMode,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Default for WindowSetting {
+    fn default() -> Self {
+        Self { mode: WindowMode::Window, width: 1280, height: 720 }
+    }
+}
+
+/// The window an instance starts with: its own if it has one, else the
+/// default from Settings, else the stock 1280 × 720 window.
+pub fn resolve_window(own: Option<WindowSetting>, global: Option<WindowSetting>) -> WindowSetting {
+    own.or(global).unwrap_or_default()
+}
+
+impl LaunchSettings {
+    /// This instance's own window setting, if it has one. Files from before
+    /// the global default carry no flag: those count as their own when they
+    /// differ from the stock window (somebody chose it) and follow the
+    /// default when they don't, so nothing changes until a default is set.
+    pub fn own_window(&self) -> Option<WindowSetting> {
+        let w = WindowSetting { mode: self.window, width: self.width, height: self.height };
+        match self.window_own {
+            Some(true) => Some(w),
+            Some(false) => None,
+            None => (w != WindowSetting::default()).then_some(w),
+        }
+    }
+
+    /// The window this instance opens with, given the global default.
+    pub fn effective_window(&self, global: Option<WindowSetting>) -> WindowSetting {
+        resolve_window(self.own_window(), global)
+    }
 }
 
 impl Default for LaunchSettings {
@@ -201,6 +246,7 @@ impl Default for LaunchSettings {
             height: 720,
             window: WindowMode::Window,
             use_my_options: true,
+            window_own: None,
         }
     }
 }
@@ -1261,6 +1307,37 @@ impl Instance {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn window_instance_wins_then_global_then_stock() {
+        let own = WindowSetting { mode: WindowMode::Fullscreen, width: 1920, height: 1080 };
+        let global = WindowSetting { mode: WindowMode::Maximized, width: 1600, height: 900 };
+        assert_eq!(resolve_window(Some(own), Some(global)), own);
+        assert_eq!(resolve_window(None, Some(global)), global);
+        assert_eq!(resolve_window(None, None), WindowSetting::default());
+        assert_eq!(WindowSetting::default(), WindowSetting { mode: WindowMode::Window, width: 1280, height: 720 });
+    }
+
+    #[test]
+    fn window_old_files_follow_default_only_when_untouched() {
+        let global = WindowSetting { mode: WindowMode::Maximized, width: 1600, height: 900 };
+        // An old file at the stock values follows the default.
+        let stock = LaunchSettings::default();
+        assert_eq!(stock.effective_window(Some(global)), global);
+        assert_eq!(stock.effective_window(None), WindowSetting::default());
+        // An old file somebody changed keeps its value.
+        let changed = LaunchSettings { width: 1920, height: 1080, ..Default::default() };
+        assert_eq!(changed.effective_window(Some(global)).width, 1920);
+        // The explicit flag wins over the values.
+        let own_stock = LaunchSettings { window_own: Some(true), ..Default::default() };
+        assert_eq!(own_stock.effective_window(Some(global)), WindowSetting::default());
+        let follow = LaunchSettings { window_own: Some(false), width: 1920, ..Default::default() };
+        assert_eq!(follow.effective_window(Some(global)), global);
+        // Nothing in an old file's JSON about it: no flag, nothing breaks.
+        let s: LaunchSettings = serde_json::from_str(r#"{"width":800,"height":600}"#).unwrap();
+        assert_eq!(s.window_own, None);
+        assert_eq!(s.effective_window(Some(global)).width, 800);
+    }
+
     #[test]
     fn finds_libraries_only_a_removed_mod_needed() {
         let addon = |file: &str, id: u64, requires: &[u64]| Addon {
