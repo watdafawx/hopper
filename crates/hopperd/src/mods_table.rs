@@ -208,8 +208,10 @@ async fn files_changes(
             all.push(source::file(a.project_id, version)?);
         }
         let new = all.iter().find(|f| f.id == version).cloned().ok_or_else(|| anyhow::anyhow!("That version isn't listed."))?;
-        let old = hopper_core::changelog_files::previous_of(&all, &new)
-            .ok_or_else(|| anyhow::anyhow!("This is the first version Hopper knows of, so there is nothing to compare it with."))?;
+        // The oldest version Hopper knows of: nothing to compare it with (no markdown, not an error).
+        let Some(old) = hopper_core::changelog_files::previous_of(&all, &new) else {
+            return Ok(json!({ "markdown": null }));
+        };
         let installed = Some((a.file_id, inst.addon_path(&a)));
         let ch = hopper_core::changelog_files::scan_versions(
             Some(&inst.root),

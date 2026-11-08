@@ -29,7 +29,7 @@
   const scanning = $derived.by(() => {
     let n = 0;
     const m = {};
-    for (const e of info?.entries || []) if (!e.same_as && !e.markdown?.trim() && e.file_id) m[e.file_id] = n++ < 5;
+    for (const e of info?.entries || []) if (!e.same_as && !e.markdown?.trim() && e.file_id) m[e.file_id] = n++;
     return m;
   });
   const stem = (f) => (f || '').replace(/\.jar(\.disabled)?$/i, '');
@@ -121,7 +121,7 @@
             <button class="btn sm ghost" title="Move this mod's config files to backups so it writes fresh defaults" onclick={() => resetConfig(base, mod)}><Settings2 size={13} />Reset config</button>{/if}
         {/snippet}
         {#if e.same_as}<div class="small muted"><i>Same notes as {e.same_as}</i></div>
-        {:else if !e.markdown?.trim() && e.file_id}<FilesChanges {base} file={mod.file} project={info.project_id} version={e.file_id} enabled={info.files_changes} scan={scanning[e.file_id]} />
+        {:else if !e.markdown?.trim() && e.file_id}<FilesChanges {base} file={mod.file} project={info.project_id} version={e.file_id} enabled={info.files_changes} scan={scanning[e.file_id] < 5} offer={scanning[e.file_id] === 0} />
         {:else}{@render log(e.markdown)}{/if}
         {#if e.earlier_count && !e.same_as}
           <button class="row ohead small muted" onclick={() => (earlierOpen[e.name] = !earlierOpen[e.name])}>{#if earlierOpen[e.name]}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}Earlier versions ({e.earlier_count})</button>

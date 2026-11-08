@@ -9,8 +9,9 @@
   import { fc, isHidden, hide, NOTICE, LABEL, FOOTER, NONE, HELP } from './filesChanges.svelte.js';
 
   // `base` is the server's API path, `file` the mod's jar, `version` the file id
-  // of this version; `enabled` what the panel said; `scan` false past a few per dialog.
-  let { base, file, project, version, enabled = false, scan = true } = $props();
+  // of this version; `enabled` what the panel said; `scan` false past a few per dialog;
+  // `offer` false on all but the first card with no changelog (the notice shows once).
+  let { base, file, project, version, enabled = false, scan = true, offer = true } = $props();
   const on = $derived(fc.on ?? enabled);
   let state = $state({ kind: 'idle', md: '', error: '' });
   let busy = $state(false);
@@ -19,7 +20,7 @@
     state = { kind: 'running', md: '', error: '' };
     try {
       const r = await api(`${base}/mods/files-changes?file=${encodeURIComponent(file)}&version=${encodeURIComponent(version)}`);
-      state = { kind: 'done', md: r.markdown || '', error: '' };
+      state = r.markdown ? { kind: 'done', md: r.markdown, error: '' } : { kind: 'none', md: '', error: '' };
     } catch (e) {
       state = { kind: 'failed', md: '', error: e.message };
     }
@@ -55,6 +56,7 @@
       <div class="notes"><Changelog markdown={state.md} /></div>
       <div class="tiny muted">{FOOTER}</div>
     </div>
+  {:else if state.kind === 'none'}<div class="empty muted"><i>{NONE}</i></div>
   {:else if state.kind === 'failed'}
     <div class="col">
       <div class="empty muted"><i>{NONE}</i></div>
@@ -63,7 +65,7 @@
   {:else}
     <div class="small muted row"><span class="spinner blue"></span>Comparing the files</div>
   {/if}
-{:else if isHidden(project)}
+{:else if !offer || isHidden(project)}
   <div class="empty muted"><i>{NONE}</i></div>
 {:else}
   <div class="col notice">

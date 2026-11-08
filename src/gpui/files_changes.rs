@@ -24,6 +24,8 @@ pub enum Scan {
     /// The result as markdown.
     Done(SharedString),
     Failed(String),
+    /// The oldest version Hopper knows of: nothing before it to compare with.
+    Nothing,
 }
 
 /// By (project, file): lives as long as the app, a few KB each.
@@ -51,11 +53,14 @@ pub struct Ctx {
 }
 
 /// Starts the comparison for `ctx` once, when the setting is on. Call it
-/// while rendering a card with no changelog; `true` when this card may show
-/// a result (at most `MAX_PER_VIEW` per `used` count of the caller).
+/// while rendering a card with no changelog; `true` when this card shows a
+/// result (at most `MAX_PER_VIEW` per `used` count of the caller), or, with
+/// the setting off, the offer (the first card only).
 pub fn ensure<V: 'static>(ctx: &Ctx, used: &mut usize, cx: &mut Context<V>) -> bool {
     if !ctx.store.read(cx).settings().files_changes {
-        return false;
+        // Off: the offer shows once, on the first card with no changelog.
+        *used += 1;
+        return *used == 1;
     }
     if state(ctx.project_id, ctx.file.id).is_some() {
         return true;
@@ -92,7 +97,7 @@ fn run(c: &Ctx) -> (u64, u64, Scan) {
         c.all.clone()
     };
     let Some(old) = cf_files::previous_of(&all, &c.file) else {
-        return done(Scan::Failed("This is the first version Hopper knows of, so there is nothing to compare it with.".into()));
+        return done(Scan::Nothing);
     };
     let installed = c.installed.as_ref().map(|(id, p)| (*id, p.as_path()));
     match cf_files::scan_versions(c.root.as_deref(), c.project_id, installed, old, &c.file) {
@@ -116,6 +121,7 @@ pub fn card(ctx: &Ctx, shown: bool, id: ElementId, cx: &App) -> AnyElement {
                 .child(Spinner::new().small())
                 .child(widgets::caption("Comparing the files", cx))
                 .into_any_element(),
+            Some(Scan::Nothing) => plain(),
             Some(Scan::Failed(e)) => v_flex()
                 .gap_1()
                 .child(plain())
@@ -129,7 +135,7 @@ pub fn card(ctx: &Ctx, shown: bool, id: ElementId, cx: &App) -> AnyElement {
                 .into_any_element(),
         };
     }
-    if s.notice_hidden(&cf_files::dismiss_key(ctx.project_id)) {
+    if !shown || s.notice_hidden(&cf_files::dismiss_key(ctx.project_id)) {
         return plain();
     }
     let (on, later) = (ctx.store.clone(), ctx.store.clone());
