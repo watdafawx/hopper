@@ -73,6 +73,12 @@ pub struct Router {
     /// "server id/player" of clients that turned the lobby island down:
     /// they get the "join again" message instead (until hopperd restarts).
     lobby_refused: Mutex<std::collections::HashSet<String>>,
+    /// "server id/player" of Forge / NeoForge clients that were turned away
+    /// from the island as modded (for clients whose handshake carries no
+    /// Forge marker): held at login when the server is set to wait.
+    modded_clients: Mutex<std::collections::HashSet<String>>,
+    /// "server id/player" of connections being held at login (one each).
+    holding: Mutex<std::collections::HashSet<String>>,
     reload: tokio::sync::Notify,
 }
 
@@ -89,6 +95,35 @@ impl Router {
 
     fn refused_key(id: &str, player: &str) -> String {
         format!("{id}/{}", player.to_ascii_lowercase())
+    }
+
+    /// A place to hold `player` for server `id`: none if that name is
+    /// already held there or the server has [`MAX_HELD`] already. Freed when
+    /// the returned guard goes.
+    fn hold_slot(app: &Arc<App>, id: &str, player: &str) -> Option<HoldSlot> {
+        let key = Self::refused_key(id, player);
+        let mut held = app.router.holding.lock().unwrap();
+        let prefix = format!("{id}/");
+        if held.contains(&key) || held.iter().filter(|k| k.starts_with(&prefix)).count() >= MAX_HELD {
+            return None;
+        }
+        held.insert(key.clone());
+        Some(HoldSlot { app: app.clone(), key })
+    }
+}
+
+/// Most connections held at login per server (they cost a socket and a
+/// task each, before anyone has proved who they are).
+const MAX_HELD: usize = 16;
+
+struct HoldSlot {
+    app: Arc<App>,
+    key: String,
+}
+
+impl Drop for HoldSlot {
+    fn drop(&mut self) {
+        self.app.router.holding.lock().unwrap().remove(&self.key);
     }
 }
 
@@ -477,6 +512,17 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
                 && !player.is_empty()
                 && !app.router.lobby_refused.lock().unwrap().contains(&Router::refused_key(&e.id, &player))
         };
+        // Forge / NeoForge players of a modded server, on servers set to let
+        // them wait on the connecting screen (see crate::hold).
+        let hold_it = |e: &Entry| {
+            s.modded_players == core::ModdedPlayers::Wait
+                && s.sleep_after_minutes > 0
+                && s.wake_on_join
+                && !player.is_empty()
+                && core::may_wake(&e.root, s.wake_who, &player)
+                && (hs.is_forge_client() || app.router.modded_clients.lock().unwrap().contains(&Router::refused_key(&e.id, &player)))
+                && core::last_ping(&e.root).is_none_or(|v| core::ping_is_modded(&v))
+        };
         if kind == Standin::WakeFailed {
             return kick(sock, &core::wake_failed_kick(&name, s.retry_in_minutes(unix_now()))).await;
         }
@@ -500,6 +546,9 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
                 busy
             };
             if busy {
+                if hold_it(e) {
+                    return wait_for(app, sock, &buf, end, hs, e, &player).await;
+                }
                 if lobby(e) && crate::limbo::takes_transfers(e) {
                     return island(app, sock, buf[end..].to_vec(), hs, e, &player, uuid).await;
                 }
@@ -507,7 +556,8 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
             }
             // The island moves players over with a transfer, which the
             // server must accept: on before it starts.
-            let to_island = lobby(e) && crate::limbo::allow_transfers(e);
+            let holding = hold_it(e);
+            let to_island = !holding && lobby(e) && crate::limbo::allow_transfers(e);
             let a = app.clone();
             let entry = e.clone();
             let started = match tokio::task::spawn_blocking(move || a.servers.act(&entry, PanelAction::Start)).await {
@@ -526,6 +576,9 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
                     app.router.active.lock().unwrap().insert(e.id.clone(), Instant::now());
                     crate::webhooks::emit(app, vec![event(e, "wake", format!("**{}** woke up for {who}", e.name))]);
                     app.refresh.notify_one();
+                    if holding {
+                        return wait_for(app, sock, &buf, end, hs, e, &player).await;
+                    }
                     if to_island {
                         return island(app, sock, buf[end..].to_vec(), hs, e, &player, uuid).await;
                     }
@@ -537,6 +590,12 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
                     return kick(sock, &core::wake_failed_kick(&name, settings(e).retry_in_minutes(unix_now()))).await;
                 }
             }
+        }
+        if kind == Standin::Starting
+            && let Some(e) = e
+            && hold_it(e)
+        {
+            return wait_for(app, sock, &buf, end, hs, e, &player).await;
         }
         if kind == Standin::Starting
             && let Some(e) = e
@@ -584,9 +643,70 @@ async fn island(app: &Arc<App>, sock: &mut TcpStream, leftover: Vec<u8>, hs: &co
             log::info!("router: {player}'s game didn't take the lobby island for {} ({why}); they get the join-again message from now on", e.name);
             e.server.note(&format!("[Hopper] {player}'s game didn't take the lobby island ({why}). They get the \"join again\" message instead."));
         }
+        crate::limbo::Outcome::Modded(why) => {
+            app.router.lobby_refused.lock().unwrap().insert(Router::refused_key(&e.id, player));
+            app.router.modded_clients.lock().unwrap().insert(Router::refused_key(&e.id, player));
+            log::info!("router: {player}'s game ({why}) is modded and can't take the lobby island for {}; it gets the join-again message{}", e.name, if settings(e).modded_players == core::ModdedPlayers::Wait { " this time, and waits on the connecting screen from the next join" } else { "" });
+            e.server.note(&format!("[Hopper] {player}'s game is modded and can't take the lobby island ({why}). They get the \"join again\" message instead."));
+        }
         o => log::debug!("router: {player} left the lobby island: {o:?}"),
     }
     Ok(())
+}
+
+/// Where the server is, for a held player (see crate::hold).
+async fn progress(app: &Arc<App>, e: &Arc<Entry>) -> crate::hold::Progress {
+    use crate::hold::Progress;
+    let state = e.server.state();
+    if state == ServerState::Running && crate::limbo::up(e).await {
+        Progress::Ready
+    } else if matches!(state, ServerState::Stopped | ServerState::Crashed(_)) && !app.router.is_waking(&e.id) {
+        Progress::Failed
+    } else {
+        Progress::Waiting
+    }
+}
+
+/// Holds a modded player at login until `e` is up, then hands their
+/// connection to it: their handshake and login (`buf[..end]`) are replayed
+/// to the server as if they had just come in.
+async fn wait_for(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], end: usize, hs: &core::Handshake, e: &Arc<Entry>, player: &str) -> anyhow::Result<()> {
+    let name = e.name.clone();
+    let join_again = || core::standin_kick(Standin::Starting, &name, e.server.usual_start_secs(), e.server.boot_status().as_ref());
+    // One held connection per name and server, and not too many.
+    let Some(_slot) = Router::hold_slot(app, &e.id, player) else {
+        return kick(sock, &join_again()).await;
+    };
+    log::info!("router: {player} (Forge client marker: {}) waits on the connecting screen for {name}", hs.is_forge_client());
+    let began = Instant::now();
+    let ended = crate::hold::hold(sock, buf[end..].to_vec(), crate::hold::Timing::default(), || progress(app, e)).await;
+    match ended {
+        Ok(crate::hold::Ended::Ready(rest)) => {
+            let port = port_of(e);
+            match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(("127.0.0.1", port))).await {
+                Ok(Ok(mut up)) => {
+                    let _ = up.set_nodelay(true);
+                    log::info!("router: handing {player} to {name} after {} s", began.elapsed().as_secs());
+                    let _listed = crate::player_ping::listen(&e.id, player, sock);
+                    up.write_all(&buf[..end]).await?;
+                    up.write_all(&rest).await?;
+                    tokio::io::copy_bidirectional(sock, &mut up).await?;
+                    Ok(())
+                }
+                _ => kick(sock, &join_again()).await,
+            }
+        }
+        Ok(crate::hold::Ended::Failed) => kick(sock, &core::wake_failed_kick(&name, settings(e).retry_in_minutes(unix_now()))).await,
+        Ok(crate::hold::Ended::Capped) => kick(sock, &join_again()).await,
+        Ok(o) => {
+            log::debug!("router: {player} stopped waiting for {name}: {o:?}");
+            Ok(())
+        }
+        Err(err) => {
+            log::debug!("router: {player} dropped while waiting for {name}: {err:#}");
+            Ok(())
+        }
+    }
 }
 
 /// Passes a server list request to a running server and its answer back
@@ -729,6 +849,7 @@ struct AddressBody {
     sleep_message: Option<String>,
     retry_after_minutes: Option<u32>,
     while_starting: Option<core::WhileStarting>,
+    modded_players: Option<core::ModdedPlayers>,
 }
 
 async fn get_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -750,7 +871,7 @@ async fn get_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
         "wake_on_join": s.wake_on_join, "wake_who": s.wake_who, "sleep_message": s.sleep_message,
         "default_sleep_message": core::SLEEP_MESSAGE, "retry_after_minutes": s.retry_after_minutes,
         "wake_failed": s.wake_failed, "last_wake": s.last_wake,
-        "while_starting": s.while_starting, "accepts_transfers": crate::limbo::takes_transfers(&e),
+        "while_starting": s.while_starting, "modded_players": s.modded_players, "accepts_transfers": crate::limbo::takes_transfers(&e),
         "wake_estimate": core::wake_estimate(e.server.usual_start_secs().or(s.last_start_secs)),
         "port": port_of(&e), "router_port": router_port, "managed_by": e.managed_by,
     })))
@@ -797,6 +918,9 @@ async fn put_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     }
     if let Some(w) = b.while_starting {
         s.while_starting = w;
+    }
+    if let Some(m) = b.modded_players {
+        s.modded_players = m;
     }
     if let Some(r) = b.retry_after_minutes {
         if r > 24 * 60 {

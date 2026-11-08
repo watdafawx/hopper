@@ -47,6 +47,27 @@ mod id {
     pub const PLAY_TIME: i32 = 0x64;
 }
 
+/// Login phase: the server's plugin request, and the client's answer.
+pub const LOGIN_PLUGIN_REQUEST: i32 = 0x04;
+pub const LOGIN_PLUGIN_RESPONSE: i32 = 0x02;
+
+/// A Login Plugin Request (clientbound, login phase) on `channel`. A client
+/// that doesn't know the channel answers "not understood" and carries on;
+/// every packet resets its read timeout, so this keeps a connection alive
+/// before the real server is there.
+pub fn login_plugin_request(message_id: i32, channel: &str, data: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_varint(&mut body, message_id);
+    write_string(&mut body, channel);
+    body.extend_from_slice(data);
+    packet(LOGIN_PLUGIN_REQUEST, &body)
+}
+
+/// The message id a Login Plugin Response (serverbound, packet body) answers.
+pub fn login_plugin_response_id(body: &[u8]) -> anyhow::Result<i32> {
+    Ok(read_varint(body)?.context("plugin response cut short")?.0)
+}
+
 pub use id::{CONFIG_IN_FINISH, CONFIG_IN_KNOWN_PACKS, CONFIG_IN_PLUGIN, LOGIN_ACK};
 
 // ---- text as NBT --------------------------------------------------------------

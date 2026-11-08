@@ -56,6 +56,22 @@ pub struct RouteSettings {
     pub last_wake: Option<LastWake>,
     /// What a player who joins while it starts gets.
     pub while_starting: WhileStarting,
+    /// What a Forge / NeoForge player joining a modded server that's starting
+    /// gets (the lobby island can't take them).
+    pub modded_players: ModdedPlayers,
+}
+
+/// What a modded (Forge / NeoForge) player joining a modded server that's
+/// starting gets. Vanilla players are not affected (see [`WhileStarting`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModdedPlayers {
+    /// "Join again in about 2 min."
+    #[default]
+    Kick,
+    /// Held on the connecting screen until the server is up (experimental;
+    /// see hopperd's `hold`).
+    Wait,
 }
 
 /// What a player joining a server that's starting gets.
@@ -84,6 +100,7 @@ impl Default for RouteSettings {
             wake_failed: None,
             last_wake: None,
             while_starting: WhileStarting::Lobby,
+            modded_players: ModdedPlayers::Kick,
         }
     }
 }
@@ -380,6 +397,13 @@ pub struct Handshake {
 impl Handshake {
     pub fn is_login(&self) -> bool {
         matches!(self.next, 2 | 3)
+    }
+
+    /// Whether the client says it is Forge / NeoForge: they append a marker
+    /// after the address ("host\0FML3\0", "\0FORGE\0" ...). Fabric clients
+    /// send nothing, so this is false for them.
+    pub fn is_forge_client(&self) -> bool {
+        self.raw_host.split('\0').skip(1).any(|p| p.starts_with("FML") || p.eq_ignore_ascii_case("forge"))
     }
 }
 
@@ -791,7 +815,10 @@ mod tests {
         assert_eq!(used, p.len() - 2);
         assert_eq!((h.protocol, h.port, h.next), (767, 25565, 2));
         assert_eq!(h.host, "survival.mc.example.com");
-        assert!(h.raw_host.ends_with("\0FML3\0") && h.is_login());
+        assert!(h.raw_host.ends_with("\0FML3\0") && h.is_login() && h.is_forge_client());
+        let plain = Handshake { protocol: 767, raw_host: "mc.example.com".into(), host: "mc.example.com".into(), port: 25565, next: 2 };
+        assert!(!plain.is_forge_client());
+        assert!(Handshake { raw_host: "a.b\0FORGE\0".into(), ..plain.clone() }.is_forge_client());
         assert!(read_handshake(&[3, 5, 0, 0]).is_err(), "not packet 0");
         assert!(read_handshake(&[0]).is_err(), "empty packet");
         assert!(is_legacy_ping(&[0xfe, 0x01]));
@@ -905,6 +932,9 @@ mod tests {
         let off = RouteSettings { sleep_after_minutes: 0, ..s.clone() };
         assert!(!off.wakes(0), "no sleep, no wake");
         assert_eq!(s.while_starting, WhileStarting::Lobby, "the lobby by default");
+        assert_eq!(s.modded_players, ModdedPlayers::Kick, "modded players get the message by default");
+        let w: RouteSettings = serde_json::from_str(r#"{"modded_players":"wait"}"#).unwrap();
+        assert_eq!(w.modded_players, ModdedPlayers::Wait);
         let t: RouteSettings = serde_json::from_str(r#"{"sleep_after_minutes":5,"wake_who":"whitelist","wake_on_join":false,"while_starting":"kick"}"#).unwrap();
         assert_eq!(t.while_starting, WhileStarting::Kick);
         assert_eq!((t.wake_who, t.wakes(0)), (WakeWho::Whitelist, false));
