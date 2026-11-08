@@ -893,6 +893,175 @@ pub fn images(blocks: &[Block]) -> Vec<String> {
     out
 }
 
+/// A CurseForge changelog. It is HTML, but many authors type Markdown into
+/// the box, which CurseForge wraps in paragraphs untouched: `# Changelog`,
+/// `**bold**`, `` `code` `` and `- item` would show as typed. When the text
+/// reads as Markdown, it is parsed as Markdown.
+///
+/// Two more shapes of the same thing are read too: the whole text inside
+/// `<pre>` / `<code>` (it would show monospace), and Markdown whose line
+/// breaks were lost on the way (see [`restore_breaks`]).
+pub fn parse_changelog(html: &str) -> Vec<Block> {
+    let blocks = parse(html);
+    if let Some(text) = all_code_text(&blocks)
+        && has_markdown(&text)
+    {
+        return parse_markdown(&restore_breaks(&text));
+    }
+    if looks_like_markdown(&blocks) {
+        return parse_markdown(&restore_breaks(&html_to_lines(html)));
+    }
+    blocks
+}
+
+/// Markdown release notes (Modrinth, GitHub) as blocks, with lost line
+/// breaks restored first.
+pub fn parse_markdown_changelog(md: &str) -> Vec<Block> {
+    parse_markdown(&restore_breaks(md))
+}
+
+/// The text of a changelog that is nothing but code (a `<pre>`, or
+/// paragraphs of inline code), one line per block: someone's Markdown the
+/// page shows in monospace. `None` when anything else is in it.
+fn all_code_text(blocks: &[Block]) -> Option<String> {
+    let mut out = Vec::new();
+    for b in blocks {
+        match &b.kind {
+            Kind::Code => out.push(b.spans.iter().map(|s| s.text.as_str()).collect::<String>()),
+            Kind::Para if b.spans.iter().all(|s| s.code && s.image.is_none()) => {
+                out.push(b.spans.iter().map(|s| s.text.as_str()).collect::<String>())
+            }
+            _ => return None,
+        }
+    }
+    (!out.is_empty()).then(|| out.join("\n"))
+}
+
+/// Whether `text` is Markdown rather than, say, a config snippet: it has a
+/// `# Heading` (at the start, on a line, or run into the line) or two or
+/// more `**bold**` pairs.
+fn has_markdown(text: &str) -> bool {
+    let t = text.trim_start();
+    is_heading_start(t)
+        || t.lines().any(|l| is_heading_start(l.trim_start()))
+        || heading_marks(t).next().is_some()
+        || t.matches("**").count() >= 4
+}
+
+/// `s` begins with `#` to `######` and a space.
+fn is_heading_start(s: &str) -> bool {
+    let n = s.chars().take_while(|&c| c == '#').count();
+    (1..=6).contains(&n) && s[n..].starts_with(' ')
+}
+
+/// Byte offsets of heading marks (`## `) that follow a space inside a line.
+fn heading_marks(s: &str) -> impl Iterator<Item = usize> + '_ {
+    s.match_indices(" #").filter_map(|(i, _)| {
+        let rest = &s[i + 1..];
+        is_heading_start(rest).then_some(i + 1)
+    })
+}
+
+/// Markdown that lost its line breaks (they became spaces somewhere on the
+/// way: `# Changelog  ## [5.1.0]  ### Added - Boulders ...`) with them put
+/// back: before a heading mark, before `- ` followed by a capital letter or
+/// a link, and at runs of two or more spaces. Text that still has line
+/// breaks is returned as it is.
+pub fn restore_breaks(md: &str) -> String {
+    if md.trim().contains('\n') || !has_markdown(md) {
+        return md.to_string();
+    }
+    let mut out = String::with_capacity(md.len() + 32);
+    let marks: Vec<usize> = heading_marks(md).collect();
+    let b = md.as_bytes();
+    let mut i = 0;
+    while i < md.len() {
+        let c = md[i..].chars().next().unwrap();
+        if marks.contains(&i) {
+            // The space before the mark is already out.
+            out.truncate(out.trim_end().len());
+            out.push_str("\n\n");
+        } else if c == ' ' {
+            let run = b[i..].iter().take_while(|&&c| c == b' ').count();
+            let after = &md[i + run..];
+            let bullet = after.starts_with("- ")
+                && after[2..].chars().next().is_some_and(|n| n.is_uppercase() || n == '[' || n == '`');
+            if run >= 2 {
+                out.truncate(out.trim_end().len());
+                out.push_str("\n\n");
+                i += run;
+                continue;
+            } else if bullet {
+                out.truncate(out.trim_end().len());
+                out.push('\n');
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// Whether parsed HTML still holds Markdown as plain text: a `# Heading`
+/// line when the page has no real headings, or `**bold**` / `` `code` ``
+/// typed in two or more blocks.
+fn looks_like_markdown(blocks: &[Block]) -> bool {
+    if blocks.iter().any(|b| matches!(b.kind, Kind::Heading(_) | Kind::Code)) {
+        return false;
+    }
+    let text = |b: &Block| -> String {
+        b.spans.iter().filter(|s| s.image.is_none() && !s.code).map(|s| s.text.as_str()).collect()
+    };
+    let mut marked = 0;
+    for b in blocks.iter().filter(|b| matches!(b.kind, Kind::Para | Kind::Bullet(_) | Kind::Numbered(_))) {
+        let t = text(b);
+        let t = t.trim_start();
+        let hashes = t.chars().take_while(|&c| c == '#').count();
+        if (1..=6).contains(&hashes) && t[hashes..].starts_with(' ') {
+            return true;
+        }
+        let pairs = |m: &str| t.matches(m).count() >= 2;
+        if pairs("**") || pairs("`") {
+            marked += 1;
+        }
+    }
+    marked >= 2
+}
+
+/// `html` as text lines for [`parse_markdown`]: block ends and `<br>` become
+/// line breaks, links and images stay tags, other tags go, entities decode.
+fn html_to_lines(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(i) = rest.find('<') {
+        out.push_str(&decode_entities(&rest[..i]));
+        rest = &rest[i..];
+        let end = rest.find('>').map_or(rest.len(), |e| e + 1);
+        let tag = &rest[..end];
+        let name: String = tag
+            .trim_start_matches('<')
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        match name.as_str() {
+            "a" | "img" => out.push_str(tag),
+            "br" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p" | "div" | "ul" | "ol" => {
+                if tag.starts_with("</") || name == "br" {
+                    out.push('\n');
+                }
+            }
+            _ => {}
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(&decode_entities(rest));
+    out
+}
+
 /// Markdown (Modrinth changelogs and descriptions) as blocks. Converted to
 /// the HTML subset [`parse`] understands; raw HTML in the text passes through.
 pub fn parse_markdown(md: &str) -> Vec<Block> {
@@ -1879,6 +2048,82 @@ mod tests {
         assert_eq!(b[0].kind, Kind::Para);
         assert_eq!(b[1].kind, Kind::Bullet(0));
         assert_eq!(text(&b[1]), "fixed a thing");
+    }
+
+    #[test]
+    fn changelog_markdown_in_html_is_parsed() {
+        let b = parse_changelog(
+            "<p># Changelog - 3.0.0</p><p>## Summary</p><p>Fixed **crash** and `code`</p><p>- one</p><p>- two &amp; three</p>",
+        );
+        assert_eq!(b[0].kind, Kind::Heading(1));
+        assert_eq!(b[1].kind, Kind::Heading(2));
+        assert!(b[2].spans.iter().any(|s| s.bold && s.text == "crash"));
+        assert!(b[2].spans.iter().any(|s| s.code && s.text == "code"));
+        assert_eq!(b[3].kind, Kind::Bullet(0));
+        assert_eq!(b[4].spans.iter().map(|s| s.text.as_str()).collect::<String>(), "two & three");
+        // The same typed with line breaks in one paragraph.
+        let b = parse_changelog("# Title<br>- a<br>- b");
+        assert_eq!(b[0].kind, Kind::Heading(1));
+        assert_eq!(b.len(), 3);
+    }
+
+    const FLAT: &str = "# Changelog  All notable changes to this project. ## [5.1.0] - 2025-03-01  ### Added - Boulders for modded ores ([#28](https://github.com/x/y/pull/28)) - Config toggles for each ore ### Fixed - Crash on **world** load ([#30](https://github.com/x/y/pull/30))";
+
+    fn flat_checks(b: &[Block]) {
+        let kinds: Vec<_> = b.iter().map(|b| b.kind.clone()).collect();
+        assert_eq!(kinds[0], Kind::Heading(1));
+        assert_eq!(kinds[1], Kind::Para);
+        assert_eq!(kinds[2], Kind::Heading(2));
+        assert_eq!(kinds[3], Kind::Heading(3));
+        assert_eq!(kinds[4], Kind::Bullet(0));
+        assert_eq!(kinds[5], Kind::Bullet(0));
+        assert_eq!(kinds[6], Kind::Heading(3));
+        assert_eq!(kinds[7], Kind::Bullet(0));
+        assert!(b[4].spans.iter().any(|s| s.link.as_deref() == Some("https://github.com/x/y/pull/28") && s.text == "#28"));
+        assert!(b[7].spans.iter().any(|s| s.bold && s.text == "world"));
+        assert!(b.iter().all(|b| b.spans.iter().all(|s| !s.code)), "nothing monospace");
+    }
+
+    #[test]
+    fn changelog_with_lost_line_breaks_comes_back() {
+        // As plain paragraph text, inside <pre>, inside <code>, and as Markdown.
+        flat_checks(&parse_changelog(&format!("<p>{FLAT}</p>")));
+        flat_checks(&parse_changelog(&format!("<pre>{FLAT}</pre>")));
+        flat_checks(&parse_changelog(&format!("<p><code>{FLAT}</code></p>")));
+        flat_checks(&parse_markdown_changelog(FLAT));
+    }
+
+    #[test]
+    fn changelog_markdown_in_code_keeps_its_lines() {
+        let md = "# Changelog\n\n## [5.1.0]\n\n### Added\n- Boulders\n- Toggles\n";
+        for html in [format!("<pre>{md}</pre>"), format!("<pre><code>{md}</code></pre>")] {
+            let b = parse_changelog(&html);
+            assert_eq!(b[0].kind, Kind::Heading(1), "{html}");
+            assert_eq!(b.iter().filter(|b| b.kind == Kind::Bullet(0)).count(), 2);
+        }
+        // Text with line breaks is never re-split.
+        assert_eq!(restore_breaks(md), md);
+        let spaced = "## A\n- Fixed a thing - Another thing";
+        assert_eq!(restore_breaks(spaced), spaced);
+    }
+
+    #[test]
+    fn real_code_blocks_stay_code() {
+        let b = parse_changelog("<pre>fn main() {\n    println!(\"hi\");\n}</pre>");
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].kind, Kind::Code);
+        let b = parse_changelog("<p>Set <code>max = 3</code> in the config</p>");
+        assert_eq!(b[0].kind, Kind::Para);
+        // "C#" and a lone hyphen in prose are not marks.
+        assert_eq!(restore_breaks("Fixed the C# bridge - Mostly"), "Fixed the C# bridge - Mostly");
+    }
+
+    #[test]
+    fn changelog_real_html_and_plain_text_unchanged() {
+        let html = "<h2>Fixes</h2><ul><li>a <b>b</b></li></ul>";
+        assert_eq!(parse_changelog(html), parse(html));
+        let plain = "<p>Fixed the C# bridge</p><p>Used `x` once</p>";
+        assert_eq!(parse_changelog(plain), parse(plain));
     }
 
     #[test]

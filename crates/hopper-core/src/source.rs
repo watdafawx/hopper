@@ -67,14 +67,14 @@ pub fn file(project: u64, file: u64) -> anyhow::Result<cf::File> {
 pub fn changelog(f: &cf::File) -> anyhow::Result<Vec<Block>> {
     if let Some(s) = &f.source {
         let notes = if s.notes.trim().is_empty() { "No release notes." } else { s.notes.as_str() };
-        return Ok(richtext::parse_markdown(notes));
+        return Ok(richtext::parse_markdown_changelog(notes));
     }
     if crate::sources::is_src(f.mod_id) {
         return Ok(richtext::parse_markdown("No release notes."));
     }
     let blocks = match &f.modrinth {
-        Some(m) => richtext::parse_markdown(&m.changelog),
-        None => richtext::parse(&cf::changelog(f.mod_id, f.id)?),
+        Some(m) => richtext::parse_markdown_changelog(&m.changelog),
+        None => richtext::parse_changelog(&cf::changelog(f.mod_id, f.id)?),
     };
     Ok(crate::extlog::expand(blocks, f))
 }
