@@ -239,6 +239,50 @@ impl VersionsView {
     }
 }
 
+/// The top of a versions / changelog dialog: the mod's icon and name over a
+/// small line. Shared by the all-versions dialog and the one-version one.
+pub(crate) fn mod_header(icon: Option<&Path>, name: String, line: String, cx: &App) -> Div {
+    // The name wraps rather than cut off; the line may truncate.
+    h_flex()
+        .gap_3()
+        .child(widgets::thumb(icon, rems(2.5), cx))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().font_semibold().child(name))
+                .child(widgets::caption(line, cx).text_xs()),
+        )
+}
+
+/// A version's card: the box every changelog dialog puts a version in.
+pub(crate) fn version_card(target: bool, installed: bool, cx: &App) -> Div {
+    let theme = cx.theme();
+    v_flex()
+        .gap_2()
+        .p_4()
+        .rounded(theme.radius_lg)
+        .border_1()
+        .border_color(if target { theme.primary } else { theme.border })
+        .when(installed, |c| c.bg(theme.list_active))
+}
+
+/// A card's first line: the version's name and its Release / Beta chip
+/// (more chips go after it, wrapping rather than cut off).
+pub(crate) fn version_title(name: String, release: &'static str, cx: &App) -> Div {
+    h_flex()
+        .flex_wrap()
+        .gap_x_2()
+        .gap_y_1()
+        .child(div().min_w_0().font_semibold().child(name))
+        .child(widgets::chip(cx.theme().muted_foreground).child(release))
+}
+
+/// A card's date.
+pub(crate) fn version_date(date: &str, cx: &App) -> Div {
+    widgets::caption(hopper::time::relative(date), cx).text_xs().flex_none()
+}
+
 /// One version's changelog (markdown), in English when it was translated;
 /// `on_link` handles a clicked link. Shared by every changelog list.
 pub(crate) fn changelog_view(
@@ -280,16 +324,7 @@ impl Render for VersionsView {
             (None, None) => format!("Installed: {}", self.from),
         };
         // The name wraps rather than cut off; the file line may truncate.
-        let header = h_flex()
-            .gap_3()
-            .child(widgets::thumb(icon.as_deref(), rems(2.5), cx))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().font_semibold().child(self.name.clone()))
-                    .child(widgets::caption(line, cx).text_xs()),
-            );
+        let header = mod_header(icon.as_deref(), self.name.clone(), line, cx);
         let lock_note = self.locked.then(|| {
             let (store, root, file) = (self.store.clone(), self.root.clone(), self.from.clone());
             h_flex()
@@ -406,20 +441,9 @@ impl Render for VersionsView {
                     });
                     // Two lines: the version's name and tags (wrapping, never
                     // cut off), then its date and buttons.
-                    v_flex()
-                        .gap_2()
-                        .p_4()
-                        .rounded(theme.radius_lg)
-                        .border_1()
-                        .border_color(if target { theme.primary } else { theme.border })
-                        .when(e.installed, |c| c.bg(theme.list_active))
+                    version_card(target, e.installed, cx)
                         .child(
-                            h_flex()
-                                .flex_wrap()
-                                .gap_x_2()
-                                .gap_y_1()
-                                .child(div().min_w_0().font_semibold().child(e.name.clone()))
-                                .child(widgets::chip(theme.muted_foreground).child(e.release))
+                            version_title(e.name.clone(), e.release, cx)
                                 .when(e.installed && (!server_mode || server_known), |r| {
                                     r.child(widgets::chip(theme.success).child(if server_mode { "On the server" } else { "Installed" }))
                                 })
@@ -437,11 +461,7 @@ impl Render for VersionsView {
                             h_flex()
                                 .flex_wrap()
                                 .gap_2()
-                                .child(
-                                    widgets::caption(hopper::time::relative(&e.date), cx)
-                                        .text_xs()
-                                        .flex_none(),
-                                )
+                                .child(version_date(&e.date, cx))
                                 .child(div().flex_1())
                                 .children(action)
                                 .children(reinstall)
@@ -855,6 +875,8 @@ struct FileLog {
     /// The instance its links open beside; none opens them in the browser.
     root: Option<PathBuf>,
     file: cf::File,
+    /// The mod's name and icon (url) for the header, when the caller knows them.
+    project: Option<(String, String)>,
     md: Option<Result<SharedString, String>>,
 }
 
@@ -868,24 +890,19 @@ impl Render for FileLog {
                 .child(widgets::caption("Loading the changelog", cx))
                 .into_any_element(),
             Some(Err(e)) => div().text_sm().text_color(cx.theme().danger).child(e.clone()).into_any_element(),
-            Some(Ok(md)) if !hopper::changelog_trim::has_visible_text(md) => widgets::caption(hopper::changelog_trim::NO_CHANGELOG, cx)
-                .italic()
-                .into_any_element(),
+            // The renderer, empty text and links of every changelog list.
             Some(Ok(md)) => {
                 let (store, root) = (self.store.clone(), self.root.clone());
-                let (id, md) = match self.store.read(cx).translations().shown(md) {
-                    Some(en) => ("file-log-en", en),
-                    None => ("file-log", md.clone()),
-                };
-                widgets::changelog_text(id, &md, cx)
-                    .on_link_click(widgets::link_handler(
-                        std::sync::Arc::new(move |url, window, cx| match &root {
-                            Some(root) => open_link(&store, root, url, window, cx),
-                            None => cx.open_url(url),
-                        }),
-                        true,
-                    ))
-                    .into_any_element()
+                changelog_view(
+                    ElementId::Name("file-log".into()),
+                    md.clone(),
+                    &self.store,
+                    move |url, window, cx| match &root {
+                        Some(root) => open_link(&store, root, url, window, cx),
+                        None => cx.open_url(url),
+                    },
+                    cx,
+                )
             }
         };
         let texts = match &self.md {
@@ -893,16 +910,22 @@ impl Render for FileLog {
             _ => Vec::new(),
         };
         let bar = widgets::translate_bar("file-log-tr", "This changelog", texts, &self.store, cx);
+        // The same header and card as "Versions and changelogs", with the one
+        // version.
+        let (name, icon) = self.project.clone().unwrap_or_default();
+        let icon = self.store.read(cx).image(&icon).map(Path::to_path_buf);
+        let name = if name.is_empty() { self.file.display_name.clone() } else { name };
+        let header = mod_header(icon.as_deref(), name, self.file.file_name.clone(), cx);
+        let card = version_card(false, false, cx)
+            .child(version_title(self.file.display_name.clone(), self.file.release_name(), cx))
+            .child(h_flex().child(version_date(&self.file.file_date, cx)))
+            .child(body);
         v_flex()
             .h(h)
-            .gap_3()
-            .child(
-                v_flex()
-                    .child(div().font_semibold().truncate().child(self.file.display_name.clone()))
-                    .child(widgets::caption(self.file.release_name(), cx).text_xs()),
-            )
+            .gap_4()
+            .child(header)
             .children(bar)
-            .child(div().id("file-log-scroll").flex_1().min_h_0().overflow_y_scrollbar().child(body))
+            .child(div().id("file-log-scroll").flex_1().min_h_0().overflow_y_scrollbar().child(card))
     }
 }
 
@@ -915,15 +938,17 @@ pub fn open_file_id(
     project_id: u64,
     file_id: u64,
     name: String,
+    icon: String,
     window: &mut Window,
     cx: &mut App,
 ) {
     let placeholder = cf::File {
         id: file_id,
         mod_id: project_id,
-        display_name: name,
+        display_name: name.clone(),
         ..Default::default()
     };
+    store.update(cx, |s, _| s.want_image(&icon));
     let tick = store.read(cx).tr_tick().clone();
     let view = cx.new(|cx| {
         cx.observe(&tick, |_, _, cx| cx.notify()).detach();
@@ -952,6 +977,7 @@ pub fn open_file_id(
             store,
             root,
             file: placeholder,
+            project: Some((name, icon)),
             md: None,
         }
     });
@@ -965,7 +991,17 @@ pub fn open_file_id(
 }
 
 /// Opens one version's changelog.
-pub fn open_file(store: Entity<Store>, root: Option<PathBuf>, file: cf::File, window: &mut Window, cx: &mut App) {
+pub fn open_file(
+    store: Entity<Store>,
+    root: Option<PathBuf>,
+    file: cf::File,
+    project: Option<(String, String)>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if let Some((_, icon)) = &project {
+        store.update(cx, |s, _| s.want_image(icon));
+    }
     let tick = store.read(cx).tr_tick().clone();
     let view = cx.new(|cx| {
         cx.observe(&tick, |_, _, cx| cx.notify()).detach();
@@ -987,6 +1023,7 @@ pub fn open_file(store: Entity<Store>, root: Option<PathBuf>, file: cf::File, wi
             store,
             root,
             file,
+            project,
             md: None,
         }
     });

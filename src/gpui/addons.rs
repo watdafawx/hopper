@@ -5107,18 +5107,24 @@ Change version", a.file_name).into()
         // file's) instead of the versions to switch between.
         if self.global_dir().is_some() || self.loose_pid(pid) || self.rep_pid(pid) {
             let root = self.root.clone();
+            let head = self
+                .table
+                .inst
+                .as_ref()
+                .and_then(|i| i.addons.iter().find(|a| a.project_id == pid))
+                .map(|a| (a.name.clone(), a.icon.clone()));
             if let Some(f) = update {
-                return crate::versions::open_file(self.store.clone(), root, f, window, cx);
+                return crate::versions::open_file(self.store.clone(), root, f, head, window, cx);
             }
             let found = self
                 .table
                 .inst
                 .as_ref()
                 .and_then(|i| i.addons.iter().find(|a| a.project_id == pid))
-                .map(|a| (a.file_id, a.name.clone()));
+                .map(|a| (a.file_id, a.name.clone(), a.icon.clone()));
             match found {
-                Some((file_id, name)) if file_id != 0 => {
-                    crate::versions::open_file_id(self.store.clone(), root, pid, file_id, name, window, cx)
+                Some((file_id, name, icon)) if file_id != 0 => {
+                    crate::versions::open_file_id(self.store.clone(), root, pid, file_id, name, icon, window, cx)
                 }
                 _ => self.open_peek(pid, cx),
             }
