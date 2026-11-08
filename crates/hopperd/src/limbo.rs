@@ -27,6 +27,10 @@ pub enum Outcome {
     /// The client turned the lobby down (a modded client, or one without
     /// Minecraft's own data): it gets the "join again" message from now on.
     Refused(String),
+    /// A Forge / NeoForge client on a modded server (named by its brand): it
+    /// can't take the island, and is held at login next time if the server
+    /// is set to wait for modded players.
+    Modded(String),
 }
 
 /// Reads packets from a connection, keeping what's left over.
@@ -144,7 +148,7 @@ pub async fn run(
     let forge = brand.to_ascii_lowercase().contains("forge");
     if forge && modded {
         sock.write_all(&lb::config_disconnect(&rejoin())).await?;
-        return Ok(Outcome::Refused(format!("{brand} client")));
+        return Ok(Outcome::Modded(format!("{brand} client")));
     }
     if !lb::has_core(&packs)? {
         sock.write_all(&lb::config_disconnect(&rejoin())).await?;
@@ -236,7 +240,7 @@ pub async fn run(
 }
 
 /// Whether the server answers on its port yet.
-async fn up(e: &Entry) -> bool {
+pub(crate) async fn up(e: &Entry) -> bool {
     let port = crate::router::port_of(e);
     matches!(tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(("127.0.0.1", port))).await, Ok(Ok(_)))
 }

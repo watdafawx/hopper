@@ -127,10 +127,13 @@ struct Wake {
     message: String,
     /// "lobby" or "kick".
     starting: String,
+    /// What Forge / NeoForge players get while it starts: "kick" or "wait".
+    modded: String,
 }
 
 const WAKE_WHO: [(&str, &str); 3] = [("anyone", "Anyone"), ("whitelist", "Whitelist"), ("ops", "Ops")];
 const WAKE_STARTING: [(&str, &str); 2] = [("lobby", "Lobby island"), ("kick", "Kick with rejoin message")];
+const WAKE_MODDED: [(&str, &str); 2] = [("kick", "Join again message"), ("wait", "Wait (experimental)")];
 const WAKE_RETRY: [(u32, &str); 4] = [(0, "Wait for a start here"), (2, "2 min"), (10, "10 min"), (30, "30 min")];
 
 /// "just now", "4 min ago", "2 h ago", "3 days ago".
@@ -251,6 +254,7 @@ fn parse_addr(v: &Value) -> Addr {
             retry: v["retry_after_minutes"].as_u64().unwrap_or(0) as u32,
             message: s(v, "sleep_message"),
             starting: v["while_starting"].as_str().unwrap_or("lobby").to_string(),
+            modded: v["modded_players"].as_str().unwrap_or("kick").to_string(),
         }),
         default_message: s(v, "default_sleep_message"),
         estimate: s(v, "wake_estimate"),
@@ -325,6 +329,7 @@ pub struct SettingsTab {
     wake_who: String,
     wake_retry: u32,
     wake_starting: String,
+    wake_modded: String,
     sleep_msg: Entity<InputState>,
     /// DNS check results by address: (points here, note).
     dns: Option<HashMap<String, (bool, String)>>,
@@ -367,6 +372,7 @@ impl SettingsTab {
             wake_who: "anyone".into(),
             wake_retry: 0,
             wake_starting: "lobby".into(),
+            wake_modded: "kick".into(),
             sleep_msg,
             dns: None,
             checking: false,
@@ -530,8 +536,8 @@ impl SettingsTab {
         let mins = if sleep > 0 { sleep } else { 15 }.to_string();
         self.sleep_min.update(cx, |s, cx| s.set_value(mins, window, cx));
         if let Some(a) = d.addr.as_ref() {
-            let w = a.wake.clone().unwrap_or(Wake { on: true, who: "anyone".into(), retry: 0, message: String::new(), starting: "lobby".into() });
-            (self.wake_on, self.wake_who, self.wake_retry, self.wake_starting) = (w.on, w.who, w.retry, w.starting);
+            let w = a.wake.clone().unwrap_or(Wake { on: true, who: "anyone".into(), retry: 0, message: String::new(), starting: "lobby".into(), modded: "kick".into() });
+            (self.wake_on, self.wake_who, self.wake_retry, self.wake_starting, self.wake_modded) = (w.on, w.who, w.retry, w.starting, w.modded);
             let placeholder = a.default_message.clone();
             self.sleep_msg.update(cx, |s, cx| {
                 s.set_value(w.message, window, cx);
@@ -639,6 +645,7 @@ impl SettingsTab {
             retry: self.wake_retry,
             message: self.sleep_msg.read(cx).value().trim().to_string(),
             starting: self.wake_starting.clone(),
+            modded: self.wake_modded.clone(),
         }
     }
 
@@ -706,6 +713,7 @@ impl SettingsTab {
                 b["retry_after_minutes"] = json!(w.retry);
                 b["sleep_message"] = json!(w.message);
                 b["while_starting"] = json!(w.starting);
+                b["modded_players"] = json!(w.modded);
             }
             b
         });
@@ -1420,6 +1428,7 @@ impl SettingsTab {
         let who_i = WAKE_WHO.iter().position(|(k, _)| *k == self.wake_who);
         let retry_i = WAKE_RETRY.iter().position(|(m, _)| *m == self.wake_retry);
         let starting_i = WAKE_STARTING.iter().position(|(k, _)| *k == self.wake_starting);
+        let modded_i = WAKE_MODDED.iter().position(|(k, _)| *k == self.wake_modded);
         let who_note = match self.wake_who.as_str() {
             "whitelist" => "Players on the whitelist or the ops list.",
             "ops" => "Only players on the ops list.",
@@ -1459,6 +1468,26 @@ impl SettingsTab {
                     "Players wait on a small island with the start's progress, then move over by themselves. Works for Minecraft 1.21 and 1.21.1; other versions and modded clients get the rejoin message. Hopper turns on accepts-transfers in server.properties for this."
                 } else {
                     "Players are told when to join again."
+                },
+                cx,
+            )))
+            .child(
+                h_flex().gap_2().child(label("Modded players")).child(
+                    widgets::Segmented::new("settings-wake-modded")
+                        .xsmall()
+                        .when_some(modded_i, |t, i| t.selected_index(i))
+                        .children(WAKE_MODDED.iter().map(|(_, l)| widgets::SegItem::new().label(*l).disabled(dis)))
+                        .on_click(cx.listener(|this, i: &usize, _, cx| {
+                            this.wake_modded = WAKE_MODDED[*i].0.to_string();
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(div().pl(rems(9.5)).child(widgets::caption(
+                if self.wake_modded == "wait" {
+                    "Modded players can wait on the connecting screen until the server is up. They see no progress bar."
+                } else {
+                    "Modded players get a message to join again."
                 },
                 cx,
             )))

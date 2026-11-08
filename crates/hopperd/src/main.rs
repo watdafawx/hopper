@@ -58,6 +58,7 @@ mod parity_overview;
 mod parity_worlds;
 mod player_ping;
 mod packs_where_api;
+mod hold;
 mod limbo;
 mod router;
 mod rules;
