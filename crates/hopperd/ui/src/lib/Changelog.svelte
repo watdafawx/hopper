@@ -11,9 +11,10 @@
 
 {#if blocks}<BrowseRich {blocks} {empty} compact />
 {:else if markdown?.trim()}<div class="changelog">{@html md(markdown)}</div>
-{:else}<div class="small muted">{empty}</div>{/if}
+{:else}<div class="empty muted">{empty}</div>{/if}
 
 <style>
+  .empty { font-size: 13px; line-height: 1.6; }
   .changelog { color: #d4d4da; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
   .changelog :global(p) { margin: 0 0 8px; }
   .changelog :global(:is(h1, h2, h3, h4, h5, h6)) { color: var(--text); font-weight: 650; font-size: 13px; margin: 10px 0 4px; }

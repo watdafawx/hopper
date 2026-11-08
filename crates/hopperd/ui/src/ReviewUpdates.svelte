@@ -94,7 +94,7 @@
             </div>
             {#if keptOut(u)}<div class="kept tiny muted" title="Keep this version: the update stays listed, but only installs when ticked here or with Shift+click"><Lock size={11} />{u.to} is locked: you keep {u.from}</div>{/if}
             {#if problems(u).length}<div class="prob tiny" title="{problems(u).join('; ')}. Hopper doesn't add or turn on mods with an update."><TriangleAlert size={11} /><span class="ell">{problems(u).join('; ')}</span></div>{/if}
-            {#if open === u.project_id}<div class="notes">{#if notes[u.project_id] === '…'}<span class="small muted">Loading…</span>{:else}<Changelog markdown={notes[u.project_id]} empty="No changelog." />{/if}</div>{/if}
+            {#if open === u.project_id}<div class="notes">{#if notes[u.project_id] === '…'}<span class="small muted">Loading…</span>{:else}<Changelog markdown={notes[u.project_id]} />{/if}</div>{/if}
           </div>
         {/each}
       {/each}

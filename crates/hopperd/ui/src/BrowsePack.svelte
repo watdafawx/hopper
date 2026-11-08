@@ -16,6 +16,7 @@
   import Brand from './lib/Brand.svelte';
   import { say } from './lib/toast.svelte.js';
   import Changelog from './lib/Changelog.svelte';
+  import VersionCard from './lib/VersionCard.svelte';
   import BrowseMenu from './BrowseMenu.svelte';
   import { packQuery, packPage, preloadNow, warm, cancelWarm } from './lib/prefetch.js';
 
@@ -523,9 +524,11 @@
               {#if openLog[v.id]}
                 {@const log = v.changelog || logs[v.id]}
                 <div class="cl">
-                  {#if log === 'loading' || !log}<span class="small muted">Loading the changelog…</span>
-                  {:else if log.error}<span class="err">{log.error}</span>
-                  {:else}<Changelog blocks={log} />{/if}
+                  <VersionCard name={v.name} release={v.type ? v.type[0].toUpperCase() + v.type.slice(1) : ''} date={ago(v.date) || date(v.date)} installed={!packs && sameFile(v)}>
+                    {#if log === 'loading' || !log}<span class="small muted">Loading the changelog…</span>
+                    {:else if log.error}<span class="err">{log.error}</span>
+                    {:else}<Changelog blocks={log} />{/if}
+                  </VersionCard>
                 </div>
               {/if}
             {:else}

@@ -116,6 +116,11 @@ async fn changelog(
         Ok(if full { hopper_core::changelog_trim::Trimmed { newer: md, ..Default::default() } } else { hopper_core::changelog_trim::trim_file(&md, &f) })
     })
     .await?;
+    // Blank markup counts as no notes, so the card says so.
+    let mut t = t;
+    if !hopper_core::changelog_trim::has_visible_text(&t.newer) {
+        t.newer.clear();
+    }
     // Only its own version's notes; the older releases a cumulative text repeats are `earlier`.
     Ok(Json(json!({ "markdown": t.newer, "earlier": t.earlier, "earlier_count": t.earlier_count })))
 }
