@@ -228,9 +228,118 @@ pub fn trim_card(text: &str, own_versions: &[String], installed: Option<(&[Strin
     Trimmed { newer: n.newer, earlier, earlier_count: n.earlier_count + own.earlier_count }
 }
 
+/// The text a card shows for a version with no notes. As markdown it is the
+/// same string on every empty version, so a compare of raw text called them
+/// "the same notes".
+pub const NO_CHANGELOG: &str = "No changelog for this version.";
+
+/// What a reader would see of a changelog, boiled down for comparing: tags,
+/// comments, entities (`&nbsp;`), markdown marks alone on a line (`#`, `---`,
+/// `*`) and extra whitespace gone. Empty when nothing would be read, and for
+/// the "No changelog" placeholder.
+pub fn visible_text(raw: &str) -> String {
+    let mut text = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(i) = rest.find('<') {
+        text.push_str(&rest[..i]);
+        rest = &rest[i..];
+        if let Some(after) = rest.strip_prefix("<!--") {
+            rest = after.find("-->").map_or("", |e| &after[e + 3..]);
+            continue;
+        }
+        // A real tag starts with a letter, `/` or `!`; a lone `<` is text.
+        let is_tag = rest[1..].chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '/' || c == '!');
+        match (is_tag, rest.find('>')) {
+            (true, Some(e)) => {
+                let name = rest[1..e].trim_start_matches('/').split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("");
+                // Block tags end a line, so words don't glue together.
+                let block = matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "br" | "p" | "div" | "li" | "ul" | "ol" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "tr" | "hr" | "pre" | "blockquote"
+                );
+                text.push(if block { '\n' } else { ' ' });
+                rest = &rest[e + 1..];
+            }
+            _ => {
+                text.push('<');
+                rest = &rest[1..];
+            }
+        }
+    }
+    text.push_str(rest);
+    let text = crate::richtext::decode_entities(&text).replace(['\u{a0}', '\u{200b}', '\u{feff}'], " ");
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|l| !l.chars().all(|c| matches!(c, '#' | '-' | '*' | '_' | '=' | '>' | '`' | '|' | '~' | '\\' | ' ' | '+' | ':')))
+        .collect();
+    let out = lines.join("\n");
+    if out.trim_matches(|c: char| c == '*' || c == '_' || c.is_whitespace()) == NO_CHANGELOG {
+        return String::new();
+    }
+    out
+}
+
+/// Whether a changelog has anything to read.
+pub fn has_visible_text(raw: &str) -> bool {
+    !visible_text(raw).is_empty()
+}
+
+/// The name of the first of `earlier` (name, notes) that reads the same as
+/// `notes`. `None` when `notes` has nothing to read: an empty version is
+/// never "the same" as another empty one.
+pub fn same_notes<'a>(notes: &str, earlier: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<String> {
+    let mine = visible_text(notes);
+    if mine.is_empty() {
+        return None;
+    }
+    earlier.into_iter().find(|(_, m)| visible_text(m) == mine).map(|(n, _)| n.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_looking_changelogs_have_no_text() {
+        for raw in [
+            "", "<p></p>", "<p>&nbsp;</p>", "<br/>", "\n\n", "<!-- -->", "<p> </p><br>", "#", "---", "* ",
+            "*No changelog for this version.*", "<p><i>No changelog for this version.</i></p>",
+        ] {
+            assert!(!has_visible_text(raw), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn real_text_is_visible() {
+        for raw in ["Fixed a crash", "<p>Fixed</p>", "## Fixes\n- a", "a < b", "<img src=x> text"] {
+            assert!(has_visible_text(raw), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn same_only_with_real_identical_text() {
+        let e = |raw| [("v1.6.6", raw)];
+        // Both empty, in every shape: never "same".
+        for (a, b) in [
+            ("<p></p>", "<p></p>"),
+            ("<p>&nbsp;</p>", "<p>&nbsp;</p>"),
+            ("<br/>", "<br/>"),
+            ("\n\n", "\n\n"),
+            ("<!-- -->", "<!-- -->"),
+            ("*No changelog for this version.*", "*No changelog for this version.*"),
+            ("<p></p>", "\n"),
+        ] {
+            assert_eq!(same_notes(a, e(b)), None, "{a:?} {b:?}");
+        }
+        // Real and identical, even when written a little differently.
+        assert_eq!(same_notes("Fixed a crash", e("Fixed a crash")).as_deref(), Some("v1.6.6"));
+        assert_eq!(same_notes("<p>Fixed&nbsp;a  crash</p>", e("Fixed a crash")).as_deref(), Some("v1.6.6"));
+        // Real then different real; empty then real; real then empty.
+        assert_eq!(same_notes("Fixed a crash", e("Added a block")), None);
+        assert_eq!(same_notes("<p></p>", e("Fixed a crash")), None);
+        assert_eq!(same_notes("Fixed a crash", e("<p></p>")), None);
+    }
 
     fn v(s: &str) -> Vec<String> {
         vec![s.to_string()]

@@ -7,6 +7,7 @@
   import { X, Download, RotateCcw, Settings2, Lock, LockOpen, ChevronRight, ChevronDown } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import Changelog from './lib/Changelog.svelte';
+  import VersionCard from './lib/VersionCard.svelte';
   import { dialog as question } from './lib/dialog.svelte.js';
   import { installVersion, resetConfig, setLocked } from './lib/modops.js';
 
@@ -78,6 +79,10 @@
   });
 </script>
 
+{#snippet log(md)}
+  {#if md?.trim()}<div class="notes"><Changelog markdown={md} /></div>{:else}<Changelog markdown="" />{/if}
+{/snippet}
+
 {#snippet body()}
   {#if dialog}
     <div class="head row">
@@ -101,22 +106,19 @@
       {#if info.latest && info.behind}<button class="btn sm pri" disabled={info.locked || !!busy} onclick={() => install(info.latest.file_id, 'Updating')}><Download size={13} />Update to {info.latest.version}</button>{/if}
     </div>
     {#each info.entries as e, i (`${i}:${e.name}`)}
-      <div class="vc" class:target={i === 0 && !e.installed} class:cur={e.installed}>
-        <div class="row wrap"><b class="vname">{e.name}</b><span class="chip">{e.release}</span>{#if e.installed}<span class="chip running">Installed</span>{/if}</div>
-        <div class="row wrap">
-          <span class="tiny muted">{when(e.date)}</span><span class="sp"></span>
+      <VersionCard name={e.name} release={e.release} date={when(e.date)} installed={e.installed} target={i === 0 && !e.installed}>
+        {#snippet actions()}
           {#if !e.installed && e.file_id}<button class="btn sm" disabled={info.locked || !!busy} onclick={() => install(e.file_id, 'Updating')}><Download size={13} />Update to {e.version || e.name}</button>{/if}
           {#if e.installed && e.file_id}<button class="btn sm" disabled={info.locked || !!busy} title="Download this version again in place of the installed file" onclick={() => install(e.file_id, 'Reinstalling')}><RotateCcw size={13} />Reinstall</button>
             <button class="btn sm ghost" title="Move this mod's config files to backups so it writes fresh defaults" onclick={() => resetConfig(base, mod)}><Settings2 size={13} />Reset config</button>{/if}
-        </div>
+        {/snippet}
         {#if e.same_as}<div class="small muted"><i>Same notes as {e.same_as}</i></div>
-        {:else if e.markdown.trim()}<div class="notes"><Changelog markdown={e.markdown} /></div>
-        {:else}<div class="small muted">No changelog for this version.</div>{/if}
+        {:else}{@render log(e.markdown)}{/if}
         {#if e.earlier_count && !e.same_as}
           <button class="row ohead small muted" onclick={() => (earlierOpen[e.name] = !earlierOpen[e.name])}>{#if earlierOpen[e.name]}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}Earlier versions ({e.earlier_count})</button>
           {#if earlierOpen[e.name]}<div class="notes"><Changelog markdown={e.earlier} /></div>{/if}
         {/if}
-      </div>
+      </VersionCard>
     {/each}
     {#if info.others.length}<div class="lbl">Other versions</div>{/if}
     {#each info.others as o (o.file_id)}
@@ -129,8 +131,7 @@
         {#if open[o.file_id] === null}<div class="small muted row"><span class="spinner blue"></span>Loading the changelog</div>
         {:else if typeof open[o.file_id] === 'string'}
           {#if open[o.file_id].startsWith('!')}<div class="err small">{open[o.file_id].slice(1)}</div>
-          {:else if open[o.file_id].trim()}<div class="notes"><Changelog markdown={open[o.file_id]} /></div>
-          {:else}<div class="small muted">No changelog for this version.</div>{/if}
+          {:else}{@render log(open[o.file_id])}{/if}
           {#if otherEarlier[o.file_id]}
             <button class="row ohead small muted" onclick={() => (earlierOpen['o' + o.file_id] = !earlierOpen['o' + o.file_id])}>{#if earlierOpen['o' + o.file_id]}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}Earlier versions ({otherEarlier[o.file_id].count})</button>
             {#if earlierOpen['o' + o.file_id]}<div class="notes"><Changelog markdown={otherEarlier[o.file_id].text} /></div>{/if}
@@ -167,10 +168,6 @@
   .nowrap { white-space: nowrap; }
   .status b { color: var(--acc); font-size: 13px; }
   .status b.ok { color: var(--green); }
-  .vc { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 10px 12px; }
-  .vc.target { border-color: var(--acc); }
-  .vc.cur { background: #ffffff07; }
-  .vname { overflow-wrap: anywhere; min-width: 0; }
   .oth { background: #ffffff07; border-radius: var(--radius-lg); padding: 7px 10px; display: flex; flex-direction: column; gap: 6px; }
   .ohead { gap: 6px; text-align: left; font-size: 12.5px; }
   .lbl { padding-top: 4px; }

@@ -3199,8 +3199,9 @@ impl BrowseView {
             _ => None,
         });
         let (store, root) = (self.store.clone(), inst.root.clone());
+        let head = (m.name.clone(), m.icon().unwrap_or_default().to_string());
         if let Some(f) = ready {
-            return crate::versions::open_file(store, Some(root), f, window, cx);
+            return crate::versions::open_file(store, Some(root), f, Some(head), window, cx);
         }
         let (id, class) = (m.id, Some(m.class_id.unwrap_or(self.class)));
         cx.spawn_in(window, async move |this, cx| {
@@ -3208,7 +3209,7 @@ impl BrowseView {
                 .background_spawn(async move { hopper::install::best_file(id, class, &inst) })
                 .await;
             this.update_in(cx, |_, window, cx| match r {
-                Ok(Some(f)) => crate::versions::open_file(store, Some(root), f, window, cx),
+                Ok(Some(f)) => crate::versions::open_file(store, Some(root), f, Some(head), window, cx),
                 Ok(None) => window.push_notification(
                     Notification::error("There's no file for this Minecraft version and loader."),
                     cx,
@@ -3966,9 +3967,10 @@ impl BrowseView {
                         let (m1, f1) = (m.clone(), f.clone());
                         let (store, log_root, log_file) =
                             (self.store.clone(), target.as_ref().map(|t| t.root.clone()), f.clone());
+                        let log_head = (m.name.clone(), m.icon().unwrap_or_default().to_string());
                         let log_id = ElementId::Name(format!("log:{}", f.id).into());
                         let open_log = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            crate::versions::open_file(store.clone(), log_root.clone(), log_file.clone(), window, cx)
+                            crate::versions::open_file(store.clone(), log_root.clone(), log_file.clone(), Some(log_head.clone()), window, cx)
                         };
                         let action: AnyElement = if installed_file == Some(f.id) {
                             widgets::split(

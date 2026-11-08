@@ -16,6 +16,7 @@
   import { ago } from './lib/browse.js';
   import { paintDown, paintOver } from './lib/dragpick.svelte.js';
   import BrowseRich from './BrowseRich.svelte';
+  import VersionCard from './lib/VersionCard.svelte';
   import BrowsePack from './BrowsePack.svelte';
   import { dialog } from './lib/dialog.svelte.js';
   import { rightClear } from './lib/rightclear.js';
@@ -511,10 +512,10 @@
                 </div>
               {/if}
               {#each log.entries as e (e.name)}
-                <div class="entry">
-                  <div class="row"><b class="en">{e.name}</b><span class="chip xs">{e.release}</span>{#if e.server_files}<span class="chip lan xs" title="This version has a server pack"><Server size={11} />Server files</span>{/if}<span class="tiny muted">{ago(e.date)}</span></div>
+                <VersionCard name={e.name} release={e.release} date={ago(e.date)}>
+                  {#snippet chips()}{#if e.server_files}<span class="chip lan" title="This version has a server pack"><Server size={11} />Server files</span>{/if}{/snippet}
                   <div class="notesbody small"><BrowseRich blocks={e.blocks} empty="No changelog for this version." /></div>
-                </div>
+                </VersionCard>
               {/each}
             {/if}
             <div class="strip small"><span class="acct"><FileText size={14} /></span><span class="grow">{strip}</span><button class="btn sm ghost" onclick={() => (tab = 1)}>See changes ›</button></div>
@@ -738,8 +739,6 @@
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .advice { border-left: 2px solid var(--gold); background: #eab3080f; border-radius: 0 var(--radius) var(--radius) 0; padding: 8px 10px 8px 12px; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
   .ah { color: var(--gold); font-weight: 600; gap: 6px; }
-  .entry { display: flex; flex-direction: column; gap: 6px; }
-  .en { font-size: 15px; }
   .notesbody { overflow-wrap: anywhere; }
   .strip { display: flex; align-items: center; gap: 10px; background: var(--raise); border-radius: var(--radius-lg); padding: 8px 10px; position: sticky; bottom: 0; }
   .acct { color: var(--acc); flex: none; display: grid; }

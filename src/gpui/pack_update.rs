@@ -366,8 +366,8 @@ impl UpdatePreview {
     /// changelog, and what Update will do.
     fn whats_new(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (warning, muted, primary, surface, radius) =
-            (theme.warning, theme.muted_foreground, theme.primary, theme.secondary, theme.radius);
+        let (warning, primary, surface, radius) =
+            (theme.warning, theme.primary, theme.secondary, theme.radius);
         let body: AnyElement = match &self.log {
             None => h_flex()
                 .gap_2()
@@ -407,15 +407,10 @@ impl UpdatePreview {
                     })
                     .children(entries.iter().map(|e| {
                         let view = view.clone();
-                        v_flex()
-                            .gap_2()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(div().text_lg().font_semibold().child(e.name.clone()))
-                                    .child(widgets::chip(muted).xsmall().child(e.release))
-                                    .child(widgets::caption(hopper::time::relative(&e.date), cx).text_xs()),
-                            )
+                        // The card every changelog dialog uses.
+                        crate::versions::version_card(false, false, cx)
+                            .child(crate::versions::version_title(e.name.clone(), e.release, cx))
+                            .child(h_flex().child(crate::versions::version_date(&e.date, cx)))
                             .child(crate::versions::changelog_view(
                                 ElementId::Name(format!("upd-log:{}", e.name).into()),
                                 e.md.clone(),
