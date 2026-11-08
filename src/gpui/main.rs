@@ -86,6 +86,7 @@ mod source_dialog;
 mod store;
 mod stuck;
 mod theme;
+mod memlog;
 mod thumbs;
 mod tasks;
 mod translation;

@@ -2712,7 +2712,7 @@ impl BrowseView {
                 .clickable(cx)
                 .when(active, |r| widgets::row_selected(r, cx).font_medium())
                 .when(!active, |r| r.hover(|s| widgets::row_hover(s, cx)))
-                .when_some(icon, |r, p| r.child(img(p).size_4().flex_none()))
+                .when_some(icon, |r, p| r.child(img(crate::thumbs::source_in(crate::thumbs::Cat::Browse, &p, crate::thumbs::Want::Rems(rems(1.)), cx)).size_4().flex_none()))
                 .child(div().truncate().child(name))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.category = id;
@@ -3777,7 +3777,7 @@ impl BrowseView {
                         .rounded(theme.radius)
                         .overflow_hidden()
                         .clickable(cx)
-                        .child(img(p).size_full().object_fit(ObjectFit::Cover))
+                        .child(img(crate::thumbs::source_in(crate::thumbs::Cat::Gallery, &p, crate::thumbs::Want::Rems(rems(10.)), cx)).size_full().object_fit(ObjectFit::Cover))
                         .on_click(move |_, window, cx| {
                             crate::image_viewer::open(store_e.clone(), gallery.clone(), i, window, cx)
                         })

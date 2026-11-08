@@ -182,9 +182,9 @@ impl Render for ImageViewer {
             (None, Some(p), _) => match widgets::image_size(&p) {
                 Some((iw, ih)) if iw > 0 && ih > 0 => {
                     let (w, h) = fit(iw as f32, ih as f32);
-                    h_flex().size_full().justify_center().items_center().child(img(p).w(w).h(h).object_fit(ObjectFit::Contain)).into_any_element()
+                    h_flex().size_full().justify_center().items_center().child(img(crate::thumbs::source_in(crate::thumbs::Cat::Viewer, &p, crate::thumbs::Want::Window, cx)).w(w).h(h).object_fit(ObjectFit::Contain)).into_any_element()
                 }
-                _ => img(p).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+                _ => img(crate::thumbs::source_in(crate::thumbs::Cat::Viewer, &p, crate::thumbs::Want::Window, cx)).size_full().object_fit(ObjectFit::Contain).into_any_element(),
             },
             // The full image is on its way: its small copy, as big as the
             // full one will show, with a spinner over it.
@@ -195,7 +195,7 @@ impl Render for ImageViewer {
                     .justify_center()
                     .items_center()
                     .relative()
-                    .child(img(p).w(px(iw as f32 * s)).h(px(ih as f32 * s)).object_fit(ObjectFit::Contain))
+                    .child(img(crate::thumbs::source_in(crate::thumbs::Cat::Viewer, &p, crate::thumbs::Want::Window, cx)).w(px(iw as f32 * s)).h(px(ih as f32 * s)).object_fit(ObjectFit::Contain))
                     .child(
                         div()
                             .absolute()
@@ -224,7 +224,7 @@ impl Render for ImageViewer {
             [(self.at + 1) % n, (self.at + n - 1) % n]
                 .iter()
                 .filter_map(|&i| store.image(&still_key(&self.images[i].url, self.cap)))
-                .map(|p| img(p.to_path_buf()).absolute().size(px(1.)).opacity(0.).into_any_element())
+                .map(|p| img(crate::thumbs::source_in(crate::thumbs::Cat::Viewer, p, crate::thumbs::Want::Window, cx)).absolute().size(px(1.)).opacity(0.).into_any_element())
                 .collect()
         };
         let u2 = url.clone();
@@ -322,6 +322,8 @@ pub fn open(store: Entity<Store>, images: Vec<Shot>, at: usize, window: &mut Win
             if let Some(key) = this.playing.take() {
                 this.store.update(cx, |s, cx| s.forget_anim(&key, cx));
             }
+            // Its pictures (the small copy shown first is a thumb, kept).
+            crate::thumbs::release(crate::thumbs::Cat::Viewer, cx);
         })
         .detach();
         let mut v = ImageViewer {

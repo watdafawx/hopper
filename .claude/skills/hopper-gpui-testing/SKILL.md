@@ -35,3 +35,5 @@ Machine-specific commands (build wrapper, ports, real instance folders) are in `
 
 ## Memory check (before a release, not in CI)
 `python .claude\skills\hopper-gpui-testing\mem-scratch.py <scratch>` builds a fake 1,156-mod instance plus 7 small ones; `pwsh -NoProfile -File .claude\skills\hopper-gpui-testing\mem-check.ps1 -Exe <hv-copy.exe> -Scratch <scratch> -Port 478xx -Label <version>` walks Library, Mods, scroll to the end, Versions, Servers, idle, and prints working set / private / GPU MB. Compare with the last release's numbers (0.58.0: 276 / 352 / 87 MB after scrolling the big list; with the icon cache: 141 / 167 / 39).
+
+`mem-peek.ps1` (same args) measures the 1920x1080 banner, the Screenshots grid and the image viewer open / close. Memory log for a real run: start Hopper with `HOPPER_MEMLOG=1`; one line per 15 s and per page change goes to `memlog.txt` in the data folder (UTC times).

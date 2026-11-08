@@ -1695,6 +1695,9 @@ impl ScreenshotsView {
         self.open = to.filter(|i| *i < self.shots.len());
         if self.open.is_some() {
             window.focus(&self.focus, cx);
+        } else {
+            // Back to the grid: the big picture's copy goes.
+            cx.defer(|cx| crate::thumbs::release(crate::thumbs::Cat::Viewer, cx));
         }
         cx.notify();
     }
@@ -1834,7 +1837,7 @@ impl ScreenshotsView {
                     .overflow_hidden()
                     // Pinned to the box rather than sized by it: an img in
                     // flow takes its own height and the bottom gets cut off.
-                    .child(img(p).absolute().inset_0().size_full().object_fit(ObjectFit::Contain)),
+                    .child(img(crate::thumbs::source_in(crate::thumbs::Cat::Viewer, &p, crate::thumbs::Want::Window, cx)).absolute().inset_0().size_full().object_fit(ObjectFit::Contain)),
             ))
             .into_any_element()
     }
@@ -1885,7 +1888,7 @@ impl Render for ScreenshotsView {
                     }
                 }))
                 .when_some(thumb, |d, t| {
-                    d.child(img(t).size_full().object_fit(ObjectFit::Cover))
+                    d.child(img(crate::thumbs::source_in(crate::thumbs::Cat::Gallery, &t, crate::thumbs::Want::Px(240.), cx)).size_full().object_fit(ObjectFit::Cover))
                 })
         });
         let empty = self.shots.is_empty();

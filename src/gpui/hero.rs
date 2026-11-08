@@ -82,7 +82,7 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
             BoxShadow::new(px(0.), px(14.), black().opacity(if dark { 0.5 } else { 0.25 })).blur_radius(px(32.)),
         ])
         .map(|d| match h.art.clone() {
-            Some(p) => d.child(img(p).size_full().object_fit(ObjectFit::Cover)),
+            Some(p) => d.child(img(crate::thumbs::source_in(crate::thumbs::Cat::Banner, &p, crate::thumbs::Want::Rems(rems(6.5)), cx)).size_full().object_fit(ObjectFit::Cover)),
             None => d.flex().items_center().justify_center().child(h.no_art),
         });
 
@@ -189,7 +189,7 @@ fn backdrop(blur: Option<PathBuf>, fx: Option<AnyElement>, cx: &App) -> Div {
         .inset_0()
         .map(|d| match (fx, blur) {
             (Some(fx), _) => d.child(fx),
-            (None, Some(p)) => d.child(img(p).size_full().object_fit(ObjectFit::Cover).opacity(if dark { 0.75 } else { 0.55 })),
+            (None, Some(p)) => d.child(img(crate::thumbs::source_in(crate::thumbs::Cat::Banner, &p, crate::thumbs::Want::Window, cx)).size_full().object_fit(ObjectFit::Cover).opacity(if dark { 0.75 } else { 0.55 })),
             (None, None) => d.bg(linear_gradient(
                 135.,
                 linear_color_stop(theme.primary.opacity(0.22), 0.),
@@ -227,7 +227,7 @@ pub fn render_compact(h: Hero, cx: &App) -> AnyElement {
         .border_1()
         .border_color(white().opacity(0.12))
         .map(|d| match h.art.clone() {
-            Some(p) => d.child(img(p).size_full().object_fit(ObjectFit::Cover)),
+            Some(p) => d.child(img(crate::thumbs::source_in(crate::thumbs::Cat::Banner, &p, crate::thumbs::Want::Rems(rems(2.5)), cx)).size_full().object_fit(ObjectFit::Cover)),
             None => d.flex().items_center().justify_center().child(h.no_art),
         });
     // Figures as one quiet line: "0/16 players · 20.0 TPS · 17.1 GB memory".

@@ -97,7 +97,7 @@ impl Slots {
 /// `url` may be animated it also marks itself in `slots`, so the page's
 /// [`LogoLayer`] plays it on top.
 pub fn thumb(slots: &Slots, url: Option<&str>, still: Option<&Path>, size: Rems, cx: &App) -> AnyElement {
-    let thumb = crate::widgets::thumb(still, size, cx);
+    let thumb = crate::widgets::thumb_in(crate::thumbs::Cat::Browse, still, size, cx);
     let Some(key) = url.and_then(key) else {
         return thumb;
     };

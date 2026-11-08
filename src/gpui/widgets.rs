@@ -28,6 +28,11 @@ pub fn logo() -> Img {
 /// A square project or instance icon, or a placeholder while it loads (or
 /// when there is none).
 pub fn thumb(path: Option<&Path>, size: Rems, cx: &App) -> AnyElement {
+    thumb_in(crate::thumbs::Cat::Icons, path, size, cx)
+}
+
+/// [`thumb`] counted under `cat`.
+pub fn thumb_in(cat: crate::thumbs::Cat, path: Option<&Path>, size: Rems, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let frame = div()
         .size(size)
@@ -38,7 +43,7 @@ pub fn thumb(path: Option<&Path>, size: Rems, cx: &App) -> AnyElement {
     match path {
         Some(p) => frame
             .child(
-                img(crate::thumbs::source(p, size, cx))
+                img(crate::thumbs::source_in(cat, p, crate::thumbs::Want::Rems(size), cx))
                     .size_full()
                     .object_fit(ObjectFit::Cover),
             )
@@ -2124,7 +2129,7 @@ pub fn description_view(
                         .when_some(path, |d, p| {
                             let src = match frame {
                                 Some(f) => ImageSource::Render(f),
-                                None => ImageSource::Resource(Resource::Path(p)),
+                                None => crate::thumbs::source_in(crate::thumbs::Cat::Gallery, &p, crate::thumbs::Want::Px(w), cx),
                             };
                             d.child(img(src).size_full().object_fit(ObjectFit::Contain))
                         })
@@ -2192,7 +2197,12 @@ pub fn description_view(
                                             .when_some(path, |d, p| {
                                                 let src = match frame {
                                                     Some(f) => ImageSource::Render(f),
-                                                    None => ImageSource::Resource(Resource::Path(p)),
+                                                    None => crate::thumbs::source_in(
+                                                        crate::thumbs::Cat::Gallery,
+                                                        &p,
+                                                        crate::thumbs::Want::Px(cap.unwrap_or(900.)),
+                                                        cx,
+                                                    ),
                                                 };
                                                 d.child(img(src).size_full().object_fit(ObjectFit::Contain))
                                             })
@@ -2322,7 +2332,7 @@ fn video_tile(
         .on_click(move |_, window, cx| crate::video::play(&video, window, cx))
         .when_some(poster, |d, p| {
             d.child(
-                img(ImageSource::Resource(Resource::Path(p)))
+                img(crate::thumbs::source_in(crate::thumbs::Cat::Gallery, &p, crate::thumbs::Want::Px(640.), cx))
                     .absolute()
                     .size_full()
                     .object_fit(ObjectFit::Cover),

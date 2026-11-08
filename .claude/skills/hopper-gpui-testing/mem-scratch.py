@@ -56,4 +56,17 @@ def make(name, n, tracked, big):
     print(name, n, "jars", os.path.getsize(f"{d}/hopper.json") // 1024, "KB hopper.json")
 
 make("Big Pack", n_big, n_big - 40, True)
+# Real-size pictures: a 1920x1080 banner as the instance icon, 12 screenshots (the
+# Screenshots tab and the viewer stand in for a mod's gallery, which needs the network).
+import numpy as np
+def big(seed):
+    r = np.random.default_rng(seed)
+    base = np.linspace(0, 255, 1920)[None, :, None] * np.ones((1080, 1, 3))
+    noise = r.integers(0, 40, (1080, 1920, 3))
+    return Image.fromarray(np.clip(base + noise + seed * 9 % 60, 0, 255).astype("uint8"))
+big(1).save(f"{icons}/banner.png")
+hj = json.load(open(f"{inst_root}/Big Pack/hopper.json")); hj["icon"] = f"{icons}/banner.png".replace("\\", "/")
+json.dump(hj, open(f"{inst_root}/Big Pack/hopper.json", "w"), indent=1)
+os.makedirs(f"{inst_root}/Big Pack/screenshots", exist_ok=True)
+for k in range(12): big(k + 2).save(f"{inst_root}/Big Pack/screenshots/2026-11-0{1 + k % 9}_20.{10 + k}.00.png")
 for k in range(1, 8): make(f"Small{k}", 12 + k, 12 + k, False)

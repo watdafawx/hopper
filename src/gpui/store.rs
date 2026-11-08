@@ -1618,6 +1618,65 @@ impl Store {
         }
     }
 
+    /// What this store holds, as text for the memory log (`memlog`): the
+    /// loaded instances (mods, the files' sizes on disk, and the size of
+    /// what is parsed, as JSON) and how many entries each cache has.
+    pub fn mem_report(&self) -> String {
+        let kb = |b: u64| b / 1024;
+        let file = |root: &Path, name: &str| std::fs::metadata(root.join(name)).map_or(0, |m| m.len());
+        let one = |i: &Instance| {
+            let held = serde_json::to_vec(i).map_or(0, |v| v.len() as u64);
+            format!(
+                "{}({} mods, hopper.json {}KB, minecraftinstance.json {}KB, held~{}KB)",
+                i.name,
+                i.addons.len(),
+                kb(file(&i.root, "hopper.json")),
+                kb(file(&i.root, "minecraftinstance.json")),
+                kb(held)
+            )
+        };
+        let (mut loading, mut ready, mut failed) = (0, 0, 0);
+        for v in self.images.values() {
+            match v {
+                Image::Loading => loading += 1,
+                Image::Ready(_) => ready += 1,
+                Image::Failed => failed += 1,
+            }
+        }
+        let (mut clips, mut frames, mut clip_bytes) = (0, 0, 0u64);
+        for a in self.anims.values() {
+            if let Anim::Ready(c) = a {
+                clips += 1;
+                for f in c.frames() {
+                    frames += 1;
+                    let s = f.size(0);
+                    clip_bytes += s.width.0 as u64 * s.height.0 as u64 * 4;
+                }
+            }
+        }
+        let insts: Vec<String> = self.instances.iter().map(&one).collect();
+        let servers: Vec<String> = self.server_insts.iter().map(&one).collect();
+        format!(
+            " | instances {}: {} | server instances {}: {} | image table: {ready} ready, {loading} loading, {failed} failed              | animated logos: {clips} clips, {frames} frames, {}MB              | caches: updates {}, breaks {}, reverts {}, pack pages {}, pack updates {}, panel servers {}, site servers {}, statuses {}, crashes {}, warnings {}, categories {}",
+            insts.len(),
+            insts.join(" "),
+            servers.len(),
+            servers.join(" "),
+            clip_bytes / 1048576,
+            self.updates.len(),
+            self.breaks.len(),
+            self.reverts.len(),
+            self.pack_pages.len(),
+            self.pack_updates.len(),
+            self.panel_servers.len(),
+            self.site_servers.len(),
+            self.statuses.len(),
+            self.crashes.len(),
+            self.warnings.len(),
+            self.cats.as_ref().map_or(0, |c| c.len()),
+        )
+    }
+
     pub fn instances(&self) -> &[Instance] {
         &self.instances
     }

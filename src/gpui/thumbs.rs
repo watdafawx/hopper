@@ -1,5 +1,6 @@
-//! Small icons (mod, pack and instance icons) decoded at the size they are
-//! shown, and kept to a memory budget.
+//! Pictures (icons, Browse results, banners, gallery shots, the viewer's
+//! image, server art) decoded at the size they are shown, and kept to a
+//! memory budget.
 //!
 //! GPUI's `img(path)` decodes the whole file and keeps the decoded copy
 //! (and its GPU copy) for as long as the app runs. A 256 px CurseForge
@@ -26,12 +27,72 @@ pub const BUDGET: usize = 96 << 20;
 /// a moment ago (a view GPUI reuses without drawing it again isn't asking).
 const GRACE: Duration = Duration::from_secs(10);
 
-/// The width to decode an icon shown `px` device pixels wide: twice that (the
-/// GPU's own downscale from it looks as crisp as from the full file), in steps of 32 so a resized
-/// window or a zoom change asks for few different sizes.
-pub fn width_for(px: f32) -> u32 {
-    let want = (px.max(1.0) * 2.0).ceil() as u32;
+/// The width to decode a picture shown `px` device pixels wide: `headroom`
+/// times that (the GPU's own downscale from twice the size looks as crisp as
+/// from the full file), in steps of 32 so a resized window or a zoom change
+/// asks for few different sizes.
+pub fn width_for_in(px: f32, headroom: f32) -> u32 {
+    let want = (px.max(1.0) * headroom).ceil() as u32;
     want.div_ceil(32) * 32
+}
+
+/// [`width_for_in`] at the usual 2x.
+#[cfg(test)]
+pub fn width_for(px: f32) -> u32 {
+    width_for_in(px, 2.0)
+}
+
+/// What a picture is for: they are counted (and the viewer's released) apart.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Cat {
+    /// Mod, pack and instance icons in lists.
+    Icons,
+    /// Browse's result cards and category icons.
+    Browse,
+    /// An instance's or server's header art and its backdrop.
+    Banner,
+    /// The small screenshots under a mod's description.
+    Gallery,
+    /// The image viewer's picture; let go when it closes.
+    Viewer,
+    /// A server's picture in lists and its header.
+    ServerArt,
+}
+
+impl Cat {
+    pub const ALL: [Cat; 6] = [Cat::Icons, Cat::Browse, Cat::Banner, Cat::Gallery, Cat::Viewer, Cat::ServerArt];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Cat::Icons => "icons",
+            Cat::Browse => "browse",
+            Cat::Banner => "banners",
+            Cat::Gallery => "gallery",
+            Cat::Viewer => "viewer",
+            Cat::ServerArt => "server_art",
+        }
+    }
+
+    /// Pictures shown close to their own size need no spare resolution;
+    /// small ones are decoded at twice.
+    fn headroom(self) -> f32 {
+        match self {
+            Cat::Viewer => 1.0,
+            Cat::Banner | Cat::Gallery => 1.5,
+            _ => 2.0,
+        }
+    }
+}
+
+/// How big a picture is shown.
+#[derive(Clone, Copy)]
+pub enum Want {
+    /// Its width, in rems.
+    Rems(Rems),
+    /// Its width in logical pixels.
+    Px(f32),
+    /// As wide as the window.
+    Window,
 }
 
 /// What is kept and how big it is; chooses what goes when it grows too big.
@@ -43,6 +104,7 @@ pub struct Lru {
 }
 
 impl Lru {
+    #[cfg(test)]
     pub fn bytes(&self) -> usize {
         self.bytes
     }
@@ -60,6 +122,13 @@ impl Lru {
                 self.bytes += size;
                 self.items.insert(key.clone(), (size, now));
             }
+        }
+    }
+
+    /// Forgets `key`.
+    pub fn remove(&mut self, key: &(PathBuf, u32)) {
+        if let Some((size, _)) = self.items.remove(key) {
+            self.bytes -= size;
         }
     }
 
@@ -92,7 +161,7 @@ impl Lru {
 
 enum State {
     Loading,
-    Ready(Arc<RenderImage>),
+    Ready(Arc<RenderImage>, Cat),
     Failed,
 }
 
@@ -133,11 +202,11 @@ fn bytes_of(img: &RenderImage) -> usize {
 }
 
 impl Thumbs {
-    fn load(&mut self, path: &Path, width: u32, window: &mut Window, cx: &mut App) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+    fn load(&mut self, cat: Cat, path: &Path, width: u32, window: &mut Window, cx: &mut App) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
         let key = (path.to_path_buf(), width);
         let now = Instant::now();
         match self.shown.get(&key) {
-            Some(State::Ready(img)) => {
+            Some(State::Ready(img, _)) => {
                 let img = img.clone();
                 self.lru.touch(&key, bytes_of(&img), now);
                 self.trim(now, window, cx);
@@ -152,7 +221,7 @@ impl Thumbs {
                     let decoded = cx.background_spawn(async move { decode(&path, width) }).await;
                     me.update(cx, |this, cx| {
                         let state = match decoded {
-                            Ok(img) => State::Ready(Arc::new(img)),
+                            Ok(img) => State::Ready(Arc::new(img), cat),
                             Err(e) => {
                                 log::debug!("icon {}: {e:#}", key.0.display());
                                 State::Failed
@@ -172,31 +241,82 @@ impl Thumbs {
 
     fn trim(&mut self, now: Instant, window: &mut Window, cx: &mut App) {
         for key in self.lru.evict(BUDGET, now, GRACE) {
-            if let Some(State::Ready(img)) = self.shown.remove(&key) {
+            if let Some(State::Ready(img, _)) = self.shown.remove(&key) {
                 cx.drop_image(img, Some(window));
             }
         }
     }
 }
 
-/// An image source for `img()`: the icon at `path`, decoded for `size`
-/// (a rem size) at the window's scale. Plain `path` when there is no cache.
-pub fn source(path: &Path, size: Rems, cx: &App) -> ImageSource {
+/// An image source for `img()`: the picture at `path`, of kind `cat`, decoded
+/// for a display `want` wide at the window's scale. Plain `path` when there
+/// is no cache. Animated files (GIF, WebP) are left to GPUI: they are
+/// played, not shown still.
+pub fn source_in(cat: Cat, path: &Path, want: Want, cx: &App) -> ImageSource {
+    let plain = || ImageSource::Resource(Resource::Path(path.into()));
     let Some(cache) = cx.try_global::<Holder>().map(|g| g.0.clone()) else {
-        return ImageSource::Resource(Resource::Path(path.into()));
+        return plain();
     };
+    if hopper::imgcache::maybe_animated(path) {
+        return plain();
+    }
     let path: PathBuf = path.to_path_buf();
     ImageSource::Custom(Arc::new(move |window, cx| {
-        let px = f32::from(size.to_pixels(window.rem_size())) * window.scale_factor();
-        let width = width_for(px);
-        cache.update(cx, |c, cx| c.load(&path, width, window, cx))
+        let scale = window.scale_factor();
+        let px = match want {
+            Want::Rems(r) => f32::from(r.to_pixels(window.rem_size())) * scale,
+            Want::Px(p) => p * scale,
+            Want::Window => f32::from(window.viewport_size().width) * scale,
+        };
+        let width = width_for_in(px, cat.headroom());
+        cache.update(cx, |c, cx| c.load(cat, &path, width, window, cx))
     }))
+}
+
+/// Lets go of every picture of `cat` (and its GPU copy): the viewer closed.
+pub fn release(cat: Cat, cx: &mut App) {
+    let Some(cache) = cx.try_global::<Holder>().map(|g| g.0.clone()) else { return };
+    let gone: Vec<Arc<RenderImage>> = cache.update(cx, |c, _| {
+        let keys: Vec<_> = c
+            .shown
+            .iter()
+            .filter(|(_, s)| matches!(s, State::Ready(_, k) if *k == cat))
+            .map(|(k, _)| k.clone())
+            .collect();
+        keys.into_iter()
+            .filter_map(|k| {
+                c.lru.remove(&k);
+                match c.shown.remove(&k) {
+                    Some(State::Ready(img, _)) => Some(img),
+                    _ => None,
+                }
+            })
+            .collect()
+    });
+    for img in gone {
+        cx.drop_image(img, None);
+    }
+}
+
+/// How many pictures of each [`Cat`] are held, and their decoded bytes.
+pub fn stats(cx: &App) -> Vec<(Cat, usize, usize)> {
+    let mut out: Vec<(Cat, usize, usize)> = Cat::ALL.iter().map(|c| (*c, 0, 0)).collect();
+    if let Some(h) = cx.try_global::<Holder>() {
+        for s in h.0.read(cx).shown.values() {
+            if let State::Ready(img, cat) = s {
+                let row = out.iter_mut().find(|r| r.0 == *cat).expect("every Cat is listed");
+                row.1 += 1;
+                row.2 += bytes_of(img);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui_kit's own `test` macro would shadow #[test].
-    use super::{GRACE, Lru, bytes_of, decode, width_for};
+    use super::{GRACE, Lru, bytes_of, decode, width_for, width_for_in};
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
@@ -210,6 +330,26 @@ mod tests {
         assert_eq!(width_for(50.0), 128);
         assert_eq!(width_for(75.0), 160);
         assert_eq!(width_for(0.0), 32);
+    }
+
+    #[test]
+    fn headroom_by_kind() {
+        // A viewer picture is decoded at the size it is shown, an icon at twice.
+        assert_eq!(width_for_in(1000.0, 1.0), 1024);
+        assert_eq!(width_for_in(1000.0, 2.0), 2016);
+        assert_eq!(width_for_in(200.0, 1.5), 320);
+        assert_eq!(width_for_in(0.0, 1.0), 32);
+    }
+
+    #[test]
+    fn removed_keys_free_their_bytes() {
+        let mut l = Lru::default();
+        let t = Instant::now();
+        l.touch(&key(1), 100, t);
+        l.touch(&key(2), 50, t);
+        l.remove(&key(1));
+        l.remove(&key(9));
+        assert_eq!((l.len(), l.bytes()), (1, 50));
     }
 
     #[test]

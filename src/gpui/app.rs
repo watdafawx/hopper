@@ -192,6 +192,7 @@ pub struct AppView {
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store = cx.new(Store::new);
+        crate::memlog::start(store.clone(), cx);
         let library = cx.new(|cx| LibraryView::new(store.clone(), window, cx));
         let browse = cx.new(|cx| BrowseView::new(store.clone(), window, cx));
         let servers = cx.new(|cx| ServersView::new(store.clone(), window, cx));
@@ -793,6 +794,7 @@ impl AppView {
         }
         self.remember_page(cx);
         self.track(cx);
+        crate::memlog::mark(&format!("page {}", page.label()), cx);
         cx.notify();
     }
 
