@@ -31,6 +31,7 @@
   import SourceAdd from './SourceAdd.svelte';
   import SourceFind from './SourceFind.svelte';
   import { askPower } from './lib/consoleKit.js';
+  import { showSourcesHint } from './lib/sourcehint.js';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { ask, confirmIt } from './lib/dialog.svelte.js';
@@ -108,7 +109,10 @@
   let finding = $state(false);
   // Mods from GitHub and other links are on for this panel.
   let srcOn = $state(false);
-  api('/settings/sources').then((r) => (srcOn = r.allowed)).catch(() => {});
+  // The setting was read (so this login may change it): the hint under the Unknown view needs it.
+  let srcKnown = $state(false);
+  let srcHintClosed = $state(false);
+  api('/settings/sources').then((r) => { srcOn = r.allowed; srcKnown = true; }).catch(() => {});
 
   async function trustSource(m) {
     if (!(await confirmIt(`Get updates from ${m.src_publisher}?`, { body: `This mod came with a sync or a pack, pinned to the file its sender had. Files from ${m.src_label} aren't checked by CurseForge or Modrinth; trust ${m.src_publisher} only if you know who publishes it. Hopper never runs anything from a download.`, ok: 'Trust and check for updates' }))) return;
@@ -854,6 +858,7 @@
     </div>
     {#if server.changed_since_start && !restartClosed}<div class="banner small restart-note"><Info size={14} /><span class="grow">Changed while the server runs: restart it to load the changes</span><button class="btn sm" disabled={server.state === 'stopping'} onclick={() => askPower(server, 'restart')}><RotateCcw size={13} />Restart</button><button class="btn sm ghost icon" title="Hide" onclick={() => (restartClosed = true)}><X size={13} /></button></div>{/if}
     {#if identifying}<div class="banner small"><span class="spinner blue"></span>{identifying}… names, icons and updates fill in when it's done.</div>{/if}
+    {#if showSourcesHint({ known: srcKnown, allowed: srcOn, chip, unknown: counts.unknown, closed: srcHintClosed })}<div class="banner small src-hint"><Info size={14} /><span class="grow">Their sources may not have come along: mods from links is off. <a href="#/settings/content">Turn it on in Settings › Mod sources</a>.</span><button class="btn sm ghost icon" title="Hide" aria-label="Hide this note" onclick={() => (srcHintClosed = true)}><X size={13} /></button></div>{/if}
     {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
     {#if data && !data.curseforge}<CfKey inline onSaved={() => { load(); checkUpdates(true); }} />{/if}
     {#if twice.length}<div class="small warn row wrap">{twice.length} mod{twice.length === 1 ? ' is' : 's are'} in twice: {twice.map((l) => l[0].name).join(', ')}. <button class="link" onclick={async () => (await drop(older)) && changed(true)}>Keep newest</button><span class="muted">(undo from History)</span></div>{/if}

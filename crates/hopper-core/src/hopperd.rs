@@ -85,6 +85,13 @@ pub fn web_url(p: &Path) -> Option<String> {
     Some(url)
 }
 
+/// The panel's Settings > Mod sources page (where "mods from links" is
+/// turned on), for the panel a remote server is on.
+pub fn mod_sources_url(p: &Path) -> Option<String> {
+    let (_, r) = remote_of(p)?;
+    Some(format!("{}/#/settings/content", r.base))
+}
+
 /// The stand-in root for a server on a Hopper Server. The first panel's
 /// servers keep `hopperd:\<folder>` (pairings are saved by it); others get
 /// their panel's id in between (see [`panel_root`]).

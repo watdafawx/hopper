@@ -165,23 +165,93 @@ pub fn pins_for(root: &Path, files: &[String]) -> Vec<Pin> {
         .collect()
 }
 
+/// How a carry went: what was sent, what the other side attached, and why
+/// the rest stayed plain. One value for every sync (instance, local server,
+/// Hopper Server), so the words are the same everywhere.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CarryReport {
+    /// Mods whose sources were sent along.
+    pub sent: usize,
+    /// Mods that now follow their source on the other side.
+    pub attached: usize,
+    /// The Hopper Server has "mods from links" turned off and took none.
+    pub off: bool,
+    /// The sources couldn't be sent at all (panel unreachable, refused).
+    pub failed: Option<String>,
+}
+
+impl CarryReport {
+    /// What a panel's answer to the pins route says. An answer without
+    /// `attached` (an old panel) counts as all attached: nothing to say.
+    pub fn from_answer(sent: usize, answer: &serde_json::Value) -> CarryReport {
+        let off = answer["off"].as_bool().unwrap_or(false);
+        let attached = if off { 0 } else { answer["attached"].as_u64().map_or(sent, |n| (n as usize).min(sent)) };
+        CarryReport { sent, attached, off, failed: None }
+    }
+
+    /// Adds another carry's numbers (a sync can go both ways).
+    pub fn merge(&mut self, o: CarryReport) {
+        self.sent += o.sent;
+        self.attached += o.attached;
+        self.off |= o.off;
+        if self.failed.is_none() {
+            self.failed = o.failed;
+        }
+    }
+
+    /// Mods whose source didn't go along.
+    pub fn missed(&self) -> usize {
+        self.sent.saturating_sub(self.attached)
+    }
+
+    /// True when the panel's own setting is the reason, so the fix is to
+    /// turn "mods from links" on there.
+    pub fn needs_panel_setting(&self) -> bool {
+        self.off && self.missed() > 0
+    }
+
+    /// The one plain line for the sync's result, or `None` when everything
+    /// went along (or nothing had a source).
+    pub fn note(&self) -> Option<String> {
+        let n = self.missed();
+        if n == 0 && self.failed.is_none() {
+            return None;
+        }
+        let n = if n == 0 { self.sent } else { n };
+        let mods = if n == 1 { "1 mod's source".to_string() } else { format!("{n} mods' sources") };
+        let why = if self.off {
+            "this panel has mods from links turned off".to_string()
+        } else if let Some(e) = &self.failed {
+            format!("they couldn't be sent ({})", e.lines().next().unwrap_or(e).trim())
+        } else {
+            "those jars aren't the file the source was pinned to".to_string()
+        };
+        Some(format!("{mods} didn't go along: {why}."))
+    }
+}
+
 /// After a sync copied jars into `to` (an instance or a server): their
 /// pins from `from` go along. A Hopper Server gets them over its API.
-pub fn carry(from: &Path, to: &Path, files: &[String]) {
+pub fn carry(from: &Path, to: &Path, files: &[String]) -> CarryReport {
     let pins = pins_for(from, files);
-    if pins.is_empty() {
-        return;
+    let sent = pins.len();
+    if sent == 0 {
+        return CarryReport::default();
     }
     let r = match crate::hopperd::locate(to) {
         Some(c) => c.and_then(|(client, id, _)| {
-            client.put(&format!("/servers/{}/mods/sources", super::enc(&id)), serde_json::json!({ "pins": pins }))?;
-            Ok(())
+            let a = client.put(&format!("/servers/{}/mods/sources", super::enc(&id)), serde_json::json!({ "pins": pins }))?;
+            Ok(CarryReport::from_answer(sent, &a))
         }),
-        None => apply(to, &pins).map(|_| ()),
+        // A folder Hopper doesn't track (no hopper.json) has nowhere to keep
+        // them: nothing to report, as before.
+        None if !to.join(crate::instances::HOPPER_FILE).is_file() => Ok(CarryReport::default()),
+        None => apply(to, &pins).map(|n| CarryReport { sent, attached: n, ..Default::default() }),
     };
-    if let Err(e) = r {
+    r.unwrap_or_else(|e| {
         log::warn!("sources didn't go along to {}: {e:#}", to.display());
-    }
+        CarryReport { sent, failed: Some(format!("{e:#}")), ..Default::default() }
+    })
 }
 
 /// The mods jars among sync results that landed in `root` (file names).

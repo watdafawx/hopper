@@ -208,6 +208,8 @@ pub struct SyncPanel {
     settle: widgets::Settle,
     _ticker: Option<Task<()>>,
     result: Option<Result<String, Vec<String>>>,
+    /// After a sync: how the mods' sources went along (hopper::sources::carry::CarryReport), when some didn't.
+    carry: Option<hopper::sources::carry::CarryReport>,
     /// The store's server revision this comparison is for.
     seen_rev: u64,
     scroll: UniformListScrollHandle,
@@ -334,6 +336,7 @@ impl SyncPanel {
             settle: Default::default(),
             _ticker: None,
             result: None,
+            carry: None,
             seen_rev,
             scroll: UniformListScrollHandle::new(),
             room: None,
@@ -504,6 +507,7 @@ impl SyncPanel {
                 ..Default::default()
             };
             self.result = None;
+            self.carry = None;
             self.diff = None;
             // Another server's crash isn't this one's.
             self.crash = None;
@@ -831,13 +835,15 @@ impl SyncPanel {
         }
         self.running = true;
         self.result = None;
+        self.carry = None;
         self._task = Some(cx.spawn(async move |this, cx| {
-            let results = cx
-                .background_spawn(async move { rigsync::run_on(ops, &server, &inst.root) })
+            let (results, carry) = cx
+                .background_spawn(async move { rigsync::run_on_report(ops, &server, &inst.root) })
                 .await;
             this.update(cx, |this, cx| {
                 this.running = false;
                 this.result = Some(rigsync::summary(&results));
+                this.carry = carry.note().is_some().then_some(carry);
                 if matches!(this.result, Some(Ok(_))) {
                     this.mark_live_sync(cx);
                 }
@@ -847,6 +853,29 @@ impl SyncPanel {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// The line under a sync's result when some mods' sources stayed behind,
+    /// with a button to the panel's Mod sources page when that setting is why.
+    fn carry_notice(&self, server: &ServerInfo, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let report = self.carry.as_ref()?;
+        let note = report.note()?;
+        let url = report.needs_panel_setting().then(|| hopper::hopperd::mod_sources_url(&server.root)).flatten();
+        let warning = cx.theme().warning;
+        Some(
+            widgets::notice_bar(warning, IconName::TriangleAlert, cx)
+                .id("sync-carry-note")
+                .child(div().flex_1().min_w_0().text_sm().child(note))
+                .children(url.map(|u| {
+                    Button::new("sync-carry-open")
+                        .small()
+                        .outline()
+                        .icon(IconName::ExternalLink)
+                        .label("Turn it on in the panel")
+                        .on_click(move |_, _, cx| cx.open_url(&u))
+                }))
+                .into_any_element(),
+        )
     }
 
     /// This tab changed the server's files: the pack's pre-join banner
@@ -884,18 +913,22 @@ impl SyncPanel {
         self.settle.clicked();
         self.acting.insert(key.clone(), words);
         self.result = None;
+        self.carry = None;
         self.ensure_ticker(cx);
         cx.spawn(async move |this, cx| {
             // History is read, changed and written: one action at a time.
             static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            let results = cx
+            let (results, carry) = cx
                 .background_spawn(async move {
                     let _g = ONE.lock().unwrap_or_else(|e| e.into_inner());
-                    rigsync::run_on(ops, &server, &inst.root)
+                    rigsync::run_on_report(ops, &server, &inst.root)
                 })
                 .await;
             this.update(cx, |this, cx| {
                 this.acting.remove(&key);
+                if carry.note().is_some() {
+                    this.carry = Some(carry);
+                }
                 match rigsync::summary(&results) {
                     Ok(_) => {
                         this.acted.insert(key, words.1);
@@ -3115,6 +3148,7 @@ impl Render for SyncPanel {
                     ))
                     .children(footer)
                     .children(result)
+                    .children(self.carry_notice(&server, cx))
                     .into_any_element()
             }
             },
