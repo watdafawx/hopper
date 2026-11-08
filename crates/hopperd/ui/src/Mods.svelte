@@ -1083,6 +1083,9 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .okt { color: var(--green); gap: 5px; }
   .link { color: var(--acc); text-decoration: underline; font-size: 12px; }
   .restart-note .grow { flex: 1; }
+  /* Readable in both themes: the panel's orange link is too faint on the light page. */
+  .src-hint .grow { flex: 1; color: var(--text); }
+  .src-hint a { color: inherit; text-decoration: underline; font-weight: 600; }
   .banner { display: flex; align-items: center; gap: 8px; border: 1px solid #60a5fa44; background: var(--blue-dim); border-radius: var(--radius-lg); padding: 6px 10px; color: var(--subtle); }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
   .spinner.blue { color: var(--blue); }
