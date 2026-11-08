@@ -82,6 +82,10 @@ pub struct Config {
     pub pack_update_clean: std::collections::HashMap<String, bool>,
     /// How long each server's `.hopper-backups` keeps the files behind Undo.
     pub backup_retention: hopper_core::retention::Retention,
+    /// For a mod version with no changelog from its author, show what changed
+    /// in the files (as in Hopper desktop's setting). Off until the owner
+    /// turns it on; the panel then compares the old and new jar for its own mods.
+    pub files_changes: bool,
 }
 
 impl Default for Config {
@@ -115,6 +119,7 @@ impl Default for Config {
             clean_pack_updates: true,
             pack_update_clean: Default::default(),
             backup_retention: Default::default(),
+            files_changes: false,
         }
     }
 }

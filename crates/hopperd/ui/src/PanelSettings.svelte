@@ -30,6 +30,7 @@
   import Addresses from './Addresses.svelte';
   import CfKey from './CfKey.svelte';
   import SourcesSetting from './SourcesSetting.svelte';
+  import FilesChangesSetting from './FilesChangesSetting.svelte';
   import PackSwitchSetting from './PackSwitchSetting.svelte';
   import Security from './Security.svelte';
   import Users from './Users.svelte';
@@ -83,7 +84,7 @@
         {#if c.id === 'panel-folder'}<ServersFolder /><BackupRetention />
         {:else if c.id === 'access' || c.id === 'account'}<Access {hello} {me} bind:pending />
         {:else if c.id === 'addresses'}<Addresses />
-        {:else if c.id === 'content'}<CfKey /><SourcesSetting />
+        {:else if c.id === 'content'}<CfKey /><SourcesSetting /><FilesChangesSetting />
         {:else if c.id === 'security'}<Security />
         {:else if c.id === 'users'}<Users />
         {:else if c.id === 'webhooks'}<Webhooks />

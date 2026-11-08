@@ -8,6 +8,7 @@
   import { api } from './lib/api.js';
   import Changelog from './lib/Changelog.svelte';
   import VersionCard from './lib/VersionCard.svelte';
+  import FilesChanges from './lib/FilesChanges.svelte';
   import { dialog as question } from './lib/dialog.svelte.js';
   import { installVersion, resetConfig, setLocked } from './lib/modops.js';
 
@@ -24,6 +25,13 @@
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
   const key = $derived(mod.file);
   const when = (d) => (d ? new Date(d).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '');
+  // At most a few versions of one list compare their files at once.
+  const scanning = $derived.by(() => {
+    let n = 0;
+    const m = {};
+    for (const e of info?.entries || []) if (!e.same_as && !e.markdown?.trim() && e.file_id) m[e.file_id] = n++ < 5;
+    return m;
+  });
   const stem = (f) => (f || '').replace(/\.jar(\.disabled)?$/i, '');
 
   async function load() {
@@ -113,6 +121,7 @@
             <button class="btn sm ghost" title="Move this mod's config files to backups so it writes fresh defaults" onclick={() => resetConfig(base, mod)}><Settings2 size={13} />Reset config</button>{/if}
         {/snippet}
         {#if e.same_as}<div class="small muted"><i>Same notes as {e.same_as}</i></div>
+        {:else if !e.markdown?.trim() && e.file_id}<FilesChanges {base} file={mod.file} project={info.project_id} version={e.file_id} enabled={info.files_changes} scan={scanning[e.file_id]} />
         {:else}{@render log(e.markdown)}{/if}
         {#if e.earlier_count && !e.same_as}
           <button class="row ohead small muted" onclick={() => (earlierOpen[e.name] = !earlierOpen[e.name])}>{#if earlierOpen[e.name]}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}Earlier versions ({e.earlier_count})</button>
@@ -131,6 +140,7 @@
         {#if open[o.file_id] === null}<div class="small muted row"><span class="spinner blue"></span>Loading the changelog</div>
         {:else if typeof open[o.file_id] === 'string'}
           {#if open[o.file_id].startsWith('!')}<div class="err small">{open[o.file_id].slice(1)}</div>
+          {:else if !open[o.file_id].trim()}<FilesChanges {base} file={mod.file} project={info.project_id} version={o.file_id} enabled={info.files_changes} />
           {:else}{@render log(open[o.file_id])}{/if}
           {#if otherEarlier[o.file_id]}
             <button class="row ohead small muted" onclick={() => (earlierOpen['o' + o.file_id] = !earlierOpen['o' + o.file_id])}>{#if earlierOpen['o' + o.file_id]}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}Earlier versions ({otherEarlier[o.file_id].count})</button>

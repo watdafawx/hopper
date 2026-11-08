@@ -395,6 +395,8 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
 
     keep_addresses_current(app.clone(), ca, own_cert.clone(), net_now);
 
+    // Old "changes in the files" results, and any jar a scan left in the temp folder.
+    std::thread::spawn(hopper_core::changelog_files::tidy);
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(serve(app, cfg, own_cert, shutdown))
 }
 

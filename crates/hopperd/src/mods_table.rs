@@ -4,7 +4,7 @@
 //! between CurseForge and Modrinth.
 
 use crate::App;
-use crate::api::{ApiResult, bad, not_found, require};
+use crate::api::{ApiResult, bad, not_found, require, require_owner};
 use crate::servers::Entry;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method};
@@ -21,6 +21,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/v1/servers/{id}/mods/changelogs", get(changelogs))
+        .route("/api/v1/servers/{id}/mods/files-changes", get(files_changes))
+        .route("/api/v1/settings/files-changes", get(files_setting).put(set_files_setting))
         .route("/api/v1/servers/{id}/mods/related", post(related))
         .route("/api/v1/servers/{id}/mods/toggle-many", post(toggle_many))
         .route("/api/v1/servers/{id}/mods/remove-many", post(remove_many))
@@ -91,6 +93,7 @@ async fn changelogs(
     let e = entry(&app, &headers, &method, &id)?;
     let file = q.get("file").cloned().unwrap_or_default();
     let sid = id.clone();
+    let files_on = app.cfg.read().unwrap().files_changes;
     let v = blocking(move || {
         let inst = crate::mods_api::instance_of(&e)?;
         let a = inst
@@ -163,12 +166,86 @@ async fn changelogs(
             "locked": a.locked, "from": a.file_name,
             "to": update.as_ref().map(|f| f.file_name.clone()),
             "behind": behind,
+            "files_changes": files_on,
             "latest": latest.map(|(id, v)| json!({ "file_id": id.to_string(), "version": v })),
             "entries": rows, "others": others,
         }))
     })
     .await?;
     Ok(Json(v))
+}
+
+// ---- changes in the files -------------------------------------------------
+
+/// What one mod version changed in its jar, for a version whose author wrote
+/// no changelog: compares it with the version before (the installed jar and
+/// History first, a download only for what's missing). Does nothing unless
+/// the owner turned "Changes in the files" on.
+async fn files_changes(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    if !app.cfg.read().unwrap().files_changes {
+        return Err(bad("Changes in the files is off. The owner can turn it on in Settings."));
+    }
+    let file = q.get("file").cloned().unwrap_or_default();
+    let version: u64 = q.get("version").and_then(|v| v.parse().ok()).ok_or_else(|| bad("Which version?"))?;
+    let v = blocking(move || {
+        let inst = crate::mods_api::instance_of(&e)?;
+        let a = inst
+            .addons
+            .iter()
+            .find(|a| same_file(&a.file_name, &file))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("{file} isn't on this server."))?;
+        anyhow::ensure!(a.project_id != 0, "Hopper doesn't know where {file} is from yet.");
+        let mut all = source::files(a.project_id, &inst.game_version, install::loader_of(&inst))?;
+        if !all.iter().any(|f| f.id == version) {
+            all.push(source::file(a.project_id, version)?);
+        }
+        let new = all.iter().find(|f| f.id == version).cloned().ok_or_else(|| anyhow::anyhow!("That version isn't listed."))?;
+        let old = hopper_core::changelog_files::previous_of(&all, &new)
+            .ok_or_else(|| anyhow::anyhow!("This is the first version Hopper knows of, so there is nothing to compare it with."))?;
+        let installed = Some((a.file_id, inst.addon_path(&a)));
+        let ch = hopper_core::changelog_files::scan_versions(
+            Some(&inst.root),
+            a.project_id,
+            installed.as_ref().map(|(i, p)| (*i, p.as_path())),
+            old,
+            &new,
+        )?;
+        Ok(json!({ "markdown": ch.to_markdown() }))
+    })
+    .await?;
+    Ok(Json(v))
+}
+
+async fn files_setting(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    Ok(Json(json!({ "on": app.cfg.read().unwrap().files_changes })))
+}
+
+#[derive(Deserialize)]
+struct FilesSettingBody {
+    on: bool,
+}
+
+/// The owner's setting, panel-wide.
+async fn set_files_setting(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Json(b): Json<FilesSettingBody>,
+) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    let mut cfg = app.cfg.write().unwrap();
+    cfg.files_changes = b.on;
+    cfg.save(&app.data_dir).map_err(|e| bad(format!("{e:#}")))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ---- related mods -------------------------------------------------------------
