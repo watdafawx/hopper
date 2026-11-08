@@ -200,7 +200,6 @@ const ENTRIES: &[Entry] = &[
     e(C::General, "delete-permanently", "Skip the Recycle Bin", "Deleted instances, worlds and backups are removed for good, so they don't fill up your C: drive. Off sends them to the Recycle Bin.", "delete recycle bin trash permanent disk space"),
     e(C::General, "translate", "Translate mod text", "Offer to translate changelogs and descriptions that aren't in English. It runs on this PC: a language's model downloads only when you first translate from it (about 300 MB, 150 MB once stored), and no text is sent anywhere.", "translate translation language english chinese russian japanese korean changelog description offline"),
     e(C::General, "translate-langs", "Translation models", "Languages downloaded for translation. Remove one to free its space.", "translate translation language model download disk space remove"),
-    e(C::Content, "files-changes", "Changes in the files", hopper::changelog_files::SETTING_HELP, "changelog compare jar files diff what changed no changelog author scan download"),
     e(C::Accounts, "account", "Microsoft accounts", "Switch which one starts your games, add another, or sign one out.", "sign in login microsoft profile skin"),
     e(C::Folders, "instances-root", "Instances folder", "Where your instances live. CurseForge's Instances folder works.", "path directory library"),
     e(C::Folders, "launcher-dir", "Launcher folder", "The folder with minecraft.exe. CurseForge keeps one in Curse\\Install.", "minecraft.exe mojang path directory"),
@@ -274,6 +273,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Content, "web-downloads", "Parallel web downloads", "Some CurseForge files only download from the website. Hopper's download window gets this many at once. Fewer helps if CurseForge keeps asking it to wait.", "curseforge website download window parallel tabs pages at once speed cloudflare"),
     e(C::Content, "allow-sources", "Allow mods from GitHub and other links", "Lets Add content's \"From GitHub or a link\" and a mod's \"Follow a source\" get mods from there. These files skip CurseForge's and Modrinth's checks, so add them only from people you trust.", "github maven jenkins link url source release jar"),
     e(C::Content, "github-token", "GitHub token", "Optional. Without one GitHub allows 60 checks an hour; Hopper asks only when something may have changed. A token (no scopes needed) raises that to 5,000. Kept in Windows Credential Manager.", "github token api rate limit"),
+    e(C::Content, "files-changes", "Changes in the files", hopper::changelog_files::SETTING_HELP, "changelog compare jar files diff what changed no changelog author scan download"),
     e(C::Discord, "discord", "Show what I'm doing on Discord", "Needs the Discord app open on this PC, with Discord's own activity sharing on. Hopper only talks to Discord on this PC.", "discord rich presence status activity profile friends playing"),
     e(C::Discord, "discord-pack", "Show the pack", "Its name and icon. Off, friends see \"Playing Minecraft\".", "discord pack name icon modpack"),
     e(C::Discord, "discord-browsing", "Show what I'm browsing", "\"Browsing modpacks on CurseForge\", or the mod you're looking at. Never what you search for.", "discord browse search mods"),
@@ -2267,7 +2267,7 @@ impl SettingsPage {
             )
         };
         let files = Row::new("files-changes").control(self.switch("files-changes", s.files_changes, |st, v| st.files_changes = v, cx));
-        let mut rows = vec![key, browse, web, allow, files];
+        let mut rows = vec![key, browse, web, allow];
         if s.allow_sources {
             let saved = hopper::sources::http::has_github_token();
             let typed = !self.gh_token.read(cx).value().trim().is_empty();
@@ -2303,6 +2303,7 @@ impl SettingsPage {
                     ),
             );
         }
+        rows.push(files);
         vec![Block::card(None, rows)]
     }
 
