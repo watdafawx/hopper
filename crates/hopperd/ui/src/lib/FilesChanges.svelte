@@ -81,5 +81,5 @@
   .col { display: flex; flex-direction: column; gap: 8px; }
   .empty { font-size: 13px; line-height: 1.6; }
   .spinner.blue { color: var(--blue); }
-  .notes { background: var(--base); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; max-height: 320px; overflow: auto; overflow-wrap: anywhere; }
+  .notes { background: var(--base); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; overflow-wrap: anywhere; }
 </style>
