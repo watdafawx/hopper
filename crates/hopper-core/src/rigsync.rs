@@ -882,25 +882,35 @@ pub fn mod_ops(act: ModAct, d: &DiffEntry, inst: &Instance, server: &ServerInfo)
 /// Runs the operations and records them in the server's history (pulls
 /// back up into the client, so their backups go there).
 pub fn run(ops: Ops, server_root: &Path, inst_root: &Path) -> Vec<SyncResult> {
+    run_report(ops, server_root, inst_root).0
+}
+
+/// [`run`] plus how the mods' sources went along ([`crate::sources::carry::CarryReport`]).
+pub fn run_report(ops: Ops, server_root: &Path, inst_root: &Path) -> (Vec<SyncResult>, crate::sources::carry::CarryReport) {
     let mut results = crate::sync::execute(ops.up, server_root);
     crate::history::record(server_root, "server", server_root, &results);
     // Mods from GitHub and other links keep their source on the other side.
-    crate::sources::carry::carry(inst_root, server_root, &crate::sources::carry::copied_jars(&results, server_root));
+    let mut report = crate::sources::carry::carry(inst_root, server_root, &crate::sources::carry::copied_jars(&results, server_root));
     let pulled = crate::sync::execute(ops.down, inst_root);
     crate::history::record(server_root, "client", inst_root, &pulled);
-    crate::sources::carry::carry(server_root, inst_root, &crate::sources::carry::copied_jars(&pulled, inst_root));
+    report.merge(crate::sources::carry::carry(server_root, inst_root, &crate::sources::carry::copied_jars(&pulled, inst_root)));
     results.extend(pulled);
-    results
+    (results, report)
 }
 
 /// Like [`run`], for any server: a server on a Hopper Server syncs over its
 /// API (replaced and removed files land in the panel's trash; pulls keep
 /// local backups as usual).
 pub fn run_on(ops: Ops, server: &ServerInfo, inst_root: &Path) -> Vec<SyncResult> {
+    run_on_report(ops, server, inst_root).0
+}
+
+/// [`run_on`] plus the carry report.
+pub fn run_on_report(ops: Ops, server: &ServerInfo, inst_root: &Path) -> (Vec<SyncResult>, crate::sources::carry::CarryReport) {
     if let Some(r) = &server.remote {
         crate::hopperd::register(&server.root, r);
     }
-    run(ops, &server.root, inst_root)
+    run_report(ops, &server.root, inst_root)
 }
 
 /// "Done: 12 files; 3 kept in .hopper-backups." or the failures.

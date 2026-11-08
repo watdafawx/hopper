@@ -510,7 +510,8 @@ fn sync_carries_pins_to_a_server_folder() {
     }];
     let jars = carry::copied_jars(&results, &server);
     assert_eq!(jars, ["modmenu-11.0.3.jar"]);
-    carry::carry(&inst_root, &server, &jars);
+    let rep = carry::carry(&inst_root, &server, &jars);
+    assert_eq!((rep.sent, rep.attached, rep.note()), (1, 1, None));
     let pins = carry::pins_in(&server);
     assert_eq!(pins.get("modmenu-11.0.3.jar").map(|s| s.seen.as_str()), Some("v11.0.3"));
     // And the peer manifest shows it for that jar.
@@ -947,4 +948,34 @@ fn pack_release_zips() {
     let m: ModSource = serde_json::from_str(r#"{"kind":"github","url":"o/r"}"#).unwrap();
     assert_eq!(m.class, 0);
     assert!(!serde_json::to_string(&m).unwrap().contains("class"));
+}
+
+#[test]
+fn carry_report_says_why_sources_stayed_behind() {
+    use carry::CarryReport;
+    use serde_json::json;
+    // The panel has mods from links off: nothing attached, and it says so.
+    let off = CarryReport::from_answer(9, &json!({ "attached": 0, "off": true }));
+    assert!(off.needs_panel_setting());
+    assert_eq!(off.note().unwrap(), "9 mods' sources didn't go along: this panel has mods from links turned off.");
+    // One mod: singular.
+    let one = CarryReport::from_answer(1, &json!({ "attached": 0, "off": true }));
+    assert_eq!(one.note().unwrap(), "1 mod's source didn't go along: this panel has mods from links turned off.");
+    // Some jars weren't the pinned file.
+    let part = CarryReport::from_answer(5, &json!({ "attached": 3 }));
+    assert_eq!((part.missed(), part.needs_panel_setting()), (2, false));
+    assert_eq!(part.note().unwrap(), "2 mods' sources didn't go along: those jars aren't the file the source was pinned to.");
+    // All attached: no line.
+    assert_eq!(CarryReport::from_answer(4, &json!({ "attached": 4 })).note(), None);
+    // An old panel answers without `attached`: nothing to say.
+    assert_eq!(CarryReport::from_answer(4, &json!({ "ok": true })).note(), None);
+    // Nothing sent: no line.
+    assert_eq!(CarryReport::default().note(), None);
+    // Couldn't reach the panel.
+    let failed = CarryReport { sent: 2, failed: Some("connection refused\nmore".into()), ..Default::default() };
+    assert_eq!(failed.note().unwrap(), "2 mods' sources didn't go along: they couldn't be sent (connection refused).");
+    // A sync that goes both ways adds up.
+    let mut both = off.clone();
+    both.merge(CarryReport { sent: 2, attached: 2, ..Default::default() });
+    assert_eq!((both.sent, both.attached, both.missed(), both.off), (11, 2, 9, true));
 }

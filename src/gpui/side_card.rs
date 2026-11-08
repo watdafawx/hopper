@@ -289,12 +289,16 @@ impl AddonsView {
             return;
         }
         cx.spawn_in(window, async move |this, cx| {
-            let results = cx
-                .background_spawn(async move { rigsync::run(ops, &server.root, &inst.root) })
+            let (results, carry) = cx
+                .background_spawn(async move { rigsync::run_report(ops, &server.root, &inst.root) })
                 .await;
             this.update_in(cx, |this, window, cx| {
                 let n = match rigsync::summary(&results) {
-                    Ok(done) => Notification::success(done),
+                    Ok(done) => match carry.note() {
+                        Some(note) => Notification::warning(format!("{done}
+{note}")),
+                        None => Notification::success(done),
+                    },
                     Err(failed) => Notification::error(failed.join("\n")),
                 };
                 window.push_notification(n, cx);
