@@ -520,8 +520,16 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
                 && s.wake_on_join
                 && !player.is_empty()
                 && core::may_wake(&e.root, s.wake_who, &player)
-                && (hs.is_forge_client() || app.router.modded_clients.lock().unwrap().contains(&Router::refused_key(&e.id, &player)))
-                && core::last_ping(&e.root).is_none_or(|v| core::ping_is_modded(&v))
+                && match core::last_ping(&e.root) {
+                    // A server known to be modded: everyone who joins is held.
+                    // NeoForge 1.21.1 clients send no marker in the handshake
+                    // (seen with a real client), so the client can't be told
+                    // from a vanilla one, and a vanilla one can't join such a
+                    // server anyway.
+                    Some(v) => core::ping_is_modded(&v),
+                    // Never seen it answer: only clients known to be modded.
+                    None => hs.is_forge_client() || app.router.modded_clients.lock().unwrap().contains(&Router::refused_key(&e.id, &player)),
+                }
         };
         if kind == Standin::WakeFailed {
             return kick(sock, &core::wake_failed_kick(&name, s.retry_in_minutes(unix_now()))).await;
