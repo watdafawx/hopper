@@ -255,11 +255,7 @@ pub fn place_downloads(inst: &mut Instance, dir: &Path) -> anyhow::Result<Vec<St
         fs::copy(at, &tmp).with_context(|| format!("copying {}", at.display()))?;
         match &p.addon {
             Some(a) => {
-                let old = inst
-                    .addons
-                    .iter()
-                    .position(|o| o.project_id == a.project_id && a.project_id != 0)
-                    .map(|i| inst.addons.remove(i));
+                let old = crate::install::take_old(inst, |o| o.project_id == a.project_id && a.project_id != 0)?;
                 let mut new = a.clone();
                 new.file_name = p.file_name.clone();
                 crate::install::replace_addon(inst, old, new, &tmp)?;
@@ -1010,27 +1006,28 @@ fn commit(
         match s.addon {
             Some(new) => {
                 let stem = crate::serverpack::jar_stem(&new.file_name);
-                let old = inst
-                    .addons
-                    .iter()
-                    .position(|o| {
-                        (new.project_id != 0 && o.project_id == new.project_id)
-                            || (o.folder() == new.folder()
-                                && o.file_name.eq_ignore_ascii_case(&new.file_name))
-                    })
+                // Every copy of the project goes, the turned-off ones too;
+                // the new file takes the on/off state of the one that was on.
+                let mut old = crate::install::take_old(inst, |o| {
+                    (new.project_id != 0 && o.project_id == new.project_id)
+                        || (o.folder() == new.folder() && o.file_name.eq_ignore_ascii_case(&new.file_name))
+                })?;
+                if old.is_none() {
                     // A file with no known project: the leaving pack file
                     // with the same name minus version ("a-1.jar" for
                     // "a-2.jar") is its older self.
-                    .or_else(|| {
-                        inst.addons.iter().position(|o| {
+                    old = inst
+                        .addons
+                        .iter()
+                        .position(|o| {
                             (o.project_id == 0 || new.project_id == 0)
                                 && o.folder() == new.folder()
                                 && drop(o)
                                 && !stem.is_empty()
                                 && crate::serverpack::jar_stem(&o.file_name) == stem
                         })
-                    })
-                    .map(|i| inst.addons.remove(i));
+                        .map(|i| inst.addons.remove(i));
+                }
                 crate::install::replace_addon(inst, old, new, &s.tmp)?;
             }
             None => {
@@ -3170,6 +3167,70 @@ mod pack_fix_tests {
         let backups = walk(&inst.root.join(crate::sync::BACKUP_DIR));
         assert!(backups.iter().any(|p| p.ends_with("x-1.jar.disabled")));
         assert!(backups.iter().any(|p| p.ends_with("gone.jar.disabled")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// TNP-LL8, 2026-11: an older file of a mod turned off beside the new
+    /// one on. A pack update replaces every copy of a project, on or off,
+    /// and the new file takes the state of the copy that was on. A pack mod
+    /// the new pack drops goes with all its copies; a mod of your own stays.
+    #[test]
+    fn a_pack_update_leaves_no_older_copy_beside_the_new_file() {
+        let dir = temp("nocopy");
+        let mut inst = Instance { root: dir.join("inst"), ..Default::default() };
+        fs::create_dir_all(inst.mods_dir()).unwrap();
+        let entry = |id, name: &str, on: bool, pack: bool| Addon {
+            project_id: id,
+            file_id: 1,
+            file_name: name.into(),
+            enabled: on,
+            from_pack: pack,
+            ..Default::default()
+        };
+        // 1 on, 2 off, 3 a double (one on, one off), 4 a double both off,
+        // 5 dropped by the pack (on and off copy), 6 yours.
+        inst.addons = vec![
+            entry(1, "a-1.jar", true, true),
+            entry(2, "b-1.jar", false, true),
+            entry(3, "c-0.jar", false, true),
+            entry(3, "c-1.jar", true, true),
+            entry(4, "d-0.jar", false, true),
+            entry(4, "d-1.jar", false, true),
+            entry(5, "e-1.jar", true, true),
+            entry(5, "e-0.jar", false, true),
+            entry(6, "mine-1.jar", true, false),
+        ];
+        for a in &inst.addons {
+            let n = if a.enabled { a.file_name.clone() } else { format!("{}.disabled", a.file_name) };
+            fs::write(inst.mods_dir().join(n), "old").unwrap();
+        }
+        let staging = Staging::new(&inst.root).unwrap();
+        let stage = |i, id, name: &str| {
+            let tmp = staging.path(i, name);
+            fs::create_dir_all(tmp.parent().unwrap()).unwrap();
+            fs::write(&tmp, "new").unwrap();
+            Staged {
+                addon: Some(Addon { project_id: id, file_id: 2, file_name: name.into(), enabled: true, from_pack: true, ..Default::default() }),
+                rel: format!("mods/{name}"),
+                tmp,
+            }
+        };
+        let staged = vec![stage(0, 1, "a-2.jar"), stage(1, 2, "b-2.jar"), stage(2, 3, "c-2.jar"), stage(3, 4, "d-2.jar")];
+        commit(&mut inst, staged, |a| a.from_pack && a.project_id == 5).unwrap();
+        drop(staging);
+        assert_eq!(mods(&inst), ["a-2.jar", "b-2.jar.disabled", "c-2.jar", "d-2.jar.disabled", "mine-1.jar"]);
+        let state = |f: &str| inst.addons.iter().find(|a| a.file_name == f).map(|a| a.enabled);
+        assert_eq!(state("a-2.jar"), Some(true));
+        assert_eq!(state("b-2.jar"), Some(false));
+        assert_eq!(state("c-2.jar"), Some(true), "the copy that was on decides");
+        assert_eq!(state("d-2.jar"), Some(false));
+        assert_eq!(state("mine-1.jar"), Some(true));
+        assert_eq!(inst.addons.len(), 5, "one entry per mod, no older copy tracked");
+        // Everything set aside is in History (the backups), so Undo can put it back.
+        let backups = walk(&inst.root.join(crate::sync::BACKUP_DIR));
+        for f in ["a-1.jar", "b-1.jar.disabled", "c-0.jar.disabled", "c-1.jar", "d-0.jar.disabled", "d-1.jar.disabled", "e-1.jar", "e-0.jar.disabled"] {
+            assert!(backups.iter().any(|p| p.ends_with(f)), "{f} should be in the backups: {backups:?}");
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

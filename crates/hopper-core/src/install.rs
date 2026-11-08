@@ -132,6 +132,28 @@ pub(crate) fn replace_addon(
     Ok(())
 }
 
+/// Takes the entry a new file of a project replaces out of `inst.addons`,
+/// and sets every other entry `is_old` picks aside (to backups, so History
+/// can put it back) so no older copy of the mod stays beside the new file,
+/// turned off or not. The entry returned is the copy that was on, else the
+/// first: the new file takes its on/off state. Pack updates and single-mod
+/// updates share this rule.
+pub(crate) fn take_old(inst: &mut Instance, is_old: impl Fn(&Addon) -> bool) -> anyhow::Result<Option<Addon>> {
+    let hits: Vec<usize> = (0..inst.addons.len()).filter(|&i| is_old(&inst.addons[i])).collect();
+    let Some(&keep) = hits.iter().find(|&&i| inst.addons[i].enabled).or(hits.first()) else {
+        return Ok(None);
+    };
+    // Highest index first, so the others keep their places while removing.
+    for &i in hits.iter().rev().filter(|&&i| i != keep) {
+        let extra = inst.addons[i].clone();
+        move_out(&inst.root, &inst.addon_path(&extra), false)?;
+        inst.addons.remove(i);
+    }
+    // The ones before it are gone, so it moved up by that many places.
+    let moved = hits.iter().filter(|&&i| i < keep).count();
+    Ok(Some(inst.addons.remove(keep - moved)))
+}
+
 fn inst_path(root: &std::path::Path, a: &Addon) -> std::path::PathBuf {
     let mut name = a.file_name.clone();
     if !a.enabled {
@@ -257,11 +279,7 @@ fn place_file(
     if let Some(s) = new.source.as_mut() {
         s.sha256 = crate::sources::sha256_file(dest)?;
     }
-    let old = inst
-        .addons
-        .iter()
-        .position(|a| a.project_id == m.id)
-        .map(|i| inst.addons.remove(i));
+    let old = take_old(inst, |a| a.project_id == m.id)?;
     if let (Some(s), Some(o)) = (new.source.as_mut(), old.as_ref().and_then(|o| o.source.as_ref())) {
         // What it followed before stays known, and so does its name.
         s.prev_project = o.prev_project;
