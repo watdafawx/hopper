@@ -125,22 +125,51 @@ pub const OFF_ON_SERVER: &str = "Turned off on the server";
 /// Compares the pack's mods ([`client_mods`]) with the server's. A mod
 /// turned off in the pack that the server still runs isn't "only on the
 /// server": its row asks to turn the server's copy off too. A mod the
-/// server has turned off (any version) isn't added there again: that left
-/// the old copy off beside a new one on, and the mod back on.
+/// server has turned off stays off: a different file of it in the pack
+/// replaces the server's off copy and is put there off too (an Update row
+/// whose server side is the off copy), so no older copy is left beside a
+/// new one and the mod isn't switched on. The same file turned off there is
+/// left alone.
 pub fn diff_mods(client: &[ModInfo], server: &[ModInfo]) -> Vec<DiffEntry> {
     let (server_off, server_on): (Vec<&ModInfo>, Vec<&ModInfo>) = server.iter().partition(|m| m.off);
     let server: Vec<ModInfo> = server_on.into_iter().cloned().collect();
-    let off_ids: HashSet<String> = server_off.iter().filter(|m| !m.mod_id.is_empty()).map(|m| m.mod_id.to_lowercase()).collect();
-    let off_stems: HashSet<String> = server_off.iter().map(|m| crate::serverpack::jar_stem(&m.file_name)).collect();
     let mut diff = diff_on(client, &server);
     for d in &mut diff {
         let Some(c) = d.client.as_ref().filter(|_| d.status == DiffStatus::OnlyClient) else { continue };
-        let off_there = (!c.mod_id.is_empty() && off_ids.contains(&c.mod_id.to_lowercase()))
-            || off_stems.contains(&crate::serverpack::jar_stem(&c.file_name));
-        if off_there {
-            d.action = DiffAction::Skip;
-            d.skip_reason = Some(OFF_ON_SERVER.into());
+        let stem = crate::serverpack::jar_stem(&c.file_name);
+        // The same mod by its id, else by its file name minus the version.
+        let same_mod = |o: &&&ModInfo| {
+            (!c.mod_id.is_empty() && o.mod_id.eq_ignore_ascii_case(&c.mod_id)) || crate::serverpack::jar_stem(&o.file_name) == stem
+        };
+        let Some(o) = server_off
+            .iter()
+            .filter(same_mod)
+            .max_by_key(|o| o.file_name.eq_ignore_ascii_case(&c.file_name))
+            .copied()
+        else {
+            continue;
+        };
+        if o.file_name.eq_ignore_ascii_case(&c.file_name) {
+            // The very file is already there, off: nothing to do, unless the pack turned it off too.
+            if !c.off {
+                d.action = DiffAction::Skip;
+                d.skip_reason = Some(OFF_ON_SERVER.into());
+            }
+            continue;
         }
+        let (cv, sv) = if !c.version.is_empty() && !o.version.is_empty() && c.version != o.version {
+            (c.version.clone(), o.version.clone())
+        } else {
+            (crate::scan::version_from_file_name(&c.file_name), crate::scan::version_from_file_name(&o.file_name))
+        };
+        d.status = if !cv.is_empty() && !sv.is_empty() && crate::scan::compare_versions(&cv, &sv).is_lt() {
+            DiffStatus::ServerNewer
+        } else {
+            DiffStatus::ClientNewer
+        };
+        d.server = Some(o.clone());
+        d.action = DiffAction::CopyToServer;
+        d.skip_reason = None;
     }
     diff
 }
@@ -548,7 +577,8 @@ pub fn join_check(diff: &[DiffEntry], blacklist: &HashSet<String>, pack_nf: Opti
         m.map(|m| if m.mod_name.is_empty() { m.file_name.clone() } else { m.mod_name.clone() }).filter(|n| !n.is_empty()).unwrap_or_else(|| d.mod_name.clone())
     };
     for d in diff {
-        if is_hidden(d, blacklist) || is_wont(d) {
+        // A mod turned off on the server isn't a version mismatch there.
+        if is_hidden(d, blacklist) || is_wont(d) || d.server.as_ref().is_some_and(|s| s.off) {
             continue;
         }
         let side = |m: &Option<ModInfo>| m.as_ref().map_or("", |m| m.side.as_str()).to_string();
@@ -726,7 +756,7 @@ impl Ops {
 pub fn push(rows: &[DiffEntry], inst: &Instance, server: &ServerInfo) -> Vec<SyncOp> {
     let rows: Vec<DiffEntry> = rows
         .iter()
-        .filter(|d| d.client.as_ref().is_some_and(|c| !c.off) && row_action(d.status) == Some(RowAct::Push))
+        .filter(|d| d.client.as_ref().is_some_and(|c| !c.off || d.server.as_ref().is_some_and(|s| s.off)) && row_action(d.status) == Some(RowAct::Push))
         .cloned()
         .map(|mut d| {
             d.action = DiffAction::CopyToServer;
@@ -743,6 +773,10 @@ pub fn pull(rows: &[DiffEntry], inst: &Instance, server: &ServerInfo) -> Vec<Syn
     let mut ops = Vec::new();
     for d in rows {
         let Some(s) = &d.server else { continue };
+        // A turned-off server copy isn't what runs there: nothing to take down.
+        if s.off {
+            continue;
+        }
         match d.status {
             DiffStatus::OnlyServer if is_off_here(d) => continue,
             DiffStatus::OnlyServer => {}
@@ -765,13 +799,19 @@ pub fn pull(rows: &[DiffEntry], inst: &Instance, server: &ServerInfo) -> Vec<Syn
     ops
 }
 
+/// The file a server mod is stored as: a turned-off one ends in `.disabled`.
+fn server_file(server: &ServerInfo, m: &ModInfo) -> std::path::PathBuf {
+    let p = server.mods_dir().join(&m.file_name);
+    if m.off { crate::sync::disabled_path(&p) } else { p }
+}
+
 /// Deletes server-only and leftover files from the server.
 pub fn remove(rows: &[DiffEntry], server: &ServerInfo) -> Vec<SyncOp> {
     rows.iter()
         .filter(|d| matches!(d.status, DiffStatus::OnlyServer | DiffStatus::ServerStale))
         .filter_map(|d| Some((d, d.server.as_ref()?)))
         .map(|(d, m)| {
-            let path = server.mods_dir().join(&m.file_name);
+            let path = server_file(server, m);
             if is_off_here(d) { SyncOp::Disable { path } } else { SyncOp::Delete { path } }
         })
         .collect()
@@ -831,7 +871,7 @@ pub fn mod_ops(act: ModAct, d: &DiffEntry, inst: &Instance, server: &ServerInfo)
                 .server
                 .iter()
                 .map(|m| SyncOp::Delete {
-                    path: server.mods_dir().join(&m.file_name),
+                    path: server_file(server, m),
                 })
                 .collect(),
             down: Vec::new(),
@@ -1167,9 +1207,10 @@ mod tests {
     }
 
     /// TNP-LL8, 2026-11-06: Advancement Frames was off on the server; Sync
-    /// added the pack's newer version on beside the old copy left off.
+    /// added the pack's newer version on beside the old copy left off. Now
+    /// the newer file takes the off copy's place, off too.
     #[test]
-    fn a_mod_off_on_the_server_is_not_added_again() {
+    fn a_mod_off_on_the_server_gets_the_new_file_off_not_a_second_copy() {
         use crate::model::ModInfo;
         let m = |file: &str, version: &str, off: bool| ModInfo {
             file_name: file.into(),
@@ -1183,11 +1224,82 @@ mod tests {
         let client = [m("advancementframes-1.21-2.3.2-neoforge.jar", "2.3.2", false)];
         let diff = diff_mods(&client, &[m("advancementframes-1.21-2.3.0-neoforge.jar", "2.3.0", true)]);
         assert_eq!(diff.len(), 1, "{diff:?}");
+        assert_eq!(diff[0].action, DiffAction::CopyToServer);
+        assert_eq!(diff[0].status, DiffStatus::ClientNewer);
+        assert_eq!(Group::of(&diff[0]), Group::Update);
+        assert!(diff[0].server.as_ref().unwrap().off);
+        // A mod that is off there isn't a version mismatch the join banner shows.
+        assert!(join_check(&diff, &HashSet::new(), None, None).versions.is_empty());
+        // The very file turned off there: nothing to do.
+        let diff = diff_mods(&client, &[m("advancementframes-1.21-2.3.2-neoforge.jar", "2.3.2", true)]);
         assert_eq!(diff[0].action, DiffAction::Skip);
         assert_eq!(diff[0].skip_reason.as_deref(), Some(OFF_ON_SERVER));
         // Not there at all: added as before.
         let diff = diff_mods(&client, &[]);
         assert_eq!(diff[0].action, DiffAction::CopyToServer, "{diff:?}");
+        assert!(diff[0].server.is_none());
+    }
+
+    /// The whole sync on throwaway folders: what the server's mods folder
+    /// holds after it, for a mod that is off on the server (the pack has it
+    /// on, or off too), one that is on, one that is new, and one the server
+    /// has but the pack dropped.
+    #[test]
+    fn a_sync_leaves_one_file_per_mod_and_keeps_it_off_or_on() {
+        let root = std::env::temp_dir().join(format!("hopper-test-offsync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let pack = Instance { name: "P".into(), root: root.join("pack"), ..Default::default() };
+        let server = ServerInfo {
+            name: "S".into(),
+            root: root.join("srv"),
+            manager: crate::server::Manager::Unknown,
+            properties: Default::default(),
+            loader: None,
+            java: None,
+            max_memory: None,
+            remote: None,
+        };
+        for d in [pack.mods_dir(), server.mods_dir()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let (cm, sm) = (pack.mods_dir(), server.mods_dir());
+        // armor: off on the server, newer and on in the pack.
+        jar(&sm.join("armor-1.0.jar.disabled"), "armor", "1.0", 10);
+        jar(&cm.join("armor-2.0.jar"), "armor", "2.0", 20);
+        // frames: off on the server and off in the pack, a newer file there.
+        jar(&sm.join("frames-1.0.jar.disabled"), "frames", "1.0", 10);
+        jar(&cm.join("frames-2.0.jar.disabled"), "frames", "2.0", 20);
+        // lib: on both sides, a newer file in the pack.
+        jar(&sm.join("lib-1.0.jar"), "lib", "1.0", 10);
+        jar(&cm.join("lib-2.0.jar"), "lib", "2.0", 20);
+        // fresh: only in the pack.
+        jar(&cm.join("fresh-1.0.jar"), "fresh", "1.0", 10);
+        // yours: only on the server, not in the pack: not part of a push.
+        jar(&sm.join("yours-1.0.jar"), "yours", "1.0", 10);
+
+        let (client, _) = client_mods(&pack, &HashSet::new()).unwrap();
+        let theirs = mods_with_off(&sm).unwrap();
+        let diff = diff_mods(&client, &theirs);
+        let rows: Vec<DiffEntry> = diff.into_iter().filter(|d| Group::of(d).pickable() && d.client.is_some()).collect();
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        let ops = push(&rows, &pack, &server);
+        let results = crate::sync::execute_local(ops, &server.root);
+        assert!(results.iter().all(|r| r.ok), "{results:?}");
+
+        let mut files: Vec<String> = std::fs::read_dir(&sm).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        files.sort();
+        assert_eq!(
+            files,
+            ["armor-2.0.jar.disabled", "frames-2.0.jar.disabled", "fresh-1.0.jar", "lib-2.0.jar", "yours-1.0.jar"],
+            "one file per mod, armor and frames still off, lib on"
+        );
+        // The old files are in the server's backups, so History can undo it.
+        let backups = std::fs::read_dir(server.root.join(crate::sync::BACKUP_DIR)).map(|d| d.count()).unwrap_or(0);
+        assert!(backups > 0);
+        // And a second look finds nothing left to do for them.
+        let again = diff_mods(&client_mods(&pack, &HashSet::new()).unwrap().0, &mods_with_off(&sm).unwrap());
+        assert!(again.iter().all(|d| d.client.is_none() || matches!(d.status, DiffStatus::Same | DiffStatus::OnlyClient) && d.action == DiffAction::Skip), "{again:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn inst(n: &str) -> Instance {

@@ -17,6 +17,20 @@ pub fn plan(diff: &[DiffEntry], client_mods: &Path, server_mods: &Path) -> Vec<S
             DiffAction::Skip => {}
             DiffAction::CopyToServer => {
                 let Some(c) = &d.client else { continue };
+                // The server's copy is turned off: the new file takes its
+                // place turned off too, and the old one goes (History keeps
+                // it), so no older copy stays beside the new one.
+                if let Some(s) = d.server.as_ref().filter(|s| s.off) {
+                    let dst = server_mods.join(&c.file_name);
+                    let src = client_mods.join(&c.file_name);
+                    ops.push(SyncOp::Copy { src: if c.off { disabled_path(&src) } else { src }, dst: dst.clone() });
+                    ops.push(SyncOp::Disable { path: dst });
+                    // Same name: the turn-off already set the old file aside.
+                    if !s.file_name.eq_ignore_ascii_case(&c.file_name) {
+                        ops.push(SyncOp::Delete { path: disabled_path(&server_mods.join(&s.file_name)) });
+                    }
+                    continue;
+                }
                 // A version swap removes the old server file as well.
                 if let Some(s) = &d.server
                     && !s.file_name.eq_ignore_ascii_case(&c.file_name)
