@@ -893,6 +893,76 @@ pub fn images(blocks: &[Block]) -> Vec<String> {
     out
 }
 
+/// A CurseForge changelog. It is HTML, but many authors type Markdown into
+/// the box, which CurseForge wraps in paragraphs untouched: `# Changelog`,
+/// `**bold**`, `` `code` `` and `- item` would show as typed. When the text
+/// reads as Markdown, it is parsed as Markdown.
+pub fn parse_changelog(html: &str) -> Vec<Block> {
+    let blocks = parse(html);
+    if looks_like_markdown(&blocks) {
+        return parse_markdown(&html_to_lines(html));
+    }
+    blocks
+}
+
+/// Whether parsed HTML still holds Markdown as plain text: a `# Heading`
+/// line when the page has no real headings, or `**bold**` / `` `code` ``
+/// typed in two or more blocks.
+fn looks_like_markdown(blocks: &[Block]) -> bool {
+    if blocks.iter().any(|b| matches!(b.kind, Kind::Heading(_) | Kind::Code)) {
+        return false;
+    }
+    let text = |b: &Block| -> String {
+        b.spans.iter().filter(|s| s.image.is_none() && !s.code).map(|s| s.text.as_str()).collect()
+    };
+    let mut marked = 0;
+    for b in blocks.iter().filter(|b| matches!(b.kind, Kind::Para | Kind::Bullet(_) | Kind::Numbered(_))) {
+        let t = text(b);
+        let t = t.trim_start();
+        let hashes = t.chars().take_while(|&c| c == '#').count();
+        if (1..=6).contains(&hashes) && t[hashes..].starts_with(' ') {
+            return true;
+        }
+        let pairs = |m: &str| t.matches(m).count() >= 2;
+        if pairs("**") || pairs("`") {
+            marked += 1;
+        }
+    }
+    marked >= 2
+}
+
+/// `html` as text lines for [`parse_markdown`]: block ends and `<br>` become
+/// line breaks, links and images stay tags, other tags go, entities decode.
+fn html_to_lines(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(i) = rest.find('<') {
+        out.push_str(&decode_entities(&rest[..i]));
+        rest = &rest[i..];
+        let end = rest.find('>').map_or(rest.len(), |e| e + 1);
+        let tag = &rest[..end];
+        let name: String = tag
+            .trim_start_matches('<')
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        match name.as_str() {
+            "a" | "img" => out.push_str(tag),
+            "br" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p" | "div" | "ul" | "ol" => {
+                if tag.starts_with("</") || name == "br" {
+                    out.push('\n');
+                }
+            }
+            _ => {}
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(&decode_entities(rest));
+    out
+}
+
 /// Markdown (Modrinth changelogs and descriptions) as blocks. Converted to
 /// the HTML subset [`parse`] understands; raw HTML in the text passes through.
 pub fn parse_markdown(md: &str) -> Vec<Block> {
@@ -1879,6 +1949,31 @@ mod tests {
         assert_eq!(b[0].kind, Kind::Para);
         assert_eq!(b[1].kind, Kind::Bullet(0));
         assert_eq!(text(&b[1]), "fixed a thing");
+    }
+
+    #[test]
+    fn changelog_markdown_in_html_is_parsed() {
+        let b = parse_changelog(
+            "<p># Changelog - 3.0.0</p><p>## Summary</p><p>Fixed **crash** and `code`</p><p>- one</p><p>- two &amp; three</p>",
+        );
+        assert_eq!(b[0].kind, Kind::Heading(1));
+        assert_eq!(b[1].kind, Kind::Heading(2));
+        assert!(b[2].spans.iter().any(|s| s.bold && s.text == "crash"));
+        assert!(b[2].spans.iter().any(|s| s.code && s.text == "code"));
+        assert_eq!(b[3].kind, Kind::Bullet(0));
+        assert_eq!(b[4].spans.iter().map(|s| s.text.as_str()).collect::<String>(), "two & three");
+        // The same typed with line breaks in one paragraph.
+        let b = parse_changelog("# Title<br>- a<br>- b");
+        assert_eq!(b[0].kind, Kind::Heading(1));
+        assert_eq!(b.len(), 3);
+    }
+
+    #[test]
+    fn changelog_real_html_and_plain_text_unchanged() {
+        let html = "<h2>Fixes</h2><ul><li>a <b>b</b></li></ul>";
+        assert_eq!(parse_changelog(html), parse(html));
+        let plain = "<p>Fixed the C# bridge</p><p>Used `x` once</p>";
+        assert_eq!(parse_changelog(plain), parse(plain));
     }
 
     #[test]

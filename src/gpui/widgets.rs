@@ -242,11 +242,9 @@ pub fn changelog_text(id: impl Into<ElementId>, md: &str, cx: &App) -> gpui_kit:
     let body = cx.theme().font_size;
     let style = TextViewStyle {
         heading_base_font_size: body,
-        heading_font_size: Some(Arc::new(|level, base| match level {
-            1 => base * 1.15,
-            2 => base * 1.08,
-            _ => base,
-        })),
+        // Headings stay body-sized (bold only): a changelog sits in a dialog,
+        // and its headings must not outgrow the dialog's own title.
+        heading_font_size: Some(Arc::new(|_level, base| base)),
         ..TextViewStyle::default()
     };
     TextView::markdown(id, SharedString::from(hopper::emoji::shortcodes_markdown(md).into_owned()))

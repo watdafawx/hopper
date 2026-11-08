@@ -74,7 +74,7 @@ pub fn changelog(f: &cf::File) -> anyhow::Result<Vec<Block>> {
     }
     let blocks = match &f.modrinth {
         Some(m) => richtext::parse_markdown(&m.changelog),
-        None => richtext::parse(&cf::changelog(f.mod_id, f.id)?),
+        None => richtext::parse_changelog(&cf::changelog(f.mod_id, f.id)?),
     };
     Ok(crate::extlog::expand(blocks, f))
 }
