@@ -1377,34 +1377,45 @@ impl SettingsTab {
                 .child(div().w(rems(4.5)).child(Input::new(&self.sleep_min).small().disabled(!self.sleep_on)))
                 .child(div().text_sm().child("min")),
         );
-        if !self.sleep_on {
-            out.push(col.child(widgets::caption("Off: it runs until someone stops it.", cx)).into_any_element());
-            return out;
-        }
+        // Sleep off: the wake options below stay in view but greyed, so people
+        // can see they exist. Their values are kept and saved as they are.
+        let dis = !self.sleep_on;
         if a.wake.is_none() {
+            if dis {
+                out.push(col.child(widgets::caption("Off: it runs until someone stops it.", cx)).into_any_element());
+                return out;
+            }
             // An older Hopper Server: it always wakes on join.
             out.push(col.child(widgets::caption("Joining starts it again; the server list shows \"Sleeping\" meanwhile.", cx)).into_any_element());
             return out;
         }
-        col = col.child(Switch::new("settings-wake").label("Wake when someone joins").checked(self.wake_on).on_click(cx.listener(|this, v: &bool, _, cx| {
+        col = col.child(Switch::new("settings-wake").label("Wake when someone joins").checked(self.wake_on).disabled(dis).on_click(cx.listener(|this, v: &bool, _, cx| {
             this.wake_on = *v;
             cx.notify();
         })));
+        if dis {
+            col = col.child(widgets::caption("Turn on sleep above to use these: a server that sleeps wakes when someone joins.", cx));
+        }
         if !self.wake_on {
-            out.push(col.child(widgets::caption("Joining doesn't start it: players see \"Offline\" until someone starts it here.", cx)).into_any_element());
+            if !dis {
+                col = col.child(widgets::caption("Joining doesn't start it: players see \"Offline\" until someone starts it here.", cx));
+            }
+            out.push(col.into_any_element());
             return out;
         }
         // Waking goes through the address router, so say so when players
         // have no address to wake it by.
         let reachable = d.router.as_ref().is_some_and(|r| r.enabled && r.error.is_none()) && !a.addresses.is_empty();
-        col = col.child(widgets::caption(
-            if reachable {
-                "Joining from Minecraft's server list starts it again. The first join takes about a minute."
-            } else {
-                "Players wake it by joining its address, and it has none yet. Add one in Network & address."
-            },
-            cx,
-        ));
+        if !dis {
+            col = col.child(widgets::caption(
+                if reachable {
+                    "Joining from Minecraft's server list starts it again. The first join takes about a minute."
+                } else {
+                    "Players wake it by joining its address, and it has none yet. Add one in Network & address."
+                },
+                cx,
+            ));
+        }
         let label = |t: &str| div().w(rems(9.)).flex_none().text_sm().child(t.to_string());
         let who_i = WAKE_WHO.iter().position(|(k, _)| *k == self.wake_who);
         let retry_i = WAKE_RETRY.iter().position(|(m, _)| *m == self.wake_retry);
@@ -1420,7 +1431,7 @@ impl SettingsTab {
                     widgets::Segmented::new("settings-wake-who")
                         .xsmall()
                         .when_some(who_i, |t, i| t.selected_index(i))
-                        .children(WAKE_WHO.iter().map(|(_, l)| widgets::SegItem::new().label(*l)))
+                        .children(WAKE_WHO.iter().map(|(_, l)| widgets::SegItem::new().label(*l).disabled(dis)))
                         .on_click(cx.listener(|this, i: &usize, _, cx| {
                             this.wake_who = WAKE_WHO[*i].0.to_string();
                             cx.notify();
@@ -1436,7 +1447,7 @@ impl SettingsTab {
                     widgets::Segmented::new("settings-wake-starting")
                         .xsmall()
                         .when_some(starting_i, |t, i| t.selected_index(i))
-                        .children(WAKE_STARTING.iter().map(|(_, l)| widgets::SegItem::new().label(*l)))
+                        .children(WAKE_STARTING.iter().map(|(_, l)| widgets::SegItem::new().label(*l).disabled(dis)))
                         .on_click(cx.listener(|this, i: &usize, _, cx| {
                             this.wake_starting = WAKE_STARTING[*i].0.to_string();
                             cx.notify();
@@ -1456,14 +1467,14 @@ impl SettingsTab {
                     widgets::Segmented::new("settings-wake-retry")
                         .xsmall()
                         .when_some(retry_i, |t, i| t.selected_index(i))
-                        .children(WAKE_RETRY.iter().map(|(_, l)| widgets::SegItem::new().label(*l)))
+                        .children(WAKE_RETRY.iter().map(|(_, l)| widgets::SegItem::new().label(*l).disabled(dis)))
                         .on_click(cx.listener(|this, i: &usize, _, cx| {
                             this.wake_retry = WAKE_RETRY[*i].0;
                             cx.notify();
                         })),
                 ),
             )
-            .child(h_flex().gap_2().child(label("Server list message")).child(div().flex_1().min_w_0().child(Input::new(&self.sleep_msg).small())));
+            .child(h_flex().gap_2().child(label("Server list message")).child(div().flex_1().min_w_0().child(Input::new(&self.sleep_msg).small().disabled(dis))));
         // How players see it in their server list while it sleeps.
         let msg = self.sleep_msg.read(cx).value().trim().to_string();
         let msg = if msg.is_empty() { a.default_message.clone() } else { msg };
@@ -1472,6 +1483,7 @@ impl SettingsTab {
         col = col.child(
             v_flex()
                 .p_2()
+                .when(dis, |p| p.opacity(0.6))
                 .rounded(theme.radius)
                 .bg(rgb(0x1d1813))
                 .border_1()

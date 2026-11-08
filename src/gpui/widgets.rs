@@ -821,7 +821,7 @@ impl RenderOnce for Segmented {
                     .map(|el| if xsmall { el.h(px(20.)).px_2().text_xs() } else { el.h(px(26.)).px_2p5().text_sm() })
                     .when(on, |el| el.bg(tint).text_color(fg).font_weight(FontWeight::MEDIUM))
                     .when(!on && !disabled, |el| el.text_color(muted).hover(move |s| s.bg(wash).text_color(fg)))
-                    .when(disabled, |el| el.text_color(muted).opacity(0.5))
+                    .when(disabled, |el| el.text_color(muted).opacity(0.7))
                     .when(!disabled, |el| {
                         el.clickable(cx).on_click(move |_, window, cx| {
                             if let Some(f) = &pick {
@@ -891,7 +891,7 @@ fn rail_view(
                     // A toggle that is on: the same tint plus a 1px ring.
                     .when(on && toggled, |el| el.shadow(vec![BoxShadow::new(px(0.), px(0.), primary.opacity(0.5)).spread_radius(px(1.)).inset()]))
                     .when(!on && !disabled, |el| el.text_color(muted).hover(move |s| s.bg(wash).text_color(fg)))
-                    .when(disabled, |el| el.text_color(muted).opacity(0.5))
+                    .when(disabled, |el| el.text_color(muted).opacity(0.7))
                     .when(icon.is_some(), |el| {
                         el.child(div().relative().child(Icon::new(icon.unwrap()).small()).when(badge && !on && count.is_some_and(|c| c > 0), |d| {
                             // Anchored by its left edge so more digits grow to the
