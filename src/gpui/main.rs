@@ -86,6 +86,7 @@ mod source_dialog;
 mod store;
 mod stuck;
 mod theme;
+mod thumbs;
 mod tasks;
 mod translation;
 mod tray;
@@ -156,6 +157,7 @@ fn main() {
             })
             .detach();
             gpui_kit::init(cx);
+            thumbs::init(cx);
             gpui_kit::component::set_locale("en");
             app::bind_keys(cx);
             addons::bind_keys(cx);

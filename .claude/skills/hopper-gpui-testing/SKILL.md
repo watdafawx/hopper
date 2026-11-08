@@ -32,3 +32,6 @@ Machine-specific commands (build wrapper, ports, real instance folders) are in `
 - Scroll areas: the parent needs a fixed height and the area `.flex_1().min_h_0().overflow_y_scrollbar()`. Always test with MCP `scroll`.
 - Title-bar buttons need `.occlude()`. MCP clicks skip Windows hit-testing, so check with WM_NCHITTEST.
 - A clickable wrapper squeezed below a `flex_none` child only clicks at its start: put the handlers on the child.
+
+## Memory check (before a release, not in CI)
+`python .claude\skills\hopper-gpui-testing\mem-scratch.py <scratch>` builds a fake 1,156-mod instance plus 7 small ones; `pwsh -NoProfile -File .claude\skills\hopper-gpui-testing\mem-check.ps1 -Exe <hv-copy.exe> -Scratch <scratch> -Port 478xx -Label <version>` walks Library, Mods, scroll to the end, Versions, Servers, idle, and prints working set / private / GPU MB. Compare with the last release's numbers (0.58.0: 276 / 352 / 87 MB after scrolling the big list; with the icon cache: 141 / 167 / 39).

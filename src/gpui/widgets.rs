@@ -38,7 +38,7 @@ pub fn thumb(path: Option<&Path>, size: Rems, cx: &App) -> AnyElement {
     match path {
         Some(p) => frame
             .child(
-                img(p.to_path_buf())
+                img(crate::thumbs::source(p, size, cx))
                     .size_full()
                     .object_fit(ObjectFit::Cover),
             )
