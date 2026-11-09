@@ -139,6 +139,12 @@ fn answer(app: &mut AppView, cmd: Command, window: &mut Window, cx: &mut Context
 }
 
 fn input(cmd: Command, window: &mut Window, cx: &mut App) -> Reply {
+    // A click sent to an inactive window is often swallowed by the first
+    // activation. Bring the test window forward before anything that inputs,
+    // so `--mcp` works while another app (even a game) is in front.
+    if !matches!(&cmd, Command::Screenshot | Command::State | Command::Navigate(_) | Command::Data(..)) {
+        window.activate_window();
+    }
     let scale = window.scale_factor();
     let at = |x: f32, y: f32| point(px(x / scale), px(y / scale));
     let done = || Ok(vec![text("done")]);

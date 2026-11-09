@@ -88,6 +88,28 @@ impl Mailbox {
         Ok(me)
     }
 
+    /// A fresh account, not saved. Tests use two of these to pair.
+    pub fn register(base: &str, name: &str) -> anyhow::Result<Self> {
+        let base = base.trim_end_matches('/').to_string();
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(90)))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let mut me = Self {
+            base,
+            account: Account::default(),
+            agent,
+        };
+        let v = me.post("/v1/register", None, serde_json::json!({ "name": name }))?;
+        me.account = Account {
+            id: v["id"].as_str().context("mailbox: no id")?.into(),
+            token: v["token"].as_str().context("mailbox: no token")?.into(),
+            name: v["name"].as_str().unwrap_or(name).into(),
+        };
+        Ok(me)
+    }
+
     /// The saved account, for showing this PC's name.
     pub fn account(&self) -> &Account {
         &self.account
@@ -219,5 +241,30 @@ mod tests {
         .unwrap();
         assert_eq!(e.from_name, "FOX");
         assert_eq!(e.left_out, ["a.jar"]);
+    }
+
+    /// The same calls the Friends buttons make. Needs a running mailbox:
+    /// `HOPPER_MAILBOX_URL=https://... cargo test -p hopper-core --lib
+    /// mailbox::tests::two_accounts_pair_and_publish -- --ignored`.
+    #[test]
+    #[ignore = "needs a live mailbox (HOPPER_MAILBOX_URL)"]
+    fn two_accounts_pair_and_publish() {
+        let base = std::env::var("HOPPER_MAILBOX_URL").expect("HOPPER_MAILBOX_URL");
+        let a = Mailbox::register(&base, "hopper-test-a").unwrap();
+        let b = Mailbox::register(&base, "hopper-test-b").unwrap();
+        let code = a.invite().unwrap();
+        let friend = b.join(&code).unwrap();
+        assert_eq!(friend.name, "hopper-test-a");
+        assert!(a
+            .friends()
+            .unwrap()
+            .iter()
+            .any(|f| f.id == b.account().id));
+        a.publish(&b.account().id, "TNP", "ATM", "HOP-test", &[])
+            .unwrap();
+        let (_, events) = b.events(0, 5).unwrap();
+        assert!(events
+            .iter()
+            .any(|e| e.from == a.account().id && e.inst == "TNP"));
     }
 }
