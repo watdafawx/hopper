@@ -620,6 +620,39 @@ fn fabric_logo_authors_and_side() {
 }
 
 #[test]
+fn source_mod_authors_follow_the_jar() {
+    // A renamed mod: the name saved when it was installed (the old authors)
+    // gives way to what the jar says now.
+    let root = scratch("authors-follow-jar");
+    let toml = b"[[mods]]\nmodId=\"foxstweaks\"\nversion=\"2.0.0\"\nauthors=\"watdafawx\"\n";
+    std::fs::write(root.join("mods/foxstweaks-2.0.0.jar"), jar_bytes(&[("META-INF/neoforge.mods.toml", toml)]).into_inner()).unwrap();
+    let src = ModSource {
+        kind: Kind::GitHub,
+        url: "watdafawx/foxs-tweaks".into(),
+        publisher: "watdafawx/foxs-tweaks".into(),
+        ..Default::default()
+    };
+    let mut inst = Instance {
+        root: root.clone(),
+        addons: vec![Addon {
+            project_id: 1,
+            file_name: "foxstweaks-2.0.0.jar".into(),
+            name: "Fox's Tweaks".into(),
+            author: "mtop".into(),
+            icon: "C:/cache/icon.png".into(),
+            enabled: true,
+            class_id: crate::cf::CLASS_MODS,
+            source: Some(src),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    looks::fill(&mut inst);
+    assert_eq!(inst.addons[0].author, "watdafawx");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn logo_is_saved_small() {
     let saved = looks::save_logo(&png(512, 256)).unwrap();
     let (w, h) = image::image_dimensions(&saved).unwrap();

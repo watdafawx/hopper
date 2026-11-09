@@ -292,9 +292,10 @@ pub fn fill(inst: &mut Instance) {
             };
         }
         if ours {
-            // The repo stays on the source; the people who made it show.
-            let publisher = a.source.as_ref().map(|s| s.publisher.as_str()).unwrap_or("");
-            if !looks.authors.is_empty() && (a.author.is_empty() || a.author == publisher) {
+            // The repo stays on the source; the people who made it show. The
+            // jar is read again every run, so a rebuilt file whose authors
+            // changed (a rename) replaces the name saved when it was installed.
+            if !looks.authors.is_empty() {
                 a.author = looks.authors.clone();
             }
             if a.env.is_empty() {
