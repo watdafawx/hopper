@@ -224,7 +224,7 @@ const TABS: [(&str, &str, IconName); 10] = [
     ("worlds", "Worlds", IconName::Globe),
     ("screenshots", "Screenshots", IconName::Image),
     ("server", "Server", IconName::HardDrive),
-    ("peers", "Peers", IconName::Users),
+    ("peers", "Friends", IconName::Users),
     ("settings", "Settings", IconName::SlidersHorizontal),
     ("logs", "Logs & crashes", IconName::Stethoscope),
 ];

@@ -16,6 +16,7 @@ use gpui_kit::component::{Selectable as _,
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::peer::{self, DiffEntry, Hub, SharedInst, Status};
+use hopper::settings::FollowedRecipe;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,6 +37,10 @@ pub struct PeersView {
     diff: Option<Result<Vec<DiffEntry>, String>>,
     picked: HashSet<String>,
     running: bool,
+    /// Show the address, port and discovery details.
+    show_advanced: bool,
+    /// Show the manual file-by-file sync under the recipe action.
+    show_files: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -66,6 +71,8 @@ impl PeersView {
             diff: None,
             picked: HashSet::new(),
             running: false,
+            show_advanced: false,
+            show_files: false,
             _subscriptions: subs,
         }
     }
@@ -139,7 +146,11 @@ impl PeersView {
             this.update(cx, |this, cx| {
                 this.remote = Some(r);
                 this.pick_remote_inst(cx);
-                this.compare(cx);
+                if this.show_files {
+                    this.compare(cx);
+                } else {
+                    this.diff = None;
+                }
             })
             .ok();
         })
@@ -304,6 +315,285 @@ impl PeersView {
         cx.notify();
     }
 
+    fn root_string(&self) -> String {
+        self.root
+            .as_ref()
+            .map(|r| r.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    fn followed(&self, cx: &App) -> Option<FollowedRecipe> {
+        let root = self.root.as_ref()?;
+        self.store
+            .read(cx)
+            .settings()
+            .followed_recipes
+            .iter()
+            .find(|f| std::path::Path::new(&f.root) == root)
+            .cloned()
+    }
+
+    fn save_follow(&self, f: FollowedRecipe, cx: &mut Context<Self>) {
+        let root = f.root.clone();
+        self.store.update(cx, |s, cx| {
+            s.update_settings(
+                |st| {
+                    st.followed_recipes.retain(|x| x.root != root);
+                    st.followed_recipes.push(f.clone());
+                },
+                cx,
+            );
+        });
+    }
+
+    /// Fetches FOX's instance as a recipe and applies it to this instance.
+    fn follow(&mut self, cx: &mut Context<Self>) {
+        let (Some(hub), Some(id), Some(root)) =
+            (self.hub(cx), self.selected.clone(), self.root.clone())
+        else {
+            return;
+        };
+        if self.remote_inst.is_empty() {
+            return;
+        }
+        let rinst = self.remote_inst.clone();
+        let peer_name = hub
+            .peers()
+            .into_iter()
+            .find(|p| p.peer_id == id)
+            .map(|p| p.name)
+            .unwrap_or_default();
+        self.running = true;
+        self.message = None;
+        cx.spawn(async move |this, cx| {
+            let (id2, rinst2, root2) = (id.clone(), rinst.clone(), root.clone());
+            let r = cx
+                .background_spawn(async move {
+                    let recipe = hub.recipe(&id2, &rinst2)?;
+                    let share = hopper::sharecode::decode(&recipe.code)?;
+                    let inst = hopper::instances::load(&root2).ok_or_else(|| {
+                        anyhow::anyhow!("{} isn't an instance any more", root2.display())
+                    })?;
+                    Ok::<_, anyhow::Error>((recipe, hopper::recipe::fit(&inst, &share)))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.running = false;
+                match r {
+                    Err(e) => this.message = Some(Err(format!("{e:#}"))),
+                    Ok((_, hopper::recipe::Fit::Different(why))) => {
+                        this.message = Some(Err(why))
+                    }
+                    Ok((recipe, _)) => {
+                        this.save_follow(
+                            FollowedRecipe {
+                                peer_id: id.clone(),
+                                peer_name: peer_name.clone(),
+                                inst: rinst.clone(),
+                                name: recipe.name.clone(),
+                                root: root.to_string_lossy().into_owned(),
+                                code: recipe.code.clone(),
+                                seen: recipe.code.clone(),
+                                left_out: recipe.left_out.clone(),
+                            },
+                            cx,
+                        );
+                        let (code, root_j) = (recipe.code.clone(), root.clone());
+                        let root_arg = root_j.clone();
+                        let title = format!("Following {peer_name}'s {}", recipe.name);
+                        this.store.read(cx).spawn_instance_job(
+                            &root_arg,
+                            title,
+                            move |job| {
+                                hopper::recipe::apply_to(&root_j, &code, job)?;
+                                Ok(crate::store::Msg::InstanceChanged(root_j.clone()))
+                            },
+                        );
+                        this.message = Some(Ok(format!(
+                            "Following {peer_name}'s {}. The mods are downloading.",
+                            recipe.name
+                        )));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Asks the followed PC whether its instance changed.
+    fn check_follow(&mut self, cx: &mut Context<Self>) {
+        let (Some(hub), Some(f)) = (self.hub(cx), self.followed(cx)) else {
+            return;
+        };
+        self.running = true;
+        self.message = None;
+        cx.spawn(async move |this, cx| {
+            let (peer, inst) = (f.peer_id.clone(), f.inst.clone());
+            let r = cx
+                .background_spawn(async move { hub.recipe(&peer, &inst) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.running = false;
+                match r {
+                    Err(e) => this.message = Some(Err(format!("{e:#}"))),
+                    Ok(recipe) => {
+                        let Some(mut f) = this.followed(cx) else { return };
+                        let changed = recipe.code != f.code;
+                        f.seen = recipe.code;
+                        f.left_out = recipe.left_out;
+                        let name = f.peer_name.clone();
+                        this.save_follow(f, cx);
+                        this.message = Some(Ok(if changed {
+                            format!("{name} changed their instance. Update to apply it.")
+                        } else {
+                            "You're up to date.".to_string()
+                        }));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Fetches the newest recipe and applies it to this instance.
+    fn update_follow(&mut self, cx: &mut Context<Self>) {
+        let (Some(hub), Some(f), Some(root)) =
+            (self.hub(cx), self.followed(cx), self.root.clone())
+        else {
+            return;
+        };
+        self.running = true;
+        self.message = None;
+        cx.spawn(async move |this, cx| {
+            let (peer, inst) = (f.peer_id.clone(), f.inst.clone());
+            let r = cx
+                .background_spawn(async move { hub.recipe(&peer, &inst) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.running = false;
+                match r {
+                    Err(e) => this.message = Some(Err(format!("{e:#}"))),
+                    Ok(recipe) => {
+                        let Some(mut f) = this.followed(cx) else { return };
+                        f.code = recipe.code.clone();
+                        f.seen = recipe.code.clone();
+                        f.left_out = recipe.left_out.clone();
+                        let (name, inst_name) = (f.peer_name.clone(), recipe.name.clone());
+                        this.save_follow(f, cx);
+                        let (code, root_j) = (recipe.code.clone(), root.clone());
+                        let root_arg = root_j.clone();
+                        this.store.read(cx).spawn_instance_job(
+                            &root_arg,
+                            format!("Updating from {name}'s {inst_name}"),
+                            move |job| {
+                                hopper::recipe::apply_to(&root_j, &code, job)?;
+                                Ok(crate::store::Msg::InstanceChanged(root_j.clone()))
+                            },
+                        );
+                        this.message =
+                            Some(Ok(format!("Updating from {name}'s {inst_name}.")));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn stop_follow(&mut self, cx: &mut Context<Self>) {
+        let root = self.root_string();
+        self.store.update(cx, |s, cx| {
+            s.update_settings(
+                |st| st.followed_recipes.retain(|f| f.root != root),
+                cx,
+            );
+        });
+        self.message = Some(Ok("Stopped following this instance.".into()));
+        cx.notify();
+    }
+
+    fn follow_line(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let f = self.followed(cx)?;
+        let theme = cx.theme();
+        let changed = f.seen != f.code;
+        Some(
+            v_flex()
+                .gap_1()
+                .py_2()
+                .border_b_1()
+                .border_color(theme.border)
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_semibold()
+                                .child(format!("Following {}'s {}", f.peer_name, f.name)),
+                        )
+                        .child(if changed {
+                            widgets::chip(theme.warning)
+                                .xsmall()
+                                .child("Update available")
+                        } else {
+                            widgets::chip(theme.success)
+                                .xsmall()
+                                .child("Up to date")
+                        })
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("follow-check")
+                                .xsmall()
+                                .ghost()
+                                .label("Check")
+                                .disabled(self.running)
+                                .on_click(cx.listener(|this, _, _, cx| this.check_follow(cx))),
+                        )
+                        .when(changed, |r| {
+                            r.child(
+                                Button::new("follow-update")
+                                    .xsmall()
+                                    .primary()
+                                    .label("Update")
+                                    .disabled(self.running)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.update_follow(cx)
+                                    })),
+                            )
+                        })
+                        .child(
+                            Button::new("follow-stop")
+                                .xsmall()
+                                .ghost()
+                                .label("Stop")
+                                .on_click(cx.listener(|this, _, _, cx| this.stop_follow(cx))),
+                        ),
+                )
+                .when(!f.left_out.is_empty(), |c| {
+                    c.child(
+                        widgets::caption(
+                            format!(
+                                "{} file{} can't be downloaded from any site. Ask them to send those.",
+                                f.left_out.len(),
+                                if f.left_out.len() == 1 { "" } else { "s" }
+                            ),
+                            cx,
+                        )
+                        .text_xs(),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
     fn intro(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .size_full()
@@ -312,26 +602,24 @@ impl PeersView {
             .gap_3()
             .px_6()
             .child(Icon::new(IconName::Users).large().text_color(cx.theme().muted_foreground))
+            .child(div().text_lg().font_semibold().child("Sync with a friend"))
             .child(
-                div()
-                    .text_lg()
-                    .font_semibold()
-                    .child("Sync this instance with a friend's or your other PC, directly"),
-            )
-            .child(
-                div().max_w(rems(36.)).text_sm().text_center().child(
-                    "Hopper finds other PCs running Hopper on your network or Tailscale. Pair once with a 6-digit code, then compare and pull or push mods, configs and packs.",
+                div().max_w(rems(38.)).text_sm().text_center().child(
+                    "Get their exact instance here, or share yours. Only the list of mods is sent — the files download from CurseForge, Modrinth and GitHub, so nothing large goes between you.",
                 ),
             )
-            .child(widgets::caption(
-                "Windows may ask whether to allow Hopper on private networks; allow it so the other PC can reach this one.",
-                cx,
-            ).text_xs())
+            .child(
+                widgets::caption(
+                    "No account. Nothing is uploaded to Hopper. Windows may ask to allow Hopper on private networks; allow it so the other PC can reach this one.",
+                    cx,
+                )
+                .text_xs(),
+            )
             .child(
                 Button::new("peers-on")
                     .primary()
                     .icon(IconName::Users)
-                    .label("Turn on peer sync")
+                    .label("Turn on sync")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.store.update(cx, |s, cx| s.set_peer_sync(true, cx))
                     })),
@@ -346,12 +634,30 @@ impl PeersView {
         let theme = cx.theme();
         let peers = hub.peers();
         let empty = peers.is_empty();
+        let following = self.followed(cx);
+        let (empty_title, empty_body) = match &following {
+            Some(f) => (
+                format!("{}'s PC isn't here right now", f.peer_name),
+                "You can still check for updates when their PC is online.".to_string(),
+            ),
+            None => (
+                "No friend's PC here yet".to_string(),
+                "Turn on sync on their PC too. Both PCs need to be on the same network or Tailscale."
+                    .to_string(),
+            ),
+        };
         v_flex()
             .gap_1()
             .children(peers.into_iter().map(|p| {
                 let online = p.last_seen > 0;
                 let active = self.selected.as_deref() == Some(p.peer_id.as_str());
                 let (id1, id2, id3) = (p.peer_id.clone(), p.peer_id.clone(), p.peer_id.clone());
+                let source = match p.source.as_str() {
+                    "lan" => "Nearby",
+                    "tailscale" => "Tailscale",
+                    "address" => "Added by address",
+                    other => other,
+                };
                 h_flex()
                     .gap_3()
                     .px_3()
@@ -364,48 +670,65 @@ impl PeersView {
                             .rounded_full()
                             .bg(if online { theme.success } else { theme.muted_foreground }),
                     )
-                    .child(div().text_sm().font_semibold().child(p.name.clone()))
-                    .when(!p.source.is_empty(), |r| {
-                        r.child(widgets::chip(cx.theme().muted_foreground).xsmall().child(p.source.clone()))
-                    })
-                    .child(widgets::caption(p.addr.clone(), cx).text_xs())
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(div().text_sm().font_semibold().child(p.name.clone()))
+                                    .when(!source.is_empty(), |r| {
+                                        r.child(
+                                            widgets::chip(theme.muted_foreground)
+                                                .xsmall()
+                                                .child(source.to_string()),
+                                        )
+                                    }),
+                            )
+                            .when(self.show_advanced, |r| {
+                                r.child(widgets::caption(p.addr.clone(), cx).text_xs())
+                            }),
+                    )
                     .child(div().flex_1())
                     .when_some(self.codes.get(&p.peer_id).cloned(), |r, c| {
-                        r.child(div().text_sm().child(format!("Code on their screen should be {c}")))
+                        r.child(
+                            div()
+                                .text_sm()
+                                .child(format!("Their screen should show {c}")),
+                        )
                     })
                     .map(|r| {
                         if p.trusted {
-                            r.child(widgets::chip(cx.theme().success).child("Paired"))
-
-                                .child(
-                                    Button::new(SharedString::from(format!("sync:{id1}")))
-                                        .small()
-                                        .outline()
-                                        .selected(active)
-                                        .label("Sync with")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.select(id1.clone(), cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!("forget:{id2}")))
-                                        .small()
-                                        .ghost()
-                                        .label("Forget")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            peer::forget(&id2);
-                                            if this.selected.as_deref() == Some(id2.as_str()) {
-                                                this.selected = None;
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
+                            r.child(widgets::chip(theme.success).child("Paired")).child(
+                                Button::new(SharedString::from(format!("sync:{id1}")))
+                                    .small()
+                                    .outline()
+                                    .selected(active)
+                                    .label("See their instances")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.select(id1.clone(), cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("forget:{id2}")))
+                                    .small()
+                                    .ghost()
+                                    .label("Forget")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        peer::forget(&id2);
+                                        if this.selected.as_deref() == Some(id2.as_str()) {
+                                            this.selected = None;
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
                         } else {
                             r.child(
                                 Button::new(SharedString::from(format!("pair:{id3}")))
                                     .small()
                                     .outline()
                                     .label("Pair")
+                                    .tooltip("Pair once, then check the 6-digit code matches on their screen")
                                     .disabled(!online)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.pair(id3.clone(), cx)
@@ -415,10 +738,50 @@ impl PeersView {
                     })
             }))
             .when(empty, |c| {
-                c.child(widgets::caption(
-                    "No other Hopper found yet. Turn on peer sync on the other PC too, or add it by address.",
-                    cx,
-                ))
+                c.child(
+                    v_flex()
+                        .items_start()
+                        .gap_3()
+                        .p_4()
+                        .rounded(theme.radius)
+                        .border_1()
+                        .border_color(theme.border)
+                        .child(
+                            h_flex()
+                                .gap_3()
+                                .items_start()
+                                .child(
+                                    Icon::new(IconName::Users)
+                                        .small()
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_semibold()
+                                                .child(empty_title),
+                                        )
+                                        .child(widgets::caption(empty_body, cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("peer-address")
+                                .small()
+                                .outline()
+                                .label("Pair by address")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_advanced = true;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(widgets::caption(
+                            "No account. Nothing is uploaded to Hopper.",
+                            cx,
+                        ).text_xs()),
+                )
             })
     }
 
@@ -649,26 +1012,64 @@ impl PeersView {
                         .child(div().text_sm().font_semibold().child(format!("{} here", me.name)))
                         .child(Icon::new(IconName::ArrowLeftRight).small())
                         .child(div().w_72().child(widgets::picker("peer-inst", current, items, rem, pick)))
+                        .when(self.show_files, |r| {
+                            r.child(
+                                widgets::Segmented::new("peer-folder")
+                                    .selected_index(folder_ix)
+                                    .children(peer::FOLDERS.iter().map(|f| widgets::SegItem::new().label(format!("{f}/"))))
+                                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                        this.folder = peer::FOLDERS[*ix];
+                                        this.compare(cx);
+                                    })),
+                            )
+                        })
+                        .when(self.show_files, |r| {
+                            r.child(
+                                Button::new("peer-compare")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::RefreshCw)
+                                    .tooltip("Compare again")
+                                    .disabled(self.running)
+                                    .on_click(cx.listener(|this, _, _, cx| this.compare(cx))),
+                            )
+                        })
+                        .child(div().flex_1())
+                        .when(self.followed(cx).is_none(), |r| {
+                            r.child(
+                                Button::new("peer-follow")
+                                    .small()
+                                    .primary()
+                                    .label("Follow this instance")
+                                    .tooltip("Match this instance to theirs. Mods download from their original sites.")
+                                    .disabled(self.running)
+                                    .on_click(cx.listener(|this, _, _, cx| this.follow(cx))),
+                            )
+                        })
                         .child(
-                            widgets::Segmented::new("peer-folder")
-                                .selected_index(folder_ix)
-                                .children(peer::FOLDERS.iter().map(|f| widgets::SegItem::new().label(format!("{f}/"))))
-                                .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                                    this.folder = peer::FOLDERS[*ix];
-                                    this.compare(cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("peer-compare")
+                            Button::new("peer-files")
                                 .small()
                                 .ghost()
-                                .icon(IconName::RefreshCw)
-                                .tooltip("Compare again")
-                                .disabled(self.running)
-                                .on_click(cx.listener(|this, _, _, cx| this.compare(cx))),
+                                .label(if self.show_files { "Hide files" } else { "Files…" })
+                                .tooltip("Copy individual files instead of following the whole instance")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_files = !this.show_files;
+                                    if this.show_files {
+                                        this.compare(cx);
+                                    } else {
+                                        this.diff = None;
+                                    }
+                                    cx.notify();
+                                })),
                         ),
                 )
-                .child(diff)
+                .when(self.show_files, |c| c.child(diff))
+                .when(!self.show_files, |c| {
+                    c.child(widgets::caption(
+                        "Only the list of mods is sent. The files download from CurseForge, Modrinth and GitHub.",
+                        cx,
+                    ))
+                })
                 .into_any_element(),
         )
     }
@@ -687,6 +1088,71 @@ impl Render for PeersView {
         let discovery = hub.discovery_error.clone();
         let peers = self.peer_list(&hub, cx);
         let panel = self.sync_panel(cx);
+        let follow = self.follow_line(cx);
+        let theme = cx.theme();
+        let advanced: AnyElement = if self.show_advanced {
+            v_flex()
+                .gap_2()
+                .pt_2()
+                .border_t_1()
+                .border_color(theme.border)
+                .child(widgets::caption(
+                    format!("This PC: {} · port {}", peer::self_name(), hub.port),
+                    cx,
+                ))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(div().w_96().child(Input::new(&self.address).small()))
+                        .child(
+                            Button::new("peer-add")
+                                .small()
+                                .outline()
+                                .label("Add")
+                                .on_click(cx.listener(|this, _, _, cx| this.add_address(cx))),
+                        ),
+                )
+                .when_some(discovery, |c, e| {
+                    c.child(
+                        widgets::caption(
+                            "Hopper can't find PCs on this network. Pair by address instead.",
+                            cx,
+                        )
+                        .text_xs(),
+                    )
+                    .child(widgets::caption(e, cx).text_xs())
+                })
+                .child(
+                    widgets::caption(
+                        "Windows may ask to allow Hopper on private networks; allow it so the other PC can reach this one.",
+                        cx,
+                    )
+                    .text_xs(),
+                )
+                .child(
+                    Button::new("peer-adv-off")
+                        .small()
+                        .ghost()
+                        .label("Hide advanced")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_advanced = false;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element()
+        } else {
+            h_flex().child(
+                Button::new("peer-adv")
+                    .small()
+                    .ghost()
+                    .label("Advanced: address and network")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_advanced = true;
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+        };
         v_flex()
             .size_full()
             .px_6()
@@ -695,33 +1161,36 @@ impl Render for PeersView {
             .child(
                 h_flex()
                     .gap_3()
-                    .child(widgets::caption(
-                        format!("This PC: {} · port {}", peer::self_name(), hub.port),
-                        cx,
-                    ))
-                    .child(div().flex_1())
-                    .child(div().w_96().child(Input::new(&self.address).small()))
                     .child(
-                        Button::new("peer-add")
-                            .small()
-                            .outline()
-                            .label("Add")
-                            .on_click(cx.listener(|this, _, _, cx| this.add_address(cx))),
+                        v_flex()
+                            .gap_0p5()
+                            .child(div().text_lg().font_semibold().child("Sync with a friend"))
+                            .child(widgets::caption(
+                                "Share this instance with a friend's PC. Only the list of mods is sent; files download from their original sites.",
+                                cx,
+                            )),
                     )
+                    .child(div().flex_1())
                     .child(
                         Button::new("peers-off")
                             .small()
                             .ghost()
-                            .label("Turn off")
+                            .label("Turn off sync")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.store.update(cx, |s, cx| s.set_peer_sync(false, cx))
                             })),
                     ),
             )
-            .when_some(discovery, |c, e| c.child(widgets::caption(e, cx).text_xs()))
+            .children(follow)
             .children(message)
-            .child(peers)
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().font_semibold().child("Friends' PCs"))
+                    .child(peers),
+            )
             .children(panel)
+            .child(advanced)
             .into_any_element()
     }
 }

@@ -5,6 +5,7 @@
 //! after checking it, and both keep a shared token that every data request
 //! carries. Pulled files go through backups like every other sync.
 
+use crate::jobs::Jobs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
@@ -463,6 +464,9 @@ pub struct Hub {
     state: Mutex<State>,
     stop: AtomicBool,
     waker: crate::waker::Waker,
+    /// Progress for recipes built while serving a peer (quiet unless they
+    /// fail).
+    jobs: Jobs,
     /// UDP discovery could not start (port in use); address and Tailscale
     /// still work.
     pub discovery_error: Option<String>,
@@ -491,12 +495,14 @@ impl Hub {
         } else {
             UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT))
         };
+        let jobs = Jobs::new(ctx.clone());
         let hub = Arc::new(Hub {
             id,
             port,
             state: Mutex::new(State::default()),
             stop: AtomicBool::new(false),
             waker: ctx,
+            jobs,
             discovery_error: udp
                 .as_ref()
                 .err()
@@ -848,6 +854,33 @@ impl Hub {
             let _ = req.respond(json(serde_json::to_value(&shared).unwrap_or_default()));
             return;
         }
+        if path == "/recipe" {
+            let key = q.get("inst").map(String::as_str).unwrap_or("");
+            let Some(si) = shared.iter().find(|s| s.key == key) else {
+                let _ = req.respond(status(404, "no such instance"));
+                return;
+            };
+            let job = self
+                .jobs
+                .start_quiet(format!("Reading {} as a recipe", si.name));
+            let r = crate::instances::load(&si.root)
+                .ok_or_else(|| anyhow::anyhow!("{} isn't an instance any more", si.root.display()))
+                .and_then(|inst| crate::recipe::of(&inst, &si.key, &job));
+            let done = r
+                .as_ref()
+                .map(|_| ())
+                .map_err(|e| anyhow::anyhow!("{e:#}"));
+            job.finish(&done);
+            match r {
+                Ok(recipe) => {
+                    let _ = req.respond(json(serde_json::to_value(recipe).unwrap_or_default()));
+                }
+                Err(e) => {
+                    let _ = req.respond(status(500, &format!("{e:#}")));
+                }
+            }
+            return;
+        }
         let inst = q
             .get("inst")
             .and_then(|k| shared.iter().find(|s| &s.key == k));
@@ -951,6 +984,18 @@ impl Hub {
 
     pub fn instances(&self, peer_id: &str) -> anyhow::Result<Vec<SharedInst>> {
         let (t, url) = self.request(peer_id, "/instances", &[])?;
+        Ok(agent()
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", t.token))
+            .call()?
+            .body_mut()
+            .read_json()?)
+    }
+
+    /// One instance on a paired peer as a share code, plus the files the
+    /// code can't describe. No instance files cross the peer link.
+    pub fn recipe(&self, peer_id: &str, inst: &str) -> anyhow::Result<crate::recipe::Recipe> {
+        let (t, url) = self.request(peer_id, "/recipe", &[("inst", inst)])?;
         Ok(agent()
             .get(&url)
             .header("Authorization", format!("Bearer {}", t.token))
@@ -1404,6 +1449,15 @@ mod tests {
         }
         std::fs::write(ra.join("mods/only-a.jar"), "a").unwrap();
         std::fs::write(rb.join("mods/only-b.jar"), "b").unwrap();
+        // A readable instance record, so the recipe can be built.
+        let binst = crate::instances::Instance {
+            name: "TNP".into(),
+            root: rb.clone(),
+            game_version: "1.21.1".into(),
+            loader: "neoforge".into(),
+            ..Default::default()
+        };
+        binst.save().unwrap();
         let share = |r: &Path| SharedInst {
             key: "TNP".into(),
             name: "TNP".into(),
@@ -1427,6 +1481,14 @@ mod tests {
 
         let insts = a.instances(&b.id).unwrap();
         assert_eq!(insts[0].key, "TNP");
+        // A recipe is a share code, not files.
+        let recipe = a.recipe(&b.id, "TNP").unwrap();
+        assert_eq!((recipe.inst.as_str(), recipe.name.as_str()), ("TNP", "TNP"));
+        assert!(recipe.left_out.is_empty());
+        assert!(matches!(
+            crate::sharecode::decode(&recipe.code).unwrap().base,
+            crate::sharecode::Base::Plain { .. }
+        ));
         let remote = a.remote_manifest(&b.id, "TNP", "mods").unwrap();
         let local = manifest(&share(&ra), "mods", &HashMap::new());
         let d: Vec<(String, Status)> = diff(&local, &remote)

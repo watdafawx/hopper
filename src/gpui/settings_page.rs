@@ -241,7 +241,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Minecraft, "mc-tutorialStep", "Skip the tutorial hints", "No \"Use W, A, S, D to move\" hints in new worlds.", "tutorial toasts hints first start"),
     e(C::Minecraft, "mc-narrator", "Narrator off", "Also skips the accessibility screen of Minecraft 1.20 and newer on the first start.", "narrator accessibility onboarding"),
     e(C::Minecraft, "mc-keys", "Key bindings", "", "keybinds keys controls bindings hotkeys"),
-    e(C::Servers, "server-tools", "Server tools", "The Servers page, server buttons on instances, and Peers. Off hides them; Servers stays as a quiet item in the top bar unless you also hide that.", "servers host hosting panel peers opt in turn on off hide"),
+    e(C::Servers, "server-tools", "Server tools", "The Servers page, server buttons on instances, and Friends (sync with a friend's PC). Off hides them; Servers stays as a quiet item in the top bar unless you also hide that.", "servers host hosting panel peers opt in turn on off hide"),
     e(C::Servers, "hide-servers", "Hide the Servers item completely", "With server tools off, the top bar shows only Library and Browse. Ctrl+K and the ⋯ menus still reach servers.", "servers top bar nav hide"),
     e(C::Servers, "servers-root", "Server packs", "The folder your server folders are in (a shared folder for a server on another PC).", "folder rig path directory"),
     e(C::Servers, "hosted-root", "Hosted servers", "Servers Hopper runs on this PC live here.", "folder host path directory"),

@@ -705,13 +705,14 @@ pub fn install_share(instances_root: &Path, share: &Share, job: &Job) -> anyhow:
         inst.loader = l.clone();
     }
     inst.save()?;
-    apply(&mut inst, &share, job)?;
+    apply_existing(&mut inst, &share, job)?;
     Ok(inst)
 }
 
-/// Brings a freshly installed pack in line with the code's entries. A file
-/// that fails is noted and the rest still go in.
-fn apply(inst: &mut Instance, share: &Share, job: &Job) -> anyhow::Result<()> {
+/// Brings an instance in line with the code's entries, in place. A file
+/// that fails is noted and the rest still go in. The caller checks that the
+/// instance starts from the same pack (see [`crate::recipe::fit`]).
+pub fn apply_existing(inst: &mut Instance, share: &Share, job: &Job) -> anyhow::Result<()> {
     let find = |inst: &Instance, t: &Target| {
         inst.addons.iter().position(|a| match t {
             Target::Curse(p) => a.project_id == *p,
@@ -722,8 +723,10 @@ fn apply(inst: &mut Instance, share: &Share, job: &Job) -> anyhow::Result<()> {
         if let Entry::Remove(t) = e
             && let Some(i) = find(inst, t)
         {
-            let a = inst.addons.remove(i);
-            let _ = std::fs::remove_file(inst.addon_path(&a));
+            let name = inst.addons[i].name.clone();
+            if let Err(e) = crate::install::remove(inst, i) {
+                job.note(format!("Couldn't remove {name}: {e:#}"));
+            }
         }
     }
     // Whose each CurseForge file is, a few hundred per request.

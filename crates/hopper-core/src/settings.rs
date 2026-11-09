@@ -19,6 +19,26 @@ pub struct JavaPreset {
     pub args: String,
 }
 
+/// A peer's instance this PC keeps matching: the local root, the peer and
+/// the last code applied (and seen, when it differs).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FollowedRecipe {
+    pub peer_id: String,
+    pub peer_name: String,
+    /// The sender's instance key.
+    pub inst: String,
+    pub name: String,
+    /// The local instance root.
+    pub root: String,
+    /// The code last applied here.
+    pub code: String,
+    /// The newest code fetched (equals `code` when up to date).
+    pub seen: String,
+    /// Files the recipe couldn't describe; the player has to get those.
+    pub left_out: Vec<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -65,6 +85,8 @@ pub struct Settings {
     pub folder_rules: crate::folderrules::Rules,
     /// Peer sync with other PCs running Hopper.
     pub peer_sync: bool,
+    /// Recipes this PC follows from paired peers, one per local instance.
+    pub followed_recipes: Vec<FollowedRecipe>,
     /// Where data packs go, per instance root: a folder relative to it.
     pub datapack_dest: HashMap<String, String>,
     /// Hopper opens curseforge.com's Install links; what handled them
@@ -498,6 +520,7 @@ impl Default for Settings {
             pack_update_clean: HashMap::new(),
             folder_rules: Default::default(),
             peer_sync: false,
+            followed_recipes: Vec::new(),
             datapack_dest: HashMap::new(),
             links_prev_handler: None,
             links_enabled: false,
