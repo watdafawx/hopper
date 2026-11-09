@@ -27,6 +27,8 @@ pub struct PeersView {
     address: Entity<InputState>,
     /// The friend's one-time code, for the mailbox.
     join_code: Entity<InputState>,
+    /// The invite code just made, shown with a Copy button and copied once.
+    invite: Option<String>,
     message: Option<Result<String, String>>,
     /// Mods from other sources the last pull left out, said after its result.
     skipped: Option<String>,
@@ -52,7 +54,7 @@ impl PeersView {
             InputState::new(window, cx).placeholder("Add by address: 100.x.y.z, host:port or https URL")
         });
         let join_code = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Their 8-character code")
+            InputState::new(window, cx).placeholder("Paste their invite code")
         });
         let subs = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
@@ -72,6 +74,7 @@ impl PeersView {
             root: None,
             address,
             join_code,
+            invite: None,
             message: None,
             skipped: None,
             codes: HashMap::new(),
@@ -634,7 +637,48 @@ impl PeersView {
                                 .label("Invite a friend")
                                 .on_click(cx.listener(|this, _, _, cx| this.mailbox_invite(cx))),
                         )
-                        .child(div().w_40().child(Input::new(&self.join_code).small()))
+                    }),
+            )
+            .when_some(err, |c, e| {
+                c.child(div().text_sm().text_color(theme.danger).child(e))
+            })
+            .when_some(self.invite.clone(), |c, code| {
+                let copy = code.clone();
+                c.child(
+                    h_flex()
+                        .gap_2()
+                        .px_1()
+                        .items_center()
+                        .child(
+                            widgets::chip(theme.primary)
+                                .text_sm()
+                                .font_semibold()
+                                .child(code),
+                        )
+                        .child(
+                            Button::new("mb-copy")
+                                .xsmall()
+                                .outline()
+                                .label("Copy")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                                    this.message = Some(Ok("Code copied.".into()));
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            widgets::caption("Works once, for 15 minutes.", cx).text_xs(),
+                        ),
+                )
+            })
+            .when(mb.is_some(), |c| {
+                c.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .px_1()
+                        .child(widgets::caption("Have a code from them?", cx))
+                        .child(div().w_64().child(Input::new(&self.join_code).small()))
                         .child(
                             Button::new("mb-join")
                                 .small()
@@ -642,15 +686,12 @@ impl PeersView {
                                 .label("Join")
                                 .disabled(self.running)
                                 .on_click(cx.listener(|this, _, _, cx| this.mailbox_join(cx))),
-                        )
-                    }),
-            )
-            .when_some(err, |c, e| {
-                c.child(div().text_sm().text_color(theme.danger).child(e))
+                        ),
+                )
             })
             .when(mb.is_some() && friends.is_empty() && recipes.is_empty(), |c| {
                 c.child(widgets::caption(
-                    "Pair once with a code. No account, and only the mod list travels — the files download from their usual sites.",
+                    "Invite a friend to get a code, or paste the code they sent you. The code works once, for 15 minutes.",
                     cx,
                 ))
             })
@@ -738,10 +779,17 @@ impl PeersView {
             let r = cx.background_spawn(async move { mb.invite() }).await;
             this.update(cx, |this, cx| {
                 this.running = false;
-                this.message = Some(
-                    r.map(|code| format!("Give them this code: {code}. It works once, for 15 minutes."))
-                        .map_err(|e| format!("{e:#}")),
-                );
+                this.message = Some(match r {
+                    Ok(code) => {
+                        // Put it on the clipboard straight away; the Copy
+                        // button beside it is for later.
+                        cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                        this.invite = Some(code);
+                        Ok("Code copied. Send it to your friend; it works once, for 15 minutes."
+                            .to_string())
+                    }
+                    Err(e) => Err(format!("{e:#}")),
+                });
                 cx.notify();
             })
             .ok();
