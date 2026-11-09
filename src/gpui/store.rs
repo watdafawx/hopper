@@ -67,6 +67,8 @@ pub enum Msg {
     /// projects leave its list of available updates (no full re-check).
     /// Pages to open in the browser (Hopper's download window couldn't).
     OpenUrls(Vec<String>),
+    /// A followed recipe was applied; remember its code.
+    RecipeApplied(PathBuf, String),
     /// Projects updated, download pages to fetch, and the project whose
     /// install or update asked for them (its button shows their progress).
     Updated(PathBuf, Vec<u64>, Vec<String>, Option<u64>),
@@ -505,6 +507,19 @@ pub struct Store {
     asked: Option<String>,
     /// Another Hopper asked to pair this run: a sign the user runs servers.
     pair_asked: bool,
+    /// The mailbox, its friends and the latest shared recipe per friend
+    /// instance.
+    mailbox: Option<std::sync::Arc<hopper::mailbox::Mailbox>>,
+    mailbox_error: Option<String>,
+    mailbox_seq: u64,
+    mailbox_friends: Vec<hopper::mailbox::Friend>,
+    mailbox_recipes: Vec<hopper::mailbox::Event>,
+    /// What was last published to the mailbox, to publish on real changes.
+    mailbox_sig: u64,
+    _mailbox_watch: Option<Task<()>>,
+    _mailbox_publish: Option<Task<()>>,
+    /// Follows waiting for their instance to stop running.
+    pending_follow: std::collections::HashSet<PathBuf>,
     /// Modpacks (project ids) whose server files were downloaded this run.
     server_files_got: std::collections::HashSet<u64>,
     /// Instance roots the game watcher looks for.
@@ -678,6 +693,15 @@ impl Store {
             shared_sig: 0,
             asked: None,
             pair_asked: false,
+            mailbox: None,
+            mailbox_error: None,
+            mailbox_seq: 0,
+            mailbox_friends: Vec::new(),
+            mailbox_recipes: Vec::new(),
+            mailbox_sig: 0,
+            _mailbox_watch: None,
+            _mailbox_publish: None,
+            pending_follow: Default::default(),
             server_files_got: Default::default(),
             watched,
             disk: disk_sync::start(tx.clone(), wake.clone()),
@@ -710,6 +734,7 @@ impl Store {
         store._self_update_watch = Self::self_update_watch(cx);
         if store.settings.peer_sync {
             store.start_peers();
+            store.start_mailbox(cx);
         }
         // Packs kept from updates that weren't used for a while go.
         let keep = store.settings.pack_keep_days;
@@ -1053,6 +1078,22 @@ impl Store {
                 for u in &urls {
                     cx.open_url(u);
                 }
+            }
+            Msg::RecipeApplied(root, code) => {
+                self.pending_follow.remove(&root);
+                self.update_settings(
+                    |st| {
+                        if let Some(f) = st
+                            .followed_recipes
+                            .iter_mut()
+                            .find(|f| std::path::Path::new(&f.root) == root)
+                        {
+                            f.code = code;
+                        }
+                    },
+                    cx,
+                );
+                self.handle(Msg::InstanceChanged(root), cx);
             }
             Msg::InstanceChanged(root) if server_mods::remote(&root).is_some() => self.refetch_server_mods(&root),
             Msg::InstanceChanged(root) => {
@@ -3325,8 +3366,15 @@ impl Store {
         self.update_settings(|st| st.peer_sync = on, cx);
         if on {
             self.start_peers();
-        } else if let Some(h) = self.peer_hub.take() {
-            h.stop();
+            self.start_mailbox(cx);
+        } else {
+            if let Some(h) = self.peer_hub.take() {
+                h.stop();
+            }
+            self.mailbox = None;
+            self.mailbox_error = None;
+            self._mailbox_watch = None;
+            self._mailbox_publish = None;
         }
         cx.notify();
     }
@@ -3345,8 +3393,315 @@ impl Store {
         }
     }
 
+    /// Starts the mailbox account and its recipe feed. Safe to call often.
+    fn start_mailbox(&mut self, cx: &mut Context<Self>) {
+        if self._mailbox_watch.is_some() {
+            return;
+        }
+        let url = self.settings.mailbox_url.trim().to_string();
+        if url.is_empty() {
+            return;
+        }
+        let name = if self.settings.mailbox_name.trim().is_empty() {
+            hopper::peer::self_name()
+        } else {
+            self.settings.mailbox_name.trim().to_string()
+        };
+        self._mailbox_watch = Some(cx.spawn(async move |this, cx| loop {
+            let (u, n) = (url.clone(), name.clone());
+            let mb = cx
+                .background_spawn(async move { hopper::mailbox::Mailbox::load(&u, &n) })
+                .await;
+            let mb = match mb {
+                Ok(mb) => std::sync::Arc::new(mb),
+                Err(e) => {
+                    this.update(cx, |s, cx| {
+                        s.mailbox_error = Some(format!("Mailbox: {e:#}"));
+                        cx.notify();
+                    })
+                    .ok();
+                    cx.background_executor()
+                        .timer(Duration::from_secs(30))
+                        .await;
+                    continue;
+                }
+            };
+            if this
+                .update(cx, |s, cx| {
+                    s.mailbox = Some(mb.clone());
+                    s.mailbox_error = None;
+                    cx.notify();
+                })
+                .is_err()
+            {
+                return;
+            }
+            loop {
+                let got = this.update(cx, |s, _| (s.mailbox_seq, s.mailbox.clone()));
+                let Ok((after, Some(mb2))) = got else { return };
+                let r = cx
+                    .background_spawn(async move { mb2.events(after, 60) })
+                    .await;
+                match r {
+                    Ok((seq, events)) => {
+                        if this
+                            .update(cx, |s, cx| {
+                                s.mailbox_seq = seq.max(after);
+                                s.mailbox_error = None;
+                                for e in events {
+                                    s.mailbox_event(e, cx);
+                                }
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        this.update(cx, |s, cx| {
+                            s.mailbox_error = Some(format!("Mailbox: {e:#}"));
+                            cx.notify();
+                        })
+                        .ok();
+                        cx.background_executor()
+                            .timer(Duration::from_secs(20))
+                            .await;
+                    }
+                }
+            }
+        }));
+        self.start_mailbox_publish(cx);
+    }
+
+    /// Publishes recipes whenever instances or the friend list change.
+    fn start_mailbox_publish(&mut self, cx: &mut Context<Self>) {
+        if self._mailbox_publish.is_some() {
+            return;
+        }
+        self._mailbox_publish = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_secs(3))
+                .await;
+            let got = this.update(cx, |s, _| {
+                let mb = s.mailbox.clone()?;
+                Some((
+                    mb,
+                    s.instances_sig(),
+                    s.instances.clone(),
+                    s.mailbox_friends.clone(),
+                    s.mailbox_sig,
+                ))
+            });
+            let Ok(Some((mb, sig, instances, old_friends, old_sig))) = got else {
+                continue;
+            };
+            let friends = {
+                let mb = mb.clone();
+                cx.background_spawn(async move { mb.friends() })
+                    .await
+                    .unwrap_or_default()
+            };
+            let friends_changed = friends != old_friends;
+            if sig == old_sig && !friends_changed {
+                continue;
+            }
+            if friends.is_empty() {
+                this.update(cx, |s, cx| {
+                    s.mailbox_sig = sig;
+                    if s.mailbox_friends != friends {
+                        s.mailbox_friends = friends;
+                        cx.notify();
+                    }
+                })
+                .ok();
+                continue;
+            }
+            let made = {
+                let instances = instances.clone();
+                cx.background_spawn(async move {
+                    let jobs = hopper::jobs::Jobs::new(Arc::new(|| {}));
+                    let mut out = Vec::new();
+                    for inst in instances {
+                        let key = inst
+                            .root
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
+                        let j = jobs.start_quiet(format!("Sharing {}", inst.name));
+                        if let Ok(m) = hopper::sharecode::make(&inst, &j) {
+                            out.push((key, inst.name.clone(), m.code, m.left_out));
+                        }
+                        j.finish(&Ok::<(), anyhow::Error>(()));
+                    }
+                    out
+                })
+                .await
+            };
+            {
+                let (mb, friends) = (mb.clone(), friends.clone());
+                cx.background_spawn(async move {
+                    for (key, name, code, left_out) in &made {
+                        for f in &friends {
+                            let _ = mb.publish(&f.id, key, name, code, left_out);
+                        }
+                    }
+                })
+                .await;
+            }
+            this.update(cx, |s, cx| {
+                s.mailbox_sig = sig;
+                s.mailbox_friends = friends;
+                s.mailbox_error = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// A recipe input for the publish signature: every field a share code
+    /// reads, so toggles and file changes publish too.
+    fn instances_sig(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.instances.len().hash(&mut h);
+        for i in &self.instances {
+            i.name.hash(&mut h);
+            i.game_version.hash(&mut h);
+            i.loader.hash(&mut h);
+            if let Some(p) = &i.pack {
+                p.project_id.hash(&mut h);
+                p.file_id.hash(&mut h);
+                p.mr_project.hash(&mut h);
+                p.mr_version.hash(&mut h);
+                p.name.hash(&mut h);
+            }
+            for a in &i.addons {
+                a.project_id.hash(&mut h);
+                a.file_id.hash(&mut h);
+                a.enabled.hash(&mut h);
+                a.mr_version.hash(&mut h);
+                a.class_id.hash(&mut h);
+                if let Some(s) = &a.source {
+                    s.url.hash(&mut h);
+                    s.seen.hash(&mut h);
+                    s.sha256.hash(&mut h);
+                    s.class.hash(&mut h);
+                }
+            }
+        }
+        h.finish()
+    }
+
+    /// A friend published a recipe to this PC: keep it for the Friends
+    /// screen and apply it when it's for an instance being followed.
+    fn mailbox_event(&mut self, e: hopper::mailbox::Event, cx: &mut Context<Self>) {
+        if let Some(ix) = self
+            .mailbox_recipes
+            .iter()
+            .position(|x| x.from == e.from && x.inst == e.inst)
+        {
+            self.mailbox_recipes[ix] = e.clone();
+        } else {
+            self.mailbox_recipes.push(e.clone());
+            if self.mailbox_recipes.len() > 100 {
+                self.mailbox_recipes.remove(0);
+            }
+        }
+        let mut apply: Option<(PathBuf, String, String)> = None;
+        let ev = e.clone();
+        self.update_settings(
+            |st| {
+                let Some(f) = st
+                    .followed_recipes
+                    .iter_mut()
+                    .find(|f| f.peer_id == ev.from && f.inst == ev.inst)
+                else {
+                    return;
+                };
+                if f.seen == ev.code {
+                    return;
+                }
+                f.seen = ev.code.clone();
+                f.left_out = ev.left_out.clone();
+                f.name = ev.name.clone();
+                f.peer_name = ev.from_name.clone();
+                apply = Some((
+                    PathBuf::from(&f.root),
+                    f.seen.clone(),
+                    format!("Updating from {}'s {}", f.peer_name, f.name),
+                ));
+            },
+            cx,
+        );
+        if let Some((root, code, title)) = apply {
+            if self.is_busy(&root) {
+                self.pending_follow.insert(root);
+            } else {
+                self.apply_follow(root, code, title, cx);
+            }
+        }
+    }
+
+    /// Applies a followed recipe now, or when the game lets go.
+    fn apply_follow(&mut self, root: PathBuf, code: String, title: String, _cx: &mut Context<Self>) {
+        if self.is_busy(&root) {
+            self.pending_follow.insert(root);
+            return;
+        }
+        let root2 = root.clone();
+        self.spawn_instance_job(&root, title, move |job| {
+            hopper::recipe::apply_to(&root2, &code, job)?;
+            Ok(Msg::RecipeApplied(root2.clone(), code.clone()))
+        });
+    }
+
+    pub fn mailbox(&self) -> Option<std::sync::Arc<hopper::mailbox::Mailbox>> {
+        self.mailbox.clone()
+    }
+
+    pub fn mailbox_error(&self) -> Option<String> {
+        self.mailbox_error.clone()
+    }
+
+    pub fn mailbox_friends(&self) -> &[hopper::mailbox::Friend] {
+        &self.mailbox_friends
+    }
+
+    pub fn mailbox_recipes(&self) -> &[hopper::mailbox::Event] {
+        &self.mailbox_recipes
+    }
+
+    /// The Friends screen calls this to follow a recipe from the mailbox.
+    pub fn apply_follow_now(&mut self, root: PathBuf, code: String, title: String, cx: &mut Context<Self>) {
+        self.apply_follow(root, code, title, cx);
+    }
+
     /// Keeps the hub's instance list current and surfaces pair requests.
     fn peer_tick(&mut self, cx: &mut Context<Self>) {
+        if !self.pending_follow.is_empty() {
+            let ready: Vec<(PathBuf, String, String)> = self
+                .pending_follow
+                .iter()
+                .filter(|r| !self.is_busy(r))
+                .filter_map(|r| {
+                    let f = self
+                        .settings
+                        .followed_recipes
+                        .iter()
+                        .find(|f| std::path::Path::new(&f.root) == *r)?;
+                    Some((
+                        r.clone(),
+                        f.seen.clone(),
+                        format!("Updating from {}'s {}", f.peer_name, f.name),
+                    ))
+                })
+                .collect();
+            for (root, code, title) in ready {
+                self.pending_follow.remove(&root);
+                self.apply_follow(root, code, title, cx);
+            }
+        }
         let Some(hub) = self.peer_hub.clone() else { return };
         let sig = self.instances.iter().fold(self.instances.len() as u64, |a, i| {
             a.wrapping_mul(31)

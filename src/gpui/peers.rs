@@ -25,6 +25,8 @@ pub struct PeersView {
     store: Entity<Store>,
     root: Option<PathBuf>,
     address: Entity<InputState>,
+    /// The friend's one-time code, for the mailbox.
+    join_code: Entity<InputState>,
     message: Option<Result<String, String>>,
     /// Mods from other sources the last pull left out, said after its result.
     skipped: Option<String>,
@@ -49,6 +51,9 @@ impl PeersView {
         let address = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Add by address: 100.x.y.z, host:port or https URL")
         });
+        let join_code = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Their 8-character code")
+        });
         let subs = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe(&address, |this, _, e: &InputEvent, cx| {
@@ -56,11 +61,17 @@ impl PeersView {
                     this.add_address(cx);
                 }
             }),
+            cx.subscribe(&join_code, |this, _, e: &InputEvent, cx| {
+                if matches!(e, InputEvent::PressEnter { .. }) {
+                    this.mailbox_join(cx);
+                }
+            }),
         ];
         Self {
             store,
             root: None,
             address,
+            join_code,
             message: None,
             skipped: None,
             codes: HashMap::new(),
@@ -592,6 +603,197 @@ impl PeersView {
                 })
                 .into_any_element(),
         )
+    }
+
+    fn mailbox_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let mb = self.store.read(cx).mailbox();
+        let friends = self.store.read(cx).mailbox_friends().to_vec();
+        let recipes = self.store.read(cx).mailbox_recipes().to_vec();
+        let err = self.store.read(cx).mailbox_error();
+        let following = self.followed(cx);
+        v_flex()
+            .gap_2()
+            .p_3()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().text_sm().font_semibold().child("From anywhere"))
+                    .when(mb.is_none() && err.is_none(), |r| {
+                        r.child(Spinner::new().small())
+                    })
+                    .child(div().flex_1())
+                    .when(mb.is_some(), |r| {
+                        r.child(
+                            Button::new("mb-invite")
+                                .small()
+                                .outline()
+                                .label("Invite a friend")
+                                .on_click(cx.listener(|this, _, _, cx| this.mailbox_invite(cx))),
+                        )
+                        .child(div().w_40().child(Input::new(&self.join_code).small()))
+                        .child(
+                            Button::new("mb-join")
+                                .small()
+                                .outline()
+                                .label("Join")
+                                .disabled(self.running)
+                                .on_click(cx.listener(|this, _, _, cx| this.mailbox_join(cx))),
+                        )
+                    }),
+            )
+            .when_some(err, |c, e| {
+                c.child(div().text_sm().text_color(theme.danger).child(e))
+            })
+            .when(mb.is_some() && friends.is_empty() && recipes.is_empty(), |c| {
+                c.child(widgets::caption(
+                    "Pair once with a code. No account, and only the mod list travels — the files download from their usual sites.",
+                    cx,
+                ))
+            })
+            .children(friends.into_iter().map(|f| {
+                h_flex()
+                    .gap_2()
+                    .px_1()
+                    .child(
+                        div()
+                            .size_2()
+                            .rounded_full()
+                            .bg(if f.online { theme.success } else { theme.muted_foreground }),
+                    )
+                    .child(div().text_sm().font_medium().child(f.name))
+                    .child(widgets::chip(theme.muted_foreground).xsmall().child("Paired"))
+            }))
+            .children(recipes.into_iter().map(|e| {
+                let already = following
+                    .as_ref()
+                    .is_some_and(|f| f.peer_id == e.from && f.inst == e.inst);
+                h_flex()
+                    .gap_2()
+                    .px_1()
+                    .child(
+                        div().text_sm().child(format!(
+                            "{} shared {}",
+                            if e.from_name.is_empty() { "A friend" } else { &e.from_name },
+                            if e.name.is_empty() { &e.inst } else { &e.name }
+                        )),
+                    )
+                    .when(!e.left_out.is_empty(), |r| {
+                        r.child(
+                            widgets::caption(
+                                format!("{} file(s) aren't downloadable", e.left_out.len()),
+                                cx,
+                            )
+                            .text_xs(),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .when(already, |r| {
+                        r.child(widgets::chip(theme.success).xsmall().child("Following"))
+                    })
+                    .when(!already, |r| {
+                        r.child(
+                            Button::new(SharedString::from(format!("mb-get:{}:{}", e.from, e.inst)))
+                                .xsmall()
+                                .outline()
+                                .label("Get this instance")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.mailbox_follow(&e, cx)
+                                })),
+                        )
+                    })
+            }))
+            .into_any_element()
+    }
+
+    fn mailbox_invite(&mut self, cx: &mut Context<Self>) {
+        let Some(mb) = self.store.read(cx).mailbox() else {
+            return;
+        };
+        self.running = true;
+        self.message = None;
+        cx.spawn(async move |this, cx| {
+            let r = cx.background_spawn(async move { mb.invite() }).await;
+            this.update(cx, |this, cx| {
+                this.running = false;
+                this.message = Some(
+                    r.map(|code| format!("Give them this code: {code}. It works once, for 15 minutes."))
+                        .map_err(|e| format!("{e:#}")),
+                );
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn mailbox_join(&mut self, cx: &mut Context<Self>) {
+        let code = self.join_code.read(cx).value().trim().to_string();
+        if code.is_empty() {
+            return;
+        }
+        let Some(mb) = self.store.read(cx).mailbox() else {
+            return;
+        };
+        self.running = true;
+        self.message = None;
+        cx.spawn(async move |this, cx| {
+            let r = cx.background_spawn(async move { mb.join(&code) }).await;
+            this.update(cx, |this, cx| {
+                this.running = false;
+                this.message = Some(match r {
+                    Ok(f) => Ok(format!(
+                        "Paired with {}. Their instances appear here when they share one.",
+                        if f.name.is_empty() { "them" } else { &f.name }
+                    )),
+                    Err(e) => Err(format!("{e:#}")),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn mailbox_follow(&mut self, e: &hopper::mailbox::Event, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let previous = self
+            .followed(cx)
+            .filter(|f| f.peer_id == e.from && f.inst == e.inst)
+            .map(|f| f.code)
+            .unwrap_or_default();
+        self.save_follow(
+            FollowedRecipe {
+                peer_id: e.from.clone(),
+                peer_name: e.from_name.clone(),
+                inst: e.inst.clone(),
+                name: e.name.clone(),
+                root: root.to_string_lossy().into_owned(),
+                code: previous,
+                seen: e.code.clone(),
+                left_out: e.left_out.clone(),
+            },
+            cx,
+        );
+        let (code, title, name) = (
+            e.code.clone(),
+            format!("Updating from {}'s {}", e.from_name, e.name),
+            e.name.clone(),
+        );
+        self.store
+            .update(cx, |s, cx| s.apply_follow_now(root, code, title, cx));
+        self.message = Some(Ok(format!(
+            "Following {}'s {}. The mods are downloading.",
+            e.from_name, name
+        )));
+        cx.notify();
     }
 
     fn intro(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1182,11 +1384,12 @@ impl Render for PeersView {
                     ),
             )
             .children(follow)
+            .child(self.mailbox_card(cx))
             .children(message)
             .child(
                 v_flex()
                     .gap_1()
-                    .child(div().text_sm().font_semibold().child("Friends' PCs"))
+                    .child(div().text_sm().font_semibold().child("On this network"))
                     .child(peers),
             )
             .children(panel)

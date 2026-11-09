@@ -85,6 +85,10 @@ pub struct Settings {
     pub folder_rules: crate::folderrules::Rules,
     /// Peer sync with other PCs running Hopper.
     pub peer_sync: bool,
+    /// Mailbox for PCs that can't reach each other directly.
+    pub mailbox_url: String,
+    /// The name other PCs see. Empty uses this PC's name.
+    pub mailbox_name: String,
     /// Recipes this PC follows from paired peers, one per local instance.
     pub followed_recipes: Vec<FollowedRecipe>,
     /// Where data packs go, per instance root: a folder relative to it.
@@ -520,6 +524,8 @@ impl Default for Settings {
             pack_update_clean: HashMap::new(),
             folder_rules: Default::default(),
             peer_sync: false,
+            mailbox_url: crate::mailbox::DEFAULT_URL.to_string(),
+            mailbox_name: String::new(),
             followed_recipes: Vec::new(),
             datapack_dest: HashMap::new(),
             links_prev_handler: None,

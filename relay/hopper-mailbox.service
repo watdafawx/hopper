@@ -1,0 +1,20 @@
+[Unit]
+Description=Hopper mailbox
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hopper-mailbox
+Group=hopper-mailbox
+ExecStart=/usr/bin/python3 /opt/hopper-mailbox/hopper_mailbox.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hopper-mailbox
+
+[Install]
+WantedBy=multi-user.target

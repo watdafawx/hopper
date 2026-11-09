@@ -57,6 +57,7 @@ pub mod jvm_editor;
 pub mod launch;
 pub mod launchers;
 pub mod locked;
+pub mod mailbox;
 pub mod jar_changes;
 pub mod loader_changes;
 pub mod loader_installer;

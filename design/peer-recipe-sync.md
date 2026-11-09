@@ -50,13 +50,40 @@ Windows firewall note live under **Advanced**. The manual file diff is under
 
 Mock: `mockups/peers-redesign.html` (Now, A, B, C; A is built).
 
+## The mailbox (PCs that can't reach each other)
+
+The direct peer link still works on a LAN, Tailscale or an address, but a
+recipe must not depend on that. The mailbox on the Oracle VM is the default
+path for everyone else:
+
+- `POST /v1/register` gives a PC a random id and bearer token, kept in
+  `data/mailbox.json`.
+- One PC makes a one-time code; the other redeems it. Both are friends.
+- When an instance changes, the publisher builds its share code and posts it
+  to each friend. The other PC long-polls `/v1/recipes`; a new event updates
+  the follow's `seen` code and auto-applies it. If the game is running, it
+  waits and applies when the instance is free.
+- Only recipes travel; files still come from CurseForge, Modrinth, GitHub and
+  the other sources. The service holds no jars.
+- The service binds `127.0.0.1:8787` on the VM; a Cloudflare Tunnel publishes
+  it as `https://sync.kyuubi.dev`, so the OCI ports stay closed (22 and the
+  voice UDP port only).
+
+The Friends screen has a "From anywhere" card: invite, join with a code,
+friends with presence, and "Get this instance" for each shared recipe. The
+old file-by-file sync and the direct peer list live under "On this network".
+
+Server code and deployment notes: `relay/`.
+
 ## Deliberately out of scope (v1)
 
-- Signatures and a public mailbox/relay. The recipe is fetched over the
-  existing paired-peer connection, which is already authenticated by the
-  pairing token. A mailbox would need a signature (peer key + revision)
-  before it can be trusted.
-- Automatic updates and notifications. Check happens when the player asks.
+- Recipe signatures. The mailbox is authenticated by a per-PC bearer token
+  over TLS; a signed envelope (peer key + revision) is the next hardening
+  step before the service is opened beyond friends.
+- Rate limiting per account and abuse controls beyond the event/size caps.
+  The service is invite-only in practice, but the routes are public.
+- Notifications when a friend shares or updates while Hopper is closed. The
+  next launch catches up from the mailbox queue.
 - Two-way sync. A follow is one-way: the follower matches the sender.
 - Server panels. This is desktop peer sync; the panel already has its own
   push/config flow.
