@@ -606,7 +606,7 @@ impl PeersView {
     }
 
     fn mailbox_card(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let mb = self.store.read(cx).mailbox();
         let friends = self.store.read(cx).mailbox_friends().to_vec();
         let recipes = self.store.read(cx).mailbox_recipes().to_vec();
@@ -655,16 +655,35 @@ impl PeersView {
                 ))
             })
             .children(friends.into_iter().map(|f| {
+                let head = if f.mc_id.is_empty() {
+                    div()
+                        .size_2()
+                        .rounded_full()
+                        .bg(if f.online { theme.success } else { theme.muted_foreground })
+                        .into_any_element()
+                } else {
+                    let saved = hopper::accounts::Saved {
+                        id: f.mc_id.clone(),
+                        name: f.name.clone(),
+                        ..Default::default()
+                    };
+                    let url = saved.fallback_avatar();
+                    self.store.update(cx, |s, _| s.want_image_now(&url));
+                    crate::accounts::head(
+                        &self.store.read(cx),
+                        &saved,
+                        rems(1.5),
+                        cx,
+                    )
+                };
                 h_flex()
                     .gap_2()
                     .px_1()
-                    .child(
-                        div()
-                            .size_2()
-                            .rounded_full()
-                            .bg(if f.online { theme.success } else { theme.muted_foreground }),
-                    )
+                    .child(head)
                     .child(div().text_sm().font_medium().child(f.name))
+                    .when(f.online && !f.mc_id.is_empty(), |r| {
+                        r.child(div().size_2().rounded_full().bg(theme.success))
+                    })
                     .child(widgets::chip(theme.muted_foreground).xsmall().child("Paired"))
             }))
             .children(recipes.into_iter().map(|e| {

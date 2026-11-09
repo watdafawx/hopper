@@ -19,6 +19,8 @@ pub struct Account {
     pub id: String,
     pub token: String,
     pub name: String,
+    /// Minecraft UUID (no dashes) when signed in.
+    pub mc_id: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +28,8 @@ pub struct Account {
 pub struct Friend {
     pub id: String,
     pub name: String,
+    /// Minecraft UUID (no dashes) when they are signed in.
+    pub mc_id: String,
     pub online: bool,
 }
 
@@ -49,8 +53,9 @@ pub struct Mailbox {
 }
 
 impl Mailbox {
-    /// Loads this PC's account, registering it the first time.
-    pub fn load(base: &str, name: &str) -> anyhow::Result<Self> {
+    /// Loads this PC's account, registering it the first time. `name` and
+    /// `mc_id` are the signed-in Minecraft profile when there is one.
+    pub fn load(base: &str, name: &str, mc_id: &str) -> anyhow::Result<Self> {
         let base = base.trim_end_matches('/').to_string();
         let path = account_path();
         let mut account: Account = std::fs::read(&path)
@@ -62,30 +67,53 @@ impl Mailbox {
             .http_status_as_error(false)
             .build()
             .into();
-        let me = Self {
+        let mut me = Self {
             base,
             account: account.clone(),
             agent,
         };
         if account.id.is_empty() || account.token.is_empty() {
-            let v = me.post("/v1/register", None, serde_json::json!({ "name": name }))?;
+            let v = me.post(
+                "/v1/register",
+                None,
+                serde_json::json!({ "name": name, "mc_id": mc_id }),
+            )?;
             account = Account {
                 id: v["id"].as_str().context("mailbox: no id")?.into(),
                 token: v["token"].as_str().context("mailbox: no token")?.into(),
                 name: v["name"].as_str().unwrap_or(name).into(),
+                mc_id: mc_id.into(),
             };
+            me.account = account.clone();
             if let Some(d) = path.parent() {
                 let _ = std::fs::create_dir_all(d);
             }
             std::fs::write(&path, serde_json::to_vec_pretty(&account)?)
                 .with_context(|| format!("saving {}", path.display()))?;
-            return Ok(Self {
-                base: me.base,
-                account,
-                agent: me.agent,
-            });
+            return Ok(me);
+        }
+        if account.name != name || account.mc_id != mc_id {
+            me.post(
+                "/v1/profile",
+                Some(&account.token),
+                serde_json::json!({ "name": name, "mc_id": mc_id }),
+            )?;
+            account.name = name.to_string();
+            account.mc_id = mc_id.to_string();
+            me.account = account.clone();
+            let _ = std::fs::write(&path, serde_json::to_vec_pretty(&account)?);
         }
         Ok(me)
+    }
+
+    /// Tells the mailbox this PC's Minecraft name and UUID after a sign-in.
+    pub fn update_profile(&self, name: &str, mc_id: &str) -> anyhow::Result<()> {
+        self.post(
+            "/v1/profile",
+            Some(&self.account.token),
+            serde_json::json!({ "name": name, "mc_id": mc_id }),
+        )?;
+        Ok(())
     }
 
     /// A fresh account, not saved. Tests use two of these to pair.
@@ -106,6 +134,7 @@ impl Mailbox {
             id: v["id"].as_str().context("mailbox: no id")?.into(),
             token: v["token"].as_str().context("mailbox: no token")?.into(),
             name: v["name"].as_str().unwrap_or(name).into(),
+            mc_id: String::new(),
         };
         Ok(me)
     }
@@ -228,9 +257,10 @@ mod tests {
             id: "a".repeat(32),
             token: "t".repeat(43),
             name: "FOX".into(),
+            mc_id: "069a79f444e94726a5befca90e38aaf5".into(),
         };
         let b: Account = serde_json::from_slice(&serde_json::to_vec(&a).unwrap()).unwrap();
-        assert_eq!((b.id, b.token, b.name), (a.id, a.token, a.name));
+        assert_eq!((b.id, b.token, b.name, b.mc_id), (a.id, a.token, a.name, a.mc_id));
     }
 
     #[test]
@@ -255,6 +285,15 @@ mod tests {
         let code = a.invite().unwrap();
         let friend = b.join(&code).unwrap();
         assert_eq!(friend.name, "hopper-test-a");
+        let mc_id = "069a79f444e94726a5befca90e38aaf5";
+        a.update_profile("Notch", mc_id).unwrap();
+        let f = b
+            .friends()
+            .unwrap()
+            .into_iter()
+            .find(|f| f.id == a.account().id)
+            .unwrap();
+        assert_eq!((f.name.as_str(), f.mc_id.as_str()), ("Notch", mc_id));
         assert!(a
             .friends()
             .unwrap()

@@ -65,6 +65,10 @@ path for everyone else:
   waits and applies when the instance is free.
 - Only recipes travel; files still come from CurseForge, Modrinth, GitHub and
   the other sources. The service holds no jars.
+- When the player is signed in, the account registers their Minecraft name
+  and UUID; friends see that name and their head. Unsigned PCs fall back to
+  the computer name and a dot. Signing in or out while Hopper is open updates
+  the profile.
 - The service binds `127.0.0.1:8787` on the VM; a Cloudflare Tunnel publishes
   it as `https://sync.kyuubi.dev`, so the OCI ports stay closed (22 and the
   voice UDP port only).

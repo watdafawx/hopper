@@ -81,6 +81,7 @@ def public(uid):
     return {
         "id": uid,
         "name": u.get("name", ""),
+        "mc_id": u.get("mc_id", ""),
         "online": now() - u.get("last_seen", 0) <= ONLINE_SECS,
     }
 
@@ -191,6 +192,7 @@ class Handler(BaseHTTPRequestHandler):
                     "token": token,
                     "created": now(),
                     "last_seen": now(),
+                    "mc_id": str(body.get("mc_id", ""))[:64],
                 }
                 state["friends"].setdefault(uid, [])
                 state["events"].setdefault(uid, [])
@@ -199,6 +201,17 @@ class Handler(BaseHTTPRequestHandler):
         uid = self.auth()
         if not uid:
             return self.send(401, {"error": "register first"})
+        if u.path == "/v1/profile":
+            with changed:
+                me = state["users"].get(uid)
+                if not me:
+                    return self.send(404, {"error": "unknown account"})
+                name = str(body.get("name", "")).strip()[:64]
+                if name:
+                    me["name"] = name
+                me["mc_id"] = str(body.get("mc_id", ""))[:64]
+                save()
+            return self.send(200, {"ok": True})
         if u.path == "/v1/invite":
             with changed:
                 code = secrets.token_hex(4).upper()

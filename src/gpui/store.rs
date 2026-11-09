@@ -1608,7 +1608,30 @@ impl Store {
         if !crate::accounts::mock() && name.is_some() {
             self.update_settings(|s| s.signed_in_as = name, cx);
         }
+        if let Some(mb) = self.mailbox.clone() {
+            let (name, mc_id) = self.mailbox_profile();
+            cx.spawn(async move |_, cx| {
+                let _ = cx
+                    .background_spawn(async move { mb.update_profile(&name, &mc_id) })
+                    .await;
+            })
+            .detach();
+        }
         cx.notify();
+    }
+
+    /// The mailbox's name and Minecraft UUID: the signed-in player when there
+    /// is one, otherwise this PC's name.
+    fn mailbox_profile(&self) -> (String, String) {
+        if let Some(a) = self.accounts.active().filter(|a| !a.name.is_empty()) {
+            return (a.name.clone(), a.id.clone());
+        }
+        let name = if self.settings.mailbox_name.trim().is_empty() {
+            hopper::peer::self_name()
+        } else {
+            self.settings.mailbox_name.trim().to_string()
+        };
+        (name, String::new())
     }
 
     pub fn settings(&self) -> &Settings {
@@ -3407,10 +3430,14 @@ impl Store {
         } else {
             self.settings.mailbox_name.trim().to_string()
         };
+        let (name, mc_id) = match self.accounts.active() {
+            Some(a) if !a.name.is_empty() => (a.name.clone(), a.id.clone()),
+            _ => (name, String::new()),
+        };
         self._mailbox_watch = Some(cx.spawn(async move |this, cx| loop {
-            let (u, n) = (url.clone(), name.clone());
+            let (u, n, m) = (url.clone(), name.clone(), mc_id.clone());
             let mb = cx
-                .background_spawn(async move { hopper::mailbox::Mailbox::load(&u, &n) })
+                .background_spawn(async move { hopper::mailbox::Mailbox::load(&u, &n, &m) })
                 .await;
             let mb = match mb {
                 Ok(mb) => std::sync::Arc::new(mb),
@@ -3502,6 +3529,31 @@ impl Store {
                     .unwrap_or_default()
             };
             let friends_changed = friends != old_friends;
+            if friends_changed {
+                this.update(cx, |s, cx| {
+                    s.update_settings(
+                        |st| {
+                            for f in &friends {
+                                if let Some(x) = st
+                                    .followed_recipes
+                                    .iter_mut()
+                                    .find(|x| x.peer_id == f.id)
+                                {
+                                    x.peer_name = f.name.clone();
+                                }
+                            }
+                        },
+                        cx,
+                    );
+                    for e in &mut s.mailbox_recipes {
+                        if let Some(f) = friends.iter().find(|f| f.id == e.from) {
+                            e.from_name = f.name.clone();
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
             if sig == old_sig && !friends_changed {
                 continue;
             }
