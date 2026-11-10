@@ -386,7 +386,25 @@ pub fn strip_version_suffix(file_name: &str) -> String {
     parts[..end].join("-")
 }
 
-/// Numeric-aware version compare. Non-numeric segments compare as text.
+/// A version part as (leading number, the rest): "24w46a" is (Some(24), "w46a").
+fn part_key(p: &str) -> (Option<u64>, &str) {
+    let end = p.find(|c: char| !c.is_ascii_digit()).unwrap_or(p.len());
+    match p[..end].parse::<u64>() {
+        Ok(n) => (Some(n), &p[end..]),
+        // No digits, or too many to fit: compare as text only.
+        Err(_) => (None, p),
+    }
+}
+
+/// Numeric-aware version compare. Each dot-separated part compares by its
+/// leading number first, then by the rest as text ("26" > "24w46a" > "1");
+/// a part with no number sorts before any with one.
+///
+/// It has to be a true total order: `sort_by` panics ("user-provided comparison
+/// function does not correctly implement a total order") when the order has
+/// cycles, and mixing "26.1" with snapshots like "22w42a" made one when a
+/// number and text were compared as plain text. A Modrinth resource pack
+/// listing both crashed the whole app that way.
 pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let a = a.trim_start_matches('v');
@@ -394,18 +412,21 @@ pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     if a == b {
         return Ordering::Equal;
     }
-    let ap: Vec<&str> = a.split('.').collect();
-    let bp: Vec<&str> = b.split('.').collect();
-    for (x, y) in ap.iter().zip(&bp) {
-        let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
-            (Ok(x), Ok(y)) => x.cmp(&y),
-            _ => x.cmp(y),
+    let mut ap = a.split('.');
+    let mut bp = b.split('.');
+    loop {
+        let (x, y) = match (ap.next(), bp.next()) {
+            (Some(x), Some(y)) => (x, y),
+            // The shorter one is older: "1.2" < "1.2.1".
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (None, None) => return Ordering::Equal,
         };
+        let ord = part_key(x).cmp(&part_key(y));
         if ord != Ordering::Equal {
             return ord;
         }
     }
-    ap.len().cmp(&bp.len())
 }
 
 #[cfg(test)]
@@ -473,5 +494,46 @@ displayTest=\"MATCH_VERSION\"
         assert_eq!(compare_versions("1.10.0", "1.9.9"), Ordering::Greater);
         assert_eq!(compare_versions("v2.0", "2.0"), Ordering::Equal);
         assert_eq!(compare_versions("1.2", "1.2.1"), Ordering::Less);
+    }
+
+    /// The version list of Modrinth's "Matcha Block Overlays" (release,
+    /// snapshot, pre-release and joke versions side by side) used to crash
+    /// the sort: the old order had cycles.
+    #[test]
+    fn mixed_release_and_snapshot_versions_sort_without_panicking() {
+        let mut v: Vec<String> = [
+            "1.17", "1.17.1", "1.21", "1.21.1", "1.21.10", "1.21.11", "1.21.2", "1.21.2-pre1",
+            "22w42a", "22w43a", "23w14a", "23w43b", "24w14potato", "24w19b", "26.1", "26.1.1",
+            "26.1.2", "26.2", "26.3", "1.20.5-pre1", "1.20.6", "9", "10", "v3", "",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        // Several input orders: the panic depended on how the sort walked it.
+        for round in 0..40 {
+            v.rotate_left(round % 7 + 1);
+            let mut w = v.clone();
+            if round % 2 == 0 {
+                w.reverse();
+            }
+            w.sort_by(|a, b| compare_versions(b, a));
+            w.sort_by(|a, b| compare_versions(a, b));
+        }
+        // Every triple is consistent (a total order has no cycles).
+        for a in &v {
+            for b in &v {
+                for c in &v {
+                    if compare_versions(a, b) == Ordering::Less
+                        && compare_versions(b, c) == Ordering::Less
+                    {
+                        assert_eq!(compare_versions(a, c), Ordering::Less, "{a} < {b} < {c}");
+                    }
+                }
+            }
+        }
+        assert_eq!(compare_versions("1.21.10", "1.21.2"), Ordering::Greater);
+        assert_eq!(compare_versions("26.1", "1.21.11"), Ordering::Greater);
+        assert_eq!(compare_versions("26.1", "24w46a"), Ordering::Greater);
+        assert_eq!(compare_versions("24w46a", "1.21.11"), Ordering::Greater);
     }
 }

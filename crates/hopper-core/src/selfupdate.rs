@@ -60,15 +60,22 @@ fn parts(v: &str) -> Vec<u64> {
         .collect()
 }
 
-/// Whether `candidate` is a later version than `current`.
-pub fn is_newer(candidate: &str, current: &str) -> bool {
-    let (a, b) = (parts(candidate), parts(current));
+/// Total order on release versions ("1.0" equals "1.0.0"). Sorting needs a
+/// real order: a comparator that says "greater" both ways makes `sort_by`
+/// panic.
+pub fn compare(a: &str, b: &str) -> std::cmp::Ordering {
+    let (a, b) = (parts(a), parts(b));
     let n = a.len().max(b.len());
     let get = |v: &Vec<u64>, i| v.get(i).copied().unwrap_or(0);
     (0..n)
         .map(|i| get(&a, i).cmp(&get(&b, i)))
         .find(|o| o.is_ne())
-        .is_some_and(|o| o.is_gt())
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Whether `candidate` is a later version than `current`.
+pub fn is_newer(candidate: &str, current: &str) -> bool {
+    compare(candidate, current).is_gt()
 }
 
 /// The release's Windows download: an .exe named like Hopper, else a zip.
@@ -293,6 +300,21 @@ pub fn clean_up() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "1.0" and "1.0.0" are neither newer than the other; the old release
+    /// sort answered "greater" both ways, which makes `sort_by` panic.
+    #[test]
+    fn release_versions_have_a_total_order() {
+        use std::cmp::Ordering;
+        assert_eq!(compare("1.0", "1.0.0"), Ordering::Equal);
+        assert_eq!(compare("0.10.0", "0.9.9"), Ordering::Greater);
+        assert!(is_newer("v1.2.1", "1.2"));
+        assert!(!is_newer("1.2", "1.2.0"));
+        let mut v = vec!["1.0.0", "1.0", "0.9", "1.0.1", "1.0", "v1.0.0"];
+        v.sort_by(|a, b| compare(b, a));
+        assert_eq!(v[0], "1.0.1");
+        assert_eq!(v[5], "0.9");
+    }
 
     #[test]
     #[cfg(windows)]

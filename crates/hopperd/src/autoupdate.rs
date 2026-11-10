@@ -148,15 +148,7 @@ fn parse_releases(all: Vec<GhRelease>) -> Vec<Release> {
             })
         })
         .collect();
-    found.sort_by(|a, b| {
-        if hopper_core::selfupdate::is_newer(&a.version, &b.version) {
-            std::cmp::Ordering::Less
-        } else if a.version == b.version {
-            std::cmp::Ordering::Equal
-        } else {
-            std::cmp::Ordering::Greater
-        }
-    });
+    found.sort_by(|a, b| hopper_core::selfupdate::compare(&b.version, &a.version));
     found
 }
 
