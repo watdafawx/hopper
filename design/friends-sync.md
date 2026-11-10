@@ -40,9 +40,15 @@ CurseForge re-import keeps it). Settings migrate once:
 ## Protocol (version 2)
 
 All routes except register and health need `Authorization: Bearer <token>`.
-Bodies are JSON, at most 64 KB. `GET /v1/health` says `v: 2`; the desktop
-asks once and falls back for an older mailbox (one publish per friend, no
-revoke, no groups).
+Bodies are JSON, at most 64 KB (`413`), with exactly one numeric
+`Content-Length` and no `Transfer-Encoding` (`400` `bad_framing`); after any
+answer that didn't read the body the connection closes. `GET /v1/health`
+says `v: 2`; the desktop asks once and falls back for an older mailbox (one
+publish per friend, no revoke, no groups).
+
+The mailbox is public, so it limits what a stranger can make it hold or do
+(see "Limits" below). The extra answer is `429` with `Retry-After`; the
+desktop shows its message like any other error.
 
 ### Friends
 
@@ -59,8 +65,13 @@ joins with the invite and follows `inst`. The owner gets a `joined` event and
 shares that pack with the new friend, so its changes arrive.
 
 Errors carry a `code`: `invite_unknown` (run out, used, or never made),
-`friends_full` (your list is at `max`), `their_friends_full`. The desktop
-says "Friend list full" for the first (`mailbox::says`).
+`friends_full` (your list is at `max`), `their_friends_full`, `rate_limited`
+(429: ten wrong codes in 15 minutes from this account or this address, or too
+many sign-ups from one address) and `invites_full` (429: five open
+invites). The desktop says "Friend list full" for the first
+(`mailbox::says`). The invite code stays eight hex characters: the share
+code's follow part (`sharecode::follow_part`) only accepts that, so guessing
+is held back by the limits instead of a longer code.
 
 Removing a friend also takes each out of the other's groups and queues an
 `unfriended` event. A follow of their pack keeps its last version.
@@ -101,8 +112,15 @@ down is taken back when it's up again.
 | `POST /v1/groups/<id>/follow` | joined | `{from, inst}`: a group pack this PC followed |
 
 A group is `{id, name, owner, me: {joined, in_step}, members: [{id, name,
-mc_id, online, last_seen, joined, in_step}], packs, follows}`. `packs` and
-`follows` are empty until `me.joined`.
+mc_id, online, last_seen, joined, in_step}], packs, follows}`. What you see
+depends on where you stand:
+
+- **Invited, not yet joined**: the name, the owner and `members` with only
+  the owner (who is your friend). `packs` and `follows` are empty.
+- **Joined**: every member's name and `joined`. `mc_id`, `online`,
+  `last_seen` and `in_step` are filled in only for members who are your
+  friends (and for you); for the others they are `""`, `false`, `0`, `false`.
+  A group is not a way to watch strangers.
 
 Access: anyone not in the group (or invited to it) gets 404 "no such group"
 for every route, the same as a group that doesn't exist, so ids can't be
@@ -113,7 +131,11 @@ other; that's why nothing reaches a member before they say yes.
 
 Limits (409 with a code): 20 groups owned per PC (`groups_full`), 50 members
 per group (`group_full`), 100 packs per group (`group_packs_full`), 20 groups
-named per publish. Names are cut at 64 characters.
+named per publish. Names are cut at 64 characters. What a PC shares into
+groups may not add up to more than 2 MB (`storage_full`), counted against
+the one sharing, whoever owns the group, so a group of one is no free
+storage. A publish, an edit or a new group that is refused changes nothing:
+every check happens before the first change.
 
 Membership changes:
 
@@ -139,6 +161,14 @@ Every event has `seq`, `kind`, `from`, `from_name`, `at`. Without `v=2` only
 | `joined` | `inst` | shares `inst` with them (an invite that named a pack) |
 | `unfriended` | | drops shares with them; their direct packs leave; follows keep their last version |
 
+Queue limits (per person waiting): 200 events, 1 MB, and 20 from any one
+sender. When full, the oldest event that is not a `recipe` or a `revoke` goes
+first; only with none left does the oldest of those go. A `group` or
+`group_follow` event replaces an older one from the same sender for the same
+group, since both only mean "read the groups again". `/v1/remove` also
+throws away what the removed friend had queued for the remover (the group
+revokes it causes are added after that and stay).
+
 The desktop reads the whole feed at each start (to list friends' packs) and
 remembers the newest event it acted on (`Settings::mailbox_handled`): older
 ones update the lists but show no notice and don't act again. Within one
@@ -159,16 +189,58 @@ read, only the newest code of each pack is applied.
   Notices (copied, paired, joined, stopped sharing, errors) go out as
   `StoreEvent::Notice`.
 
+## Limits (abuse)
+
+The relay sits behind Cloudflare Tunnel on the open internet. All of this is
+in `relay/hopper_mailbox.py` (constants at the top) and listed in
+`relay/README.md`:
+
+- **Sign-ups**: 20 per hour per client address (`CF-Connecting-IP`, believed
+  only from a connection on this machine, else the peer address; IPv6 per /64).
+- **Wrong invite codes**: 10 per 15 minutes per account and per address.
+- **Open invites**: 5 per account; run-out invites are swept on every
+  invite and join.
+- **Sizes**: bytes, not characters: share code 20000, each `left_out` entry
+  400 (100 entries), names 256. `inst` may not contain `/`.
+- **Connections**: 256 at once (`503` above), 30 s socket timeout,
+  3 long-polls per account (a fourth ends the oldest).
+- **Tokens** are stored as sha256; lookups go through a hash index.
+- **Presence** (online, last seen, Minecraft id) is shown to friends only.
+- Saving is a dirty flag plus one writer thread (about every 1.5 s, and on
+  SIGTERM): a crash loses the last second or two. If saving fails it is
+  logged and retried; requests still answer from memory. A state file that
+  can't be read is renamed `state.json.corrupt-<time>` and the service exits
+  instead of starting empty.
+- Any unexpected error is a JSON `500` (`internal`), logged once.
+
 ## Deploying the relay
 
-Copy `relay/hopper_mailbox.py` to `/opt/hopper-mailbox/` and restart
-`hopper-mailbox` (see `relay/README.md`). The state file gains a `groups`
-key on its own; nothing to migrate. A new desktop works against the old
+First deploy of this version over one that stores plain tokens (the
+public VM): do it in this order, and keep the saved copy.
+
+1. `sudo systemctl stop hopper-mailbox`
+2. `sudo cp -a /var/lib/hopper-mailbox/state.json /var/lib/hopper-mailbox/state.json.pre-hash`
+3. Copy `relay/hopper_mailbox.py` to `/opt/hopper-mailbox/`.
+4. Install `relay/hopper-mailbox.service` (it now has `UMask=0077`), then
+   `sudo systemctl daemon-reload`.
+5. `sudo systemctl start hopper-mailbox`; the journal says `hashed N stored
+   tokens`. `curl -s http://127.0.0.1:8787/v1/health` answers `v: 2`.
+
+The first start replaces each stored token with its sha256 and saves that;
+PCs keep working since they still send the token and it hashes to the same
+value. A `groups` key is added by itself. A new desktop works against the old
 mailbox (falls back), and an old desktop against the new one (v1 feed).
 
-Rolling back: reinstall the previous file and restart. Groups are dropped on
-its next save; friends and queued events stay. Queued non-recipe events
-then reach old and new desktops alike from the old file's feed: an old
-desktop ignores fields it doesn't know but would try to follow a revoke as a
-recipe with no code (it fails with an error and changes nothing). Clearing
-the queues (`events` in the state file) avoids that.
+**Rolling back after that first start needs `state.json.pre-hash`.** The old
+relay compares plain tokens and can't read a hashed state file: with the new
+file every PC would get 401 and have to sign up again, losing its friends.
+So: stop the service, put `state.json.pre-hash` back as `state.json`,
+reinstall the previous `hopper_mailbox.py` and unit, start it. Accounts,
+pairings and groups made since the copy are lost. Delete the copy once you
+won't go back (it holds every token in the clear). With the old file,
+queued non-recipe events reach old and new desktops alike from its feed: an
+old desktop ignores fields it doesn't know but would try to follow a revoke
+as a recipe with no code (it fails with an error and changes nothing).
+Clearing the queues (`events` in the state file) avoids that.
+
+Later updates (no format change) are: copy the file, restart.
