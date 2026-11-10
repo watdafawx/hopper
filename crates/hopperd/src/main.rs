@@ -205,7 +205,23 @@ fn parse_args() -> anyhow::Result<Option<Args>> {
 
 type Shutdown = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
+/// The folder this run keeps its config in: `--data`, else the default.
+/// Read straight from the command line, before [`parse_args`] has run.
+fn data_dir_from_args() -> PathBuf {
+    let mut it = std::env::args().skip(1);
+    while let Some(arg) = it.next() {
+        if arg == "--data" {
+            if let Some(v) = it.next() {
+                return PathBuf::from(v);
+            }
+        }
+    }
+    config::data_dir()
+}
+
 fn main() -> anyhow::Result<()> {
+    // Before anything else, so a panic leaves a crash log beside hopperd.log.
+    hopper_core::panic_log::install("Hopper Server", env!("CARGO_PKG_VERSION"), &data_dir_from_args());
     let _ = rustls::crypto::ring::default_provider().install_default();
     control::init();
     let argv: Vec<String> = std::env::args().skip(1).collect();

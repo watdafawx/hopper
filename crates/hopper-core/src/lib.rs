@@ -78,6 +78,7 @@ pub mod packdiff;
 pub mod packs;
 pub mod pack_where;
 pub mod panel;
+pub mod panic_log;
 pub mod paths;
 pub mod msauth;
 pub mod peer;

@@ -110,6 +110,11 @@ use gpui_kit::*;
 
 fn main() {
     load_env();
+    // Before the window exists, so a panic leaves a crash log: its folder
+    // comes from the environment, which `load_env` may set.
+    if let Some(dirs) = hopper::paths::dirs() {
+        hopper::panic_log::install("Hopper", env!("CARGO_PKG_VERSION"), dirs.data_dir());
+    }
     env_logger::init();
     // Windows' Installed apps → Uninstall runs this.
     if std::env::args().any(|a| a == "--uninstall") {
