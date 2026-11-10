@@ -20,6 +20,7 @@ sign-ups and failed invite guesses. Tokens are stored as sha256 hashes.
 """
 
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -49,12 +50,27 @@ MAX_BODY = 64 * 1024
 INVITE_TTL = 15 * 60
 ONLINE_SECS = 90
 MAX_FRIENDS = 100
-MAX_EVENTS = 200
-# One sender may have at most this many events waiting for one person.
-MAX_EVENTS_PER_SENDER = 20
-# Bytes: what waits for one person, and what one account keeps in groups.
-MAX_QUEUE_BYTES = 1024 * 1024
-MAX_PACK_BYTES = 2 * 1024 * 1024
+MAX_EVENTS = 1000
+# A backstop for one sender. Real packs don't reach it: a recipe replaces the
+# older one for the same pack (per sender and pack), so this only stops a
+# friend inventing endless pack names to push other people's events out.
+MAX_EVENTS_PER_SENDER = 150
+# Events are forgotten after this long: recipes and revokes keep the longest,
+# since the desktop lists friends' packs from them.
+EVENT_TTL = 14 * 24 * 3600
+KEEP_TTL = 180 * 24 * 3600
+# Bytes: what waits for one person, and what one account keeps in groups
+# (a group nobody else has joined keeps much less).
+MAX_QUEUE_BYTES = 4 * 1024 * 1024
+MAX_PACK_BYTES = 1024 * 1024
+SOLO_PACK_BYTES = 64 * 1024
+# The whole service: accounts, and the size of the state file. Past either,
+# sign-ups and new group packs get 503 `busy` until accounts age out.
+MAX_USERS = _env_int("HOPPER_MAILBOX_MAX_USERS", 20000)
+MAX_STATE_BYTES = _env_int("HOPPER_MAILBOX_MAX_STATE_BYTES", 32 * 1024 * 1024)
+# Accounts with no friends and no groups, unseen this long, are removed.
+IDLE_PRUNE_SECS = 30 * 24 * 3600
+PRUNE_EVERY = 3600
 # Groups: how many one PC can own, how many people one holds, how many
 # packs can be shared into one, and how many groups one publish may name.
 MAX_GROUPS_OWNED = 20
@@ -63,12 +79,15 @@ MAX_GROUP_PACKS = 100
 MAX_GROUPS_PER_POST = 20
 # Abuse limits.
 SOCKET_TIMEOUT = 30           # seconds a read or write may stall
-MAX_CONNECTIONS = _env_int("HOPPER_MAILBOX_MAX_CONNECTIONS", 256)
+REQUEST_DEADLINE = 30         # seconds for a whole request's headers and body
+MAX_CONNECTIONS = _env_int("HOPPER_MAILBOX_MAX_CONNECTIONS", 2000)
 MAX_POLLS_PER_USER = 3        # long-polls one account may hold open
-REGISTER_PER_HOUR = _env_int("HOPPER_MAILBOX_REGISTER_LIMIT", 20)   # per client IP
-JOIN_FAILS = 10               # failed joins per account and per IP ...
+MAX_WAIT = 90                 # longest a long-poll may ask to wait
+REGISTER_PER_HOUR = _env_int("HOPPER_MAILBOX_REGISTER_LIMIT", 60)   # per client IP
+JOIN_FAILS = 10               # failed joins per account ...
+JOIN_FAILS_IP = 30            # ... and per address ...
 JOIN_FAIL_WINDOW = 15 * 60    # ... in this many seconds
-MAX_LIVE_INVITES = 5          # per account
+MAX_LIVE_INVITES = 20         # per account
 SAVE_INTERVAL = 1.5           # seconds between background saves
 # Event kinds older desktops understand. Anything else is only sent to a
 # client that asks with v=2, so an old Hopper never sees a revoke as a
@@ -124,12 +143,31 @@ class Limiter:
     def add(self, key, window):
         t = time.time()
         with self.lock:
-            if len(self.hits) > 50000:
-                # Forget keys whose window is over, so a flood of addresses
-                # can't grow this without end.
-                for k in [k for k, q in self.hits.items() if not q or q[-1] <= t - window]:
-                    del self.hits[k]
+            self._forget(t, window)
             self.hits.setdefault(key, deque()).append(t)
+
+    def take(self, key, window, limit):
+        """Counts and records in one step, so a burst of requests that all
+        arrive before any finishes can't each see room that is already
+        spoken for. False when `key` is at `limit`."""
+        t = time.time()
+        with self.lock:
+            q = self.hits.get(key)
+            if q:
+                while q and q[0] <= t - window:
+                    q.popleft()
+            if q is not None and len(q) >= limit:
+                return False
+            self._forget(t, window)
+            self.hits.setdefault(key, deque()).append(t)
+            return True
+
+    def _forget(self, t, window):
+        if len(self.hits) > 50000:
+            # Forget keys whose window is over, so a flood of addresses
+            # can't grow this without end.
+            for k in [k for k, q in self.hits.items() if not q or q[-1] <= t - window]:
+                del self.hits[k]
 
     def clear(self):
         with self.lock:
@@ -168,15 +206,23 @@ def reset(path=None):
         register_limit.clear()
         join_limit.clear()
         _writer["dirty"] = False
+        _writer["size"] = 0
+        _closing.clear()
 
 
 def load():
-    """Reads the state file. A missing file is a fresh start; anything else
-    wrong with it stops the service after moving the file aside, so the
-    next save can't replace it with an empty one."""
+    """Reads the state file. A missing file is a fresh start.
+
+    A file that is there but not valid (bad JSON or encoding, or the wrong
+    shape) is moved aside as `<name>.corrupt-<time>` and the service exits
+    with status 1. A file that can't be read at all (rights, disk) is left
+    exactly as it is, and the service exits with status 1 too. Either way it
+    never starts empty on top of real data, and the unit's
+    `RestartPreventExitStatus=1` keeps systemd from starting it again."""
     try:
         with open(STATE, "r", encoding="utf-8") as f:
-            s = json.load(f)
+            raw = f.read()
+        s = json.loads(raw)
         if not isinstance(s, dict):
             raise ValueError("state is not an object")
         for k in ("users", "friends", "invites", "events", "groups"):
@@ -186,7 +232,7 @@ def load():
             raise ValueError("state.seq is not a number")
     except FileNotFoundError:
         return
-    except Exception as e:
+    except (ValueError, UnicodeDecodeError) as e:   # JSONDecodeError is a ValueError
         aside = f"{STATE}.corrupt-{int(time.time())}"
         try:
             os.replace(STATE, aside)
@@ -195,6 +241,10 @@ def load():
             where = f"could not be moved aside ({e2})"
         print(f"state load failed: {e}; file {where}; exiting", file=sys.stderr)
         sys.exit(1)
+    except Exception as e:   # OSError, or anything we didn't expect
+        print(f"state load failed: {type(e).__name__}: {e}; file left as it is; exiting", file=sys.stderr)
+        sys.exit(1)
+    _writer["size"] = len(raw)
     with lock:
         for k in state:
             if k in s:
@@ -211,11 +261,54 @@ def load():
         if migrated:
             print(f"hashed {migrated} stored tokens", file=sys.stderr)
             mark_dirty()
+        gone = prune_accounts()
+        if gone:
+            print(f"removed {gone} idle accounts with no friends or groups", file=sys.stderr)
 
 
 # The saver: requests only flip `dirty`; one thread writes the file.
-_writer = {"dirty": False, "thread": None, "stop": threading.Event(), "wake": threading.Event()}
+# `size` is how big the last state file was, for the service-wide cap.
+_writer = {"dirty": False, "size": 0, "thread": None, "stop": threading.Event(), "wake": threading.Event()}
 write_lock = threading.Lock()
+# Set when the service is stopping: new requests are turned away.
+_closing = threading.Event()
+
+
+def prune_accounts():
+    """Forgets accounts with no friends, no groups and no activity for
+    IDLE_PRUNE_SECS (a PC that signed up and was never used, or was wiped),
+    and events that have outlived their age. Returns how many accounts."""
+    with lock:
+        t = now()
+        cutoff = t - IDLE_PRUNE_SECS
+        in_group = set()
+        for g in state["groups"].values():
+            in_group.update(g["members"])
+        drop = [
+            uid for uid, u in state["users"].items()
+            if u.get("last_seen", 0) < cutoff and not state["friends"].get(uid) and uid not in in_group
+        ]
+        for uid in drop:
+            u = state["users"].pop(uid)
+            if token_index.get(u.get("token_hash")) == uid:
+                del token_index[u["token_hash"]]
+            state["friends"].pop(uid, None)
+            state["events"].pop(uid, None)
+        if drop:
+            gone = set(drop)
+            for c, inv in list(state["invites"].items()):
+                if inv["owner"] in gone:
+                    del state["invites"][c]
+            for q in state["events"].values():
+                q[:] = [e for e in q if e["from"] not in gone]
+        changed = len(drop)
+        for q in state["events"].values():
+            before = len(q)
+            q[:] = [e for e in q if not event_expired(e, t)]
+            changed += before - len(q)
+        if changed:
+            mark_dirty()
+        return len(drop)
 
 
 def mark_dirty():
@@ -258,6 +351,7 @@ def flush():
                 return True
             _writer["dirty"] = False
             data = json.dumps(state, separators=(",", ":")).encode("utf-8")
+            _writer["size"] = len(data)
         try:
             _write_file(data)
             return True
@@ -269,14 +363,24 @@ def flush():
 
 
 def _writer_loop():
+    last_prune = time.time()
     while not _writer["stop"].is_set():
-        _writer["wake"].wait(timeout=30)
-        _writer["wake"].clear()
-        if _writer["stop"].is_set():
-            break
-        # Let a burst of changes become one write.
-        _writer["stop"].wait(SAVE_INTERVAL)
-        flush()
+        # Nothing in here may end this thread: a stopped saver would lose
+        # every change until the next restart.
+        try:
+            _writer["wake"].wait(timeout=30)
+            _writer["wake"].clear()
+            if _writer["stop"].is_set():
+                break
+            if time.time() - last_prune >= PRUNE_EVERY:
+                last_prune = time.time()
+                prune_accounts()
+            # Let a burst of changes become one write.
+            _writer["stop"].wait(SAVE_INTERVAL)
+            flush()
+        except Exception as e:
+            print(f"saver error: {type(e).__name__}: {e}", file=sys.stderr)
+            _writer["stop"].wait(2)
 
 
 def start_writer():
@@ -289,13 +393,14 @@ def start_writer():
 
 
 def stop_writer():
+    """Stops the saver and writes whatever is unsaved. True if that worked."""
     _writer["stop"].set()
     _writer["wake"].set()
     t = _writer["thread"]
     if t:
         t.join(timeout=10)
     _writer["thread"] = None
-    flush()
+    return flush()
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -355,7 +460,7 @@ def id_list(v, n):
 def size_of(v):
     """Rough bytes a stored value takes."""
     if isinstance(v, str):
-        return len(v.encode("utf-8", "replace"))
+        return len(v) if v.isascii() else len(v.encode("utf-8", "replace"))
     if isinstance(v, (list, tuple)):
         return sum(size_of(x) for x in v) + 2 * len(v)
     if isinstance(v, dict):
@@ -369,6 +474,11 @@ def wake(uid):
         c.notify_all()
 
 
+def event_expired(e, t):
+    ttl = KEEP_TTL if e.get("kind", "recipe") in KEEP_KINDS else EVENT_TTL
+    return t - e.get("at", t) > ttl
+
+
 def pick_victim(evs):
     """The oldest event a full queue can lose: not a recipe or a revoke if
     there is any other, else the oldest of all."""
@@ -379,6 +489,8 @@ def pick_victim(evs):
 
 
 def trim_queue(q, frm):
+    t = now()
+    q[:] = [e for e in q if not event_expired(e, t)]
     mine = [e for e in q if e["from"] == frm]
     while len(mine) > MAX_EVENTS_PER_SENDER:
         v = pick_victim(mine)
@@ -391,6 +503,25 @@ def trim_queue(q, frm):
         size -= size_of(v)
 
 
+def same_event(a, b):
+    """Whether `b` makes the older `a` pointless. Each kind has a key, so one
+    sender can have only as many events waiting as it has packs or groups,
+    not one per call."""
+    if a.get("kind", "recipe") != b["kind"] or a["from"] != b["from"]:
+        return False
+    k = b["kind"]
+    if k == "recipe":
+        return a.get("inst") == b.get("inst")
+    if k in ("group", "group_follow"):
+        # These only say "read the groups again", so one waiting is enough.
+        return a.get("group") == b.get("group")
+    if k == "revoke":
+        return (a.get("inst"), a.get("direct"), a.get("groups")) == (b.get("inst"), b.get("direct"), b.get("groups"))
+    if k == "joined":
+        return a.get("inst") == b.get("inst")
+    return k == "unfriended"
+
+
 def make_event(to, kind, frm, **fields):
     """Queues one event for `to`. Every event has seq, kind, from and at;
     the rest depends on the kind (see design/friends-sync.md)."""
@@ -398,18 +529,10 @@ def make_event(to, kind, frm, **fields):
     ev = {"seq": state["seq"], "kind": kind, "from": frm, "at": now()}
     ev.update(fields)
     q = state["events"].setdefault(to, [])
-    if kind == "recipe":
-        # Only a pack's newest code matters. Dropping older ones keeps the
-        # queue for other packs and events, and a desktop reading the feed
-        # from the start doesn't apply each old version in turn.
-        q[:] = [e for e in q if not (
-            e.get("kind", "recipe") == "recipe" and e["from"] == frm and e.get("inst") == ev.get("inst")
-        )]
-    elif kind in ("group", "group_follow"):
-        # These only say "read the groups again", so one waiting is enough.
-        q[:] = [e for e in q if not (
-            e.get("kind") == kind and e["from"] == frm and e.get("group") == ev.get("group")
-        )]
+    # Only a recipe's newest code matters (a desktop reading the feed from
+    # the start doesn't apply each old version in turn), and likewise for
+    # the other kinds: a newer one replaces the older one it makes useless.
+    q[:] = [e for e in q if not same_event(e, ev)]
     q.append(ev)
     trim_queue(q, frm)
     wake(to)
@@ -433,15 +556,20 @@ def pack_bytes(p):
     return size_of([p.get("inst", ""), p.get("key", ""), p.get("name", ""), p.get("code", ""), p.get("left_out", [])])
 
 
-def pack_bytes_of(uid):
-    """What `uid` keeps in groups: the packs they shared into them. Counted
-    against the sharer, so a group can't be used as free storage."""
-    return sum(
-        pack_bytes(p)
-        for g in state["groups"].values()
-        for p in g["packs"].values()
-        if p["from"] == uid
-    )
+def pack_usage(uid):
+    """What `uid` keeps in groups, as (all, in groups nobody else has joined).
+    Counted against the one who shares, so a group is no free storage, and a
+    group of one holds much less than a real one (SOLO_PACK_BYTES)."""
+    total = solo = 0
+    for g in state["groups"].values():
+        alone = not any(m != uid for m in joined_ids(g))
+        for p in g["packs"].values():
+            if p["from"] == uid:
+                b = pack_bytes(p)
+                total += b
+                if alone:
+                    solo += b
+    return total, solo
 
 
 def publish(to, frm, body):
@@ -525,6 +653,29 @@ def group_view(gid, g, uid):
     return out
 
 
+def group_pack_events(uid, after):
+    """The recipe events for packs a group already shared when `uid` joined
+    it. They are made up here when the feed is read, all numbered with the
+    joining, so they arrive once (the desktop remembers the newest number)
+    and again on a fresh start, like any queued event, but cost the queue
+    nothing and can't be pushed out of it."""
+    out = []
+    for gid, g in state["groups"].items():
+        m = g["members"].get(uid)
+        since = m.get("since") if m and m.get("joined") else None
+        if not since or since <= after:
+            continue
+        for p in g["packs"].values():
+            if p["from"] != uid and p.get("seq", 0) <= since:
+                ev = {"seq": since, "kind": "recipe", "from": p["from"], "at": p.get("at", 0),
+                      "direct": False, "groups": [gid]}
+                for f in ("inst", "key", "code", "name", "left_out"):
+                    if f in p:
+                        ev[f] = p[f]
+                out.append(ev)
+    return out
+
+
 def tell_group(gid, g, actor, also=()):
     """Tells every member (and `also`) that the group changed; their
     desktops fetch GET /v1/groups again."""
@@ -563,6 +714,7 @@ def unfriend_groups(a, b):
 
 # ── the server ───────────────────────────────────────────────────────
 
+_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")   # RFC 9110 header names
 _CONTROL = re.compile(r"[^\x20-\x7e]")
 _DIGITS = re.compile(r"[0-9]{1,12}")
 
@@ -584,11 +736,43 @@ def net_key(ip):
     return str(a)
 
 
+class _DeadlineReader(io.RawIOBase):
+    """The request side of the socket, which gives up when the handler's
+    deadline passes. The socket timeout alone only limits each wait, so a
+    client sending a byte every few seconds could hold a thread forever."""
+
+    def __init__(self, sock, handler):
+        self.sock = sock
+        self.handler = handler
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        left = self.handler.deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("request took too long")
+        self.sock.settimeout(min(left, self.handler.timeout or left))
+        return self.sock.recv_into(b)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "hopper-mailbox"
     sys_version = ""
     protocol_version = "HTTP/1.1"
     timeout = SOCKET_TIMEOUT
+
+    def setup(self):
+        super().setup()
+        self.deadline = time.monotonic() + REQUEST_DEADLINE
+        old, self.rfile = self.rfile, io.BufferedReader(_DeadlineReader(self.connection, self))
+        old.close()
+
+    def handle_one_request(self):
+        # Each request gets REQUEST_DEADLINE seconds to arrive in full (an
+        # idle keep-alive connection is dropped by the same clock).
+        self.deadline = time.monotonic() + REQUEST_DEADLINE
+        super().handle_one_request()
 
     def version_string(self):
         return self.server_version
@@ -643,7 +827,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response_only(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
-        if status == 429:
+        if status in (429, 503):
             self.send_header("Retry-After", "60")
         if self.close_connection:
             self.send_header("Connection", "close")
@@ -663,6 +847,13 @@ class Handler(BaseHTTPRequestHandler):
         None after answering an error (the connection then closes)."""
         self._unread = False
         h = self.headers
+        # Header names must be RFC tokens, and the parser must have had no
+        # complaint about the block (a folded or malformed line is how two
+        # servers come to read one request differently).
+        if h.defects or any(not _TOKEN.fullmatch(k) for k in h.keys()):
+            self._unread = True
+            self.fail(400, "bad header", "bad_framing")
+            return None
         if h.get_all("Transfer-Encoding"):
             self._unread = True
             self.fail(400, "chunked bodies are not accepted", "bad_framing")
@@ -712,6 +903,10 @@ class Handler(BaseHTTPRequestHandler):
         """Runs a request; whatever goes wrong becomes a JSON 500 and one
         log line, and a stalled or dropped peer just ends the connection."""
         try:
+            if _closing.is_set():
+                self._unread = True
+                self.close_connection = True
+                return self.send_json(503, {"error": "restarting, try again", "code": "busy"})
             fn()
         except (socket.timeout, TimeoutError, ConnectionError):
             self.close_connection = True
@@ -760,7 +955,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/v1/recipes":
             try:
                 after = int((q.get("after") or ["0"])[0])
-                wait = max(0, min(120, int((q.get("wait") or ["0"])[0])))
+                wait = max(0, min(MAX_WAIT, int((q.get("wait") or ["0"])[0])))
                 v = int((q.get("v") or ["1"])[0])
             except ValueError:
                 return self.fail(400, "bad query")
@@ -781,13 +976,24 @@ class Handler(BaseHTTPRequestHandler):
             if cond is None:
                 cond = wakers[uid] = threading.Condition(lock)
             wake(uid)
+            status = 200
             try:
                 while True:
                     evs = [
                         e for e in state["events"].get(uid, [])
                         if e["seq"] > after and (v >= 2 or e.get("kind", "recipe") in V1_KINDS)
                     ]
-                    if evs or poll["stop"] or time.time() >= deadline:
+                    evs += group_pack_events(uid, after)
+                    evs.sort(key=lambda e: e["seq"])
+                    if poll["stop"]:
+                        # Pushed out by a newer poll from the same account.
+                        # An error, not an empty answer: the desktop waits
+                        # before asking again, where an empty one would be
+                        # asked again at once and the two would take turns.
+                        status = 409
+                        data = self.encode({"error": "another connection took over this feed", "code": "poll_superseded"})
+                        break
+                    if evs or time.time() >= deadline:
                         out = []
                         for e in evs:
                             x = dict(e)
@@ -804,7 +1010,7 @@ class Handler(BaseHTTPRequestHandler):
                     polls.pop(uid, None)
                     wakers.pop(uid, None)
         # Writing to the socket happens without the lock.
-        return self.send_json(200, None, raw=data)
+        return self.send_json(status, None, raw=data)
 
     def _post(self):
         n = self.framing()
@@ -812,13 +1018,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path
         if path == "/v1/register":
+            with lock:
+                full = len(state["users"]) >= MAX_USERS or _writer["size"] >= MAX_STATE_BYTES
+            if full:
+                return self.fail(503, "the sync service is full; try again later", "busy")
+            # The place in the hourly allowance is taken now, before the body
+            # is read: otherwise a crowd of slow requests could all pass the
+            # check while none had been counted yet.
             ip = net_key(self.client_ip())
-            if register_limit.count(ip, 3600) >= REGISTER_PER_HOUR:
+            if not register_limit.take(ip, 3600, REGISTER_PER_HOUR):
                 return self.fail(429, "too many new accounts from here; try again later", "rate_limited")
             body = self.read_body(n)
             if body is None:
                 return self.fail(400, "bad body")
-            register_limit.add(ip, 3600)
             name = text(body.get("name"), 64).strip() or "This PC"
             uid = secrets.token_hex(16)
             token = secrets.token_urlsafe(32)
@@ -834,6 +1046,16 @@ class Handler(BaseHTTPRequestHandler):
                 state["friends"].setdefault(uid, [])
                 state["events"].setdefault(uid, [])
                 mark_dirty()
+            # Not acknowledged until it is on disk: a crash right after
+            # would otherwise leave a PC with a token nobody remembers.
+            if not flush():
+                with lock:
+                    u = state["users"].pop(uid, None)
+                    if u:
+                        token_index.pop(u["token_hash"], None)
+                    state["friends"].pop(uid, None)
+                    state["events"].pop(uid, None)
+                return self.fail(503, "could not save the new account; try again", "save_failed")
             return self.send(200, {"id": uid, "token": token, "name": name})
         # Everything else knows who is asking before it reads anything.
         uid = self.auth()
@@ -917,7 +1139,7 @@ class Handler(BaseHTTPRequestHandler):
         # Codes are short, so guessing is slowed down: too many misses from
         # one account or one address and the door stays shut for a while.
         if (join_limit.count("u:" + uid, JOIN_FAIL_WINDOW) >= JOIN_FAILS
-                or join_limit.count("i:" + ip, JOIN_FAIL_WINDOW) >= JOIN_FAILS):
+                or join_limit.count("i:" + ip, JOIN_FAIL_WINDOW) >= JOIN_FAILS_IP):
             return 429, {"error": "too many wrong codes; try again later", "code": "rate_limited"}
         code = text(body.get("code"), 32).strip().upper()
         inv = state["invites"].get(code)
@@ -946,7 +1168,11 @@ class Handler(BaseHTTPRequestHandler):
         return 200, {"friend": public(owner), "inst": inst}
 
     def recipes(self, uid, body):
-        if not text(body.get("code"), 20000, 20000).startswith("HOP-"):
+        raw_code = body.get("code")
+        if isinstance(raw_code, str) and size_of(raw_code) > 20000:
+            # Said out loud: a cut code would be a different, broken pack.
+            return 413, {"error": "that share code is too large", "code": "too_large"}
+        if not text(raw_code, 20000, 20000).startswith("HOP-"):
             return 400, {"error": "not a share code"}
         to = body.get("to")
         friends = friend_ids(uid)
@@ -979,12 +1205,16 @@ class Handler(BaseHTTPRequestHandler):
                 return 409, {"error": "the group has too many packs", "code": "group_packs_full"}
             targets.append((gid, g))
         if targets:
-            new = dict(fields, **{"from": uid, "at": now()})
-            used = pack_bytes_of(uid)
+            if _writer["size"] >= MAX_STATE_BYTES:
+                return 503, {"error": "the sync service is full; try again later", "code": "busy"}
+            nb = pack_bytes(fields)
+            total, solo = pack_usage(uid)
             for _, g in targets:
-                used -= pack_bytes(g["packs"][k]) if k in g["packs"] else 0
-            used += pack_bytes(new) * len(targets)
-            if used > MAX_PACK_BYTES:
+                d = nb - (pack_bytes(g["packs"][k]) if k in g["packs"] else 0)
+                total += d
+                if not any(m != uid for m in joined_ids(g)):
+                    solo += d
+            if total > MAX_PACK_BYTES or solo > SOLO_PACK_BYTES:
                 return 409, {"error": "you share too much through groups already", "code": "storage_full"}
         reach = {}
         for f in direct:
@@ -998,6 +1228,11 @@ class Handler(BaseHTTPRequestHandler):
         seq = state["seq"]
         for m, how in reach.items():
             seq = make_event(m, "recipe", uid, direct=how["direct"], groups=how["groups"], **fields)["seq"]
+        # Everyone in the group now has this version by their queue; anyone
+        # who joins later is given the pack from the group itself (their
+        # joining comes after this number).
+        for _, g in targets:
+            g["packs"][k]["seq"] = state["seq"]
         return 200, {"seq": seq, "sent": len(reach), "skipped": skipped}
 
     def revoke(self, uid, body):
@@ -1101,11 +1336,13 @@ class Handler(BaseHTTPRequestHandler):
             me = g["members"][uid]
             if not me.get("joined"):
                 me["joined"] = True
-                # What the group already shares reaches the new member now.
-                for p in g["packs"].values():
-                    if p["from"] != uid:
-                        fields = {k: p[k] for k in ("inst", "key", "code", "name", "left_out") if k in p}
-                        make_event(uid, "recipe", p["from"], direct=False, groups=[gid], **fields)
+                # What the group already shares reaches the new member now:
+                # not queued (a long list would push their other events
+                # out) but read from the group when they ask, for every pack
+                # published before this point (group_pack_events).
+                state["seq"] += 1
+                me["since"] = state["seq"]
+                wake(uid)
                 tell_group(gid, g, uid)
             return 200, {"group": group_view(gid, g, uid)}
         if action == "leave":
@@ -1156,6 +1393,12 @@ class Server(ThreadingHTTPServer):
                     "Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body)
                 )
                 request.sendall(head.encode("ascii") + body)
+                # Read what the client already sent before closing: closing
+                # with unread data resets the connection, and the reset can
+                # destroy the answer on its way.
+                request.shutdown(socket.SHUT_WR)
+                request.settimeout(0.2)
+                request.recv(4096)
             except OSError:
                 pass
             self.shutdown_request(request)
@@ -1172,13 +1415,24 @@ class Server(ThreadingHTTPServer):
         finally:
             self.slots.release()
 
+    def handle_error(self, request, client_address):
+        # A peer that resets or vanishes is not news; one line, no traceback.
+        e = sys.exc_info()[1]
+        sys.stderr.write("%s connection error: %s\n" % (
+            clean(client_address[0]), clean(type(e).__name__)))
+
 
 def main():
+    # Threads are small (they only parse JSON and wait); the default 8 MB of
+    # address space each is what a crowd of idle connections would pay for.
+    threading.stack_size(512 * 1024)
     load()
     start_writer()
     srv = Server((HOST, PORT), Handler)
 
     def stop(signum, frame):
+        # New requests get 503 from now on, so the last save is the last word.
+        _closing.set()
         # shutdown() waits for serve_forever, which this signal interrupted
         # on the main thread, so ask from another one.
         threading.Thread(target=srv.shutdown, daemon=True).start()
@@ -1190,8 +1444,9 @@ def main():
         srv.serve_forever()
     finally:
         srv.server_close()
-        stop_writer()
-        print("hopper-mailbox stopped, state saved", file=sys.stderr)
+        ok = stop_writer()
+        print("hopper-mailbox stopped, state saved" if ok else
+              "hopper-mailbox stopped, FINAL SAVE FAILED (last changes lost)", file=sys.stderr)
 
 
 if __name__ == "__main__":

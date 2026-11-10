@@ -102,7 +102,8 @@ def recipe(inst, code="HOP-x", **kw):
 CONSTS = [
     "REGISTER_PER_HOUR", "MAX_CONNECTIONS", "MAX_PACK_BYTES", "MAX_QUEUE_BYTES", "MAX_EVENTS",
     "MAX_EVENTS_PER_SENDER", "MAX_LIVE_INVITES", "JOIN_FAILS", "MAX_FRIENDS", "SAVE_INTERVAL",
-    "MAX_BODY", "MAX_POLLS_PER_USER",
+    "MAX_BODY", "MAX_POLLS_PER_USER", "SOLO_PACK_BYTES", "JOIN_FAILS_IP", "MAX_STATE_BYTES",
+    "MAX_USERS", "REQUEST_DEADLINE", "MAX_WAIT", "EVENT_TTL", "KEEP_TTL", "IDLE_PRUNE_SECS",
 ]
 
 
@@ -378,13 +379,16 @@ class HardeningTest(Base):
 
     def test_code_and_left_out_are_cut_by_bytes(self):
         self.a.befriend(self.b)
-        # 8000 characters but 24000 bytes: cut at 20000 bytes. (JSON writes
-        # each as a 6-byte escape, so this just fits the 64 KB body limit.)
+        # 8000 characters but 24000 bytes: refused outright, not cut (a cut
+        # code would be a different, broken pack). JSON writes each as a
+        # 6-byte escape, so this just fits the 64 KB body limit.
         code = "HOP-" + "€" * 8000
+        r = self.a.post("/v1/recipes", dict(recipe("p1", code=code), to=[self.b.id], groups=[]))
+        self.assertEqual((r["status"], r["code"]), (413, "too_large"))
+        self.assertEqual(self.b.events(), [])
         left = ["€" * 150] * 10
-        self.a.post("/v1/recipes", dict(recipe("p1", code=code, left_out=left), to=[self.b.id], groups=[]))
+        self.a.post("/v1/recipes", dict(recipe("p1", left_out=left), to=[self.b.id], groups=[]))
         e = self.b.events()[0]
-        self.assertLessEqual(len(e["code"].encode()), 20000)
         self.assertEqual(len(e["left_out"]), 10)
         self.assertTrue(all(len(x.encode()) <= 400 for x in e["left_out"]))
 
@@ -434,30 +438,35 @@ class HardeningTest(Base):
         # IPv6 is counted by /64.
         self.assertEqual(mb.net_key("2001:db8::1:2:3:4"), mb.net_key("2001:db8::ffff:0:0:1"))
 
+    def saved_text(self):
+        with open(mb.STATE, encoding="utf-8") as f:
+            return f.read()
+
     def test_saving_is_off_the_request_path(self):
-        self.assertFalse(os.path.exists(mb.STATE))
+        before = self.saved_text()
         mb.SAVE_INTERVAL = 0.1
         mb.start_writer()
-        Client(self.relay, "late")
+        self.a.post("/v1/profile", {"name": "renamed-late"})
+        self.assertEqual(self.saved_text(), before)   # the request did not write
         deadline = time.time() + 5
-        while not os.path.exists(mb.STATE) and time.time() < deadline:
+        while "renamed-late" not in self.saved_text() and time.time() < deadline:
             time.sleep(0.05)
-        self.assertTrue(os.path.exists(mb.STATE))
+        self.assertIn("renamed-late", self.saved_text())
         self.assertFalse(os.path.exists(mb.STATE + ".tmp"))
 
     def test_requests_alone_do_not_write_the_file(self):
+        before = self.saved_text()
         self.a.befriend(self.b)
         self.a.post("/v1/profile", {"name": "z"})
-        self.assertFalse(os.path.exists(mb.STATE))
+        self.assertEqual(self.saved_text(), before)
 
     def test_stopping_flushes_what_is_unsaved(self):
         mb.SAVE_INTERVAL = 60
         mb.start_writer()
-        me = Client(self.relay, "unsaved")
-        self.assertFalse(os.path.exists(mb.STATE))
-        mb.stop_writer()   # what SIGTERM does
-        with open(mb.STATE, encoding="utf-8") as f:
-            self.assertIn(me.id, json.load(f)["users"])
+        self.a.post("/v1/profile", {"name": "unsaved-name"})
+        self.assertNotIn("unsaved-name", self.saved_text())
+        self.assertTrue(mb.stop_writer())   # what SIGTERM does
+        self.assertIn("unsaved-name", self.saved_text())
 
     @unittest.skipUnless(threading.current_thread() is threading.main_thread(), "signals need the main thread")
     def test_sigterm_stops_the_server_and_saves(self):
@@ -465,10 +474,13 @@ class HardeningTest(Base):
         mb.SAVE_INTERVAL = 60
         mb.HOST, mb.PORT = "127.0.0.1", 0
         old = {n: signal.getsignal(n) for n in (signal.SIGTERM, signal.SIGINT)}
-        with mb.lock:
-            mb.state["seq"] = 41
-            mb.mark_dirty()
-        threading.Timer(1.0, lambda: signal.raise_signal(signal.SIGTERM)).start()
+        def change_then_term():
+            # main() loads the file first, so the change comes after that.
+            with mb.lock:
+                mb.state["seq"] = 41
+                mb.mark_dirty()
+            signal.raise_signal(signal.SIGTERM)
+        threading.Timer(1.0, change_then_term).start()
         err = io.StringIO()
         old_err, sys.stderr = sys.stderr, err
         try:
@@ -482,7 +494,8 @@ class HardeningTest(Base):
             self.assertEqual(json.load(f)["seq"], 41)
 
     def test_a_failed_save_is_kept_and_retried(self):
-        Client(self.relay, "x")
+        with mb.lock:
+            mb.mark_dirty()
         good = mb.STATE
         blocker = os.path.join(self.relay.dir.name, "blocker")
         open(blocker, "w").close()   # a file where a folder must be
@@ -677,7 +690,7 @@ class HardeningTest(Base):
         self.assertNotIn("status", self.c.post("/v1/join", {"code": code}, {"CF-Connecting-IP": "192.0.2.1"}))
 
     def test_wrong_codes_are_counted_per_address_too(self):
-        mb.JOIN_FAILS = 3
+        mb.JOIN_FAILS_IP = 3
         h = {"CF-Connecting-IP": "198.51.100.9"}
         for who in (self.a, self.b, self.c):
             self.assertEqual(who.post("/v1/join", {"code": "00000000"}, h)["status"], 404)
@@ -854,7 +867,7 @@ class HardeningTest(Base):
 
     def test_an_old_state_file_with_plain_tokens_still_logs_in(self):
         old = {
-            "users": {"u1": {"name": "Old PC", "token": "T" * 43, "created": 1, "last_seen": 1, "mc_id": ""}},
+            "users": {"u1": {"name": "Old PC", "token": "T" * 43, "created": 1, "last_seen": time.time(), "mc_id": ""}},
             "friends": {"u1": []}, "invites": {}, "events": {"u1": []}, "groups": {}, "seq": 0,
         }
         with open(mb.STATE, "w", encoding="utf-8") as f:
@@ -971,6 +984,361 @@ class HardeningTest(Base):
         self.assertEqual(status, 501)
         self.assertIn("error", json.loads(body))
         self.assertNotIn(b"Python", head)
+
+
+class ResilienceTest(Base):
+    """The second round: running out of room, restarts, and slow or odd peers."""
+
+    def setUp(self):
+        super().setUp()
+        self.a = Client(self.relay, "hopper-test-a")
+        self.b = Client(self.relay, "hopper-test-b")
+        self.c = Client(self.relay, "hopper-test-c")
+
+    def make_group(self, owner, members):
+        return owner.post("/v1/groups", {"name": "Crew", "members": [m.id for m in members]})["group"]["id"]
+
+    def reg(self, ip):
+        return raw(self.relay, req("/v1/register", headers=["CF-Connecting-IP: " + ip], body=b'{"name":"x"}'))
+
+    def saved(self):
+        with open(mb.STATE, encoding="utf-8") as f:
+            return json.load(f)
+
+    # -- F1: the service has a size
+
+    def test_new_sign_ups_are_refused_when_the_service_is_full(self):
+        mb.MAX_USERS = 3
+        status, body, _, head = self.reg("203.0.113.1")
+        self.assertEqual((status, json.loads(body)["code"]), (503, "busy"))
+        self.assertIn(b"Retry-After", head)
+        # Existing accounts carry on.
+        self.assertEqual(self.a.get("/v1/friends")["friends"], [])
+        mb.MAX_USERS = 100
+        mb.MAX_STATE_BYTES = 10
+        mb.flush()
+        self.assertEqual(self.reg("203.0.113.2")[0], 503)
+
+    def test_idle_accounts_with_nobody_are_forgotten_but_not_others(self):
+        self.a.befriend(self.b)
+        gid = self.make_group(self.b, [])
+        long_ago = mb.now() - mb.IDLE_PRUNE_SECS - 100
+        with mb.lock:
+            for u in (self.a, self.b, self.c):
+                mb.state["users"][u.id]["last_seen"] = long_ago
+        d = Client(self.relay, "hopper-test-d")     # in a group only
+        with mb.lock:
+            mb.state["groups"][gid]["members"][d.id] = {"joined": True}
+            mb.state["users"][d.id]["last_seen"] = long_ago
+        self.assertEqual(mb.prune_accounts(), 1)    # only C: no friends, no group
+        self.assertEqual(self.a.get("/v1/friends")["status"] if "status" in self.a.get("/v1/friends") else 200, 200)
+        self.assertEqual(self.c.get("/v1/friends")["status"], 401)
+        self.assertNotIn("status", self.d_get(d))
+
+    def d_get(self, d):
+        return d.get("/v1/friends")
+
+    def test_a_group_with_nobody_else_holds_little(self):
+        mb.SOLO_PACK_BYTES = 30000
+        big = "HOP-" + "x" * 19000
+        solo = self.make_group(self.a, [])
+        self.assertIn("seq", self.a.post("/v1/recipes", dict(recipe("p0", code=big), to=[], groups=[solo])))
+        r = self.a.post("/v1/recipes", dict(recipe("p1", code=big), to=[], groups=[solo]))
+        self.assertEqual((r["status"], r["code"]), (409, "storage_full"))
+        # With a friend in it the bigger allowance applies.
+        self.a.befriend(self.b)
+        crew = self.make_group(self.a, [self.b])
+        self.b.post("/v1/groups/%s/accept" % crew)
+        self.assertIn("seq", self.a.post("/v1/recipes", dict(recipe("p1", code=big), to=[], groups=[crew])))
+
+    def test_group_packs_stop_at_the_state_cap(self):
+        gid = self.make_group(self.a, [])
+        mb.MAX_STATE_BYTES = 1
+        mb.flush()
+        r = self.a.post("/v1/recipes", dict(recipe("p0"), to=[], groups=[gid]))
+        self.assertEqual((r["status"], r["code"]), (503, "busy"))
+
+    def test_live_invites_and_sign_ups_have_their_new_limits(self):
+        self.assertEqual((mb.MAX_LIVE_INVITES, mb.REGISTER_PER_HOUR_DEFAULT if hasattr(mb, "REGISTER_PER_HOUR_DEFAULT") else 60,
+                          mb.JOIN_FAILS, mb.JOIN_FAILS_IP), (20, 60, 10, 30))
+
+    # -- F2: a state file that can't be read is not touched
+
+    def test_an_unreadable_state_file_is_left_alone_and_the_relay_stops(self):
+        mb.flush()
+        with open(mb.STATE, "rb") as f:
+            before = f.read()
+        real_open = open
+
+        def deny(path, *a, **kw):
+            if path == mb.STATE:
+                raise PermissionError(13, "denied")
+            return real_open(path, *a, **kw)
+
+        import builtins
+        builtins.open, old = deny, builtins.open
+        err = io.StringIO()
+        old_err, sys.stderr = sys.stderr, err
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                mb.load()
+        finally:
+            builtins.open = old
+            sys.stderr = old_err
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("left as it is", err.getvalue())
+        with open(mb.STATE, "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual([n for n in os.listdir(self.relay.dir.name) if ".corrupt-" in n], [])
+
+    def test_bad_encoding_is_moved_aside_like_bad_json(self):
+        with open(mb.STATE, "wb") as f:
+            f.write(b"\xff\xfe\x00bad")
+        old_err, sys.stderr = sys.stderr, io.StringIO()
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                mb.load()
+        finally:
+            sys.stderr = old_err
+        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(len([n for n in os.listdir(self.relay.dir.name) if ".corrupt-" in n]), 1)
+
+    def test_the_unit_does_not_restart_after_a_refused_start(self):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hopper-mailbox.service"), encoding="utf-8") as f:
+            unit = f.read()
+        for line in ("RestartPreventExitStatus=1", "StateDirectory=hopper-mailbox", "StateDirectoryMode=0700",
+                     "MemoryMax=512M", "LimitNOFILE=8192", "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
+                     "PrivateDevices=true", "ProtectKernelTunables=true", "SystemCallFilter=@system-service",
+                     "UMask=0077"):
+            self.assertIn(line, unit)
+
+    # -- F3: a sign-up is on disk before it is answered
+
+    def test_a_new_account_is_saved_before_the_answer(self):
+        d = Client(self.relay, "durable")
+        self.assertIn(d.id, self.saved()["users"])
+
+    def test_a_sign_up_that_cannot_be_saved_is_refused_and_forgotten(self):
+        good = mb.STATE
+        blocker = os.path.join(self.relay.dir.name, "blocker")
+        open(blocker, "w").close()
+        mb.STATE = os.path.join(blocker, "state.json")
+        old_err, sys.stderr = sys.stderr, io.StringIO()
+        try:
+            status, body, _, _ = self.reg("203.0.113.9")
+        finally:
+            sys.stderr = old_err
+            mb.STATE = good
+        self.assertEqual((status, json.loads(body)["code"]), (503, "save_failed"))
+        with mb.lock:
+            self.assertEqual(len(mb.state["users"]), 3)
+            self.assertEqual(len(mb.token_index), 3)
+
+    # -- F4: a pushed-out poll is told so
+
+    def test_a_pushed_out_poll_gets_an_error_not_an_empty_answer(self):
+        mb.MAX_POLLS_PER_USER = 1
+        out = []
+        t = threading.Thread(target=lambda: out.append(self.a.get("/v1/recipes?after=0&wait=8&v=2")))
+        t.start()
+        time.sleep(0.4)
+        t2 = threading.Thread(target=lambda: self.a.get("/v1/recipes?after=0&wait=1&v=2"))
+        t2.start()
+        t.join(4)
+        t2.join(4)
+        self.assertEqual((out[0]["status"], out[0]["code"]), (409, "poll_superseded"))
+
+    def test_wait_is_capped(self):
+        mb.MAX_WAIT = 1
+        t = time.time()
+        self.a.get("/v1/recipes?after=0&wait=60&v=2")
+        self.assertLess(time.time() - t, 3)
+
+    # -- F5: the allowance is taken before the body is read
+
+    def test_slow_sign_ups_cannot_all_pass_the_check_together(self):
+        mb.REGISTER_PER_HOUR = 2
+        mb.register_limit.clear()
+        head = req("/v1/register", headers=["CF-Connecting-IP: 198.51.100.77"], body=b"").replace(
+            b"Content-Length: 0", b"Content-Length: 20")
+        held = []
+        try:
+            for _ in range(2):
+                sk = socket.create_connection(("127.0.0.1", self.relay.port), timeout=3)
+                sk.sendall(head)         # body never sent
+                held.append(sk)
+            time.sleep(0.4)
+            status, _, _, _ = raw(self.relay, req("/v1/register", headers=["CF-Connecting-IP: 198.51.100.77"], body=b'{"name":"x"}'))
+            self.assertEqual(status, 429)
+        finally:
+            for sk in held:
+                sk.close()
+
+    # -- F6: see test_code_and_left_out_are_cut_by_bytes (413)
+
+    # -- F8: groups, queues and age
+
+    def test_joining_a_group_gives_its_packs_without_using_the_queue(self):
+        self.a.befriend(self.b)
+        gid = self.make_group(self.a, [self.b])
+        for i in range(30):
+            self.a.post("/v1/recipes", dict(recipe("p%d" % i), to=[], groups=[gid]))
+        self.b.post("/v1/groups/%s/accept" % gid)
+        evs = [e for e in self.b.events() if e["kind"] == "recipe"]
+        self.assertEqual(sorted(e["inst"] for e in evs), sorted("p%d" % i for i in range(30)))
+        self.assertTrue(all(e["groups"] == [gid] and e["direct"] is False and e["from"] == self.a.id for e in evs))
+        with mb.lock:
+            self.assertEqual(len(mb.state["events"][self.b.id]), 1)    # just the "group" one, not 30 recipes
+        # Asked again from the start (a fresh PC) they come again; from the end, never.
+        self.b.after = 0
+        self.assertEqual(len([e for e in self.b.events() if e["kind"] == "recipe"]), 30)
+        self.assertEqual([e for e in self.b.events() if e["kind"] == "recipe"], [])
+
+    def test_a_pack_published_after_joining_comes_once_through_the_queue(self):
+        self.a.befriend(self.b)
+        gid = self.make_group(self.a, [self.b])
+        self.b.post("/v1/groups/%s/accept" % gid)
+        self.b.events()
+        self.a.post("/v1/recipes", dict(recipe("late"), to=[], groups=[gid]))
+        evs = [e for e in self.b.events() if e["kind"] == "recipe"]
+        self.assertEqual([e["inst"] for e in evs], ["late"])
+        self.b.after = 0
+        again = [e for e in self.b.events() if e["kind"] == "recipe"]
+        self.assertEqual([e["inst"] for e in again], ["late"])     # not twice
+
+    def test_a_friend_with_many_packs_keeps_them_all(self):
+        self.a.befriend(self.b)
+        for i in range(40):
+            self.a.post("/v1/recipes", dict(recipe("p%d" % i), to=[self.b.id]))
+        self.assertEqual(len([e for e in self.b.events() if e["kind"] == "recipe"]), 40)
+        # A new version of one pack replaces its old event.
+        self.a.post("/v1/recipes", dict(recipe("p3", code="HOP-new"), to=[self.b.id]))
+        self.b.after = 0
+        evs = [e for e in self.b.events() if e["kind"] == "recipe" and e["inst"] == "p3"]
+        self.assertEqual([e["code"] for e in evs], ["HOP-new"])
+
+    def test_old_events_expire_but_recipes_last_longer(self):
+        self.a.befriend(self.b)
+        self.a.post("/v1/recipes", dict(recipe("keep"), to=[self.b.id]))
+        with mb.lock:
+            mb.make_event(self.b.id, "group", self.a.id, group="old")
+            for e in mb.state["events"][self.b.id]:
+                e["at"] = mb.now() - mb.EVENT_TTL - 10
+        mb.prune_accounts()
+        kinds = [e["kind"] for e in self.b.events()]
+        self.assertIn("recipe", kinds)
+        self.assertNotIn("group", kinds)
+
+    # -- F9, F10: odd headers, slow requests
+
+    def test_bad_header_names_are_refused(self):
+        for name in ("Bad Name", "Bad(Name)", "Bad\x01Name", "Bad@Name"):
+            data = req("/v1/health", "GET", headers=["%s: v" % name], cl=False)
+            status, _, closed, _ = raw(self.relay, data)
+            self.assertEqual(status, 400, name)
+            self.assertTrue(closed, name)
+        self.assertEqual(raw(self.relay, req("/v1/health", "GET", headers=["X-Fine_Name.1: v"], cl=False), wait=0.5)[0], 200)
+
+    def test_a_request_that_trickles_in_is_cut_at_the_deadline(self):
+        mb.REQUEST_DEADLINE = 1.5
+        sk = socket.create_connection(("127.0.0.1", self.relay.port), timeout=6)
+        t = time.time()
+        closed = False
+        try:
+            sk.sendall(b"POST /v1/register HTTP/1.1\r\nHost: x\r\nContent-Length: 40\r\n\r\n")
+            while time.time() - t < 5:
+                try:
+                    sk.sendall(b"{")
+                except OSError:
+                    closed = True
+                    break
+                time.sleep(0.3)      # well inside the per-read timeout
+                sk.settimeout(0.01)
+                try:
+                    if sk.recv(100) == b"":
+                        closed = True
+                        break
+                except socket.timeout:
+                    pass
+                except OSError:
+                    closed = True
+                    break
+        finally:
+            sk.close()
+        self.assertTrue(closed)
+        self.assertLess(time.time() - t, 4)
+
+    # -- F11, F12, F13
+
+    def test_a_dropped_connection_logs_one_line(self):
+        err = io.StringIO()
+        old, sys.stderr = sys.stderr, err
+        try:
+            try:
+                raise ConnectionResetError("peer gone")
+            except ConnectionResetError:
+                self.relay.srv.handle_error(None, ("203.0.113.4", 5))
+        finally:
+            sys.stderr = old
+        out = err.getvalue()
+        self.assertEqual(out.count("\n"), 1)
+        self.assertIn("203.0.113.4", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_the_saver_survives_an_error(self):
+        mb.SAVE_INTERVAL = 0.05
+        real = mb.flush
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("disk exploded")
+            return real()
+
+        mb.flush = flaky
+        old_err, sys.stderr = sys.stderr, io.StringIO()
+        try:
+            mb.start_writer()
+            with mb.lock:
+                mb.mark_dirty()
+            deadline = time.time() + 8
+            while len(calls) < 2 and time.time() < deadline:
+                with mb.lock:
+                    mb.mark_dirty()
+                time.sleep(0.1)
+        finally:
+            sys.stderr = old_err
+            mb.flush = real
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertTrue(mb._writer["thread"].is_alive())
+
+    def test_new_requests_get_503_once_the_service_is_closing(self):
+        mb._closing.set()
+        try:
+            status, body, closed, _ = raw(self.relay, req("/v1/health", "GET", cl=False))
+        finally:
+            mb._closing.clear()
+        self.assertEqual((status, json.loads(body)["code"]), (503, "busy"))
+        self.assertTrue(closed)
+        self.assertEqual(raw(self.relay, req("/v1/health", "GET", cl=False), wait=0.5)[0], 200)
+
+    def test_the_final_save_reports_whether_it_worked(self):
+        with mb.lock:
+            mb.mark_dirty()
+        self.assertTrue(mb.stop_writer())
+        with mb.lock:
+            mb.mark_dirty()
+        good = mb.STATE
+        mb.STATE = os.path.join(self.relay.dir.name, "nodir", "x", "state.json")
+        os.makedirs(os.path.join(self.relay.dir.name, "nodir"))
+        open(os.path.join(self.relay.dir.name, "nodir", "x"), "w").close()
+        old_err, sys.stderr = sys.stderr, io.StringIO()
+        try:
+            self.assertFalse(mb.stop_writer())
+        finally:
+            sys.stderr = old_err
+            mb.STATE = good
 
 
 if __name__ == "__main__":

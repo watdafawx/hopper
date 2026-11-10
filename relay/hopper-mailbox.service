@@ -10,13 +10,30 @@ Group=hopper-mailbox
 ExecStart=/usr/bin/python3 /opt/hopper-mailbox/hopper_mailbox.py
 Restart=always
 RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/hopper-mailbox
+# Exit status 1 means "the state file is bad or unreadable, a person must
+# look" (the relay never starts empty on top of it). Do not retry that.
+RestartPreventExitStatus=1
+
+# /var/lib/hopper-mailbox, created and owned by the service user.
+StateDirectory=hopper-mailbox
+StateDirectoryMode=0700
 # The state file holds every account; nobody else on the machine reads it.
 UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ReadWritePaths=/var/lib/hopper-mailbox
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+
+# A full disk of accounts or a crowd of sockets ends in 503s, not in the
+# machine running out of memory or file handles.
+MemoryMax=512M
+LimitNOFILE=8192
 
 [Install]
 WantedBy=multi-user.target
