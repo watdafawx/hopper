@@ -20,6 +20,20 @@ use hopper::settings::FollowedRecipe;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// The invite code just made, and when it stops working.
+#[derive(Clone)]
+struct Invite {
+    code: String,
+    until: Instant,
+}
+
+/// "Works once. Expires in 14:32." from the mailbox's own lifetime.
+fn invite_left(inv: &Invite) -> String {
+    let secs = inv.until.saturating_duration_since(Instant::now()).as_secs();
+    format!("Works once. Expires in {:02}:{:02}.", secs / 60, secs % 60)
+}
 
 pub struct PeersView {
     store: Entity<Store>,
@@ -28,7 +42,9 @@ pub struct PeersView {
     /// The friend's one-time code, for the mailbox.
     join_code: Entity<InputState>,
     /// The invite code just made, shown with a Copy button and copied once.
-    invite: Option<String>,
+    invite: Option<Invite>,
+    /// Bumped for each invite so an older countdown stops.
+    invite_gen: u64,
     message: Option<Result<String, String>>,
     /// Mods from other sources the last pull left out, said after its result.
     skipped: Option<String>,
@@ -75,6 +91,7 @@ impl PeersView {
             address,
             join_code,
             invite: None,
+            invite_gen: 0,
             message: None,
             skipped: None,
             codes: HashMap::new(),
@@ -615,6 +632,7 @@ impl PeersView {
         let recipes = self.store.read(cx).mailbox_recipes().to_vec();
         let err = self.store.read(cx).mailbox_error();
         let following = self.followed(cx);
+        let has_friends = !friends.is_empty();
         v_flex()
             .gap_2()
             .p_3()
@@ -642,8 +660,8 @@ impl PeersView {
             .when_some(err, |c, e| {
                 c.child(div().text_sm().text_color(theme.danger).child(e))
             })
-            .when_some(self.invite.clone(), |c, code| {
-                let copy = code.clone();
+            .when_some(self.invite.clone(), |c, inv| {
+                let copy = inv.code.clone();
                 c.child(
                     h_flex()
                         .gap_2()
@@ -653,7 +671,7 @@ impl PeersView {
                             widgets::chip(theme.primary)
                                 .text_sm()
                                 .font_semibold()
-                                .child(code),
+                                .child(inv.code.clone()),
                         )
                         .child(
                             Button::new("mb-copy")
@@ -666,9 +684,7 @@ impl PeersView {
                                     cx.notify();
                                 })),
                         )
-                        .child(
-                            widgets::caption("Works once, for 15 minutes.", cx).text_xs(),
-                        ),
+                        .child(widgets::caption(invite_left(&inv), cx).text_xs()),
                 )
             })
             .when(mb.is_some(), |c| {
@@ -691,7 +707,7 @@ impl PeersView {
             })
             .when(mb.is_some() && friends.is_empty() && recipes.is_empty(), |c| {
                 c.child(widgets::caption(
-                    "Invite a friend to get a code, or paste the code they sent you. The code works once, for 15 minutes.",
+                    "Invite a friend to get a code, or paste the code they sent you. Codes work once and run out after 15 minutes.",
                     cx,
                 ))
             })
@@ -727,6 +743,12 @@ impl PeersView {
                     })
                     .child(widgets::chip(theme.muted_foreground).xsmall().child("Paired"))
             }))
+            .when(!recipes.is_empty() && has_friends, |c| {
+                c.child(widgets::caption(
+                    "Your instances are shared with them automatically. Theirs show below; Get this instance sets one up here.",
+                    cx,
+                ))
+            })
             .children(recipes.into_iter().map(|e| {
                 let already = following
                     .as_ref()
@@ -736,7 +758,7 @@ impl PeersView {
                     .px_1()
                     .child(
                         div().text_sm().child(format!(
-                            "{} shared {}",
+                            "{} shared {} with you",
                             if e.from_name.is_empty() { "A friend" } else { &e.from_name },
                             if e.name.is_empty() { &e.inst } else { &e.name }
                         )),
@@ -780,13 +802,16 @@ impl PeersView {
             this.update(cx, |this, cx| {
                 this.running = false;
                 this.message = Some(match r {
-                    Ok(code) => {
+                    Ok((code, secs)) => {
                         // Put it on the clipboard straight away; the Copy
                         // button beside it is for later.
                         cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                        this.invite = Some(code);
-                        Ok("Code copied. Send it to your friend; it works once, for 15 minutes."
-                            .to_string())
+                        this.invite = Some(Invite {
+                            code,
+                            until: Instant::now() + Duration::from_secs(secs),
+                        });
+                        this.start_invite_ticker(cx);
+                        Ok("Code copied. Send it to your friend; it works once.".to_string())
                     }
                     Err(e) => Err(format!("{e:#}")),
                 });
@@ -796,6 +821,39 @@ impl PeersView {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Keeps the invite's "Expires in" line moving, then clears it. It runs
+    /// while the view is open, so changing tabs or instance doesn't lose it.
+    fn start_invite_ticker(&mut self, cx: &mut Context<Self>) {
+        self.invite_gen = self.invite_gen.wrapping_add(1);
+        let id = self.invite_gen;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let more = this
+                    .update(cx, |this, cx| {
+                        if this.invite_gen != id {
+                            return false;
+                        }
+                        let Some(inv) = &this.invite else {
+                            return false;
+                        };
+                        if Instant::now() >= inv.until {
+                            this.invite = None;
+                            this.message =
+                                Some(Ok("That code expired. Invite a friend again for a new one.".into()));
+                        }
+                        cx.notify();
+                        this.invite.is_some()
+                    })
+                    .unwrap_or(false);
+                if !more {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn mailbox_join(&mut self, cx: &mut Context<Self>) {
@@ -1422,8 +1480,15 @@ impl Render for PeersView {
             )
             .into_any_element()
         };
-        v_flex()
+        // The page is taller than the window once there are friends and a
+        // library, so it scrolls as a whole.
+        div()
+            .id("peers-scroll")
             .size_full()
+            .overflow_y_scrollbar()
+            .child(
+        v_flex()
+            .w_full()
             .px_6()
             .pb_6()
             .gap_4()
@@ -1461,6 +1526,7 @@ impl Render for PeersView {
             )
             .children(panel)
             .child(advanced)
+            )
             .into_any_element()
     }
 }

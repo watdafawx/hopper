@@ -13,6 +13,9 @@ use std::time::Duration;
 /// Where the public mailbox is. Change for a self-hosted one.
 pub const DEFAULT_URL: &str = "https://sync.kyuubi.dev";
 
+/// How long a one-time invite lasts when the mailbox doesn't say.
+pub const INVITE_SECS: u64 = 15 * 60;
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Account {
@@ -144,9 +147,13 @@ impl Mailbox {
         &self.account
     }
 
-    pub fn invite(&self) -> anyhow::Result<String> {
+    /// Makes a one-time invite code and says how many seconds it lasts,
+    /// so the window can count it down instead of promising "15 minutes".
+    pub fn invite(&self) -> anyhow::Result<(String, u64)> {
         let v = self.post("/v1/invite", Some(&self.account.token), serde_json::json!({}))?;
-        Ok(v["code"].as_str().context("mailbox: no code")?.to_string())
+        let code = v["code"].as_str().context("mailbox: no code")?.to_string();
+        let secs = v["expires"].as_u64().unwrap_or(INVITE_SECS);
+        Ok((code, secs))
     }
 
     pub fn join(&self, code: &str) -> anyhow::Result<Friend> {
@@ -282,7 +289,7 @@ mod tests {
         let base = std::env::var("HOPPER_MAILBOX_URL").expect("HOPPER_MAILBOX_URL");
         let a = Mailbox::register(&base, "hopper-test-a").unwrap();
         let b = Mailbox::register(&base, "hopper-test-b").unwrap();
-        let code = a.invite().unwrap();
+        let (code, _) = a.invite().unwrap();
         let friend = b.join(&code).unwrap();
         assert_eq!(friend.name, "hopper-test-a");
         let mc_id = "069a79f444e94726a5befca90e38aaf5";
