@@ -1407,6 +1407,17 @@ impl AppView {
                                         }),
                                 )
                                 .child(
+                                    Button::new("open-friends")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::Users)
+                                        .when(!dialog, |b| b.tooltip("Friends: who you follow, and which packs you share"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.go(Page::Library, cx);
+                                            this.library.update(cx, |l, cx| l.toggle_friends(cx));
+                                        })),
+                                )
+                                .child(
                                     Button::new("open-github")
                                         .ghost()
                                         .small()

@@ -52,6 +52,8 @@ pub struct PeersView {
     invite: Option<Invite>,
     /// Bumped for each invite so an older countdown stops.
     invite_gen: u64,
+    /// Drawn as the docked panel instead of the full page.
+    docked: bool,
     message: Option<Result<String, String>>,
     /// Mods from other sources the last pull left out, said after its result.
     skipped: Option<String>,
@@ -99,6 +101,7 @@ impl PeersView {
             join_code,
             invite: None,
             invite_gen: 0,
+            docked: false,
             message: None,
             skipped: None,
             codes: HashMap::new(),
@@ -630,6 +633,11 @@ impl PeersView {
                 })
                 .into_any_element(),
         )
+    }
+
+    /// Drawn as the docked panel (full height, beside the page).
+    pub fn set_docked(&mut self, docked: bool) {
+        self.docked = docked;
     }
 
     /// The Friends panel docked beside an instance page: the same card as
@@ -1538,6 +1546,9 @@ impl PeersView {
 
 impl Render for PeersView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.docked {
+            return div().size_full().child(self.panel_body(cx)).into_any_element();
+        }
         let Some(hub) = self.hub(cx) else {
             return self.intro(cx);
         };

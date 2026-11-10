@@ -326,6 +326,17 @@ pub struct LibraryView {
 }
 
 impl LibraryView {
+    /// Whether the Friends panel is docked beside the page.
+    pub fn friends_open(&self) -> bool {
+        self.friends_open
+    }
+
+    /// The title bar's Friends button: dock or hide the panel.
+    pub fn toggle_friends(&mut self, cx: &mut Context<Self>) {
+        self.friends_open = !self.friends_open;
+        cx.notify();
+    }
+
     /// Ctrl+F: the Mods search of the picked instance.
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tab.class().is_none() {
@@ -2046,15 +2057,6 @@ impl LibraryView {
         let play_small = Some(widgets::glow(play.min_w_24(), play_color, cx));
         let history = self.history_button(&root, cx);
         let site = self.pack_facts(inst, cx).map(|(_, _, _, url, mr)| (url, mr));
-        let following = self
-            .store
-            .read(cx)
-            .settings()
-            .followed_recipes
-            .iter()
-            .find(|f| std::path::Path::new(&f.root) == inst.root)
-            .map(|f| format!("Following {}'s {}", f.peer_name, f.name));
-        let friends_label = following.clone().unwrap_or_else(|| "Friends".into());
         let actions = h_flex()
                             .flex_none()
                             .flex_nowrap()
@@ -2062,18 +2064,6 @@ impl LibraryView {
                             .children(play_small)
                             .children(pack_update)
                             .children(sync_to)
-                            .child(
-                                Button::new("friends-chip")
-                                    .outline()
-                                    .selected(self.friends_open || following.is_some())
-                                    .icon(IconName::Users)
-                                    .label(friends_label)
-                                    .tooltip("Friends: who you follow, and which of your packs they can follow")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.friends_open = !this.friends_open;
-                                        cx.notify();
-                                    })),
-                            )
                             .child(
                                 Button::new("folder")
                                     .outline()
@@ -2978,7 +2968,8 @@ impl Render for LibraryView {
             s.panel_widths.get("config.panel").copied().unwrap_or(30.).abs().clamp(24., 48.).min(window.viewport_size().width / window.rem_size() * 0.4)
         });
         let peek_w = peek_w + config_w;
-        self.detail_w = window.viewport_size().width / window.rem_size() - side - peek_w;
+        let friends_w = if self.friends_open { 23.0 } else { 0.0 };
+        self.detail_w = window.viewport_size().width / window.rem_size() - side - peek_w - friends_w;
         // The table fits its columns to this; it is re-laid out whenever
         // the room changes (its bounds change), so no notify is needed.
         let (room, list_open) = (self.detail_w, side > RAIL);
@@ -3010,6 +3001,10 @@ impl Render for LibraryView {
         let peek = peek.map(|p| {
             AnyView::from(p).cached(StyleRefinement::default().w(rems(peek_w)).flex_none().h_full())
         });
+        self.peers.update(cx, |p, _| p.set_docked(self.friends_open));
+        let friends_panel = self.friends_open.then(|| {
+            AnyView::from(self.peers.clone()).cached(StyleRefinement::default().w(rems(23.)).flex_none().h_full())
+        });
         h_flex()
             .id("library")
             .relative()
@@ -3032,6 +3027,7 @@ impl Render for LibraryView {
             .items_stretch()
             .child(self.sidebar(list, cx))
             .child(page)
+            .children(friends_panel)
             .children(peek)
             .children(config_panel)
             .child(self.logo_layer.clone())
