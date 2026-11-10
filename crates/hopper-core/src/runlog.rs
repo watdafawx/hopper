@@ -68,12 +68,17 @@ pub fn first_time(text: &str) -> Option<i64> {
 
 /// When one log line says it was written (`[05Nov2026 07:52:26.119] …`).
 pub fn line_time(l: &str) -> Option<i64> {
+    Some(line_wall(l)? - crate::hosting::schedule::utc_offset_secs())
+}
+
+/// A log line's time as written, with no time zone ([`crate::time::wall_secs`]).
+pub fn line_wall(l: &str) -> Option<i64> {
     let s = l.get(1..19)?;
     let day: i64 = s.get(0..2)?.parse().ok()?;
     let mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].iter().position(|m| s.get(2..5) == Some(*m))? as i64 + 1;
     let year: i64 = s.get(5..9)?.parse().ok()?;
     let (h, mi, sec): (i64, i64, i64) = (s.get(10..12)?.parse().ok()?, s.get(13..15)?.parse().ok()?, s.get(16..18)?.parse().ok()?);
-    (s.as_bytes().get(9) == Some(&b' ')).then(|| crate::time::local_secs(year, mon, day, h, mi, sec))
+    (s.as_bytes().get(9) == Some(&b' ')).then(|| crate::time::wall_secs(year, mon, day, h, mi, sec))
 }
 
 /// The log of the start that wrote a crash report at `written` (seconds

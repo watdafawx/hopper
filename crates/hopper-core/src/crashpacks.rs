@@ -79,7 +79,7 @@ fn reloads(log: &str) -> Vec<Reload> {
         .filter_map(|l| {
             let list = &l[l.find("Reloading ResourceManager: ")? + "Reloading ResourceManager: ".len()..];
             let packs = list.split(", ").map(str::trim).filter(|p| p.starts_with("file/")).map(str::to_string).collect();
-            Some(Reload { at: crate::runlog::line_time(l), packs })
+            Some(Reload { at: crate::runlog::line_wall(l), packs })
         })
         .collect()
 }
@@ -109,11 +109,11 @@ pub fn drawing(report: &str) -> bool {
     trace.take_while(|l| !l.trim().is_empty()).any(|l| l.trim_start().starts_with("at ") && MODEL_FRAMES.iter().any(|m| l.contains(m)))
 }
 
-/// The report's own time (`Time: 2026-11-10 21:56:48`, local).
+/// The report's own time as written (`Time: 2026-11-10 21:56:48`), no time zone.
 fn report_time(report: &str) -> Option<i64> {
     let t = report.lines().find_map(|l| l.strip_prefix("Time: "))?.trim();
     let n = |a: usize, b: usize| t.get(a..b)?.parse::<i64>().ok();
-    Some(crate::time::local_secs(n(0, 4)?, n(5, 7)?, n(8, 10)?, n(11, 13)?, n(14, 16)?, n(17, 19)?))
+    Some(crate::time::wall_secs(n(0, 4)?, n(5, 7)?, n(8, 10)?, n(11, 13)?, n(14, 16)?, n(17, 19)?))
 }
 
 /// The last reload of `rs` that turned packs on, and those packs.
@@ -267,6 +267,11 @@ mod tests {
         let a = advice(&t);
         assert!(a.starts_with("You turned on the resource pack \"Matcha Block Overlays 2-b1+fusion\" 40 seconds before this crash"), "{a}");
         assert!(a.contains("Turn that pack off (Resource packs tab)"), "{a}");
+        // The same with either line ending.
+        let lf = |s: &str| s.replace("\r\n", "\n");
+        let crlf = |s: &str| lf(s).replace('\n', "\r\n");
+        assert_eq!(find(&crlf(REPORT), &crlf(LOG), None), Some(t.clone()));
+        assert_eq!(find(&lf(REPORT), &lf(LOG), None), Some(t));
     }
 
     #[test]

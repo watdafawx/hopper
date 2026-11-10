@@ -130,7 +130,14 @@ pub fn exact_full(t: i64) -> String {
 /// Seconds since the epoch for a date and time on this PC's clock (as game
 /// logs write them).
 pub fn local_secs(y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64) -> i64 {
-    days_from_civil(y, m, d) * 86_400 + h * 3600 + mi * 60 + s - crate::hosting::schedule::utc_offset_secs()
+    wall_secs(y, m, d, h, mi, s) - crate::hosting::schedule::utc_offset_secs()
+}
+
+/// A date and time as written, counted in seconds without any time zone:
+/// only for comparing two times the same clock wrote (a log line and its
+/// crash report), so the PC's zone never matters.
+pub fn wall_secs(y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64) -> i64 {
+    days_from_civil(y, m, d) * 86_400 + h * 3600 + mi * 60 + s
 }
 
 /// Local date and time for a file name, the way Minecraft names crash

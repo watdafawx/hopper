@@ -3648,8 +3648,18 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         }
         let mods: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         let ids = |f: &str| crate::deps::own_ids(&dir.join(f)).0;
+        // Files get the times the game gave them (its report's own time on
+        // this PC's clock), never "now": the fixture's day may still be ahead
+        // somewhere when the test runs.
+        let written = crate::time::local_secs(2026, 11, 10, 21, 56, 48);
+        let stamp = |p: &Path, secs: i64| {
+            let f = fs::File::options().write(true).open(p).unwrap();
+            f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64)).unwrap();
+        };
         let report = root.join("crash-reports/crash-2026-11-10_21.56.40-client.txt");
         fs::write(&report, report_text).unwrap();
+        stamp(&report, written);
+        let latest = root.join("logs/latest.log");
 
         // Without a log the report alone blames the mod that threw.
         let c = from_report(&root, &report, &mods, ids).unwrap();
@@ -3657,8 +3667,15 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         assert!(c.advice.is_empty());
 
         // The log says the pack came on 40 seconds before: it is the likely
-        // trigger, and the mods that drew it drop to possible.
-        fs::write(root.join("logs/latest.log"), log).unwrap();
+        // trigger, and the mods that drew it drop to possible. The same with
+        // either line ending.
+        let lf = log.replace("\r\n", "\n");
+        fs::write(&latest, lf.replace('\n', "\r\n")).unwrap();
+        stamp(&latest, written + 1);
+        let c = from_report(&root, &report, &mods, ids).unwrap();
+        assert!(c.advice.starts_with("You turned on the resource pack \"Matcha Block Overlays 2-b1+fusion\" 40 seconds before"), "{}", c.advice);
+        fs::write(&latest, &lf).unwrap();
+        stamp(&latest, written + 1);
         let c = from_report(&root, &report, &mods, ids).unwrap();
         assert!(c.advice.starts_with("You turned on the resource pack \"Matcha Block Overlays 2-b1+fusion\" 40 seconds before"), "{}", c.advice);
         assert!(c.suspects.iter().all(|s| s.certainty == Certainty::Possible), "{:#?}", c.suspects);
@@ -3678,10 +3695,10 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
             let mut e = flate2::write::GzEncoder::new(fs::File::create(&gz).unwrap(), flate2::Compression::fast());
             e.write_all(log.as_bytes()).unwrap();
             e.finish().unwrap();
-            let f = fs::File::options().write(true).open(&gz).unwrap();
-            f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600)).unwrap();
+            stamp(&gz, written - 600);
         }
-        fs::write(root.join("logs/latest.log"), again).unwrap();
+        fs::write(&latest, again).unwrap();
+        stamp(&latest, written + 1);
         let c = from_report(&root, &report, &mods, ids).unwrap();
         assert!(c.advice.starts_with("The game crashed while drawing blocks, as the last start did right after you turned on the resource pack \"Matcha"), "{}", c.advice);
         assert!(c.suspects.iter().all(|s| s.certainty == Certainty::Possible), "{:#?}", c.suspects);
