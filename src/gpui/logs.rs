@@ -552,7 +552,8 @@ impl LogsView {
             .flex_1()
             .min_h_0()
             .gap_3()
-            .when(!notices.is_empty(), |d| d.child(v_flex().max_w(rems(76.)).gap_3().children(notices)))
+            // No cap: the notices span the page like the cards above and below.
+            .when(!notices.is_empty(), |d| d.child(v_flex().w_full().gap_3().children(notices)))
             .child(self.help.clone())
             .child(split)
             .into_any_element()
