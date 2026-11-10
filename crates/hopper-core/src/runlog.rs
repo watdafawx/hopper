@@ -63,7 +63,11 @@ pub fn read_text(p: &Path) -> Option<String> {
 /// `[05Nov2026 07:52:26.119]`. `None` for a line without a date (Fabric
 /// and vanilla write the time only).
 pub fn first_time(text: &str) -> Option<i64> {
-    let l = text.lines().find(|l| l.starts_with('['))?;
+    line_time(text.lines().find(|l| l.starts_with('['))?)
+}
+
+/// When one log line says it was written (`[05Nov2026 07:52:26.119] …`).
+pub fn line_time(l: &str) -> Option<i64> {
     let s = l.get(1..19)?;
     let day: i64 = s.get(0..2)?.parse().ok()?;
     let mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].iter().position(|m| s.get(2..5) == Some(*m))? as i64 + 1;
@@ -100,6 +104,25 @@ pub fn for_report(root: &Path, written: i64) -> Option<RunLog> {
         None if t - written > 6 * 3600 => return None,
         None => {}
     }
+    Some(RunLog { rel: format!("logs/{name}"), text })
+}
+
+/// The log of the start before the one in `rel` ("logs/latest.log" or a
+/// packed one): what the game had on last time.
+pub fn previous(root: &Path, rel: &str) -> Option<RunLog> {
+    let dir = root.join("logs");
+    let this = modified_secs(&root.join(rel))?;
+    let name = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            is_old_log(&name).then(|| Some((modified_secs(&e.path())?, name)))?
+        })
+        .filter(|(t, n)| *t < this && format!("logs/{n}") != rel)
+        .max_by_key(|(t, _)| *t)?
+        .1;
+    let text = read_text(&dir.join(&name))?;
     Some(RunLog { rel: format!("logs/{name}"), text })
 }
 

@@ -991,10 +991,11 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
     let before = report.as_deref().and_then(modified_secs).unwrap_or(now);
     let (mut suspects, stopped) = analyze(root, &text, &log, &loading, before, mods, &ids);
     let native_text = native.as_deref().map(|n| tail(n, 64 << 10)).unwrap_or_default();
-    let advice = crate::crashsigs::advice(&text, &log, &native_text, false);
+    let mut advice = crate::crashsigs::advice(&text, &log, &native_text, false);
     if crate::crashsigs::driver_crash(&native_text).is_some() {
         shaders_as_a_factor(&mut suspects, mods, &ids);
     }
+    pack_trigger(root, &text, before, &mut suspects, &mut advice);
     let out_of_memory = text.contains("OutOfMemoryError") || log.contains("java.lang.OutOfMemoryError");
     let kind = if !suspects.is_empty() {
         CrashKind::Mods
@@ -1039,8 +1040,11 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
     let before = modified_secs(&saved.source).unwrap_or(saved.when);
     let text = tail(&saved.source, 2 << 20);
     let (mut suspects, stopped) = analyze(root, &text, &log, &loading, before, mods, &ids);
+    let mut advice = crate::crashsigs::advice(&text, &log, "", saved.server);
+    if !saved.server {
+        pack_trigger(root, &text, before, &mut suspects, &mut advice);
+    }
     let (switches, switched_off) = switches(root, &text, &log, &suspects, saved.server);
-    let advice = crate::crashsigs::advice(&text, &log, "", saved.server);
     // A change already put back (its older copy left backups for the mods
     // folder) stays on the card, to say so.
     for s in suspects.iter_mut().filter(|s| s.changed.is_none()) {
@@ -1090,7 +1094,7 @@ fn from_report_as(root: &Path, report: &Path, mods: &[String], ids: &impl Fn(&st
         }
         None => (String::new(), String::new()),
     };
-    let (suspects, stopped) = analyze(root, &text, &log, &loading, written, mods, ids);
+    let (mut suspects, stopped) = analyze(root, &text, &log, &loading, written, mods, ids);
     let kind = if !suspects.is_empty() {
         CrashKind::Mods
     } else if text.contains("OutOfMemoryError") {
@@ -1098,8 +1102,11 @@ fn from_report_as(root: &Path, report: &Path, mods: &[String], ids: &impl Fn(&st
     } else {
         CrashKind::Unknown
     };
+    let mut advice = crate::crashsigs::advice(&text, &log, "", server);
+    if !server {
+        pack_trigger(root, &text, written, &mut suspects, &mut advice);
+    }
     let (switches, switched_off) = switches(root, &text, &log, &suspects, server);
-    let advice = crate::crashsigs::advice(&text, &log, "", server);
     let log_file = run.filter(|r| !r.is_latest() && !log.is_empty()).map(|r| r.rel);
     let follow_up = text.contains(UNDO_FRAME);
     Some(Crash {
@@ -1171,6 +1178,20 @@ pub fn before_crash(log: &str) -> &str {
     match CRASH_SAVED.iter().filter_map(|m| log.find(m)).min() {
         Some(i) => &log[..log[..i].rfind('\n').map_or(0, |n| n + 1)],
         None => log,
+    }
+}
+
+/// A resource pack the player turned on just before a crash while the game
+/// drew blocks (crashpacks.rs), from the log of the report's start and of the
+/// start before it. The report itself never names a pack.
+fn pack_trigger(root: &Path, text: &str, written: i64, suspects: &mut [Suspect], advice: &mut String) {
+    if !advice.is_empty() || !crate::crashpacks::drawing(text) {
+        return;
+    }
+    let Some(run) = crate::runlog::for_report(root, written) else { return };
+    let prev = crate::runlog::previous(root, &run.rel);
+    if let Some(t) = crate::crashpacks::find(text, before_crash(&run.text), prev.as_ref().map(|p| p.text.as_str())) {
+        crate::crashpacks::apply(&t, suspects, advice);
     }
 }
 
@@ -3607,6 +3628,66 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
     /// the frames inside Architectury's listener: Litematica Tool's
     /// `lambda$init$1` put its item after one that isn't in the game.
     /// MineColonies only rebuilt the tabs (on the server thread, earlier).
+    #[test]
+    fn a_resource_pack_turned_on_before_a_drawing_crash_is_the_trigger() {
+        let report_text = include_str!("crashdetect_fixtures/atm10-pack-overlay-crash.txt");
+        let log = include_str!("crashdetect_fixtures/atm10-pack-overlay-latest.log");
+        let again = include_str!("crashdetect_fixtures/atm10-pack-overlay-again.log");
+        let root = std::env::temp_dir().join(format!("hopper-crash-pack-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["crash-reports", "logs", "mods"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let dir = root.join("mods");
+        for (file, id, name) in [
+            ("FramedBlocks-10.6.3.jar", "framedblocks", "FramedBlocks"),
+            ("fusion-1.3.16-neoforge-mc1.21.1.jar", "fusion", "Fusion (Connected Textures)"),
+            ("net.caffeinemc.sodium-neoforge-0.8.13+mc1.21.1-mod.jar", "sodium", "Sodium"),
+        ] {
+            fake_jar(&dir.join(file), id, name, "1.0");
+        }
+        let mods: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let ids = |f: &str| crate::deps::own_ids(&dir.join(f)).0;
+        let report = root.join("crash-reports/crash-2026-11-10_21.56.40-client.txt");
+        fs::write(&report, report_text).unwrap();
+
+        // Without a log the report alone blames the mod that threw.
+        let c = from_report(&root, &report, &mods, ids).unwrap();
+        assert_eq!((c.suspects[0].mod_id.as_str(), c.suspects[0].certainty), ("framedblocks", Certainty::Likely), "{:#?}", c.suspects);
+        assert!(c.advice.is_empty());
+
+        // The log says the pack came on 40 seconds before: it is the likely
+        // trigger, and the mods that drew it drop to possible.
+        fs::write(root.join("logs/latest.log"), log).unwrap();
+        let c = from_report(&root, &report, &mods, ids).unwrap();
+        assert!(c.advice.starts_with("You turned on the resource pack \"Matcha Block Overlays 2-b1+fusion\" 40 seconds before"), "{}", c.advice);
+        assert!(c.suspects.iter().all(|s| s.certainty == Certainty::Possible), "{:#?}", c.suspects);
+        assert!(to_turn_off(&c).is_empty());
+        let fb = c.suspects.iter().find(|s| s.mod_id == "framedblocks").unwrap();
+        assert!(fb.facts.iter().any(|f| f.rule == crate::crashpacks::RULE));
+        // Read again later, the answer holds.
+        let saved = Crash { suspects: Vec::new(), advice: String::new(), ..c.clone() };
+        let again_read = reread(&root, &saved, &mods, ids).unwrap();
+        assert_eq!((again_read.suspects.clone(), again_read.advice.clone()), (c.suspects.clone(), c.advice.clone()));
+
+        // The next start had it on from the beginning and crashed the same
+        // way: its log has one reload, the start before has the crash.
+        {
+            use std::io::Write;
+            let gz = root.join("logs/2026-11-10-2.log.gz");
+            let mut e = flate2::write::GzEncoder::new(fs::File::create(&gz).unwrap(), flate2::Compression::fast());
+            e.write_all(log.as_bytes()).unwrap();
+            e.finish().unwrap();
+            let f = fs::File::options().write(true).open(&gz).unwrap();
+            f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600)).unwrap();
+        }
+        fs::write(root.join("logs/latest.log"), again).unwrap();
+        let c = from_report(&root, &report, &mods, ids).unwrap();
+        assert!(c.advice.starts_with("The game crashed while drawing blocks, as the last start did right after you turned on the resource pack \"Matcha"), "{}", c.advice);
+        assert!(c.suspects.iter().all(|s| s.certainty == Certainty::Possible), "{:#?}", c.suspects);
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_mod_inside_a_library_s_event_is_the_cause() {
         // The report alone names only the library: it must not stand.

@@ -1,0 +1,7 @@
+[10Nov2026 21:57:03.971] [main/INFO] [cpw.mods.modlauncher.Launcher/MODLAUNCHER]: ModLauncher running: args [--version, neoforge-21.1.265, --fml.mcVersion, 1.21.1]
+[10Nov2026 21:58:12.097] [Render thread/INFO] [net.minecraft.server.packs.resources.ReloadableResourceManager/]: Reloading ResourceManager: vanilla, mod_resources, moonlight:merged_pack, file/AE2-ALL-IN-ONE-26.1.2.zip, file/Fusion Connected Blocks v1.1.0 for Minecraft 1.20-26.2.zip, file/Fusion Connected Glass v1.0.1 for Minecraft 1.20-1.21.8.zip, file/Fusion Stacking Items v1.0.1 for Minecraft 1.20-1.21.8.zip, file/Fast Better Grass.zip, file/Simple Grass Flowers v2.0.0.zip, file/FBGFSGF v1.0.zip, file/Fusion 3D Items v1.0.1 for Minecraft 1.20-1.21.8.zip, file/Matcha Block Overlays 2-b1+fusion.zip
+[10Nov2026 22:00:02.100] [Render thread/FATAL] [net.neoforged.neoforge.common.NeoForgeMod/]: Preparing crash report with UUID cfbcf224-5b4a-418a-a683-3939b724fd06
+Time: 2026-11-10 22:00:02
+Description: Encountered exception while building chunk meshes
+
+java.lang.NullPointerException: Cannot invoke "net.neoforged.neoforge.client.model.data.ModelData.get(net.neoforged.neoforge.client.model.data.ModelProperty)" because "modelData" is null
