@@ -69,6 +69,9 @@ pub enum Msg {
     OpenUrls(Vec<String>),
     /// A followed recipe was applied; remember its code.
     RecipeApplied(PathBuf, String),
+    /// A new instance was made by following a friend's pack: remember the
+    /// recipe for its root (known only once it was made).
+    Followed(Box<hopper::settings::FollowedRecipe>),
     /// Projects updated, download pages to fetch, and the project whose
     /// install or update asked for them (its button shows their progress).
     Updated(PathBuf, Vec<u64>, Vec<String>, Option<u64>),
@@ -1078,6 +1081,17 @@ impl Store {
                 for u in &urls {
                     cx.open_url(u);
                 }
+            }
+            Msg::Followed(f) => {
+                let root = PathBuf::from(&f.root);
+                self.update_settings(
+                    |st| {
+                        st.followed_recipes.retain(|x| x.root != f.root);
+                        st.followed_recipes.push((*f).clone());
+                    },
+                    cx,
+                );
+                self.handle(Msg::installed(root, &[], None), cx);
             }
             Msg::RecipeApplied(root, code) => {
                 self.pending_follow.remove(&root);
@@ -3509,15 +3523,23 @@ impl Store {
             cx.background_executor()
                 .timer(Duration::from_secs(3))
                 .await;
-            let got = this.update(cx, |s, _| {
+            let got = this.update(cx, |s, cx| {
                 let mb = s.mailbox.clone()?;
-                let shared = s.settings().shared_instances.clone();
+                // Older builds shared a pack with every friend at once.
+                // Now that the friends are known, give each of them what
+                // that meant, then forget the old list.
+                let friend_ids: Vec<String> =
+                    s.mailbox_friends.iter().map(|f| f.id.clone()).collect();
+                if !friend_ids.is_empty() && !s.settings().shared_instances.is_empty() {
+                    s.update_settings(|st| { st.migrate_shared(&friend_ids); }, cx);
+                }
+                let shared = s.settings().shared_with.clone();
                 let instances: Vec<_> = s
                     .instances
                     .iter()
                     .filter(|i| {
                         let key = i.root.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                        shared.iter().any(|k| k.eq_ignore_ascii_case(&key))
+                        shared.iter().any(|p| p.key.eq_ignore_ascii_case(&key))
                     })
                     .cloned()
                     .collect();
@@ -3527,9 +3549,10 @@ impl Store {
                     instances,
                     s.mailbox_friends.clone(),
                     s.mailbox_sig,
+                    shared,
                 ))
             });
-            let Ok(Some((mb, sig, instances, old_friends, old_sig))) = got else {
+            let Ok(Some((mb, sig, instances, old_friends, old_sig, shared))) = got else {
                 continue;
             };
             let friends = {
@@ -3602,9 +3625,17 @@ impl Store {
             };
             {
                 let (mb, friends) = (mb.clone(), friends.clone());
+                let shared = shared.clone();
                 cx.background_spawn(async move {
                     for (key, name, code, left_out) in &made {
+                        // Each pack goes only to the friends it was
+                        // switched on for.
                         for f in &friends {
+                            if !shared.iter().any(|p| {
+                                p.friend == f.id && p.key.eq_ignore_ascii_case(key)
+                            }) {
+                                continue;
+                            }
                             let _ = mb.publish(&f.id, key, name, code, left_out);
                         }
                     }
@@ -3627,10 +3658,19 @@ impl Store {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.instances.len().hash(&mut h);
-        // Which packs are shared decides what is published, so it counts too.
-        let mut shared = self.settings().shared_instances.clone();
-        shared.sort();
-        shared.hash(&mut h);
+        // Which packs are shared, and with whom, decides what is published,
+        // so it counts too.
+        let mut shared = self.settings().shared_with.clone();
+        shared.sort_by(|a, b| {
+            a.key
+                .to_lowercase()
+                .cmp(&b.key.to_lowercase())
+                .then_with(|| a.friend.cmp(&b.friend))
+        });
+        for p in &shared {
+            p.key.to_lowercase().hash(&mut h);
+            p.friend.hash(&mut h);
+        }
         for i in &self.instances {
             i.name.hash(&mut h);
             i.game_version.hash(&mut h);

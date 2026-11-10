@@ -2802,42 +2802,7 @@ impl LibraryView {
                     .child(widgets::enter(
                         ElementId::Name(anim.into()),
                         div().flex_1().min_w_0().size_full().child(body),
-                    ))
-                    .when(self.friends_open, |d| {
-                        let theme = cx.theme();
-                        d.child(
-                            v_flex()
-                                .id("friends-dock")
-                                .w(rems(23.))
-                                .flex_none()
-                                .h_full()
-                                .min_h_0()
-                                .border_l_1()
-                                .border_color(theme.border)
-                                .child(
-                                    h_flex()
-                                        .px_3()
-                                        .py_2()
-                                        .gap_2()
-                                        .flex_none()
-                                        .child(div().text_sm().font_semibold().child("Friends"))
-                                        .child(div().flex_1())
-                                        .child(
-                                            Button::new("friends-hide")
-                                                .xsmall()
-                                                .ghost()
-                                                .label("Hide")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.friends_open = false;
-                                                    cx.notify();
-                                                })),
-                                        ),
-                                )
-                                .child(div().flex_1().min_h_0().child(
-                                    self.peers.update(cx, |p, cx| p.panel_body(cx)),
-                                )),
-                        )
-                    }),
+                    )),
             )
             .into_any_element()
     }
@@ -3001,7 +2966,14 @@ impl Render for LibraryView {
         let peek = peek.map(|p| {
             AnyView::from(p).cached(StyleRefinement::default().w(rems(peek_w)).flex_none().h_full())
         });
-        self.peers.update(cx, |p, _| p.set_docked(self.friends_open));
+        self.peers.update(cx, |p, cx| {
+            p.set_docked(self.friends_open);
+            // The docked panel acts on the open instance, so it needs it
+            // even when the Peers tab itself was never opened.
+            if let Some(root) = self.selected.clone() {
+                p.show_for(root, cx);
+            }
+        });
         let friends_panel = self.friends_open.then(|| {
             AnyView::from(self.peers.clone()).cached(StyleRefinement::default().w(rems(23.)).flex_none().h_full())
         });

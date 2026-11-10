@@ -39,6 +39,15 @@ pub struct FollowedRecipe {
     pub left_out: Vec<String>,
 }
 
+/// One pack shared with one friend. The key is the instance folder's name;
+/// `friend` is the mailbox id of the friend who can see it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SharedPack {
+    pub key: String,
+    pub friend: String,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -91,8 +100,12 @@ pub struct Settings {
     pub mailbox_name: String,
     /// Recipes this PC follows from paired peers, one per local instance.
     pub followed_recipes: Vec<FollowedRecipe>,
-    /// Instance folders (their folder names) the player shares with friends.
-    /// Empty means nothing is shared; every pack starts off.
+    /// Instance folders (their folder names) the player shares with friends,
+    /// one entry per friend. Empty means nothing is shared; every pack
+    /// starts off private.
+    pub shared_with: Vec<SharedPack>,
+    /// Older builds shared a pack with every friend at once. Read so those
+    /// players keep sharing, then fanned out into `shared_with` and cleared.
     pub shared_instances: Vec<String>,
     /// The "Share your packs with your friends?" prompt was answered.
     pub share_prompt_done: bool,
@@ -532,6 +545,7 @@ impl Default for Settings {
             mailbox_url: crate::mailbox::DEFAULT_URL.to_string(),
             mailbox_name: String::new(),
             followed_recipes: Vec::new(),
+            shared_with: Vec::new(),
             shared_instances: Vec::new(),
             share_prompt_done: false,
             datapack_dest: HashMap::new(),
@@ -621,6 +635,52 @@ impl Settings {
             .get(&*root.to_string_lossy())
             .copied()
             .unwrap_or(self.clean_pack_updates)
+    }
+
+    /// Whether the instance folder `key` is shared with the friend `friend`
+    /// (their mailbox id).
+    pub fn shares_with(&self, key: &str, friend: &str) -> bool {
+        self.shared_with
+            .iter()
+            .any(|s| s.friend == friend && s.key.eq_ignore_ascii_case(key))
+    }
+
+    /// Turns one pack's share on or off for one friend.
+    pub fn set_shared(&mut self, key: &str, friend: &str, on: bool) {
+        self.shared_with
+            .retain(|s| !(s.friend == friend && s.key.eq_ignore_ascii_case(key)));
+        if on {
+            self.shared_with.push(SharedPack {
+                key: key.to_string(),
+                friend: friend.to_string(),
+            });
+        }
+    }
+
+    /// Shares every `key` with every friend on `friends` (the "Share all"
+    /// prompt). Keys already shared stay as they are.
+    pub fn share_with_all(&mut self, keys: &[String], friends: &[String]) {
+        for key in keys {
+            for friend in friends {
+                if !self.shares_with(key, friend) {
+                    self.shared_with.push(SharedPack {
+                        key: key.clone(),
+                        friend: friend.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Folds the older all-friends share list into `shared_with`, once the
+    /// friends are known. Returns whether anything changed.
+    pub fn migrate_shared(&mut self, friends: &[String]) -> bool {
+        if self.shared_instances.is_empty() || friends.is_empty() {
+            return false;
+        }
+        let keys = std::mem::take(&mut self.shared_instances);
+        self.share_with_all(&keys, friends);
+        true
     }
 
     /// [`Settings::web_downloads`], kept to 1..=8 (an old or hand-edited
@@ -1127,6 +1187,48 @@ mod tests {
         assert!(Settings::load_from(&p).is_none());
         assert!(Settings::load_error().is_some());
         let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn a_pack_is_shared_with_one_friend_at_a_time() {
+        let mut s = Settings::default();
+        s.set_shared("Pizza", "kimbley", true);
+        s.set_shared("Pizza", "sam", true);
+        assert!(s.shares_with("pizza", "kimbley"));
+        assert!(s.shares_with("PIZZA", "sam"));
+        assert!(!s.shares_with("Pizza", "alex"));
+
+        s.set_shared("Pizza", "kimbley", false);
+        assert!(!s.shares_with("Pizza", "kimbley"));
+        assert!(s.shares_with("Pizza", "sam"));
+        assert_eq!(s.shared_with.len(), 1);
+    }
+
+    #[test]
+    fn share_all_adds_every_friend_once() {
+        let mut s = Settings::default();
+        let keys = vec!["Pizza".to_string(), "Sky".to_string()];
+        let friends = vec!["kimbley".to_string(), "sam".to_string()];
+        s.share_with_all(&keys, &friends);
+        s.share_with_all(&keys, &friends);
+        assert_eq!(s.shared_with.len(), 4);
+    }
+
+    #[test]
+    fn an_old_share_list_is_fanned_out_to_every_friend_once() {
+        let mut s = Settings::default();
+        s.shared_instances = vec!["Pizza".to_string()];
+        // No friends yet: the list waits, nothing is lost.
+        assert!(!s.migrate_shared(&[]));
+        assert_eq!(s.shared_instances, vec!["Pizza".to_string()]);
+
+        assert!(s.migrate_shared(&["kimbley".to_string(), "sam".to_string()]));
+        assert!(s.shared_instances.is_empty());
+        assert!(s.shares_with("Pizza", "kimbley"));
+        assert!(s.shares_with("Pizza", "sam"));
+        // Running it again changes nothing.
+        assert!(!s.migrate_shared(&["kimbley".to_string()]));
+        assert_eq!(s.shared_with.len(), 2);
     }
 }
 
