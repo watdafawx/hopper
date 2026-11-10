@@ -353,13 +353,6 @@ impl PeersView {
         cx.notify();
     }
 
-    fn root_string(&self) -> String {
-        self.root
-            .as_ref()
-            .map(|r| r.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    }
-
     fn followed(&self, cx: &App) -> Option<FollowedRecipe> {
         let root = self.root.as_ref()?;
         self.store
@@ -423,30 +416,16 @@ impl PeersView {
                         this.message = Some(Err(why))
                     }
                     Ok((recipe, _)) => {
-                        this.save_follow(
-                            FollowedRecipe {
-                                peer_id: id.clone(),
-                                peer_name: peer_name.clone(),
-                                inst: rinst.clone(),
-                                name: recipe.name.clone(),
-                                root: root.to_string_lossy().into_owned(),
-                                code: recipe.code.clone(),
-                                seen: recipe.code.clone(),
-                                left_out: recipe.left_out.clone(),
-                            },
-                            cx,
-                        );
-                        let (code, root_j) = (recipe.code.clone(), root.clone());
-                        let root_arg = root_j.clone();
-                        let title = format!("Following {peer_name}'s {}", recipe.name);
-                        this.store.read(cx).spawn_instance_job(
-                            &root_arg,
-                            title,
-                            move |job| {
-                                hopper::recipe::apply_to(&root_j, &code, job)?;
-                                Ok(crate::store::Msg::InstanceChanged(root_j.clone()))
-                            },
-                        );
+                        let req = crate::store::FollowReq {
+                            peer_id: id.clone(),
+                            peer_name: peer_name.clone(),
+                            inst: rinst.clone(),
+                            name: recipe.name.clone(),
+                            code: recipe.code.clone(),
+                            left_out: recipe.left_out.clone(),
+                            ..Default::default()
+                        };
+                        this.follow_in_window(req, root.clone(), cx);
                         this.message = Some(Ok(format!(
                             "Following {peer_name}'s {}. The mods are downloading.",
                             recipe.name
@@ -518,22 +497,18 @@ impl PeersView {
                 match r {
                     Err(e) => this.message = Some(Err(format!("{e:#}"))),
                     Ok(recipe) => {
-                        let Some(mut f) = this.followed(cx) else { return };
-                        f.code = recipe.code.clone();
-                        f.seen = recipe.code.clone();
-                        f.left_out = recipe.left_out.clone();
+                        let Some(f) = this.followed(cx) else { return };
                         let (name, inst_name) = (f.peer_name.clone(), recipe.name.clone());
-                        this.save_follow(f, cx);
-                        let (code, root_j) = (recipe.code.clone(), root.clone());
-                        let root_arg = root_j.clone();
-                        this.store.read(cx).spawn_instance_job(
-                            &root_arg,
-                            format!("Updating from {name}'s {inst_name}"),
-                            move |job| {
-                                hopper::recipe::apply_to(&root_j, &code, job)?;
-                                Ok(crate::store::Msg::InstanceChanged(root_j.clone()))
-                            },
-                        );
+                        let req = crate::store::FollowReq {
+                            peer_id: f.peer_id.clone(),
+                            peer_name: f.peer_name.clone(),
+                            inst: f.inst.clone(),
+                            name: recipe.name.clone(),
+                            code: recipe.code.clone(),
+                            left_out: recipe.left_out.clone(),
+                            ..Default::default()
+                        };
+                        this.follow_in_window(req, root.clone(), cx);
                         this.message =
                             Some(Ok(format!("Updating from {name}'s {inst_name}.")));
                     }
@@ -546,14 +521,23 @@ impl PeersView {
         cx.notify();
     }
 
-    fn stop_follow(&mut self, cx: &mut Context<Self>) {
-        let root = self.root_string();
-        self.store.update(cx, |s, cx| {
-            s.update_settings(
-                |st| st.followed_recipes.retain(|f| f.root != root),
-                cx,
-            );
+    /// Follows over `root` once the window can ask about mods from other
+    /// sources (this runs after a fetch, outside any click).
+    fn follow_in_window(&self, req: crate::store::FollowReq, root: PathBuf, cx: &mut Context<Self>) {
+        let Some(handle) = cx.active_window() else { return };
+        let store = self.store.clone();
+        cx.defer(move |cx| {
+            handle
+                .update(cx, |_, window, cx| {
+                    crate::store::follow_pack(&store, req, crate::store::FollowTarget::Existing(root), window, cx)
+                })
+                .ok();
         });
+    }
+
+    fn stop_follow(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        self.store.update(cx, |s, cx| s.stop_following(&root, cx));
         self.message = Some(Ok("Stopped following this instance.".into()));
         cx.notify();
     }
@@ -648,50 +632,18 @@ impl PeersView {
             .into_any_element()
     }
 
-    fn set_shared(&mut self, key: String, friend: String, on: bool, cx: &mut Context<Self>) {
-        self.store.update(cx, |s, cx| {
-            s.update_settings(
-                |st| {
-                    st.set_shared(&key, &friend, on);
-                    st.share_prompt_done = true;
-                },
-                cx,
-            )
-        });
+    fn set_shared(&mut self, inst: String, friend: String, on: bool, cx: &mut Context<Self>) {
+        self.store.update(cx, |s, cx| s.set_shared(&inst, &friend, on, cx));
         cx.notify();
     }
 
     fn share_all(&mut self, cx: &mut Context<Self>) {
-        let keys: Vec<String> = self
-            .store
-            .read(cx)
-            .instances()
-            .iter()
-            .filter_map(|i| i.root.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .collect();
-        let friends: Vec<String> = self
-            .store
-            .read(cx)
-            .mailbox_friends()
-            .iter()
-            .map(|f| f.id.clone())
-            .collect();
-        self.store.update(cx, |s, cx| {
-            s.update_settings(
-                |st| {
-                    st.share_with_all(&keys, &friends);
-                    st.share_prompt_done = true;
-                },
-                cx,
-            )
-        });
+        self.store.update(cx, |s, cx| s.share_all(cx));
         cx.notify();
     }
 
     fn dismiss_share_prompt(&mut self, cx: &mut Context<Self>) {
-        self.store.update(cx, |s, cx| {
-            s.update_settings(|st| st.share_prompt_done = true, cx)
-        });
+        self.store.update(cx, |s, cx| s.dismiss_share_prompt(cx));
         cx.notify();
     }
 
@@ -832,7 +784,7 @@ impl PeersView {
                                     .settings()
                                     .followed_recipes
                                     .iter()
-                                    .any(|f| f.peer_id == e.from && f.inst == e.inst);
+                                    .any(|f| f.matches(&e.from, &e.inst, ""));
                                 let pack = if e.name.is_empty() { e.inst.clone() } else { e.name.clone() };
                                 h_flex()
                                     .gap_2()
@@ -871,15 +823,8 @@ impl PeersView {
                             div().pt_1().px_1().child(widgets::caption("Your packs", cx)),
                         )
                         .children(instances.iter().map(|inst| {
-                            let key = inst
-                                .root
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned();
-                            let on = shared
-                                .iter()
-                                .any(|p| p.friend == fid && p.key.eq_ignore_ascii_case(&key));
+                            let key = inst.id.clone();
+                            let on = self.store.read(cx).settings().shares_with(&key, &fid);
                             let name = inst.name.clone();
                             let (k2, f2) = (key.clone(), fid.clone());
                             h_flex()
@@ -1002,7 +947,7 @@ impl PeersView {
                         this.start_invite_ticker(cx);
                         Ok("Code copied. Send it to your friend; it works once.".to_string())
                     }
-                    Err(e) => Err(format!("{e:#}")),
+                    Err(e) => Err(hopper::mailbox::says(&e)),
                 });
                 cx.notify();
             })
@@ -1060,11 +1005,11 @@ impl PeersView {
             this.update(cx, |this, cx| {
                 this.running = false;
                 this.message = Some(match r {
-                    Ok(f) => Ok(format!(
+                    Ok((f, _)) => Ok(format!(
                         "Paired with {}. Their instances appear here when they share one.",
                         if f.name.is_empty() { "them" } else { &f.name }
                     )),
-                    Err(e) => Err(format!("{e:#}")),
+                    Err(e) => Err(hopper::mailbox::says(&e)),
                 });
                 cx.notify();
             })
@@ -1114,7 +1059,7 @@ impl PeersView {
         cx.defer(move |cx| {
             handle
                 .update(cx, |_, window, cx| {
-                    let view = cx.new(|cx| FollowChooser::new(&e, share, fitting, preferred, cx));
+                    let view = cx.new(|cx| FollowChooser::new(&e, fitting, preferred, cx));
                     window.open_dialog(cx, move |dialog, window, _| {
                         let (f2, s2) = (view.clone(), store.clone());
                         dialog
@@ -1625,13 +1570,11 @@ enum FollowPick {
 /// done without asking.
 #[derive(Clone)]
 struct FollowChooser {
-    peer_id: String,
+    /// The pack, as the store follows it.
+    req: crate::store::FollowReq,
     peer_name: String,
-    /// The sender's instance key.
     inst: String,
     name: String,
-    code: String,
-    share: hopper::sharecode::Share,
     left_out: Vec<String>,
     /// Local instances the code fits, and whether their pack updates first.
     fitting: Vec<(PathBuf, String, bool)>,
@@ -1641,7 +1584,6 @@ struct FollowChooser {
 impl FollowChooser {
     fn new(
         e: &hopper::mailbox::Event,
-        share: hopper::sharecode::Share,
         fitting: Vec<(PathBuf, String, bool)>,
         preferred: usize,
         _cx: &mut Context<Self>,
@@ -1652,76 +1594,29 @@ impl FollowChooser {
             FollowPick::Existing(preferred.min(fitting.len() - 1))
         };
         Self {
-            peer_id: e.from.clone(),
+            req: crate::store::FollowReq::of(e),
             peer_name: e.from_name.clone(),
             inst: e.inst.clone(),
             name: e.name.clone(),
-            code: e.code.clone(),
-            share,
             left_out: e.left_out.clone(),
             fitting,
             pick,
         }
     }
 
-    fn recipe(&self) -> FollowedRecipe {
-        FollowedRecipe {
-            peer_id: self.peer_id.clone(),
-            peer_name: self.peer_name.clone(),
-            inst: self.inst.clone(),
-            name: self.name.clone(),
-            root: String::new(),
-            code: self.code.clone(),
-            seen: self.code.clone(),
-            left_out: self.left_out.clone(),
-        }
-    }
-
-    fn go(view: &Entity<Self>, store: &Entity<Store>, _: &mut Window, cx: &mut App) -> bool {
+    fn go(view: &Entity<Self>, store: &Entity<Store>, window: &mut Window, cx: &mut App) -> bool {
         let this = view.read(cx).clone();
-        let title = format!("Following {}'s {}", this.peer_name, this.name);
-        match this.pick {
+        let target = match this.pick {
             FollowPick::Existing(ix) => {
                 let Some((root, _, _)) = this.fitting.get(ix) else {
                     return true;
                 };
-                let root = root.clone();
-                let code = this.code.clone();
-                let mut recipe = this.recipe();
-                recipe.root = root.to_string_lossy().into_owned();
-                store.update(cx, |s, cx| {
-                    s.update_settings(
-                        |st| {
-                            // What was applied last stays, so the instance
-                            // can still say an update is waiting.
-                            if let Some(old) =
-                                st.followed_recipes.iter().find(|x| x.root == recipe.root)
-                            {
-                                recipe.code = old.code.clone();
-                            }
-                            st.followed_recipes.retain(|x| x.root != recipe.root);
-                            st.followed_recipes.push(recipe.clone());
-                        },
-                        cx,
-                    );
-                    s.apply_follow_now(root, code, title, cx);
-                });
+                crate::store::FollowTarget::Existing(root.clone())
             }
-            FollowPick::New => {
-                let root = PathBuf::from(store.read(cx).settings().instances_root.clone());
-                let share = this.share.clone();
-                let recipe = this.recipe();
-                store.read(cx).spawn_job(title, move |job| {
-                    job.announce();
-                    let inst = hopper::sharecode::install_share(&root, &share, job)?;
-                    job.detail(format!("Installed {}", inst.name));
-                    Ok(crate::store::Msg::Followed(Box::new(FollowedRecipe {
-                        root: inst.root.to_string_lossy().into_owned(),
-                        ..recipe
-                    })))
-                });
-            }
-        }
+            FollowPick::New => crate::store::FollowTarget::New,
+        };
+        // The store asks about mods from other sources, then follows.
+        crate::store::follow_pack(store, this.req, target, window, cx);
         true
     }
 }

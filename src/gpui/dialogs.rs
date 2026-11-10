@@ -1608,30 +1608,14 @@ impl RedeemForm {
 
     fn install(form: &Entity<Self>, store: &Entity<Store>, window: &mut Window, cx: &mut App) -> bool {
         let this = form.read(cx);
-        let Some(Ok(share)) = this.parsed.clone() else {
+        if !this.ready() {
             return false;
-        };
-        // Mods from GitHub and other links: ask (once this dialog closes)
-        // before anything installs.
-        let pins = hopper::sharecode::pins(&share);
-        let store = store.clone();
-        window.defer(cx, move |window, cx| {
-            crate::incoming_sources::gate(store.clone(), pins, window, cx, move |skip, _, cx| {
-                let (share, note) = hopper::sharecode::without(&share, &skip);
-                let s = store.read(cx);
-                let root = PathBuf::from(&s.settings().instances_root);
-                s.spawn_job("Setting up a shared pack", move |job| {
-                    job.announce();
-                    let inst = hopper::sharecode::install_share(&root, &share, job)?;
-                    job.detail(format!("Installed {}", inst.name));
-                    if let Some(n) = note {
-                        job.note(n);
-                    }
-                    Ok(Msg::installed(inst.root, &[], None))
-                });
-            });
-        });
-        true
+        }
+        // The store asks about mods from GitHub and other links (once this
+        // dialog closes) before anything installs, and follows the pack
+        // when the code carries a follow part.
+        let text = this.input.read(cx).value().trim().to_string();
+        crate::store::redeem(store, &text, window, cx)
     }
 }
 

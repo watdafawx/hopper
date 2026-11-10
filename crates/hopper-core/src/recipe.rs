@@ -165,9 +165,20 @@ fn pack_name(p: &crate::instances::PackRef) -> String {
 }
 
 /// Applies `code` to the instance at `root`, updating its pack first when
-/// the code is a newer version of the same pack. Returns the saved instance.
-pub fn apply_to(root: &Path, code: &str, job: &Job) -> anyhow::Result<Instance> {
-    let share = sharecode::decode(code)?;
+/// the code is a newer version of the same pack. Mods from GitHub and other
+/// links in `skip` are left out (the player said no, or wasn't there to
+/// ask; see [`crate::sources::carry::auto_skip`]), with a note on the job.
+/// Returns the saved instance.
+pub fn apply_to(
+    root: &Path,
+    code: &str,
+    skip: &[crate::sources::carry::Pin],
+    job: &Job,
+) -> anyhow::Result<Instance> {
+    let (share, note) = sharecode::without(&sharecode::decode(code)?, skip);
+    if let Some(n) = note {
+        job.note(n);
+    }
     let mut inst = crate::instances::load(root)
         .with_context(|| format!("{} isn't an instance any more", root.display()))?;
     match fit(&inst, &share) {
@@ -330,7 +341,7 @@ mod tests {
             ],
         };
         let code = sharecode::encode(&share);
-        let inst = apply_to(&root, &code, &job).unwrap();
+        let inst = apply_to(&root, &code, &[], &job).unwrap();
         assert!(!inst.addons.iter().find(|a| a.project_id == 101).unwrap().enabled);
         assert!(inst.addons.iter().all(|a| a.project_id != 303));
         assert!(!root.join("mods/one.jar").exists());
@@ -357,7 +368,7 @@ mod tests {
             loader: None,
             entries: Vec::new(),
         };
-        let err = apply_to(&root, &sharecode::encode(&share), &job()).unwrap_err();
+        let err = apply_to(&root, &sharecode::encode(&share), &[], &job()).unwrap_err();
         assert!(format!("{err:#}").contains("this instance is ATM"));
         assert!(root.join("mods/one.jar").exists());
     }

@@ -21,6 +21,11 @@ pub const FORMAT: u32 = 6;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Instance {
+    /// A random id that stays with the folder (it lives in `hopper.json`),
+    /// so friends' shares and follows survive the folder being renamed.
+    /// Given on first load; a copy of the folder gets a new one.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub name: String,
     #[serde(skip)]
     pub root: PathBuf,
@@ -447,6 +452,16 @@ impl Instance {
         Ok(out)
     }
 
+    /// Gives this instance an [`Instance::id`] when it has none (not
+    /// saved). Returns whether it was given one.
+    pub fn ensure_id(&mut self) -> bool {
+        if !self.id.is_empty() {
+            return false;
+        }
+        self.id = new_id();
+        true
+    }
+
     /// Folder-safe version of a display name.
     pub fn folder_name(name: &str) -> String {
         name.chars()
@@ -671,6 +686,7 @@ fn same_file(a: &Addon, b: &Addon) -> bool {
 /// A CurseForge re-import replaced `imported`'s addons; bring back what
 /// only Hopper knew from its previous `own` copy.
 fn merge_reimport(imported: &mut Instance, own: Instance, root: &Path) {
+    imported.id = own.id.clone();
     imported.settings = own.settings;
     imported.mod_profiles = own.mod_profiles;
     // An icon the user picked (anything not a web URL) outlives a re-import.
@@ -845,6 +861,10 @@ fn merge_concurrent(out: &mut Instance, disk: Instance, touched: &[String]) {
     }
     out.play_seconds = out.play_seconds.max(disk.play_seconds);
     out.last_played = out.last_played.take().max(disk.last_played);
+    // A copy loaded before the id was given must not take it away again.
+    if out.id.is_empty() {
+        out.id = disk.id;
+    }
 }
 
 /// The instance in `root`, importing (or re-importing) CurseForge's files
@@ -938,7 +958,23 @@ pub fn load(root: &Path) -> Option<Instance> {
     if inst.name.is_empty() {
         inst.name = root.file_name()?.to_string_lossy().into_owned();
     }
+    give_id(&mut inst);
     Some(inst)
+}
+
+/// Gives an instance that has none its [`Instance::id`] and saves it, so
+/// every copy loaded from now on carries the same one.
+fn give_id(inst: &mut Instance) {
+    if inst.ensure_id() && inst.unreadable.is_none() && !crate::hopperd::is_remote_root(&inst.root) {
+        if let Err(e) = inst.save() {
+            log::warn!("could not write {}: {e:#}", inst.root.join(HOPPER_FILE).display());
+        }
+    }
+}
+
+/// A new random [`Instance::id`].
+pub fn new_id() -> String {
+    crate::peer::random_hex(16)
 }
 
 /// An instance another launcher keeps, managed where it is: Hopper's own
@@ -1000,6 +1036,7 @@ pub fn load_foreign(f: &crate::launchers::Foreign) -> Option<Instance> {
     if inst.name.is_empty() {
         inst.name = f.name.clone();
     }
+    give_id(&mut inst);
     Some(inst)
 }
 
@@ -1252,6 +1289,8 @@ fn import_curseforge(root: &Path) -> Option<Imported> {
         .unwrap_or_default();
 
     let inst = Instance {
+        // Kept from Hopper's own file by `merge_reimport`, else given on load.
+        id: String::new(),
         mod_profiles: Vec::new(),
         name: raw.name,
         root: root.to_path_buf(),

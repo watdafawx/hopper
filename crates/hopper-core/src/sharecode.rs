@@ -244,10 +244,31 @@ impl Groups {
     }
 }
 
-/// Reads a code. Spaces and line breaks (from chat apps wrapping it) are
-/// ignored, and the `HOP-` prefix is optional.
-pub fn decode(text: &str) -> anyhow::Result<Share> {
+/// A code with a "follow" part: the relay's one-time invite (eight hex
+/// characters) after a `.`, which base64url never contains. Redeeming it
+/// pairs the two PCs and follows the pack; the code part works on its own
+/// after the invite has run out.
+pub fn with_follow(code: &str, invite: &str) -> String {
+    format!("{}.{}", code.trim(), invite.trim().to_uppercase())
+}
+
+/// Splits a pasted code into the code and its follow part, if it has one.
+/// Spaces and line breaks are dropped first.
+pub fn follow_part(text: &str) -> (String, Option<String>) {
     let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    match text.rsplit_once('.') {
+        Some((code, inv)) if inv.len() == 8 && inv.chars().all(|c| c.is_ascii_hexdigit()) => {
+            (code.to_string(), Some(inv.to_uppercase()))
+        }
+        _ => (text, None),
+    }
+}
+
+/// Reads a code. Spaces and line breaks (from chat apps wrapping it) are
+/// ignored, and the `HOP-` prefix is optional. A follow part
+/// ([`follow_part`]) is ignored here.
+pub fn decode(text: &str) -> anyhow::Result<Share> {
+    let (text, _) = follow_part(text);
     let body = text
         .strip_prefix(PREFIX)
         .or_else(|| text.strip_prefix(&PREFIX.to_lowercase()))
@@ -704,6 +725,8 @@ pub fn install_share(instances_root: &Path, share: &Share, job: &Job) -> anyhow:
     if let Some(l) = &share.loader {
         inst.loader = l.clone();
     }
+    // Following it right away needs its id before anything loads it again.
+    inst.ensure_id();
     inst.save()?;
     apply_existing(&mut inst, &share, job)?;
     Ok(inst)
@@ -849,6 +872,13 @@ mod tests {
         let wrapped = format!("  {}\n{} ", &code[..20], &code[20..]);
         assert_eq!(decode(&wrapped).unwrap(), s);
         assert_eq!(decode(&code[PREFIX.len()..]).unwrap(), s);
+
+        // With a follow part: the code still reads, and the invite comes off.
+        let followed = with_follow(&code, "a1b2c3d4");
+        assert_eq!(decode(&followed).unwrap(), s);
+        let wrapped = format!("{}\n{}", &followed[..30], &followed[30..]);
+        assert_eq!(follow_part(&wrapped), (code.clone(), Some("A1B2C3D4".to_string())));
+        assert_eq!(follow_part(&code), (code.clone(), None));
     }
 
     #[test]

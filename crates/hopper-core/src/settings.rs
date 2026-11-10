@@ -26,26 +26,89 @@ pub struct JavaPreset {
 pub struct FollowedRecipe {
     pub peer_id: String,
     pub peer_name: String,
-    /// The sender's instance key.
+    /// The sender's instance: its [`crate::instances::Instance::id`], or
+    /// its folder name from before ids (changed to the id when the next
+    /// code arrives with both).
     pub inst: String,
     pub name: String,
     /// The local instance root.
     pub root: String,
+    /// The local instance's id, so a renamed folder is found again.
+    pub local: String,
     /// The code last applied here.
     pub code: String,
     /// The newest code fetched (equals `code` when up to date).
     pub seen: String,
     /// Files the recipe couldn't describe; the player has to get those.
     pub left_out: Vec<String>,
+    /// When the sender last changed the pack (unix seconds, the relay's).
+    pub at: u64,
+    /// Why no more updates come, once they stopped: "unshared" (they turned
+    /// sharing off), "deleted" (the pack is gone on their PC), "left_group"
+    /// (it came through a group this PC is no longer in). The instance here
+    /// stays as it is.
+    pub ended: String,
+    /// The friend group "Keep everyone in step" followed it through, if any.
+    pub group: String,
 }
 
-/// One pack shared with one friend. The key is the instance folder's name;
-/// `friend` is the mailbox id of the friend who can see it.
+impl FollowedRecipe {
+    /// Whether an incoming code from `from` for their instance `inst` (old
+    /// folder name `key`) is the one this follows.
+    pub fn matches(&self, from: &str, inst: &str, key: &str) -> bool {
+        self.peer_id == from
+            && (self.inst == inst || (!key.is_empty() && self.inst.eq_ignore_ascii_case(key)))
+    }
+}
+
+/// One pack shared with one friend or one friend group.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SharedPack {
-    pub key: String,
+    /// The instance's [`crate::instances::Instance::id`].
+    pub inst: String,
+    /// The mailbox id of the friend who can see it (empty for a group).
     pub friend: String,
+    /// The friend group that can see it (empty for one friend).
+    pub group: String,
+    /// Older builds keyed shares by the instance folder's name. Kept until
+    /// the folder is found and `inst` filled in, then cleared.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub key: String,
+}
+
+impl SharedPack {
+    fn same_target(&self, o: &SharedPack) -> bool {
+        self.friend == o.friend && self.group == o.group
+    }
+}
+
+/// A named set of friends who share packs with each other. The relay holds
+/// the group (members, who said yes); this is this PC's copy, to show while
+/// the relay can't be reached, plus what only this PC decides.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FriendGroup {
+    pub id: String,
+    pub name: String,
+    /// Mailbox ids of everyone in it who said yes, the owner too.
+    pub members: Vec<String>,
+    /// Who made it; only they change its name and members.
+    pub owner: String,
+    /// This PC said yes to "Keep everyone in step": a group pack another
+    /// member follows is followed here too.
+    pub in_step: bool,
+    /// Group packs ("<from>/<inst>") this PC stopped following, so keeping
+    /// in step doesn't follow them again.
+    pub stopped: Vec<String>,
+}
+
+/// One pack to send to the relay: the friends and groups it goes to.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PublishTo {
+    pub inst: String,
+    pub to: Vec<String>,
+    pub groups: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -100,10 +163,18 @@ pub struct Settings {
     pub mailbox_name: String,
     /// Recipes this PC follows from paired peers, one per local instance.
     pub followed_recipes: Vec<FollowedRecipe>,
-    /// Instance folders (their folder names) the player shares with friends,
-    /// one entry per friend. Empty means nothing is shared; every pack
-    /// starts off private.
+    /// Packs the player shares, one entry per friend or friend group.
+    /// Empty means nothing is shared; every pack starts off private.
     pub shared_with: Vec<SharedPack>,
+    /// What was last sent to the relay, so a share turned off (or a pack
+    /// deleted) can be taken back from the friends who had it.
+    pub mailbox_sent: Vec<SharedPack>,
+    /// Friend groups this PC is in (see [`FriendGroup`]).
+    pub friend_groups: Vec<FriendGroup>,
+    /// The newest mailbox event acted on once (a friend joining with a
+    /// pack's invite, notices). Every start reads the whole feed again to
+    /// list friends' packs; events up to here aren't acted on twice.
+    pub mailbox_handled: u64,
     /// Older builds shared a pack with every friend at once. Read so those
     /// players keep sharing, then fanned out into `shared_with` and cleared.
     pub shared_instances: Vec<String>,
@@ -546,6 +617,9 @@ impl Default for Settings {
             mailbox_name: String::new(),
             followed_recipes: Vec::new(),
             shared_with: Vec::new(),
+            mailbox_sent: Vec::new(),
+            friend_groups: Vec::new(),
+            mailbox_handled: 0,
             shared_instances: Vec::new(),
             share_prompt_done: false,
             datapack_dest: HashMap::new(),
@@ -637,50 +711,274 @@ impl Settings {
             .unwrap_or(self.clean_pack_updates)
     }
 
-    /// Whether the instance folder `key` is shared with the friend `friend`
-    /// (their mailbox id).
-    pub fn shares_with(&self, key: &str, friend: &str) -> bool {
+    /// Whether the instance `inst` (its id) is shared with the friend
+    /// `friend` (their mailbox id) directly, not through a group.
+    pub fn shares_with(&self, inst: &str, friend: &str) -> bool {
         self.shared_with
             .iter()
-            .any(|s| s.friend == friend && s.key.eq_ignore_ascii_case(key))
+            .any(|s| !s.inst.is_empty() && s.inst == inst && s.friend == friend && s.group.is_empty())
+    }
+
+    /// Whether the instance `inst` is shared with the friend group `group`.
+    pub fn shares_with_group(&self, inst: &str, group: &str) -> bool {
+        self.shared_with
+            .iter()
+            .any(|s| !s.inst.is_empty() && s.inst == inst && s.group == group && s.friend.is_empty())
     }
 
     /// Turns one pack's share on or off for one friend.
-    pub fn set_shared(&mut self, key: &str, friend: &str, on: bool) {
+    pub fn set_shared(&mut self, inst: &str, friend: &str, on: bool) {
         self.shared_with
-            .retain(|s| !(s.friend == friend && s.key.eq_ignore_ascii_case(key)));
-        if on {
+            .retain(|s| !(s.inst == inst && s.friend == friend && s.group.is_empty()));
+        if on && !inst.is_empty() && !friend.is_empty() {
             self.shared_with.push(SharedPack {
-                key: key.to_string(),
+                inst: inst.to_string(),
                 friend: friend.to_string(),
+                ..Default::default()
             });
         }
     }
 
-    /// Shares every `key` with every friend on `friends` (the "Share all"
-    /// prompt). Keys already shared stay as they are.
-    pub fn share_with_all(&mut self, keys: &[String], friends: &[String]) {
-        for key in keys {
+    /// Turns one pack's share on or off for a friend group.
+    pub fn set_shared_group(&mut self, inst: &str, group: &str, on: bool) {
+        self.shared_with
+            .retain(|s| !(s.inst == inst && s.group == group && s.friend.is_empty()));
+        if on && !inst.is_empty() && !group.is_empty() {
+            self.shared_with.push(SharedPack {
+                inst: inst.to_string(),
+                group: group.to_string(),
+                ..Default::default()
+            });
+        }
+    }
+
+    /// Shares every instance in `insts` (ids) with every friend on
+    /// `friends`. Shares already on stay as they are.
+    pub fn share_with_all(&mut self, insts: &[String], friends: &[String]) {
+        for inst in insts {
             for friend in friends {
-                if !self.shares_with(key, friend) {
-                    self.shared_with.push(SharedPack {
-                        key: key.clone(),
-                        friend: friend.clone(),
-                    });
+                if !self.shares_with(inst, friend) {
+                    self.set_shared(inst, friend, true);
                 }
             }
         }
     }
 
-    /// Folds the older all-friends share list into `shared_with`, once the
-    /// friends are known. Returns whether anything changed.
+    /// Folds the older all-friends share list (folder names) into
+    /// `shared_with`, once the friends are known; the folder names become
+    /// ids in [`Settings::reconcile_instances`]. Returns whether anything
+    /// changed.
     pub fn migrate_shared(&mut self, friends: &[String]) -> bool {
         if self.shared_instances.is_empty() || friends.is_empty() {
             return false;
         }
-        let keys = std::mem::take(&mut self.shared_instances);
-        self.share_with_all(&keys, friends);
+        for key in std::mem::take(&mut self.shared_instances) {
+            for friend in friends {
+                let dup = self
+                    .shared_with
+                    .iter()
+                    .any(|s| s.friend == *friend && s.key.eq_ignore_ascii_case(&key));
+                if !dup {
+                    self.shared_with.push(SharedPack {
+                        key: key.clone(),
+                        friend: friend.clone(),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
         true
+    }
+
+    /// Brings shares and follows in line with the instances on this PC,
+    /// given as (id, root): shares from before ids (by folder name) get
+    /// their instance's id, follows learn their instance's id, and a
+    /// followed instance whose folder was renamed is found again by it.
+    /// Returns whether anything changed.
+    pub fn reconcile_instances(&mut self, live: &[(String, String)]) -> bool {
+        let folder = |root: &str| {
+            Path::new(root)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let mut changed = false;
+        for s in &mut self.shared_with {
+            if s.inst.is_empty()
+                && !s.key.is_empty()
+                && let Some((id, _)) = live.iter().find(|(_, r)| folder(r).eq_ignore_ascii_case(&s.key))
+            {
+                s.inst = id.clone();
+                s.key.clear();
+                changed = true;
+            }
+        }
+        // Two old entries may have become the same share.
+        let mut seen: Vec<SharedPack> = Vec::new();
+        self.shared_with.retain(|s| {
+            if s.inst.is_empty() {
+                return true;
+            }
+            if seen.iter().any(|x| x.inst == s.inst && x.same_target(s)) {
+                changed = true;
+                return false;
+            }
+            seen.push(s.clone());
+            true
+        });
+        for f in &mut self.followed_recipes {
+            if f.local.is_empty() {
+                if let Some((id, _)) = live.iter().find(|(_, r)| Path::new(r) == Path::new(&f.root)) {
+                    f.local = id.clone();
+                    changed = true;
+                }
+            } else if let Some((_, r)) = live.iter().find(|(id, _)| *id == f.local)
+                && Path::new(r) != Path::new(&f.root)
+            {
+                f.root = r.clone();
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// What to send to the relay: each shared instance on this PC (`live`
+    /// ids) with the friends and groups it goes to. A friend appears once
+    /// per pack however often it's shared with them; the relay then sends
+    /// one copy to someone who gets it directly and through a group. Shares
+    /// with someone who isn't a friend any more, or a group this PC isn't
+    /// in, are left out.
+    pub fn publish_plan(&self, live: &[String], friends: &[String], groups: &[String]) -> Vec<PublishTo> {
+        let mut out: Vec<PublishTo> = Vec::new();
+        for s in &self.shared_with {
+            if s.inst.is_empty() || !live.contains(&s.inst) {
+                continue;
+            }
+            let ix = match out.iter().position(|p| p.inst == s.inst) {
+                Some(ix) => ix,
+                None => {
+                    out.push(PublishTo {
+                        inst: s.inst.clone(),
+                        ..Default::default()
+                    });
+                    out.len() - 1
+                }
+            };
+            let p = &mut out[ix];
+            if !s.friend.is_empty() && friends.contains(&s.friend) && !p.to.contains(&s.friend) {
+                p.to.push(s.friend.clone());
+            }
+            if !s.group.is_empty() && groups.contains(&s.group) && !p.groups.contains(&s.group) {
+                p.groups.push(s.group.clone());
+            }
+        }
+        out.retain(|p| !p.to.is_empty() || !p.groups.is_empty());
+        out
+    }
+
+    /// Shares sent before that aren't wanted any more, with why: the share
+    /// was turned off ("unshared") or the instance is gone from this PC
+    /// ("deleted"). The caller tells the relay, then forgets each with
+    /// [`Settings::forget_sent`].
+    pub fn stale_shares(&self, live: &[String]) -> Vec<(SharedPack, &'static str)> {
+        self.mailbox_sent
+            .iter()
+            .filter_map(|s| {
+                if !live.contains(&s.inst) {
+                    Some((s.clone(), "deleted"))
+                } else if !self
+                    .shared_with
+                    .iter()
+                    .any(|w| w.inst == s.inst && w.same_target(s))
+                {
+                    Some((s.clone(), "unshared"))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Remembers that `plan` reached the relay.
+    pub fn note_sent(&mut self, plan: &PublishTo) {
+        let friends = plan.to.iter().map(|f| SharedPack {
+            inst: plan.inst.clone(),
+            friend: f.clone(),
+            ..Default::default()
+        });
+        let groups = plan.groups.iter().map(|g| SharedPack {
+            inst: plan.inst.clone(),
+            group: g.clone(),
+            ..Default::default()
+        });
+        for s in friends.chain(groups).collect::<Vec<_>>() {
+            if !self.mailbox_sent.contains(&s) {
+                self.mailbox_sent.push(s);
+            }
+        }
+    }
+
+    /// Forgets a sent share once the relay has taken it back. A deleted
+    /// instance's share goes from `shared_with` too.
+    pub fn forget_sent(&mut self, s: &SharedPack, deleted: bool) {
+        self.mailbox_sent
+            .retain(|x| !(x.inst == s.inst && x.same_target(s)));
+        if deleted {
+            self.shared_with
+                .retain(|x| !(x.inst == s.inst && x.same_target(s)));
+        }
+    }
+
+    /// The local follows of a friend's pack, as indexes into
+    /// `followed_recipes`. Several instances may follow the same pack.
+    pub fn followers(&self, from: &str, inst: &str, key: &str) -> Vec<usize> {
+        self.followed_recipes
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.matches(from, inst, key))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Stops following at the instance `root`. The instance stays as it
+    /// is. A pack that came through a group is remembered, so keeping the
+    /// group in step doesn't follow it again. Returns whether it followed.
+    pub fn stop_following(&mut self, root: &str) -> bool {
+        let gone: Vec<FollowedRecipe> = self
+            .followed_recipes
+            .iter()
+            .filter(|f| Path::new(&f.root) == Path::new(root))
+            .cloned()
+            .collect();
+        for f in &gone {
+            let key = format!("{}/{}", f.peer_id, f.inst);
+            for g in &mut self.friend_groups {
+                if (f.group.is_empty() || g.id == f.group) && g.members.contains(&f.peer_id) && !g.stopped.contains(&key) {
+                    g.stopped.push(key.clone());
+                }
+            }
+        }
+        self.followed_recipes
+            .retain(|f| Path::new(&f.root) != Path::new(root));
+        !gone.is_empty()
+    }
+
+    /// Stores the relay's view of the groups this PC is in, keeping what
+    /// only this PC decides (packs it stopped following). Shares with a
+    /// group this PC is no longer in go too. Returns whether anything
+    /// changed.
+    pub fn set_friend_groups(&mut self, mut groups: Vec<FriendGroup>) -> bool {
+        for g in &mut groups {
+            if let Some(old) = self.friend_groups.iter().find(|o| o.id == g.id) {
+                g.stopped = old.stopped.clone();
+            }
+        }
+        let before = self.shared_with.len();
+        self.shared_with
+            .retain(|s| s.group.is_empty() || groups.iter().any(|g| g.id == s.group));
+        let changed = groups != self.friend_groups || before != self.shared_with.len();
+        self.friend_groups = groups;
+        changed
     }
 
     /// [`Settings::web_downloads`], kept to 1..=8 (an old or hand-edited
@@ -1192,25 +1490,33 @@ mod tests {
     #[test]
     fn a_pack_is_shared_with_one_friend_at_a_time() {
         let mut s = Settings::default();
-        s.set_shared("Pizza", "kimbley", true);
-        s.set_shared("Pizza", "sam", true);
-        assert!(s.shares_with("pizza", "kimbley"));
-        assert!(s.shares_with("PIZZA", "sam"));
-        assert!(!s.shares_with("Pizza", "alex"));
+        s.set_shared("id-pizza", "kimbley", true);
+        s.set_shared("id-pizza", "sam", true);
+        assert!(s.shares_with("id-pizza", "kimbley"));
+        assert!(s.shares_with("id-pizza", "sam"));
+        assert!(!s.shares_with("id-pizza", "alex"));
 
-        s.set_shared("Pizza", "kimbley", false);
-        assert!(!s.shares_with("Pizza", "kimbley"));
-        assert!(s.shares_with("Pizza", "sam"));
+        s.set_shared("id-pizza", "kimbley", false);
+        assert!(!s.shares_with("id-pizza", "kimbley"));
+        assert!(s.shares_with("id-pizza", "sam"));
+        assert_eq!(s.shared_with.len(), 1);
+
+        // A group share is its own entry; the direct one is untouched.
+        s.set_shared_group("id-pizza", "crew", true);
+        assert!(s.shares_with_group("id-pizza", "crew"));
+        assert!(!s.shares_with("id-pizza", "crew"));
+        s.set_shared_group("id-pizza", "crew", false);
+        assert!(s.shares_with("id-pizza", "sam"));
         assert_eq!(s.shared_with.len(), 1);
     }
 
     #[test]
     fn share_all_adds_every_friend_once() {
         let mut s = Settings::default();
-        let keys = vec!["Pizza".to_string(), "Sky".to_string()];
+        let insts = vec!["id-pizza".to_string(), "id-sky".to_string()];
         let friends = vec!["kimbley".to_string(), "sam".to_string()];
-        s.share_with_all(&keys, &friends);
-        s.share_with_all(&keys, &friends);
+        s.share_with_all(&insts, &friends);
+        s.share_with_all(&insts, &friends);
         assert_eq!(s.shared_with.len(), 4);
     }
 
@@ -1224,11 +1530,169 @@ mod tests {
 
         assert!(s.migrate_shared(&["kimbley".to_string(), "sam".to_string()]));
         assert!(s.shared_instances.is_empty());
-        assert!(s.shares_with("Pizza", "kimbley"));
-        assert!(s.shares_with("Pizza", "sam"));
         // Running it again changes nothing.
         assert!(!s.migrate_shared(&["kimbley".to_string()]));
         assert_eq!(s.shared_with.len(), 2);
+        // Once the folder is found, the shares are by its id.
+        let live = vec![("id-pizza".to_string(), r"C:\inst\pizza".to_string())];
+        assert!(s.reconcile_instances(&live));
+        assert!(s.shares_with("id-pizza", "kimbley"));
+        assert!(s.shares_with("id-pizza", "sam"));
+        assert!(s.shared_with.iter().all(|p| p.key.is_empty()));
+    }
+
+    /// Settings saved by the branch before ids: `shared_with` by folder
+    /// name, follows without their instance's id.
+    #[test]
+    fn shares_and_follows_from_before_ids_move_to_ids() {
+        let old = r#"{
+            "shared_with": [
+                {"key": "Pizza", "friend": "sam"},
+                {"key": "pizza", "friend": "sam"},
+                {"key": "Gone", "friend": "sam"}
+            ],
+            "followed_recipes": [
+                {"peer_id": "sam", "inst": "Their Pack", "root": "C:\\inst\\Mine", "code": "HOP-a", "seen": "HOP-a"}
+            ]
+        }"#;
+        let mut s: Settings = serde_json::from_str(old).unwrap();
+        let live = vec![
+            ("id-pizza".to_string(), r"C:\inst\Pizza".to_string()),
+            ("id-mine".to_string(), r"C:\inst\Mine".to_string()),
+        ];
+        assert!(s.reconcile_instances(&live));
+        // The two spellings were one share; the missing folder waits.
+        assert_eq!(s.shared_with.len(), 2);
+        assert!(s.shares_with("id-pizza", "sam"));
+        assert_eq!(s.shared_with[1].key, "Gone");
+        assert_eq!(s.followed_recipes[0].local, "id-mine");
+        assert!(!s.reconcile_instances(&live));
+
+        // The followed folder is renamed: found again by its id.
+        let renamed = vec![("id-mine".to_string(), r"C:\inst\Mine 2".to_string())];
+        assert!(s.reconcile_instances(&renamed));
+        assert_eq!(s.followed_recipes[0].root, r"C:\inst\Mine 2");
+
+        // Their next code names the pack by id and by its old folder name;
+        // the follow matches either.
+        let f = &s.followed_recipes[0];
+        assert!(f.matches("sam", "id-theirs", "their pack"));
+        assert!(f.matches("sam", "Their Pack", ""));
+        assert!(!f.matches("alex", "id-theirs", "Their Pack"));
+        assert!(!f.matches("sam", "id-theirs", ""));
+    }
+
+    #[test]
+    fn a_friend_in_a_group_gets_one_copy_per_pack() {
+        let mut s = Settings::default();
+        s.set_shared("id-pizza", "sam", true);
+        s.set_shared_group("id-pizza", "crew", true);
+        s.set_shared("id-sky", "kim", true);
+        s.set_shared("id-old", "sam", true);
+        // A stale duplicate (an older build) is still one recipient.
+        s.shared_with.push(SharedPack {
+            inst: "id-pizza".into(),
+            friend: "sam".into(),
+            ..Default::default()
+        });
+        s.set_shared_group("id-sky", "left", true);
+        let live = vec!["id-pizza".to_string(), "id-sky".to_string()];
+        let friends = vec!["sam".to_string()];
+        let groups = vec!["crew".to_string()];
+        let plan = s.publish_plan(&live, &friends, &groups);
+        assert_eq!(
+            plan,
+            vec![PublishTo {
+                inst: "id-pizza".into(),
+                to: vec!["sam".into()],
+                groups: vec!["crew".into()],
+            }]
+        );
+        // Kim isn't a friend any more and "left" isn't joined: nothing
+        // goes for id-sky; id-old isn't on this PC.
+    }
+
+    #[test]
+    fn shares_turned_off_or_deleted_are_taken_back_once() {
+        let mut s = Settings::default();
+        s.set_shared("id-pizza", "sam", true);
+        s.set_shared_group("id-pizza", "crew", true);
+        s.set_shared("id-sky", "sam", true);
+        let live = vec!["id-pizza".to_string(), "id-sky".to_string()];
+        for p in s.publish_plan(&live, &["sam".to_string()], &["crew".to_string()]) {
+            s.note_sent(&p);
+        }
+        assert_eq!(s.mailbox_sent.len(), 3);
+        assert!(s.stale_shares(&live).is_empty());
+
+        s.set_shared_group("id-pizza", "crew", false);
+        let live = vec!["id-pizza".to_string()];
+        let mut stale = s.stale_shares(&live);
+        stale.sort_by(|a, b| a.0.inst.cmp(&b.0.inst));
+        assert_eq!(stale.len(), 2);
+        assert_eq!((stale[0].0.group.as_str(), stale[0].1), ("crew", "unshared"));
+        assert_eq!((stale[1].0.inst.as_str(), stale[1].1), ("id-sky", "deleted"));
+        for (p, why) in &stale {
+            s.forget_sent(p, *why == "deleted");
+        }
+        assert!(s.stale_shares(&live).is_empty());
+        assert_eq!(s.mailbox_sent.len(), 1);
+        // The deleted pack's share went with it; the live one stays.
+        assert!(!s.shares_with("id-sky", "sam"));
+        assert!(s.shares_with("id-pizza", "sam"));
+    }
+
+    #[test]
+    fn every_instance_following_a_pack_is_found() {
+        let mut s = Settings::default();
+        for root in [r"C:\a", r"C:\b"] {
+            s.followed_recipes.push(FollowedRecipe {
+                peer_id: "sam".into(),
+                inst: "id-pizza".into(),
+                root: root.into(),
+                ..Default::default()
+            });
+        }
+        s.followed_recipes.push(FollowedRecipe {
+            peer_id: "sam".into(),
+            inst: "id-other".into(),
+            root: r"C:\c".into(),
+            ..Default::default()
+        });
+        assert_eq!(s.followers("sam", "id-pizza", ""), vec![0, 1]);
+        assert!(s.followers("kim", "id-pizza", "").is_empty());
+    }
+
+    #[test]
+    fn group_changes_keep_local_choices_and_drop_left_shares() {
+        let mut s = Settings::default();
+        let crew = FriendGroup {
+            id: "crew".into(),
+            name: "The server crew".into(),
+            members: vec!["me".into(), "sam".into()],
+            owner: "sam".into(),
+            ..Default::default()
+        };
+        assert!(s.set_friend_groups(vec![crew.clone()]));
+        s.set_shared_group("id-pizza", "crew", true);
+        s.followed_recipes.push(FollowedRecipe {
+            peer_id: "sam".into(),
+            inst: "id-sky".into(),
+            root: r"C:\sky".into(),
+            group: "crew".into(),
+            ..Default::default()
+        });
+        assert!(s.stop_following(r"C:\sky"));
+        assert_eq!(s.friend_groups[0].stopped, vec!["sam/id-sky".to_string()]);
+        // A refresh from the relay keeps what this PC stopped following.
+        let mut renamed = crew.clone();
+        renamed.name = "Crew".into();
+        assert!(s.set_friend_groups(vec![renamed]));
+        assert_eq!(s.friend_groups[0].stopped, vec!["sam/id-sky".to_string()]);
+        assert!(!s.set_friend_groups(s.friend_groups.clone()));
+        // Out of the group: its shares go.
+        assert!(s.set_friend_groups(Vec::new()));
+        assert!(!s.shares_with_group("id-pizza", "crew"));
     }
 }
 
