@@ -1068,6 +1068,17 @@ pub fn parse_markdown(md: &str) -> Vec<Block> {
     parse(&markdown_to_html(md))
 }
 
+/// Whether `line` opens or closes a fenced code block. A fence is a line of
+/// three or more backticks, and an opening one may carry a language
+/// ("```rust") but no backtick after it: "```text```" on one line is inline
+/// code. Taking it for a fence turned every later fence inside out, so a
+/// description showed its text as code and its code as text.
+fn is_fence(line: &str, in_code: bool) -> bool {
+    let t = line.trim();
+    let n = t.bytes().take_while(|&c| c == b'`').count();
+    n >= 3 && (in_code || !t[n..].contains('`'))
+}
+
 fn markdown_to_html(md: &str) -> String {
     let mut out = String::new();
     let mut para: Vec<String> = Vec::new();
@@ -1097,7 +1108,7 @@ fn markdown_to_html(md: &str) -> String {
     };
     for raw in md.lines() {
         let line = raw.trim_end();
-        if line.trim_start().starts_with("```") {
+        if is_fence(line, in_code) {
             flush_para(&mut out, &mut para);
             close_table(&mut out, &mut in_table);
             out.push_str(if in_code { "</pre>" } else { "<pre>" });
@@ -1281,14 +1292,27 @@ fn inline_md(s: &str) -> String {
             i += end + 1;
             continue;
         }
-        if let Some(after) = rest.strip_prefix('`')
-            && let Some(end) = after.find('`')
-        {
-            out.push_str(&format!(
-                "<code>{}</code>",
-                after[..end].replace('<', "&lt;")
-            ));
-            i += end + 2;
+        if rest.starts_with('`') {
+            // A span opens with a run of backticks and closes at the next
+            // run of the same length, so ```text``` is one span too.
+            let n = rest.bytes().take_while(|&c| c == b'`').count();
+            let ticks = &rest[..n];
+            let body = &rest[n..];
+            let close = body.match_indices(ticks).find(|(at, _)| {
+                // A longer run is a different delimiter.
+                !body[..*at].ends_with('`') && !body[at + n..].starts_with('`')
+            });
+            if let Some((end, _)) = close {
+                out.push_str(&format!(
+                    "<code>{}</code>",
+                    body[..end].trim().replace('&', "&amp;").replace('<', "&lt;")
+                ));
+                i += n + end + n;
+                continue;
+            }
+            // No closing run: the ticks are plain text.
+            out.push_str(ticks);
+            i += n;
             continue;
         }
         if rest.starts_with("![")
@@ -2294,6 +2318,62 @@ let x = 1;
         assert_eq!(one[0].height, Some(64));
         let rest = to_markdown(&b);
         assert!(rest.contains("**Credits**") && !rest.contains("details"), "{rest}");
+    }
+
+    /// Fresh Animations on Modrinth opens with ```text``` (inline code in
+    /// three backticks), which used to open a code block that swallowed the
+    /// banner, the images and the intro, and turned the real fenced list
+    /// further down into plain text.
+    #[test]
+    fn triple_backtick_inline_code_is_not_a_fence() {
+        let md = "<center>
+
+```Early access versions are available on Ko-fi```<br>
+[<img src=\"https://imgur.com/a.png\" alt=\"Early Access button\" height=\"57\"/>](https://ko-fi.com/freshlx/posts) 
+[<img src=\"https://imgur.com/b.png\" alt=\"Early Access button\" height=\"57\"/>](https://www.patreon.com/cw/FreshLX) 
+
+---
+
+# <img src=\"https://imgur.com/c.png\" alt=\"Fresh Animations\" width=\"550\"/>
+
+Fresh Animations is a work in progress resource pack.    
+<br>
+
+</center>
+
+<details>
+  <summary>Animated mobs list</summary>
+
+
+```
+Version 1.0:
+Villager, Iron Golem
+```
+
+</details>
+";
+        let b = parse_markdown(md);
+        let codes: Vec<String> = b
+            .iter()
+            .filter(|b| b.kind == Kind::Code)
+            .map(|b| b.spans.iter().map(|s| s.text.as_str()).collect())
+            .collect();
+        // Only the fence the author wrote is a code block.
+        assert_eq!(codes, vec!["Version 1.0:
+Villager, Iron Golem
+".to_string()], "{b:?}");
+        let all: String = b.iter().flat_map(|b| b.spans.iter()).map(|s| s.text.as_str()).collect();
+        assert!(!all.contains("<img") && !all.contains("<center") && !all.contains("<details") && !all.contains("<br"), "{all}");
+        assert!(all.contains("Early access versions") && all.contains("work in progress"), "{all}");
+        // Images in links keep their link; the heading image is an image.
+        let linked: Vec<_> = b.iter().flat_map(|b| b.spans.iter()).filter_map(|s| s.image.as_ref().zip(s.link.as_ref())).collect();
+        assert_eq!(linked.len(), 2, "{b:?}");
+        assert!(b.iter().flat_map(|b| b.spans.iter()).any(|s| s.image.as_deref() == Some("https://imgur.com/c.png")));
+        assert!(b.iter().any(|b| b.kind == Kind::Rule), "{b:?}");
+        // Inline code in other spellings.
+        let b = parse_markdown("use `a` and ``b ` c`` and ```d```, not ``e");
+        let code: Vec<&str> = b[0].spans.iter().filter(|s| s.code).map(|s| s.text.as_str()).collect();
+        assert_eq!(code, vec!["a", "b ` c", "d"], "{b:?}");
     }
 
     #[test]
