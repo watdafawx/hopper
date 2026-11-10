@@ -166,13 +166,21 @@ Every event has `seq`, `kind`, `from`, `from_name`, `at`. Without `v=2` only
 | `joined` | `inst` | shares `inst` with them (an invite that named a pack) |
 | `unfriended` | | drops shares with them; their direct packs leave; follows keep their last version |
 
-Queue limits (per person waiting): 1000 events, 4 MB, and 150 from any one
+Queue limits (per person waiting): 1000 events, 2 MB, and 150 from any one
 sender (a backstop: a friend with a few dozen packs is nowhere near it).
+Across all the queues one sender may have 3 MB waiting (`storage_full`).
 Events are kept 14 days, `recipe` and `revoke` 180 (the desktop lists a
 friend's packs from them). A new `recipe` from a sender for the same pack
 replaces the older one, so there is one waiting per pack and not per call.
 When full, the oldest event that is not a `recipe` or a `revoke` goes
-first; only with none left does the oldest of those go. A `group` or
+first; only with none left does a queue drop from the sender holding the
+most bytes in it (their oldest), so one friend sending a lot never pushes
+out another friend's single pack.
+
+A recipe event is replaced by a newer one for the same sender and pack, and
+carries the whole set of ways it was shared (`direct`, `groups`): the desktop
+sends every target of a pack in one call, so nothing is merged; a way that
+stopped is taken back by its own revoke. A `group` or
 `group_follow` event replaces an older one from the same sender for the same
 group, since both only mean "read the groups again". `/v1/remove` also
 throws away what the removed friend had queued for the remover (the group
@@ -204,8 +212,11 @@ The relay sits behind Cloudflare Tunnel on the open internet. All of this is
 in `relay/hopper_mailbox.py` (constants at the top) and listed in
 `relay/README.md`:
 
-- **The service has a size**: 20000 accounts and 32 MB of state; above that
-  new sign-ups (and group packs) get `503 busy`. Accounts with no friends,
+- **The service has a size**: 20000 accounts and 32 MB of state. Share codes
+  (direct and group packs) stop at 75% of that (a new version that isn't
+  bigger always goes), sign-ups at 100%, so a flood of codes can't lock
+  accounts out; one sender may have 3 MB waiting. A state file over 150% is
+  not loaded (exit 78, untouched; recovery steps in `relay/README.md`). Accounts with no friends,
   no groups and nothing for 30 days are forgotten. A Cloudflare rate-limit
   rule on `/v1/register` is recommended on top (see `relay/README.md`).
 - **Sign-ups**: 60 per hour per client address (`CF-Connecting-IP`, believed
@@ -228,8 +239,8 @@ in `relay/hopper_mailbox.py` (constants at the top) and listed in
   SIGTERM): a crash loses the last second or two. If saving fails it is
   logged and retried; requests still answer from memory. A state file that
   is invalid is renamed `state.json.corrupt-<time>`, one that can't be read
-  is left untouched, and either way the service exits (status 1, which the
-  unit does not restart) instead of starting empty. While stopping, new
+  is left untouched, and either way the service exits (status 78, which the
+  unit does not restart; an ordinary crash exits 1 and does restart) instead of starting empty. While stopping, new
   requests get `503` and the log says whether the final save worked.
 - Any unexpected error is a JSON `500` (`internal`), logged once.
 
@@ -242,7 +253,7 @@ public VM): do it in this order, and keep the saved copy.
 2. `sudo cp -a /var/lib/hopper-mailbox/state.json /var/lib/hopper-mailbox/state.json.pre-hash`
 3. Copy `relay/hopper_mailbox.py` to `/opt/hopper-mailbox/`.
 4. Install `relay/hopper-mailbox.service` (`UMask=0077`, `StateDirectory`,
-   `RestartPreventExitStatus=1`, memory and file limits, syscall filter),
+   `RestartPreventExitStatus=78`, memory and file limits, syscall filter),
    then `sudo systemctl daemon-reload` and
    `systemd-analyze verify /etc/systemd/system/hopper-mailbox.service`.
 5. `sudo systemctl start hopper-mailbox`; the journal says `hashed N stored
@@ -256,7 +267,8 @@ mailbox (falls back), and an old desktop against the new one (v1 feed).
 **Rolling back after that first start needs `state.json.pre-hash`.** The old
 relay compares plain tokens and can't read a hashed state file: with the new
 file every PC would get 401 and have to sign up again, losing its friends.
-So: stop the service, put `state.json.pre-hash` back as `state.json`,
+So: stop the service, put `state.json.pre-hash` back as `state.json` with
+`sudo cp -a` or `sudo mv` (keeps the owner and mode),
 reinstall the previous `hopper_mailbox.py` and unit, start it. Accounts,
 pairings and groups made since the copy are lost. Delete the copy once you
 won't go back (it holds every token in the clear). With the old file,

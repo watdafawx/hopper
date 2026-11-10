@@ -12,7 +12,7 @@ Cloudflare Tunnel as `https://sync.kyuubi.dev`.
 - groups: name, owner, members (each with "said yes" and "keep in step"),
   the latest share code of every pack shared with the group, and which of
   those packs a member follows;
-- the latest events per PC (at most 1000 and 4 MB, kept 14 days; share codes
+- the latest events per PC (at most 1000 and 2 MB, kept 14 days; share codes
   and revokes 180 days; no files).
 
 State is `/var/lib/hopper-mailbox/state.json`, owned by the
@@ -22,12 +22,16 @@ about every 1.5 s after a change, and once more when the service stops
 sign-up, which is saved before it is answered. At start:
 
 - a file that is there but not valid (bad JSON or encoding, wrong shape) is
-  renamed to `state.json.corrupt-<time>` and the service exits with status 1;
+  renamed to `state.json.corrupt-<time>` and the service exits with status 78;
 - a file that can't be read at all (rights, disk) is **left exactly where it
-  is** and the service exits with status 1.
+  is** and the service exits with status 78;
+- a file over 48 MB (150% of the 32 MB budget) is **left exactly where it
+  is** and the service exits with status 78: it would not fit in the unit's
+  512 MB of memory once loaded.
 
 Either way it never starts over on top of real data, and the unit has
-`RestartPreventExitStatus=1`, so systemd does not keep retrying: look at
+`RestartPreventExitStatus=78`, so systemd does not keep retrying that one
+(an ordinary crash exits 1 and is restarted after 3 s): look at
 `journalctl -u hopper-mailbox`, fix the cause (or restore a copy), then
 `systemctl start hopper-mailbox`. Deleting the file resets every account and
 pairing (desktops notice, sign up again and tell their player to invite
@@ -75,14 +79,16 @@ Minecraft id. The protocol, event kinds and limits are in
 | What | Limit | Answer |
 |---|---|---|
 | Request body | 64 KB; no `Transfer-Encoding`, one numeric `Content-Length` | `413` / `400` `bad_framing`, then the connection closes |
-| Accounts | 20000, and 32 MB of state in all; new sign-ups only | `503` `busy` |
+| The state's size | 32 MB in all. Share codes (direct or into groups) stop at 75% of it, sign-ups at 100%, so accounts always have the last quarter. A new version of a pack that is not bigger than the one it replaces is always taken | `503` `busy` |
+| Accounts | 20000 | `503` `busy` |
+| Share codes one sender has waiting, all friends together | 3 MB | `409` `storage_full` |
 | Idle accounts | no friends, no groups and nothing for 30 days: forgotten (checked hourly) | |
 | Sign-ups | 60 per hour per client address (`CF-Connecting-IP`, else the peer; IPv6 by /64). The place is taken before the body is read | `429` `rate_limited` |
 | Wrong invite codes | 10 per 15 min per account, 30 per 15 min per address | `429` `rate_limited` |
 | Open invites | 20 per account | `429` `invites_full` |
 | Packs shared into groups | 1 MB per account, 64 KB while no one else has joined the group; counted against whoever shares | `409` `storage_full` (`503` `busy` when the state is full) |
 | Share code | 20000 bytes; larger is refused, not cut | `413` `too_large` |
-| Waiting events | 1000 and 4 MB per PC, 150 per sender as a backstop; a new version of a pack replaces its old event; 14 days (share codes and revokes 180); `recipe` and `revoke` are dropped last | oldest dropped |
+| Waiting events | 1000 and 2 MB per PC, 150 per sender as a backstop; a new version of a pack replaces its old event; 14 days (share codes and revokes 180). Full: anything but a `recipe` or `revoke` goes first, then the oldest event of whoever has the most bytes in that queue | oldest dropped |
 | Packs a group already had | not queued: read from the group when the new member asks | |
 | Long-polls | 3 per account (a 4th ends the oldest, which gets `409` `poll_superseded`); `wait` up to 90 s | |
 | Connections | 2000 at once; a whole request must arrive in 30 s, and a socket stalled for 30 s is closed | `503` `busy` |
@@ -144,7 +150,9 @@ curl -s http://127.0.0.1:8787/v1/health
 The old relay compares plain tokens, so it can't read the hashed state: every
 PC would get "register first" and have to sign up again, losing its friends
 (and the new-version file holds no token to recover). To go back, stop the
-service, put `state.json.pre-hash` back as `state.json`, install the old
+service, put `state.json.pre-hash` back as `state.json` with
+`sudo cp -a` or `sudo mv` (not a plain `cp`/`cat >`, which can leave it
+owned by root with the wrong mode, unreadable to the service), install the old
 `hopper_mailbox.py` and unit, and start it. Whatever happened since the copy
 (new accounts, pairings) is lost, so decide quickly or accept that. Delete
 `state.json.pre-hash` once you are sure you won't go back; it holds every
@@ -165,9 +173,39 @@ start, the journal says which line (the filter is the likeliest; remove that
 one line and report it).
 
 **Desktops after a data reset.** A Hopper that finds its saved token
-unknown to the service (`401`) signs up again once, keeps its local
-settings and tells its player: "Your friends list was reset on the sync
-server. Invite your friends again."
+unknown to the service (`401`) signs up again, keeps its local settings and
+tells its player: "Your friends list was reset on the sync server. Invite
+your friends again." It does this at most once per run of the app; if the
+service still answers 401 after that, the desktop shows the error and asks
+again every 30 seconds without signing up again.
+
+### A state file that is too big
+
+The service refuses to load a state file over 48 MB (exit status 78, the
+file untouched). The budget normally stops this long before, so it means
+the budget was raised and lowered, or the file was copied from elsewhere.
+To get going again, keep the accounts and friends and drop the waiting
+events (people lose queued share codes; their next publish sends them again):
+
+```bash
+sudo systemctl stop hopper-mailbox
+sudo cp -a /var/lib/hopper-mailbox/state.json /var/lib/hopper-mailbox/state.json.too-big
+sudo -u hopper-mailbox python3 - <<'EOF'
+import json, os
+p = "/var/lib/hopper-mailbox/state.json"
+s = json.load(open(p))
+s["events"] = {u: [] for u in s["users"]}
+for g in s.get("groups", {}).values():
+    g["packs"] = {}
+json.dump(s, open(p + ".tmp", "w"), separators=(",", ":"))
+os.chmod(p + ".tmp", 0o600)
+os.replace(p + ".tmp", p)
+EOF
+sudo systemctl start hopper-mailbox
+```
+
+(That script runs outside the service's memory limit; a file of a few
+hundred MB loads fine in it. Delete `state.json.too-big` afterwards.)
 
 `hopper-mailbox.service` binds `127.0.0.1:8787`; nothing listens publicly.
 The tunnel is a separate unit, `hopper-tunnel.service`, running
