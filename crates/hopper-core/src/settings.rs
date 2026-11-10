@@ -180,6 +180,12 @@ pub struct Settings {
     pub shared_instances: Vec<String>,
     /// The "Share your packs with your friends?" prompt was answered.
     pub share_prompt_done: bool,
+    /// The newest friend's pack change (`Event::at`) seen in the Friends
+    /// panel. A newer one puts a dot on the title bar's Friends button.
+    pub friends_seen: u64,
+    /// Friends' packs hidden from the Friends panel ("<from>/<inst>/<at>").
+    /// A change to the pack shows it again.
+    pub friends_hidden: Vec<String>,
     /// Where data packs go, per instance root: a folder relative to it.
     pub datapack_dest: HashMap<String, String>,
     /// Hopper opens curseforge.com's Install links; what handled them
@@ -210,7 +216,8 @@ pub struct Settings {
     pub accounts_sidebar_collapsed: bool,
     /// Width of the Accounts dialog's account list, in rem.
     pub accounts_sidebar_width: f32,
-    /// Width of the GPUI project page panel (Browse and the Library peek), in rem.
+    /// Width of the project page panel of older builds, in rem. It moved to
+    /// `panel_widths["dock"]` (see [`Settings::migrate_dock_width`]).
     pub browse_panel_width: f32,
     /// Widths of the GPUI side panels in rem, by panel key. Negative means
     /// collapsed to a rail, remembering the open width.  Missing = default.
@@ -622,6 +629,8 @@ impl Default for Settings {
             mailbox_handled: 0,
             shared_instances: Vec::new(),
             share_prompt_done: false,
+            friends_seen: 0,
+            friends_hidden: Vec::new(),
             datapack_dest: HashMap::new(),
             links_prev_handler: None,
             links_enabled: false,
@@ -1037,6 +1046,7 @@ impl Settings {
         match serde_json::from_slice::<Settings>(&b) {
             Ok(mut s) => {
                 s.migrate_panels();
+                s.migrate_dock_width();
                 Some(s)
             }
             Err(e) => {
@@ -1061,6 +1071,17 @@ impl Settings {
                 set_load_error(msg);
                 None
             }
+        }
+    }
+
+    /// The project panel's width of older builds becomes the right-hand
+    /// dock's (the mod peek and the Friends panel share it). Once: the old
+    /// value goes back to its default, as the dock drops its own entry
+    /// whenever it's dragged back to the default.
+    pub fn migrate_dock_width(&mut self) {
+        let old = std::mem::replace(&mut self.browse_panel_width, 32.0);
+        if old != 32.0 && !self.panel_widths.contains_key("dock") {
+            self.panel_widths.insert("dock".into(), old);
         }
     }
 
@@ -1204,6 +1225,21 @@ mod tests {
         let old: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!((old.zoom, old.still_header, old.smooth_scroll), (100, false, true));
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn dock_width_moves_once() {
+        let mut s = Settings { browse_panel_width: 40.0, ..Settings::default() };
+        s.migrate_dock_width();
+        assert_eq!(s.panel_widths.get("dock"), Some(&40.0));
+        assert_eq!(s.browse_panel_width, 32.0);
+        // Dragged back to the default, the entry goes; it must stay gone.
+        s.panel_widths.remove("dock");
+        s.migrate_dock_width();
+        assert!(s.panel_widths.get("dock").is_none());
+        let mut fresh = Settings::default();
+        fresh.migrate_dock_width();
+        assert!(fresh.panel_widths.is_empty());
     }
 
     #[test]

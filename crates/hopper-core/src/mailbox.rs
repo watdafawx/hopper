@@ -360,6 +360,13 @@ impl Mailbox {
         Ok(self.proto()? >= 2)
     }
 
+    /// Whether taking a share back reaches the friend, once the mailbox's
+    /// version is known (no network call; `None` until it has been asked).
+    /// An old mailbox can't tell them, so they keep what they have.
+    pub fn takes_back(&self) -> Option<bool> {
+        self.proto.get().map(|v| *v >= 2)
+    }
+
     fn proto(&self) -> anyhow::Result<u64> {
         if let Some(v) = self.proto.get() {
             return Ok(*v);
