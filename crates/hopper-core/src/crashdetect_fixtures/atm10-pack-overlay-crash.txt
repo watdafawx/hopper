@@ -1,0 +1,58 @@
+---- Minecraft Crash Report ----
+
+!!! Invasive Optimizations is installed! Check its section for a list of affected mods.
+
+
+// Hey, that tickles! Hehehe!
+
+Time: 2026-11-10 21:56:48
+Description: Encountered exception while building chunk meshes
+
+java.lang.NullPointerException: Cannot invoke "net.neoforged.neoforge.client.model.data.ModelData.get(net.neoforged.neoforge.client.model.data.ModelProperty)" because "modelData" is null
+	at TRANSFORMER/framedblocks@10.6.3/xfacthd.framedblocks.client.data.ConTexDataHandler.extractConTexData(ConTexDataHandler.java:41) ~[FramedBlocks-10.6.3.jar%23934!/:?] {re:classloading}
+	at TRANSFORMER/fusion@1.3.16/com.supermartijn642.fusion.integration.framedblocks.FusionFramedBlocksIntegrationImpl.getCacheValue(FusionFramedBlocksIntegrationImpl.java:12) ~[fusion-1.3.16-neoforge-mc1.21.1.jar%23949!/:?] {re:classloading}
+	at TRANSFORMER/fusion@1.3.16/com.supermartijn642.fusion.integration.framedblocks.FusionFramedBlocksIntegration.getCacheProperty(FusionFramedBlocksIntegration.java:27) ~[fusion-1.3.16-neoforge-mc1.21.1.jar%23949!/:?] {re:classloading}
+	at TRANSFORMER/fusion@1.3.16/com.supermartijn642.fusion.model.modifiers.block.BlockModelModifierBakedModel.createCacheKey(BlockModelModifierBakedModel.java:264) ~[fusion-1.3.16-neoforge-mc1.21.1.jar%23949!/:?] {re:mixin,re:classloading}
+	at TRANSFORMER/fusion@1.3.16/com.supermartijn642.fusion.model.modifiers.block.BlockModelModifierBakedModel.lambda$getModelData$0(BlockModelModifierBakedModel.java:128) ~[fusion-1.3.16-neoforge-mc1.21.1.jar%23949!/:?] {re:mixin,re:classloading}
+	at TRANSFORMER/fusion@1.3.16/com.supermartijn642.fusion.integration.framedblocks.FusionFramedBlocksIntegration$LazyCacheable.resolve(FusionFramedBlocksIntegration.java:49) ~[fusion-1.3.16-neoforge-mc1.21.1.jar%23949!/:?] {re:classloading}
+	at TRANSFORMER/fusion@1.3.16/com.supermartijn642.fusion.integration.framedblocks.FusionFramedBlocksIntegration$LazyCacheable.hashCode(FusionFramedBlocksIntegration.java:65) ~[fusion-1.3.16-neoforge-mc1.21.1.jar%23949!/:?] {re:classloading}
+	at java.base/java.util.Objects.hashCode(Objects.java:103) ~[?:?] {}
+	at TRANSFORMER/framedblocks@10.6.3/xfacthd.framedblocks.api.model.cache.SimpleQuadCacheKey.hashCode(SimpleQuadCacheKey.java:10) ~[FramedBlocks-10.6.3.jar%23934!/:?] {re:classloading}
+	at java.base/java.util.concurrent.ConcurrentHashMap.get(ConcurrentHashMap.java:936) ~[?:?] {}
+	at TRANSFORMER/framedblocks@10.6.3/xfacthd.framedblocks.client.model.FramedBlockModel.getCamoQuads(FramedBlockModel.java:265) ~[FramedBlocks-10.6.3.jar%23934!/:?] {re:classloading}
+	at TRANSFORMER/framedblocks@10.6.3/xfacthd.framedblocks.client.model.FramedBlockModel.getQuads(FramedBlockModel.java:107) ~[FramedBlocks-10.6.3.jar%23934!/:?] {re:classloading}
+	at TRANSFORMER/framedblocks@10.6.3/xfacthd.framedblocks.client.model.FramedDoubleBlockModel.getQuads(FramedDoubleBlockModel.java:74) ~[FramedBlocks-10.6.3.jar%23934!/:?] {re:classloading}
+	at TRANSFORMER/sodium@0.8.13+mc1.21.1/net.caffeinemc.mods.sodium.neoforge.model.NeoForgeModelAccess.getQuads(NeoForgeModelAccess.java:32) ~[net.caffeinemc.sodium-neoforge-0.8.13+mc1.21.1-mod.jar%23731!/:?] {re:classloading}
+	at TRANSFORMER/sodium@0.8.13+mc1.21.1/net.caffeinemc.mods.sodium.client.render.frapi.render.AbstractBlockRenderContext.bufferDefaultModel(AbstractBlockRenderContext.java:267) ~[net.caffeinemc.sodium-neoforge-0.8.13+mc1.21.1-mod.jar%23731!/:?] {re:mixin,re:classloading,pl:mixin:APP:mixins.iris.compat.sodium.json:MixinAbstractBlockRenderContext from mod iris,pl:mixin:APP:sodium-neoforge.mixins.json:platform.neoforge.AbstractBlockRenderContextMixin from mod sodium,pl:mixin:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.resources.model.BakedModel.emitBlockQuads(BakedModel.java:521) ~[client-1.21.1-20240808.144430-srg.jar%23729!/:?] {re:mixin,pl:runtimedistcleaner:A,re:classloading,pl:mixin:APP:sodium-common.mixins.json:features.render.frapi.BakedModelMixin from mod sodium,pl:mixin:APP:fabric-renderer-api-v1.mixins.json:client.BakedModelMixin from mod fabric_renderer_api_v1,pl:mixin:A,pl:runtimedistcleaner:A}
+	at TRANSFORMER/sodium@0.8.13+mc1.21.1/net.caffeinemc.mods.sodium.client.render.chunk.compile.pipeline.BlockRenderer.renderModel(BlockRenderer.java:119) ~[net.caffeinemc.sodium-neoforge-0.8.13+mc1.21.1-mod.jar%23731!/:?] {re:mixin,re:classloading,pl:mixin:APP:mixins.iris.compat.sodium.json:BlockRendererAccessor from mod iris,pl:mixin:APP:mixins.iris.compat.sodium.json:MixinBlockRenderer from mod iris,pl:mixin:APP:copycats-common.mixins.json:compat.rubidium.BlockRendererMixin from mod copycats,pl:mixin:APP:fusion.mixins.json:sodium.BlockRendererMixinSodium from mod fusion,pl:mixin:A}
+	at TRANSFORMER/sodium@0.8.13+mc1.21.1/net.caffeinemc.mods.sodium.client.render.chunk.compile.tasks.ChunkBuilderMeshingTask.execute(ChunkBuilderMeshingTask.java:118) ~[net.caffeinemc.sodium-neoforge-0.8.13+mc1.21.1-mod.jar%23731!/:?] {re:mixin,re:computing_frames,re:classloading,pl:mixin:APP:mixins.iris.compat.sodium.json:MixinChunkMeshBuildTask from mod iris,pl:mixin:A}
+	at TRANSFORMER/sodium@0.8.13+mc1.21.1/net.caffeinemc.mods.sodium.client.render.chunk.compile.tasks.ChunkBuilderMeshingTask.execute(ChunkBuilderMeshingTask.java:51) ~[net.caffeinemc.sodium-neoforge-0.8.13+mc1.21.1-mod.jar%23731!/:?] {re:mixin,re:computing_frames,re:classloading,pl:mixin:APP:mixins.iris.compat.sodium.json:MixinChunkMeshBuildTask from mod iris,pl:mixin:A}
+	at TRANSFORMER/sodium@0.8.13+mc1.21.1/net.caffeinemc.mods.sodium.client.render.chunk.compile.executor.ChunkJobTyped.execute(ChunkJobTyped.java:49) ~[net.caffeinemc.sodium-neoforge-0.8.13+mc1.21.1-mod.jar%23731!/:?] {re:classloading}
+	at TRANSFORMER/sodium@0.8.13+mc1.21.1/net.caffeinemc.mods.sodium.client.render.chunk.compile.executor.ChunkBuilder$WorkerRunnable.run(ChunkBuilder.java:185) ~[net.caffeinemc.sodium-neoforge-0.8.13+mc1.21.1-mod.jar%23731!/:?] {re:classloading}
+	at java.base/java.lang.Thread.run(Thread.java:1583) ~[?:?] {}
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: Render thread
+Stacktrace:
+	at TRANSFORMER/framedblocks@10.6.3/xfacthd.framedblocks.client.data.ConTexDataHandler.extractConTexData(ConTexDataHandler.java:41) ~[FramedBlocks-10.6.3.jar%23934!/:?] {re:classloading}
+	at TRANSFORMER/fusion@1.3.16/com.supermartijn642.fusion.integration.framedblocks.FusionFramedBlocksIntegrationImpl.getCacheValue(FusionFramedBlocksIntegrationImpl.java:12) ~[fusion-1.3.16-neoforge-mc1.21.1.jar%23949!/:?] {re:classloading}
+	at TRANSFORMER/fusion@1.3.16/com.supermartijn642.fusion.integration.framedblocks.FusionFramedBlocksIntegration.getCacheProperty(FusionFramedBlocksIntegration.java:27) ~[fusion-1.3.16-neoforge-mc1.21.1.jar%23949!/:?] {re:classloading}
+-- Block being rendered --
+Details:
+	Block: Block{framedblocks:framed_double_slab}[glowing=false,propagates_skylight=false,solid=false]
+	Block location: World: (3266,82,928), Section: (at 2,2,0 in 204,5,58; chunk contains blocks 3264,-64,928 to 3279,319,943), Region: (6,1; contains chunks 192,32 to 223,63, blocks 3072,-64,512 to 3583,319,1023)
+	Chunk section: RenderSection at chunk (204, 5, 58) from (3264, 80, 928) to (3279, 95, 943)
+	Render context volume: BoundingBox{minX=3262, minY=78, minZ=926, maxX=3281, maxY=97, maxZ=945}
+Stacktrace:
+	at TRANSFORMER/sodium@0.8.13+mc1.21.1/net.caffeinemc.mods.sodium.client.render.chunk.compile.tasks.ChunkBuilderMeshingTask.execute(ChunkBuilderMeshingTask.java:118) ~[net.caffeinemc.sodium-neoforge-0.8.13+mc1.21.1-mod.jar%23731!/:?] {re:mixin,re:computing_frames,re:classloading,pl:mixin:APP:mixins.iris.compat.sodium.json:MixinChunkMeshBuildTask from mod iris,pl:mixin:A}
+	at TRANSFORMER/sodium@0.8.13+mc1.21.1/net.caffeinemc.mods.sodium.client.render.chunk.compile.tasks.ChunkBuilderMeshingTask.execute(ChunkBuilderMeshingTask.java:51) ~[net.caffeinemc.sodium-neoforge-0.8.13+mc1.21.1-mod.jar%23731!/:?] {re:mixin,re:computing_frames,re:classloading,pl:mixin:APP:mixins.iris.compat.sodium.json:MixinChunkMeshBuildTask from mod iris,pl:mixin:A}
+	at TRANSFORMER/sodium@0.8.13+mc1.21.1/net.caffeinemc.mods.sodium.client.render.chunk.compile.executor.ChunkJobTyped.execute(ChunkJobTyped.java:49) ~[net.caffeinemc.sodium-neoforge-0.8.13+mc1.21.1-mod.jar%23731!/:?] {re:classloading}
+	at TRANSFORMER/sodium@0.8.13+mc1.21.1/net.caffeinemc.mods.sodium.client.render.chunk.compile.executor.ChunkBuilder$WorkerRunnable.run(ChunkBuilder.java:185) ~[net.caffeinemc.sodium-neoforge-0.8.13+mc1.21.1-mod.jar%23731!/:?] {re:classloading}
+	at java.base/java.lang.Thread.run(Thread.java:1583) ~[?:?] {}
+
+

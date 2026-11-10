@@ -26,6 +26,7 @@ pub mod crashengine;
 pub mod crashfiles;
 pub mod crashgroup;
 pub mod crashloop;
+pub mod crashpacks;
 pub mod crashscan;
 pub mod crashsigs;
 pub mod crashtrace;

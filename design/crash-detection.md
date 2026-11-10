@@ -191,6 +191,45 @@ swords, whose nested gear data made the chain deep enough to overflow.
 Tests: `crashloop::tests`, `a_loop_the_report_cannot_name_is_read_from_the_log`
 (`emi-loop-*`).
 
+## A resource pack turned on just before (2026-11-10: built; `crashpacks.rs`)
+
+Case: All the Mods 10 crashed three times "building chunk meshes" with
+`"modelData" is null` thrown in FramedBlocks, reached through Fusion's
+model wrapper (`model.modifiers.block.BlockModelModifierBakedModel`) on a
+framed block. Hopper said "Likely: FramedBlocks". Each time, 37–40 seconds
+earlier, the player had turned on an overlay resource pack in game (Deep
+Origins Overlays, then Matcha Block Overlays); the third start had Matcha on
+from the beginning; the start after removing it ran fine. Many other enabled
+packs also carry Fusion model modifiers, so the pack's contents can't single
+it out; the timing does.
+
+- **Which packs were on, and when:** the game logs every resource reload
+  (`Reloading ResourceManager: vanilla, …, file/Some Pack.zip`). The
+  player's own packs are the `file/` entries. A reload that adds some is
+  "turned on in game" at that line's time.
+- **Only a crash while drawing:** the report's description (`building chunk
+  meshes`, `Tesselating block`, `Rendering item`, …) or a model frame
+  (`BakedModel`, `ModelBakery`, `ModelManager`) in its first trace.
+- **Certainty from timing** (the report never names a pack): Likely when
+  exactly one pack came on in game up to 2 minutes before, or the start
+  before crashed the same way (same description) right after turning it on
+  and this start had it on from the beginning; Possible for more packs (up
+  to 3), up to 10 minutes, or only "on since the last start" (this start's
+  first reload against the previous start's first). A pack on for longer
+  names nothing: the game drew fine since.
+- **What the card says:** the advice line ("You turned on the resource pack
+  "X" 40 seconds before this crash, and the game crashed while drawing
+  blocks. Turn that pack off (Resource packs tab) and play again: the mods
+  below only drew what it changed."). When the pack is Likely, the mods'
+  Likely suspects drop to Possible (fact `resource_pack`), so the card
+  doesn't offer to turn them off. Another advice (wrong Java, …) wins.
+- Clients only (a server draws nothing). Shader packs (Iris logs `Using
+  shaderpack: X`) aren't covered yet: no crash to test it on.
+
+Tests: `crashpacks::tests`,
+`a_resource_pack_turned_on_before_a_drawing_crash_is_the_trigger`
+(`atm10-pack-overlay-*`).
+
 ## The engine: weighing evidence (2026-11-03: built; `crashengine.rs`, `modindex.rs`)
 
 The rules above each decided a mod's certainty and wrote its sentence, and
