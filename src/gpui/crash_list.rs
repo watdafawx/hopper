@@ -689,8 +689,8 @@ pub fn split<V: Host>(this: &mut V, card: AnyElement, none: &'static str, cx: &m
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                // Capped like a page of text.
-                .child(div().max_w(rems(56.)).pb_2().child(card))
+                // No cap: the top cards and the list fill the page.
+                .child(div().w_full().pb_2().child(card))
                 .overflow_y_scrollbar(),
         )
         .into_any_element()
@@ -795,7 +795,7 @@ pub fn older_pane<V: Host>(this: &mut V, none: &'static str, cx: &mut Context<V>
     v_flex()
         .flex_1()
         .min_h_0()
-        .max_w(rems(48.))
+        .w_full()
         .gap_2()
         .child(
             h_flex().child(div().flex_1()).child(
