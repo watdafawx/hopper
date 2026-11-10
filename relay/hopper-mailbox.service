@@ -10,9 +10,9 @@ Group=hopper-mailbox
 ExecStart=/usr/bin/python3 /opt/hopper-mailbox/hopper_mailbox.py
 Restart=always
 RestartSec=3
-# Exit status 1 means "the state file is bad or unreadable, a person must
+# Exit status 78 means "the state file is bad, unreadable or too big, a person must
 # look" (the relay never starts empty on top of it). Do not retry that.
-RestartPreventExitStatus=1
+RestartPreventExitStatus=78
 
 # /var/lib/hopper-mailbox, created and owned by the service user.
 StateDirectory=hopper-mailbox

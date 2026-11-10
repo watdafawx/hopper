@@ -61,13 +61,30 @@ EVENT_TTL = 14 * 24 * 3600
 KEEP_TTL = 180 * 24 * 3600
 # Bytes: what waits for one person, and what one account keeps in groups
 # (a group nobody else has joined keeps much less).
-MAX_QUEUE_BYTES = 4 * 1024 * 1024
+MAX_QUEUE_BYTES = 2 * 1024 * 1024
 MAX_PACK_BYTES = 1024 * 1024
 SOLO_PACK_BYTES = 64 * 1024
 # The whole service: accounts, and the size of the state file. Past either,
 # sign-ups and new group packs get 503 `busy` until accounts age out.
 MAX_USERS = _env_int("HOPPER_MAILBOX_MAX_USERS", 20000)
 MAX_STATE_BYTES = _env_int("HOPPER_MAILBOX_MAX_STATE_BYTES", 32 * 1024 * 1024)
+# The state file is the memory of the service (about 7 times its size once
+# loaded, and the unit allows 512 MB), so its size is a budget:
+#  - share codes (direct, or into groups) stop being accepted at 75% of it,
+#    which leaves the last quarter for accounts, so sign-ups never starve;
+#  - sign-ups stop at 100%;
+#  - a file bigger than 150% is not loaded at all (see load()).
+# A new version of a pack that is not bigger than the one it replaces is
+# always taken, so normal updates keep working when it is full.
+EVENT_BUDGET_FRACTION = 0.75
+LOAD_LIMIT_FRACTION = 1.5
+# What one sender may have waiting for all their friends together, so a few
+# paired accounts can't spend the budget on their own.
+SENDER_QUOTA_BYTES = 3 * 1024 * 1024
+# Exit status for "the state file is bad, unreadable or too big": the unit
+# does not restart on it (RestartPreventExitStatus=78), a person must look.
+# An ordinary crash exits 1 and is restarted.
+EXIT_BAD_STATE = 78
 # Accounts with no friends and no groups, unseen this long, are removed.
 IDLE_PRUNE_SECS = 30 * 24 * 3600
 PRUNE_EVERY = 3600
@@ -207,6 +224,8 @@ def reset(path=None):
         join_limit.clear()
         _writer["dirty"] = False
         _writer["size"] = 0
+        _writer["added"] = 0
+        _sender_bytes.clear()
         _closing.clear()
 
 
@@ -215,11 +234,17 @@ def load():
 
     A file that is there but not valid (bad JSON or encoding, or the wrong
     shape) is moved aside as `<name>.corrupt-<time>` and the service exits
-    with status 1. A file that can't be read at all (rights, disk) is left
-    exactly as it is, and the service exits with status 1 too. Either way it
+    with status 78. A file that can't be read at all (rights, disk) is left
+    exactly as it is, and the service exits with status 78 too. Either way it
     never starts empty on top of real data, and the unit's
-    `RestartPreventExitStatus=1` keeps systemd from starting it again."""
+    `RestartPreventExitStatus=78` keeps systemd from starting it again."""
     try:
+        on_disk = os.path.getsize(STATE)
+        if on_disk > load_limit():
+            print(f"state load refused: {STATE} is {on_disk} bytes, over the {load_limit()} this service "
+                  "can hold in memory; file left as it is; exiting (see relay/README.md, \"A state file "
+                  "that is too big\")", file=sys.stderr)
+            sys.exit(EXIT_BAD_STATE)
         with open(STATE, "r", encoding="utf-8") as f:
             raw = f.read()
         s = json.loads(raw)
@@ -240,10 +265,10 @@ def load():
         except OSError as e2:
             where = f"could not be moved aside ({e2})"
         print(f"state load failed: {e}; file {where}; exiting", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_BAD_STATE)
     except Exception as e:   # OSError, or anything we didn't expect
         print(f"state load failed: {type(e).__name__}: {e}; file left as it is; exiting", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_BAD_STATE)
     _writer["size"] = len(raw)
     with lock:
         for k in state:
@@ -258,6 +283,7 @@ def load():
                 u["token_hash"] = hash_token(tok)
                 migrated += 1
         rebuild_index()
+        rebuild_sender_index()
         if migrated:
             print(f"hashed {migrated} stored tokens", file=sys.stderr)
             mark_dirty()
@@ -268,7 +294,7 @@ def load():
 
 # The saver: requests only flip `dirty`; one thread writes the file.
 # `size` is how big the last state file was, for the service-wide cap.
-_writer = {"dirty": False, "size": 0, "thread": None, "stop": threading.Event(), "wake": threading.Event()}
+_writer = {"dirty": False, "size": 0, "added": 0, "thread": None, "stop": threading.Event(), "wake": threading.Event()}
 write_lock = threading.Lock()
 # Set when the service is stopping: new requests are turned away.
 _closing = threading.Event()
@@ -302,6 +328,7 @@ def prune_accounts():
             for q in state["events"].values():
                 q[:] = [e for e in q if e["from"] not in gone]
         changed = len(drop)
+        rebuild_sender_index()
         for q in state["events"].values():
             before = len(q)
             q[:] = [e for e in q if not event_expired(e, t)]
@@ -352,6 +379,7 @@ def flush():
             _writer["dirty"] = False
             data = json.dumps(state, separators=(",", ":")).encode("utf-8")
             _writer["size"] = len(data)
+            _writer["added"] = 0
         try:
             _write_file(data)
             return True
@@ -479,6 +507,94 @@ def event_expired(e, t):
     return t - e.get("at", t) > ttl
 
 
+def load_limit():
+    return int(MAX_STATE_BYTES * LOAD_LIMIT_FRACTION)
+
+
+def state_used():
+    """About how big the state is now: the last save plus what came in since."""
+    return _writer["size"] + _writer["added"]
+
+
+def event_room(extra=0):
+    """Whether share codes may grow the state by `extra` more bytes."""
+    return state_used() + extra <= int(MAX_STATE_BYTES * EVENT_BUDGET_FRACTION)
+
+
+# Bytes of events each sender has waiting in all queues. Additions are exact;
+# removals are not tracked, so the number can only be too high. It is checked
+# against the real scan before anyone is refused (sender_over_quota).
+_sender_bytes = {}
+
+
+def rebuild_sender_index():
+    _sender_bytes.clear()
+    for q in state["events"].values():
+        for e in q:
+            _sender_bytes[e["from"]] = _sender_bytes.get(e["from"], 0) + size_of(e)
+
+
+def sender_exact(frm):
+    n = sum(size_of(e) for q in state["events"].values() for e in q if e["from"] == frm)
+    _sender_bytes[frm] = n
+    return n
+
+
+def sender_over_quota(frm, extra):
+    if _sender_bytes.get(frm, 0) + extra <= SENDER_QUOTA_BYTES:
+        return False
+    return sender_exact(frm) + extra > SENDER_QUOTA_BYTES
+
+
+def recipe_size(frm, how, fields):
+    """The size make_event will give the event, worked out the same way."""
+    head = {"seq": 0, "kind": "recipe", "from": frm, "at": 0,
+            "direct": True, "groups": (how or {}).get("groups", [])}
+    return size_of(head) + size_of(fields)
+
+
+def recipe_growth(to, frm, how, fields):
+    """How many bytes a recipe from `frm` adds to `to`'s queue: all of it for
+    a new pack, the difference when it replaces the older version."""
+    new = recipe_size(frm, how, fields)
+    for e in state["events"].get(to, []):
+        if e["from"] == frm and e.get("kind", "recipe") == "recipe" and e.get("inst") == fields["inst"]:
+            return new - size_of(e)
+    return new
+
+
+def check_recipe_room(frm, reach, fields):
+    """None if the recipe may go to everyone in `reach`, else (status, body).
+    Nothing has been changed yet."""
+    growth = [recipe_growth(m, frm, how, fields) for m, how in reach.items()]
+    extra = sum(growth)
+    # Over the budget only what makes the state bigger is refused: a new
+    # version that is not bigger than the one it replaces always goes.
+    if extra > 0 and not event_room(extra):
+        return 503, {"error": "the sync service is full; try again later", "code": "busy"}
+    if extra > 0 and sender_over_quota(frm, extra):
+        return 409, {"error": "you have shared too much with your friends at once", "code": "storage_full"}
+    return None
+
+
+def pick_evictee(q):
+    """What a full queue loses. Anything but a recipe or revoke goes first
+    (oldest). Otherwise the oldest event of the sender holding the most
+    bytes in this queue, so a friend sending a lot pays for it and someone
+    with one small pack waiting keeps it."""
+    for e in q:
+        if e.get("kind", "recipe") not in KEEP_KINDS:
+            return e
+    per = {}
+    for e in q:
+        per[e["from"]] = per.get(e["from"], 0) + size_of(e)
+    big = max(per, key=per.get)
+    for e in q:
+        if e["from"] == big:
+            return e
+    return q[0]
+
+
 def pick_victim(evs):
     """The oldest event a full queue can lose: not a recipe or a revoke if
     there is any other, else the oldest of all."""
@@ -498,7 +614,7 @@ def trim_queue(q, frm):
         q.remove(v)
     size = sum(size_of(e) for e in q)
     while q and (len(q) > MAX_EVENTS or size > MAX_QUEUE_BYTES):
-        v = pick_victim(q)
+        v = pick_evictee(q)
         q.remove(v)
         size -= size_of(v)
 
@@ -534,6 +650,9 @@ def make_event(to, kind, frm, **fields):
     # the other kinds: a newer one replaces the older one it makes useless.
     q[:] = [e for e in q if not same_event(e, ev)]
     q.append(ev)
+    n = size_of(ev)
+    _writer["added"] += n
+    _sender_bytes[frm] = _sender_bytes.get(frm, 0) + n
     trim_queue(q, frm)
     wake(to)
     return ev
@@ -573,8 +692,13 @@ def pack_usage(uid):
 
 
 def publish(to, frm, body):
-    """The original one-friend publish, kept for older desktops."""
-    return make_event(to, "recipe", frm, direct=True, groups=[], **recipe_fields(body))
+    """The original one-friend publish, kept for older desktops. Returns the
+    event, or (status, body) when there is no room."""
+    fields = recipe_fields(body)
+    no = check_recipe_room(frm, {to: None}, fields)
+    if no:
+        return no
+    return make_event(to, "recipe", frm, direct=True, groups=[], **fields)
 
 
 def prune_invites():
@@ -1019,7 +1143,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/v1/register":
             with lock:
-                full = len(state["users"]) >= MAX_USERS or _writer["size"] >= MAX_STATE_BYTES
+                full = len(state["users"]) >= MAX_USERS or state_used() >= MAX_STATE_BYTES
             if full:
                 return self.fail(503, "the sync service is full; try again later", "busy")
             # The place in the hourly allowance is taken now, before the body
@@ -1183,6 +1307,8 @@ class Handler(BaseHTTPRequestHandler):
             if "/" in text(body.get("inst"), 128):
                 return 400, {"error": "bad instance"}
             ev = publish(to, uid, body)
+            if isinstance(ev, tuple):
+                return ev
             return 200, {"seq": ev["seq"], "sent": 1, "skipped": []}
         direct = id_list(to, MAX_FRIENDS)
         gids = id_list(body.get("groups"), MAX_GROUPS_PER_POST)
@@ -1205,15 +1331,17 @@ class Handler(BaseHTTPRequestHandler):
                 return 409, {"error": "the group has too many packs", "code": "group_packs_full"}
             targets.append((gid, g))
         if targets:
-            if _writer["size"] >= MAX_STATE_BYTES:
-                return 503, {"error": "the sync service is full; try again later", "code": "busy"}
             nb = pack_bytes(fields)
             total, solo = pack_usage(uid)
+            grew = 0
             for _, g in targets:
                 d = nb - (pack_bytes(g["packs"][k]) if k in g["packs"] else 0)
+                grew += max(d, 0)
                 total += d
                 if not any(m != uid for m in joined_ids(g)):
                     solo += d
+            if grew and not event_room(grew):
+                return 503, {"error": "the sync service is full; try again later", "code": "busy"}
             if total > MAX_PACK_BYTES or solo > SOLO_PACK_BYTES:
                 return 409, {"error": "you share too much through groups already", "code": "storage_full"}
         reach = {}
@@ -1221,10 +1349,16 @@ class Handler(BaseHTTPRequestHandler):
             if f in friends:
                 reach.setdefault(f, {"direct": False, "groups": []})["direct"] = True
         for gid, g in targets:
-            g["packs"][k] = dict(fields, **{"from": uid, "at": now()})
             for m in joined_ids(g):
                 if m != uid:
                     reach.setdefault(m, {"direct": False, "groups": []})["groups"].append(gid)
+        no = check_recipe_room(uid, reach, fields)
+        if no:
+            return no
+        for gid, g in targets:
+            old = pack_bytes(g["packs"][k]) if k in g["packs"] else 0
+            _writer["added"] += max(0, pack_bytes(fields) - old)
+            g["packs"][k] = dict(fields, **{"from": uid, "at": now()})
         seq = state["seq"]
         for m, how in reach.items():
             seq = make_event(m, "recipe", uid, direct=how["direct"], groups=how["groups"], **fields)["seq"]

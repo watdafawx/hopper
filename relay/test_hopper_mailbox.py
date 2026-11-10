@@ -103,7 +103,7 @@ CONSTS = [
     "REGISTER_PER_HOUR", "MAX_CONNECTIONS", "MAX_PACK_BYTES", "MAX_QUEUE_BYTES", "MAX_EVENTS",
     "MAX_EVENTS_PER_SENDER", "MAX_LIVE_INVITES", "JOIN_FAILS", "MAX_FRIENDS", "SAVE_INTERVAL",
     "MAX_BODY", "MAX_POLLS_PER_USER", "SOLO_PACK_BYTES", "JOIN_FAILS_IP", "MAX_STATE_BYTES",
-    "MAX_USERS", "REQUEST_DEADLINE", "MAX_WAIT", "EVENT_TTL", "KEEP_TTL", "IDLE_PRUNE_SECS",
+    "MAX_USERS", "SENDER_QUOTA_BYTES", "EVENT_BUDGET_FRACTION", "LOAD_LIMIT_FRACTION", "REQUEST_DEADLINE", "MAX_WAIT", "EVENT_TTL", "KEEP_TTL", "IDLE_PRUNE_SECS",
 ]
 
 
@@ -1085,7 +1085,7 @@ class ResilienceTest(Base):
         finally:
             builtins.open = old
             sys.stderr = old_err
-        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(cm.exception.code, 78)
         self.assertIn("left as it is", err.getvalue())
         with open(mb.STATE, "rb") as f:
             self.assertEqual(f.read(), before)
@@ -1100,13 +1100,13 @@ class ResilienceTest(Base):
                 mb.load()
         finally:
             sys.stderr = old_err
-        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(cm.exception.code, 78)
         self.assertEqual(len([n for n in os.listdir(self.relay.dir.name) if ".corrupt-" in n]), 1)
 
     def test_the_unit_does_not_restart_after_a_refused_start(self):
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hopper-mailbox.service"), encoding="utf-8") as f:
             unit = f.read()
-        for line in ("RestartPreventExitStatus=1", "StateDirectory=hopper-mailbox", "StateDirectoryMode=0700",
+        for line in ("RestartPreventExitStatus=78", "StateDirectory=hopper-mailbox", "StateDirectoryMode=0700",
                      "MemoryMax=512M", "LimitNOFILE=8192", "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
                      "PrivateDevices=true", "ProtectKernelTunables=true", "SystemCallFilter=@system-service",
                      "UMask=0077"):
@@ -1339,6 +1339,131 @@ class ResilienceTest(Base):
         finally:
             sys.stderr = old_err
             mb.STATE = good
+
+
+class RoomTest(Base):
+    """The size budget: share codes can't use up the room accounts need."""
+
+    def setUp(self):
+        super().setUp()
+        self.a = Client(self.relay, "hopper-test-a")
+        self.b = Client(self.relay, "hopper-test-b")
+        self.c = Client(self.relay, "hopper-test-c")
+        self.a.befriend(self.b)
+        self.a.befriend(self.c)
+        self.b.befriend(self.c)
+
+    def send(self, who, inst, n, to):
+        return who.post("/v1/recipes", dict(recipe(inst, code="HOP-" + "a" * n), to=to, groups=[]))
+
+    def test_direct_sends_stop_at_the_budget_but_updates_and_sign_ups_go_on(self):
+        mb.flush()
+        base = mb.state_used()
+        # Share codes may use 25000 more bytes; the whole state a third more.
+        mb.MAX_STATE_BYTES = int((base + 25000) / mb.EVENT_BUDGET_FRACTION)
+        self.assertNotIn("status", self.send(self.a, "p1", 10000, [self.b.id]))
+        self.assertNotIn("status", self.send(self.a, "p2", 10000, [self.b.id]))
+        r = self.send(self.a, "p3", 10000, [self.b.id])
+        self.assertEqual((r["status"], r["code"]), (503, "busy"))
+        r = self.send(self.a, "p4", 6000, [self.b.id])
+        self.assertEqual((r["status"], r["code"]), (503, "busy"))
+        # A new version that is not bigger still goes (a smaller one, and the same size).
+        self.assertNotIn("status", self.send(self.a, "p1", 5000, [self.b.id]))
+        self.assertNotIn("status", self.send(self.a, "p1", 5000, [self.b.id]))
+        # A bigger one does not.
+        self.assertEqual(self.send(self.a, "p1", 18000, [self.b.id])["code"], "busy")
+        # The older one-friend call is held to the same rule.
+        r = self.a.post("/v1/recipes", dict(recipe("old", code="HOP-" + "a" * 12000), to=self.b.id))
+        self.assertEqual((r["status"], r["code"]), (503, "busy"))
+        # Accounts still sign up: the last quarter of the room is theirs.
+        d = Client(self.relay, "late-sign-up")
+        self.assertTrue(d.id)
+        # Nothing was queued by the refusals.
+        got = {e["inst"]: len(e["code"]) for e in self.b.events() if e["kind"] == "recipe"}
+        self.assertEqual(sorted(got), ["p1", "p2"])
+        self.assertEqual(got["p1"], 5004)
+
+    def test_group_packs_stop_at_the_same_budget(self):
+        gid = self.a.post("/v1/groups", {"name": "Crew", "members": [self.b.id]})["group"]["id"]
+        self.b.post("/v1/groups/%s/accept" % gid)
+        mb.flush()
+        mb.MAX_STATE_BYTES = int((mb.state_used() + 100) / mb.EVENT_BUDGET_FRACTION)
+        r = self.a.post("/v1/recipes", dict(recipe("g1", code="HOP-" + "a" * 5000), to=[], groups=[gid]))
+        self.assertEqual((r["status"], r["code"]), (503, "busy"))
+
+    def test_one_sender_has_a_quota_across_all_friends(self):
+        mb.SENDER_QUOTA_BYTES = 50000
+        for i in range(3):
+            self.assertNotIn("status", self.send(self.a, "p%d" % i, 15000, [self.b.id]))
+        r = self.send(self.a, "p3", 15000, [self.b.id])
+        self.assertEqual((r["status"], r["code"]), (409, "storage_full"))
+        # The quota is for all their friends together ...
+        r = self.send(self.a, "p4", 15000, [self.c.id])
+        self.assertEqual((r["status"], r["code"]), (409, "storage_full"))
+        # ... a new version of the same size fits, and others have their own.
+        self.assertNotIn("status", self.send(self.a, "p0", 15000, [self.b.id]))
+        self.assertNotIn("status", self.send(self.b, "q0", 15000, [self.c.id]))
+        # Packs taken out of the queues (expired here) give the room back.
+        with mb.lock:
+            for e in mb.state["events"][self.b.id]:
+                e["at"] = mb.now() - mb.KEEP_TTL - 10
+        mb.prune_accounts()
+        self.assertNotIn("status", self.send(self.a, "p5", 15000, [self.c.id]))
+
+    def test_a_full_queue_drops_the_biggest_sender_not_the_smallest(self):
+        mb.MAX_QUEUE_BYTES = 40000
+        self.assertNotIn("status", self.send(self.c, "small", 50, [self.b.id]))
+        for i in range(3):
+            self.assertNotIn("status", self.send(self.a, "big%d" % i, 15000, [self.b.id]))
+        got = [(e["from"], e["inst"]) for e in self.b.events() if e["kind"] == "recipe"]
+        self.assertIn((self.c.id, "small"), got)
+        self.assertNotIn((self.a.id, "big0"), got)            # their oldest went
+        self.assertEqual(sorted(i for f, i in got if f == self.a.id), ["big1", "big2"])
+
+    def test_a_state_file_over_the_hard_limit_is_not_loaded(self):
+        mb.MAX_STATE_BYTES = 1000
+        with open(mb.STATE, "w", encoding="utf-8") as f:
+            f.write('{"users": {}, "pad": "' + "x" * 2000 + '"}')
+        with open(mb.STATE, "rb") as f:
+            before = f.read()
+        old_err, sys.stderr = sys.stderr, io.StringIO()
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                mb.load()
+        finally:
+            err_text, sys.stderr = sys.stderr.getvalue(), old_err
+        self.assertEqual(cm.exception.code, mb.EXIT_BAD_STATE)
+        self.assertIn("too big", err_text.replace("over the", "too big over the"))
+        with open(mb.STATE, "rb") as f:
+            self.assertEqual(f.read(), before)           # untouched, not moved aside
+        self.assertEqual([n for n in os.listdir(self.relay.dir.name) if ".corrupt-" in n], [])
+        # Just under the limit loads.
+        with open(mb.STATE, "w", encoding="utf-8") as f:
+            f.write('{"users": {}}')
+        mb.load()
+
+    def test_a_refused_start_uses_a_code_ordinary_crashes_do_not(self):
+        self.assertEqual(mb.EXIT_BAD_STATE, 78)
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hopper-mailbox.service"), encoding="utf-8") as f:
+            unit = f.read()
+        self.assertIn("RestartPreventExitStatus=78", unit)
+        self.assertNotIn("RestartPreventExitStatus=1\n", unit)
+        self.assertIn("Restart=always", unit)
+
+    def test_one_call_with_a_direct_and_a_group_target_makes_one_event(self):
+        gid = self.a.post("/v1/groups", {"name": "Crew", "members": [self.b.id]})["group"]["id"]
+        self.b.post("/v1/groups/%s/accept" % gid)
+        self.b.events()
+        self.a.post("/v1/recipes", dict(recipe("p1"), to=[self.b.id], groups=[gid]))
+        evs = [e for e in self.b.events() if e["kind"] == "recipe"]
+        self.assertEqual([(e["direct"], e["groups"]) for e in evs], [(True, [gid])])
+        # The desktop sends the whole set each time (it keeps the targets per
+        # pack), so a later call replaces: the way that was dropped goes with
+        # a revoke of its own, not by merging.
+        self.b.after = 0
+        self.a.post("/v1/recipes", dict(recipe("p1", code="HOP-v2"), to=[], groups=[gid]))
+        evs = [e for e in self.b.events() if e["kind"] == "recipe" and e["inst"] == "p1"]
+        self.assertEqual([(e["code"], e["direct"], e["groups"]) for e in evs], [("HOP-v2", False, [gid])])
 
 
 if __name__ == "__main__":
