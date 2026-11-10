@@ -366,8 +366,8 @@ impl Store {
             move |mb| {
                 let (f, _) = mb.join(&code)?;
                 Ok(format!(
-                    "Paired with {}. Their packs appear here when they share one.",
-                    if f.name.is_empty() { "them" } else { &f.name }
+                    "{} is now your friend. Their packs show here when they share one.",
+                    if f.name.is_empty() { "Your friend" } else { &f.name }
                 ))
             },
             |_, _| {},
@@ -440,6 +440,44 @@ impl Store {
 
     pub fn dismiss_share_prompt(&mut self, cx: &mut Context<Self>) {
         self.update_settings(|st| st.share_prompt_done = true, cx);
+    }
+
+    /// Something waits in the Friends panel: a friend's pack changed since
+    /// it was last open, or a group invitation. The title bar's dot.
+    pub fn friends_news(&self) -> bool {
+        if self.sync_status() == SyncStatus::Off {
+            return false;
+        }
+        let seen = self.settings.friends_seen;
+        self.mailbox_recipes.iter().any(|e| e.at > seen && !self.pack_hidden(e))
+            || self.mailbox_groups.iter().any(|g| !g.me.joined)
+    }
+
+    /// The Friends panel was open: what's there now isn't new any more.
+    pub fn mark_friends_seen(&mut self, cx: &mut Context<Self>) {
+        let newest = self.mailbox_recipes.iter().map(|e| e.at).max().unwrap_or(0);
+        if newest > self.settings.friends_seen {
+            self.update_settings_quietly(|st| st.friends_seen = newest);
+            cx.notify();
+        }
+    }
+
+    /// Hides a friend's pack from the panel until it changes again.
+    pub fn hide_friend_pack(&mut self, e: &Event, cx: &mut Context<Self>) {
+        let key = hidden_key(e);
+        self.update_settings(
+            |st| {
+                // One entry per pack: an older change's is dropped.
+                let pack = format!("{}/{}/", e.from, e.inst);
+                st.friends_hidden.retain(|k| !k.starts_with(&pack));
+                st.friends_hidden.push(key);
+            },
+            cx,
+        );
+    }
+
+    pub fn pack_hidden(&self, e: &Event) -> bool {
+        self.settings.friends_hidden.contains(&hidden_key(e))
     }
 
     /// Makes a group of some friends; each gets an invitation.
@@ -1117,6 +1155,13 @@ impl Store {
 
     fn got_friends(&mut self, friends: Vec<mailbox::Friend>, max: usize, cx: &mut Context<Self>) {
         self.mailbox_max = max;
+        // The relay answered. On a quiet feed the first long poll only
+        // returns after a minute, so this is what ends "Connecting".
+        if !self.mailbox_heard || self.mailbox_error.is_some() {
+            self.mailbox_heard = true;
+            self.mailbox_error = None;
+            cx.notify();
+        }
         if friends == self.mailbox_friends {
             return;
         }
@@ -1130,6 +1175,17 @@ impl Store {
         for e in &mut self.mailbox_recipes {
             if let Some(f) = friends.iter().find(|f| f.id == e.from) {
                 e.from_name = f.name.clone();
+            }
+        }
+        // A plain invite sends no event when it's used, so a new friend
+        // turning up while one is open means it was used (codes work once).
+        if self.mailbox_invite().is_some() {
+            let new: Vec<&mailbox::Friend> =
+                friends.iter().filter(|f| !self.mailbox_friends.iter().any(|o| o.id == f.id)).collect();
+            if let Some(f) = new.first() {
+                let who = if f.name.is_empty() { "Your friend".to_string() } else { f.name.clone() };
+                cx.emit(StoreEvent::Notice(format!("{who} joined with your code."), false));
+                self.mailbox_invite = None;
             }
         }
         self.mailbox_friends = friends;
@@ -1343,6 +1399,11 @@ fn newest_codes_only(events: Vec<Event>) -> Vec<Event> {
         .into_iter()
         .filter(|e| e.kind() != Kind::Recipe || latest.get(&(e.from.clone(), e.inst.clone())) == Some(&e.seq))
         .collect()
+}
+
+/// A hidden pack's key: who, which pack, and which change of it.
+fn hidden_key(e: &Event) -> String {
+    format!("{}/{}/{}", e.from, e.inst, e.at)
 }
 
 /// Takes the ways a revoke closes off a received pack: shared directly,

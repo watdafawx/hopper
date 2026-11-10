@@ -8,12 +8,10 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::radio::Radio;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Selectable as _, 
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _,
     h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -23,33 +21,11 @@ use hopper::settings::FollowedRecipe;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-/// The invite code just made, and when it stops working.
-#[derive(Clone)]
-struct Invite {
-    code: String,
-    until: Instant,
-}
-
-/// "Works once. Expires in 14:32." from the mailbox's own lifetime.
-fn invite_left(inv: &Invite) -> String {
-    let secs = inv.until.saturating_duration_since(Instant::now()).as_secs();
-    format!("Works once. Expires in {:02}:{:02}.", secs / 60, secs % 60)
-}
 
 pub struct PeersView {
     store: Entity<Store>,
     root: Option<PathBuf>,
     address: Entity<InputState>,
-    /// The friend's one-time code, for the mailbox.
-    join_code: Entity<InputState>,
-    /// The invite code just made, shown with a Copy button and copied once.
-    invite: Option<Invite>,
-    /// Bumped for each invite so an older countdown stops.
-    invite_gen: u64,
-    /// Drawn as the docked panel instead of the full page.
-    docked: bool,
     message: Option<Result<String, String>>,
     /// Mods from other sources the last pull left out, said after its result.
     skipped: Option<String>,
@@ -74,9 +50,6 @@ impl PeersView {
         let address = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Add by address: 100.x.y.z, host:port or https URL")
         });
-        let join_code = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Paste their invite code")
-        });
         let subs = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe(&address, |this, _, e: &InputEvent, cx| {
@@ -84,20 +57,11 @@ impl PeersView {
                     this.add_address(cx);
                 }
             }),
-            cx.subscribe(&join_code, |this, _, e: &InputEvent, cx| {
-                if matches!(e, InputEvent::PressEnter { .. }) {
-                    this.mailbox_join(cx);
-                }
-            }),
         ];
         Self {
             store,
             root: None,
             address,
-            join_code,
-            invite: None,
-            invite_gen: 0,
-            docked: false,
             message: None,
             skipped: None,
             codes: HashMap::new(),
@@ -616,467 +580,6 @@ impl PeersView {
         )
     }
 
-    /// Drawn as the docked panel (full height, beside the page).
-    pub fn set_docked(&mut self, docked: bool) {
-        self.docked = docked;
-    }
-
-    /// The Friends panel docked beside an instance page: the same card as
-    /// the Friends tab, without the page's title and network section.
-    pub fn panel_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .id("friends-panel")
-            .size_full()
-            .overflow_y_scrollbar()
-            .child(div().p_3().child(self.mailbox_card(cx)))
-            .into_any_element()
-    }
-
-    fn set_shared(&mut self, inst: String, friend: String, on: bool, cx: &mut Context<Self>) {
-        self.store.update(cx, |s, cx| s.set_shared(&inst, &friend, on, cx));
-        cx.notify();
-    }
-
-    fn share_all(&mut self, cx: &mut Context<Self>) {
-        self.store.update(cx, |s, cx| s.share_all(cx));
-        cx.notify();
-    }
-
-    fn dismiss_share_prompt(&mut self, cx: &mut Context<Self>) {
-        self.store.update(cx, |s, cx| s.dismiss_share_prompt(cx));
-        cx.notify();
-    }
-
-    fn mailbox_card(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let mb = self.store.read(cx).mailbox();
-        let friends = self.store.read(cx).mailbox_friends().to_vec();
-        let recipes = self.store.read(cx).mailbox_recipes().to_vec();
-        let err = self.store.read(cx).mailbox_error();
-        let has_friends = !friends.is_empty();
-        let instances = self.store.read(cx).instances().to_vec();
-        let shared = self.store.read(cx).settings().shared_with.clone();
-        let prompt = has_friends && shared.is_empty() && !self.store.read(cx).settings().share_prompt_done;
-        // One section per friend. A friend who sent a pack but isn't paired
-        // any more still gets one, so their pack doesn't vanish.
-        let mut groups: Vec<(String, String, String, bool)> = friends
-            .iter()
-            .map(|f| (f.id.clone(), f.name.clone(), f.mc_id.clone(), f.online))
-            .collect();
-        for e in &recipes {
-            if !groups.iter().any(|g| g.0 == e.from) {
-                groups.push((e.from.clone(), e.from_name.clone(), String::new(), false));
-            }
-        }
-        let groups_len = groups.len();
-        v_flex()
-            .gap_2()
-            .p_3()
-            .rounded(theme.radius)
-            .border_1()
-            .border_color(theme.border)
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(div().text_sm().font_semibold().child("From anywhere"))
-                    .when(mb.is_none() && err.is_none(), |r| {
-                        r.child(Spinner::new().small())
-                    })
-                    .child(div().flex_1())
-                    .when(mb.is_some(), |r| {
-                        r.child(
-                            Button::new("mb-invite")
-                                .small()
-                                .outline()
-                                .label("Invite a friend")
-                                .on_click(cx.listener(|this, _, _, cx| this.mailbox_invite(cx))),
-                        )
-                    }),
-            )
-            .when_some(err, |c, e| {
-                c.child(div().text_sm().text_color(theme.danger).child(e))
-            })
-            .when(mb.is_some() && friends.is_empty() && recipes.is_empty(), |c| {
-                c.child(widgets::caption(
-                    "Invite a friend to get a code, or paste the code they sent you. Codes work once and run out after 15 minutes.",
-                    cx,
-                ))
-            })
-            .when(prompt, |c| {
-                let theme = cx.theme().clone();
-                c.child(
-                    v_flex()
-                        .gap_1()
-                        .p_2()
-                        .rounded(theme.radius)
-                        .bg(theme.muted)
-                        .child(div().text_sm().font_medium().child("Your friends can't see your packs yet."))
-                        .child(widgets::caption(
-                            "Turn on the packs you want to share. Only the mod list goes to them; files download from their sites.",
-                            cx,
-                        ))
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .pt_1()
-                                .child(
-                                    Button::new("mb-share-all")
-                                        .xsmall()
-                                        .primary()
-                                        .label("Share all")
-                                        .on_click(cx.listener(|this, _, _, cx| this.share_all(cx))),
-                                )
-                                .child(
-                                    Button::new("mb-share-not")
-                                        .xsmall()
-                                        .ghost()
-                                        .label("Not now")
-                                        .on_click(cx.listener(|this, _, _, cx| this.dismiss_share_prompt(cx))),
-                                ),
-                        ),
-                )
-            })
-            .children(groups.into_iter().enumerate().map(|(gi, (fid, fname, mc_id, online))| {
-                let fname = if fname.is_empty() { "A friend".to_string() } else { fname };
-                let theirs: Vec<hopper::mailbox::Event> =
-                    recipes.iter().filter(|e| e.from == fid).cloned().collect();
-                let head = if mc_id.is_empty() {
-                    div()
-                        .size_2()
-                        .rounded_full()
-                        .bg(if online { theme.success } else { theme.muted_foreground })
-                        .into_any_element()
-                } else {
-                    let saved = hopper::accounts::Saved {
-                        id: mc_id.clone(),
-                        name: fname.clone(),
-                        ..Default::default()
-                    };
-                    let url = saved.fallback_avatar();
-                    self.store.update(cx, |s, _| s.want_image_now(&url));
-                    crate::accounts::head(&self.store.read(cx), &saved, rems(1.5), cx)
-                };
-                v_flex()
-                    .gap_1()
-                    .py_2()
-                    .when(gi > 0, |r| {
-                        r.pt_3().border_t_1().border_color(theme.border)
-                    })
-                    .when(gi == 0 && groups_len > 0, |r| r.pt_1())
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .px_1()
-                            .items_center()
-                            .child(head)
-                            .child(div().text_sm().font_medium().child(fname.clone()))
-                            .when(online && !mc_id.is_empty(), |r| {
-                                r.child(div().size_2().rounded_full().bg(theme.success))
-                            })
-                            .child(widgets::chip(theme.muted_foreground).xsmall().child("Paired")),
-                    )
-                    .when(!theirs.is_empty(), |c| {
-                        c.child(div().pt_1().px_1().child(widgets::caption("Their packs", cx)))
-                            .children(theirs.into_iter().map(|e| {
-                                let already = self
-                                    .store
-                                    .read(cx)
-                                    .settings()
-                                    .followed_recipes
-                                    .iter()
-                                    .any(|f| f.matches(&e.from, &e.inst, ""));
-                                let pack = if e.name.is_empty() { e.inst.clone() } else { e.name.clone() };
-                                h_flex()
-                                    .gap_2()
-                                    .px_1()
-                                    .child(div().text_sm().flex_1().min_w_0().truncate().child(pack))
-                                    .when(!e.left_out.is_empty(), |r| {
-                                        r.child(
-                                            widgets::caption(
-                                                format!("{} file(s) aren't downloadable", e.left_out.len()),
-                                                cx,
-                                            )
-                                            .text_xs(),
-                                        )
-                                    })
-                                    .when(already, |r| {
-                                        r.child(widgets::chip(theme.success).xsmall().child("Following"))
-                                    })
-                                    .when(!already, |r| {
-                                        r.child(
-                                            Button::new(SharedString::from(format!(
-                                                "mb-get:{}:{}",
-                                                e.from, e.inst
-                                            )))
-                                            .xsmall()
-                                            .outline()
-                                            .label("Follow")
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.mailbox_follow(&e, cx)
-                                            })),
-                                        )
-                                    })
-                            }))
-                    })
-                    .when(!instances.is_empty(), |c| {
-                        c.child(
-                            div().pt_1().px_1().child(widgets::caption("Your packs", cx)),
-                        )
-                        .children(instances.iter().map(|inst| {
-                            let key = inst.id.clone();
-                            let on = self.store.read(cx).settings().shares_with(&key, &fid);
-                            let name = inst.name.clone();
-                            let (k2, f2) = (key.clone(), fid.clone());
-                            h_flex()
-                                .gap_2()
-                                .px_1()
-                                .items_center()
-                                .child(div().text_sm().flex_1().min_w_0().truncate().child(name))
-                                .child(
-                                    widgets::caption(if on { "Shared" } else { "Private" }, cx)
-                                        .text_xs()
-                                        .text_color(if on {
-                                            theme.success
-                                        } else {
-                                            theme.muted_foreground
-                                        }),
-                                )
-                                .child(
-                                    Switch::new(SharedString::from(format!(
-                                        "mb-share:{key}:{fid}"
-                                    )))
-                                    .small()
-                                    .checked(on)
-                                    .tooltip(format!("Share this pack with {fname}. Only the mod list goes to them."))
-                                    .on_change(cx.listener(move |this, v: &bool, _, cx| {
-                                        this.set_shared(k2.clone(), f2.clone(), *v, cx)
-                                    })),
-                                )
-                        }))
-                    })
-            }))
-            .when_some(self.invite.clone(), |c, inv| {
-                let copy = inv.code.clone();
-                c.child(
-                    v_flex()
-                        .gap_1()
-                        .px_1()
-                        .pt_2()
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    widgets::chip(theme.primary)
-                                        .text_sm()
-                                        .font_semibold()
-                                        .child(inv.code.clone()),
-                                )
-                                .child(
-                                    Button::new("mb-copy")
-                                        .xsmall()
-                                        .outline()
-                                        .label("Copy")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                                            this.message = Some(Ok("Code copied.".into()));
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(widgets::caption(invite_left(&inv), cx).text_xs()),
-                )
-            })
-            .when(mb.is_some(), |c| {
-                c.child(
-                    v_flex()
-                        .gap_1()
-                        .px_1()
-                        .pt_2()
-                        .when(self.invite.is_none(), |r| {
-                            r.border_t_1().border_color(theme.border)
-                        })
-                        .child(widgets::caption("Have a code from them?", cx))
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(Input::new(&self.join_code).small()),
-                                )
-                                .child(
-                                    Button::new("mb-join")
-                                        .small()
-                                        .outline()
-                                        .label("Join")
-                                        .disabled(self.running)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.mailbox_join(cx)
-                                        })),
-                                ),
-                        ),
-                )
-            })
-            .into_any_element()
-    }
-
-    fn mailbox_invite(&mut self, cx: &mut Context<Self>) {
-        let Some(mb) = self.store.read(cx).mailbox() else {
-            return;
-        };
-        self.running = true;
-        self.message = None;
-        cx.spawn(async move |this, cx| {
-            let r = cx.background_spawn(async move { mb.invite() }).await;
-            this.update(cx, |this, cx| {
-                this.running = false;
-                this.message = Some(match r {
-                    Ok((code, secs)) => {
-                        // Put it on the clipboard straight away; the Copy
-                        // button beside it is for later.
-                        cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                        this.invite = Some(Invite {
-                            code,
-                            until: Instant::now() + Duration::from_secs(secs),
-                        });
-                        this.start_invite_ticker(cx);
-                        Ok("Code copied. Send it to your friend; it works once.".to_string())
-                    }
-                    Err(e) => Err(hopper::mailbox::says(&e)),
-                });
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Keeps the invite's "Expires in" line moving, then clears it. It runs
-    /// while the view is open, so changing tabs or instance doesn't lose it.
-    fn start_invite_ticker(&mut self, cx: &mut Context<Self>) {
-        self.invite_gen = self.invite_gen.wrapping_add(1);
-        let id = self.invite_gen;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let more = this
-                    .update(cx, |this, cx| {
-                        if this.invite_gen != id {
-                            return false;
-                        }
-                        let Some(inv) = &this.invite else {
-                            return false;
-                        };
-                        if Instant::now() >= inv.until {
-                            this.invite = None;
-                            this.message =
-                                Some(Ok("That code expired. Invite a friend again for a new one.".into()));
-                        }
-                        cx.notify();
-                        this.invite.is_some()
-                    })
-                    .unwrap_or(false);
-                if !more {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    fn mailbox_join(&mut self, cx: &mut Context<Self>) {
-        let code = self.join_code.read(cx).value().trim().to_string();
-        if code.is_empty() {
-            return;
-        }
-        let Some(mb) = self.store.read(cx).mailbox() else {
-            return;
-        };
-        self.running = true;
-        self.message = None;
-        cx.spawn(async move |this, cx| {
-            let r = cx.background_spawn(async move { mb.join(&code) }).await;
-            this.update(cx, |this, cx| {
-                this.running = false;
-                this.message = Some(match r {
-                    Ok((f, _)) => Ok(format!(
-                        "Paired with {}. Their instances appear here when they share one.",
-                        if f.name.is_empty() { "them" } else { &f.name }
-                    )),
-                    Err(e) => Err(hopper::mailbox::says(&e)),
-                });
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn mailbox_follow(&mut self, e: &hopper::mailbox::Event, cx: &mut Context<Self>) {
-        let share = match hopper::sharecode::decode(&e.code) {
-            Ok(s) => s,
-            Err(err) => {
-                self.message = Some(Err(format!("{err:#}")));
-                cx.notify();
-                return;
-            }
-        };
-        // Only instances this code fits: the same pack, or a newer version
-        // of it. A different pack has to be a new instance.
-        let mut fitting = Vec::new();
-        for inst in self.store.read(cx).instances() {
-            let update = match hopper::recipe::fit(inst, &share) {
-                hopper::recipe::Fit::Different(_) => continue,
-                hopper::recipe::Fit::PackUpdate(_) => true,
-                hopper::recipe::Fit::Same => false,
-            };
-            fitting.push((inst.root.clone(), inst.name.clone(), update));
-        }
-        let preferred = self
-            .root
-            .as_ref()
-            .and_then(|r| fitting.iter().position(|(root, _, _)| root == r))
-            .unwrap_or(0);
-        let Some(handle) = cx.active_window() else {
-            return;
-        };
-        let e = e.clone();
-        let store = self.store.clone();
-        let title = format!(
-            "Follow {}'s {}",
-            if e.from_name.is_empty() { "a friend" } else { &e.from_name },
-            if e.name.is_empty() { &e.inst } else { &e.name }
-        );
-        // Opening a dialog from inside this view's click handler is too
-        // early; wait for the window's next update like the other dialogs.
-        cx.defer(move |cx| {
-            handle
-                .update(cx, |_, window, cx| {
-                    let view = cx.new(|cx| FollowChooser::new(&e, fitting, preferred, cx));
-                    window.open_dialog(cx, move |dialog, window, _| {
-                        let (f2, s2) = (view.clone(), store.clone());
-                        dialog
-                            .title(title.clone())
-                            .w(rems(40.).to_pixels(window.rem_size()))
-                            .margin_top(rems(widgets::DIALOG_TOP).to_pixels(window.rem_size()))
-                            .child(view.clone())
-                            .footer(crate::dialogs::footer("Follow", true))
-                            .on_ok(move |_, window, cx| {
-                                FollowChooser::go(&f2, &s2, window, cx)
-                            })
-                    });
-                })
-                .ok();
-        });
-    }
-
     fn intro(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .size_full()
@@ -1093,7 +596,7 @@ impl PeersView {
             )
             .child(
                 widgets::caption(
-                    "No account. Nothing is uploaded to Hopper. Windows may ask to allow Hopper on private networks; allow it so the other PC can reach this one.",
+                    "No account needed. PCs on the same network talk to each other directly. Windows may ask to allow Hopper on private networks; allow it so the other PC can reach this one.",
                     cx,
                 )
                 .text_xs(),
@@ -1261,7 +764,7 @@ impl PeersView {
                                 })),
                         )
                         .child(widgets::caption(
-                            "No account. Nothing is uploaded to Hopper.",
+                            "PCs on this network talk to each other directly.",
                             cx,
                         ).text_xs()),
                 )
@@ -1558,170 +1061,8 @@ impl PeersView {
     }
 }
 
-/// What the Follow dialog picked.
-#[derive(Clone, Debug, PartialEq)]
-enum FollowPick {
-    Existing(usize),
-    New,
-}
-
-/// Asks where a friend's pack should go: over an instance that already
-/// fits it, or as a new one. Following replaces the mods, so this is never
-/// done without asking.
-#[derive(Clone)]
-struct FollowChooser {
-    /// The pack, as the store follows it.
-    req: crate::store::FollowReq,
-    peer_name: String,
-    inst: String,
-    name: String,
-    left_out: Vec<String>,
-    /// Local instances the code fits, and whether their pack updates first.
-    fitting: Vec<(PathBuf, String, bool)>,
-    pick: FollowPick,
-}
-
-impl FollowChooser {
-    fn new(
-        e: &hopper::mailbox::Event,
-        fitting: Vec<(PathBuf, String, bool)>,
-        preferred: usize,
-        _cx: &mut Context<Self>,
-    ) -> Self {
-        let pick = if fitting.is_empty() {
-            FollowPick::New
-        } else {
-            FollowPick::Existing(preferred.min(fitting.len() - 1))
-        };
-        Self {
-            req: crate::store::FollowReq::of(e),
-            peer_name: e.from_name.clone(),
-            inst: e.inst.clone(),
-            name: e.name.clone(),
-            left_out: e.left_out.clone(),
-            fitting,
-            pick,
-        }
-    }
-
-    fn go(view: &Entity<Self>, store: &Entity<Store>, window: &mut Window, cx: &mut App) -> bool {
-        let this = view.read(cx).clone();
-        let target = match this.pick {
-            FollowPick::Existing(ix) => {
-                let Some((root, _, _)) = this.fitting.get(ix) else {
-                    return true;
-                };
-                crate::store::FollowTarget::Existing(root.clone())
-            }
-            FollowPick::New => crate::store::FollowTarget::New,
-        };
-        // The store asks about mods from other sources, then follows.
-        crate::store::follow_pack(store, this.req, target, window, cx);
-        true
-    }
-}
-
-impl Render for FollowChooser {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let who = if self.peer_name.is_empty() {
-            "A friend".to_string()
-        } else {
-            self.peer_name.clone()
-        };
-        let pack = if self.name.is_empty() {
-            self.inst.clone()
-        } else {
-            self.name.clone()
-        };
-        let mut body = v_flex()
-            .gap_3()
-            .child(div().text_sm().child(format!(
-                "{who} shared {pack} with you. Following it keeps this PC in step with theirs."
-            )))
-            .when(!self.left_out.is_empty(), |c| {
-                c.child(
-                    widgets::caption(
-                        format!(
-                            "{} file(s) can't be downloaded from any site. Ask them to send those.",
-                            self.left_out.len()
-                        ),
-                        cx,
-                    )
-                    .text_xs(),
-                )
-            })
-            .child(widgets::caption(
-                if self.fitting.is_empty() {
-                    "None of your packs match theirs, so this starts a new one."
-                } else {
-                    "Where should it go?"
-                },
-                cx,
-            ));
-        let fitting = self.fitting.clone();
-        body = body.children(fitting.iter().enumerate().map(|(ix, (_, name, updates))| {
-            let picked = self.pick == FollowPick::Existing(ix);
-            v_flex()
-                .gap_1()
-                .child(
-                    Radio::new(SharedString::from(format!("follow-here:{ix}")))
-                        .label(name.clone())
-                        .checked(picked)
-                        .on_click(cx.listener(move |this, _: &bool, _, cx| {
-                            this.pick = FollowPick::Existing(ix);
-                            cx.notify();
-                        })),
-                )
-                .when(*updates, |c| {
-                    c.child(
-                        widgets::caption(
-                            "Their pack is a newer version. Your pack updates first, then the mods.",
-                            cx,
-                        )
-                        .text_xs()
-                        .pl_6(),
-                    )
-                })
-        }));
-        body
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        Radio::new("follow-new")
-                            .label(format!("Start a new instance: {pack}"))
-                            .checked(self.pick == FollowPick::New)
-                            .on_click(cx.listener(|this, _: &bool, _, cx| {
-                                this.pick = FollowPick::New;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        widgets::caption(
-                            "Their pack and mods install as a new instance. Nothing here changes.",
-                            cx,
-                        )
-                        .text_xs()
-                        .pl_6(),
-                    ),
-            )
-            .when(matches!(self.pick, FollowPick::Existing(_)), |c| {
-                c.child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.warning)
-                        .child("Your mods and settings there are replaced with theirs. History can undo it."),
-                )
-            })
-    }
-}
-
 impl Render for PeersView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.docked {
-            return div().size_full().child(self.panel_body(cx)).into_any_element();
-        }
         let Some(hub) = self.hub(cx) else {
             return self.intro(cx);
         };
@@ -1834,7 +1175,10 @@ impl Render for PeersView {
                     ),
             )
             .children(follow)
-            .child(self.mailbox_card(cx))
+            .child(widgets::caption(
+                "Friends anywhere, and the packs they share, are in the Friends panel (the people button at the top).",
+                cx,
+            ))
             .children(message)
             .child(
                 v_flex()

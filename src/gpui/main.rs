@@ -32,6 +32,7 @@ mod files_changes;
 mod fetch_progress;
 #[cfg(windows)]
 mod fetch_window;
+mod friends;
 mod crash_help;
 mod crash_view;
 mod hero;
