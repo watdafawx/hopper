@@ -13,6 +13,7 @@
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -251,6 +252,9 @@ pub fn failure(e: &anyhow::Error) -> Failure {
     Failure::Other(m.message.clone())
 }
 
+/// Set once this run has replaced a forgotten account (see `Mailbox::load_at`).
+static SIGNED_UP_AGAIN: AtomicBool = AtomicBool::new(false);
+
 /// Whether the mailbox no longer knows this PC's token (its data was reset).
 pub fn unauthorized(e: &anyhow::Error) -> bool {
     e.downcast_ref::<MailboxError>().is_some_and(|m| m.status == 401)
@@ -306,10 +310,20 @@ impl Mailbox {
     /// Loads this PC's account, registering it the first time. `name` and
     /// `mc_id` are the signed-in Minecraft profile when there is one.
     pub fn load(base: &str, name: &str, mc_id: &str) -> anyhow::Result<Self> {
-        Self::load_at(&account_path(), base, name, mc_id)
+        Self::load_at(&account_path(), base, name, mc_id, &SIGNED_UP_AGAIN)
     }
 
-    fn load_at(path: &Path, base: &str, name: &str, mc_id: &str) -> anyhow::Result<Self> {
+    /// `signed_up_again` is set the first time a forgotten account is
+    /// replaced; after that a 401 is just an error, so a service that keeps
+    /// refusing new accounts is asked again every half minute at most, not
+    /// registered with in a loop.
+    fn load_at(
+        path: &Path,
+        base: &str,
+        name: &str,
+        mc_id: &str,
+        signed_up_again: &AtomicBool,
+    ) -> anyhow::Result<Self> {
         let mut account: Account = std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
@@ -322,6 +336,9 @@ impl Mailbox {
             // saved account is kept.
             if let Err(e) = me.get("/v1/friends", Some(&account.token)) {
                 if unauthorized(&e) {
+                    if signed_up_again.swap(true, Ordering::SeqCst) {
+                        return Err(e);
+                    }
                     account = Account::default();
                     me.account = Account::default();
                     me.reset = true;
@@ -766,7 +783,8 @@ mod tests {
         };
         std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
         let (url, seen) = forgetful_mailbox();
-        let mb = Mailbox::load_at(&path, &url, "FOX", "").unwrap();
+        let again = AtomicBool::new(false);
+        let mb = Mailbox::load_at(&path, &url, "FOX", "", &again).unwrap();
         assert!(mb.was_reset());
         assert_eq!((mb.account().id.as_str(), mb.account().token.as_str()), ("newid", "newtoken"));
         // The new account is what is saved.
@@ -774,8 +792,15 @@ mod tests {
         assert_eq!(saved.id, "newid");
         let lines: Vec<String> = seen.try_iter().collect();
         assert_eq!(lines.iter().filter(|l| l.starts_with("POST /v1/register")).count(), 1);
-        // A second start finds a good account (this fake still says 401 to
-        // everything, so only check that a fresh file wasn't needed first).
+        // This fake says 401 to everything, even the new account. A second
+        // start must not sign up again: it is an error, and the saved
+        // account stays.
+        let e = Mailbox::load_at(&path, &url, "FOX", "", &again).err().expect("second load fails");
+        assert!(unauthorized(&e));
+        let lines: Vec<String> = seen.try_iter().collect();
+        assert_eq!(lines.iter().filter(|l| l.starts_with("POST /v1/register")).count(), 0);
+        let saved: Account = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.id, "newid");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -792,7 +817,7 @@ mod tests {
         };
         std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
         // Nothing listens here: the name is unchanged, so no call is needed.
-        let mb = Mailbox::load_at(&path, "http://127.0.0.1:9", "FOX", "").unwrap();
+        let mb = Mailbox::load_at(&path, "http://127.0.0.1:9", "FOX", "", &AtomicBool::new(false)).unwrap();
         assert!(!mb.was_reset());
         assert_eq!(mb.account().id, "oldid");
         let _ = std::fs::remove_dir_all(&dir);
