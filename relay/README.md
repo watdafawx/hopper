@@ -8,7 +8,10 @@ Cloudflare Tunnel as `https://sync.kyuubi.dev`.
 
 - a random id and bearer token per PC;
 - the friend list and one-time invite codes (15 minutes);
-- the latest recipe events per PC (at most 200; no files).
+- groups: name, owner, members (each with "said yes" and "keep in step"),
+  the latest share code of every pack shared with the group, and which of
+  those packs a member follows;
+- the latest events per PC (at most 200; no files).
 
 State is `/var/lib/hopper-mailbox/state.json`, owned by the
 `hopper-mailbox` user. Deleting it resets every account and pairing:
@@ -26,13 +29,31 @@ All routes except `register` and `health` need
 | Route | What |
 |---|---|
 | `POST /v1/register` | `{name}` → `{id, token}` |
-| `POST /v1/invite` | → `{code}` (one use, 15 min) |
-| `POST /v1/join` | `{code}` → `{friend}` |
-| `GET /v1/friends` | `{friends: [{id,name,online}]}` |
-| `POST /v1/remove` | `{id}` |
-| `POST /v1/recipes` | `{to, inst, name, code, left_out}` |
-| `GET /v1/recipes?after=N&wait=60` | `{seq, events}`; long-polls |
-| `GET /v1/health` | `{ok:true}` |
+| `POST /v1/profile` | `{name, mc_id}` |
+| `POST /v1/invite` | `{inst?}` → `{code, expires}` (seconds) (one use, 15 min) |
+| `POST /v1/join` | `{code}` → `{friend, inst}`; 409 `friends_full` / `their_friends_full` |
+| `GET /v1/friends` | `{friends: [{id,name,mc_id,online,last_seen}], max}` |
+| `POST /v1/remove` | `{id}`; also leaves each other's groups |
+| `POST /v1/recipes` | `{to: [ids], groups: [ids], inst, key, name, code, left_out}` → `{seq, sent, skipped}`; one event per person |
+| `POST /v1/revoke` | `{inst, to: [ids], groups: [ids], reason}` (`unshared` / `deleted`) |
+| `GET /v1/recipes?after=N&wait=60&v=2` | `{seq, events}`; long-polls. Without `v=2` only `recipe` events |
+| `GET /v1/groups` | groups you own, belong to or are invited to |
+| `POST /v1/groups` | `{name, members}` → `{group}` (members must be your friends) |
+| `POST /v1/groups/<id>` | owner: `{name?, add?, remove?}` |
+| `POST /v1/groups/<id>/delete` | owner |
+| `POST /v1/groups/<id>/accept` | invited member says yes; gets the group's packs |
+| `POST /v1/groups/<id>/leave` | member (not the owner) |
+| `POST /v1/groups/<id>/in-step` | `{on}`: follow what other members follow |
+| `POST /v1/groups/<id>/follow` | `{from, inst}`: tell in-step members you followed a group pack |
+| `GET /v1/health` | `{ok:true, v:2}` |
+
+A group is invisible to anyone who isn't in it (404). The protocol, event
+kinds and limits are in `design/friends-sync.md`.
+
+## Tests
+
+`python -B -m unittest relay/test_hopper_mailbox.py` (from the repo root)
+runs the mailbox on a loopback port with a temporary state file.
 
 ## Deploy
 
@@ -47,6 +68,11 @@ sudo install -m 644 hopper-mailbox.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now hopper-mailbox
 ```
+
+Updating the file later is the `install` line for `hopper_mailbox.py` plus
+`sudo systemctl restart hopper-mailbox`. A state file from before groups
+loads as is (it gets an empty `groups`). Going back to an older file drops
+the groups on its next save; friends and pending events stay.
 
 `hopper-mailbox.service` binds `127.0.0.1:8787`; nothing listens publicly.
 The tunnel is a separate unit, `hopper-tunnel.service`, running
