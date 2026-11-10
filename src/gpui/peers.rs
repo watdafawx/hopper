@@ -10,6 +10,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Selectable as _, 
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
@@ -21,6 +22,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Whether this instance's folder is in the share list.
+fn is_shared(shared: &[String], inst: &hopper::instances::Instance) -> bool {
+    let key = inst.root.file_name().unwrap_or_default().to_string_lossy();
+    shared.iter().any(|k| k.eq_ignore_ascii_case(&key))
+}
 
 /// The invite code just made, and when it stops working.
 #[derive(Clone)]
@@ -625,6 +632,64 @@ impl PeersView {
         )
     }
 
+    /// The Friends panel docked beside an instance page: the same card as
+    /// the Friends tab, without the page's title and network section.
+    pub fn panel_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("friends-panel")
+            .size_full()
+            .overflow_y_scrollbar()
+            .child(div().p_3().child(self.mailbox_card(cx)))
+            .into_any_element()
+    }
+
+    fn set_shared(&mut self, key: String, on: bool, cx: &mut Context<Self>) {
+        self.store.update(cx, |s, cx| {
+            s.update_settings(
+                |st| {
+                    st.shared_instances.retain(|k| !k.eq_ignore_ascii_case(&key));
+                    if on {
+                        st.shared_instances.push(key.clone());
+                    }
+                    st.share_prompt_done = true;
+                },
+                cx,
+            )
+        });
+        cx.notify();
+    }
+
+    fn share_all(&mut self, cx: &mut Context<Self>) {
+        let keys: Vec<String> = self
+            .store
+            .read(cx)
+            .instances()
+            .iter()
+            .filter_map(|i| i.root.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        self.store.update(cx, |s, cx| {
+            s.update_settings(
+                |st| {
+                    for k in keys {
+                        if !st.shared_instances.iter().any(|x| x.eq_ignore_ascii_case(&k)) {
+                            st.shared_instances.push(k);
+                        }
+                    }
+                    st.share_prompt_done = true;
+                },
+                cx,
+            )
+        });
+        cx.notify();
+    }
+
+    fn dismiss_share_prompt(&mut self, cx: &mut Context<Self>) {
+        self.store.update(cx, |s, cx| {
+            s.update_settings(|st| st.share_prompt_done = true, cx)
+        });
+        cx.notify();
+    }
+
     fn mailbox_card(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let mb = self.store.read(cx).mailbox();
@@ -633,6 +698,10 @@ impl PeersView {
         let err = self.store.read(cx).mailbox_error();
         let following = self.followed(cx);
         let has_friends = !friends.is_empty();
+        let instances = self.store.read(cx).instances().to_vec();
+        let shared = self.store.read(cx).settings().shared_instances.clone();
+        let any_shared = instances.iter().any(|i| is_shared(&shared, i));
+        let prompt = has_friends && !any_shared && !self.store.read(cx).settings().share_prompt_done;
         v_flex()
             .gap_2()
             .p_3()
@@ -711,6 +780,40 @@ impl PeersView {
                     cx,
                 ))
             })
+            .when(prompt, |c| {
+                let theme = cx.theme().clone();
+                c.child(
+                    v_flex()
+                        .gap_1()
+                        .p_2()
+                        .rounded(theme.radius)
+                        .bg(theme.muted)
+                        .child(div().text_sm().font_medium().child("Your friends can't see your packs yet."))
+                        .child(widgets::caption(
+                            "Turn on the packs you want to share. Only the mod list goes to them; files download from their sites.",
+                            cx,
+                        ))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .pt_1()
+                                .child(
+                                    Button::new("mb-share-all")
+                                        .xsmall()
+                                        .primary()
+                                        .label("Share all")
+                                        .on_click(cx.listener(|this, _, _, cx| this.share_all(cx))),
+                                )
+                                .child(
+                                    Button::new("mb-share-not")
+                                        .xsmall()
+                                        .ghost()
+                                        .label("Not now")
+                                        .on_click(cx.listener(|this, _, _, cx| this.dismiss_share_prompt(cx))),
+                                ),
+                        ),
+                )
+            })
             .children(friends.into_iter().map(|f| {
                 let head = if f.mc_id.is_empty() {
                     div()
@@ -743,9 +846,40 @@ impl PeersView {
                     })
                     .child(widgets::chip(theme.muted_foreground).xsmall().child("Paired"))
             }))
+            .when(!instances.is_empty(), |c| {
+                let theme = cx.theme().clone();
+                c.child(div().pt_1().child(widgets::caption(
+                    "Your packs · only the ones switched on are shared",
+                    cx,
+                )))
+                .children(instances.into_iter().map(|inst| {
+                    let key = inst.root.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    let on = is_shared(&shared, &inst);
+                    let name = inst.name.clone();
+                    h_flex()
+                        .gap_2()
+                        .px_1()
+                        .items_center()
+                        .child(div().text_sm().flex_1().min_w_0().truncate().child(name))
+                        .child(
+                            widgets::caption(if on { "Shared" } else { "Not shared" }, cx)
+                                .text_xs()
+                                .text_color(if on { theme.success } else { theme.muted_foreground }),
+                        )
+                        .child(
+                            Switch::new(SharedString::from(format!("mb-share:{key}")))
+                                .small()
+                                .checked(on)
+                                .tooltip("Share this pack with your friends. Only the mod list goes to them.")
+                                .on_change(cx.listener(move |this, v: &bool, _, cx| {
+                                    this.set_shared(key.clone(), *v, cx)
+                                })),
+                        )
+                }))
+            })
             .when(!recipes.is_empty() && has_friends, |c| {
                 c.child(widgets::caption(
-                    "Your instances are shared with them automatically. Theirs show below; Get this instance sets one up here.",
+                    "Follow a pack to keep this PC in step with theirs. The packs you share show above.",
                     cx,
                 ))
             })
@@ -781,7 +915,7 @@ impl PeersView {
                             Button::new(SharedString::from(format!("mb-get:{}:{}", e.from, e.inst)))
                                 .xsmall()
                                 .outline()
-                                .label("Get this instance")
+                                .label("Follow")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.mailbox_follow(&e, cx)
                                 })),

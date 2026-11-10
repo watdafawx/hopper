@@ -270,6 +270,8 @@ pub struct LibraryView {
     history_btn: std::cell::RefCell<Option<Entity<crate::history_button::HistoryButton>>>,
     selected: Option<PathBuf>,
     tab: InstTab,
+    /// The Friends panel is docked beside the page.
+    friends_open: bool,
     /// The tab before the last switch, and when it happened, for the
     /// sliding underline and the hero's height.
     tab_from: InstTab,
@@ -480,6 +482,7 @@ impl LibraryView {
             history_btn: Default::default(),
             selected: None,
             tab: first_tab,
+            friends_open: false,
             tab_from: first_tab,
             tab_moved: None,
             tab_serial: 0,
@@ -2043,6 +2046,15 @@ impl LibraryView {
         let play_small = Some(widgets::glow(play.min_w_24(), play_color, cx));
         let history = self.history_button(&root, cx);
         let site = self.pack_facts(inst, cx).map(|(_, _, _, url, mr)| (url, mr));
+        let following = self
+            .store
+            .read(cx)
+            .settings()
+            .followed_recipes
+            .iter()
+            .find(|f| std::path::Path::new(&f.root) == inst.root)
+            .map(|f| format!("Following {}'s {}", f.peer_name, f.name));
+        let friends_label = following.clone().unwrap_or_else(|| "Friends".into());
         let actions = h_flex()
                             .flex_none()
                             .flex_nowrap()
@@ -2050,6 +2062,18 @@ impl LibraryView {
                             .children(play_small)
                             .children(pack_update)
                             .children(sync_to)
+                            .child(
+                                Button::new("friends-chip")
+                                    .outline()
+                                    .selected(self.friends_open || following.is_some())
+                                    .icon(IconName::Users)
+                                    .label(friends_label)
+                                    .tooltip("Friends: who you follow, and which of your packs they can follow")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.friends_open = !this.friends_open;
+                                        cx.notify();
+                                    })),
+                            )
                             .child(
                                 Button::new("folder")
                                     .outline()
@@ -2780,10 +2804,51 @@ impl LibraryView {
             .children(pre_join)
             .child(tabs)
             .children(pack_tabs)
-            .child(div().flex_1().min_h_0().pt_3().child(widgets::enter(
-                ElementId::Name(anim.into()),
-                div().size_full().child(body),
-            )))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .pt_3()
+                    .child(widgets::enter(
+                        ElementId::Name(anim.into()),
+                        div().flex_1().min_w_0().size_full().child(body),
+                    ))
+                    .when(self.friends_open, |d| {
+                        let theme = cx.theme();
+                        d.child(
+                            v_flex()
+                                .id("friends-dock")
+                                .w(rems(23.))
+                                .flex_none()
+                                .h_full()
+                                .min_h_0()
+                                .border_l_1()
+                                .border_color(theme.border)
+                                .child(
+                                    h_flex()
+                                        .px_3()
+                                        .py_2()
+                                        .gap_2()
+                                        .flex_none()
+                                        .child(div().text_sm().font_semibold().child("Friends"))
+                                        .child(div().flex_1())
+                                        .child(
+                                            Button::new("friends-hide")
+                                                .xsmall()
+                                                .ghost()
+                                                .label("Hide")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.friends_open = false;
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                )
+                                .child(div().flex_1().min_h_0().child(
+                                    self.peers.update(cx, |p, cx| p.panel_body(cx)),
+                                )),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 }
