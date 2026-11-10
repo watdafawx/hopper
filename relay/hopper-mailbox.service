@@ -15,6 +15,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/hopper-mailbox
+# The state file holds every account; nobody else on the machine reads it.
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
