@@ -576,9 +576,9 @@ impl SettingsPage {
             );
         }
         let search = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Search settings")
-                .clean_on_escape()
+            // No clean-on-Escape: Esc is how you leave Settings (and the
+            // search box has focus the moment the page opens).
+            InputState::new(window, cx).placeholder("Search settings")
         });
         let cf_key = cx.new(|cx| {
             InputState::new(window, cx).masked(true).placeholder(
