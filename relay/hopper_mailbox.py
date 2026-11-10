@@ -132,6 +132,13 @@ def make_event(to, kind, frm, **fields):
     ev = {"seq": state["seq"], "kind": kind, "from": frm, "at": now()}
     ev.update(fields)
     q = state["events"].setdefault(to, [])
+    if kind == "recipe":
+        # Only a pack's newest code matters. Dropping older ones keeps the
+        # queue for other packs and events, and a desktop reading the feed
+        # from the start doesn't apply each old version in turn.
+        q[:] = [e for e in q if not (
+            e.get("kind", "recipe") == "recipe" and e["from"] == frm and e.get("inst") == ev.get("inst")
+        )]
     q.append(ev)
     if len(q) > MAX_EVENTS:
         del q[: len(q) - MAX_EVENTS]

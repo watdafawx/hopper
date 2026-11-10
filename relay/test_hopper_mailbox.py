@@ -125,6 +125,14 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(self.b.events()[-1]["reason"], "unshared")
         self.assertEqual(self.c.events(), [])
 
+    def test_only_the_newest_code_of_a_pack_waits(self):
+        self.a.befriend(self.b)
+        for code in ("HOP-1", "HOP-2", "HOP-3"):
+            self.a.post("/v1/recipes", dict(recipe("p1", code=code), to=[self.b.id]))
+        self.a.post("/v1/recipes", dict(recipe("p2", code="HOP-x"), to=[self.b.id]))
+        evs = self.b.events()
+        self.assertEqual([(e["inst"], e["code"]) for e in evs], [("p1", "HOP-3"), ("p2", "HOP-x")])
+
     def test_friend_list_full_is_its_own_error(self):
         mb.MAX_FRIENDS, old = 1, mb.MAX_FRIENDS
         try:
