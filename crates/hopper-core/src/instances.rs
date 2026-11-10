@@ -487,7 +487,7 @@ pub fn discover(root: &Path) -> Vec<Instance> {
     let mut out: Vec<Instance> = entries
         .flatten()
         .filter(|e| e.file_name() != crate::instance_ops::HOPPER_TRASH)
-        .filter_map(|e| load(&e.path()))
+        .filter_map(|e| load_managed(&e.path()))
         .collect();
     out.sort_by_key(|i| i.name.to_lowercase());
     out
@@ -958,13 +958,27 @@ pub fn load(root: &Path) -> Option<Instance> {
     if inst.name.is_empty() {
         inst.name = root.file_name()?.to_string_lossy().into_owned();
     }
+    Some(inst)
+}
+
+/// [`load`] for an instance Hopper lists as its own (in its instances
+/// folder): gives it an [`Instance::id`] the first time. Plain `load` reads
+/// server folders and instances Hopper only looks at too, and must never
+/// write an id into those.
+pub fn load_managed(root: &Path) -> Option<Instance> {
+    let mut inst = load(root)?;
     give_id(&mut inst);
     Some(inst)
 }
 
 /// Gives an instance that has none its [`Instance::id`] and saves it, so
-/// every copy loaded from now on carries the same one.
-fn give_id(inst: &mut Instance) {
+/// every copy loaded from now on carries the same one. A folder holding a
+/// server is left alone: shares and follows are for players' instances, and
+/// a server's files change only through its own page.
+pub fn give_id(inst: &mut Instance) {
+    if inst.root.join("server.properties").is_file() {
+        return;
+    }
     if inst.ensure_id() && inst.unreadable.is_none() && !crate::hopperd::is_remote_root(&inst.root) {
         if let Err(e) = inst.save() {
             log::warn!("could not write {}: {e:#}", inst.root.join(HOPPER_FILE).display());
@@ -1475,6 +1489,45 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(d.join("mods")).unwrap();
         d
+    }
+
+    #[test]
+    fn only_listed_instances_get_an_id_written() {
+        let base = temp("ids");
+        let write = |dir: &Path, extra: &[(&str, &str)]| {
+            fs::create_dir_all(dir.join("mods")).unwrap();
+            let inst = Instance {
+                name: dir.file_name().unwrap().to_string_lossy().into_owned(),
+                root: dir.to_path_buf(),
+                format: FORMAT,
+                ..Default::default()
+            };
+            inst.save().unwrap();
+            for (f, body) in extra {
+                fs::write(dir.join(f), body).unwrap();
+            }
+        };
+        let on_disk = |dir: &Path| read_own(dir).unwrap().unwrap().id;
+        let (pack, server) = (base.join("Pack"), base.join("Server"));
+        write(&pack, &[]);
+        write(&server, &[("server.properties", "motd=x\n")]);
+
+        // Reading a folder (a server page, a crash check) writes nothing.
+        assert!(load(&pack).unwrap().id.is_empty());
+        assert!(on_disk(&pack).is_empty());
+
+        // Listed as one of Hopper's instances: given an id once, kept after.
+        let found = discover(&base);
+        let id = found.iter().find(|i| i.root == pack).unwrap().id.clone();
+        assert!(!id.is_empty());
+        assert_eq!(on_disk(&pack), id);
+        assert_eq!(load_managed(&pack).unwrap().id, id);
+
+        // A server folder among them is never written.
+        assert!(found.iter().find(|i| i.root == server).unwrap().id.is_empty());
+        assert!(on_disk(&server).is_empty());
+        assert!(load_managed(&server).unwrap().id.is_empty());
+        let _ = fs::remove_dir_all(&base);
     }
 
     const CF_JSON: &str = r#"{

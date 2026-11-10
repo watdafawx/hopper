@@ -1113,7 +1113,11 @@ impl Store {
             Msg::RecipeApplied(root, code) => self.on_recipe_applied(root, code, cx),
             Msg::InstanceChanged(root) if server_mods::remote(&root).is_some() => self.refetch_server_mods(&root),
             Msg::InstanceChanged(root) => {
-                if let Some(new) = instances::load(&root) {
+                // Only Hopper's own instances get an id written; a folder
+                // it only looks at is read as it is.
+                let managed = self.instance(&root).is_some() || root.parent() == Some(Path::new(&self.settings.instances_root));
+                let load = if managed { instances::load_managed } else { instances::load };
+                if let Some(new) = load(&root) {
                     self.put_instance(new);
                 }
                 self.prune_fetches(&root);
