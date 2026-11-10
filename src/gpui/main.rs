@@ -183,6 +183,7 @@ fn main() {
                     None => app::start_bounds(saved.and_then(|s| s.window), cx),
                 }),
                 window_min_size: Some(size(px(960.), px(600.))),
+                focus: !no_focus(),
                 ..TitleBar::window_options()
             };
             gpui_kit::open_window(options, cx, move |window, cx| {
@@ -193,6 +194,13 @@ fn main() {
             })
             .expect("open the main window");
         });
+}
+
+/// `--no-focus`: a test run that never takes the keyboard from the app
+/// in front. The window opens behind it without activating, and `--mcp`
+/// input goes straight to Hopper instead of bringing it forward first.
+pub(crate) fn no_focus() -> bool {
+    std::env::args().any(|a| a == "--no-focus")
 }
 
 /// `--size 1100x700`: a window of that size for this run (screenshots),
