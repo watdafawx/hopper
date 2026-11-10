@@ -12,7 +12,7 @@
 
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -251,6 +251,11 @@ pub fn failure(e: &anyhow::Error) -> Failure {
     Failure::Other(m.message.clone())
 }
 
+/// Whether the mailbox no longer knows this PC's token (its data was reset).
+pub fn unauthorized(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<MailboxError>().is_some_and(|m| m.status == 401)
+}
+
 /// One plain sentence for a failed mailbox call.
 pub fn says(e: &anyhow::Error) -> String {
     match failure(e) {
@@ -271,6 +276,9 @@ pub struct Mailbox {
     agent: ureq::Agent,
     /// The mailbox's protocol version, asked once.
     proto: OnceLock<u64>,
+    /// This PC's saved account was unknown to the mailbox, so it signed up
+    /// again (the service lost its data).
+    reset: bool,
 }
 
 impl Mailbox {
@@ -285,18 +293,41 @@ impl Mailbox {
             account,
             agent,
             proto: OnceLock::new(),
+            reset: false,
         }
+    }
+
+    /// True when the mailbox had forgotten this PC and a new account was
+    /// made: friends and groups are gone, local settings are not.
+    pub fn was_reset(&self) -> bool {
+        self.reset
     }
 
     /// Loads this PC's account, registering it the first time. `name` and
     /// `mc_id` are the signed-in Minecraft profile when there is one.
     pub fn load(base: &str, name: &str, mc_id: &str) -> anyhow::Result<Self> {
-        let path = account_path();
-        let mut account: Account = std::fs::read(&path)
+        Self::load_at(&account_path(), base, name, mc_id)
+    }
+
+    fn load_at(path: &Path, base: &str, name: &str, mc_id: &str) -> anyhow::Result<Self> {
+        let mut account: Account = std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         let mut me = Self::new(base, account.clone());
+        if !account.id.is_empty() && !account.token.is_empty() {
+            // A mailbox that lost its data answers 401 to a token it never
+            // issued. Sign up again, once, instead of failing for ever. Any
+            // other failure (offline, the tunnel down) is not that, and the
+            // saved account is kept.
+            if let Err(e) = me.get("/v1/friends", Some(&account.token)) {
+                if unauthorized(&e) {
+                    account = Account::default();
+                    me.account = Account::default();
+                    me.reset = true;
+                }
+            }
+        }
         if account.id.is_empty() || account.token.is_empty() {
             let v = me.post(
                 "/v1/register",
@@ -313,7 +344,7 @@ impl Mailbox {
             if let Some(d) = path.parent() {
                 let _ = std::fs::create_dir_all(d);
             }
-            std::fs::write(&path, serde_json::to_vec_pretty(&account)?)
+            std::fs::write(path, serde_json::to_vec_pretty(&account)?)
                 .with_context(|| format!("saving {}", path.display()))?;
             return Ok(me);
         }
@@ -326,7 +357,7 @@ impl Mailbox {
             account.name = name.to_string();
             account.mc_id = mc_id.to_string();
             me.account = account.clone();
-            let _ = std::fs::write(&path, serde_json::to_vec_pretty(&account)?);
+            let _ = std::fs::write(path, serde_json::to_vec_pretty(&account)?);
         }
         Ok(me)
     }
@@ -688,6 +719,83 @@ mod tests {
         assert_eq!(e.groups, ["g1"]);
         let e: Event = serde_json::from_str(r#"{"kind":"something_new"}"#).unwrap();
         assert_eq!(e.kind(), Kind::Other);
+    }
+
+    /// A mailbox that forgot every account: 401 for the old token, and a
+    /// new account for a sign-up. Answers one request per connection.
+    fn forgetful_mailbox() -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { return };
+                let mut buf = vec![0u8; 8192];
+                let n = c.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let line = head.lines().next().unwrap_or("").to_string();
+                let (status, body) = if line.starts_with("GET /v1/friends") {
+                    ("401 Unauthorized", r#"{"error":"register first","code":"unauthorized"}"#)
+                } else if line.starts_with("POST /v1/register") {
+                    ("200 OK", r#"{"id":"newid","token":"newtoken","name":"FOX"}"#)
+                } else {
+                    ("404 Not Found", r#"{"error":"no"}"#)
+                };
+                let _ = tx.send(line);
+                let _ = write!(
+                    c,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (url, rx)
+    }
+
+    #[test]
+    fn a_forgotten_account_signs_up_again_once() {
+        let dir = std::env::temp_dir().join(format!("hopper-mailbox-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mailbox.json");
+        let old = Account {
+            id: "oldid".into(),
+            token: "oldtoken".into(),
+            name: "FOX".into(),
+            mc_id: String::new(),
+        };
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let (url, seen) = forgetful_mailbox();
+        let mb = Mailbox::load_at(&path, &url, "FOX", "").unwrap();
+        assert!(mb.was_reset());
+        assert_eq!((mb.account().id.as_str(), mb.account().token.as_str()), ("newid", "newtoken"));
+        // The new account is what is saved.
+        let saved: Account = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.id, "newid");
+        let lines: Vec<String> = seen.try_iter().collect();
+        assert_eq!(lines.iter().filter(|l| l.starts_with("POST /v1/register")).count(), 1);
+        // A second start finds a good account (this fake still says 401 to
+        // everything, so only check that a fresh file wasn't needed first).
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreachable_mailbox_keeps_the_saved_account() {
+        let dir = std::env::temp_dir().join(format!("hopper-mailbox-test-off-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mailbox.json");
+        let old = Account {
+            id: "oldid".into(),
+            token: "oldtoken".into(),
+            name: "FOX".into(),
+            mc_id: String::new(),
+        };
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        // Nothing listens here: the name is unchanged, so no call is needed.
+        let mb = Mailbox::load_at(&path, "http://127.0.0.1:9", "FOX", "").unwrap();
+        assert!(!mb.was_reset());
+        assert_eq!(mb.account().id, "oldid");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
