@@ -132,14 +132,19 @@ other; that's why nothing reaches a member before they say yes.
 Limits (409 with a code): 20 groups owned per PC (`groups_full`), 50 members
 per group (`group_full`), 100 packs per group (`group_packs_full`), 20 groups
 named per publish. Names are cut at 64 characters. What a PC shares into
-groups may not add up to more than 2 MB (`storage_full`), counted against
-the one sharing, whoever owns the group, so a group of one is no free
-storage. A publish, an edit or a new group that is refused changes nothing:
+groups may not add up to more than 1 MB (`storage_full`), and 64 KB in
+groups where no one else has joined yet; counted against the one sharing,
+whoever owns the group, so a group of one is no free storage. A share code
+over 20000 bytes is refused (`413`), never cut. A publish, an edit or a new group that is refused changes nothing:
 every check happens before the first change.
 
 Membership changes:
 
-- **Accept**: the group's packs (latest codes) arrive as recipe events.
+- **Accept**: the group's packs (latest codes) reach the new member without
+  being queued: the feed adds them, as recipe events numbered with the
+  joining, while the member's cursor is before it (so a fresh start sees
+  them again, like any event, and a long list can't push their other events
+  out of the queue). Packs published after the joining arrive normally.
 - **Leave or removed**: the member gets a revoke (`left_group`) for each
   group pack; the others get one for each pack the member shared into it.
 - **Delete**: like everyone leaving.
@@ -161,8 +166,12 @@ Every event has `seq`, `kind`, `from`, `from_name`, `at`. Without `v=2` only
 | `joined` | `inst` | shares `inst` with them (an invite that named a pack) |
 | `unfriended` | | drops shares with them; their direct packs leave; follows keep their last version |
 
-Queue limits (per person waiting): 200 events, 1 MB, and 20 from any one
-sender. When full, the oldest event that is not a `recipe` or a `revoke` goes
+Queue limits (per person waiting): 1000 events, 4 MB, and 150 from any one
+sender (a backstop: a friend with a few dozen packs is nowhere near it).
+Events are kept 14 days, `recipe` and `revoke` 180 (the desktop lists a
+friend's packs from them). A new `recipe` from a sender for the same pack
+replaces the older one, so there is one waiting per pack and not per call.
+When full, the oldest event that is not a `recipe` or a `revoke` goes
 first; only with none left does the oldest of those go. A `group` or
 `group_follow` event replaces an older one from the same sender for the same
 group, since both only mean "read the groups again". `/v1/remove` also
@@ -195,22 +204,33 @@ The relay sits behind Cloudflare Tunnel on the open internet. All of this is
 in `relay/hopper_mailbox.py` (constants at the top) and listed in
 `relay/README.md`:
 
-- **Sign-ups**: 20 per hour per client address (`CF-Connecting-IP`, believed
+- **The service has a size**: 20000 accounts and 32 MB of state; above that
+  new sign-ups (and group packs) get `503 busy`. Accounts with no friends,
+  no groups and nothing for 30 days are forgotten. A Cloudflare rate-limit
+  rule on `/v1/register` is recommended on top (see `relay/README.md`).
+- **Sign-ups**: 60 per hour per client address (`CF-Connecting-IP`, believed
   only from a connection on this machine, else the peer address; IPv6 per /64).
-- **Wrong invite codes**: 10 per 15 minutes per account and per address.
-- **Open invites**: 5 per account; run-out invites are swept on every
+  The place is taken before the body is read, and the account is saved
+  before it is answered.
+- **Wrong invite codes**: 10 per 15 minutes per account, 30 per address.
+- **Open invites**: 20 per account; run-out invites are swept on every
   invite and join.
-- **Sizes**: bytes, not characters: share code 20000, each `left_out` entry
-  400 (100 entries), names 256. `inst` may not contain `/`.
-- **Connections**: 256 at once (`503` above), 30 s socket timeout,
-  3 long-polls per account (a fourth ends the oldest).
+- **Sizes**: bytes, not characters: share code 20000 (larger is `413`),
+  each `left_out` entry 400 (100 entries), names 256. `inst` may not
+  contain `/`.
+- **Connections**: 2000 at once (`503` above), 30 s socket timeout and 30 s
+  for a whole request, header names must be tokens, 3 long-polls per
+  account (a fourth ends the oldest, which is answered `409
+  poll_superseded` so the desktop backs off), `wait` up to 90 s.
 - **Tokens** are stored as sha256; lookups go through a hash index.
 - **Presence** (online, last seen, Minecraft id) is shown to friends only.
 - Saving is a dirty flag plus one writer thread (about every 1.5 s, and on
   SIGTERM): a crash loses the last second or two. If saving fails it is
   logged and retried; requests still answer from memory. A state file that
-  can't be read is renamed `state.json.corrupt-<time>` and the service exits
-  instead of starting empty.
+  is invalid is renamed `state.json.corrupt-<time>`, one that can't be read
+  is left untouched, and either way the service exits (status 1, which the
+  unit does not restart) instead of starting empty. While stopping, new
+  requests get `503` and the log says whether the final save worked.
 - Any unexpected error is a JSON `500` (`internal`), logged once.
 
 ## Deploying the relay
@@ -221,8 +241,10 @@ public VM): do it in this order, and keep the saved copy.
 1. `sudo systemctl stop hopper-mailbox`
 2. `sudo cp -a /var/lib/hopper-mailbox/state.json /var/lib/hopper-mailbox/state.json.pre-hash`
 3. Copy `relay/hopper_mailbox.py` to `/opt/hopper-mailbox/`.
-4. Install `relay/hopper-mailbox.service` (it now has `UMask=0077`), then
-   `sudo systemctl daemon-reload`.
+4. Install `relay/hopper-mailbox.service` (`UMask=0077`, `StateDirectory`,
+   `RestartPreventExitStatus=1`, memory and file limits, syscall filter),
+   then `sudo systemctl daemon-reload` and
+   `systemd-analyze verify /etc/systemd/system/hopper-mailbox.service`.
 5. `sudo systemctl start hopper-mailbox`; the journal says `hashed N stored
    tokens`. `curl -s http://127.0.0.1:8787/v1/health` answers `v: 2`.
 

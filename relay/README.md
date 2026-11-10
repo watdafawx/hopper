@@ -12,15 +12,26 @@ Cloudflare Tunnel as `https://sync.kyuubi.dev`.
 - groups: name, owner, members (each with "said yes" and "keep in step"),
   the latest share code of every pack shared with the group, and which of
   those packs a member follows;
-- the latest events per PC (at most 200, 20 per sender, 1 MB; no files).
+- the latest events per PC (at most 1000 and 4 MB, kept 14 days; share codes
+  and revokes 180 days; no files).
 
 State is `/var/lib/hopper-mailbox/state.json`, owned by the
 `hopper-mailbox` user, mode 600. It is written by one background thread
 about every 1.5 s after a change, and once more when the service stops
-(SIGTERM). A crash can lose the last second or two. If the file can't be
-read at start, it is renamed to `state.json.corrupt-<time>` and the service
-exits with an error (it never starts over on top of it). Deleting the file
-resets every account and pairing:
+(SIGTERM). A crash can lose the last second or two, except for a new
+sign-up, which is saved before it is answered. At start:
+
+- a file that is there but not valid (bad JSON or encoding, wrong shape) is
+  renamed to `state.json.corrupt-<time>` and the service exits with status 1;
+- a file that can't be read at all (rights, disk) is **left exactly where it
+  is** and the service exits with status 1.
+
+Either way it never starts over on top of real data, and the unit has
+`RestartPreventExitStatus=1`, so systemd does not keep retrying: look at
+`journalctl -u hopper-mailbox`, fix the cause (or restore a copy), then
+`systemctl start hopper-mailbox`. Deleting the file resets every account and
+pairing (desktops notice, sign up again and tell their player to invite
+their friends again):
 
 ```bash
 sudo rm /var/lib/hopper-mailbox/state.json
@@ -64,19 +75,33 @@ Minecraft id. The protocol, event kinds and limits are in
 | What | Limit | Answer |
 |---|---|---|
 | Request body | 64 KB; no `Transfer-Encoding`, one numeric `Content-Length` | `413` / `400` `bad_framing`, then the connection closes |
-| Sign-ups | 20 per hour per client address (`CF-Connecting-IP`, else the peer; IPv6 by /64) | `429` `rate_limited` |
-| Wrong invite codes | 10 per 15 min per account, and 10 per 15 min per address | `429` `rate_limited` |
-| Open invites | 5 per account | `429` `invites_full` |
-| Packs shared into groups | 2 MB per account, counted against whoever shares | `409` `storage_full` |
-| Waiting events | 200 and 1 MB per PC, 20 per sender; `recipe` and `revoke` are dropped last | oldest dropped |
-| Long-polls | 3 per account (a 4th ends the oldest) | |
-| Connections | 256 at once; a socket stalled for 30 s is closed | `503` `busy` |
+| Accounts | 20000, and 32 MB of state in all; new sign-ups only | `503` `busy` |
+| Idle accounts | no friends, no groups and nothing for 30 days: forgotten (checked hourly) | |
+| Sign-ups | 60 per hour per client address (`CF-Connecting-IP`, else the peer; IPv6 by /64). The place is taken before the body is read | `429` `rate_limited` |
+| Wrong invite codes | 10 per 15 min per account, 30 per 15 min per address | `429` `rate_limited` |
+| Open invites | 20 per account | `429` `invites_full` |
+| Packs shared into groups | 1 MB per account, 64 KB while no one else has joined the group; counted against whoever shares | `409` `storage_full` (`503` `busy` when the state is full) |
+| Share code | 20000 bytes; larger is refused, not cut | `413` `too_large` |
+| Waiting events | 1000 and 4 MB per PC, 150 per sender as a backstop; a new version of a pack replaces its old event; 14 days (share codes and revokes 180); `recipe` and `revoke` are dropped last | oldest dropped |
+| Packs a group already had | not queued: read from the group when the new member asks | |
+| Long-polls | 3 per account (a 4th ends the oldest, which gets `409` `poll_superseded`); `wait` up to 90 s | |
+| Connections | 2000 at once; a whole request must arrive in 30 s, and a socket stalled for 30 s is closed | `503` `busy` |
+| Headers | names must be RFC tokens, no folded lines | `400` `bad_framing` |
+| Shutting down | new requests while the last save is written | `503` `busy` |
 
-`429` answers carry `Retry-After`. `code` (share code) is cut at 20000
-bytes, `left_out` at 100 entries of 400 bytes, names at 64 characters.
-Unexpected errors are a JSON `500` with `code: internal` and one log line.
-Set `HOPPER_MAILBOX_REGISTER_LIMIT` or `HOPPER_MAILBOX_MAX_CONNECTIONS` to
-change the first or last (tests and local runs).
+`429` and `503` answers carry `Retry-After`. `left_out` is cut at 100
+entries of 400 bytes, names at 64 characters. Unexpected errors are a JSON
+`500` with `code: internal` and one log line; a dropped connection is one log
+line too.
+Set `HOPPER_MAILBOX_REGISTER_LIMIT`, `HOPPER_MAILBOX_MAX_CONNECTIONS`,
+`HOPPER_MAILBOX_MAX_USERS` or `HOPPER_MAILBOX_MAX_STATE_BYTES` to change
+those (tests and local runs).
+
+**Put a Cloudflare rate-limiting rule on `POST /v1/register`** (Security →
+WAF → Rate limiting rules; for example 10 requests per minute per IP, action
+Block for 10 minutes). The relay counts sign-ups per address itself, but
+Cloudflare can stop a flood before it reaches the tunnel. Nothing here sets
+that rule up; it is a dashboard setting.
 
 ## Tests
 
@@ -107,7 +132,7 @@ token and it hashes to the same value. Do this in order:
 sudo systemctl stop hopper-mailbox
 sudo cp -a /var/lib/hopper-mailbox/state.json /var/lib/hopper-mailbox/state.json.pre-hash   # keep this
 sudo install -m 644 hopper_mailbox.py /opt/hopper-mailbox/hopper_mailbox.py
-sudo install -m 644 hopper-mailbox.service /etc/systemd/system/   # now has UMask=0077
+sudo install -m 644 hopper-mailbox.service /etc/systemd/system/   # UMask, StateDirectory, hardening lines
 sudo systemctl daemon-reload
 sudo systemctl start hopper-mailbox
 sudo chmod 600 /var/lib/hopper-mailbox/state.json                 # the old file's mode; the next save is 600 anyway
@@ -126,8 +151,23 @@ service, put `state.json.pre-hash` back as `state.json`, install the old
 token in the clear.
 
 Updating later (same version family) is the `install` line for
-`hopper_mailbox.py` plus `sudo systemctl restart hopper-mailbox`. A state
-file from before groups loads as is (it gets an empty `groups`).
+`hopper_mailbox.py` plus `sudo systemctl restart hopper-mailbox`. If the unit
+changed, install it and `sudo systemctl daemon-reload` first. A state file
+from before groups loads as is (it gets an empty `groups`).
+
+The unit (`hopper-mailbox.service`) also sets `StateDirectory=hopper-mailbox`
+(mode 0700), `MemoryMax=512M`, `LimitNOFILE=8192`, address families limited
+to IP and Unix, `PrivateDevices`, `ProtectKernelTunables` and
+`SystemCallFilter=@system-service`. It was checked for syntax by eye only;
+after installing, run `systemd-analyze verify /etc/systemd/system/hopper-mailbox.service`
+and `systemd-analyze security hopper-mailbox`, and if the service won't
+start, the journal says which line (the filter is the likeliest; remove that
+one line and report it).
+
+**Desktops after a data reset.** A Hopper that finds its saved token
+unknown to the service (`401`) signs up again once, keeps its local
+settings and tells its player: "Your friends list was reset on the sync
+server. Invite your friends again."
 
 `hopper-mailbox.service` binds `127.0.0.1:8787`; nothing listens publicly.
 The tunnel is a separate unit, `hopper-tunnel.service`, running
