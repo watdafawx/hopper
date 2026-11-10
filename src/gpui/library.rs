@@ -2987,15 +2987,10 @@ impl Render for LibraryView {
                 cx.notify();
             }))
             .on_drop(cx.listener(|this, _: &SidebarResize, _, cx| this.end_resize(cx)))
-            // The docked project page's edge: it tracks the drag itself;
-            // re-lay out here and save the width wherever it's let go.
-            .on_drag_move(cx.listener(|_, _: &DragMoveEvent<crate::browse::PanelResize>, _, cx| {
-                cx.notify()
-            }))
-            .on_drop(cx.listener(|this, _: &crate::browse::PanelResize, _, cx| {
-                let peek = this.addons.read(cx).peek().clone();
-                peek.update(cx, |p, cx| p.end_resize(cx));
-            }))
+            // The dock's edge (the docked project page or Friends): the
+            // panel tracks and saves the drag itself; re-lay out here so the
+            // page beside it follows.
+            .on_drag_move(cx.listener(|_, _: &DragMoveEvent<widgets::PanelDrag>, _, cx| cx.notify()))
             .items_stretch()
             .child(self.sidebar(list, cx))
             .child(page)

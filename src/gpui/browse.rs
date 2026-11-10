@@ -430,8 +430,8 @@ pub struct BrowseView {
     /// Set by a left press outside the peek: `peeks` at that moment. The
     /// release closes the panel unless that click opened something.
     blur_armed: Option<u64>,
-    /// The panel's width while its edge is being dragged, in rem.
-    drag_width: Option<f32>,
+    /// The project panel's place in the right-hand dock (its width).
+    dock: widgets::SidePanel,
     /// The filter column, resizable.
     filters_panel: widgets::SidePanel,
     /// The list shows the saved bookmarks instead of search results.
@@ -572,7 +572,7 @@ impl BrowseView {
             peek: false,
             peeks: 0,
             blur_armed: None,
-            drag_width: None,
+            dock: widgets::SidePanel::new(widgets::DOCK),
             filters_panel: widgets::SidePanel::new(FILTERS_PANEL),
             bookmarked: false,
             suggest: Default::default(),
@@ -5273,26 +5273,6 @@ fn instances_root_at(view: &Entity<BrowseView>, ix: usize, cx: &App) -> Option<P
 /// The filter column: 16rem by default, dragged between 13 and 26.
 const FILTERS_PANEL: widgets::PanelSpec = widgets::PanelSpec::new("browse.filters", 16., 13., 26.);
 
-/// The project panel's default width, in rem.
-pub const PANEL_W: f32 = 32.;
-/// The narrowest and widest the panel's edge can be dragged, in rem; it
-/// also never takes more than [`PANEL_MAX_SHARE`] of the window.
-const PANEL_MIN: f32 = 26.;
-const PANEL_MAX: f32 = 64.;
-const PANEL_MAX_SHARE: f32 = 0.7;
-
-/// Dragging the project panel's left edge.
-pub(crate) struct PanelResize;
-
-/// What a drag shows under the pointer: nothing.
-struct Blank;
-
-impl Render for Blank {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-    }
-}
-
 /// A filled button in the site's color: the theme's primary for
 /// CurseForge, its green for Modrinth.
 fn site_primary(b: Button, modrinth: bool, _cx: &App) -> Button {
@@ -5409,7 +5389,6 @@ impl Render for BrowseView {
                     linear_color_stop(site_color(self.modrinth).opacity(0.), 0.55),
                 ))
             })
-            .on_drop(cx.listener(|this, _: &PanelResize, _, cx| this.end_resize(cx)))
             .child(filters)
             .child(results)
             .children(detail)
@@ -5419,51 +5398,17 @@ impl Render for BrowseView {
 }
 
 impl BrowseView {
-    /// The project panel's width in rem: the live drag, else the saved
-    /// width, kept within the limits and the window.
+    /// The project panel's width in rem: the dock's (live while its edge
+    /// is dragged).
     pub fn panel_width(&self, window: &Window, cx: &App) -> f32 {
-        let w = self.drag_width.unwrap_or(self.store.read(cx).settings().browse_panel_width);
-        let window_w = window.viewport_size().width / window.rem_size();
-        w.clamp(PANEL_MIN, PANEL_MAX).min(window_w * PANEL_MAX_SHARE).max(PANEL_MIN.min(window_w))
+        self.dock.layout(self.store.read(cx).settings(), window).width
     }
 
-    /// The panel's edge was let go: keep the new width.
-    pub(crate) fn end_resize(&mut self, cx: &mut Context<Self>) {
-        let Some(w) = self.drag_width.take() else { return };
-        self.save_panel_width(w, cx);
-    }
-
-    fn save_panel_width(&mut self, w: f32, cx: &mut Context<Self>) {
-        let w = w.clamp(PANEL_MIN, PANEL_MAX);
-        self.store.update(cx, |s, cx| s.update_settings(|st| st.browse_panel_width = w, cx));
-        cx.notify();
-    }
-
-    /// The project panel down the right side, when one is open.
-    fn panel(
-        &mut self,
-        target: Option<&Instance>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let theme = cx.theme().clone();
+    /// The dock around a project panel's `body`, sliding in when `id`
+    /// changes.
+    fn frame(&mut self, id: ElementId, body: AnyElement, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let peek = self.peek;
-        let width = self.panel_width(window, cx);
-        let dragging = self.drag_width.is_some();
-        // Moves are seen during the capture phase wherever the pointer is;
-        // the width is measured from the window's right edge.
-        let drag_move = cx.listener(|this, e: &DragMoveEvent<PanelResize>, window, cx| {
-            let right = window.viewport_size().width;
-            this.drag_width = Some((right - e.event.position.x) / window.rem_size());
-            cx.notify();
-        });
-        let reset = cx.listener(|this, e: &ClickEvent, _, cx| {
-            if e.click_count() == 2 {
-                this.drag_width = None;
-                this.save_panel_width(PANEL_W, cx);
-            }
-        });
-        let drop = cx.listener(|this, _: &PanelResize, _, cx| this.end_resize(cx));
+        let sidebar = cx.theme().sidebar;
         // A peek closes on a click anywhere else (not in a dialog it opened),
         // on release and after the click's own handlers: a click on another
         // mod swaps the panel's project instead of closing it first.
@@ -5497,43 +5442,29 @@ impl BrowseView {
                 }
             });
         });
-        let frame = |id: ElementId, body: AnyElement| {
-            div()
-                .when(peek, |d| d.on_mouse_down_out(arm).on_mouse_up_out(MouseButton::Left, blur))
-                .relative()
-                .w(rems(width))
-                .flex_none()
-                .h_full()
-                .border_l_1()
-                .border_color(theme.border)
-                // In Browse, the page's site color shows through.
-                .bg(if peek { theme.sidebar } else { theme.sidebar.opacity(0.6) })
-                .on_drag_move(drag_move)
-                .on_drop(drop)
-                .child(widgets::slide_in(id, div().size_full().child(body)))
-                .child(
-                    div()
-                        .id("panel-resize")
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .left(rems(-0.25))
-                        .w(rems(0.5))
-                        .cursor_col_resize()
-                        .when(dragging, |d| d.bg(theme.primary.opacity(0.5)))
-                        .hover(|s| s.bg(theme.primary.opacity(0.35)))
-                        .on_click(reset)
-                        .on_drag(PanelResize, |_, _, _, cx| cx.new(|_| Blank)),
-                )
-                .into_any_element()
-        };
+        widgets::dock(id, &self.dock, |b: &mut Self| &mut b.dock, &self.store, body, window, cx)
+            // In Browse, the page's site color shows through.
+            .when(!peek, |d| d.bg(sidebar.opacity(0.6)))
+            .when(peek, |d| d.on_mouse_down_out(arm).on_mouse_up_out(MouseButton::Left, blur))
+            .into_any_element()
+    }
+
+    /// The project panel down the right side, when one is open.
+    fn panel(
+        &mut self,
+        target: Option<&Instance>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        let width = self.panel_width(window, cx);
         if self.opening.is_some() {
             let body = v_flex().p_5().child(widgets::skeleton_rows(8, rems(2.5), cx)).into_any_element();
-            return Some(frame("detail:opening".into(), body));
+            return Some(self.frame("detail:opening".into(), body, window, cx));
         }
         if let Some(name) = self.author.as_ref().map(|a| a.name.clone()) {
             let body = self.author_panel(target, cx);
-            return Some(frame(ElementId::Name(format!("author:{name}").into()), body));
+            return Some(self.frame(ElementId::Name(format!("author:{name}").into()), body, window, cx));
         }
         if let Some(m) = self.selected.clone() {
             if let (0, Some(Load::Ready(d))) = (self.detail_tab, self.detail.get(&m.id)) {
@@ -5553,13 +5484,11 @@ impl BrowseView {
                 self.desc.update(cx, |v, _| v.show(id, segments, images));
             }
             let body = self.detail(&m, target, width, cx);
-            return Some(frame(ElementId::Name(format!("detail:{}", m.id).into()), body));
+            return Some(self.frame(ElementId::Name(format!("detail:{}", m.id).into()), body, window, cx));
         }
         // A peek whose project didn't load says why.
         let e = self.error.clone().filter(|_| self.peek)?;
-        Some(frame(
-            "detail:error".into(),
-            v_flex()
+        let body = v_flex()
                 .p_5()
                 .gap_3()
                 .child(div().text_sm().text_color(theme.danger).child(e.clone()))
@@ -5575,8 +5504,8 @@ impl BrowseView {
                             })),
                     ),
                 )
-                .into_any_element(),
-        ))
+                .into_any_element();
+        Some(self.frame("detail:error".into(), body, window, cx))
     }
 }
 
