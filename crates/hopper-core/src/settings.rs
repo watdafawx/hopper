@@ -91,6 +91,11 @@ pub struct Settings {
     pub mailbox_name: String,
     /// Recipes this PC follows from paired peers, one per local instance.
     pub followed_recipes: Vec<FollowedRecipe>,
+    /// Instance folders (their folder names) the player shares with friends.
+    /// Empty means nothing is shared; every pack starts off.
+    pub shared_instances: Vec<String>,
+    /// The "Share your packs with your friends?" prompt was answered.
+    pub share_prompt_done: bool,
     /// Where data packs go, per instance root: a folder relative to it.
     pub datapack_dest: HashMap<String, String>,
     /// Hopper opens curseforge.com's Install links; what handled them
@@ -527,6 +532,8 @@ impl Default for Settings {
             mailbox_url: crate::mailbox::DEFAULT_URL.to_string(),
             mailbox_name: String::new(),
             followed_recipes: Vec::new(),
+            shared_instances: Vec::new(),
+            share_prompt_done: false,
             datapack_dest: HashMap::new(),
             links_prev_handler: None,
             links_enabled: false,

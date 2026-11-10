@@ -3511,10 +3511,20 @@ impl Store {
                 .await;
             let got = this.update(cx, |s, _| {
                 let mb = s.mailbox.clone()?;
+                let shared = s.settings().shared_instances.clone();
+                let instances: Vec<_> = s
+                    .instances
+                    .iter()
+                    .filter(|i| {
+                        let key = i.root.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                        shared.iter().any(|k| k.eq_ignore_ascii_case(&key))
+                    })
+                    .cloned()
+                    .collect();
                 Some((
                     mb,
                     s.instances_sig(),
-                    s.instances.clone(),
+                    instances,
                     s.mailbox_friends.clone(),
                     s.mailbox_sig,
                 ))
@@ -3617,6 +3627,10 @@ impl Store {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.instances.len().hash(&mut h);
+        // Which packs are shared decides what is published, so it counts too.
+        let mut shared = self.settings().shared_instances.clone();
+        shared.sort();
+        shared.hash(&mut h);
         for i in &self.instances {
             i.name.hash(&mut h);
             i.game_version.hash(&mut h);
