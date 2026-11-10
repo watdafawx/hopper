@@ -852,7 +852,7 @@ impl AppView {
     }
 
     /// Esc: closes the project panel open beside a list.
-    fn close_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_panel(&mut self, cx: &mut Context<Self>) {
         // Esc leaves Settings the way the title bar's back arrow does.
         if self.page == Page::Settings {
             if self.history.can_step(true) {
@@ -1469,7 +1469,7 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &OpenCfKey, _, cx| this.open_settings_at("cf-key", cx)))
             .on_action(cx.listener(|this, _: &GoLibrary, _, cx| this.go(Page::Library, cx)))
             .on_action(cx.listener(|this, _: &GoBack, window, cx| this.nav_step(true, window, cx)))
-            .on_action(cx.listener(|this, _: &ClosePanel, window, cx| this.close_panel(window, cx)))
+            .on_action(cx.listener(|this, _: &ClosePanel, _, cx| this.close_panel(cx)))
             .on_action(cx.listener(|this, _: &GoForward, window, cx| this.nav_step(false, window, cx)))
             // The mouse's back and forward buttons, anywhere in the window:
             // over the palette or a dialog too, which they close first.
