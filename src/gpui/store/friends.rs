@@ -692,6 +692,16 @@ impl Store {
                 .update(cx, |s, cx| {
                     s.mailbox = Some(mb.clone());
                     s.mailbox_error = None;
+                    if mb.was_reset() {
+                        // The service lost its data: friends are gone there,
+                        // and its event numbers start over.
+                        s.mailbox_seq = 0;
+                        s.update_settings(|st| st.mailbox_handled = 0, cx);
+                        cx.emit(StoreEvent::Notice(
+                            "Your friend list was lost. Invite your friends again with a new code.".into(),
+                            true,
+                        ));
+                    }
                     cx.notify();
                 })
                 .is_err()
@@ -734,6 +744,11 @@ impl Store {
                             cx.notify();
                         })
                         .ok();
+                        // The service forgot this PC: load the account again,
+                        // which signs up once more.
+                        if mailbox::unauthorized(&e) {
+                            break;
+                        }
                         cx.background_executor().timer(Duration::from_secs(20)).await;
                     }
                 }
