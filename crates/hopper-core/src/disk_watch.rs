@@ -597,59 +597,63 @@ mod tests {
 
     #[test]
     fn folders_under_an_instances_folder() {
-        let roots = vec![p(r"C:\Instances")];
+        // Built with join: on Linux "C:\Instances" is a single file name
+        // without a path separator, so the test has to use the host's.
+        let root = p("Instances");
+        let roots = vec![root.clone()];
         let none = HashSet::new();
-        let c = |s: &str| classify(&p(s), &roots, None, &none);
-        assert_eq!(c(r"C:\Instances\New Pack"), Some(Seen::Folder(p(r"C:\Instances\New Pack"))));
-        assert_eq!(
-            c(r"C:\Instances\New Pack\minecraftinstance.json"),
-            Some(Seen::Folder(p(r"C:\Instances\New Pack")))
-        );
+        let c = |rel: &str| classify(&root.join(rel), &roots, None, &none);
+        let pack = root.join("New Pack");
+        assert_eq!(c("New Pack"), Some(Seen::Folder(pack.clone())));
+        assert_eq!(c("New Pack/minecraftinstance.json"), Some(Seen::Folder(pack)));
         // Deeper files of instances that aren't open don't matter.
-        assert_eq!(c(r"C:\Instances\New Pack\mods\a.jar"), None);
-        assert_eq!(c(r"C:\Instances\New Pack\hopper.json"), None);
-        assert_eq!(c(r"C:\Instances\.hopper-trash"), None);
-        assert_eq!(c(r"C:\Elsewhere\x"), None);
-        assert_eq!(c(r"C:\Instances"), None);
+        assert_eq!(c("New Pack/mods/a.jar"), None);
+        assert_eq!(c("New Pack/hopper.json"), None);
+        assert_eq!(c(".hopper-trash"), None);
+        assert_eq!(classify(&p("Elsewhere/x"), &roots, None, &none), None);
+        assert_eq!(classify(&root, &roots, None, &none), None);
     }
 
     #[test]
     fn writes_inside_a_folder_being_installed_keep_it_busy() {
-        let roots = vec![p(r"C:\Instances")];
-        let installing: HashSet<PathBuf> = [p(r"C:\Instances\New Pack")].into();
-        let c = |s: &str| classify(&p(s), &roots, None, &installing);
-        assert_eq!(c(r"C:\Instances\New Pack\mods\a.jar"), Some(Seen::Folder(p(r"C:\Instances\New Pack"))));
-        assert_eq!(c(r"C:\Instances\New Pack\.hopper-backups\x"), None);
-        assert_eq!(c(r"C:\Instances\Other\mods\a.jar"), None);
+        let root = p("Instances");
+        let pack = root.join("New Pack");
+        let roots = vec![root.clone()];
+        let installing: HashSet<PathBuf> = [pack.clone()].into();
+        let c = |rel: &str| classify(&root.join(rel), &roots, None, &installing);
+        assert_eq!(c("New Pack/mods/a.jar"), Some(Seen::Folder(pack)));
+        assert_eq!(c("New Pack/.hopper-backups/x"), None);
+        assert_eq!(c("Other/mods/a.jar"), None);
     }
 
     #[test]
     fn the_open_instances_content_folders() {
-        let roots = vec![p(r"C:\Instances")];
-        let open = p(r"C:\Instances\Pack");
+        let root = p("Instances");
+        let open = root.join("Pack");
+        let roots = vec![root];
         let none = HashSet::new();
-        let c = |s: &str| classify(&p(s), &roots, Some(&open), &none);
-        assert_eq!(c(r"C:\Instances\Pack\mods\a.jar"), Some(Seen::Content(open.clone(), Area::Mods)));
-        assert_eq!(c(r"C:\Instances\Pack\mods\a.jar.disabled"), Some(Seen::Content(open.clone(), Area::Mods)));
-        assert_eq!(c(r"C:\Instances\Pack\mods"), Some(Seen::Content(open.clone(), Area::Mods)));
-        assert_eq!(c(r"C:\Instances\Pack\Mods\b.jar"), Some(Seen::Content(open.clone(), Area::Mods)));
-        assert_eq!(c(r"C:\Instances\Pack\resourcepacks\x.zip"), Some(Seen::Content(open.clone(), Area::ResourcePacks)));
-        assert_eq!(c(r"C:\Instances\Pack\shaderpacks\x.zip"), Some(Seen::Content(open.clone(), Area::ShaderPacks)));
-        assert_eq!(c(r"C:\Instances\Pack\saves\World"), Some(Seen::Content(open.clone(), Area::Worlds)));
-        assert_eq!(c(r"C:\Instances\Pack\screenshots\a.png"), Some(Seen::Content(open.clone(), Area::Screenshots)));
+        let c = |rel: &str| classify(&open.join(rel), &roots, Some(&open), &none);
+        assert_eq!(c("mods/a.jar"), Some(Seen::Content(open.clone(), Area::Mods)));
+        assert_eq!(c("mods/a.jar.disabled"), Some(Seen::Content(open.clone(), Area::Mods)));
+        assert_eq!(c("mods"), Some(Seen::Content(open.clone(), Area::Mods)));
+        assert_eq!(c("Mods/b.jar"), Some(Seen::Content(open.clone(), Area::Mods)));
+        assert_eq!(c("resourcepacks/x.zip"), Some(Seen::Content(open.clone(), Area::ResourcePacks)));
+        assert_eq!(c("shaderpacks/x.zip"), Some(Seen::Content(open.clone(), Area::ShaderPacks)));
+        assert_eq!(c("saves/World"), Some(Seen::Content(open.clone(), Area::Worlds)));
+        assert_eq!(c("screenshots/a.png"), Some(Seen::Content(open.clone(), Area::Screenshots)));
         // A running world writes region files all the time: not a change
         // to the list of worlds.
-        assert_eq!(c(r"C:\Instances\Pack\saves\World\region\r.0.0.mca"), None);
+        assert_eq!(c("saves/World/region/r.0.0.mca"), None);
         // Hopper's own files and temporary downloads.
-        assert_eq!(c(r"C:\Instances\Pack\mods\a.jar.part"), None);
-        assert_eq!(c(r"C:\Instances\Pack\mods\.hopper-staging"), None);
-        assert_eq!(c(r"C:\Instances\Pack\hopper.json"), None);
-        assert_eq!(c(r"C:\Instances\Pack\.hopper-backups\mods\a.jar"), None);
+        assert_eq!(c("mods/a.jar.part"), None);
+        assert_eq!(c("mods/.hopper-staging"), None);
+        assert_eq!(c("hopper.json"), None);
+        assert_eq!(c(".hopper-backups/mods/a.jar"), None);
         // Game files written at launch.
-        assert_eq!(c(r"C:\Instances\Pack\options.txt"), None);
-        assert_eq!(c(r"C:\Instances\Pack\logs\latest.log"), None);
+        assert_eq!(c("options.txt"), None);
+        assert_eq!(c("logs/latest.log"), None);
         // CurseForge changed the open pack.
-        assert_eq!(c(r"C:\Instances\Pack\minecraftinstance.json"), Some(Seen::Folder(open.clone())));
+        assert_eq!(c("minecraftinstance.json"), Some(Seen::Folder(open.clone())));
     }
 
     #[test]

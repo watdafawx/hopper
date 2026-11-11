@@ -827,11 +827,13 @@ impl Settings {
     /// followed instance whose folder was renamed is found again by it.
     /// Returns whether anything changed.
     pub fn reconcile_instances(&mut self, live: &[(String, String)]) -> bool {
+        // Both separators end a folder name: settings can hold a path
+        // written on another platform (a moved settings file, a folder on a
+        // mounted drive), and on Linux `Path::file_name` would return the
+        // whole `C:\inst\Pizza` string as one name.
         let folder = |root: &str| {
-            Path::new(root)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default()
+            let sep = |c: char| c == '/' || c == '\\';
+            root.trim_end_matches(sep).rsplit(sep).next().unwrap_or_default().to_string()
         };
         let mut changed = false;
         for s in &mut self.shared_with {
