@@ -190,7 +190,7 @@ fn changes(v: &Value) -> Changes {
 }
 
 fn plural(n: usize, one: &str) -> String {
-    format!("{n} {one}{}", if n == 1 { "" } else { "s" })
+    hopper::words::count(n, one)
 }
 
 /// "Newest 12 · one a day for 7 days", as the panel says the keep rules.

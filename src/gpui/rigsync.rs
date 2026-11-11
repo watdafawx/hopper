@@ -1520,7 +1520,7 @@ impl SyncPanel {
             .as_ref()
             .is_some_and(|p| p.project_id != 0 && !hopper::modrinth::is_mr(p.project_id));
         let pack_line = match self.note.as_ref().map(|a| (a.server_pack_jars, &a.note)) {
-            Some((Some(n), _)) => Some(format!("Lists {n} mods")),
+            Some((Some(n), _)) => Some(format!("Lists {}", hopper::words::count(n, "mod"))),
             Some((None, Some(note))) => Some(note.clone()),
             _ => None,
         };
@@ -1670,11 +1670,11 @@ impl SyncPanel {
         match self.note.as_ref().map(|a| (a.server_pack_jars, &a.note, a.flagged)) {
             Some((Some(n), _, _)) => chips.push(
                 widgets::chip(theme.muted_foreground)
-                    .child(format!("Server pack lists {n} mods"))
+                    .child(format!("Server pack lists {}", hopper::words::count(n, "mod")))
                     .into_any_element(),
             ),
             Some((None, Some(note), f)) => {
-                chips.push(widgets::caption(format!("{note} {f} mods flagged."), cx).truncate().into_any_element())
+                chips.push(widgets::caption(format!("{note} {} flagged.", hopper::words::count(f, "mod")), cx).truncate().into_any_element())
             }
             _ => {}
         }

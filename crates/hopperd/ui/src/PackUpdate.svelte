@@ -14,6 +14,7 @@
   import { followJob } from './lib/jobs.js';
   import { say } from './lib/toast.svelte.js';
   import { ago } from './lib/browse.js';
+  import { plural } from './lib/worlds.js';
   import { paintDown, paintOver } from './lib/dragpick.svelte.js';
   import BrowseRich from './BrowseRich.svelte';
   import VersionCard from './lib/VersionCard.svelte';
@@ -179,7 +180,7 @@
   const canCompare = $derived(plan && quick && !plan.compared && !!plan.base);
   const written = $derived(files.filter((f) => ['Add', 'Update', 'Merge'].includes(f.action) || (f.action === 'Conflict' && take.has(f.rel))));
   const changesLabel = $derived(
-    plan ? `Changes · ${mods.length} mods · ${written.length} files`
+    plan ? `Changes · ${plural(mods.length, 'mod')} · ${plural(written.length, 'file')}`
       : planErr ? "Changes · couldn't prepare"
         : why ? 'Changes'
           : `Changes · preparing${status?.progress != null ? ` ${Math.round(status.progress * 100)}%` : '…'}`,
@@ -326,9 +327,9 @@
   const mergedN = $derived(written.filter((f) => f.action === 'Merge').length);
   const filesText = $derived(
     !written.length ? 'No server pack files change'
-      : !plan?.base_known ? `${written.length} server pack files written: ${written.length - newN} replaced, ${newN} new`
-        : mergedN ? `${written.length} server pack files updated (${newN} new, ${mergedN} merged)`
-          : `${written.length} server pack files updated (${newN} new)`,
+      : !plan?.base_known ? `${plural(written.length, 'server pack file')} written: ${written.length - newN} replaced, ${newN} new`
+        : mergedN ? `${plural(written.length, 'server pack file')} updated (${newN} new, ${mergedN} merged)`
+          : `${plural(written.length, 'server pack file')} updated (${newN} new)`,
   );
   const fileRows = $derived(
     written
@@ -340,7 +341,7 @@
   // What stays.
   const yourMods = $derived(plan?.your_mods || []);
   const yourFiles = $derived(plan?.your_files || []);
-  const stayText = $derived([yourMods.length && `${yourMods.length} mods not in the server pack`, yourFiles.length && `${yourFiles.length} of the server's own files`].filter(Boolean).join(' · '));
+  const stayText = $derived([yourMods.length && `${plural(yourMods.length, 'mod')} not in the server pack`, yourFiles.length && `${yourFiles.length} of the server's own files`].filter(Boolean).join(' · '));
   const needBy = $derived(new Map(needed.map((n) => [n.by.toLowerCase(), n.name])));
   const stayMods = $derived(
     yourMods
@@ -545,7 +546,7 @@
                 <div class="row"><span class="chip acc xs">Your choice</span><b class="small">{heldVersions.length} mod{heldVersions.length === 1 ? '' : 's'} run the server's versions, not the pack's</b></div>
                 <div class="seg"><button class:on={!resetVersions} onclick={() => (resetVersions = false)}>Keep the server's</button><button class:on={resetVersions} onclick={() => (resetVersions = true)}>Use the pack's</button></div>
                 <div class="tiny muted">{versionsNote}</div>
-                <button class="lh small" onclick={() => (openVersions = !openVersions)}>{#if openVersions}<ChevronDown size={13} />Hide the mods{:else}<Caret size={13} />Show the {heldVersions.length} mods{/if}</button>
+                <button class="lh small" onclick={() => (openVersions = !openVersions)}>{#if openVersions}<ChevronDown size={13} />Hide the mods{:else}<Caret size={13} />Show the {plural(heldVersions.length, 'mod')}{/if}</button>
                 {#if openVersions}
                   <div class="list">
                     {#each heldVersions.slice(0, LIST_CAP) as m (m.from)}
@@ -606,7 +607,7 @@
               {#snippet modsBody()}
                 {#if !mods.length}<span class="muted">No mod changes</span>
                 {:else}
-                  {mods.length} mods:
+                  {plural(mods.length, 'mod')}:
                   {#if added}<span class="chip running xs">{added} added</span>{/if}
                   {#if updated}<span class="chip lan xs">{updated} updated</span>{/if}
                   {#if dropped}<span class="chip crashed xs">{dropped} dropped</span>{/if}
@@ -650,7 +651,7 @@
               {/if}
 
               {#if gone.length}
-                {#snippet goneBody()}{gone.length} files the pack dropped, unedited: to backups{/snippet}
+                {#snippet goneBody()}{plural(gone.length, 'file')} the pack dropped, unedited: to backups{/snippet}
                 {@render sumRow(Archive, 'red', section === 'dropped', () => toggleSection('dropped'), goneBody)}
                 {#if section === 'dropped'}<div class="area">{@render tools([])}{@render fileTree(gone)}</div>{/if}
               {/if}
@@ -686,7 +687,7 @@
                 {#if section === 'edited'}<div class="area">{@render tools([])}{@render fileTree(edited)}</div>{/if}
               {/if}
               {#if plan.mod_made}
-                {#snippet madeBody()}<span class="muted">{plan.mod_made} settings files the pack's mods made: never touched</span>{/snippet}
+                {#snippet madeBody()}<span class="muted">{plural(plan.mod_made, 'settings file')} the pack's mods made: never touched</span>{/snippet}
                 {@render sumRow(Settings2, 'mut', null, null, madeBody)}
               {/if}
               {#snippet neverBody()}<span class="muted">The world, ops, whitelist and bans: never touched</span>{/snippet}

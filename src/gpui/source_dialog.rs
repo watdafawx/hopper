@@ -957,7 +957,7 @@ impl FindForm {
         }
         let n = picked.len();
         store.update(cx, |s, _| {
-            s.spawn_instance_job(&root.clone(), format!("Finding sources for {n} mods"), move |job| {
+            s.spawn_instance_job(&root.clone(), format!("Finding sources for {}", hopper::words::count(n, "mod")), move |job| {
                 let mut inst = hopper::instances::load(&root).ok_or_else(|| anyhow::anyhow!("the instance is gone"))?;
                 let mut done = 0;
                 for (i, (file, link)) in picked.iter().enumerate() {
@@ -975,7 +975,7 @@ impl FindForm {
                         Err(e) => job.note(format!("{file}: {e:#}")),
                     }
                 }
-                job.detail(format!("{done} of {n} mods follow a source now."));
+                job.detail(if n == 1 { format!("{done} of 1 mod follows a source now.") } else { format!("{done} of {n} mods follow a source now.") });
                 Ok(Msg::InstanceChanged(root))
             });
         });

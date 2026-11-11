@@ -380,10 +380,18 @@ impl Store {
         let root2 = root.to_path_buf();
         self.spawn_instance_job(root, format!("Adding {n} mod{} to the server", if n == 1 { "" } else { "s" }), move |job| {
             let c = Client::for_remote(&r)?;
+            // The bar follows the bytes sent, so a big jar on a slow link
+            // looks slow, not stuck.
+            let sizes: Vec<u64> = jars.iter().map(|j| std::fs::metadata(j).map_or(1, |m| m.len().max(1))).collect();
+            let total: u64 = sizes.iter().sum();
+            let mut before = 0u64;
             for (i, j) in jars.iter().enumerate() {
                 let name = j.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 job.detail(format!("Uploading {name} ({}/{n})", i + 1));
-                match c.upload_mod(&r.id, j) {
+                let at = before;
+                before += sizes[i];
+                job.progress(at as usize, total as usize);
+                match c.upload_mod_with(&r.id, j, &|sent| job.progress((at + sent.min(sizes[i])) as usize, total as usize)) {
                     Ok(true) => job.note(format!("{name} replaced an older version (kept in the server's backups)")),
                     Ok(false) => {}
                     Err(e) => job.note(format!("{name}: {e:#}")),
@@ -627,7 +635,7 @@ impl Store {
             .iter()
             .map(|(f, l)| json!({ "file": f.trim_end_matches(".disabled"), "link": l }))
             .collect();
-        self.remote_job(root, format!("Finding sources for {n} mods"), "/mods/source/adopt-many", json!({ "items": items }), |root, _| {
+        self.remote_job(root, format!("Finding sources for {}", hopper::words::count(n, "mod")), "/mods/source/adopt-many", json!({ "items": items }), |root, _| {
             Msg::InstanceChanged(root)
         });
     }

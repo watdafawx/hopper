@@ -10,6 +10,7 @@
   import { bytes, uptime, xmx, stateText, stateKey, stateTip, bootLeft, memTitle, loaderText } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
   import { copyText } from './lib/browse.js';
+  import { plural } from './lib/worlds.js';
   import { ask } from './lib/dialog.svelte.js';
   import { followJob } from './lib/jobs.js';
   import { askPower, askKickOrBan, playerAct, head } from './lib/consoleKit.js';
@@ -149,7 +150,7 @@
       const { job } = await post(`/servers/${encodeURIComponent(id)}/backups`, { worlds_only: false, note });
       say(`Backing up ${s.name}.`);
       const b = await followJob(job);
-      say(`Backed up: ${b?.added ? `${bytes(b.added)} new` : 'nothing changed since the last one'}${b?.files != null ? ` · ${b.files} files` : ''}`);
+      say(`Backed up: ${b?.added ? `${bytes(b.added)} new` : 'nothing changed since the last one'}${b?.files != null ? ` · ${plural(b.files, 'file')}` : ''}`);
     } catch (e) {
       say(e.message, true);
     }

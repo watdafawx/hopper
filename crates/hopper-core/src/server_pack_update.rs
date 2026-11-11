@@ -682,7 +682,7 @@ impl Report {
         }
         let [a, u, r] = self.mods;
         parts.push(format!("mods: {a} added, {u} updated, {r} removed"));
-        parts.push(format!("{} files written, {} removed", self.files, self.removed));
+        parts.push(format!("{} written, {} removed", crate::words::count(self.files, "file"), self.removed));
         if let Some(p) = &self.panel {
             parts.push(p.clone());
         }

@@ -7,7 +7,7 @@
   // followed while the server runs (LogText).
   import { FileWarning, RefreshCw, FileText, Share2, ChevronRight, Trash2 } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
-  import { exactLabel, fullDate } from './lib/worlds.js';
+  import { exactLabel, fullDate, plural } from './lib/worlds.js';
   import { bytes } from './lib/format.js';
   import { confirmIt } from './lib/dialog.svelte.js';
   import { say } from './lib/toast.svelte.js';
@@ -104,7 +104,7 @@
     if (!(await confirmIt(title, { body, ok: 'Delete', danger: true }))) return;
     try {
       const r = await post(`${base}/logs/clear`, { what });
-      say(`Deleted ${r.deleted} files. They are in the trash (Files › Trash).`);
+      say(`Deleted ${plural(r.deleted, 'file')}. They are in the trash (Files › Trash).`);
       await afterDelete();
     } catch (e) {
       say(e.message, true);

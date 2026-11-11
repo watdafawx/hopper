@@ -3,6 +3,11 @@
 //! progress). It is written into the server's `mods/` folder, as desktop does
 //! for a jar dropped on an instance; the name is cleaned first so nothing can
 //! land outside that folder.
+//!
+//! With `staged=1` the body is empty: the jar was already sent in resumable
+//! chunks (the file routes' uploads) to `mods/.{name}.upload`, the place this
+//! route writes it anyway, and only the rest happens here. Desktop sends big
+//! jars that way so a dropped connection costs one chunk, not the whole jar.
 
 use crate::api::{ApiResult, bad};
 use crate::App;
@@ -85,28 +90,45 @@ async fn upload(
     let part = mods.join(format!(".{name}.upload"));
     let mut size = 0u64;
     let mut head: Vec<u8> = Vec::with_capacity(4);
-    let written: Result<(), String> = async {
-        let mut f = tokio::fs::File::create(&part).await.map_err(|x| x.to_string())?;
-        let mut s = body.into_data_stream();
-        while let Some(chunk) = s.next().await {
-            let chunk = chunk.map_err(|x| x.to_string())?;
-            if head.len() < 4 {
-                head.extend(chunk.iter().take(4 - head.len()));
-            }
-            size += chunk.len() as u64;
-            f.write_all(&chunk).await.map_err(|x| x.to_string())?;
+    let staged = q.get("staged").is_some_and(|v| v == "1");
+    let written: Result<(), String> = if staged {
+        // Sent before in chunks: read what arrived instead of the body.
+        async {
+            use tokio::io::AsyncReadExt as _;
+            let mut f = tokio::fs::File::open(&part).await.map_err(|_| "the jar hadn't arrived; send it again".to_string())?;
+            size = f.metadata().await.map_err(|x| x.to_string())?.len();
+            let mut b = [0u8; 4];
+            let n = f.read(&mut b).await.map_err(|x| x.to_string())?;
+            head.extend_from_slice(&b[..n]);
+            Ok(())
         }
-        f.flush().await.map_err(|x| x.to_string())?;
-        Ok(())
-    }
-    .await;
+        .await
+    } else {
+        async {
+            let mut f = tokio::fs::File::create(&part).await.map_err(|x| x.to_string())?;
+            let mut s = body.into_data_stream();
+            while let Some(chunk) = s.next().await {
+                let chunk = chunk.map_err(|x| x.to_string())?;
+                if head.len() < 4 {
+                    head.extend(chunk.iter().take(4 - head.len()));
+                }
+                size += chunk.len() as u64;
+                f.write_all(&chunk).await.map_err(|x| x.to_string())?;
+            }
+            f.flush().await.map_err(|x| x.to_string())?;
+            Ok(())
+        }
+        .await
+    };
     if let Err(m) = written {
         let _ = tokio::fs::remove_file(&part).await;
+        log::warn!("mod upload {name} to server {id}: {m}");
         return Err(bad(format!("{name}: the upload broke off ({m}).")));
     }
     // A jar is a zip file.
     if size == 0 || head != b"PK\x03\x04" {
         let _ = tokio::fs::remove_file(&part).await;
+        log::warn!("mod upload {name} to server {id}: not a jar ({size} bytes{})", if staged { ", sent in chunks" } else { "" });
         return Err(bad(format!("{name} isn't a jar file.")));
     }
     let (e2, dest2, part2, name2) = (e.clone(), dest.clone(), part.clone(), name.clone());

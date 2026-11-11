@@ -197,7 +197,7 @@ impl Report {
         if let Some((from, to)) = &self.loader {
             parts.push(format!("NeoForge {from} » {to}"));
         }
-        let mut mods = vec![format!("{} mods copied", self.copied), format!("{} removed", self.removed)];
+        let mut mods = vec![format!("{} copied", crate::words::count(self.copied, "mod")), format!("{} removed", self.removed)];
         if self.turned_on > 0 {
             mods.push(format!("{} turned on", self.turned_on));
         }
@@ -373,7 +373,7 @@ pub fn update_server(
         }
     }
     let ops = crate::sync::plan(&diff, &inst.mods_dir(), &server.mods_dir());
-    job.detail(format!("Syncing {} files", ops.len()));
+    job.detail(format!("Syncing {}", crate::words::count(ops.len(), "file")));
     if let Some(r) = &server.remote {
         crate::hopperd::register(&server.root, r);
     }

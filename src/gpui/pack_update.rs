@@ -354,7 +354,7 @@ impl UpdatePreview {
                         _ => false,
                     })
                     .count();
-                format!("Changes · {} mods · {files} files", p.mods.len())
+                format!("Changes · {} · {}", hopper::words::count(p.mods.len(), "mod"), hopper::words::count(files, "file"))
             }
             Some(Err(_)) => "Changes · couldn't prepare".into(),
             // The footer button shows how far it got.
@@ -1316,7 +1316,7 @@ impl UpdatePreview {
                     .clickable(cx)
                     .hover(move |s| s.text_color(crate::theme::ink(primary)))
                     .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small())
-                    .child(if open { "Hide the mods".to_string() } else { format!("Show the {n} mods") })
+                    .child(if open { "Hide the mods".to_string() } else { format!("Show the {}", hopper::words::count(n, "mod")) })
                     .on_click(cx.listener(|this, _, _, cx| this.toggle(Group::Versions, cx))),
             )
             .when(open, |c| c.child(self.mod_rows("versions", rows, cx)));
@@ -1729,7 +1729,7 @@ impl UpdatePreview {
         if total == 0 {
             body = body.child(div().text_color(muted).child("No mod changes"));
         } else {
-            body = body.child(format!("{total} mods:"));
+            body = body.child(format!("{}:", hopper::words::count(total, "mod")));
             for (n, l, c) in [(added, "added", success), (updated, "updated", info), (dropped, "dropped", danger)] {
                 if n > 0 {
                     body = body.child(widgets::chip(c).xsmall().child(format!("{n} {l}")));
@@ -1874,7 +1874,7 @@ impl UpdatePreview {
                     "sum-dropped",
                     IconName::Archive,
                     danger,
-                    div().child(format!("{n} files the pack dropped, unedited: undo from History")),
+                    div().child(format!("{} the pack dropped, unedited: undo from History", hopper::words::count(n, "file"))),
                     Some(open == Some(Section::Dropped)),
                     cx,
                 )
@@ -1903,7 +1903,7 @@ impl UpdatePreview {
         let mut out = v_flex().gap_0p5().child(div().font_semibold().child("What stays"));
         let mut parts = Vec::new();
         if m > 0 {
-            parts.push(if server { format!("{m} mods not in the server pack") } else { format!("{m} mods you added") });
+            parts.push(if server { format!("{} not in the server pack", hopper::words::count(m, "mod")) } else { format!("{} you added", hopper::words::count(m, "mod")) });
         }
         if f > 0 {
             parts.push(if server {
@@ -2013,7 +2013,7 @@ impl UpdatePreview {
                 "sum-made",
                 IconName::Settings2,
                 muted,
-                div().text_color(muted).child(format!("{} settings files the pack's mods made: never touched", plan.mod_made)),
+                div().text_color(muted).child(format!("{} the pack's mods made: never touched", hopper::words::count(plan.mod_made, "settings file"))),
                 None,
                 cx,
             ));
@@ -2305,7 +2305,7 @@ impl UpdatePreview {
                                     Button::new(SharedString::from(format!("sets:{rel}")))
                                         .xsmall()
                                         .ghost()
-                                        .label(if mine_n > 0 { format!("{mine_n} of yours · {n_set} differ") } else { format!("{n_set} settings differ") })
+                                        .label(if mine_n > 0 { format!("{mine_n} of yours · {n_set} differ") } else { format!("{} differ", hopper::words::count(n_set, "setting")) })
                                         .tooltip("The settings where yours and the pack's differ")
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if !this.settings_open.remove(&r3) {

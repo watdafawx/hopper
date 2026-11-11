@@ -30,7 +30,7 @@
     try {
       const { job } = await post(`${base}/mods/source/adopt-many`, { items: picked.map((r) => ({ file: r.file_name, link: r.link })) });
       const r = await followJob(job, (st) => (busy = st.detail || busy));
-      say(`${r.added?.length ?? picked.length} mods follow a source now. Later releases show in Updates.`);
+      say(`${(n => n === 1 ? '1 mod follows' : `${n} mods follow`)(r.added?.length ?? picked.length)} a source now. Later releases show in Updates.`);
       onChanged(true);
       onClose();
     } catch (e) {

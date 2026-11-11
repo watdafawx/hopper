@@ -88,7 +88,7 @@
     if (note === null) return;
     try {
       const { job } = await post(`${base}/backups`, { worlds_only: worldsOnly, note });
-      run('Starting', job, (b) => say(`Backed up: ${b.added ? `${bytes(b.added)} new` : 'nothing changed since the last one'} · ${b.files} files`));
+      run('Starting', job, (b) => say(`Backed up: ${b.added ? `${bytes(b.added)} new` : 'nothing changed since the last one'} · ${plural(b.files, 'file')}`));
     } catch (e) {
       say(e.message, true);
     }

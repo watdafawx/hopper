@@ -39,7 +39,7 @@ pub enum ContentEvent {
 
 /// "1 world", "3 worlds".
 fn plural(n: usize, what: &str) -> String {
-    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+    hopper::words::count(n, what)
 }
 
 /// "12,345".

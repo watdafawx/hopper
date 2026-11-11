@@ -481,6 +481,8 @@ pub struct Client {
     web: Option<std::sync::OnceLock<(ureq::Agent, ureq::Agent, ureq::Agent)>>,
     /// The last answer came with the web roots, so start with them.
     on_web: std::sync::atomic::AtomicBool,
+    /// What the panel says it can do (its hello), asked once.
+    caps: std::sync::OnceLock<Vec<String>>,
 }
 
 /// An answer from `GET /changes` ([`Client::changes`]).
@@ -548,6 +550,7 @@ impl Client {
             chunk: agent_chunk(&base, &trust),
             web: matches!(trust, Trust::Pinned(_)).then(std::sync::OnceLock::new),
             on_web: Default::default(),
+            caps: Default::default(),
             base,
             panel: String::new(),
             token: token.to_string(),
@@ -1021,13 +1024,75 @@ impl Client {
     /// tab: another version of a mod it has replaces that one (kept in the
     /// panel's backups). Answers whether one was replaced.
     pub fn upload_mod(&self, id: &str, local: &Path) -> anyhow::Result<bool> {
+        self.upload_mod_with(id, local, &|_| {})
+    }
+
+    /// [`Client::upload_mod`], telling `progress` the bytes sent so far.
+    /// The jar goes in resumable chunks (as [`Client::upload`]) to where
+    /// the panel's mods route stages it, then one small call adds it; a
+    /// panel from before that gets the whole jar in one request, with
+    /// limits and a few tries. Either way it ends, with the panel's error
+    /// when it failed.
+    pub fn upload_mod_with(&self, id: &str, local: &Path, progress: &dyn Fn(u64)) -> anyhow::Result<bool> {
         let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).context("no file name")?;
-        let body = std::fs::read(local).with_context(|| format!("opening {}", local.display()))?;
-        let url = self.url(&format!("/servers/{}/mods/upload?name={}&conflict=replace", enc(id), enc(&name)));
-        let v = reply(self.send_via(Lane::Slow, |slow| {
-            slow.post(&url).header("Authorization", &self.auth()).content_type("application/octet-stream").send(&body[..])
-        }))?;
+        let size = std::fs::metadata(local).with_context(|| format!("opening {}", local.display()))?.len();
+        let add = format!("/servers/{}/mods/upload?name={}&conflict=replace", enc(id), enc(&name));
+        let v = if self.can("mods.staged") {
+            self.upload_with(id, local, &format!("mods/.{name}.upload"), progress)?;
+            let url = self.url(&format!("{add}&staged=1"));
+            with_tries(FINISH_TRIES, &mut std::thread::sleep, |n| {
+                // A lost reply: the panel may have added it already.
+                if n > 1 && self.mod_landed(id, &name) {
+                    return Try::Done(json!({}));
+                }
+                Try::of(self.send_via(Lane::Chunk, |a| a.post(&url).header("Authorization", &self.auth()).send_empty()))
+            })
+        } else {
+            let body = std::fs::read(local).with_context(|| format!("opening {}", local.display()))?;
+            let url = self.url(&add);
+            // 32 KB/s at least, and never under the chunk's own limits.
+            let send = CHUNK_SEND.max(Duration::from_secs(size / (32 * 1024)));
+            let v = with_tries(FINISH_TRIES, &mut std::thread::sleep, |_| {
+                Try::of(self.send_via(Lane::Slow, |slow| {
+                    slow.post(&url)
+                        .config()
+                        .timeout_send_body(Some(send))
+                        .timeout_recv_response(Some(CHUNK_REPLY))
+                        .timeout_global(Some(send + CHUNK_WAIT))
+                        .build()
+                        .header("Authorization", &self.auth())
+                        .content_type("application/octet-stream")
+                        .send(&body[..])
+                }))
+            });
+            if v.is_ok() {
+                progress(size);
+            }
+            v
+        };
+        let v = v.with_context(|| format!("adding {name}"))?;
         Ok(v["replaced"].as_bool().unwrap_or(false))
+    }
+
+    /// Whether the panel says it has `cap` (its hello's capabilities).
+    fn can(&self, cap: &str) -> bool {
+        self.caps
+            .get_or_init(|| {
+                self.get("/hello")
+                    .ok()
+                    .and_then(|v| serde_json::from_value::<Vec<String>>(v["capabilities"].clone()).ok())
+                    .unwrap_or_default()
+            })
+            .iter()
+            .any(|c| c == cap)
+    }
+
+    /// The jar `name` is in the server's mods and its staged copy is gone:
+    /// a call that adds it went through.
+    fn mod_landed(&self, id: &str, name: &str) -> bool {
+        let Ok(v) = self.get(&format!("/fs/{}/list?path=mods", enc(id))) else { return false };
+        let names: Vec<&str> = v["entries"].as_array().into_iter().flatten().filter_map(|e| e["name"].as_str()).collect();
+        names.contains(&name) && !names.contains(&format!(".{name}.upload").as_str())
     }
 
     /// Uploads zip `local` to the panel's incoming folder, where its zip
@@ -1117,6 +1182,54 @@ fn read_full(f: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Result<usiz
 }
 
 // ---- resumable chunked uploads -------------------------------------------------------
+
+/// How many times a single call that ends an upload is tried.
+const FINISH_TRIES: u32 = 3;
+
+/// What one try of a call came to.
+enum Try<T> {
+    Done(T),
+    /// Worth another try: no answer, or a busy or broken-off one.
+    Again(anyhow::Error),
+    /// A refusal: trying again won't help.
+    Stop(anyhow::Error),
+}
+
+impl Try<Value> {
+    /// A reply's JSON as a try: signed out, refused, missing or too big
+    /// stop; everything else is tried again.
+    fn of(resp: anyhow::Result<ureq::http::Response<ureq::Body>>) -> Try<Value> {
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => return Try::Again(e),
+        };
+        let status = resp.status().as_u16();
+        let refused = matches!(status, 401 | 403 | 404 | 409 | 413);
+        match reply(Ok(resp)) {
+            Ok(v) => Try::Done(v),
+            Err(e) if refused => Try::Stop(e),
+            Err(e) => Try::Again(e),
+        }
+    }
+}
+
+/// Runs `f` (given the try's number, from 1) up to `max` times, pausing
+/// 2, 4, 8 s… between; the last error once they're used up.
+fn with_tries<T>(max: u32, pause: &mut dyn FnMut(Duration), mut f: impl FnMut(u32) -> Try<T>) -> anyhow::Result<T> {
+    let mut n = 1;
+    loop {
+        match f(n) {
+            Try::Done(v) => return Ok(v),
+            Try::Stop(e) => return Err(e),
+            Try::Again(e) if n >= max => return Err(e.context(format!("gave up after {n} tries"))),
+            Try::Again(e) => {
+                log::warn!("try {n} of {max} failed: {e:#}");
+                pause(Duration::from_secs(1 << n));
+                n += 1;
+            }
+        }
+    }
+}
 
 /// What a chunk's PUT came back with.
 enum Put {
@@ -2421,6 +2534,36 @@ mod chunk_tests {
     }
 
     #[test]
+    fn single_calls_get_a_few_tries_then_a_plain_error() {
+        // Fails twice, then works.
+        let mut pauses = Vec::new();
+        let mut calls = 0;
+        let v = with_tries(3, &mut |d| pauses.push(d), |n| {
+            calls += 1;
+            if n < 3 { Try::Again(anyhow::anyhow!("no reply came")) } else { Try::Done(7) }
+        });
+        assert_eq!((v.unwrap(), calls), (7, 3));
+        assert_eq!(pauses, vec![Duration::from_secs(2), Duration::from_secs(4)]);
+        // Never works: the last error, after exactly the tries.
+        let mut calls = 0;
+        let e = with_tries::<()>(3, &mut |_| {}, |_| {
+            calls += 1;
+            Try::Again(anyhow::anyhow!("Hopper Server answered 502"))
+        })
+        .unwrap_err();
+        assert_eq!(calls, 3);
+        assert_eq!(format!("{e:#}"), "gave up after 3 tries: Hopper Server answered 502");
+        // A refusal ends at once.
+        let mut calls = 0;
+        let e = with_tries::<()>(3, &mut |_| panic!("no pause"), |_| {
+            calls += 1;
+            Try::Stop(anyhow::anyhow!("signed out"))
+        })
+        .unwrap_err();
+        assert_eq!((calls, e.to_string().as_str()), (1, "signed out"));
+    }
+
+    #[test]
     fn an_empty_file_is_one_empty_chunk() {
         let fake = Fake::new(false, 0, &[]);
         let (r, _, seen) = run(&fake);
@@ -2544,7 +2687,8 @@ mod chunk_live {
                             return;
                         }
                         let line = String::from_utf8_lossy(&head[..head.iter().position(|&b| b == b'\r').unwrap_or(0)]).to_string();
-                        let cut = if line.starts_with("PUT ") && line.contains("/uploads/") {
+                        let counted = (line.starts_with("PUT ") && line.contains("/uploads/")) || (line.starts_with("POST ") && line.contains("/mods/upload"));
+                        let cut = if counted {
                             plan(count.fetch_add(1, Ordering::SeqCst) + 1)
                         } else {
                             Cut::Pass
@@ -2637,6 +2781,24 @@ mod chunk_live {
         println!("went on after a stall in {:.1} s", t.elapsed().as_secs_f32());
         assert!(t.elapsed() < Duration::from_secs(120));
         assert!(std::fs::read(folder.join("mods/flaky-test-3.jar")).unwrap() == data);
+
+        // 4: a jar added like one dropped on the Mods tab: the reply to a
+        // chunk and the reply to the call that adds it are both lost.
+        let mut jar = data.clone();
+        jar[..4].copy_from_slice(b"PK\x03\x04");
+        let local_jar = local.with_file_name(format!("flaky-mod-{}.jar", std::process::id()));
+        std::fs::write(&local_jar, &jar).unwrap();
+        let (at, ca) = proxy(to, Arc::new(|n| if n == 2 || n == 4 { Cut::LoseReply } else { Cut::Pass }));
+        let c = Client::new(&format!("https://{at}"), &token, &ca);
+        let t = Instant::now();
+        let seen = std::sync::Mutex::new(Vec::new());
+        c.upload_mod_with(id, &local_jar, &|o| seen.lock().unwrap().push(o)).expect("the mod should be added");
+        println!("mod added in {:.1} s; progress {:?}", t.elapsed().as_secs_f32(), seen.lock().unwrap());
+        let name = local_jar.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(std::fs::read(folder.join("mods").join(&name)).unwrap() == jar);
+        assert!(!folder.join("mods").join(format!(".{name}.upload")).exists());
+        let _ = std::fs::remove_file(folder.join("mods").join(&name));
+        let _ = std::fs::remove_file(&local_jar);
 
         let _ = std::fs::remove_file(&local);
         for f in ["flaky-test.jar", "flaky-test-3.jar"] {
