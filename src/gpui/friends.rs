@@ -405,9 +405,9 @@ impl FriendsPanel {
                     .when(!friends.is_empty(), |c| {
                         c.child(widgets::fine_print(
                             if takes_back {
-                                "Untick someone and they stop getting your changes. The pack leaves their list, but their copy stays on their PC."
+                                "Ticked friends see this pack in their Friends panel and can follow it. Untick someone and they stop getting your changes. The pack leaves their list, but their copy stays on their PC."
                             } else {
-                                "Untick someone and they stop getting your changes. Their copy stays on their PC."
+                                "Ticked friends see this pack in their Friends panel and can follow it. Untick someone and they stop getting your changes. Their copy stays on their PC."
                             },
                             cx,
                         ))
@@ -626,7 +626,7 @@ impl FriendsPanel {
             return v_flex()
                 .gap_1()
                 .child(Button::new("invite").w_full().primary().label("Friend list full").disabled(true))
-                .child(widgets::fine_print("You have as many friends as Hopper allows. Remove one to add someone new.", cx))
+                .child(widgets::fine_print("Your friend list is full. Remove a friend to add someone new.", cx))
                 .into_any_element();
         }
         Button::new("invite")
@@ -900,9 +900,10 @@ impl FriendsPanel {
                         c.child(
                             widgets::caption(
                                 format!(
-                                    "{} file{} can't be downloaded from any site",
+                                    "{} file{} can't be downloaded from any site. Ask your friend to send {}.",
                                     e.left_out.len(),
-                                    if e.left_out.len() == 1 { "" } else { "s" }
+                                    if e.left_out.len() == 1 { "" } else { "s" },
+                                    if e.left_out.len() == 1 { "it" } else { "them" }
                                 ),
                                 cx,
                             )
@@ -1141,7 +1142,7 @@ impl FriendsPanel {
                         v4.update(cx, |t, cx| {
                             t.confirm_group(
                                 format!("Leave {name}?"),
-                                "Packs you got only from this group stop getting changes. Your copies stay on your PC.".into(),
+                                "Packs you got only from this group stop getting changes. Your copies stay on your PC, listed under \u{201c}These won't change any more\u{201d}.".into(),
                                 "Leave group",
                                 Rc::new(move |s, cx| s.leave_group(&id, cx)),
                                 window,
@@ -1322,7 +1323,7 @@ impl FriendsPanel {
                             .min_w_0()
                             .child(div().text_sm().font_medium().child("Keep my packs the same as the group"))
                             .child(widgets::fine_print(
-                                "When someone in the group follows one of its packs, this PC follows it too. Each friend chooses this on their own PC.",
+                                "When someone in the group follows one of its packs, this PC gets it too, as a new instance. Your other instances don't change. Each friend chooses this on their own PC.",
                                 cx,
                             )),
                     )
