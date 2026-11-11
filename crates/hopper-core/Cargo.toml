@@ -76,6 +76,8 @@ windows = { workspace = true, features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# Hopper as a browser choice in Default apps (browser.rs), per user only.
+windows-registry = "0.6"
 
 [dev-dependencies]
 # An FTP(S) server in the tests, for the FTP client (ring, like the rest).

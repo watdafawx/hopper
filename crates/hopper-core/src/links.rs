@@ -10,6 +10,18 @@ use std::time::Duration;
 const PORT: u16 = 47802;
 const SCHEME: &str = "curseforge";
 
+/// `HOPPER_LINK_PORT` moves the hand-off for a test build, so its links
+/// never reach the player's own Hopper.
+fn port() -> u16 {
+    std::env::var("HOPPER_LINK_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(PORT)
+}
+
+/// What a later launch may hand over: an Install link, or a CurseForge or
+/// Modrinth project page (see [`crate::modlinks`]).
+fn accepted(s: &str) -> bool {
+    is_link(s) || crate::modlinks::parse(s).is_some()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
     pub project_id: u64,
@@ -41,10 +53,11 @@ pub fn parse(url: &str) -> Option<Link> {
     })
 }
 
-/// Hands `url` to a running Hopper. False when none is listening.
+/// Hands `url` (an Install link or a project page) to a running Hopper.
+/// False when none is listening.
 pub fn forward(url: &str) -> bool {
     let Ok(mut s) =
-        TcpStream::connect_timeout(&([127, 0, 0, 1], PORT).into(), Duration::from_millis(400))
+        TcpStream::connect_timeout(&([127, 0, 0, 1], port()).into(), Duration::from_millis(400))
     else {
         return false;
     };
@@ -53,7 +66,7 @@ pub fn forward(url: &str) -> bool {
 
 /// Accepts links from later launches, on localhost only.
 pub fn listen(on_link: impl Fn(String) + Send + 'static) {
-    let Ok(l) = TcpListener::bind(("127.0.0.1", PORT)) else {
+    let Ok(l) = TcpListener::bind(("127.0.0.1", port())) else {
         return;
     };
     let _ = std::thread::Builder::new()
@@ -62,7 +75,7 @@ pub fn listen(on_link: impl Fn(String) + Send + 'static) {
             for s in l.incoming().flatten() {
                 let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
                 let mut line = String::new();
-                if BufReader::new(s).read_line(&mut line).is_ok() && is_link(line.trim()) {
+                if BufReader::new(s).read_line(&mut line).is_ok() && accepted(line.trim()) {
                     on_link(line.trim().to_string());
                 }
             }
