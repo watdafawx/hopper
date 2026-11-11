@@ -64,6 +64,7 @@ pub mod loader_changes;
 pub mod loader_installer;
 pub mod launch_native;
 pub mod links;
+pub mod modlinks;
 pub mod logs;
 pub mod mclogs;
 pub mod mcoptions;
