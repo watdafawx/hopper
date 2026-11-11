@@ -44,7 +44,7 @@ hopperd
   `hopperd.toml` holds the port, bind address, servers folder and extra
   server folders.
 - Servers keep running when hopperd stops or restarts; it reconnects to
-  them on start (Windows; Linux follows).
+  them on start (console, commands, stop), on Windows and Linux.
 - Folders Crafty or MCSS manage are listed but hopperd won't start them.
 - Setting up without the code trusts only a direct connection from
   127.0.0.1/::1 with a `localhost` Host and no proxy headers, and only until
@@ -261,8 +261,13 @@ as a user, change Log On in services.msc). `--copy` copies the exe to
 Logs go to `hopperd.log` in the data folder. `install` prints where to
 open the panel (the port from the panel folder's settings, once there is
 one). Linux: a systemd unit running as the user behind sudo, with
-`KillMode=process` so servers survive restarts. On Linux hopperd starts
-servers but doesn't yet reattach to them after it restarts.
+`KillMode=process` so servers survive restarts. On Linux each server runs
+in its own session (a signal to hopperd doesn't reach it), its output goes
+to `.hopper-console.log` in its folder and its commands through a FIFO
+only the service user can open, in `run/` in the data folder; a restarted
+hopperd checks the process is still that server (start time, folder, the
+FIFO) before taking it over. Servers started by an older hopperd
+can't be taken over: stop and start them once.
 
 Releases: pushing a `hopperd-v<version>` tag builds Windows and Linux
 downloads and the Docker image.
@@ -271,7 +276,10 @@ downloads and the Docker image.
 for a new release every half hour and, with "Update by itself" on (the
 default) or when the owner picks Update now (or an older version in
 Other versions), downloads it from the project's GitHub releases, puts it
-in place of the running program and restarts once no job is running. The
+in place of the running program and restarts once no job is running.
+Minecraft servers keep running through it; on Linux it waits for any it
+couldn't take over afterwards (started by an older hopperd), or stops them
+first when the owner picks "Stop servers and update". The
 download's length is checked against what GitHub lists and it must be a
 program for the same system and CPU. On Linux the new file is written
 next to the running one and renamed over it, the version before stays

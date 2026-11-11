@@ -532,8 +532,8 @@ fn install_and_restart(app: &Arc<App>, r: &Release) {
         }
     }
     // Long work (a pack update, a backup) finishes first. On Linux so do the
-    // Minecraft servers: a restarted panel doesn't take over servers it
-    // finds running (Windows does), so none may be running at the restart.
+    // Minecraft servers the restarted panel couldn't take over (started by
+    // an older panel, without the console FIFO); the rest keep running.
     set(|s| s.state = "waiting".into());
     let mut told = false;
     loop {
@@ -595,12 +595,25 @@ fn waiting_text(jobs: usize, g: Gate) -> String {
 static STOP_SERVERS: AtomicBool = AtomicBool::new(false);
 
 /// The names of this panel's servers that are starting, running or stopping
-/// (empty on Windows, where they don't matter).
+/// and that a restarted panel couldn't pick up again (empty on Windows,
+/// where it always can).
 pub fn running_servers(app: &App) -> Vec<String> {
     if cfg!(windows) {
         return Vec::new();
     }
-    app.servers.list().iter().filter(|e| e.server.state().is_alive()).map(|e| e.name.clone()).collect()
+    app.servers
+        .list()
+        .iter()
+        .filter(|e| holds_back(e.server.state().is_alive(), e.server.reattachable()))
+        .map(|e| e.name.clone())
+        .collect()
+}
+
+/// A running server holds a Linux restart back only when the restarted
+/// panel couldn't take it over: one started by an older panel, or whose
+/// console FIFO couldn't be made. The rest keep running through it.
+fn holds_back(alive: bool, reattachable: bool) -> bool {
+    alive && !reattachable
 }
 
 /// The normal stop for each server still running (saves its worlds first).
@@ -962,6 +975,27 @@ mod tests {
         assert_eq!(waiting_text(1, Gate::Go), "1 running job to finish");
         assert_eq!(waiting_text(3, Gate::Wait(1)), "1 running server to stop and 3 running jobs to finish");
         assert_eq!(waiting_text(0, Gate::Go), "");
+    }
+
+    #[test]
+    fn only_servers_the_new_panel_cant_take_over_hold_it_back() {
+        use super::{Gate, gate, holds_back};
+        // Started with the console FIFO: picked up again, no wait.
+        assert!(!holds_back(true, true));
+        // Started by an older panel, or without the FIFO: waited for.
+        assert!(holds_back(true, false));
+        // Stopped ones never count.
+        assert!(!holds_back(false, false));
+        assert!(!holds_back(false, true));
+        // Two running, one of them from an older panel: only that one is asked about.
+        let servers = [("Survival", true, true), ("Creative", true, false), ("Old", false, false)];
+        let held: Vec<String> = servers.iter().filter(|s| holds_back(s.1, s.2)).map(|s| s.0.to_string()).collect();
+        assert_eq!(held, ["Creative"]);
+        assert_eq!(gate(false, false, &held), Gate::Wait(1));
+        assert_eq!(gate(false, true, &held), Gate::StopThem(1));
+        // All of them can be taken over: the update goes ahead.
+        let none: Vec<String> = servers.iter().filter(|s| holds_back(s.1, s.1)).map(|s| s.0.to_string()).collect();
+        assert_eq!(gate(false, false, &none), Gate::Go);
     }
 
     #[test]

@@ -23,7 +23,8 @@ export function isNewer(a, b) {
 
 /**
  * Before an update starts: on Linux a restarted panel can't take over
- * servers that are running, so with some running it asks. Resolves to
+ * servers an older panel started (`running_servers` lists only those), so
+ * with some running it asks. Resolves to
  * `{ stop }` (stop them first, or wait until they're stopped), or null when
  * cancelled. Nothing running: `{ stop: false }` without asking.
  */

@@ -4525,6 +4525,7 @@ dependencies = [
  "flate2",
  "image",
  "keyring",
+ "libc",
  "libunftp",
  "log",
  "mdns-sd",
