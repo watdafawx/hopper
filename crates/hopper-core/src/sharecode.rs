@@ -778,15 +778,24 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     }
     let mut now: Vec<Seen> = Vec::new();
     let mut files: Vec<(u64, u64, bool)> = Vec::new();
+    // A file that couldn't be looked up is missing from `now` without being
+    // gone from their copy, so nothing is removed this time.
+    let mut unsure = false;
     for e in &share.entries {
         match e {
             Entry::CurseFile { file, enabled } => match owner.get(file) {
                 Some(&p) => files.push((p, *file, *enabled)),
-                None => job.note(format!("CurseForge has no file {file} any more")),
+                None => {
+                    unsure = true;
+                    job.note(format!("CurseForge has no file {file} any more"))
+                }
             },
             Entry::ModrinthFile { version, enabled } => match modrinth::version(version) {
                 Ok(v) => files.push((num_id(&v.project_id), num_id(&v.id), *enabled)),
-                Err(e) => job.note(format!("Modrinth version {version}: {e:#}")),
+                Err(e) => {
+                    unsure = true;
+                    job.note(format!("Modrinth version {version}: {e:#}"))
+                }
             },
             Entry::Source { pin, enabled } => now.push(Seen { who: source_who(&pin.source), own: true, on: *enabled }),
             Entry::Remove(t) | Entry::Off(t) => now.push(Seen { who: target_who(t), own: false, on: false }),
@@ -796,7 +805,7 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     // Gone from their copy since the last code: it goes here too. Only what
     // the last code listed as theirs, so mods added on this PC stay.
     let (gone, back_on) = follow_changes(&was, &now);
-    for who in &gone {
+    for who in gone.iter().filter(|_| !unsure) {
         if let Some(i) = inst.addons.iter().position(|a| !a.from_pack && who.is(a)) {
             let name = inst.addons[i].name.clone();
             if let Err(e) = crate::install::remove(inst, i) {
