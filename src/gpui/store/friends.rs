@@ -512,10 +512,36 @@ impl Store {
     }
 
     /// The Friends panel was open: what's there now isn't new any more.
+    /// A friend's own "2 new" stays until their page is opened, so anyone
+    /// without a time of their own keeps the old one.
     pub fn mark_friends_seen(&mut self, cx: &mut Context<Self>) {
         let newest = self.mailbox_recipes.iter().map(|e| e.at).max().unwrap_or(0);
         if newest > self.settings.friends_seen {
-            self.update_settings_quietly(|st| st.friends_seen = newest);
+            let old = self.settings.friends_seen;
+            let ids: Vec<String> = self.mailbox_recipes.iter().map(|e| e.from.clone()).collect();
+            self.update_settings_quietly(|st| {
+                for id in ids {
+                    st.friend_seen.entry(id).or_insert(old);
+                }
+                st.friends_seen = newest;
+            });
+            cx.notify();
+        }
+    }
+
+    /// Changes to `id`'s packs newer than this are new to the player.
+    pub fn friend_seen(&self, id: &str) -> u64 {
+        self.settings.friend_seen.get(id).copied().unwrap_or(self.settings.friends_seen)
+    }
+
+    /// `id`'s page was open: their packs aren't new any more.
+    pub fn mark_friend_seen(&mut self, id: &str, cx: &mut Context<Self>) {
+        let newest = self.mailbox_recipes.iter().filter(|e| e.from == id).map(|e| e.at).max().unwrap_or(0);
+        if newest > self.friend_seen(id) {
+            let id = id.to_string();
+            self.update_settings_quietly(|st| {
+                st.friend_seen.insert(id, newest);
+            });
             cx.notify();
         }
     }

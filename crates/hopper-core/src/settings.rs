@@ -183,6 +183,10 @@ pub struct Settings {
     /// The newest friend's pack change (`Event::at`) seen in the Friends
     /// panel. A newer one puts a dot on the title bar's Friends button.
     pub friends_seen: u64,
+    /// Per friend (their id): the newest of their packs' changes seen on
+    /// their page in the Friends panel. Newer ones show as "2 new" on their
+    /// row. A friend with no entry yet counts from `friends_seen`.
+    pub friend_seen: HashMap<String, u64>,
     /// Friends' packs hidden from the Friends panel ("<from>/<inst>/<at>").
     /// A change to the pack shows it again.
     pub friends_hidden: Vec<String>,
@@ -630,6 +634,7 @@ impl Default for Settings {
             shared_instances: Vec::new(),
             share_prompt_done: false,
             friends_seen: 0,
+            friend_seen: HashMap::new(),
             friends_hidden: Vec::new(),
             datapack_dest: HashMap::new(),
             links_prev_handler: None,

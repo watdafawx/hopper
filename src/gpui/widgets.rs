@@ -1064,6 +1064,35 @@ pub fn row_actions(id: impl Into<ElementId>) -> Stateful<Div> {
     h_flex().id(id).flex_none().gap_2().on_click(|_, _, cx| cx.stop_propagation())
 }
 
+/// A row's action that shows only while the row (`.group(row)`) is hovered
+/// or the action has keyboard focus: a Follow button, a hide ✕, a ⋯ menu.
+/// It stays laid out, so nothing moves when it appears. A hidden element
+/// drops out of the Tab order, so this one is see-through instead and Tab
+/// still reaches it. `id` keeps its focus between frames.
+pub fn reveal_on_hover(row: impl Into<SharedString>, id: impl Into<ElementId>, el: impl IntoElement, window: &mut Window, cx: &mut App) -> Div {
+    let focus = window.use_keyed_state(id, cx, |_, cx| cx.focus_handle().tab_stop(false)).read(cx).clone();
+    let shown = focus.contains_focused(window, cx);
+    let row = row.into();
+    div().flex_none().track_focus(&focus).when(!shown, |d| d.opacity(0.).group_hover(row, |s| s.opacity(1.))).child(el)
+}
+
+/// Faces side by side, each overlapping the one before by a third, with a
+/// ring in `ring` (the background they sit on) so the edges stay apart.
+/// `corner` is the faces' own corner radius: the ring follows it, so a
+/// square head's corners don't poke out of a round ring.
+/// Every face but the last sits in a slot two thirds its width and spills
+/// out under the next one (a negative margin would leave the stack with no
+/// width of its own, and the text beside it would run over the faces).
+pub fn face_stack(faces: Vec<AnyElement>, ring: Hsla, size: Rems, corner: Pixels) -> Div {
+    let last = faces.len().saturating_sub(1);
+    h_flex().flex_none().children(faces.into_iter().enumerate().map(|(i, f)| {
+        div()
+            .flex_none()
+            .when(i < last, |d| d.w(rems(0.68 * size.0)))
+            .child(div().flex_none().rounded(corner + px(2.)).border_2().border_color(ring).child(f))
+    }))
+}
+
 /// The focus ring: 2px in the theme's `ring` color, just inside the edge
 /// (an outer shadow would show through see-through elements as a fill).
 /// For a custom `.focus_visible(..)` style; `clickable` already adds it.
