@@ -720,7 +720,8 @@ pub fn mc_versions(text: &str) -> Vec<String> {
             i += end.max(1);
             continue;
         }
-        if at_word && text[i..].starts_with("1.") {
+        // By byte: `i` may sit inside a character ("模组-1.21.jar").
+        if at_word && b[i..].starts_with(b"1.") {
             let rest = &text[i..];
             let end = rest
                 .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == 'x'))

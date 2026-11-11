@@ -179,21 +179,36 @@ fn delay_ms(d: image::Delay) -> u64 {
     if ms < 20 { 100 } else { ms }
 }
 
+/// The largest animation canvas decoded, in pixels (4096x4096).
+const MAX_CANVAS_PX: u64 = 4096 * 4096;
+
 /// The frames of the GIF or animated WebP at `path`, decoded and ready to
 /// upload: scaled to at most `max` wide, BGRA as GPUI wants.
 fn frames(
     path: &Path,
     max: u32,
 ) -> anyhow::Result<Option<impl Iterator<Item = anyhow::Result<(Arc<RenderImage>, u64)>>>> {
+    use image::ImageDecoder;
     use image::codecs::{gif::GifDecoder, webp::WebPDecoder};
+    // Every frame gets a canvas of the image's full size, and these decoders
+    // set no limit: a GIF claiming 65535x65535 would ask for 17 GB.
+    let fits = |(w, h): (u32, u32)| {
+        anyhow::ensure!(w as u64 * h as u64 <= MAX_CANVAS_PX, "{w}x{h} is too big to play");
+        Ok(())
+    };
     let reader = std::io::BufReader::new(std::fs::File::open(path)?);
     let frames = match image::ImageFormat::from_path(path)? {
-        image::ImageFormat::Gif => GifDecoder::new(reader)?.into_frames(),
+        image::ImageFormat::Gif => {
+            let d = GifDecoder::new(reader)?;
+            fits(d.dimensions())?;
+            d.into_frames()
+        }
         image::ImageFormat::WebP => {
             let mut d = WebPDecoder::new(reader)?;
             if !d.has_animation() {
                 return Ok(None);
             }
+            fits(d.dimensions())?;
             d.set_background_color(image::Rgba([0, 0, 0, 0]))?;
             d.into_frames()
         }

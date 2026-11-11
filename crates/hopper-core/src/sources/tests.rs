@@ -87,6 +87,9 @@ fn year_versions_count_as_minecraft() {
     assert_eq!(mc_versions("sodium-fabric-0.6.13+mc1.21.1.jar"), ["1.21.1"]);
     assert_eq!(mc_versions("mymod-1.2.0.jar"), Vec::<String>::new());
     assert_eq!(mc_versions("thing-1.20.x-3.jar"), ["1.20.x"]);
+    // Non-ASCII names crashed the app (a slice inside a character).
+    assert_eq!(mc_versions("\u{6a21}\u{7ec4}-1.21.jar v1.0\u{2013}fix"), ["1.21"]);
+    assert_eq!(mc_versions("\u{e9}1.21.1 \u{1F600}26.1"), ["1.21.1", "26.1"]);
     assert_eq!(fit("x-26.3.1.jar", "", "26.3.1", Loader::Fabric), Fit::Good);
     assert_eq!(fit("x-26.3.1.jar", "", "1.21.1", Loader::Fabric), Fit::Minecraft("26.3.1".into()));
 }

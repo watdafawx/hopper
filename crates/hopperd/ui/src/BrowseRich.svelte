@@ -44,9 +44,9 @@
       {#if s.href}<a href={s.href} class:fill={fill(s, grid)} target="_blank" rel="noreferrer noopener" onclick={(e) => click(e, s.href)}><img src={s.img} alt={s.t} loading="lazy" onload={loaded} class:fill={fill(s, grid)} style:max-width={imgW(s)} style:height={imgH(s)} /></a>
       {:else}<img src={s.img} alt={s.t} loading="lazy" onload={loaded} class:fill={fill(s, grid)} style:max-width={imgW(s)} style:height={imgH(s)} />{/if}
     {:else if s.href}
-      <a href={s.href} target="_blank" rel="noreferrer noopener" class:b={s.b} class:i={s.i} onclick={(e) => click(e, s.href)}>{s.t}</a>
+      <a href={s.href} target="_blank" rel="noreferrer noopener" class:b={s.b} class:i={s.i} class:s={s.s} onclick={(e) => click(e, s.href)}>{s.t}</a>
     {:else if s.c}<code>{s.t}</code>
-    {:else}<span class:b={s.b} class:i={s.i}>{s.t}</span>{/if}
+    {:else}<span class:b={s.b} class:i={s.i} class:s={s.s}>{s.t}</span>{/if}
   {/each}
 {/snippet}
 
@@ -88,6 +88,7 @@
   .mk { position: absolute; margin-left: -14px; color: var(--muted); }
   .b { font-weight: 650; color: var(--text); }
   .i { font-style: italic; }
+  .s { text-decoration: line-through; }
   code { font: 12px var(--mono); background: var(--raise); padding: 0 5px; border-radius: var(--radius-sm); }
   pre { font: 12px var(--mono); background: var(--term); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; overflow: auto; margin: 0 0 8px; white-space: pre-wrap; }
   img { max-width: 100%; height: auto; border-radius: var(--radius-sm); vertical-align: middle; }

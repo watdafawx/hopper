@@ -669,6 +669,9 @@ fn spans_json(spans: &[Span]) -> Value {
             if s.code {
                 o["c"] = json!(true);
             }
+            if s.strike {
+                o["s"] = json!(true);
+            }
             if let Some(l) = s.link.as_deref().filter(|l| is_http(l)) {
                 o["href"] = json!(l);
             }

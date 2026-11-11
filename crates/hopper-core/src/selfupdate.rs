@@ -314,6 +314,7 @@ mod tests {
         v.sort_by(|a, b| compare(b, a));
         assert_eq!(v[0], "1.0.1");
         assert_eq!(v[5], "0.9");
+        crate::scan::check_total_order(compare);
     }
 
     #[test]
