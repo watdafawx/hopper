@@ -57,21 +57,26 @@ fn how_it_works(cx: &App) -> Div {
         .child(step("3", "Share a pack. When you change it, their copy changes too."))
 }
 
-/// The tabs.
-const FRIENDS: usize = 0;
-const YOUR_PACKS: usize = 1;
+/// The rail's width and its tiles' size, in rem. 3 rem (48 px at 100%)
+/// leaves the narrowest panel (26 rem) 23 rem for the list; the mock's
+/// 56 px rail cut a long name and its chip off sooner.
+const RAIL_W: f32 = 3.;
+const TILE: f32 = 2.375;
+/// A rail tile's fill: `foreground` at this opacity. `muted` is the panel's
+/// own colour in light themes, so the tiles vanished there.
+const TILE_FILL: f32 = 0.08;
 
 /// A friend sharing more packs than this gets a search box on their page.
 const PAGE_SEARCH_FROM: usize = 8;
 
-/// What the Friends tab shows: the list, or one friend's, group's or the
-/// stopped follows' page in its place.
+/// What the panel shows beside the rail: everyone, one friend, one group
+/// (or its invitation), or the packs.
 #[derive(Clone, PartialEq)]
 enum Page {
-    List,
+    Everyone,
     Friend(String),
     Group(String),
-    Ended,
+    Packs,
 }
 
 /// Someone in the Friends list: a friend, or someone who shares a pack
@@ -101,7 +106,6 @@ impl EventEmitter<FriendsEvent> for FriendsPanel {}
 pub struct FriendsPanel {
     store: Entity<Store>,
     panel: widgets::SidePanel,
-    tab: usize,
     /// The friend's invite code, to join them.
     join_code: Entity<InputState>,
     /// The Your packs row whose share popover is open (its instance id).
@@ -119,8 +123,12 @@ pub struct FriendsPanel {
     page_since: u64,
     /// The header's + popover (invite, join, new group) is open.
     plus_pop: bool,
-    /// Where the + was last drawn, for its popover.
+    /// Where the Invite button was last drawn, for its popover.
     plus_anchor: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    /// The popover was opened from "Got a code?": only the join part, under
+    /// that link.
+    join_only: bool,
+    join_anchor: Rc<RefCell<Option<Bounds<Pixels>>>>,
     /// The list's search, and the one on a friend's page.
     search: Entity<InputState>,
     pack_search: Entity<InputState>,
@@ -153,16 +161,17 @@ impl FriendsPanel {
         Self {
             store,
             panel: widgets::SidePanel::new(widgets::DOCK),
-            tab: FRIENDS,
             join_code,
             share_pop: None,
             anchors: Rc::default(),
             paint: drag_pick::Paint::default(),
             ticking: false,
-            page: Page::List,
+            page: Page::Everyone,
             page_since: 0,
             plus_pop: false,
             plus_anchor: Rc::default(),
+            join_only: false,
+            join_anchor: Rc::default(),
             search,
             pack_search,
             by_name: false,
@@ -194,6 +203,8 @@ impl FriendsPanel {
     fn set_plus(&mut self, open: bool, cx: &mut Context<Self>) {
         if open {
             self.set_pop(None, cx);
+        } else {
+            self.join_only = false;
         }
         if self.plus_pop != open {
             self.plus_pop = open;
@@ -211,7 +222,7 @@ impl FriendsPanel {
         } else {
             // It opens on the list again.
             self.leave_page(cx);
-            self.page = Page::List;
+            self.page = Page::Everyone;
         }
         cx.notify();
     }
@@ -233,10 +244,10 @@ impl FriendsPanel {
             self.store.update(cx, |s, cx| s.mark_friend_seen(&id, cx));
         }
         widgets::clear_search(&self.pack_search, window, cx);
-        if page != Page::List {
+        if page != Page::Everyone {
             window.focus(&self.focus, cx);
         }
-        self.tab = FRIENDS;
+        self.set_pop(None, cx);
         self.page = page;
         cx.notify();
     }
@@ -532,15 +543,15 @@ impl FriendsPanel {
         Some(place.apply(pop, 17., 22., window).into_any_element())
     }
 
-    /// The + popover: invite a friend, join with their code, new group.
+    /// The Invite popover: invite a friend, or join with their code.
     fn plus_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let anchor = (*self.plus_anchor.borrow())?;
+        let join_only = self.join_only;
+        let anchor = if join_only { *self.join_anchor.borrow() } else { *self.plus_anchor.borrow() }?;
         let theme = cx.theme().clone();
         let down = matches!(self.store.read(cx).sync_status(), SyncStatus::Down(_));
-        let can_group = self.can_group(cx);
         let place = widgets::anchored_popover(anchor, window);
         let me = cx.entity();
-        let invite = self.invite_block(down, true, cx);
+        let invite = (!join_only).then(|| self.invite_block(down, true, cx));
         let join = self.join_block(down, cx);
         let pop = v_flex()
             .id("plus-pop")
@@ -553,34 +564,14 @@ impl FriendsPanel {
             .bg(theme.popover)
             .shadow_lg()
             .on_mouse_down_out(move |e: &MouseDownEvent, _, cx| {
-                // The + toggles it itself.
+                // The button that opened it toggles it itself.
                 if anchor.contains(&e.position) {
                     return;
                 }
                 me.update(cx, |t, cx| t.set_plus(false, cx))
             })
-            .child(invite)
-            .child(or_line(cx))
-            .child(join)
-            .when(can_group, |c| {
-                c.child(div().h_px().bg(theme.border)).child(
-                    h_flex()
-                        .id("plus-new-group")
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .rounded(theme.radius)
-                        .text_sm()
-                        .clickable(cx)
-                        .hover(|s| widgets::row_hover(s, cx))
-                        .child(Icon::new(IconName::Users).small().text_color(theme.muted_foreground))
-                        .child("New group\u{2026}")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_plus(false, cx);
-                            this.group_dialog(GroupMode::New, None, window, cx)
-                        })),
-                )
-            });
+            .when_some(invite, |p, i| p.child(i).child(or_line(cx)))
+            .child(join);
         Some(place.apply(pop, 18.5, 18.5, window).into_any_element())
     }
 
@@ -638,7 +629,8 @@ impl FriendsPanel {
             .px_3()
             .gap_2()
             .child(div().flex_1().text_base().font_semibold().child("Friends"))
-            .when(self.store.read(cx).sync_status() != SyncStatus::Off, |h| {
+            // The empty page has its own Invite button.
+            .when(self.store.read(cx).sync_status() != SyncStatus::Off && !self.nobody(cx), |h| {
                 let anchor = self.plus_anchor.clone();
                 h.child(
                     div()
@@ -646,13 +638,15 @@ impl FriendsPanel {
                         .flex_none()
                         .child(
                             Button::new("friends-plus")
-                                .ghost()
+                                .outline()
                                 .small()
                                 .icon(IconName::Plus)
+                                .label("Invite")
                                 .selected(self.plus_pop)
-                                .tooltip("Invite a friend, join with a code, or make a group")
+                                .tooltip("Invite a friend, or join a friend with their code")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let open = !this.plus_pop;
+                                    this.join_only = false;
                                     this.set_plus(open, cx)
                                 })),
                         )
@@ -677,22 +671,6 @@ impl FriendsPanel {
             .border_color(theme.border)
     }
 
-    fn tabs(&self, friends: Option<usize>, shared: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let me = cx.entity();
-        h_flex().flex_none().px_2().border_b_1().border_color(cx.theme().border).child(widgets::underline_tabs(
-            "friends-tab",
-            vec![("Friends".into(), friends), ("Your packs".into(), Some(shared))],
-            self.tab,
-            move |ix, _, cx| {
-                me.update(cx, |t, cx| {
-                    t.tab = *ix;
-                    t.set_pop(None, cx);
-                })
-            },
-            cx,
-        ))
-    }
-
     /// Friends is off: what it is, and a button to turn it on.
     fn off(&self, cx: &mut Context<Self>) -> AnyElement {
         let err = self.store.read(cx).peer_error();
@@ -715,28 +693,6 @@ impl FriendsPanel {
                 )
                 .when_some(err, |c, e| c.child(div().text_sm().text_color(cx.theme().danger).child(e))),
             )
-            .into_any_element()
-    }
-
-    /// No friends and nothing shared with this PC yet: what Friends does,
-    /// with the invite and join right there.
-    fn empty(&mut self, down: bool, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .w_full()
-            .child(
-                widgets::empty_state(
-                    IconName::Users,
-                    "Play the same packs as your friends",
-                    None,
-                    cx,
-                )
-                .child(div().px_4().child(how_it_works(cx)))
-                .pb_4(),
-            )
-            .child(v_flex().px_4().gap_3().child(self.invite_block(down, false, cx)).child(or_line(cx)).child(self.join_block(down, cx)).child(widgets::fine_print(
-                "Nothing to sign up for. Hopper only sends your friend codes and mod lists. Your worlds and other files stay on your PC.",
-                cx,
-            )))
             .into_any_element()
     }
 
@@ -853,7 +809,7 @@ impl FriendsPanel {
                     .gap_2()
                     .pt_1()
                     .child(Button::new("prompt-choose").small().outline().label("Choose packs").on_click(cx.listener(|this, _, _, cx| {
-                        this.tab = YOUR_PACKS;
+                        this.page = Page::Packs;
                         this.store.update(cx, |s, cx| s.dismiss_share_prompt(cx));
                     })))
                     .child(
@@ -923,7 +879,7 @@ impl FriendsPanel {
                 let (v1, v2, f2) = (view.clone(), view.clone(), f.clone());
                 let mut menu = menu.item(PopupMenuItem::new(format!("Choose packs to share with {first}")).icon(IconName::Share2).on_click(move |_, _, cx| {
                     v1.update(cx, |t, cx| {
-                        t.tab = YOUR_PACKS;
+                        t.page = Page::Packs;
                         cx.notify();
                     })
                 }));
@@ -1009,8 +965,8 @@ impl FriendsPanel {
                         .ghost()
                         .small()
                         .icon(IconName::ChevronLeft)
-                        .label("All friends")
-                        .on_click(cx.listener(|this, _, window, cx| this.open(Page::List, window, cx))),
+                        .label("Everyone")
+                        .on_click(cx.listener(|this, _, window, cx| this.open(Page::Everyone, window, cx))),
                 ),
             )
             .child(who)
@@ -1365,81 +1321,6 @@ impl FriendsPanel {
             .collect()
     }
 
-    /// The list's last row: the follows that stopped, opening their page.
-    fn ended_row(&self, ended: &[(PathBuf, String, String, String)], cx: &mut Context<Self>) -> Option<AnyElement> {
-        let first = ended.first()?;
-        let theme = cx.theme().clone();
-        let sub = match ended.len() {
-            1 => format!("1 pack: {}", first.1),
-            n => format!("{n} packs"),
-        };
-        Some(
-            div()
-                .mt_1p5()
-                .border_t_1()
-                .border_color(theme.border)
-                .child(
-                    h_flex()
-                        .id("ended-row")
-                        .gap_2()
-                        .px_3()
-                        .py_1p5()
-                        .clickable(cx)
-                        .hover(|s| widgets::row_hover(s, cx))
-                        .on_click(cx.listener(|this, _, window, cx| this.open(Page::Ended, window, cx)))
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .child(widgets::caption("These won't change any more", cx).text_xs().font_medium())
-                                .child(widgets::caption(sub, cx).text_xs().truncate()),
-                        )
-                        .child(Icon::new(IconName::ChevronRight).small().flex_none().text_color(theme.muted_foreground)),
-                )
-                .into_any_element(),
-        )
-    }
-
-    /// The stopped follows' page; each can be taken off the list, and the
-    /// instance stays.
-    fn ended_page(&self, ended: Vec<(PathBuf, String, String, String)>, cx: &mut Context<Self>) -> (Option<AnyElement>, AnyElement) {
-        let top = self.page_top(div().px_3().pt_1p5().pb_2p5().text_base().font_semibold().child("These won't change any more"), cx);
-        let body = v_flex()
-            .py_1()
-            .children(ended.into_iter().enumerate().map(|(i, (root, pack, local, who))| {
-                h_flex()
-                    .id(("ended", i))
-                    .gap_2()
-                    .px_3()
-                    .py_1()
-                    .hover(|s| widgets::row_hover(s, cx))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().text_sm().truncate().child(pack))
-                            .child(widgets::caption(format!("{who} · your copy: {local}"), cx).text_xs()),
-                    )
-                    .child(
-                        Button::new(("stop-follow", i))
-                            .xsmall()
-                            .outline()
-                            .label("Stop following")
-                            .tooltip("Take it off this list. Your copy stays on your PC.")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let root = root.clone();
-                                this.store.update(cx, |s, cx| s.stop_following(&root, cx))
-                            })),
-                    )
-            }))
-            .child(div().px_3().py_2().child(widgets::fine_print(
-                "The friend removed you, or stopped sharing the pack. Your copies stay on your PC as they are.",
-                cx,
-            )))
-            .into_any_element();
-        (Some(top), body)
-    }
-
     /// Someone asked this PC into a group: join or decline.
     fn invitation(&self, gi: usize, g: &Group, down: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
@@ -1485,7 +1366,7 @@ impl FriendsPanel {
                 Button::new(("group-decline", gi))
                     .xsmall()
                     .ghost()
-                    .label("Decline")
+                    .label("No thanks")
                     .disabled(down)
                     .tooltip("Say no. They won't be told why.")
                     .on_click(cx.listener(move |this, _, _, cx| this.store.update(cx, |s, cx| s.leave_group(&d, cx)))),
@@ -1515,31 +1396,6 @@ impl FriendsPanel {
         }
         let faces: Vec<AnyElement> = others.iter().take(3).map(|m| face(&self.store, &m.mc_id, &m.name, size, cx)).collect();
         (widgets::face_stack(faces, cx.theme().sidebar, size, cx.theme().radius), sub)
-    }
-
-    /// A group this PC is in, in the list: opens its page.
-    fn group_row(&self, gi: usize, g: &Group, recipes: &[Event], words: &[String], cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let (faces, sub) = self.group_look(g, recipes, rems(1.25), cx);
-        let id = g.id.clone();
-        h_flex()
-            .id(("group", gi))
-            .gap_2()
-            .px_3()
-            .py_1p5()
-            .clickable(cx)
-            .hover(|s| widgets::row_hover(s, cx))
-            .on_click(cx.listener(move |this, _, window, cx| this.open(Page::Group(id.clone()), window, cx)))
-            .child(faces)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().text_sm().font_medium().truncate().child(widgets::marked(g.name.clone(), words, cx)))
-                    .child(widgets::caption(sub, cx).text_xs().truncate()),
-            )
-            .child(Icon::new(IconName::ChevronRight).small().flex_none().text_color(theme.muted_foreground))
-            .into_any_element()
     }
 
     /// A group's ⋯: rename, add friends, delete (its maker), or leave.
@@ -1606,31 +1462,33 @@ impl FriendsPanel {
             })
     }
 
-    /// A group's page: its members, "Keep my packs the same as the group",
-    /// the packs it shares and the ones this PC shares with it.
+    /// A group's page: an invitation's answer first; then "Keep my packs
+    /// the same as the group", the packs in it, and the people.
     fn group_page(&mut self, g: &Group, recipes: &[Event], down: bool, window: &mut Window, cx: &mut Context<Self>) -> (Option<AnyElement>, AnyElement) {
         let theme = cx.theme().clone();
-        let (faces, sub) = self.group_look(g, recipes, rems(1.5), cx);
-        let menu = self.group_menu(g, cx);
-        let who = h_flex()
+        let (_, sub) = self.group_look(g, recipes, rems(1.5), cx);
+        let menu = g.me.joined.then(|| self.group_menu(g, cx));
+        let top = h_flex()
+            .flex_none()
             .gap_2()
-            .px_3()
-            .pt_1p5()
-            .pb_2p5()
-            .child(faces)
+            .pl_3()
+            .pr_2()
+            .py_1p5()
+            .border_b_1()
+            .border_color(theme.border)
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_base().font_semibold().truncate().child(g.name.clone()))
+                    .child(div().text_sm().font_semibold().truncate().child(g.name.clone()))
                     .child(widgets::caption(sub, cx).text_xs().truncate()),
             )
-            .child(menu);
-        let top = self.page_top(who, cx);
+            .children(menu)
+            .into_any_element();
         let s = self.store.read(cx);
         let me = s.mailbox_id();
         let mine = g.owner == me;
-        let others: Vec<_> = g.members.iter().filter(|m| m.id != me).cloned().collect();
+        let owner_name = g.members.iter().find(|m| m.id == g.owner).map(|m| name_or(&m.name, "A friend")).unwrap_or_else(|| "A friend".into());
         let my_packs: Vec<(PathBuf, String)> = s
             .instances()
             .iter()
@@ -1638,16 +1496,19 @@ impl FriendsPanel {
             .map(|i| (i.root.clone(), i.name.clone()))
             .collect();
         let can_add = mine && s.mailbox_friends().iter().any(|f| !g.members.iter().any(|m| m.id == f.id));
-        // Members, the owner first.
-        let mut members = others.clone();
-        members.sort_by_key(|m| m.id != g.owner);
+        // You first, then whoever made it, then the rest.
+        let mut members: Vec<_> = g.members.clone();
+        members.sort_by_key(|m| (m.id != me, m.id != g.owner));
         let member_rows: Vec<AnyElement> = members
             .iter()
             .enumerate()
             .map(|(mi, m)| {
-                let name = name_or(&m.name, "A friend");
+                let you = m.id == me;
+                let name = if you { "You".to_string() } else { name_or(&m.name, "A friend") };
                 let status = if !m.joined {
-                    "Not joined yet".to_string()
+                    String::new()
+                } else if you {
+                    String::new()
                 } else if m.online && !down {
                     "Online".to_string()
                 } else if m.last_seen > 0 {
@@ -1655,10 +1516,14 @@ impl FriendsPanel {
                 } else {
                     "Offline".to_string()
                 };
-                let status = if m.id == g.owner { format!("Created the group · {status}") } else { status };
-                let f = face(&self.store, &m.mc_id, &name, rems(1.25), cx);
+                let status = match (m.id == g.owner, status.is_empty()) {
+                    (true, true) => "Made the group".to_string(),
+                    (true, false) => format!("Made the group · {status}"),
+                    _ => status,
+                };
+                let f = face(&self.store, &m.mc_id, &m.name, rems(1.25), cx);
                 let row_id = SharedString::from(format!("gm:{mi}"));
-                let remove = (mine && m.id != g.owner).then(|| {
+                let remove = (mine && m.id != g.owner && !you).then(|| {
                     let (id, mid, gname, who) = (g.id.clone(), m.id.clone(), g.name.clone(), name.clone());
                     let b = Button::new(SharedString::from(format!("gm-x:{mi}")))
                         .xsmall()
@@ -1684,18 +1549,17 @@ impl FriendsPanel {
                     .group(row_id.clone())
                     .gap_2()
                     .px_3()
-                    .py_0p5()
+                    .py_1()
                     .hover(|s| widgets::row_hover(s, cx))
                     .child(f)
                     .child(div().flex_1().min_w_0().truncate().text_sm().child(name))
-                    .child(widgets::caption(status, cx).text_xs().flex_none())
+                    .when(!m.joined, |r| r.child(widgets::chip(theme.muted_foreground).child("Invited")))
+                    .when(!status.is_empty(), |r| r.child(widgets::caption(status, cx).text_xs().flex_none()))
                     .children(remove)
                     .into_any_element()
             })
             .collect();
-        // Packs others share with the group, as the friends' pack rows. The
-        // feed says which groups each came through; the group's own list is
-        // read less often.
+        // Packs others share with the group, as the friends' pack rows.
         let shared: Vec<Event> = recipes.iter().filter(|e| e.from != me && e.groups.contains(&g.id)).cloned().collect();
         let pack_rows: Vec<AnyElement> = shared
             .iter()
@@ -1713,19 +1577,23 @@ impl FriendsPanel {
                     .id(SharedString::from(format!("gp-mine:{pi}")))
                     .gap_2()
                     .px_3()
-                    .py_0p5()
+                    .py_1()
                     .hover(|s| widgets::row_hover(s, cx))
                     .child(
-                        div()
+                        v_flex()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .clickable(cx)
-                            .hover(|s| s.text_color(crate::theme::ink(theme.primary)))
-                            .child(name.clone())
-                            .id(SharedString::from(format!("gp-mine-name:{pi}")))
-                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(FriendsEvent::Show(root.clone())))),
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("gp-mine-name:{pi}")))
+                                    .truncate()
+                                    .text_sm()
+                                    .clickable(cx)
+                                    .hover(|s| s.text_color(crate::theme::ink(theme.primary)))
+                                    .child(name.clone())
+                                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(FriendsEvent::Show(root.clone())))),
+                            )
+                            .child(widgets::caption("Yours", cx).text_xs()),
                     )
                     .child(
                         Button::new(SharedString::from(format!("gp-change:{pi}")))
@@ -1733,63 +1601,70 @@ impl FriendsPanel {
                             .outline()
                             .label("Change")
                             .tooltip("Choose who gets this pack")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.tab = YOUR_PACKS;
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(|this, _, window, cx| this.open(Page::Packs, window, cx))),
                     )
                     .into_any_element()
             })
             .collect();
+        let n_packs = pack_rows.len() + my_rows.len();
         let gid = g.id.clone();
+        // Only the group's maker adds people; say who, where it can't be done.
+        let add = if g.me.joined {
+            let b = Button::new("group-add").xsmall().ghost().icon(IconName::Plus).label("Add");
+            Some(if mine {
+                b.disabled(down || !can_add)
+                    .tooltip(if down {
+                        CANT_CONNECT.to_string()
+                    } else if can_add {
+                        "Ask another friend into this group".to_string()
+                    } else {
+                        "All your friends are in this group".to_string()
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| this.group_dialog(GroupMode::Add(gid.clone()), None, window, cx)))
+            } else {
+                b.disabled(true).tooltip(format!("Only {owner_name} can add people"))
+            })
+        } else {
+            None
+        };
+        let card = |c: Div| c.mx_3().mt_3().p_3().rounded(theme.radius_lg).border_1().border_color(theme.border);
+        let setting = g.me.joined.then(|| {
+            card(h_flex().gap_3().items_start())
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(div().text_sm().font_medium().child("Keep my packs the same as the group"))
+                        .child(widgets::fine_print(
+                            "This PC gets the group's packs, and when anyone changes a mod in one, your copy changes too. Your other instances don't change.",
+                            cx,
+                        )),
+                )
+                .child(crate::switch::Switch::new("group-step").checked(in_step).on_click({
+                    let store = self.store.clone();
+                    move |v: &bool, _, cx| {
+                        let (id, v) = (step_id.clone(), *v);
+                        store.update(cx, |s, cx| s.set_in_step(&id, v, cx))
+                    }
+                }))
+        });
+        let ask = (!g.me.joined).then(|| self.invitation(0, g, down, cx));
         let body = v_flex()
             .pb_2()
-            .child(cap("Members", Some(member_rows.len()), None, cx))
-            .children(member_rows)
-            .when(can_add, |c| {
-                c.child(
-                    h_flex().px_3().py_0p5().child(
-                        Button::new("group-add")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::Plus)
-                            .label("Add a friend")
-                            .disabled(down)
-                            .tooltip(if down { CANT_CONNECT } else { "Invite another friend into this group" })
-                            .on_click(cx.listener(move |this, _, window, cx| this.group_dialog(GroupMode::Add(gid.clone()), None, window, cx))),
-                    ),
-                )
-            })
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_start()
-                    .px_3()
-                    .pt_3()
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().text_sm().font_medium().child("Keep my packs the same as the group"))
-                            .child(widgets::fine_print(
-                                "When someone in the group follows one of its packs, this PC gets it too, as a new instance. When anyone turns a mod off or on, adds, removes or updates one in a group pack, everyone's copy changes too. Your other instances don't change. Each friend chooses this on their own PC.",
-                                cx,
-                            )),
-                    )
-                    .child(crate::switch::Switch::new("group-step").checked(in_step).on_click({
-                        let store = self.store.clone();
-                        move |v: &bool, _, cx| {
-                            let (id, v) = (step_id.clone(), *v);
-                            store.update(cx, |s, cx| s.set_in_step(&id, v, cx))
-                        }
-                    })),
-            )
-            .when(!pack_rows.is_empty(), |c| c.child(cap("Packs from the group", Some(pack_rows.len()), None, cx)).children(pack_rows))
-            .child(cap("Your packs in the group", (!my_rows.is_empty()).then_some(my_rows.len()), None, cx))
-            .when(my_rows.is_empty(), |c| {
-                c.child(div().px_3().child(widgets::fine_print("You haven't shared any packs with the group. Pick some under Your packs.", cx)))
-            })
+            .children(ask)
+            .children(setting)
+            .child(cap("Packs", (n_packs > 0).then_some(n_packs), None, cx))
+            .children(pack_rows)
             .children(my_rows)
+            .when(n_packs == 0, |c| {
+                c.child(div().px_3().child(widgets::fine_print(
+                    if g.me.joined { "Nobody has shared a pack with the group yet. Share yours under Packs on the left." } else { "Join to get the packs the group shares." },
+                    cx,
+                )))
+            })
+            .child(cap("People", Some(member_rows.len()), add.map(|b| b.into_any_element()), cx))
+            .children(member_rows)
             .into_any_element();
         (Some(top), body)
     }
@@ -1859,119 +1734,91 @@ impl FriendsPanel {
         )
     }
 
-    /// The Friends tab: the list, or the open page (its top stays put
-    /// above the scrolling part).
-    fn friends_tab(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) -> (Option<AnyElement>, AnyElement) {
-        let s = self.store.read(cx);
-        let friends = s.mailbox_friends().to_vec();
-        let all_recipes = s.mailbox_recipes().to_vec();
-        let recipes: Vec<Event> = all_recipes.iter().filter(|e| !s.pack_hidden(e)).cloned().collect();
-        let groups: Vec<Group> = s.mailbox_groups().to_vec();
-        let ended = self.ended_list(&friends, &all_recipes, cx);
-        if self.page == Page::Ended && !ended.is_empty() {
-            return self.ended_page(ended, cx);
-        }
-        if friends.is_empty() && all_recipes.is_empty() {
-            self.page = Page::List;
-            let row = self.ended_row(&ended, cx);
-            return (None, v_flex().children(row).child(self.empty(down, cx)).into_any_element());
-        }
-        let people = self.people(&recipes, &groups, down, cx);
-        match self.page.clone() {
-            Page::Friend(id) => {
-                if let Some(p) = people.iter().find(|p| p.id == id) {
-                    return self.friend_page(p, down, window, cx);
-                }
-            }
-            Page::Group(id) => {
-                if let Some(g) = groups.iter().find(|g| g.id == id && g.me.joined) {
-                    return self.group_page(g, &all_recipes, down, window, cx);
-                }
-            }
-            Page::Ended | Page::List => {}
-        }
-        // The page's friend or group is gone: the list again.
-        self.page = Page::List;
-        (None, self.list(&people, &groups, &recipes, &all_recipes, &ended, down, window, cx))
-    }
-
-    /// The list: what this PC follows, groups, friends, and the follows
-    /// that stopped. Searching narrows each and adds the packs that match.
-    #[allow(clippy::too_many_arguments)]
-    fn list(
-        &mut self,
-        people: &[Person],
-        groups: &[Group],
-        recipes: &[Event],
-        all_recipes: &[Event],
-        ended: &[(PathBuf, String, String, String)],
-        down: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let s = self.store.read(cx);
-        let has_friends = people.iter().any(|p| p.friend.is_some());
-        let prompt = has_friends && s.settings().shared_with.is_empty() && !s.settings().share_prompt_done;
-        let q = self.search.read(cx).value().to_string();
-        let words = widgets::search_words(&q);
-        let n_packs: usize = people.iter().map(|p| p.packs.len()).sum();
-        let searchable = people.len() > 4 || n_packs > 12 || !words.is_empty();
+    /// No friends, nothing shared and no group yet: what Friends does, the
+    /// Invite button (it opens the invite popover under itself) and a way
+    /// to paste a friend's code.
+    fn empty(&mut self, down: bool, cx: &mut Context<Self>) -> AnyElement {
+        let anchor = self.plus_anchor.clone();
+        let invite = div()
+            .relative()
+            .w_full()
+            .child(
+                Button::new("empty-invite")
+                    .w_full()
+                    .primary()
+                    .icon(IconName::UserPlus)
+                    .label("Invite a friend")
+                    .selected(self.plus_pop)
+                    .disabled(down)
+                    .tooltip(if down { CANT_CONNECT } else { INVITE_TIP })
+                    // The code comes up in the popover under the button, so
+                    // the popover has no second Invite button.
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.plus_pop && !this.join_only {
+                            return this.set_plus(false, cx);
+                        }
+                        this.invite_hidden = false;
+                        if this.plain_invite(cx).is_none() {
+                            this.store.update(cx, |s, cx| s.make_invite("", cx));
+                        }
+                        this.join_only = false;
+                        this.set_plus(true, cx)
+                    })),
+            )
+            .child(canvas(move |b, _, _| *anchor.borrow_mut() = Some(b), |_, _, _, _| {}).absolute().top_0().left_0().size_full());
+        let join_anchor = self.join_anchor.clone();
+        let paste = div()
+            .id("empty-paste")
+            .relative()
+            .text_sm()
+            .text_color(crate::theme::ink(cx.theme().primary))
+            .clickable(cx)
+            .hover(|s| s.underline())
+            .child("Got a code from a friend? Paste it here")
+            .child(canvas(move |b, _, _| *join_anchor.borrow_mut() = Some(b), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.set_plus(true, cx);
+                this.join_only = true;
+                this.join_code.update(cx, |s, cx| s.focus(window, cx));
+            }));
         let reminder = self.invite_reminder(cx);
-        let following = self.following(recipes, &words, down, cx);
-        // Invitations first: they wait for an answer.
-        let mut order: Vec<&Group> = groups.iter().filter(|g| !g.me.joined).collect();
-        order.extend(groups.iter().filter(|g| g.me.joined));
-        let group_rows: Vec<AnyElement> = order
-            .into_iter()
-            .filter(|g| hits(&g.name, &words))
-            .enumerate()
-            .map(|(gi, g)| if g.me.joined { self.group_row(gi, g, all_recipes, &words, cx) } else { self.invitation(gi, g, down, cx) })
-            .collect();
-        let friend_rows: Vec<AnyElement> = people
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| hits(&p.name, &words))
-            .map(|(i, p)| self.friend_row(i, p, &words, down, window, cx))
-            .collect();
-        // Searching: the packs that match, from whoever shares them.
-        let mut pack_hits: Vec<AnyElement> = Vec::new();
-        if !words.is_empty() {
-            let s = self.store.read(cx);
-            let found: Vec<(Event, String)> = people
-                .iter()
-                .flat_map(|p| p.packs.iter().map(move |e| (e.clone(), p.name.clone())))
-                .filter(|(e, _)| hits(&pack_name(e), &words) && s.followers_of(&e.from, &e.inst).is_empty())
-                .collect();
-            for (i, (e, by)) in found.iter().enumerate() {
-                pack_hits.push(self.their_pack(&format!("hit:{i}"), e, Some(by.clone()), false, down, window, cx));
-            }
-        }
-        let ended_row = if words.is_empty() { self.ended_row(ended, cx) } else { None };
-        let nothing = !words.is_empty() && following.is_empty() && group_rows.is_empty() && friend_rows.is_empty() && pack_hits.is_empty();
-        let hint = words.is_empty() && people.len() == 1 && !people[0].packs.is_empty();
-        let n_groups = group_rows.len();
         v_flex()
-            .pb_2()
-            .when(prompt, |c| c.child(div().px_3().pt_3().child(self.prompt(cx))))
+            .w_full()
             .children(reminder)
-            .when(searchable, |c| c.child(search_box(&self.search)))
-            .when(!following.is_empty(), |c| c.child(cap("Following", Some(following.len()), None, cx)).children(following))
-            .when(n_groups > 0, |c| c.child(cap("Groups", Some(n_groups), None, cx)).children(group_rows))
-            .when(!friend_rows.is_empty(), |c| c.child(cap("Friends", Some(friend_rows.len()), None, cx)).children(friend_rows))
-            .when(hint, |c| c.child(div().px_3().py_2().child(widgets::fine_print("Open a friend to see the packs they share with you.", cx))))
-            .when(!pack_hits.is_empty(), |c| c.child(cap("Packs", Some(pack_hits.len()), None, cx)).children(pack_hits))
-            .when(nothing, |c| c.child(div().px_3().py_3().child(widgets::fine_print(format!("Nothing matches \u{201c}{q}\u{201d}."), cx))))
-            .children(ended_row)
+            .child(v_flex()
+            .w_full()
+            .px_4()
+            .pt_6()
+            .gap_4()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_base().font_semibold().child("Play the same packs as your friends"))
+                    .child(widgets::fine_print("Your friends and your groups show up here.", cx)),
+            )
+            .child(how_it_works(cx))
+            .child(v_flex().gap_2().items_center().child(invite).child(paste))
+            .child(widgets::fine_print(
+                "Nothing to sign up for. Hopper only sends your friend codes and mod lists. Your worlds and other files stay on your PC.",
+                cx,
+            )))
             .into_any_element()
     }
 
-    fn packs_tab(&mut self, down: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// Your packs: each with the faces of who gets it and its Share button,
+    /// under the "every pack starts private" line until it's closed.
+    fn my_packs(&mut self, down: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let s = self.store.read(cx);
+        let me = s.mailbox_id();
         let friends = s.mailbox_friends().to_vec();
+        let groups: Vec<Group> = s.mailbox_groups().iter().filter(|g| g.me.joined).cloned().collect();
         let insts: Vec<Instance> = s.instances().iter().filter(|i| !i.id.is_empty()).cloned().collect();
+        let explain = !s.settings().share_prompt_done;
         if insts.is_empty() {
-            return widgets::empty_state(IconName::Package, "No packs yet", Some("Install a pack, and it shows up here to share with your friends.".into()), cx)
+            return v_flex()
+                .child(cap("Your packs", None, None, cx))
+                .child(div().px_3().pb_1().child(widgets::fine_print("Install a pack, and it shows up here to share with your friends.", cx)))
                 .into_any_element();
         }
         let rows: Vec<AnyElement> = insts
@@ -1980,22 +1827,26 @@ impl FriendsPanel {
             .map(|(i, inst)| {
                 let s = self.store.read(cx);
                 // Friends first, then groups.
-                let who: Vec<String> = friends
-                    .iter()
-                    .filter(|f| s.settings().shares_with(&inst.id, &f.id))
-                    .map(|f| name_or(&f.name, "a friend"))
-                    .chain(
-                        s.mailbox_groups()
-                            .iter()
-                            .filter(|g| g.me.joined && s.settings().shares_with_group(&inst.id, &g.id))
-                            .map(|g| g.name.clone()),
-                    )
-                    .collect();
+                let direct: Vec<&Friend> = friends.iter().filter(|f| s.settings().shares_with(&inst.id, &f.id)).collect();
+                let in_groups: Vec<&Group> = groups.iter().filter(|g| s.settings().shares_with_group(&inst.id, &g.id)).collect();
+                let who: Vec<String> = direct.iter().map(|f| name_or(&f.name, "a friend")).chain(in_groups.iter().map(|g| g.name.clone())).collect();
                 let sub = match who.len() {
-                    0 => "Not shared".to_string(),
+                    0 => "Only you".to_string(),
                     1..=3 => who.join(", "),
                     n => format!("{}, {} and {} more", who[0], who[1], n - 2),
                 };
+                // Everyone who gets it, each once.
+                let mut people: Vec<(String, String, String)> = direct.iter().map(|f| (f.id.clone(), f.mc_id.clone(), name_or(&f.name, "A friend"))).collect();
+                for g in &in_groups {
+                    for m in g.members.iter().filter(|m| m.id != me && m.joined) {
+                        if !people.iter().any(|p| p.0 == m.id) {
+                            people.push((m.id.clone(), m.mc_id.clone(), name_or(&m.name, "A friend")));
+                        }
+                    }
+                }
+                let people: Vec<(String, String)> = people.into_iter().map(|(_, mc, n)| (mc, n)).collect();
+                let faces = (!people.is_empty()).then(|| faces_of(&self.store, &people, theme.background, rems(1.25), cx));
+                let s = self.store.read(cx);
                 let icon = inst.icon.as_deref().and_then(|u| s.image(u)).map(Path::to_path_buf);
                 let open = self.share_pop.as_deref() == Some(inst.id.as_str());
                 let (root, inst_id) = (inst.root.clone(), inst.id.clone());
@@ -2025,10 +1876,12 @@ impl FriendsPanel {
                             .child(
                                 widgets::caption(sub, cx)
                                     .text_xs()
+                                    .truncate()
                                     .pl(rems(1.625))
                                     .when(!who.is_empty(), |d| d.text_color(theme.foreground)),
                             ),
                     )
+                    .children(faces)
                     .child(
                         div()
                             .relative()
@@ -2066,13 +1919,415 @@ impl FriendsPanel {
             })
             .collect();
         v_flex()
-            .child(div().px_3().pt_3().pb_2().child(widgets::fine_print(
-                "Every pack starts private. Share one, and those friends get it plus every change you make. Only the mod list is sent. The mods download from their own sites.",
-                cx,
-            )))
+            .child(cap("Your packs", Some(rows.len()), None, cx))
+            .when(explain, |c| {
+                c.child(
+                    h_flex()
+                        .mx_3()
+                        .mb_1()
+                        .gap_2()
+                        .items_start()
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded(theme.radius_lg)
+                        .bg(theme.muted)
+                        .child(div().flex_1().min_w_0().child(widgets::fine_print(
+                            "Every pack starts private. Share one, and those friends get it plus every change you make. Only the mod list is sent. The mods download from their own sites.",
+                            cx,
+                        )))
+                        .child(
+                            Button::new("explain-hide")
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::Close)
+                                .tooltip("Got it")
+                                .on_click(cx.listener(|this, _, _, cx| this.store.update(cx, |s, cx| s.dismiss_share_prompt(cx)))),
+                        ),
+                )
+            })
             .children(rows)
             .into_any_element()
     }
+}
+
+// ---- the rail and its pages ----------------------------------------------------
+
+/// A small mark on a rail tile: news (a dot) or something to look at.
+// Alert is for the sync status badges (phase 3).
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+enum TileMark {
+    Dot(Hsla),
+    Alert(Hsla),
+}
+
+impl FriendsPanel {
+    /// Nobody yet: no friends, nothing shared with this PC and no group.
+    fn nobody(&self, cx: &App) -> bool {
+        let s = self.store.read(cx);
+        s.mailbox_friends().is_empty() && s.mailbox_recipes().is_empty() && s.mailbox_groups().is_empty()
+    }
+
+    /// One tile on the rail: its art in a rounded square, centred in a slot
+    /// as wide as the rail. The open page's slot gets the selected look
+    /// (tint and the 3px bar on the rail's edge), as Discord marks the open
+    /// server. Clicking opens `page`.
+    #[allow(clippy::too_many_arguments)]
+    fn tile(&self, id: SharedString, selected: bool, tip: SharedString, art: AnyElement, mark: Option<TileMark>, page: Option<Page>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme().clone();
+        let face = div()
+            .relative()
+            .flex_none()
+            .size(rems(TILE))
+            .rounded(theme.radius_lg)
+            // A see-through fill: it shows on light and dark panels alike.
+            .bg(theme.foreground.opacity(TILE_FILL))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(if selected { theme.foreground } else { theme.muted_foreground })
+            .child(art)
+            .when_some(mark, |d, m| match m {
+                TileMark::Dot(c) => d.child(
+                    div().absolute().top(px(-2.)).right(px(-2.)).size(px(10.)).rounded_full().border_2().border_color(theme.background).bg(c),
+                ),
+                TileMark::Alert(c) => d.child(
+                    div()
+                        .absolute()
+                        .top(px(-4.))
+                        .right(px(-4.))
+                        .size(px(16.))
+                        .rounded_full()
+                        .border_2()
+                        .border_color(theme.background)
+                        .bg(c)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme.background)
+                        .text_size(px(10.))
+                        .font_bold()
+                        .child("!"),
+                ),
+            });
+        let tip2 = tip.clone();
+        h_flex()
+            .id(id)
+            .w_full()
+            .flex_none()
+            .justify_center()
+            .py(px(3.))
+            .when(selected, |d| widgets::row_selected(d, cx))
+            .when(!selected, |d| d.hover(|s| widgets::row_hover(s, cx)))
+            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip2.clone()).build(w, cx))
+            .when_some(page, |d, page| {
+                d.clickable(cx).on_click(cx.listener(move |this, _, window, cx| this.open(page.clone(), window, cx)))
+            })
+            .child(face)
+    }
+
+    /// A group's tile art: two members' faces, or the group's initials
+    /// when nobody else is in it yet.
+    fn group_art(&self, g: &Group, ring: Hsla, cx: &mut Context<Self>) -> AnyElement {
+        let me = self.store.read(cx).mailbox_id();
+        // Faces only when there are real ones: two blank heads say less
+        // than the group's initials.
+        let others: Vec<(String, String)> =
+            g.members.iter().filter(|m| m.id != me && m.joined && !m.mc_id.is_empty()).take(2).map(|m| (m.mc_id.clone(), m.name.clone())).collect();
+        if others.is_empty() {
+            return div().text_sm().font_semibold().child(initials(&g.name)).into_any_element();
+        }
+        let faces: Vec<AnyElement> = others.iter().map(|(mc, n)| face(&self.store, mc, n, rems(1.125), cx)).collect();
+        widgets::face_stack(faces, ring, rems(1.125), cx.theme().radius).into_any_element()
+    }
+
+    /// The rail: everyone, each group (invitations first), a new group,
+    /// and the packs at the foot.
+    fn rail(&self, groups: &[Group], cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let everyone = matches!(self.page, Page::Everyone | Page::Friend(_));
+        let mut order: Vec<&Group> = groups.iter().filter(|g| !g.me.joined).collect();
+        order.extend(groups.iter().filter(|g| g.me.joined));
+        let mut tiles: Vec<AnyElement> = Vec::new();
+        for g in order {
+            let open = self.page == Page::Group(g.id.clone());
+            let art = self.group_art(g, theme.background, cx);
+            let (tip, mark) = if g.me.joined {
+                (g.name.clone(), None)
+            } else {
+                (format!("{}: you're asked to join", g.name), Some(TileMark::Dot(theme.primary)))
+            };
+            tiles.push(self.tile(format!("rail-g:{}", g.id).into(), open, tip.into(), art, mark, Some(Page::Group(g.id.clone())), cx).into_any_element());
+        }
+        let can_group = self.can_group(cx);
+        let plus = self
+            .tile(
+                "rail-new".into(),
+                false,
+                if can_group { "New group".into() } else { "Make a group once you have a friend".into() },
+                Icon::new(IconName::Plus).small().into_any_element(),
+                None,
+                None,
+                cx,
+            )
+            .when(!can_group, |d| d.opacity(0.5))
+            .when(can_group, |d| {
+                d.clickable(cx).on_click(cx.listener(|this, _, window, cx| this.group_dialog(GroupMode::New, None, window, cx)))
+            });
+        let packs_open = self.page == Page::Packs;
+        v_flex()
+            .flex_none()
+            .w(rems(RAIL_W))
+            .h_full()
+            .border_r_1()
+            .border_color(theme.border)
+            .py_1p5()
+            .gap_1()
+            .child(self.tile(
+                "rail-everyone".into(),
+                everyone,
+                "Everyone".into(),
+                Icon::new(IconName::Users).small().into_any_element(),
+                None,
+                Some(Page::Everyone),
+                cx,
+            ))
+            .child(div().flex_none().mx_auto().w(rems(1.5)).h_px().my_0p5().bg(theme.border))
+            .child(v_flex().id("rail-groups").flex_1().min_h_0().overflow_y_scroll().gap_1().children(tiles).child(plus))
+            .child(self.tile(
+                "rail-packs".into(),
+                packs_open,
+                "Packs: yours and your friends'".into(),
+                Icon::new(IconName::Package).small().into_any_element(),
+                None,
+                Some(Page::Packs),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// The bar above a page: its title, and something on the right.
+    fn page_head(&self, title: impl Into<SharedString>, right: Option<AnyElement>, cx: &App) -> AnyElement {
+        h_flex()
+            .flex_none()
+            .h(rems(2.5))
+            .pl_3()
+            .pr_2()
+            .gap_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(div().flex_1().min_w_0().truncate().text_sm().font_semibold().child(title.into()))
+            .children(right)
+            .into_any_element()
+    }
+
+    /// What's beside the rail: the open page's top and its scrolling body.
+    fn page_body(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) -> (Option<AnyElement>, AnyElement) {
+        let s = self.store.read(cx);
+        let friends = s.mailbox_friends().to_vec();
+        let all_recipes = s.mailbox_recipes().to_vec();
+        let recipes: Vec<Event> = all_recipes.iter().filter(|e| !s.pack_hidden(e)).cloned().collect();
+        let groups: Vec<Group> = s.mailbox_groups().to_vec();
+        if self.page == Page::Packs {
+            let top = self.page_head("Packs", None, cx);
+            return (Some(top), self.packs_view(&friends, &recipes, &all_recipes, down, window, cx));
+        }
+        if self.nobody(cx) {
+            self.page = Page::Everyone;
+            return (None, self.empty(down, cx));
+        }
+        let people = self.people(&recipes, &groups, down, cx);
+        match self.page.clone() {
+            Page::Friend(id) => {
+                if let Some(p) = people.iter().find(|p| p.id == id) {
+                    return self.friend_page(p, down, window, cx);
+                }
+            }
+            Page::Group(id) => {
+                if let Some(g) = groups.iter().find(|g| g.id == id) {
+                    return self.group_page(g, &all_recipes, down, window, cx);
+                }
+            }
+            Page::Everyone | Page::Packs => {}
+        }
+        // The page's friend or group is gone: everyone again.
+        self.page = Page::Everyone;
+        let online = people.iter().filter(|p| p.friend.as_ref().is_some_and(|f| f.online) && !down).count();
+        let right = (online > 0).then(|| widgets::caption(format!("{online} online"), cx).text_xs().flex_none().into_any_element());
+        let top = self.page_head("Everyone", right, cx);
+        (Some(top), self.everyone(&people, &recipes, down, window, cx))
+    }
+
+    /// Everyone: online friends, then offline ones, then people met only
+    /// through a group. Searching narrows them and adds the packs that match.
+    fn everyone(&mut self, people: &[Person], recipes: &[Event], down: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let s = self.store.read(cx);
+        let has_friends = people.iter().any(|p| p.friend.is_some());
+        let prompt = has_friends && s.settings().shared_with.is_empty() && !s.settings().share_prompt_done;
+        let q = self.search.read(cx).value().to_string();
+        let words = widgets::search_words(&q);
+        let n_packs: usize = people.iter().map(|p| p.packs.len()).sum();
+        let searchable = people.len() > 6 || n_packs > 12 || !words.is_empty();
+        let reminder = self.invite_reminder(cx);
+        let mut on_rows = Vec::new();
+        let mut off_rows = Vec::new();
+        let mut other_rows = Vec::new();
+        for (i, p) in people.iter().enumerate().filter(|(_, p)| hits(&p.name, &words)) {
+            let row = self.friend_row(i, p, &words, down, window, cx);
+            match &p.friend {
+                Some(f) if f.online && !down => on_rows.push(row),
+                Some(_) => off_rows.push(row),
+                None => other_rows.push(row),
+            }
+        }
+        let mut pack_hits: Vec<AnyElement> = Vec::new();
+        if !words.is_empty() {
+            let s = self.store.read(cx);
+            let found: Vec<(Event, String)> = people
+                .iter()
+                .flat_map(|p| p.packs.iter().map(move |e| (e.clone(), p.name.clone())))
+                .filter(|(e, _)| hits(&pack_name(e), &words) && s.followers_of(&e.from, &e.inst).is_empty())
+                .collect();
+            for (i, (e, by)) in found.iter().enumerate() {
+                pack_hits.push(self.their_pack(&format!("hit:{i}"), e, Some(by.clone()), false, down, window, cx));
+            }
+        }
+        let _ = recipes;
+        let nothing = !words.is_empty() && on_rows.is_empty() && off_rows.is_empty() && other_rows.is_empty() && pack_hits.is_empty();
+        let groups_here = self.store.read(cx).mailbox_groups().iter().any(|g| g.me.joined);
+        v_flex()
+            .pb_2()
+            .when(prompt, |c| c.child(div().px_3().pt_3().child(self.prompt(cx))))
+            .children(reminder)
+            .when(searchable, |c| c.child(search_box(&self.search)))
+            .when(!on_rows.is_empty(), |c| c.child(cap("Online", Some(on_rows.len()), None, cx)).children(on_rows))
+            .when(!off_rows.is_empty(), |c| c.child(cap("Offline", Some(off_rows.len()), None, cx)).children(off_rows))
+            .when(!other_rows.is_empty(), |c| c.child(cap("In your groups", Some(other_rows.len()), None, cx)).children(other_rows))
+            .when(!pack_hits.is_empty(), |c| c.child(cap("Packs", Some(pack_hits.len()), None, cx)).children(pack_hits))
+            .when(nothing, |c| c.child(div().px_3().py_3().child(widgets::fine_print(format!("Nothing matches \u{201c}{q}\u{201d}."), cx))))
+            .when(words.is_empty() && has_friends, |c| {
+                c.child(div().px_3().py_3().child(widgets::fine_print(
+                    if groups_here {
+                        "Open a friend to see the packs they share with you. Drag a friend onto a group on the left to add them."
+                    } else {
+                        "Open a friend to see the packs they share with you."
+                    },
+                    cx,
+                )))
+            })
+            .into_any_element()
+    }
+
+    /// The Packs page: this PC's packs and who gets each, the friends'
+    /// packs (followed ones first), and the follows that stopped.
+    fn packs_view(&mut self, friends: &[Friend], recipes: &[Event], all_recipes: &[Event], down: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let mine = self.my_packs(down, cx);
+        let me = self.store.read(cx).mailbox_id();
+        let following = self.following(recipes, &[], down, cx);
+        // The rest of what friends share, each pack once however it came.
+        let s = self.store.read(cx);
+        let mut rest: Vec<Event> = recipes.iter().filter(|e| e.from != me && s.followers_of(&e.from, &e.inst).is_empty()).cloned().collect();
+        rest.sort_by_key(|e| std::cmp::Reverse(e.at));
+        let rest_rows: Vec<AnyElement> = rest
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let by = self.via(e, cx);
+                self.their_pack(&format!("pk:{i}"), e, Some(by), false, down, window, cx)
+            })
+            .collect();
+        let ended = self.ended_list(friends, all_recipes, cx);
+        let ended_rows = self.ended_rows(ended, cx);
+        let nothing_in = following.is_empty() && rest_rows.is_empty();
+        v_flex()
+            .pb_2()
+            .child(mine)
+            .child(cap("From friends", (!nothing_in).then_some(following.len() + rest_rows.len()), None, cx))
+            .when(nothing_in, |c| c.child(div().px_3().pb_1().child(widgets::fine_print("Packs your friends share with you show up here.", cx))))
+            .children(following)
+            .children(rest_rows)
+            .when(!ended_rows.is_empty(), |c| {
+                c.child(cap("Won't change any more", Some(ended_rows.len()), None, cx))
+                    .child(div().px_3().pb_1().child(widgets::fine_print(
+                        "The friend removed you, or stopped sharing the pack. Your copies stay on your PC as they are.",
+                        cx,
+                    )))
+                    .children(ended_rows)
+            })
+            .into_any_element()
+    }
+
+    /// How a friend's pack reached this PC: the group's name, or "Sam".
+    fn via(&self, e: &Event, cx: &App) -> String {
+        let s = self.store.read(cx);
+        let sender = name_or(&e.from_name, "a friend");
+        let g = e.groups.iter().find_map(|g| s.mailbox_groups().iter().find(|x| &x.id == g && x.me.joined).map(|x| x.name.clone()));
+        match g {
+            Some(g) if !e.direct => g,
+            Some(g) => format!("{sender} and {g}"),
+            None => sender,
+        }
+    }
+
+    /// The stopped follows, each with Stop following.
+    fn ended_rows(&self, ended: Vec<(PathBuf, String, String, String)>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        ended
+            .into_iter()
+            .enumerate()
+            .map(|(i, (root, pack, local, who))| {
+                h_flex()
+                    .id(("ended", i))
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .hover(|s| widgets::row_hover(s, cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_sm().truncate().child(pack))
+                            .child(widgets::caption(format!("{who} · your copy: {local}"), cx).text_xs()),
+                    )
+                    .child(
+                        Button::new(("stop-follow", i))
+                            .xsmall()
+                            .outline()
+                            .label("Stop following")
+                            .tooltip("Take it off this list. Your copy stays on your PC.")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let root = root.clone();
+                                this.store.update(cx, |s, cx| s.stop_following(&root, cx))
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    }
+}
+
+/// A group's initials for its tile, as Discord does for a server without
+/// a picture: the first letters of its first two words ("drunk gamblers"
+/// is DG), or the first letter of a one-word name.
+fn initials(name: &str) -> String {
+    let firsts: Vec<char> = name.split_whitespace().filter_map(|w| w.chars().find(|c| c.is_alphanumeric())).take(2).collect();
+    match firsts.len() {
+        0 => "?".to_string(),
+        _ => firsts.into_iter().flat_map(char::to_uppercase).collect(),
+    }
+}
+
+/// Up to three faces of who gets something, overlapped, and how many more.
+/// (gpui-kit's `AvatarGroup` clips the initials at any size but its fixed
+/// pixel ones, which don't follow the zoom.)
+fn faces_of(store: &Entity<Store>, people: &[(String, String)], ring: Hsla, size: Rems, cx: &mut App) -> Div {
+    let faces: Vec<AnyElement> = people.iter().take(3).map(|(mc, n)| face(store, mc, n, size, cx)).collect();
+    let more = people.len().saturating_sub(3);
+    let corner = cx.theme().radius;
+    h_flex()
+        .flex_none()
+        .gap_1()
+        .child(widgets::face_stack(faces, ring, size, corner))
+        .when(more > 0, |d| d.child(widgets::caption(format!("+{more}"), cx).text_xs()))
 }
 
 impl Render for FriendsPanel {
@@ -2080,13 +2335,8 @@ impl Render for FriendsPanel {
         let theme = cx.theme().clone();
         let s = self.store.read(cx);
         let status = s.sync_status();
-        let heard = !s.mailbox_friends().is_empty() || !s.mailbox_recipes().is_empty();
-        let n_friends = s.mailbox_friends().len();
-        let n_shared = s
-            .instances()
-            .iter()
-            .filter(|i| !i.id.is_empty() && s.settings().shared_with.iter().any(|x| x.inst == i.id))
-            .count();
+        let heard = !s.mailbox_friends().is_empty() || !s.mailbox_recipes().is_empty() || !s.mailbox_groups().is_empty();
+        let groups: Vec<Group> = s.mailbox_groups().to_vec();
         let down = matches!(status, SyncStatus::Down(_));
         let body: AnyElement = match &status {
             SyncStatus::Off => self.off(cx),
@@ -2096,25 +2346,23 @@ impl Render for FriendsPanel {
             _ => {
                 // Down before the relay ever answered: the friend list isn't
                 // known, so don't show the "no friends yet" pitch.
-                let (top, content) = if self.tab == FRIENDS && down && !heard {
+                let (top, content) = if down && !heard && self.page != Page::Packs {
                     (None, div().into_any_element())
-                } else if self.tab == FRIENDS {
-                    self.friends_tab(down, window, cx)
                 } else {
-                    (None, self.packs_tab(down, cx))
+                    self.page_body(down, window, cx)
                 };
                 // Each page keeps its own scroll position, and a fresh one
                 // starts at the top.
-                let scroll_id = match (&self.page, self.tab) {
-                    (Page::Friend(id), FRIENDS) => SharedString::from(format!("friends-scroll:f:{id}")),
-                    (Page::Group(id), FRIENDS) => SharedString::from(format!("friends-scroll:g:{id}")),
-                    (Page::Ended, FRIENDS) => SharedString::from("friends-scroll:ended"),
-                    _ => SharedString::from("friends-scroll"),
+                let scroll_id = match &self.page {
+                    Page::Friend(id) => SharedString::from(format!("friends-scroll:f:{id}")),
+                    Page::Group(id) => SharedString::from(format!("friends-scroll:g:{id}")),
+                    Page::Packs => SharedString::from("friends-scroll:packs"),
+                    Page::Everyone => SharedString::from("friends-scroll"),
                 };
-                v_flex()
-                    .size_full()
-                    // No count while the list isn't known yet.
-                    .child(self.tabs((heard || !down).then_some(n_friends), n_shared, cx))
+                let main = v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
                     .when_some(match &status {
                         SyncStatus::Down(e) => Some(e.clone()),
                         _ => None,
@@ -2140,31 +2388,33 @@ impl Render for FriendsPanel {
                         )
                     })
                     .children(top)
-                    .child(div().id(scroll_id).flex_1().min_h_0().overflow_y_scrollbar().child(content))
-                    .into_any_element()
+                    .child(div().id(scroll_id).flex_1().min_h_0().overflow_y_scrollbar().child(content));
+                h_flex().size_full().items_start().child(self.rail(&groups, cx)).child(main).into_any_element()
             }
         };
         let content = v_flex()
             .size_full()
             .track_focus(&self.focus)
-            // Escape on a page goes back to the list.
+            // Escape on a page goes back to everyone.
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
-                if e.keystroke.key == "escape" && this.page != Page::List && !this.plus_pop {
-                    this.open(Page::List, window, cx);
+                if e.keystroke.key != "escape" {
+                    return;
+                }
+                // A popover closes first, then the page goes back.
+                if this.plus_pop || this.share_pop.is_some() {
+                    this.set_plus(false, cx);
+                    this.set_pop(None, cx);
+                    cx.stop_propagation();
+                } else if this.page != Page::Everyone {
+                    this.open(Page::Everyone, window, cx);
                     cx.stop_propagation();
                 }
             }))
             .child(self.header(cx))
             .child(div().flex_1().min_h_0().child(body));
         // The same dock as the mod peek: its width, edge, border and look.
-        // Its id follows the page, so a page slides in like the panel does.
-        let dock_id = match &self.page {
-            Page::List => SharedString::from("friends-dock"),
-            Page::Friend(id) => SharedString::from(format!("friends-dock:f:{id}")),
-            Page::Group(id) => SharedString::from(format!("friends-dock:g:{id}")),
-            Page::Ended => SharedString::from("friends-dock:ended"),
-        };
-        widgets::dock(dock_id, &self.panel, |t: &mut Self| &mut t.panel, &self.store, content, window, cx)
+        let _ = &theme;
+        widgets::dock(SharedString::from("friends-dock"), &self.panel, |t: &mut Self| &mut t.panel, &self.store, content, window, cx)
     }
 }
 
@@ -2800,6 +3050,15 @@ mod tests {
         assert_eq!(ago(t - 4 * 2_592_000), "4 months ago");
     }
 
+    #[::core::prelude::v1::test]
+    fn group_initials_read_like_discords() {
+        assert_eq!(initials("drunk gamblers"), "DG");
+        assert_eq!(initials("The Late Night Survival Crew"), "TL");
+        assert_eq!(initials("Builders"), "B");
+        assert_eq!(initials("  ünder  -dogs "), "ÜD");
+        assert_eq!(initials("!!"), "?");
+    }
+
     /// Every string the Friends panel can show: its string literals, with
     /// comments skipped.
     fn panel_strings() -> Vec<String> {
@@ -2841,7 +3100,7 @@ mod tests {
     fn the_panel_never_names_the_service() {
         let strings = panel_strings();
         assert!(strings.iter().any(|s| s == "Open a friend to see the packs they share with you."));
-        assert!(strings.iter().any(|s| s == "Invite a friend, join with a code, or make a group"));
+        assert!(strings.iter().any(|s| s == "Invite a friend, or join a friend with their code"));
         let words = ["relay", "mailbox", "sync server", "sync service", "token", "pair", "peer"];
         for s in &strings {
             // This test's own list.
