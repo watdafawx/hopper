@@ -298,7 +298,7 @@ impl LogsView {
                 if follow {
                     this.scroll_to_end();
                 } else {
-                    this.lines.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                    this.lines.scroll_to_start();
                 }
                 cx.notify();
                 true
@@ -320,7 +320,7 @@ impl LogsView {
                 }
                 let alive = this.update(cx, |this, cx| {
                     // Follow only a reader who is at the bottom already.
-                    let at_end = this.lines.scroll.is_scrolled_to_end().unwrap_or(true);
+                    let at_end = this.lines.at_end();
                     let Some(log) = this.log.as_mut().filter(|l| l.path == path) else {
                         return;
                     };
@@ -350,7 +350,7 @@ impl LogsView {
     }
 
     fn scroll_to_end(&self) {
-        self.lines.scroll_to_end(self.line_count());
+        self.lines.scroll_to_end();
     }
 
     /// How many lines the viewer shows (all, or the problems only).
