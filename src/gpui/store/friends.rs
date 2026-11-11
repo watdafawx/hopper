@@ -189,6 +189,10 @@ pub fn redeem(store: &Entity<Store>, text: &str, window: &mut Window, cx: &mut A
                         Ok(Msg::Followed(Box::new(req.recipe(&inst.root, &inst.id, &code, ""))))
                     }
                     Ok(_) => Ok(Msg::installed(inst.root, &[], None)),
+                    Err(e) if mailbox::failure(&e) == mailbox::Failure::InviteUnknown => {
+                        job.note("The follow part of the code ran out or was already used, so this copy doesn't follow their changes. Ask them for a new code to follow it.");
+                        Ok(Msg::installed(inst.root, &[], None))
+                    }
                     Err(e) => {
                         job.note(format!("Not following their changes: {}", mailbox::says(&e)));
                         Ok(Msg::installed(inst.root, &[], None))

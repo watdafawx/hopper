@@ -1719,12 +1719,15 @@ pub struct RedeemForm {
     parsed: Option<Result<hopper::sharecode::Share, String>>,
     /// The pack's name and version, by the code's pack.
     pack: Option<(hopper::sharecode::Base, String)>,
+    /// "Follow their updates", for a code with a follow part.
+    follow: bool,
+    store: Entity<Store>,
     _sub: Subscription,
     _lookup: Option<Task<()>>,
 }
 
 impl RedeemForm {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // A code on the clipboard goes straight in.
         let clip = cx
             .read_from_clipboard()
@@ -1739,7 +1742,7 @@ impl RedeemForm {
                 cx.notify();
             }
         });
-        let mut f = Self { input, parsed: None, pack: None, _sub: sub, _lookup: None };
+        let mut f = Self { input, parsed: None, pack: None, follow: true, store, _sub: sub, _lookup: None };
         f.parse(cx);
         f
     }
@@ -1790,6 +1793,16 @@ impl RedeemForm {
         matches!(self.parsed, Some(Ok(_)))
     }
 
+    /// The pasted code has a follow part (`sharecode::with_follow`).
+    fn has_follow(&self, cx: &App) -> bool {
+        self.ready() && hopper::sharecode::follow_part(&self.input.read(cx).value()).1.is_some()
+    }
+
+    /// Installing also follows: ticked, and Friends is on to do it.
+    fn follows(&self, cx: &App) -> bool {
+        self.follow && self.has_follow(cx) && !matches!(self.store.read(cx).sync_status(), crate::store::SyncStatus::Off)
+    }
+
     fn install(form: &Entity<Self>, store: &Entity<Store>, window: &mut Window, cx: &mut App) -> bool {
         let this = form.read(cx);
         if !this.ready() {
@@ -1798,7 +1811,11 @@ impl RedeemForm {
         // The store asks about mods from GitHub and other links (once this
         // dialog closes) before anything installs, and follows the pack
         // when the code carries a follow part.
-        let text = this.input.read(cx).value().trim().to_string();
+        let mut text = this.input.read(cx).value().trim().to_string();
+        if !this.follows(cx) {
+            // Without its follow part the code only installs.
+            text = hopper::sharecode::follow_part(&text).0;
+        }
         crate::store::redeem(store, &text, window, cx)
     }
 }
@@ -1845,20 +1862,62 @@ impl Render for RedeemForm {
                     .into_any_element()
             }
         };
-        v_flex().gap_3().child(Input::new(&self.input)).child(status)
+        let card = self.has_follow(cx).then(|| self.follow_card(cx));
+        v_flex().gap_3().child(Input::new(&self.input)).child(status).children(card)
+    }
+}
+
+impl RedeemForm {
+    /// "Follow their updates", for a code with a follow part. The code
+    /// doesn't say who sent it or whether its follow part is still good;
+    /// a follow part that ran out is told after installing.
+    fn follow_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let off = matches!(self.store.read(cx).sync_status(), crate::store::SyncStatus::Off);
+        let on = self.follows(cx);
+        v_flex()
+            .p_3()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(if on { theme.primary.opacity(0.5) } else { theme.border })
+            .when(on, |d| d.bg(theme.primary.opacity(0.06)))
+            .child(
+                Checkbox::new("redeem-follow")
+                    .checked(on)
+                    .disabled(off)
+                    .on_click(cx.listener(|this, v: &bool, _, cx| {
+                        this.follow = *v;
+                        cx.notify();
+                    }))
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(div().text_sm().font_medium().child("Follow their updates"))
+                            .child(card_note(
+                                if off {
+                                    "Turn on Friends to follow their updates. The pack installs either way."
+                                } else {
+                                    "Adds whoever sent the code to your friends. When they change this pack, your copy changes with it. You can stop any time from the Friends panel."
+                                },
+                                cx,
+                            )),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
 pub fn open_redeem(store: Entity<Store>, window: &mut Window, cx: &mut App) {
-    let form = cx.new(|cx| RedeemForm::new(window, cx));
+    let form = cx.new(|cx| RedeemForm::new(store.clone(), window, cx));
     window.open_dialog(cx, move |dialog, window, cx| {
         let (store, f2) = (store.clone(), form.clone());
         let ready = form.read(cx).ready();
+        let action = if form.read(cx).follows(cx) { "Install and follow" } else { "Install" };
         dialog
             .title("Install from a share code")
             .w(rems(36.).to_pixels(window.rem_size()))
             .child(form.clone())
-            .footer(footer("Install", ready))
+            .footer(footer(action, ready))
             .on_ok(move |_, window, cx| RedeemForm::install(&f2, &store, window, cx))
     });
 }
