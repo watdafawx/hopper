@@ -596,7 +596,7 @@ impl PeersView {
             )
             .child(
                 widgets::caption(
-                    "No account needed. Windows may ask to let Hopper use private networks. Say yes, so the other PC can find this one.",
+                    "Nothing to sign up for. Windows may ask to let Hopper use private networks. Say yes, so the other PC can find this one.",
                     cx,
                 )
                 .text_xs(),

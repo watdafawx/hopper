@@ -401,14 +401,17 @@ impl FriendsPanel {
                     .pt_2()
                     .border_t_1()
                     .border_color(theme.border)
-                    .child(widgets::fine_print(
-                        if takes_back {
-                            "Untick someone and they stop getting your changes. The pack leaves their list, but their copy stays on their PC."
-                        } else {
-                            "Untick someone and they stop getting your changes. Their copy stays on their PC."
-                        },
-                        cx,
-                    ))
+                    // Nothing to untick yet: the line would talk about people who aren't there.
+                    .when(!friends.is_empty(), |c| {
+                        c.child(widgets::fine_print(
+                            if takes_back {
+                                "Untick someone and they stop getting your changes. The pack leaves their list, but their copy stays on their PC."
+                            } else {
+                                "Untick someone and they stop getting your changes. Their copy stays on their PC."
+                            },
+                            cx,
+                        ))
+                    })
                     .child(
                         h_flex().child(
                             Button::new("share-pop-code")
@@ -564,7 +567,7 @@ impl FriendsPanel {
                     .child(widgets::caption("or", cx).text_xs())
                     .child(div().flex_1().h_px().bg(theme.border)),
             ).child(self.join_block(down, cx)).child(widgets::fine_print(
-                "No account needed. Hopper only sends your friend codes and mod lists. Your worlds and other files stay on your PC.",
+                "Nothing to sign up for. Hopper only sends your friend codes and mod lists. Your worlds and other files stay on your PC.",
                 cx,
             )))
             .into_any_element()
@@ -1200,7 +1203,7 @@ impl FriendsPanel {
                 } else {
                     "Offline".to_string()
                 };
-                let status = if m.id == g.owner { format!("Made the group · {status}") } else { status };
+                let status = if m.id == g.owner { format!("Created the group · {status}") } else { status };
                 let f = face(&self.store, &m.mc_id, &name, rems(1.25), cx);
                 let row_id = SharedString::from(format!("gm:{gi}:{mi}"));
                 let remove = (mine && m.id != g.owner).then(|| {
@@ -1844,7 +1847,7 @@ fn open_group(store: Entity<Store>, mode: GroupMode, pick: Option<String>, windo
     let form = cx.new(|cx| GroupForm {
         store: store.clone(),
         mode: mode.clone(),
-        name: cx.new(|cx| InputState::new(window, cx).placeholder("The server crew").default_value(old)),
+        name: cx.new(|cx| InputState::new(window, cx).placeholder("Weekend crew").default_value(old)),
         friends,
         picked: pick.into_iter().collect(),
         paint: drag_pick::Paint::default(),

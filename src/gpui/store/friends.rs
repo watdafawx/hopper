@@ -547,7 +547,7 @@ impl Store {
         self.mailbox_do(
             move |mb| {
                 mb.create_group(&name, &members)?;
-                Ok(format!("Made {name}. Your friends get an invitation to join."))
+                Ok(format!("Created {name}. Your friends get an invitation to join."))
             },
             |_, _| {},
             cx,
