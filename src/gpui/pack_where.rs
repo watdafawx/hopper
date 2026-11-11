@@ -675,7 +675,7 @@ impl AddonsView {
         } else {
             (color.opacity(widgets::alpha::TINT), color.opacity(widgets::alpha::TINT * 2.))
         };
-        let variant = ButtonCustomVariant::new(cx).color(bg).foreground(color).hover(hover).active(hover);
+        let variant = ButtonCustomVariant::new(cx).color(bg).foreground(crate::theme::ink(color)).hover(hover).active(hover);
         let running = self.class == cf::CLASS_RESOURCE_PACKS && self.where_running(cx);
         let view = cx.entity();
         let dp = self.class == cf::CLASS_DATAPACKS;

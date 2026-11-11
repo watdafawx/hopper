@@ -713,7 +713,7 @@ impl AddonsView {
                                     None => div().font_family(theme.mono_font_family.clone()).child(m.needs.clone()),
                                 })
                                 .clickable(cx)
-                                .hover(|s| s.text_color(theme.primary))
+                                .hover(|s| s.text_color(crate::theme::ink(theme.primary)))
                                 .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     let found = this.dep_projects.borrow().get(&dep).cloned().flatten();

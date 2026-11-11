@@ -1180,7 +1180,7 @@ impl UpdatePreview {
                         .text_sm()
                         .text_color(muted)
                         .clickable(cx)
-                        .hover(move |s| s.text_color(primary))
+                        .hover(move |s| s.text_color(crate::theme::ink(primary)))
                         .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small())
                         .child(if open { "Hide the files".to_string() } else { format!("Review {n} {files}") })
                         .on_click(cx.listener(|this, _, _, cx| this.toggle(Group::Files(FileAction::Conflict), cx))),
@@ -1314,7 +1314,7 @@ impl UpdatePreview {
                     .text_sm()
                     .text_color(muted)
                     .clickable(cx)
-                    .hover(move |s| s.text_color(primary))
+                    .hover(move |s| s.text_color(crate::theme::ink(primary)))
                     .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small())
                     .child(if open { "Hide the mods".to_string() } else { format!("Show the {n} mods") })
                     .on_click(cx.listener(|this, _, _, cx| this.toggle(Group::Versions, cx))),
@@ -1518,7 +1518,7 @@ impl UpdatePreview {
                     .border_b_1()
                     .border_color(border)
                     .clickable(cx)
-                    .hover(move |s| s.text_color(primary))
+                    .hover(move |s| s.text_color(crate::theme::ink(primary)))
                     .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted))
                     .child(div().flex_1().min_w_0().font_semibold().child(folder.clone()))
                     .child(div().text_xs().text_color(muted).child(counts))
@@ -2096,7 +2096,7 @@ impl UpdatePreview {
             .child(div().min_w_0().text_sm().truncate().child(name.to_string()))
             .when(project != 0, |d| {
                 d.clickable(cx)
-                    .hover(|s| s.text_color(theme.primary))
+                    .hover(|s| s.text_color(crate::theme::ink(theme.primary)))
 
                     .on_click(cx.listener(move |this, _, window, cx| this.open_peek(project, window, cx)))
             })

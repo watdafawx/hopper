@@ -2069,8 +2069,8 @@ impl AddonsView {
                 Some(pid) => h_flex()
                     .gap_1p5()
                     .child("Remove")
-                    .child(peek_link("remove-title", what.clone(), *pid, &peek, cx))
-                    .child("?")
+                    // The "?" belongs to the name: no gap between them.
+                    .child(h_flex().child(peek_link("remove-title", what.clone(), *pid, &peek, cx)).child("?"))
                     .into_any_element(),
                 None => format!("Remove {what}?").into_any_element(),
             };
@@ -3813,6 +3813,8 @@ impl AddonsView {
                 (color, SharedString::from(format!("Server: {text}")))
             });
         let side = crate::side_card::side_of(&a.env);
+        let side_known = side.is_some();
+        let side = side.unwrap_or(crate::side_card::SIDE_UNKNOWN);
         // The Side cell, in its column or (narrow) by the name.
         let side_el = (self.cols.side || self.cols.side_inline).then(|| {
             let card = self.side_card(a, cx);
@@ -3833,8 +3835,8 @@ impl AddonsView {
                         div()
                             .size_4()
                             .flex_none()
-                            .text_color(theme.muted_foreground)
-                            .when_some(side, |d, (icon, _)| d.child(Icon::new(icon).small())),
+                            .text_color(if side_known { theme.muted_foreground } else { theme.muted_foreground.opacity(0.75) })
+                            .child(Icon::new(side.0).small()),
                     )
                     .when_some(mark, |c, (color, _)| {
                         c.child(div().size_2().rounded_full().bg(color))
@@ -3902,7 +3904,7 @@ Details").into()),
                     })
                     .when(pid != 0, |d| {
                         d.clickable(cx)
-                            .hover(|s| s.text_color(theme.primary))
+                            .hover(|s| s.text_color(crate::theme::ink(theme.primary)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.open_peek(pid, cx);
@@ -4263,9 +4265,11 @@ It stays disabled after updating: turn it on in the On column.")
                     .flex()
                     .flex_col()
                     .gap_0p5()
-                    .when(dim, |d| d.opacity(0.55))
-                    .child(name_line)
-                    .child(h_flex().gap_2().min_w_0().overflow_hidden().child(tags).child({
+                    // A row that is off fades, but its text stays at 4.5:1:
+                    // the name a little, the file name and chips less (they
+                    // are already muted, and fading both dropped them to 3:1).
+                    .child(name_line.when(dim, |d| d.opacity(0.65)))
+                    .child(h_flex().gap_2().min_w_0().overflow_hidden().when(dim, |d| d.opacity(0.95)).child(tags).child({
                         // File name and version chip. Click either to pick
                         // another version.
                         let (pid, upd) = (a.project_id, update.map(|u| u.file.clone()));
@@ -4328,7 +4332,7 @@ It stays disabled after updating: turn it on in the On column.")
                                     chip.bg(theme.muted)
                                         .text_color(theme.muted_foreground)
                                         .group_hover("file", move |s| {
-                                            s.bg(primary.opacity(widgets::alpha::TINT)).text_color(primary)
+                                            s.bg(primary.opacity(widgets::alpha::TINT)).text_color(crate::theme::ink(primary))
                                         })
                                         .child(div().min_w_0().truncate().child(v))
                                 })
@@ -4354,7 +4358,7 @@ Change version", a.file_name).into()
                                 widgets::caption(a.file_name.clone(), cx)
                                     .text_xs()
                                     .min_w_0()
-                                    .group_hover("file", move |s| s.text_color(primary)),
+                                    .group_hover("file", move |s| s.text_color(crate::theme::ink(primary))),
                             ),
                         };
                         target.when(pid != 0, |d| {
@@ -5482,7 +5486,7 @@ impl Render for UpdateReview {
                                 .text_xs()
                                 .child(div().min_w_0().truncate().text_color(theme.muted_foreground).child(r.from.clone()))
                                 .child(Icon::new(IconName::ArrowRight).xsmall().flex_none().text_color(theme.primary))
-                                .child(div().min_w_0().truncate().text_color(theme.primary).child(r.to.clone())),
+                                .child(div().min_w_0().truncate().text_color(crate::theme::ink(theme.primary)).child(r.to.clone())),
                         ))
                 }))
         });

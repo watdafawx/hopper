@@ -1271,7 +1271,7 @@ impl FriendsPanel {
                             .truncate()
                             .text_sm()
                             .clickable(cx)
-                            .hover(|s| s.text_color(theme.primary))
+                            .hover(|s| s.text_color(crate::theme::ink(theme.primary)))
                             .child(name.clone())
                             .id(SharedString::from(format!("gp-mine-name:{gi}:{pi}")))
                             .on_click(cx.listener(move |_, _, _, cx| cx.emit(FriendsEvent::Show(root.clone())))),
@@ -1441,7 +1441,7 @@ impl FriendsPanel {
                                 widgets::mod_name(("my-pack-name", i), inst.name.clone(), icon.as_deref(), cx)
                                     .text_sm()
                                     .clickable(cx)
-                                    .hover(|s| s.text_color(theme.primary))
+                                    .hover(|s| s.text_color(crate::theme::ink(theme.primary)))
                                     .on_click(move |_, _, cx| {
                                         let root = root.clone();
                                         view.update(cx, |_, cx| cx.emit(FriendsEvent::Show(root)))

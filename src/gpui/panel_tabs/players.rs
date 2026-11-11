@@ -272,7 +272,7 @@ impl Render for PlayersTab {
         let face = |name: &str| -> AnyElement {
             let frame = div().size(rems(1.5)).flex_none().rounded(crate::theme::radius_sm()).overflow_hidden().bg(theme.muted);
             match store.image(&head_url(name)) {
-                Some(p) => frame.child(img(p.to_path_buf()).size_full()).into_any_element(),
+                Some(p) => frame.child(img(p.to_path_buf()).size_full().rounded(crate::theme::radius_sm())).into_any_element(),
                 None => frame.into_any_element(),
             }
         };

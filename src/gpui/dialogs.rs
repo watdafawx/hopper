@@ -1822,7 +1822,8 @@ impl RedeemForm {
 }
 
 impl Render for RedeemForm {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rem = window.rem_size();
         let theme = cx.theme();
         let status = match &self.parsed {
             None => note(
@@ -1864,7 +1865,11 @@ impl Render for RedeemForm {
             }
         };
         let card = self.has_follow(cx).then(|| self.follow_card(cx));
-        v_flex().gap_3().child(Input::new(&self.input)).child(status).children(card)
+        v_flex()
+            .gap_3()
+            .child(settings_form(rem).child(Field::new().label("Share code").child(Input::new(&self.input))))
+            .child(status)
+            .children(card)
     }
 }
 
@@ -1917,6 +1922,7 @@ pub fn open_redeem(store: Entity<Store>, window: &mut Window, cx: &mut App) {
         dialog
             .title("Install from a share code")
             .w(rems(36.).to_pixels(window.rem_size()))
+            .margin_top(rems(widgets::DIALOG_TOP).to_pixels(window.rem_size()))
             .child(form.clone())
             .footer(footer(action, ready))
             .on_ok(move |_, window, cx| RedeemForm::install(&f2, &store, window, cx))

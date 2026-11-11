@@ -2,10 +2,11 @@
 //! from small palettes, filled out into every color the components use.
 //! Glass themes are translucent over a blurred (acrylic) or Mica window.
 
-use gpui_kit::component::{Theme, ThemeConfig, ThemeMode, ThemeSet};
+use gpui_kit::component::{ActiveTheme as _, Theme, ThemeConfig, ThemeMode, ThemeSet};
 use gpui_kit::*;
 use serde_json::{Map, Value, json};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The base font size at 100% zoom; every rem-sized thing follows it.
 const BASE: f32 = 15.0;
@@ -139,7 +140,7 @@ pub const PALETTES: &[Palette] = &[
     Palette { bg: "#282c34", panel: "#21252b", surface: "#2c313a", raised: "#3a3f4b", border: "#3a3f4b", fg: "#abb2bf", muted: "#8b92a0", accent: "#61afef", accent_fg: "#1e2127", success: "#98c379", warning: "#e5c07b", danger: "#e06c75", info: "#56b6c2", ..dark("One Dark") },
     Palette { bg: "#2c2525", panel: "#211c1c", surface: "#352e2e", raised: "#403838", border: "#403838", fg: "#fff1f3", muted: "#c3b7b8", accent: "#f9cc6c", accent_fg: "#2c2525", success: "#adda78", warning: "#f38d70", danger: "#fd6883", info: "#85dacc", ..dark("Ristretto") },
     Palette { bg: "#1f1f28", panel: "#16161d", surface: "#2a2a37", raised: "#363646", border: "#363646", fg: "#dcd7ba", muted: "#a09c8c", accent: "#7e9cd8", accent_fg: "#1f1f28", success: "#98bb6c", warning: "#e6c384", danger: "#e46876", info: "#7fb4ca", ..dark("Kanagawa") },
-    Palette { bg: "#fafafa", panel: "#f1f1f3", surface: "#f4f4f5", raised: "#e7e7ea", border: "#e4e4e7", fg: "#18181b", muted: "#6b6b75", accent: "#ea580c", accent_fg: "#141414", success: "#16a34a", warning: "#ca8a04", danger: "#dc2626", info: "#0284c7", ..light(HOPPER_LIGHT) },
+    Palette { bg: "#fafafa", panel: "#f1f1f3", surface: "#f4f4f5", raised: "#e7e7ea", border: "#e4e4e7", fg: "#18181b", muted: "#5f5f69", accent: "#ea580c", accent_fg: "#141414", success: "#16a34a", warning: "#ca8a04", danger: "#dc2626", info: "#0284c7", ..light(HOPPER_LIGHT) },
     Palette { bg: "#eff1f5", panel: "#e6e9ef", surface: "#e6e9ef", raised: "#ccd0da", border: "#ccd0da", fg: "#4c4f69", muted: "#6c6f85", accent: "#8839ef", accent_fg: "#eff1f5", success: "#40a02b", warning: "#df8e1d", danger: "#d20f39", info: "#04a5e5", ..light("Catppuccin Latte") },
     Palette { bg: "#faf4ed", panel: "#f2e9e1", surface: "#fffaf3", raised: "#dfdad9", border: "#dfdad9", fg: "#575279", muted: "#797593", accent: "#d7827e", accent_fg: "#141414", success: "#56949f", warning: "#ea9d34", danger: "#b4637a", info: "#907aa9", ..light("Rosé Pine Dawn") },
     Palette { bg: "#e1e2e7", panel: "#d0d5e3", surface: "#e9e9ed", raised: "#c4c8da", border: "#c4c8da", fg: "#3760bf", muted: "#6172b0", accent: "#2e7de9", accent_fg: "#141414", success: "#587539", warning: "#8c6c3e", danger: "#f52a65", info: "#007197", ..light("Tokyo Night Day") },
@@ -403,8 +404,45 @@ pub fn apply(name: &str, mode: u8, zoom: u16, cx: &mut App) {
     for w in cx.windows() {
         let _ = w.update(cx, |_, window, _| set_backdrop(window, back, dark));
     }
+    let page = gpui_kit::Rgba::from(cx.theme().background);
+    let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
+    let packed = byte(page.r) << 16 | byte(page.g) << 8 | byte(page.b);
+    LIGHT_PAGE.store(if dark { 0 } else { packed }, Ordering::Relaxed);
     set_zoom(zoom, cx);
 }
+
+/// The page colour (0xRRGGBB) of the light theme in use; 0 under a dark one.
+/// [`ink`] reads it, since a chip or a tinted row doesn't know the theme.
+static LIGHT_PAGE: AtomicU32 = AtomicU32::new(0);
+
+/// A colour used as small text (an accent, a status, a chip's label), dark
+/// enough to read on its own tint over a light page: the brand orange or a
+/// pale amber that works as a button fill or an icon is under 3:1 as text
+/// there. Dark themes keep the colour as it is.
+pub fn ink(c: Hsla) -> Hsla {
+    let page = LIGHT_PAGE.load(Ordering::Relaxed);
+    if page == 0 {
+        return c;
+    }
+    let ch = |shift: u32| ((page >> shift) & 255) as f32 / 255.;
+    let (pr, pg, pb) = (ch(16), ch(8), ch(0));
+    // A selected row or chip is the colour at about 15% over the page.
+    let o = gpui_kit::Rgba::from(c);
+    let tint = Rgba(pr + (o.r - pr) * 0.15, pg + (o.g - pg) * 0.15, pb + (o.b - pb) * 0.15, 1.0);
+    let mut out = c;
+    for _ in 0..80 {
+        let t = gpui_kit::Rgba::from(out);
+        if ratio(Rgba(t.r, t.g, t.b, 1.0), tint) >= INK_RATIO {
+            break;
+        }
+        out.l -= 0.01;
+    }
+    out
+}
+
+/// The contrast [`ink`] aims for: 4.5:1 plus a little, since thin small text
+/// anti-aliases lighter than its colour.
+const INK_RATIO: f32 = 5.0;
 
 fn hopper_dark() -> Option<ThemeConfig> {
     match serde_json::from_str::<ThemeSet>(include_str!("theme.json")) {
@@ -452,7 +490,11 @@ fn lum(c: Rgba) -> f32 {
 
 /// WCAG contrast ratio of two colors.
 fn contrast(a: &str, b: &str) -> f32 {
-    let (x, y) = (lum(parse(a)), lum(parse(b)));
+    ratio(parse(a), parse(b))
+}
+
+fn ratio(a: Rgba, b: Rgba) -> f32 {
+    let (x, y) = (lum(a), lum(b));
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
 }
 
@@ -501,7 +543,7 @@ fn config(p: &Palette) -> Option<ThemeConfig> {
     let edge = if glass { alpha(p.fg, if p.dark { 0.14 } else { 0.12 }) } else { p.border.to_string() };
     let (ok, ok_h, ok_a, ok_f) = status(p.success);
     let (bad, bad_h, bad_a, bad_f) = status(p.danger);
-    let colors: Vec<(&str, String)> = vec![
+    let mut colors: Vec<(&str, String)> = vec![
         ("background", p.bg.into()),
         ("foreground", p.fg.into()),
         ("border", p.border.into()),
@@ -523,9 +565,6 @@ fn config(p: &Palette) -> Option<ThemeConfig> {
         ("ring", p.accent.into()),
         ("selection.background", alpha(p.accent, 0.35)),
         ("caret", p.accent.into()),
-        ("link.foreground", mix(p.accent, lift, 0.1)),
-        ("link.hover.foreground", mix(p.accent, lift, 0.3)),
-        ("link.active.foreground", p.accent.into()),
         ("list.background", page.into()),
         ("list.hover.background", alpha(p.fg, hover_a)),
         ("list.active.background", alpha(p.accent, active_a)),
@@ -581,6 +620,14 @@ fn config(p: &Palette) -> Option<ThemeConfig> {
         ("overlay", if p.dark { "#0000008c".into() } else { "#00000059".into() }),
         ("window.border", edge),
     ];
+    // Link text (Open folder and the like) reads at 5:1 on a light page; the
+    // accent itself is under that there. Dark keeps the kit's own link color.
+    if !p.dark {
+        let link = reach(p.accent, lift, p.bg, INK_RATIO);
+        colors.push(("link.hover", reach(&link, lift, p.bg, 7.0)));
+        colors.push(("link.active", reach(&link, lift, p.bg, 7.0)));
+        colors.push(("link", link));
+    }
     let colors: Map<String, Value> = colors
         .into_iter()
         .map(|(k, v)| (k.to_string(), Value::String(v)))

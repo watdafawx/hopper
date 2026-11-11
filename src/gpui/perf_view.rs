@@ -767,7 +767,7 @@ impl Render for PerfView {
                 r.child(widgets::empty_state(
                     IconName::Activity,
                     "No runs yet",
-                    Some("Play this instance and each run shows up here: FPS, frame times, GC pauses, load time.".into()),
+                    Some("Play once and each run shows up here: FPS, frame times, GC pauses, load time.".into()),
                     cx,
                 ))
             })

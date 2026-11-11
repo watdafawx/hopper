@@ -340,7 +340,7 @@ impl BackupsView {
             .child(div().min_w_0().truncate().child(text))
             .when(project != 0, |d| {
                 d.clickable(cx)
-                    .hover(move |s| s.text_color(primary))
+                    .hover(move |s| s.text_color(crate::theme::ink(primary)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.open_peek(project, window, cx)
@@ -788,7 +788,7 @@ impl BackupsView {
                     div()
                         .id(("snap-all", i))
                         .text_xs()
-                        .text_color(theme.primary)
+                        .text_color(crate::theme::ink(theme.primary))
                         .clickable(cx)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.all.remove(&id) {
@@ -871,7 +871,9 @@ impl Render for BackupsView {
                         )
                     }),
             )
-            .child(widgets::caption(intro, cx))
+            // Wraps: the sentence is two lines in a dialog this wide, and a
+            // truncated one lost the part about configs.
+            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(intro))
             .children(banner)
             // Empty, it shows its empty state at its own height (a flex_1 scroll
             // area has none without a set height).
