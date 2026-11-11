@@ -1285,7 +1285,9 @@ fn pack_look(s: &Store, code: &str) -> (Option<PathBuf>, u64) {
 mod tests {
     use super::*;
 
-    #[test]
+    // `super::*` brings in gpui's `test` attribute, which expands to `#[test]`
+    // again and loops; name the standard one.
+    #[::core::prelude::v1::test]
     fn ago_reads_like_a_person() {
         let t = now();
         assert_eq!(ago(t), "just now");
