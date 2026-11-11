@@ -59,6 +59,8 @@ fn copy_to(inst: &Instance, parent: &Path, name: &str, job: &Job) -> anyhow::Res
     let mut copy = crate::instances::load(&dest).context("the copy is not a readable instance")?;
     copy.name = name;
     copy.source.clear();
+    // A copy is another instance: shares and follows keep the original.
+    copy.id = crate::instances::new_id();
     copy.save()?;
     Ok(dest)
 }

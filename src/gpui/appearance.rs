@@ -486,7 +486,9 @@ impl Render for AppearanceButton {
                     .when(!dialog && !self.open, |b| b.tooltip("Appearance: theme, zoom (Ctrl+Shift+A)"))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle(window, cx))),
             )
-            .child(canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {}).absolute().size_full())
+            // Pinned to the button: an absolute box with no top/left sits below it,
+            // which put the popover a button's height too low.
+            .child(canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
     }
 }
 

@@ -2667,11 +2667,19 @@ pub struct PanelSpec {
     /// Let go narrower than `.0`, it collapses to a rail `.1` wide.
     pub rail: Option<(f32, f32)>,
     pub edge: PanelEdge,
+    /// The most of the window it takes when open.
+    pub share: f32,
 }
 
 impl PanelSpec {
     pub const fn new(key: &'static str, default: f32, min: f32, max: f32) -> Self {
-        Self { key, default, min, max, rail: None, edge: PanelEdge::Right }
+        Self { key, default, min, max, rail: None, edge: PanelEdge::Right, share: PANEL_MAX_SHARE }
+    }
+
+    /// Takes up to `share` of the window instead of the usual 40%.
+    pub const fn share(mut self, share: f32) -> Self {
+        self.share = share;
+        self
     }
 
     /// Collapses to a rail `width` wide when let go narrower than `below`.
@@ -2681,7 +2689,6 @@ impl PanelSpec {
     }
 
     /// Docked on the trailing side, its handle on the left.
-    #[allow(dead_code)]
     pub const fn trailing(mut self) -> Self {
         self.edge = PanelEdge::Left;
         self
@@ -2744,7 +2751,7 @@ impl SidePanel {
             return PanelLayout { width: rail, collapsed: true };
         }
         let window_w = window.viewport_size().width / window.rem_size();
-        let cap = (window_w * PANEL_MAX_SHARE).max(spec.min);
+        let cap = (window_w * spec.share).max(spec.min);
         PanelLayout { width: w.clamp(spec.min, spec.max).min(cap), collapsed: false }
     }
 
@@ -2863,6 +2870,28 @@ pub fn side_panel<V: 'static>(
                 .on_click(reset)
                 .on_drag(PanelDrag(spec.key), |_, _, _, cx| cx.new(|_| PanelGhost)),
         )
+}
+
+/// The dock down the window's right side: the mod peek and the Friends
+/// panel. One spec, so each opens at the same width and a drag on either
+/// moves both. Up to 70% of the window: a project page needs the room.
+pub const DOCK: PanelSpec = PanelSpec::new("dock", 32., 26., 64.).trailing().share(0.7);
+
+/// A panel in the right-hand dock ([`DOCK`]): [`side_panel`] with the dock's
+/// border and background, sliding in whenever `id` changes. `content`
+/// fills its height and scrolls its own body.
+pub fn dock<V: 'static>(
+    id: impl Into<ElementId>,
+    panel: &SidePanel,
+    lens: fn(&mut V) -> &mut SidePanel,
+    store: &Entity<crate::store::Store>,
+    content: impl IntoElement,
+    window: &Window,
+    cx: &mut Context<V>,
+) -> Div {
+    let (border, bg) = (cx.theme().border, cx.theme().sidebar);
+    let body = slide_in(id, div().size_full().child(content));
+    side_panel("dock-resize", panel, lens, store, body, window, cx).border_l_1().border_color(border).bg(bg)
 }
 
 // ---- anchored popovers -------------------------------------------------------

@@ -141,8 +141,10 @@ fn answer(app: &mut AppView, cmd: Command, window: &mut Window, cx: &mut Context
 fn input(cmd: Command, window: &mut Window, cx: &mut App) -> Reply {
     // A click sent to an inactive window is often swallowed by the first
     // activation. Bring the test window forward before anything that inputs,
-    // so `--mcp` works while another app (even a game) is in front.
-    if !matches!(&cmd, Command::Screenshot | Command::State | Command::Navigate(_) | Command::Data(..)) {
+    // so `--mcp` works while another app (even a game) is in front. Not
+    // with `--no-focus`: someone is using the PC, and input reaches Hopper
+    // directly anyway.
+    if !crate::no_focus() && !matches!(&cmd, Command::Screenshot | Command::State | Command::Navigate(_) | Command::Data(..)) {
         window.activate_window();
     }
     let scale = window.scale_factor();

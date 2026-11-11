@@ -1390,14 +1390,47 @@ pub fn open_sign_in(store: Entity<Store>, window: &mut Window, cx: &mut App) {
 
 /// Shows an instance's share code, worked out in the background.
 pub struct ShareView {
+    store: Entity<Store>,
+    root: PathBuf,
+    inst_id: String,
     pack: String,
     made: Option<Result<hopper::sharecode::Made, String>>,
     copied: bool,
+    /// "Let them follow updates from this PC" is ticked: the code carries
+    /// a one-time invite for this pack.
+    follow: bool,
+    /// Ticked, and the relay hasn't answered with the invite yet.
+    asking: bool,
+    /// Why the follow part went while the box was ticked: it ran out, or
+    /// someone used it.
+    gone: Option<&'static str>,
+    /// When the follow part runs out, while ticked.
+    until: Option<std::time::Instant>,
+    ticking: bool,
     _task: Task<()>,
+    _subs: Vec<Subscription>,
 }
 
 impl ShareView {
-    fn new(inst: hopper::instances::Instance, cx: &mut Context<Self>) -> Self {
+    fn new(store: Entity<Store>, inst: hopper::instances::Instance, cx: &mut Context<Self>) -> Self {
+        let (root, inst_id) = (inst.root.clone(), inst.id.clone());
+        let subs = vec![
+            cx.observe(&store, |this, _, cx| {
+                if this.asking && this.invite(cx).is_some() {
+                    this.asking = false;
+                    this.copied = true;
+                }
+                cx.notify();
+            }),
+            // The relay said no (down, friend list full): untick.
+            cx.subscribe(&store, |this, _, e: &crate::store::StoreEvent, cx| {
+                if this.asking && matches!(e, crate::store::StoreEvent::Notice(_, true)) {
+                    this.asking = false;
+                    this.follow = false;
+                    cx.notify();
+                }
+            }),
+        ];
         let pack = match &inst.pack {
             Some(p) if p.project_id != 0 => format!("{} {}", p.name, p.version).trim().to_string(),
             _ => format!("Minecraft {} with {}", inst.game_version, nice_loader(&inst.loader)),
@@ -1421,13 +1454,156 @@ impl ShareView {
             })
             .ok();
         });
-        Self { pack, made: None, copied: false, _task: task }
+        Self {
+            store,
+            root,
+            inst_id,
+            pack,
+            made: None,
+            copied: false,
+            follow: false,
+            asking: false,
+            gone: None,
+            until: None,
+            ticking: false,
+            _task: task,
+            _subs: subs,
+        }
+    }
+
+    /// The live invite that follows this pack, if one was made for it.
+    fn invite(&self, cx: &App) -> Option<crate::store::Invite> {
+        self.store.read(cx).mailbox_invite(&self.inst_id)
+    }
+
+    /// The code as shown and copied: with the follow part while ticked.
+    fn text(&self, code: &str, cx: &App) -> String {
+        match self.invite(cx) {
+            Some(i) if self.follow => hopper::sharecode::with_follow(code, &i.code),
+            _ => code.to_string(),
+        }
+    }
+
+    fn set_follow(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.follow = on;
+        self.gone = None;
+        if on && self.invite(cx).is_none() {
+            // The store makes the invite and copies the code with it.
+            self.asking = true;
+            let root = self.root.clone();
+            self.store.update(cx, |s, cx| s.copy_follow_code(&root, cx));
+        } else if let Some(Ok(m)) = &self.made {
+            let text = self.text(&m.code, cx);
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.copied = true;
+        }
+        cx.notify();
+    }
+
+    /// Redraws once a second while the follow part counts down.
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        if self.ticking {
+            return;
+        }
+        self.ticking = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let more = this
+                    .update(cx, |this, cx| {
+                        cx.notify();
+                        let inv = this.invite(cx).filter(|_| this.follow);
+                        let live = inv.is_some();
+                        if this.follow && !live {
+                            // Codes work once: gone early means it was used.
+                            let used = this.until.is_some_and(|u| std::time::Instant::now() < u);
+                            this.follow = false;
+                            // The copied code carries the dead part: copy again.
+                            this.copied = false;
+                            this.gone = Some(if used {
+                                "A friend joined with this code and now gets your changes. Tick the box again to make a code for someone else."
+                            } else {
+                                "The code ran out for getting your changes. Tick the box again for a new one."
+                            });
+                        }
+                        this.until = inv.map(|i| i.until);
+                        this.ticking = live;
+                        live
+                    })
+                    .unwrap_or(false);
+                if !more {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The tick box card under the code, or why it can't be ticked.
+    fn follow_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::store::SyncStatus;
+        let theme = cx.theme().clone();
+        let s = self.store.read(cx);
+        let why_not = match s.sync_status() {
+            SyncStatus::Off => Some("Turn on friends to let them get your changes."),
+            SyncStatus::Down(_) => Some("Can't connect right now. Try again in a moment."),
+            _ if s.friends_full() && !self.follow => Some("Your friend list is full. Remove a friend to add someone new."),
+            _ => None,
+        };
+        let invite = self.invite(cx).filter(|_| self.follow);
+        let sub = match (invite, self.asking) {
+            (_, true) => "Making the code…".to_string(),
+            (Some(i), _) => {
+                let left = i.until.saturating_duration_since(std::time::Instant::now()).as_secs();
+                format!("Getting your changes: works for {:02}:{:02} more. Installing the pack: works any time.", left / 60, left % 60)
+            }
+            _ => String::new(),
+        };
+        if self.follow && !self.asking {
+            self.tick(cx);
+        }
+        let on = self.follow;
+        v_flex()
+            .gap_1()
+            .p_3()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(if on { theme.primary.opacity(0.5) } else { theme.border })
+            .when(on, |d| d.bg(theme.primary.opacity(0.06)))
+            .child(
+                // The kit's checkbox centres its box on the first line of
+                // its children, and a click on the text ticks it too.
+                Checkbox::new("share-follow")
+                    .checked(on)
+                    .disabled(why_not.is_some() || self.asking)
+                    .on_click(cx.listener(|this, v: &bool, _, cx| this.set_follow(*v, cx)))
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(div().text_sm().font_medium().child("Let them get my changes to this pack"))
+                            .child(card_note(
+                                why_not.unwrap_or(
+                                    "When you change the pack, their copy changes too. This also makes them your friend. It works for one person, for 15 minutes.",
+                                ),
+                                cx,
+                            ))
+                            .when(!sub.is_empty(), |d| d.child(div().text_sm().font_medium().child(sub)))
+                            .when_some(self.gone, |d, g| d.child(card_note(g, cx))),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
 /// A muted line that wraps (`widgets::caption` cuts off).
 fn note(text: impl Into<SharedString>, cx: &App) -> Div {
     div().text_sm().text_color(cx.theme().muted_foreground).child(text.into())
+}
+
+/// `note` inside a checkbox's text: the checkbox sets a tight line height
+/// for its first line, which is too tight for a paragraph.
+fn card_note(text: impl Into<SharedString>, cx: &App) -> Div {
+    note(text, cx).line_height(relative(1.5))
 }
 
 /// "neoforge-21.1.256" as "NeoForge 21.1.256".
@@ -1448,6 +1624,7 @@ fn nice_loader(loader: &str) -> String {
 
 impl Render for ShareView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let card = matches!(self.made, Some(Ok(_))).then(|| self.follow_card(cx));
         let theme = cx.theme();
         let made = match &self.made {
             None => {
@@ -1462,7 +1639,7 @@ impl Render for ShareView {
             }
             Some(Ok(m)) => m,
         };
-        let code = made.code.clone();
+        let code = self.text(&made.code, cx);
         // Codes have no spaces to wrap at, so they're cut into lines.
         let chars: Vec<char> = code.chars().collect();
         let lines: Vec<String> = chars.chunks(56).map(|c| c.iter().collect()).collect();
@@ -1470,7 +1647,7 @@ impl Render for ShareView {
         v_flex()
             .gap_3()
             .child(note(
-                "Send this code to a friend. They paste it in Hopper under Install from a share code (the link button above the instance list, or Ctrl+K) and get this exact setup.",
+                "Send this code to a friend. In Hopper, they click the link button above the instance list (or press Ctrl+K) and pick Install from a share code. They get this exact pack.",
                 cx,
             ))
             .child(
@@ -1485,15 +1662,17 @@ impl Render for ShareView {
                     .children(lines.into_iter().map(|l| div().child(l))),
             )
             .child(note(
-                format!("{} · {} · {} characters", self.pack, made.share.summary(), made.code.len()),
+                format!("{} · {} · {} characters", self.pack, made.share.summary(), code.len()),
                 cx,
             ))
+            .children(card)
             .child(
                 h_flex().child(
                     Button::new("share-copy")
                         .primary()
                         .icon(IconName::Copy)
                         .label(if self.copied { "Copied" } else { "Copy" })
+                        .tooltip("Copy the code to send it in a chat or message")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
                             this.copied = true;
@@ -1501,9 +1680,15 @@ impl Render for ShareView {
                         })),
                 ),
             )
+            .when(self.follow, |d| {
+                d.child(note(
+                    "Already friends in Hopper? Share it from the Friends panel instead. That never runs out.",
+                    cx,
+                ))
+            })
             .when(!made.left_out.is_empty(), |d| {
                 d.child(div().text_sm().text_color(theme.warning).child(format!(
-                    "Not in the code (not on CurseForge or Modrinth, so your friend adds these by hand): {}",
+                    "Your friend adds these by hand, because they aren't on CurseForge or Modrinth: {}",
                     made.left_out.join(", ")
                 )))
             })
@@ -1520,7 +1705,7 @@ pub fn open_share(store: Entity<Store>, root: PathBuf, window: &mut Window, cx: 
         return;
     };
     let title = format!("Share {}", inst.name);
-    let view = cx.new(|cx| ShareView::new(inst, cx));
+    let view = cx.new(|cx| ShareView::new(store, inst, cx));
     window.open_dialog(cx, move |dialog, window, _| {
         dialog
             .title(title.clone())
@@ -1535,12 +1720,15 @@ pub struct RedeemForm {
     parsed: Option<Result<hopper::sharecode::Share, String>>,
     /// The pack's name and version, by the code's pack.
     pack: Option<(hopper::sharecode::Base, String)>,
+    /// "Follow their updates", for a code with a follow part.
+    follow: bool,
+    store: Entity<Store>,
     _sub: Subscription,
     _lookup: Option<Task<()>>,
 }
 
 impl RedeemForm {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // A code on the clipboard goes straight in.
         let clip = cx
             .read_from_clipboard()
@@ -1555,7 +1743,7 @@ impl RedeemForm {
                 cx.notify();
             }
         });
-        let mut f = Self { input, parsed: None, pack: None, _sub: sub, _lookup: None };
+        let mut f = Self { input, parsed: None, pack: None, follow: true, store, _sub: sub, _lookup: None };
         f.parse(cx);
         f
     }
@@ -1606,32 +1794,30 @@ impl RedeemForm {
         matches!(self.parsed, Some(Ok(_)))
     }
 
+    /// The pasted code has a follow part (`sharecode::with_follow`).
+    fn has_follow(&self, cx: &App) -> bool {
+        self.ready() && hopper::sharecode::follow_part(&self.input.read(cx).value()).1.is_some()
+    }
+
+    /// Installing also follows: ticked, and Friends is on to do it.
+    fn follows(&self, cx: &App) -> bool {
+        self.follow && self.has_follow(cx) && !matches!(self.store.read(cx).sync_status(), crate::store::SyncStatus::Off)
+    }
+
     fn install(form: &Entity<Self>, store: &Entity<Store>, window: &mut Window, cx: &mut App) -> bool {
         let this = form.read(cx);
-        let Some(Ok(share)) = this.parsed.clone() else {
+        if !this.ready() {
             return false;
-        };
-        // Mods from GitHub and other links: ask (once this dialog closes)
-        // before anything installs.
-        let pins = hopper::sharecode::pins(&share);
-        let store = store.clone();
-        window.defer(cx, move |window, cx| {
-            crate::incoming_sources::gate(store.clone(), pins, window, cx, move |skip, _, cx| {
-                let (share, note) = hopper::sharecode::without(&share, &skip);
-                let s = store.read(cx);
-                let root = PathBuf::from(&s.settings().instances_root);
-                s.spawn_job("Setting up a shared pack", move |job| {
-                    job.announce();
-                    let inst = hopper::sharecode::install_share(&root, &share, job)?;
-                    job.detail(format!("Installed {}", inst.name));
-                    if let Some(n) = note {
-                        job.note(n);
-                    }
-                    Ok(Msg::installed(inst.root, &[], None))
-                });
-            });
-        });
-        true
+        }
+        // The store asks about mods from GitHub and other links (once this
+        // dialog closes) before anything installs, and follows the pack
+        // when the code carries a follow part.
+        let mut text = this.input.read(cx).value().trim().to_string();
+        if !this.follows(cx) {
+            // Without its follow part the code only installs.
+            text = hopper::sharecode::follow_part(&text).0;
+        }
+        crate::store::redeem(store, &text, window, cx)
     }
 }
 
@@ -1670,27 +1856,69 @@ impl Render for RedeemForm {
                     .child(div().text_sm().text_color(theme.success).child(format!("{what}{name}: {}.", s.summary())))
                     .when(!srcs.is_empty(), |d| {
                         d.child(div().text_sm().child(format!(
-                            "Includes mods from {}. Hopper downloads the exact files the code names and checks them by their sha256. Their updates stay off until you turn them on for each source.",
+                            "Includes mods from {}. Hopper downloads the exact files and checks nobody changed them. Updates for these mods stay off until you turn them on.",
                             srcs.iter().map(|(k, p)| format!("{k}: {p}")).collect::<Vec<_>>().join(", ")
                         )))
                     })
                     .into_any_element()
             }
         };
-        v_flex().gap_3().child(Input::new(&self.input)).child(status)
+        let card = self.has_follow(cx).then(|| self.follow_card(cx));
+        v_flex().gap_3().child(Input::new(&self.input)).child(status).children(card)
+    }
+}
+
+impl RedeemForm {
+    /// "Follow their updates", for a code with a follow part. The code
+    /// doesn't say who sent it or whether its follow part is still good;
+    /// a follow part that ran out is told after installing.
+    fn follow_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let off = matches!(self.store.read(cx).sync_status(), crate::store::SyncStatus::Off);
+        let on = self.follows(cx);
+        v_flex()
+            .p_3()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(if on { theme.primary.opacity(0.5) } else { theme.border })
+            .when(on, |d| d.bg(theme.primary.opacity(0.06)))
+            .child(
+                Checkbox::new("redeem-follow")
+                    .checked(on)
+                    .disabled(off)
+                    .on_click(cx.listener(|this, v: &bool, _, cx| {
+                        this.follow = *v;
+                        cx.notify();
+                    }))
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(div().text_sm().font_medium().child("Get their changes to this pack"))
+                            .child(card_note(
+                                if off {
+                                    "Turn on friends to get their changes. The pack installs either way."
+                                } else {
+                                    "This also makes whoever sent the code your friend. When they change the pack, your copy changes too. You can stop any time in the Friends panel."
+                                },
+                                cx,
+                            )),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
 pub fn open_redeem(store: Entity<Store>, window: &mut Window, cx: &mut App) {
-    let form = cx.new(|cx| RedeemForm::new(window, cx));
+    let form = cx.new(|cx| RedeemForm::new(store.clone(), window, cx));
     window.open_dialog(cx, move |dialog, window, cx| {
         let (store, f2) = (store.clone(), form.clone());
         let ready = form.read(cx).ready();
+        let action = if form.read(cx).follows(cx) { "Install and follow" } else { "Install" };
         dialog
             .title("Install from a share code")
             .w(rems(36.).to_pixels(window.rem_size()))
             .child(form.clone())
-            .footer(footer("Install", ready))
+            .footer(footer(action, ready))
             .on_ok(move |_, window, cx| RedeemForm::install(&f2, &store, window, cx))
     });
 }

@@ -93,7 +93,8 @@ impl Store {
             return;
         }
         self.spawn(move || {
-            let inst = if root.is_dir() { instances::load(&root) } else { None };
+            // Listed or in the instances folder: one of Hopper's own.
+            let inst = if root.is_dir() { instances::load_managed(&root) } else { None };
             Msg::DiskLoaded(root, inst.map(Box::new), area)
         });
     }

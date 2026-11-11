@@ -87,7 +87,7 @@ impl InstTab {
             InstTab::Configs => "Configs",
             InstTab::Screenshots => "Screenshots",
             InstTab::Server => "Server",
-            InstTab::Peers => "Friends",
+            InstTab::Peers => "Friends nearby",
             InstTab::Settings => "Settings",
             InstTab::Logs => "Logs & crashes",
             InstTab::Performance => "Performance",
@@ -270,6 +270,8 @@ pub struct LibraryView {
     history_btn: std::cell::RefCell<Option<Entity<crate::history_button::HistoryButton>>>,
     selected: Option<PathBuf>,
     tab: InstTab,
+    /// The Friends panel is docked beside the page.
+    friends_open: bool,
     /// The tab before the last switch, and when it happened, for the
     /// sliding underline and the hero's height.
     tab_from: InstTab,
@@ -310,6 +312,8 @@ pub struct LibraryView {
     logs: Entity<LogsView>,
     perf: Entity<crate::perf_view::PerfView>,
     peers: Entity<PeersView>,
+    /// The Friends panel, docked beside the page from the title bar.
+    friends: Entity<crate::friends::FriendsPanel>,
     search: Entity<InputState>,
     query: String,
     /// The instance list and the instance's page (made on first draw, see
@@ -324,6 +328,49 @@ pub struct LibraryView {
 }
 
 impl LibraryView {
+    /// Whether the Friends panel is docked beside the page.
+    pub fn friends_open(&self) -> bool {
+        self.friends_open
+    }
+
+    /// Friends is open and has the dock (no config file or mod page in it).
+    pub fn friends_shown(&self, cx: &App) -> bool {
+        self.friends_open && self.config_shown().is_none() && self.peek_shown(cx).is_none()
+    }
+
+    /// The title bar's Friends button: dock or hide the panel.
+    pub fn toggle_friends(&mut self, cx: &mut Context<Self>) {
+        self.set_friends(!self.friends_open, cx);
+    }
+
+    fn set_friends(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.friends_open = open;
+        self.friends.update(cx, |f, cx| f.shown(open, cx));
+        cx.notify();
+    }
+
+    /// The Friends panel, for its popover (drawn over the whole window).
+    pub fn friends(&self) -> &Entity<crate::friends::FriendsPanel> {
+        &self.friends
+    }
+
+    fn friends_event(&mut self, e: &crate::friends::FriendsEvent, cx: &mut Context<Self>) {
+        use crate::friends::FriendsEvent;
+        match e {
+            FriendsEvent::Close => self.set_friends(false, cx),
+            FriendsEvent::Show(root) => self.select(root.clone(), cx),
+            FriendsEvent::Project(id) => {
+                // The project page docks beside the content tabs.
+                if self.tab.class().is_none() {
+                    self.set_tab(InstTab::Mods, cx);
+                }
+                let id = *id;
+                self.addons.update(cx, |a, cx| a.open_peek(id, cx));
+            }
+            FriendsEvent::Popover => {}
+        }
+    }
+
     /// Ctrl+F: the Mods search of the picked instance.
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tab.class().is_none() {
@@ -423,6 +470,7 @@ impl LibraryView {
         let logs = cx.new(|cx| LogsView::new(store.clone(), window, cx));
         let perf = cx.new(|cx| crate::perf_view::PerfView::new(store.clone(), window, cx));
         let peers = cx.new(|cx| PeersView::new(store.clone(), window, cx));
+        let friends = cx.new(|cx| crate::friends::FriendsPanel::new(store.clone(), window, cx));
         server.update(cx, |s, _| s.set_peek(peek.clone()));
         let control = server.read(cx).control().clone();
         let subs = vec![
@@ -437,6 +485,7 @@ impl LibraryView {
             }),
             crate::browse::observe_peek(&peek, cx, |_, cx| cx.notify()),
             cx.subscribe(&addons, |this, _, event, cx| this.addons_event(event, cx)),
+            cx.subscribe(&friends, |this, _, event, cx| this.friends_event(event, cx)),
             cx.subscribe(&worlds, |this, _, event, cx| this.content_event(event, cx)),
             cx.subscribe(&store, |this, _, event: &store::StoreEvent, cx| this.disk_event(event, cx)),
             cx.observe(&store, |this, _, cx| {
@@ -480,6 +529,7 @@ impl LibraryView {
             history_btn: Default::default(),
             selected: None,
             tab: first_tab,
+            friends_open: false,
             tab_from: first_tab,
             tab_moved: None,
             tab_serial: 0,
@@ -504,6 +554,7 @@ impl LibraryView {
             logs,
             perf,
             peers,
+            friends,
             search,
             query: String::new(),
             parts: None,
@@ -2780,10 +2831,16 @@ impl LibraryView {
             .children(pre_join)
             .child(tabs)
             .children(pack_tabs)
-            .child(div().flex_1().min_h_0().pt_3().child(widgets::enter(
-                ElementId::Name(anim.into()),
-                div().size_full().child(body),
-            )))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .pt_3()
+                    .child(widgets::enter(
+                        ElementId::Name(anim.into()),
+                        div().flex_1().min_w_0().size_full().child(body),
+                    )),
+            )
             .into_any_element()
     }
 }
@@ -2913,7 +2970,12 @@ impl Render for LibraryView {
             s.panel_widths.get("config.panel").copied().unwrap_or(30.).abs().clamp(24., 48.).min(window.viewport_size().width / window.rem_size() * 0.4)
         });
         let peek_w = peek_w + config_w;
-        self.detail_w = window.viewport_size().width / window.rem_size() - side - peek_w;
+        // One dock on the right: a config file, else a mod's page, else
+        // Friends. A mod opened from Friends takes the dock; Friends is
+        // back when it closes.
+        let friends_shown = self.friends_shown(cx);
+        let friends_w = if friends_shown { self.friends.read(cx).width(window, cx) } else { 0.0 };
+        self.detail_w = window.viewport_size().width / window.rem_size() - side - peek_w - friends_w;
         // The table fits its columns to this; it is re-laid out whenever
         // the room changes (its bounds change), so no notify is needed.
         let (room, list_open) = (self.detail_w, side > RAIL);
@@ -2945,6 +3007,7 @@ impl Render for LibraryView {
         let peek = peek.map(|p| {
             AnyView::from(p).cached(StyleRefinement::default().w(rems(peek_w)).flex_none().h_full())
         });
+        let friends_panel = friends_shown.then(|| self.friends.clone());
         h_flex()
             .id("library")
             .relative()
@@ -2955,18 +3018,14 @@ impl Render for LibraryView {
                 cx.notify();
             }))
             .on_drop(cx.listener(|this, _: &SidebarResize, _, cx| this.end_resize(cx)))
-            // The docked project page's edge: it tracks the drag itself;
-            // re-lay out here and save the width wherever it's let go.
-            .on_drag_move(cx.listener(|_, _: &DragMoveEvent<crate::browse::PanelResize>, _, cx| {
-                cx.notify()
-            }))
-            .on_drop(cx.listener(|this, _: &crate::browse::PanelResize, _, cx| {
-                let peek = this.addons.read(cx).peek().clone();
-                peek.update(cx, |p, cx| p.end_resize(cx));
-            }))
+            // The dock's edge (the docked project page or Friends): the
+            // panel tracks and saves the drag itself; re-lay out here so the
+            // page beside it follows.
+            .on_drag_move(cx.listener(|_, _: &DragMoveEvent<widgets::PanelDrag>, _, cx| cx.notify()))
             .items_stretch()
             .child(self.sidebar(list, cx))
             .child(page)
+            .children(friends_panel)
             .children(peek)
             .children(config_panel)
             .child(self.logo_layer.clone())
@@ -3206,7 +3265,7 @@ fn instance_menu(
     // Peers is a server tool: only with them on.
     .when(tools, |m| {
         let (v, r) = vr();
-        m.item(PopupMenuItem::new("Friends").icon(IconName::Users).on_click(move |_, _, cx| {
+        m.item(PopupMenuItem::new("Friends nearby").icon(IconName::Users).on_click(move |_, _, cx| {
             v.update(cx, |this, cx| {
                 this.select(r.clone(), cx);
                 this.set_tab(InstTab::Peers, cx);

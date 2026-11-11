@@ -282,6 +282,17 @@ pub fn new_sources(pins: &[Pin]) -> Vec<ModSource> {
     out
 }
 
+/// The pins to leave out when nobody can be asked (a followed pack that
+/// updates by itself, "Keep everyone in step"): all of them while Settings
+/// › Mod sources is off, else those from sources the player hasn't
+/// confirmed yet. The same answer the ask would need, never a guess.
+pub fn auto_skip(pins: &[Pin], allow_sources: bool) -> Vec<Pin> {
+    pins.iter()
+        .filter(|p| !allow_sources || !super::trusted(&p.source))
+        .cloned()
+        .collect()
+}
+
 /// A pinned mod's name for people: the repo's name for GitHub ("EZActions"),
 /// else the jar's name without its version and loader ("modmenu").
 pub fn display_name(p: &Pin) -> String {
@@ -339,4 +350,30 @@ pub fn skip(inst: &mut Instance, pins: &[Pin]) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod auto_skip_tests {
+    use super::*;
+
+    fn pin(url: &str) -> Pin {
+        Pin {
+            file: format!("{url}.jar"),
+            source: ModSource {
+                url: format!("hopper-test-never-trusted/{url}"),
+                publisher: format!("hopper-test-never-trusted/{url}"),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn nothing_from_other_sources_installs_by_itself_unless_confirmed() {
+        let pins = vec![pin("a"), pin("b")];
+        // Mod sources off: every pinned mod waits for the player.
+        assert_eq!(auto_skip(&pins, false), pins);
+        // On, but these sources were never confirmed: still left out.
+        assert_eq!(auto_skip(&pins, true), pins);
+        assert!(auto_skip(&[], false).is_empty());
+    }
 }

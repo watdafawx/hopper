@@ -207,7 +207,10 @@ impl AppView {
         let me = cx.entity().downgrade();
         let appearance = cx.new(|cx| crate::appearance::AppearanceButton::new(store.clone(), me, cx));
         let peek = library.read(cx).peek_view(cx);
+        let friends = library.read(cx).friends().clone();
         let subs = vec![
+            // The Friends panel's share popover is drawn over the window.
+            cx.subscribe(&friends, |_, _, _: &crate::friends::FriendsEvent, cx| cx.notify()),
             // Each page notifies when it moves: back and forward note it.
             cx.observe(&library, |this, _, cx| this.track(cx)),
             crate::browse::observe_peek(&peek, cx, |this, cx| this.track(cx)),
@@ -1384,6 +1387,44 @@ impl AppView {
                                             this.toggle_palette(&CommandPalette, window, cx)
                                         })),
                                 )
+                                .child({
+                                    // Open beside the Library: tinted. Something new
+                                    // there (a friend's pack changed, a group
+                                    // invitation): a dot, until the panel is opened.
+                                    let open = self.page == Page::Library && self.library.read(cx).friends_open();
+                                    let news = !open && self.store.read(cx).friends_news();
+                                    let button = Button::new("open-friends")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::Users)
+                                        .selected(open)
+                                        .when(!dialog, |b| {
+                                            b.tooltip(if news {
+                                                "Friends: something new from your friends"
+                                            } else {
+                                                "Friends: share packs and play the same ones as your friends"
+                                            })
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            // From another page it opens the panel; on the
+                                            // Library it opens or closes it.
+                                            let away = this.page != Page::Library;
+                                            this.go(Page::Library, cx);
+                                            let open = this.library.read(cx).friends_open();
+                                            if !(away && open) {
+                                                this.library.update(cx, |l, cx| l.toggle_friends(cx));
+                                            }
+                                        }));
+                                    if news {
+                                        gpui_kit::component::badge::Badge::new()
+                                            .dot()
+                                            .color(cx.theme().primary)
+                                            .child(button)
+                                            .into_any_element()
+                                    } else {
+                                        button.into_any_element()
+                                    }
+                                })
                                 .child(
                                     Button::new("refresh")
                                         .ghost()
@@ -1406,6 +1447,7 @@ impl AppView {
                                             cx.open_url(&issue_url(App::Hopper, hopper::selfupdate::CURRENT, None))
                                         }),
                                 )
+
                                 .child(
                                     Button::new("open-github")
                                         .ghost()
@@ -1453,6 +1495,9 @@ impl Render for AppView {
         let title = self.title_bar(window, cx);
         let overlay = self.tasks.update(cx, |t, cx| t.overlay(window, cx));
         let appearance_pop = self.appearance.update(cx, |t, cx| t.overlay(window, cx));
+        let friends_pop = (self.page == Page::Library && self.library.read(cx).friends_shown(cx))
+            .then(|| self.library.read(cx).friends().clone())
+            .and_then(|f| f.update(cx, |f, cx| f.overlay(window, cx)));
         let theme = cx.theme();
         let ring = theme.primary;
         v_flex()
@@ -1517,6 +1562,7 @@ impl Render for AppView {
             )))
             .children(overlay)
             .children(appearance_pop)
+            .children(friends_pop)
             .children(widgets::link_menu_overlay(window, cx))
             .children(self.palette.as_ref().map(|p| p.view()))
             // A playing video's window hides under the palette and dialogs.

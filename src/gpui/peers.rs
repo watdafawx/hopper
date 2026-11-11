@@ -11,7 +11,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Selectable as _, 
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -20,31 +21,11 @@ use hopper::settings::FollowedRecipe;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-/// The invite code just made, and when it stops working.
-#[derive(Clone)]
-struct Invite {
-    code: String,
-    until: Instant,
-}
-
-/// "Works once. Expires in 14:32." from the mailbox's own lifetime.
-fn invite_left(inv: &Invite) -> String {
-    let secs = inv.until.saturating_duration_since(Instant::now()).as_secs();
-    format!("Works once. Expires in {:02}:{:02}.", secs / 60, secs % 60)
-}
 
 pub struct PeersView {
     store: Entity<Store>,
     root: Option<PathBuf>,
     address: Entity<InputState>,
-    /// The friend's one-time code, for the mailbox.
-    join_code: Entity<InputState>,
-    /// The invite code just made, shown with a Copy button and copied once.
-    invite: Option<Invite>,
-    /// Bumped for each invite so an older countdown stops.
-    invite_gen: u64,
     message: Option<Result<String, String>>,
     /// Mods from other sources the last pull left out, said after its result.
     skipped: Option<String>,
@@ -69,9 +50,6 @@ impl PeersView {
         let address = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Add by address: 100.x.y.z, host:port or https URL")
         });
-        let join_code = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Paste their invite code")
-        });
         let subs = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe(&address, |this, _, e: &InputEvent, cx| {
@@ -79,19 +57,11 @@ impl PeersView {
                     this.add_address(cx);
                 }
             }),
-            cx.subscribe(&join_code, |this, _, e: &InputEvent, cx| {
-                if matches!(e, InputEvent::PressEnter { .. }) {
-                    this.mailbox_join(cx);
-                }
-            }),
         ];
         Self {
             store,
             root: None,
             address,
-            join_code,
-            invite: None,
-            invite_gen: 0,
             message: None,
             skipped: None,
             codes: HashMap::new(),
@@ -109,11 +79,12 @@ impl PeersView {
     }
 
     pub fn show_for(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        if self.root.as_ref() != Some(&root) {
-            self.diff = None;
-            self.picked.clear();
-            self.remote_inst.clear();
+        if self.root.as_ref() == Some(&root) {
+            return;
         }
+        self.diff = None;
+        self.picked.clear();
+        self.remote_inst.clear();
         self.root = Some(root);
         cx.notify();
     }
@@ -135,7 +106,7 @@ impl PeersView {
                 .await;
             this.update(cx, |this, cx| {
                 this.message = Some(
-                    r.map(|_| "Found it. Pair to sync.".to_string())
+                    r.map(|_| "Found their PC. Click Connect to share packs.".to_string())
                         .map_err(|e| format!("{addr}: {e:#}")),
                 );
                 cx.notify();
@@ -155,7 +126,7 @@ impl PeersView {
                     Ok(code) => {
                         this.codes.insert(id, code);
                     }
-                    Err(e) => this.message = Some(Err(format!("Pairing failed: {e:#}"))),
+                    Err(e) => this.message = Some(Err(format!("Couldn't connect to their PC: {e:#}"))),
                 }
                 cx.notify();
             })
@@ -315,7 +286,7 @@ impl PeersView {
                             results.iter().filter_map(|r| r.error.clone()).collect();
                         if failed.is_empty() {
                             Ok(format!(
-                                "Pulled {} files. Undo it from History.",
+                                "Got {} files from their PC. You can undo it in History.",
                                 results.len()
                             ))
                         } else {
@@ -324,7 +295,7 @@ impl PeersView {
                     } else {
                         let failed = hub.push(&id, &rinst, folder, &root, &files);
                         if failed.is_empty() {
-                            Ok(format!("Sent {} files.", files.len()))
+                            Ok(format!("Sent {} files to their PC.", files.len()))
                         } else {
                             Err(format!("{} failed: {}", failed.len(), failed[0]))
                         }
@@ -344,13 +315,6 @@ impl PeersView {
         })
         .detach();
         cx.notify();
-    }
-
-    fn root_string(&self) -> String {
-        self.root
-            .as_ref()
-            .map(|r| r.to_string_lossy().into_owned())
-            .unwrap_or_default()
     }
 
     fn followed(&self, cx: &App) -> Option<FollowedRecipe> {
@@ -416,30 +380,16 @@ impl PeersView {
                         this.message = Some(Err(why))
                     }
                     Ok((recipe, _)) => {
-                        this.save_follow(
-                            FollowedRecipe {
-                                peer_id: id.clone(),
-                                peer_name: peer_name.clone(),
-                                inst: rinst.clone(),
-                                name: recipe.name.clone(),
-                                root: root.to_string_lossy().into_owned(),
-                                code: recipe.code.clone(),
-                                seen: recipe.code.clone(),
-                                left_out: recipe.left_out.clone(),
-                            },
-                            cx,
-                        );
-                        let (code, root_j) = (recipe.code.clone(), root.clone());
-                        let root_arg = root_j.clone();
-                        let title = format!("Following {peer_name}'s {}", recipe.name);
-                        this.store.read(cx).spawn_instance_job(
-                            &root_arg,
-                            title,
-                            move |job| {
-                                hopper::recipe::apply_to(&root_j, &code, job)?;
-                                Ok(crate::store::Msg::InstanceChanged(root_j.clone()))
-                            },
-                        );
+                        let req = crate::store::FollowReq {
+                            peer_id: id.clone(),
+                            peer_name: peer_name.clone(),
+                            inst: rinst.clone(),
+                            name: recipe.name.clone(),
+                            code: recipe.code.clone(),
+                            left_out: recipe.left_out.clone(),
+                            ..Default::default()
+                        };
+                        this.follow_in_window(req, root.clone(), cx);
                         this.message = Some(Ok(format!(
                             "Following {peer_name}'s {}. The mods are downloading.",
                             recipe.name
@@ -511,22 +461,18 @@ impl PeersView {
                 match r {
                     Err(e) => this.message = Some(Err(format!("{e:#}"))),
                     Ok(recipe) => {
-                        let Some(mut f) = this.followed(cx) else { return };
-                        f.code = recipe.code.clone();
-                        f.seen = recipe.code.clone();
-                        f.left_out = recipe.left_out.clone();
+                        let Some(f) = this.followed(cx) else { return };
                         let (name, inst_name) = (f.peer_name.clone(), recipe.name.clone());
-                        this.save_follow(f, cx);
-                        let (code, root_j) = (recipe.code.clone(), root.clone());
-                        let root_arg = root_j.clone();
-                        this.store.read(cx).spawn_instance_job(
-                            &root_arg,
-                            format!("Updating from {name}'s {inst_name}"),
-                            move |job| {
-                                hopper::recipe::apply_to(&root_j, &code, job)?;
-                                Ok(crate::store::Msg::InstanceChanged(root_j.clone()))
-                            },
-                        );
+                        let req = crate::store::FollowReq {
+                            peer_id: f.peer_id.clone(),
+                            peer_name: f.peer_name.clone(),
+                            inst: f.inst.clone(),
+                            name: recipe.name.clone(),
+                            code: recipe.code.clone(),
+                            left_out: recipe.left_out.clone(),
+                            ..Default::default()
+                        };
+                        this.follow_in_window(req, root.clone(), cx);
                         this.message =
                             Some(Ok(format!("Updating from {name}'s {inst_name}.")));
                     }
@@ -539,14 +485,23 @@ impl PeersView {
         cx.notify();
     }
 
-    fn stop_follow(&mut self, cx: &mut Context<Self>) {
-        let root = self.root_string();
-        self.store.update(cx, |s, cx| {
-            s.update_settings(
-                |st| st.followed_recipes.retain(|f| f.root != root),
-                cx,
-            );
+    /// Follows over `root` once the window can ask about mods from other
+    /// sources (this runs after a fetch, outside any click).
+    fn follow_in_window(&self, req: crate::store::FollowReq, root: PathBuf, cx: &mut Context<Self>) {
+        let Some(handle) = cx.active_window() else { return };
+        let store = self.store.clone();
+        cx.defer(move |cx| {
+            handle
+                .update(cx, |_, window, cx| {
+                    crate::store::follow_pack(&store, req, crate::store::FollowTarget::Existing(root), window, cx)
+                })
+                .ok();
         });
+    }
+
+    fn stop_follow(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        self.store.update(cx, |s, cx| s.stop_following(&root, cx));
         self.message = Some(Ok("Stopped following this instance.".into()));
         cx.notify();
     }
@@ -625,302 +580,6 @@ impl PeersView {
         )
     }
 
-    fn mailbox_card(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let mb = self.store.read(cx).mailbox();
-        let friends = self.store.read(cx).mailbox_friends().to_vec();
-        let recipes = self.store.read(cx).mailbox_recipes().to_vec();
-        let err = self.store.read(cx).mailbox_error();
-        let following = self.followed(cx);
-        let has_friends = !friends.is_empty();
-        v_flex()
-            .gap_2()
-            .p_3()
-            .rounded(theme.radius)
-            .border_1()
-            .border_color(theme.border)
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(div().text_sm().font_semibold().child("From anywhere"))
-                    .when(mb.is_none() && err.is_none(), |r| {
-                        r.child(Spinner::new().small())
-                    })
-                    .child(div().flex_1())
-                    .when(mb.is_some(), |r| {
-                        r.child(
-                            Button::new("mb-invite")
-                                .small()
-                                .outline()
-                                .label("Invite a friend")
-                                .on_click(cx.listener(|this, _, _, cx| this.mailbox_invite(cx))),
-                        )
-                    }),
-            )
-            .when_some(err, |c, e| {
-                c.child(div().text_sm().text_color(theme.danger).child(e))
-            })
-            .when_some(self.invite.clone(), |c, inv| {
-                let copy = inv.code.clone();
-                c.child(
-                    h_flex()
-                        .gap_2()
-                        .px_1()
-                        .items_center()
-                        .child(
-                            widgets::chip(theme.primary)
-                                .text_sm()
-                                .font_semibold()
-                                .child(inv.code.clone()),
-                        )
-                        .child(
-                            Button::new("mb-copy")
-                                .xsmall()
-                                .outline()
-                                .label("Copy")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                                    this.message = Some(Ok("Code copied.".into()));
-                                    cx.notify();
-                                })),
-                        )
-                        .child(widgets::caption(invite_left(&inv), cx).text_xs()),
-                )
-            })
-            .when(mb.is_some(), |c| {
-                c.child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .px_1()
-                        .child(widgets::caption("Have a code from them?", cx))
-                        .child(div().w_64().child(Input::new(&self.join_code).small()))
-                        .child(
-                            Button::new("mb-join")
-                                .small()
-                                .outline()
-                                .label("Join")
-                                .disabled(self.running)
-                                .on_click(cx.listener(|this, _, _, cx| this.mailbox_join(cx))),
-                        ),
-                )
-            })
-            .when(mb.is_some() && friends.is_empty() && recipes.is_empty(), |c| {
-                c.child(widgets::caption(
-                    "Invite a friend to get a code, or paste the code they sent you. Codes work once and run out after 15 minutes.",
-                    cx,
-                ))
-            })
-            .children(friends.into_iter().map(|f| {
-                let head = if f.mc_id.is_empty() {
-                    div()
-                        .size_2()
-                        .rounded_full()
-                        .bg(if f.online { theme.success } else { theme.muted_foreground })
-                        .into_any_element()
-                } else {
-                    let saved = hopper::accounts::Saved {
-                        id: f.mc_id.clone(),
-                        name: f.name.clone(),
-                        ..Default::default()
-                    };
-                    let url = saved.fallback_avatar();
-                    self.store.update(cx, |s, _| s.want_image_now(&url));
-                    crate::accounts::head(
-                        &self.store.read(cx),
-                        &saved,
-                        rems(1.5),
-                        cx,
-                    )
-                };
-                h_flex()
-                    .gap_2()
-                    .px_1()
-                    .child(head)
-                    .child(div().text_sm().font_medium().child(f.name))
-                    .when(f.online && !f.mc_id.is_empty(), |r| {
-                        r.child(div().size_2().rounded_full().bg(theme.success))
-                    })
-                    .child(widgets::chip(theme.muted_foreground).xsmall().child("Paired"))
-            }))
-            .when(!recipes.is_empty() && has_friends, |c| {
-                c.child(widgets::caption(
-                    "Your instances are shared with them automatically. Theirs show below; Get this instance sets one up here.",
-                    cx,
-                ))
-            })
-            .children(recipes.into_iter().map(|e| {
-                let already = following
-                    .as_ref()
-                    .is_some_and(|f| f.peer_id == e.from && f.inst == e.inst);
-                h_flex()
-                    .gap_2()
-                    .px_1()
-                    .child(
-                        div().text_sm().child(format!(
-                            "{} shared {} with you",
-                            if e.from_name.is_empty() { "A friend" } else { &e.from_name },
-                            if e.name.is_empty() { &e.inst } else { &e.name }
-                        )),
-                    )
-                    .when(!e.left_out.is_empty(), |r| {
-                        r.child(
-                            widgets::caption(
-                                format!("{} file(s) aren't downloadable", e.left_out.len()),
-                                cx,
-                            )
-                            .text_xs(),
-                        )
-                    })
-                    .child(div().flex_1())
-                    .when(already, |r| {
-                        r.child(widgets::chip(theme.success).xsmall().child("Following"))
-                    })
-                    .when(!already, |r| {
-                        r.child(
-                            Button::new(SharedString::from(format!("mb-get:{}:{}", e.from, e.inst)))
-                                .xsmall()
-                                .outline()
-                                .label("Get this instance")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.mailbox_follow(&e, cx)
-                                })),
-                        )
-                    })
-            }))
-            .into_any_element()
-    }
-
-    fn mailbox_invite(&mut self, cx: &mut Context<Self>) {
-        let Some(mb) = self.store.read(cx).mailbox() else {
-            return;
-        };
-        self.running = true;
-        self.message = None;
-        cx.spawn(async move |this, cx| {
-            let r = cx.background_spawn(async move { mb.invite() }).await;
-            this.update(cx, |this, cx| {
-                this.running = false;
-                this.message = Some(match r {
-                    Ok((code, secs)) => {
-                        // Put it on the clipboard straight away; the Copy
-                        // button beside it is for later.
-                        cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                        this.invite = Some(Invite {
-                            code,
-                            until: Instant::now() + Duration::from_secs(secs),
-                        });
-                        this.start_invite_ticker(cx);
-                        Ok("Code copied. Send it to your friend; it works once.".to_string())
-                    }
-                    Err(e) => Err(format!("{e:#}")),
-                });
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Keeps the invite's "Expires in" line moving, then clears it. It runs
-    /// while the view is open, so changing tabs or instance doesn't lose it.
-    fn start_invite_ticker(&mut self, cx: &mut Context<Self>) {
-        self.invite_gen = self.invite_gen.wrapping_add(1);
-        let id = self.invite_gen;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let more = this
-                    .update(cx, |this, cx| {
-                        if this.invite_gen != id {
-                            return false;
-                        }
-                        let Some(inv) = &this.invite else {
-                            return false;
-                        };
-                        if Instant::now() >= inv.until {
-                            this.invite = None;
-                            this.message =
-                                Some(Ok("That code expired. Invite a friend again for a new one.".into()));
-                        }
-                        cx.notify();
-                        this.invite.is_some()
-                    })
-                    .unwrap_or(false);
-                if !more {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    fn mailbox_join(&mut self, cx: &mut Context<Self>) {
-        let code = self.join_code.read(cx).value().trim().to_string();
-        if code.is_empty() {
-            return;
-        }
-        let Some(mb) = self.store.read(cx).mailbox() else {
-            return;
-        };
-        self.running = true;
-        self.message = None;
-        cx.spawn(async move |this, cx| {
-            let r = cx.background_spawn(async move { mb.join(&code) }).await;
-            this.update(cx, |this, cx| {
-                this.running = false;
-                this.message = Some(match r {
-                    Ok(f) => Ok(format!(
-                        "Paired with {}. Their instances appear here when they share one.",
-                        if f.name.is_empty() { "them" } else { &f.name }
-                    )),
-                    Err(e) => Err(format!("{e:#}")),
-                });
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn mailbox_follow(&mut self, e: &hopper::mailbox::Event, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else {
-            return;
-        };
-        let previous = self
-            .followed(cx)
-            .filter(|f| f.peer_id == e.from && f.inst == e.inst)
-            .map(|f| f.code)
-            .unwrap_or_default();
-        self.save_follow(
-            FollowedRecipe {
-                peer_id: e.from.clone(),
-                peer_name: e.from_name.clone(),
-                inst: e.inst.clone(),
-                name: e.name.clone(),
-                root: root.to_string_lossy().into_owned(),
-                code: previous,
-                seen: e.code.clone(),
-                left_out: e.left_out.clone(),
-            },
-            cx,
-        );
-        let (code, title, name) = (
-            e.code.clone(),
-            format!("Updating from {}'s {}", e.from_name, e.name),
-            e.name.clone(),
-        );
-        self.store
-            .update(cx, |s, cx| s.apply_follow_now(root, code, title, cx));
-        self.message = Some(Ok(format!(
-            "Following {}'s {}. The mods are downloading.",
-            e.from_name, name
-        )));
-        cx.notify();
-    }
-
     fn intro(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .size_full()
@@ -929,15 +588,15 @@ impl PeersView {
             .gap_3()
             .px_6()
             .child(Icon::new(IconName::Users).large().text_color(cx.theme().muted_foreground))
-            .child(div().text_lg().font_semibold().child("Sync with a friend"))
+            .child(div().text_lg().font_semibold().child("Friends nearby"))
             .child(
                 div().max_w(rems(38.)).text_sm().text_center().child(
-                    "Get their exact instance here, or share yours. Only the list of mods is sent — the files download from CurseForge, Modrinth and GitHub, so nothing large goes between you.",
+                    "Get a friend's exact instance, or share yours, when your PCs are on the same network. Only the mod list is sent. The mods download from CurseForge, Modrinth and GitHub.",
                 ),
             )
             .child(
                 widgets::caption(
-                    "No account. Nothing is uploaded to Hopper. Windows may ask to allow Hopper on private networks; allow it so the other PC can reach this one.",
+                    "Nothing to sign up for. Windows may ask to let Hopper use private networks. Say yes, so the other PC can find this one.",
                     cx,
                 )
                 .text_xs(),
@@ -946,7 +605,7 @@ impl PeersView {
                 Button::new("peers-on")
                     .primary()
                     .icon(IconName::Users)
-                    .label("Turn on sync")
+                    .label("Turn on Friends nearby")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.store.update(cx, |s, cx| s.set_peer_sync(true, cx))
                     })),
@@ -969,7 +628,7 @@ impl PeersView {
             ),
             None => (
                 "No friend's PC here yet".to_string(),
-                "Turn on sync on their PC too. Both PCs need to be on the same network or Tailscale."
+                "Turn on Friends nearby in their Hopper too. Both PCs need to be on the same home network, or on Tailscale."
                     .to_string(),
             ),
         };
@@ -1026,7 +685,7 @@ impl PeersView {
                     })
                     .map(|r| {
                         if p.trusted {
-                            r.child(widgets::chip(theme.success).child("Paired")).child(
+                            r.child(widgets::chip(theme.success).child("Connected")).child(
                                 Button::new(SharedString::from(format!("sync:{id1}")))
                                     .small()
                                     .outline()
@@ -1054,8 +713,8 @@ impl PeersView {
                                 Button::new(SharedString::from(format!("pair:{id3}")))
                                     .small()
                                     .outline()
-                                    .label("Pair")
-                                    .tooltip("Pair once, then check the 6-digit code matches on their screen")
+                                    .label("Connect")
+                                    .tooltip("Connect once. Then check their screen shows the same 6-digit code.")
                                     .disabled(!online)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.pair(id3.clone(), cx)
@@ -1098,14 +757,14 @@ impl PeersView {
                             Button::new("peer-address")
                                 .small()
                                 .outline()
-                                .label("Pair by address")
+                                .label("Connect by address")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.show_advanced = true;
                                     cx.notify();
                                 })),
                         )
                         .child(widgets::caption(
-                            "No account. Nothing is uploaded to Hopper.",
+                            "PCs on this network talk to each other directly.",
                             cx,
                         ).text_xs()),
                 )
@@ -1226,8 +885,8 @@ impl PeersView {
                                     .small()
                                     .outline()
                                     .icon(IconName::Upload)
-                                    .label(format!("Push to them ({nu})"))
-                                    .tooltip("Send these files to their PC; they can undo it from History")
+                                    .label(format!("Send to their PC ({nu})"))
+                                    .tooltip("Send these files to their PC. They can undo it in History.")
                                     .disabled(nu == 0 || self.running)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.transfer(false, push.clone(), cx)
@@ -1238,8 +897,8 @@ impl PeersView {
                                     .small()
                                     .primary()
                                     .icon(IconName::Download)
-                                    .label(format!("Pull to this PC ({np})"))
-                                    .tooltip("Copy their files here; what's replaced is backed up")
+                                    .label(format!("Get from their PC ({np})"))
+                                    .tooltip("Copy their files to this PC. You can undo it in History.")
                                     .disabled(np == 0 || self.running)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.transfer(true, pull.clone(), cx)
@@ -1368,7 +1027,7 @@ impl PeersView {
                                     .small()
                                     .primary()
                                     .label("Follow this instance")
-                                    .tooltip("Match this instance to theirs. Mods download from their original sites.")
+                                    .tooltip("Match this instance to theirs. The mods download from their own sites.")
                                     .disabled(self.running)
                                     .on_click(cx.listener(|this, _, _, cx| this.follow(cx))),
                             )
@@ -1393,7 +1052,7 @@ impl PeersView {
                 .when(self.show_files, |c| c.child(diff))
                 .when(!self.show_files, |c| {
                     c.child(widgets::caption(
-                        "Only the list of mods is sent. The files download from CurseForge, Modrinth and GitHub.",
+                        "Only the mod list is sent. The mods download from CurseForge, Modrinth and GitHub.",
                         cx,
                     ))
                 })
@@ -1442,7 +1101,7 @@ impl Render for PeersView {
                 .when_some(discovery, |c, e| {
                     c.child(
                         widgets::caption(
-                            "Hopper can't find PCs on this network. Pair by address instead.",
+                            "Hopper can't find other PCs on this network. Connect by address instead.",
                             cx,
                         )
                         .text_xs(),
@@ -1451,7 +1110,7 @@ impl Render for PeersView {
                 })
                 .child(
                     widgets::caption(
-                        "Windows may ask to allow Hopper on private networks; allow it so the other PC can reach this one.",
+                        "Windows may ask to let Hopper use private networks. Say yes, so the other PC can find this one.",
                         cx,
                     )
                     .text_xs(),
@@ -1498,9 +1157,9 @@ impl Render for PeersView {
                     .child(
                         v_flex()
                             .gap_0p5()
-                            .child(div().text_lg().font_semibold().child("Sync with a friend"))
+                            .child(div().text_lg().font_semibold().child("Friends nearby"))
                             .child(widgets::caption(
-                                "Share this instance with a friend's PC. Only the list of mods is sent; files download from their original sites.",
+                                "Share this instance with a friend's PC on the same network. Only the mod list is sent. The mods download from their own sites.",
                                 cx,
                             )),
                     )
@@ -1509,14 +1168,17 @@ impl Render for PeersView {
                         Button::new("peers-off")
                             .small()
                             .ghost()
-                            .label("Turn off sync")
+                            .label("Turn off Friends nearby")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.store.update(cx, |s, cx| s.set_peer_sync(false, cx))
                             })),
                     ),
             )
             .children(follow)
-            .child(self.mailbox_card(cx))
+            .child(widgets::caption(
+                "Friends anywhere, and the packs they share, are in the Friends panel (the people button at the top).",
+                cx,
+            ))
             .children(message)
             .child(
                 v_flex()

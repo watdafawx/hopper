@@ -2550,11 +2550,8 @@ impl Render for ServersView {
         h_flex()
             .size_full()
             .items_stretch()
-            .on_drag_move(cx.listener(|_, _: &DragMoveEvent<crate::browse::PanelResize>, _, cx| cx.notify()))
-            .on_drop(cx.listener(|this, _: &crate::browse::PanelResize, _, cx| {
-                let peek = this.mods_table.read(cx).peek().clone();
-                peek.update(cx, |p, cx| p.end_resize(cx));
-            }))
+            // The docked peek's edge saves itself; re-lay out as it moves.
+            .on_drag_move(cx.listener(|_, _: &DragMoveEvent<widgets::PanelDrag>, _, cx| cx.notify()))
             .child(list)
             .child(div().flex_1().min_w_0().h_full().child(detail))
             .children(peek)
