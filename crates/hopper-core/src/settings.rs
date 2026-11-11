@@ -50,9 +50,22 @@ pub struct FollowedRecipe {
     pub ended: String,
     /// The friend group "Keep everyone in step" followed it through, if any.
     pub group: String,
+    /// Mods from GitHub and other links (names) the last automatic apply
+    /// left out because nobody was there to ask: Update asks about them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<String>,
+    /// Those mods the player said to skip ([`crate::recipe::pin_key`]), so
+    /// they aren't asked about again.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub declined: Vec<String>,
 }
 
 impl FollowedRecipe {
+    /// A newer code from a pack still shared isn't applied here yet.
+    pub fn waiting(&self) -> bool {
+        self.ended.is_empty() && !self.seen.is_empty() && self.seen != self.code
+    }
+
     /// Whether an incoming code from `from` for their instance `inst` (old
     /// folder name `key`) is the one this follows.
     pub fn matches(&self, from: &str, inst: &str, key: &str) -> bool {
@@ -171,6 +184,10 @@ pub struct Settings {
     pub mailbox_sent: Vec<SharedPack>,
     /// Friend groups this PC is in (see [`FriendGroup`]).
     pub friend_groups: Vec<FriendGroup>,
+    /// Group packs kept the same as the group, both ways (see
+    /// [`crate::groupsync`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub group_copies: Vec<crate::groupsync::PackCopy>,
     /// The newest mailbox event acted on once (a friend joining with a
     /// pack's invite, notices). Every start reads the whole feed again to
     /// list friends' packs; events up to here aren't acted on twice.
@@ -643,6 +660,7 @@ impl Default for Settings {
             shared_with: Vec::new(),
             mailbox_sent: Vec::new(),
             friend_groups: Vec::new(),
+            group_copies: Vec::new(),
             mailbox_handled: 0,
             shared_instances: Vec::new(),
             share_prompt_done: false,

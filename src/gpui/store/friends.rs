@@ -11,6 +11,7 @@
 
 use super::{Msg, Store, StoreEvent};
 use gpui_kit::*;
+use hopper::groupsync::{self, Got, PackCopy};
 use hopper::mailbox::{self, Event, Group, Kind, Mailbox};
 use hopper::settings::{FollowedRecipe, FriendGroup, PublishTo, SharedPack};
 use hopper::sources::carry::Pin;
@@ -29,6 +30,9 @@ const PUBLISH_TICK: Duration = Duration::from_millis(500);
 const FRIENDS_EVERY: Duration = Duration::from_secs(3);
 /// Packs from friends kept for the Friends screen.
 const RECIPES_KEPT: usize = 200;
+/// How long other members' changes wait for a change made here to be
+/// sent before they go in anyway (see `groupsync::Verdict::Held`).
+const HELD_FOR: Duration = Duration::from_secs(10);
 
 /// How the sync service is doing, for the Friends screen's status line.
 #[allow(dead_code)]
@@ -117,6 +121,7 @@ impl FollowReq {
             at: self.at,
             ended: String::new(),
             group: group.to_string(),
+            ..Default::default()
         }
     }
 }
@@ -129,6 +134,29 @@ pub enum FollowTarget {
     Existing(PathBuf),
     /// Installed as a new instance.
     New,
+}
+
+/// A followed pack's code applied over an instance.
+pub struct RecipeApplied {
+    pub root: PathBuf,
+    pub code: String,
+    /// Mods from other sources it left out without asking (names).
+    pub held: Vec<String>,
+    /// The player's answer about those mods (`hopper::recipe::pin_key`s to
+    /// skip), when they were asked.
+    pub declined: Option<Vec<String>>,
+}
+
+/// Other members' changes taken into a group copy (`hopper::groupsync`).
+pub struct GroupMerged {
+    pub local: String,
+    pub root: PathBuf,
+    pub merged: groupsync::Merged,
+}
+
+/// The newest waiting code's number, which a failed try is kept against.
+fn newest_waiting(c: &PackCopy) -> String {
+    c.waiting.values().map(|g| g.seq).max().unwrap_or(0).to_string()
 }
 
 /// Follows a friend's pack: asks about mods from GitHub and other links
@@ -457,7 +485,8 @@ impl Store {
         let r = root.to_string_lossy().into_owned();
         let mut did = false;
         self.update_settings(|st| did = st.stop_following(&r), cx);
-        self.pending_follow.remove(root);
+        self.forget_follow_state(root);
+        self.sync_copies();
         if did {
             cx.emit(StoreEvent::Notice("Stopped following. Your copy stays as it is and won't change when theirs does.".into(), false));
         }
@@ -485,6 +514,7 @@ impl Store {
             },
             cx,
         );
+        self.sync_copies();
     }
 
     /// "Share all": every pack with every friend.
@@ -808,44 +838,361 @@ impl Store {
             },
             cx,
         );
+        self.sync_copies();
         self.handle(Msg::installed(root, &[], None), cx);
     }
 
-    /// A followed pack's code was applied at `root`.
-    pub(super) fn on_recipe_applied(&mut self, root: PathBuf, code: String, cx: &mut Context<Self>) {
-        self.pending_follow.remove(&root);
+    /// A followed pack's code was applied at its root.
+    pub(super) fn on_recipe_applied(&mut self, r: RecipeApplied, cx: &mut Context<Self>) {
+        let RecipeApplied { root, code, held, declined } = r;
+        self.follow_applying.remove(&root);
+        // It worked: the failed tries before it are done with.
+        if let Some(old) = self.follow_retry.remove(&root) {
+            self.jobs.dismiss(old.job);
+        }
+        // The player answered about mods from other sources while this ran
+        // by itself: apply again with their answer.
+        let answer = match self.pending_follow.remove(&root) {
+            Some(Some(skip)) if declined.is_none() => Some(skip),
+            _ => None,
+        };
         self.update_settings(
             |st| {
                 for f in st.followed_recipes.iter_mut().filter(|f| Path::new(&f.root) == root) {
                     f.code = code.clone();
+                    f.held = held.clone();
+                    if let Some(d) = &declined {
+                        f.declined = d.clone();
+                    }
                 }
             },
             cx,
         );
-        self.handle(Msg::InstanceChanged(root), cx);
+        // A group pack's first version is in: from now on it syncs both ways.
+        self.sync_copies();
+        self.handle(Msg::InstanceChanged(root.clone()), cx);
+        if let Some(skip) = answer
+            && let Some(f) = self.follow_at(&root).cloned()
+        {
+            self.apply_follow(root, f.seen.clone(), format!("Updating from {}'s {}", f.peer_name, f.name), Some(skip), cx);
+        }
+    }
+
+    /// Applying a followed pack's code failed: said once, shown on its row,
+    /// and tried again after a while (unless trying again can't help).
+    pub(super) fn on_recipe_failed(&mut self, root: PathBuf, code: String, e: anyhow::Error, job: u64, cx: &mut Context<Self>) {
+        self.follow_applying.remove(&root);
+        let prev = self.follow_retry.get(&root);
+        // One failed task per follow on the task list, the newest.
+        if let Some(p) = prev.filter(|p| p.job != job) {
+            self.jobs.dismiss(p.job);
+        }
+        let r = hopper::recipe::Retry::failed(prev, &code, &e, job, Instant::now());
+        log::warn!("applying a followed pack at {}: {e:#} (try {})", root.display(), r.failures);
+        if r.failures == 1
+            && let Some(f) = self.follow_at(&root)
+        {
+            let local = self.instance(&root).map(|i| i.name.clone()).unwrap_or_else(|| f.name.clone());
+            let who = if f.peer_name.is_empty() { "your friend" } else { &f.peer_name };
+            let again = if r.next.is_some() { " Hopper tries again in a moment." } else { "" };
+            cx.emit(StoreEvent::Notice(format!("Couldn't update {local} with {who}'s changes. {}{again}", r.error), true));
+        }
+        self.follow_retry.insert(root, r);
+        cx.notify();
+    }
+
+    /// Why the last automatic update of the follow at `root` failed, and
+    /// whether Hopper tries again by itself.
+    pub fn follow_error(&self, root: &Path) -> Option<(&str, bool)> {
+        if let Some(c) = self.group_copy(root) {
+            let r = self.group_retry.get(&c.local).filter(|r| !c.waiting.is_empty() && r.code == newest_waiting(c))?;
+            return Some((r.error.as_str(), r.next.is_some()));
+        }
+        let f = self.follow_at(root)?;
+        let r = self.follow_retry.get(root).filter(|r| r.code == f.seen && f.waiting())?;
+        Some((r.error.as_str(), r.next.is_some()))
+    }
+
+    /// Whether the follow at `root` is being updated now, or will be as
+    /// soon as its game closes or another task on it ends.
+    pub fn follow_updating(&self, root: &Path) -> bool {
+        if let Some(c) = self.group_copy(root) {
+            return self.group_merging.contains(&c.local) || (!c.waiting.is_empty() && self.follow_error(root).is_none());
+        }
+        self.follow_applying.contains(root)
+            || self.follow_at(root).is_some_and(|f| f.waiting() && self.follow_error(root).is_none())
     }
 
     /// An instance was deleted in Hopper: what it followed stops (and a
     /// group pack isn't followed again by keeping the group in step).
     pub(super) fn forget_follows(&mut self, root: &Path) {
         let r = root.to_string_lossy().into_owned();
-        self.pending_follow.remove(root);
+        self.forget_follow_state(root);
         self.update_settings_quietly(|st| {
             st.stop_following(&r);
         });
+        self.sync_copies();
     }
 
-    /// Applies follows that waited for their game to close.
-    pub(super) fn follow_tick(&mut self, cx: &mut Context<Self>) {
-        if self.pending_follow.is_empty() {
-            return;
+    fn forget_follow_state(&mut self, root: &Path) {
+        self.pending_follow.remove(root);
+        self.follow_applying.remove(root);
+        if let Some(r) = self.follow_retry.remove(root) {
+            self.jobs.dismiss(r.job);
         }
-        let ready: Vec<PathBuf> = self.pending_follow.keys().filter(|r| !self.is_busy(r)).cloned().collect();
-        for root in ready {
+    }
+
+    /// A game running or a task changing the instance: a follow waits.
+    fn follow_busy(&self, root: &Path) -> bool {
+        self.is_busy(root) || self.running(root).is_some() || self.is_launching(root)
+    }
+
+    /// Applies every follow whose newest code isn't applied yet and can be
+    /// now: a code that just came, one that waited for its game to close or
+    /// a task to end, one Hopper was closed before applying (on start), and
+    /// failed tries once their wait is over (`hopper::recipe::due`). Runs
+    /// on the store's wake-ups and twice a second while friends sync runs.
+    pub(super) fn follow_tick(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let due: Vec<FollowedRecipe> = self
+            .settings
+            .followed_recipes
+            .iter()
+            .filter(|f| {
+                let root = Path::new(&f.root);
+                // A pack from the feed, or one the player asked to update
+                // (a PC on the network, which only updates on request).
+                let ours = self.pending_follow.contains_key(root)
+                    || self.mailbox_recipes.iter().any(|e| f.matches(&e.from, &e.inst, &e.key));
+                ours && !self.follow_applying.contains(root)
+                    // Kept both ways with a group: changes come mod by mod.
+                    && !self.settings.group_copies.iter().any(|c| c.inst == f.inst && c.local == f.local)
+                    && hopper::recipe::due(f, self.follow_retry.get(root), self.follow_busy(root), now)
+                    // An instance deleted outside Hopper has nothing to update.
+                    && root.is_dir()
+            })
+            .cloned()
+            .collect();
+        for f in due {
+            let root = PathBuf::from(&f.root);
             let skip = self.pending_follow.remove(&root).flatten();
-            let Some(f) = self.follow_at(&root).cloned() else { continue };
             self.apply_follow(root, f.seen.clone(), format!("Updating from {}'s {}", f.peer_name, f.name), skip, cx);
         }
+        // Group packs with other members' changes waiting.
+        let mut ready: Vec<(PackCopy, PathBuf, bool)> = Vec::new();
+        for c in &self.settings.group_copies {
+            if c.waiting.is_empty() || self.group_merging.contains(&c.local) {
+                continue;
+            }
+            let Some(root) = self.instances.iter().find(|i| i.id == c.local).map(|i| i.root.clone()) else { continue };
+            // Waiting for a change made here to be sent; after a while the
+            // others' changes go in anyway.
+            let ignore_unsent = match self.group_held.get(&c.local) {
+                Some((seq, t)) if *seq == c.sent_seq => {
+                    if t.elapsed() < HELD_FOR {
+                        continue;
+                    }
+                    true
+                }
+                _ => false,
+            };
+            let due = match self.group_retry.get(&c.local) {
+                Some(r) if r.code == newest_waiting(c) => r.next.is_some_and(|t| now >= t),
+                _ => true,
+            };
+            if due && !self.follow_busy(&root) && root.is_dir() {
+                ready.push((c.clone(), root, ignore_unsent));
+            }
+        }
+        for (c, root, ignore_unsent) in ready {
+            self.merge_group(c, root, ignore_unsent);
+        }
+    }
+
+    // ---- Group packs kept both ways ---------------------------------------
+
+    /// The copy of a group pack at `root`, when it is kept both ways.
+    pub fn group_copy(&self, root: &Path) -> Option<&PackCopy> {
+        let id = &self.instance(root)?.id;
+        if id.is_empty() {
+            return None;
+        }
+        self.settings.group_copies.iter().find(|c| &c.local == id)
+    }
+
+    /// Who in the group changed this mod last, when it wasn't this PC:
+    /// "Turned off by Mia".
+    pub fn group_mark(&self, root: &Path, a: &hopper::instances::Addon) -> Option<String> {
+        use groupsync::Kind;
+        let m = self.group_copy(root)?.marks.get(&groupsync::addon_key(a))?;
+        if m.name.is_empty() || m.by == self.mailbox_id() {
+            return None;
+        }
+        // Changed here since (not sent yet): the mark is out of date.
+        match m.kind {
+            Kind::Off if a.enabled => return None,
+            Kind::On | Kind::Added if !a.enabled => return None,
+            _ => {}
+        }
+        // A pack mod set to another file reads as an update.
+        let kind = if m.kind == Kind::Added && a.from_pack { Kind::Updated } else { m.kind };
+        Some(kind.says(&m.name))
+    }
+
+    /// Keeps the list of group packs kept both ways matching what is
+    /// shared and followed here. A member's copy that stopped is taken
+    /// back from the group, so nobody keeps getting an old version of it.
+    pub(super) fn sync_copies(&mut self) {
+        let mut copies = self.settings.group_copies.clone();
+        let recipes = &self.mailbox_recipes;
+        let gone = groupsync::reconcile(&mut copies, &self.settings, |f| {
+            recipes
+                .iter()
+                .find(|e| f.matches(&e.from, &e.inst, &e.key))
+                .map(|e| e.groups.clone())
+                .unwrap_or_default()
+        });
+        // Members' copies that came before this one was set up.
+        for c in &mut copies {
+            let strays: Vec<Event> = self.group_strays.iter().filter(|((_, i), _)| *i == c.inst).map(|(_, e)| e.clone()).collect();
+            for e in strays {
+                self.group_strays.remove(&(e.from.clone(), e.inst.clone()));
+                c.arrive(&e.from, Got { code: e.code, seq: e.seq, at: e.at, name: e.from_name });
+            }
+        }
+        if copies != self.settings.group_copies {
+            self.update_settings_quietly(|st| st.group_copies = copies);
+        }
+        let back: Vec<PackCopy> = gone.into_iter().filter(|c| c.local != c.inst).collect();
+        for c in &back {
+            self.group_held.remove(&c.local);
+            if let Some(r) = self.group_retry.remove(&c.local) {
+                self.jobs.dismiss(r.job);
+            }
+        }
+        if !back.is_empty()
+            && let Some(mb) = self.mailbox.clone()
+        {
+            std::thread::spawn(move || {
+                for c in back {
+                    if let Err(e) = mb.revoke(&c.inst, &[], &[c.group.clone()], "unshared") {
+                        log::warn!("taking back this PC's copy of a group pack: {e:#}");
+                    }
+                }
+            });
+        }
+    }
+
+    /// A member's copy of a group pack arrived: taken into this PC's copy.
+    fn got_copy(&mut self, e: Event, cx: &mut Context<Self>) {
+        if e.from == self.mailbox_id() {
+            return;
+        }
+        let name = if e.from_name.is_empty() { self.friend_name(&e.from) } else { e.from_name.clone() };
+        let g = Got { code: e.code.clone(), seq: e.seq, at: e.at, name };
+        if self.settings.group_copies.iter().any(|c| c.inst == e.inst) {
+            self.update_settings_quietly(|st| {
+                for c in st.group_copies.iter_mut().filter(|c| c.inst == e.inst) {
+                    c.arrive(&e.from, g.clone());
+                }
+            });
+            self.follow_tick(cx);
+        } else {
+            let k = (e.from.clone(), e.inst.clone());
+            if self.group_strays.get(&k).is_none_or(|x| x.seq < e.seq) {
+                self.group_strays.insert(k, e);
+            }
+        }
+    }
+
+    /// Takes other members' waiting changes into the copy at `root`, off
+    /// the task list unless it changes something.
+    fn merge_group(&mut self, copy: PackCopy, root: PathBuf, ignore_unsent: bool) {
+        if let Some(r) = self.group_retry.get(&copy.local) {
+            self.jobs.dismiss(r.job);
+        }
+        self.group_merging.insert(copy.local.clone());
+        let allow = self.settings.allow_sources;
+        let name = self.instance(&root).map(|i| i.name.clone()).unwrap_or_default();
+        let mut who: Vec<&str> = copy.waiting.values().map(|g| g.name.as_str()).filter(|n| !n.is_empty()).collect();
+        who.dedup();
+        let title = match who.as_slice() {
+            [one] => format!("Updating {name} with {one}'s changes"),
+            _ => format!("Updating {name} with the group's changes"),
+        };
+        let (tx, local, r2) = (self.tx.clone(), copy.local.clone(), root.clone());
+        self.spawn_instance_job_quiet(&root, title, move |job| {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| groupsync::merge(&r2, &copy, allow, ignore_unsent, job)))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Hopper hit a bug and stopped this task.")));
+            match r {
+                Ok(merged) => Ok(Msg::GroupMerged(Box::new(GroupMerged { local, root: r2, merged }))),
+                Err(e) => {
+                    let text = format!("{e:#}");
+                    let _ = tx.send(Msg::GroupMergeFailed(local, e, job.id()));
+                    Err(anyhow::anyhow!(text))
+                }
+            }
+        });
+    }
+
+    pub(super) fn on_group_merged(&mut self, m: GroupMerged, cx: &mut Context<Self>) {
+        let GroupMerged { local, root, merged } = m;
+        self.group_merging.remove(&local);
+        if let Some(old) = self.group_retry.remove(&local) {
+            self.jobs.dismiss(old.job);
+        }
+        let mut sent_seq = 0;
+        self.update_settings_quietly(|st| {
+            let Some(c) = st.group_copies.iter_mut().find(|c| c.local == local) else { return };
+            for (from, g) in merged.taken {
+                if c.waiting.get(&from).is_some_and(|w| w.seq == g.seq) {
+                    c.waiting.remove(&from);
+                }
+                c.got.insert(from, g);
+            }
+            for (k, mk) in merged.marks {
+                if c.marks.get(&k).is_none_or(|x| x.seq <= mk.seq) {
+                    c.marks.insert(k, mk);
+                }
+            }
+            sent_seq = c.sent_seq;
+        });
+        if merged.held {
+            if self.group_held.get(&local).is_none_or(|(s, _)| *s != sent_seq) {
+                self.group_held.insert(local, (sent_seq, Instant::now()));
+            }
+        } else {
+            self.group_held.remove(&local);
+        }
+        if !merged.made.is_empty() {
+            self.handle(Msg::InstanceChanged(root), cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn on_group_merge_failed(&mut self, local: String, e: anyhow::Error, job: u64, cx: &mut Context<Self>) {
+        self.group_merging.remove(&local);
+        let Some(c) = self.settings.group_copies.iter().find(|c| c.local == local) else { return };
+        let key = newest_waiting(c);
+        let prev = self.group_retry.get(&local);
+        if let Some(p) = prev.filter(|p| p.job != job) {
+            self.jobs.dismiss(p.job);
+        }
+        let r = hopper::recipe::Retry::failed(prev, &key, &e, job, Instant::now());
+        log::warn!("taking group changes into {local}: {e:#} (try {})", r.failures);
+        let root = self.instances.iter().find(|i| i.id == local).map(|i| (i.root.clone(), i.name.clone()));
+        if r.failures == 1
+            && let Some((_, name)) = &root
+        {
+            let again = if r.next.is_some() { " Hopper tries again in a moment." } else { "" };
+            cx.emit(StoreEvent::Notice(format!("Couldn't update {name} with the group's changes. {}{again}", r.error), true));
+        }
+        self.group_retry.insert(local, r);
+        // Some changes may have gone in before the one that failed.
+        if let Some((root, _)) = root {
+            self.handle(Msg::InstanceChanged(root), cx);
+        }
+        cx.notify();
     }
 
     // ---- Inside ----------------------------------------------------------
@@ -935,6 +1282,10 @@ impl Store {
     /// A friend's pack, new or changed: listed, and applied on every
     /// instance here that follows it.
     fn got_recipe(&mut self, e: Event, cx: &mut Context<Self>) {
+        if e.key == groupsync::COPY_KEY {
+            self.got_copy(e, cx);
+            return;
+        }
         // One entry per pack; one from before ids (its folder name) is the
         // same pack.
         self.mailbox_recipes.retain(|x| {
@@ -944,7 +1295,6 @@ impl Store {
         if self.mailbox_recipes.len() > RECIPES_KEPT {
             self.mailbox_recipes.remove(0);
         }
-        let mut apply: Vec<(PathBuf, String)> = Vec::new();
         self.update_settings_quietly(|st| {
             for ix in st.followers(&e.from, &e.inst, &e.key) {
                 let f = &mut st.followed_recipes[ix];
@@ -958,18 +1308,29 @@ impl Store {
                 f.at = e.at;
                 // Shared again after it stopped.
                 f.ended.clear();
-                if f.seen != e.code {
-                    f.seen = e.code.clone();
-                    // An instance deleted outside Hopper has nothing to update.
-                    if Path::new(&f.root).is_dir() {
-                        apply.push((PathBuf::from(&f.root), format!("Updating from {}'s {}", f.peer_name, f.name)));
-                    }
-                }
+                f.seen = e.code.clone();
             }
         });
-        for (root, title) in apply {
-            self.apply_follow(root, e.code.clone(), title, None, cx);
+        // A group pack kept both ways takes its sharer's code mod by mod,
+        // like every other member's.
+        self.sync_copies();
+        if self.settings.group_copies.iter().any(|c| c.inst == e.inst && c.local != c.inst) {
+            let name = if e.from_name.is_empty() { self.friend_name(&e.from) } else { e.from_name.clone() };
+            let g = Got { code: e.code.clone(), seq: e.seq, at: e.at, name };
+            self.update_settings_quietly(|st| {
+                let mut two_way = Vec::new();
+                for c in st.group_copies.iter_mut().filter(|c| c.inst == e.inst && c.local != c.inst) {
+                    c.arrive(&e.from, g.clone());
+                    two_way.push(c.local.clone());
+                }
+                for f in st.followed_recipes.iter_mut().filter(|f| f.inst == e.inst && two_way.contains(&f.local)) {
+                    f.code = e.code.clone();
+                }
+            });
         }
+        // Applied by the tick, which also catches a code seen before but
+        // never applied (Hopper closed first, or the apply failed).
+        self.follow_tick(cx);
     }
 
     /// A friend stopped sharing a pack with this PC (or one of the ways it
@@ -1105,6 +1466,7 @@ impl Store {
             self.mailbox_groups = groups;
             cx.notify();
         }
+        self.sync_copies();
         self.keep_in_step(cx);
     }
 
@@ -1218,28 +1580,67 @@ impl Store {
         }
     }
 
-    /// Applies a followed pack's code at `root` now, or when its game
-    /// closes.
+    /// Applies a followed pack's code at `root` now, or once its game
+    /// closes and other tasks on it end ([`Self::follow_tick`]). `skip`:
+    /// the player's answer about mods from other sources (None: nobody
+    /// was asked).
     fn apply_follow(&mut self, root: PathBuf, code: String, title: String, skip: Option<Vec<Pin>>, _cx: &mut Context<Self>) {
-        if self.is_busy(&root) {
-            self.pending_follow.insert(root, skip);
+        if self.follow_busy(&root) || self.follow_applying.contains(&root) {
+            // Keep an answer the player gave; the tick applies it later.
+            if skip.is_some() || !self.pending_follow.contains_key(&root) {
+                self.pending_follow.insert(root, skip);
+            }
             return;
         }
+        // The next try starts: the last failed one leaves the task list.
+        if let Some(r) = self.follow_retry.get(&root) {
+            self.jobs.dismiss(r.job);
+        }
+        self.follow_applying.insert(root.clone());
         let allow = self.settings.allow_sources;
         // What was applied here last, so what they removed or turned back
         // on since then changes here too.
-        let prev = self.follow_at(&root).map(|f| f.code.clone()).unwrap_or_default();
-        let r2 = root.clone();
+        let (prev, declined) = self
+            .follow_at(&root)
+            .map(|f| (f.code.clone(), f.declined.clone()))
+            .unwrap_or_default();
+        let (tx, r2) = (self.tx.clone(), root.clone());
         self.spawn_instance_job(&root, title, move |job| {
-            let skip = match skip {
-                Some(s) => s,
-                None => hopper::sources::carry::auto_skip(
-                    &hopper::sharecode::pins(&hopper::sharecode::decode(&code)?),
-                    allow,
-                ),
+            let work = || -> anyhow::Result<RecipeApplied> {
+                use hopper::recipe::pin_key;
+                let (skip, held, answer) = match skip {
+                    Some(s) => {
+                        let answer = s.iter().map(pin_key).collect();
+                        (s, Vec::new(), Some(answer))
+                    }
+                    None => {
+                        let pins = hopper::sharecode::pins(&hopper::sharecode::decode(&code)?);
+                        let s = hopper::sources::carry::auto_skip(&pins, allow);
+                        // Left out without asking, unless the player said
+                        // to skip it before: Update asks about these.
+                        let held = s
+                            .iter()
+                            .filter(|p| !declined.contains(&pin_key(p)))
+                            .map(hopper::sources::carry::display_name)
+                            .collect();
+                        (s, held, None)
+                    }
+                };
+                hopper::recipe::apply_to(&r2, &code, &prev, &skip, job)?;
+                Ok(RecipeApplied { root: r2.clone(), code: code.clone(), held, declined: answer })
             };
-            hopper::recipe::apply_to(&r2, &code, &prev, &skip, job)?;
-            Ok(Msg::RecipeApplied(r2.clone(), code.clone()))
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Hopper hit a bug and stopped this task.")));
+            match r {
+                Ok(a) => Ok(Msg::RecipeApplied(Box::new(a))),
+                // The store hears about a failure too, to try again; the
+                // task keeps the same text.
+                Err(e) => {
+                    let text = format!("{e:#}");
+                    let _ = tx.send(Msg::RecipeFailed(r2.clone(), code.clone(), e, job.id()));
+                    Err(anyhow::anyhow!(text))
+                }
+            }
         });
     }
 
@@ -1311,12 +1712,15 @@ impl Store {
         self._mailbox_publish = Some(cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(PUBLISH_TICK).await;
             let read = read_at.is_none_or(|t| t.elapsed() >= FRIENDS_EVERY);
-            let got = this.update(cx, |s, _| {
+            let got = this.update(cx, |s, cx| {
+                // Follows waiting on a game, a task or a retry's delay.
+                s.follow_tick(cx);
                 let mb = s.mailbox.clone()?;
                 if !read {
                     return Some((mb, None));
                 }
                 s.reconcile_shares();
+                s.sync_copies();
                 s.retry_unreadable();
                 let due = s.groups_due || s.groups_at.is_none_or(|t| t.elapsed() >= GROUPS_EVERY);
                 if due {
@@ -1392,15 +1796,33 @@ impl Store {
             for p in &plan {
                 (&p.inst, &p.to, &p.groups).hash(&mut h);
             }
+            for c in &self.settings.group_copies {
+                (&c.inst, &c.local, &c.group).hash(&mut h);
+            }
             h.finish()
         };
         if sig == self.mailbox_sig && !stale_due && !retry {
             return None;
         }
-        let packs = plan
+        let copies = &self.settings.group_copies;
+        let mut packs: Vec<(hopper::instances::Instance, PublishTo, Option<CopyOut>)> = plan
             .into_iter()
-            .filter_map(|p| Some((self.instances.iter().find(|i| i.id == p.inst)?.clone(), p)))
+            .filter_map(|p| {
+                let inst = self.instances.iter().find(|i| i.id == p.inst)?.clone();
+                // The sharer's own copy goes out with the share.
+                let copy = copies
+                    .iter()
+                    .find(|c| c.local == p.inst && c.inst == p.inst && p.groups.contains(&c.group))
+                    .map(|c| CopyOut { copy: c.clone(), member: false });
+                Some((inst, p, copy))
+            })
             .collect();
+        // A member's copy goes to the group under the pack's own id.
+        for c in copies.iter().filter(|c| c.local != c.inst) {
+            let Some(inst) = self.instances.iter().find(|i| i.id == c.local) else { continue };
+            let to = PublishTo { inst: c.local.clone(), to: Vec::new(), groups: vec![c.group.clone()] };
+            packs.push((inst.clone(), to, Some(CopyOut { copy: c.clone(), member: true })));
+        }
         // Where to look for each pack that seems deleted: where it was last
         // seen, else the instances folder.
         let homes = stale
@@ -1411,7 +1833,14 @@ impl Store {
                 (s.inst.clone(), at)
             })
             .collect();
-        Some(PublishWork { sig, stale, packs, homes, instances_root: PathBuf::from(&self.settings.instances_root) })
+        Some(PublishWork {
+            sig,
+            stale,
+            packs,
+            homes,
+            instances_root: PathBuf::from(&self.settings.instances_root),
+            me: self.mailbox_id(),
+        })
     }
 
     fn publish_done(&mut self, done: PublishDone, cx: &mut Context<Self>) {
@@ -1428,6 +1857,18 @@ impl Store {
             }
             for p in &done.sent {
                 st.note_sent(p);
+            }
+            for s in &done.copies {
+                let Some(c) = st.group_copies.iter_mut().find(|c| c.local == s.local) else { continue };
+                c.sent = s.code.clone();
+                c.sent_seq = s.seq;
+                for (k, m) in &s.marks {
+                    // Another member's change taken in meanwhile keeps
+                    // their name.
+                    if c.marks.get(k).is_none_or(|x| x.seq <= m.seq && x.state != m.state) {
+                        c.marks.insert(k.clone(), m.clone());
+                    }
+                }
             }
         });
         cx.notify();
@@ -1469,15 +1910,32 @@ impl Store {
     }
 }
 
+/// A group copy going out with a publish: the copy as it was, and whether
+/// it's a member's copy (sent under the pack's id) or the sharer's own.
+struct CopyOut {
+    copy: PackCopy,
+    member: bool,
+}
+
+/// A group copy that went out: its code, number and own changes' marks.
+struct CopySent {
+    local: String,
+    code: String,
+    seq: u64,
+    marks: Vec<(String, groupsync::Mark)>,
+}
+
 /// One publish: shares to take back and packs to send.
 struct PublishWork {
     sig: u64,
     stale: Vec<(SharedPack, &'static str)>,
-    packs: Vec<(hopper::instances::Instance, PublishTo)>,
+    packs: Vec<(hopper::instances::Instance, PublishTo, Option<CopyOut>)>,
     /// For each pack that seems deleted (by id), the folder it was last
     /// seen in.
     homes: HashMap<String, Option<PathBuf>>,
     instances_root: PathBuf,
+    /// This PC's mailbox id, for its own changes' marks.
+    me: String,
 }
 
 struct PublishDone {
@@ -1486,6 +1944,7 @@ struct PublishDone {
     revoked: Vec<(SharedPack, bool)>,
     /// What reached the relay (groups it skipped left out).
     sent: Vec<PublishTo>,
+    copies: Vec<CopySent>,
     failed: bool,
     /// A pack missing from the list was still on disk, so it wasn't taken
     /// back.
@@ -1499,6 +1958,7 @@ impl PublishWork {
             sig: self.sig,
             revoked: Vec::new(),
             sent: Vec::new(),
+            copies: Vec::new(),
             failed: false,
             held: false,
         };
@@ -1535,8 +1995,12 @@ impl PublishWork {
             }
         }
         let jobs = hopper::jobs::Jobs::new(Arc::new(|| {}));
-        for (inst, mut plan) in self.packs {
-            let key = inst.root.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        for (inst, mut plan, copy) in self.packs {
+            let member = copy.as_ref().is_some_and(|c| c.member);
+            let (relay_inst, key) = match &copy {
+                Some(c) if c.member => (c.copy.inst.clone(), groupsync::COPY_KEY.to_string()),
+                _ => (inst.id.clone(), inst.root.file_name().unwrap_or_default().to_string_lossy().into_owned()),
+            };
             let j = jobs.start_quiet(format!("Sharing {}", inst.name));
             let made = hopper::sharecode::make(&inst, &j);
             j.finish(&Ok::<(), anyhow::Error>(()));
@@ -1551,10 +2015,21 @@ impl PublishWork {
                     continue;
                 }
             };
-            match mb.publish_to(&plan.to, &plan.groups, &inst.id, &key, &inst.name, &made.code, &made.left_out) {
+            match mb.publish_to(&plan.to, &plan.groups, &relay_inst, &key, &inst.name, &made.code, &made.left_out) {
                 Ok(sent) => {
+                    if let Some(c) = &copy
+                        && !sent.skipped.contains(&c.copy.group)
+                    {
+                        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                        let marks = groupsync::sent_marks(&inst, &c.copy, &made.share, &self.me, sent.seq, at);
+                        out.copies.push(CopySent { local: c.copy.local.clone(), code: made.code.clone(), seq: sent.seq, marks });
+                    }
                     plan.groups.retain(|g| !sent.skipped.contains(g));
-                    out.sent.push(plan);
+                    // A member's copy isn't a share of this PC's to take
+                    // back later (see `sync_copies`).
+                    if !member {
+                        out.sent.push(plan);
+                    }
                 }
                 Err(e) => {
                     log::warn!("sharing {}: {e:#}", inst.name);

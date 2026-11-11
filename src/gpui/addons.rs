@@ -3887,6 +3887,8 @@ impl AddonsView {
         // "breaks" / "needs" / Lock chips share the tag line: categories
         // fold into "+n" so it isn't clipped off.
         let lock_line = update.is_some() && (vlocked || !breaks.is_empty() || needs.is_some());
+        // A group pack kept both ways: who changed this mod last.
+        let changed_by = self.root.as_ref().and_then(|r| store.group_mark(r, a));
         let tags = widgets::mod_tags(
             widgets::ModTags {
                 key: &file,
@@ -3895,12 +3897,14 @@ impl AddonsView {
                 // One marker: "Added by you" says it's new to the pack already.
                 new: flags.new && !flags.added,
                 added: flags.added,
+                changed_by: changed_by.as_deref(),
                 env: &a.env,
                 // Narrow, the categories give the version chip room.
                 categories: if self.compact { &[] } else { store.categories(a) },
                 modrinth: !a.mr_project.is_empty(),
                 crashed: self.crashed.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).map(String::as_str),
-                max_categories: lock_line.then_some(0),
+                // One category fewer next to who changed it.
+                max_categories: if lock_line { Some(0) } else { changed_by.is_some().then_some(1) },
                 source: a.source.as_ref().map(|s| s.kind.label()),
                 source_changed: update.is_some_and(|u| u.file.source.as_ref().is_some_and(|s| s.changed)),
             },
