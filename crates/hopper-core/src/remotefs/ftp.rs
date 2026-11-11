@@ -114,8 +114,17 @@ mod tests {
     /// A free port for the test server. Fixed ports made two test runs at once
     /// (several sessions, or a run and CI-like reruns) talk to each other's
     /// server and hang or fail.
+    /// A free control port from 20000-29999, apart from the passive ranges
+    /// and below the ports the system hands out by itself (49152 up on
+    /// Windows, 32768 up on Linux): one of those could become another test
+    /// server's passive port, and a test would then talk to the wrong server.
     fn free_port() -> u16 {
-        std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port()
+        static TAKEN: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+        let mut p = 20000 + (std::process::id() % 9000) as u16 + TAKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        while std::net::TcpListener::bind(("127.0.0.1", p)).is_err() {
+            p = if p >= 29999 { 20000 } else { p + 1 };
+        }
+        p
     }
 
     /// `n` free ports in a row for passive data connections, starting at a
@@ -123,7 +132,9 @@ mod tests {
     fn free_range(n: u16) -> std::ops::RangeInclusive<u16> {
         // The tests of this process run side by side: each takes its own slice.
         static TAKEN: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
-        let mut start = 30000 + (std::process::id() % 20000) as u16 + TAKEN.fetch_add(n + 1, std::sync::atomic::Ordering::Relaxed);
+        // From 30000 up, above `free_port`'s block, so a passive port never
+        // takes another test server's control port.
+        let mut start = 30000 + (std::process::id() % 15000) as u16 + TAKEN.fetch_add(n + 1, std::sync::atomic::Ordering::Relaxed);
         loop {
             if (start..start + n).all(|p| std::net::TcpListener::bind(("127.0.0.1", p)).is_ok()) {
                 return start..=start + n - 1;
