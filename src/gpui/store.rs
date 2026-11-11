@@ -1669,7 +1669,7 @@ impl Store {
         crate::smooth_scroll::set_enabled(self.settings.smooth_scroll);
         let now = serde_json::to_string(&self.settings).unwrap_or_default();
         if now != self.saved_settings {
-            if let Err(e) = self.settings.save() {
+            if let Err(e) = self.settings.save_later() {
                 log::warn!("saving settings: {e:#}");
             }
             self.saved_settings = now;
@@ -1699,7 +1699,7 @@ impl Store {
         edit(&mut self.settings);
         let now = serde_json::to_string(&self.settings).unwrap_or_default();
         if now != self.saved_settings {
-            if let Err(e) = self.settings.save() {
+            if let Err(e) = self.settings.save_later() {
                 log::warn!("saving settings: {e:#}");
             }
             self.saved_settings = now;

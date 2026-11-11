@@ -115,6 +115,12 @@ fn main() {
     // comes from the environment, which `load_env` may set.
     if let Some(dirs) = hopper::paths::dirs() {
         hopper::panic_log::install("Hopper", env!("CARGO_PKG_VERSION"), dirs.data_dir());
+        // A crash keeps the last settings change too.
+        let logged = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            hopper::settings::flush_on_panic();
+            logged(info);
+        }));
     }
     env_logger::init();
     // Windows' Installed apps → Uninstall runs this.
@@ -166,6 +172,11 @@ fn main() {
             std::thread::spawn(hopper::changelog_files::tidy);
             cx.on_app_quit(|_| {
                 hopper::changelog_files::clear_temp();
+                // Settings are saved in the background: the last change
+                // goes to disk before the process ends.
+                if let Err(e) = hopper::settings::flush() {
+                    log::warn!("saving settings: {e:#}");
+                }
                 async {}
             })
             .detach();

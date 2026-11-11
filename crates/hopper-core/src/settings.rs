@@ -1006,6 +1006,10 @@ impl Settings {
     /// `settings.json.bad-<unix time>` (so the next save can't overwrite it),
     /// `None` is returned, and [`Settings::load_error`] says what happened.
     pub fn load() -> Option<Settings> {
+        // A save still queued would be read as the old settings.
+        if let Err(e) = flush() {
+            log::warn!("saving settings: {e:#}");
+        }
         Self::load_from(&Self::path()?)
     }
 
@@ -1013,6 +1017,9 @@ impl Settings {
     /// first-run setup). Settings that exist but can't be read count as set
     /// up: their user isn't new, and is told about the reset instead.
     pub fn load_or_default() -> Settings {
+        if let Err(e) = flush() {
+            log::warn!("saving settings: {e:#}");
+        }
         match Self::path() {
             Some(p) => Self::load_or_default_from(&p),
             None => Settings::default(),
@@ -1124,15 +1131,142 @@ impl Settings {
         LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Writes the settings now. A copy [`Settings::save_later`] still has
+    /// queued for the file is dropped: this one is newer.
     pub fn save(&self) -> anyhow::Result<()> {
         let p = Self::path().ok_or_else(|| anyhow::anyhow!("no data folder"))?;
+        writer::write_now(&p, &serde_json::to_vec_pretty(self)?)
+    }
+
+    /// Writes the settings on a background thread, so the UI doesn't wait
+    /// for the disk (a few ms a save, on every tab switch). Saves that come
+    /// faster than the disk keeps up are merged: only the newest copy is
+    /// written. Call [`flush`] before the process ends or another Hopper
+    /// reads the file.
+    pub fn save_later(&self) -> anyhow::Result<()> {
+        let p = Self::path().ok_or_else(|| anyhow::anyhow!("no data folder"))?;
+        writer::queue(p, serde_json::to_vec_pretty(self)?);
+        Ok(())
+    }
+}
+
+/// Writes what [`Settings::save_later`] queued, now, and waits for it: on
+/// quit, before a restart, before the data folder moves.
+pub fn flush() -> anyhow::Result<()> {
+    writer::flush()
+}
+
+/// [`flush`] for a panic: gives up after a moment instead of waiting
+/// forever, in case the panic came from the writer itself.
+pub fn flush_on_panic() {
+    writer::flush_within(std::time::Duration::from_millis(500));
+}
+
+/// The background writer behind [`Settings::save_later`].
+mod writer {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
+    use std::time::{Duration, Instant};
+
+    /// The newest copy waiting for each file.
+    static QUEUED: Mutex<Vec<(PathBuf, Vec<u8>)>> = Mutex::new(Vec::new());
+    static WAKE: Condvar = Condvar::new();
+    /// Held while a file is written, so an older copy still being written
+    /// can't land after a newer one.
+    static WRITING: Mutex<()> = Mutex::new(());
+    /// Whether the thread started.
+    static THREAD: OnceLock<bool> = OnceLock::new();
+
+    fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+        m.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A temporary file, then a rename: a crash mid-write leaves the old
+    /// settings whole.
+    fn write_file(p: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d)?;
         }
         let tmp = p.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        std::fs::write(&tmp, bytes)?;
         std::fs::rename(tmp, p)?;
         Ok(())
+    }
+
+    pub(super) fn queue(p: PathBuf, bytes: Vec<u8>) {
+        let started = *THREAD.get_or_init(|| std::thread::Builder::new().name("settings-writer".into()).spawn(run).is_ok());
+        {
+            let mut q = lock(&QUEUED);
+            q.retain(|(x, _)| *x != p);
+            q.push((p, bytes));
+        }
+        if started {
+            WAKE.notify_one();
+        } else if let Err(e) = flush() {
+            log::warn!("saving settings: {e:#}");
+        }
+    }
+
+    fn run() {
+        loop {
+            {
+                let mut q = lock(&QUEUED);
+                while q.is_empty() {
+                    q = WAKE.wait(q).unwrap_or_else(|e| e.into_inner());
+                }
+            }
+            if let Err(e) = flush() {
+                log::warn!("saving settings: {e:#}");
+            }
+        }
+    }
+
+    /// Writes everything queued. Takes `WRITING` before the queue, so
+    /// whoever writes last holds the newest copy.
+    pub(super) fn flush() -> anyhow::Result<()> {
+        let held = lock(&WRITING);
+        write_queued(held)
+    }
+
+    fn write_queued(_held: MutexGuard<'_, ()>) -> anyhow::Result<()> {
+        let mut result = Ok(());
+        loop {
+            let next = {
+                let mut q = lock(&QUEUED);
+                if q.is_empty() { None } else { Some(q.remove(0)) }
+            };
+            let Some((p, bytes)) = next else { break };
+            if let Err(e) = write_file(&p, &bytes) {
+                result = Err(e);
+            }
+        }
+        result
+    }
+
+    pub(super) fn flush_within(wait: Duration) {
+        let end = Instant::now() + wait;
+        loop {
+            match WRITING.try_lock() {
+                Ok(held) => {
+                    let _ = write_queued(held);
+                    return;
+                }
+                Err(std::sync::TryLockError::Poisoned(e)) => {
+                    let _ = write_queued(e.into_inner());
+                    return;
+                }
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < end => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return,
+            }
+        }
+    }
+
+    pub(super) fn write_now(p: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+        let _held = lock(&WRITING);
+        lock(&QUEUED).retain(|(x, _)| x != p);
+        write_file(p, bytes)
     }
 }
 
@@ -1488,6 +1622,40 @@ mod tests {
         // A file that can't be read: not a new user.
         std::fs::write(&p, b"{ broken").unwrap();
         assert!(!Settings::load_or_default_from(&p).needs_setup());
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn background_saves_keep_the_newest_copy() {
+        let t = temp("writer");
+        let p = t.join("settings.json");
+        let at = |zoom: u16| serde_json::to_vec_pretty(&Settings { zoom, ..Settings::default() }).unwrap();
+        // A burst of saves: whatever the thread wrote along the way, the
+        // last one is what's on disk after a flush.
+        for z in 100..140 {
+            writer::queue(p.clone(), at(z));
+        }
+        flush().unwrap();
+        assert_eq!(Settings::load_from(&p).unwrap().zoom, 139);
+        // A direct save after a queued one wins, even if the thread is
+        // still busy with the queued one.
+        writer::queue(p.clone(), at(150));
+        writer::write_now(&p, &at(160)).unwrap();
+        flush().unwrap();
+        assert_eq!(Settings::load_from(&p).unwrap().zoom, 160);
+        // Without a flush the thread still writes it on its own.
+        writer::queue(p.clone(), at(170));
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // (Read directly: a read that meets the rename mustn't count as a
+        // load error, which another test checks.)
+        let zoom = || std::fs::read(&p).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()).map(|s| s.zoom);
+        while zoom() != Some(170) {
+            assert!(std::time::Instant::now() < end, "the writer thread never wrote");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Written through a temporary file that's gone afterwards.
+        flush().unwrap();
+        assert!(!p.with_extension("json.tmp").exists());
         let _ = std::fs::remove_dir_all(&t);
     }
 

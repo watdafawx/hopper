@@ -2522,6 +2522,7 @@ impl SettingsPage {
                                     .ghost()
                                     .label("Open the installed Hopper")
                                     .on_click(move |_, _, cx| {
+                                        let _ = hopper::settings::flush();
                                         if std::process::Command::new(&exe).spawn().is_ok() {
                                             cx.quit();
                                         }
@@ -3364,6 +3365,10 @@ pub static RESTARTING: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 
 /// Starts Hopper again (the updated exe) and quits this one.
 pub fn restart(cx: &mut App) {
+    // The new Hopper reads the settings as soon as it starts.
+    if let Err(e) = hopper::settings::flush() {
+        log::warn!("saving settings: {e:#}");
+    }
     match std::env::current_exe() {
         Ok(exe) => {
             if let Err(e) = std::process::Command::new(exe).spawn() {

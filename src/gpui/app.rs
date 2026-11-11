@@ -476,6 +476,9 @@ impl AppView {
             // callbacks, so Discord is cleared here too.
             if ok {
                 crate::discord::shutdown();
+                if let Err(e) = hopper::settings::flush() {
+                    log::warn!("saving settings: {e:#}");
+                }
             }
             ok
         });

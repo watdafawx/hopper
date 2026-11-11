@@ -202,6 +202,10 @@ pub fn start(
     window: &mut Window,
     cx: &mut App,
 ) {
+    // The copy has to carry the newest settings.
+    if let Err(e) = hopper::settings::flush() {
+        log::warn!("saving settings: {e:#}");
+    }
     let job = store.read(cx).jobs().start("Moving Hopper's files");
     let from = hopper::paths::dirs().and_then(|d| d.root()).map(Path::to_path_buf);
     let handle = window.window_handle();
