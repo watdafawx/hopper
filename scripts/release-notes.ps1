@@ -22,7 +22,10 @@ $notes = ($body -join "`n").Trim()
 $prev = git describe --tags --abbrev=0 --match $match "$Tag^" 2>$null
 if ($LASTEXITCODE -ne 0) { $prev = $null }
 if ($prev) {
-    $shipped = @(git log --no-merges --format='- %s' "$prev..$Tag^" | Where-Object { $_ -notmatch '^- Cargo.lock' -and $_ -notmatch '^- Hopper (Server )?\d+\.\d+\.\d+$' })
+    # Server notes skip the commit list: most shared-library commits are
+    # desktop work and would bury what changed for the server (its panel
+    # shows these notes). The compare link still has every commit.
+    $shipped = if ($server) { @() } else { @(git log --no-merges --format='- %s' "$prev..$Tag^" | Where-Object { $_ -notmatch '^- Cargo.lock' -and $_ -notmatch '^- Hopper (Server )?\d+\.\d+\.\d+$' -and $_ -notmatch '^- Site:' }) }
     if ($shipped.Count) { $notes = ($notes + "`n`n" + ($shipped -join "`n")).Trim() }
     $notes = ($notes + "`n`n**Full Changelog**: https://github.com/$Repo/compare/$prev...$Tag").Trim()
 }
