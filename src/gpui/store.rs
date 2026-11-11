@@ -22,7 +22,7 @@ mod panel_events;
 mod server_mods;
 // Invite and SyncStatus are for the Friends screen being rebuilt on top.
 #[allow(unused_imports)]
-pub use friends::{FollowReq, FollowTarget, Invite, SyncStatus, follow_pack, redeem};
+pub use friends::{FollowReq, FollowTarget, Invite, RecipeApplied, SyncStatus, follow_pack, redeem};
 pub use server_mods::{RemoteLoose, remote as on_hopper_server, remote_config_files, remote_config_reset, remote_remove, remote_undo_remove};
 
 /// Results from worker threads.
@@ -72,7 +72,10 @@ pub enum Msg {
     /// Pages to open in the browser (Hopper's download window couldn't).
     OpenUrls(Vec<String>),
     /// A followed recipe was applied; remember its code.
-    RecipeApplied(PathBuf, String),
+    RecipeApplied(Box<RecipeApplied>),
+    /// Applying a followed recipe failed: the root, the code, why, and the
+    /// failed task's id. Tried again later (see `hopper::recipe::Retry`).
+    RecipeFailed(PathBuf, String, anyhow::Error, u64),
     /// A new instance was made by following a friend's pack: remember the
     /// recipe for its root (known only once it was made).
     Followed(Box<hopper::settings::FollowedRecipe>),
@@ -546,9 +549,13 @@ pub struct Store {
     auto_following: HashSet<String>,
     _mailbox_watch: Option<Task<()>>,
     _mailbox_publish: Option<Task<()>>,
-    /// Follows waiting for their instance to stop running, with the
-    /// player's answer about mods from other sources (None: not asked).
+    /// The player's answer about mods from other sources for a follow
+    /// that waits for its instance (a task or the game) before it applies.
     pending_follow: HashMap<PathBuf, Option<Vec<hopper::sources::carry::Pin>>>,
+    /// Follows being applied now, so the same code isn't started twice.
+    follow_applying: HashSet<PathBuf>,
+    /// Follows whose last automatic apply failed, by instance root.
+    follow_retry: HashMap<PathBuf, hopper::recipe::Retry>,
     /// Modpacks (project ids) whose server files were downloaded this run.
     server_files_got: std::collections::HashSet<u64>,
     /// Instance roots the game watcher looks for.
@@ -742,6 +749,8 @@ impl Store {
             _mailbox_watch: None,
             _mailbox_publish: None,
             pending_follow: Default::default(),
+            follow_applying: Default::default(),
+            follow_retry: Default::default(),
             server_files_got: Default::default(),
             watched,
             disk: disk_sync::start(tx.clone(), wake.clone()),
@@ -1120,7 +1129,8 @@ impl Store {
                 }
             }
             Msg::Followed(f) => self.on_followed(*f, cx),
-            Msg::RecipeApplied(root, code) => self.on_recipe_applied(root, code, cx),
+            Msg::RecipeApplied(r) => self.on_recipe_applied(*r, cx),
+            Msg::RecipeFailed(root, code, e, job) => self.on_recipe_failed(root, code, e, job, cx),
             Msg::InstanceChanged(root) if server_mods::remote(&root).is_some() => self.refetch_server_mods(&root),
             Msg::InstanceChanged(root) => {
                 // Only Hopper's own instances get an id written; a folder

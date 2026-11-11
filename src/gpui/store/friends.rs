@@ -117,6 +117,7 @@ impl FollowReq {
             at: self.at,
             ended: String::new(),
             group: group.to_string(),
+            ..Default::default()
         }
     }
 }
@@ -129,6 +130,17 @@ pub enum FollowTarget {
     Existing(PathBuf),
     /// Installed as a new instance.
     New,
+}
+
+/// A followed pack's code applied over an instance.
+pub struct RecipeApplied {
+    pub root: PathBuf,
+    pub code: String,
+    /// Mods from other sources it left out without asking (names).
+    pub held: Vec<String>,
+    /// The player's answer about those mods (`hopper::recipe::pin_key`s to
+    /// skip), when they were asked.
+    pub declined: Option<Vec<String>>,
 }
 
 /// Follows a friend's pack: asks about mods from GitHub and other links
@@ -457,7 +469,7 @@ impl Store {
         let r = root.to_string_lossy().into_owned();
         let mut did = false;
         self.update_settings(|st| did = st.stop_following(&r), cx);
-        self.pending_follow.remove(root);
+        self.forget_follow_state(root);
         if did {
             cx.emit(StoreEvent::Notice("Stopped following. Your copy stays as it is and won't change when theirs does.".into(), false));
         }
@@ -811,39 +823,128 @@ impl Store {
         self.handle(Msg::installed(root, &[], None), cx);
     }
 
-    /// A followed pack's code was applied at `root`.
-    pub(super) fn on_recipe_applied(&mut self, root: PathBuf, code: String, cx: &mut Context<Self>) {
-        self.pending_follow.remove(&root);
+    /// A followed pack's code was applied at its root.
+    pub(super) fn on_recipe_applied(&mut self, r: RecipeApplied, cx: &mut Context<Self>) {
+        let RecipeApplied { root, code, held, declined } = r;
+        self.follow_applying.remove(&root);
+        // It worked: the failed tries before it are done with.
+        if let Some(old) = self.follow_retry.remove(&root) {
+            self.jobs.dismiss(old.job);
+        }
+        // The player answered about mods from other sources while this ran
+        // by itself: apply again with their answer.
+        let answer = match self.pending_follow.remove(&root) {
+            Some(Some(skip)) if declined.is_none() => Some(skip),
+            _ => None,
+        };
         self.update_settings(
             |st| {
                 for f in st.followed_recipes.iter_mut().filter(|f| Path::new(&f.root) == root) {
                     f.code = code.clone();
+                    f.held = held.clone();
+                    if let Some(d) = &declined {
+                        f.declined = d.clone();
+                    }
                 }
             },
             cx,
         );
-        self.handle(Msg::InstanceChanged(root), cx);
+        self.handle(Msg::InstanceChanged(root.clone()), cx);
+        if let Some(skip) = answer
+            && let Some(f) = self.follow_at(&root).cloned()
+        {
+            self.apply_follow(root, f.seen.clone(), format!("Updating from {}'s {}", f.peer_name, f.name), Some(skip), cx);
+        }
+    }
+
+    /// Applying a followed pack's code failed: said once, shown on its row,
+    /// and tried again after a while (unless trying again can't help).
+    pub(super) fn on_recipe_failed(&mut self, root: PathBuf, code: String, e: anyhow::Error, job: u64, cx: &mut Context<Self>) {
+        self.follow_applying.remove(&root);
+        let prev = self.follow_retry.get(&root);
+        // One failed task per follow on the task list, the newest.
+        if let Some(p) = prev.filter(|p| p.job != job) {
+            self.jobs.dismiss(p.job);
+        }
+        let r = hopper::recipe::Retry::failed(prev, &code, &e, job, Instant::now());
+        log::warn!("applying a followed pack at {}: {e:#} (try {})", root.display(), r.failures);
+        if r.failures == 1
+            && let Some(f) = self.follow_at(&root)
+        {
+            let local = self.instance(&root).map(|i| i.name.clone()).unwrap_or_else(|| f.name.clone());
+            let who = if f.peer_name.is_empty() { "your friend" } else { &f.peer_name };
+            let again = if r.next.is_some() { " Hopper tries again in a moment." } else { "" };
+            cx.emit(StoreEvent::Notice(format!("Couldn't update {local} with {who}'s changes. {}{again}", r.error), true));
+        }
+        self.follow_retry.insert(root, r);
+        cx.notify();
+    }
+
+    /// Why the last automatic update of the follow at `root` failed, and
+    /// whether Hopper tries again by itself.
+    pub fn follow_error(&self, root: &Path) -> Option<(&str, bool)> {
+        let f = self.follow_at(root)?;
+        let r = self.follow_retry.get(root).filter(|r| r.code == f.seen && f.waiting())?;
+        Some((r.error.as_str(), r.next.is_some()))
+    }
+
+    /// Whether the follow at `root` is being updated now, or will be as
+    /// soon as its game closes or another task on it ends.
+    pub fn follow_updating(&self, root: &Path) -> bool {
+        self.follow_applying.contains(root)
+            || self.follow_at(root).is_some_and(|f| f.waiting() && self.follow_error(root).is_none())
     }
 
     /// An instance was deleted in Hopper: what it followed stops (and a
     /// group pack isn't followed again by keeping the group in step).
     pub(super) fn forget_follows(&mut self, root: &Path) {
         let r = root.to_string_lossy().into_owned();
-        self.pending_follow.remove(root);
+        self.forget_follow_state(root);
         self.update_settings_quietly(|st| {
             st.stop_following(&r);
         });
     }
 
-    /// Applies follows that waited for their game to close.
-    pub(super) fn follow_tick(&mut self, cx: &mut Context<Self>) {
-        if self.pending_follow.is_empty() {
-            return;
+    fn forget_follow_state(&mut self, root: &Path) {
+        self.pending_follow.remove(root);
+        self.follow_applying.remove(root);
+        if let Some(r) = self.follow_retry.remove(root) {
+            self.jobs.dismiss(r.job);
         }
-        let ready: Vec<PathBuf> = self.pending_follow.keys().filter(|r| !self.is_busy(r)).cloned().collect();
-        for root in ready {
+    }
+
+    /// A game running or a task changing the instance: a follow waits.
+    fn follow_busy(&self, root: &Path) -> bool {
+        self.is_busy(root) || self.running(root).is_some() || self.is_launching(root)
+    }
+
+    /// Applies every follow whose newest code isn't applied yet and can be
+    /// now: a code that just came, one that waited for its game to close or
+    /// a task to end, one Hopper was closed before applying (on start), and
+    /// failed tries once their wait is over (`hopper::recipe::due`). Runs
+    /// on the store's wake-ups and twice a second while friends sync runs.
+    pub(super) fn follow_tick(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let due: Vec<FollowedRecipe> = self
+            .settings
+            .followed_recipes
+            .iter()
+            .filter(|f| {
+                let root = Path::new(&f.root);
+                // A pack from the feed, or one the player asked to update
+                // (a PC on the network, which only updates on request).
+                let ours = self.pending_follow.contains_key(root)
+                    || self.mailbox_recipes.iter().any(|e| f.matches(&e.from, &e.inst, &e.key));
+                ours && !self.follow_applying.contains(root)
+                    && hopper::recipe::due(f, self.follow_retry.get(root), self.follow_busy(root), now)
+                    // An instance deleted outside Hopper has nothing to update.
+                    && root.is_dir()
+            })
+            .cloned()
+            .collect();
+        for f in due {
+            let root = PathBuf::from(&f.root);
             let skip = self.pending_follow.remove(&root).flatten();
-            let Some(f) = self.follow_at(&root).cloned() else { continue };
             self.apply_follow(root, f.seen.clone(), format!("Updating from {}'s {}", f.peer_name, f.name), skip, cx);
         }
     }
@@ -944,7 +1045,6 @@ impl Store {
         if self.mailbox_recipes.len() > RECIPES_KEPT {
             self.mailbox_recipes.remove(0);
         }
-        let mut apply: Vec<(PathBuf, String)> = Vec::new();
         self.update_settings_quietly(|st| {
             for ix in st.followers(&e.from, &e.inst, &e.key) {
                 let f = &mut st.followed_recipes[ix];
@@ -958,18 +1058,12 @@ impl Store {
                 f.at = e.at;
                 // Shared again after it stopped.
                 f.ended.clear();
-                if f.seen != e.code {
-                    f.seen = e.code.clone();
-                    // An instance deleted outside Hopper has nothing to update.
-                    if Path::new(&f.root).is_dir() {
-                        apply.push((PathBuf::from(&f.root), format!("Updating from {}'s {}", f.peer_name, f.name)));
-                    }
-                }
+                f.seen = e.code.clone();
             }
         });
-        for (root, title) in apply {
-            self.apply_follow(root, e.code.clone(), title, None, cx);
-        }
+        // Applied by the tick, which also catches a code seen before but
+        // never applied (Hopper closed first, or the apply failed).
+        self.follow_tick(cx);
     }
 
     /// A friend stopped sharing a pack with this PC (or one of the ways it
@@ -1218,28 +1312,67 @@ impl Store {
         }
     }
 
-    /// Applies a followed pack's code at `root` now, or when its game
-    /// closes.
+    /// Applies a followed pack's code at `root` now, or once its game
+    /// closes and other tasks on it end ([`Self::follow_tick`]). `skip`:
+    /// the player's answer about mods from other sources (None: nobody
+    /// was asked).
     fn apply_follow(&mut self, root: PathBuf, code: String, title: String, skip: Option<Vec<Pin>>, _cx: &mut Context<Self>) {
-        if self.is_busy(&root) {
-            self.pending_follow.insert(root, skip);
+        if self.follow_busy(&root) || self.follow_applying.contains(&root) {
+            // Keep an answer the player gave; the tick applies it later.
+            if skip.is_some() || !self.pending_follow.contains_key(&root) {
+                self.pending_follow.insert(root, skip);
+            }
             return;
         }
+        // The next try starts: the last failed one leaves the task list.
+        if let Some(r) = self.follow_retry.get(&root) {
+            self.jobs.dismiss(r.job);
+        }
+        self.follow_applying.insert(root.clone());
         let allow = self.settings.allow_sources;
         // What was applied here last, so what they removed or turned back
         // on since then changes here too.
-        let prev = self.follow_at(&root).map(|f| f.code.clone()).unwrap_or_default();
-        let r2 = root.clone();
+        let (prev, declined) = self
+            .follow_at(&root)
+            .map(|f| (f.code.clone(), f.declined.clone()))
+            .unwrap_or_default();
+        let (tx, r2) = (self.tx.clone(), root.clone());
         self.spawn_instance_job(&root, title, move |job| {
-            let skip = match skip {
-                Some(s) => s,
-                None => hopper::sources::carry::auto_skip(
-                    &hopper::sharecode::pins(&hopper::sharecode::decode(&code)?),
-                    allow,
-                ),
+            let work = || -> anyhow::Result<RecipeApplied> {
+                use hopper::recipe::pin_key;
+                let (skip, held, answer) = match skip {
+                    Some(s) => {
+                        let answer = s.iter().map(pin_key).collect();
+                        (s, Vec::new(), Some(answer))
+                    }
+                    None => {
+                        let pins = hopper::sharecode::pins(&hopper::sharecode::decode(&code)?);
+                        let s = hopper::sources::carry::auto_skip(&pins, allow);
+                        // Left out without asking, unless the player said
+                        // to skip it before: Update asks about these.
+                        let held = s
+                            .iter()
+                            .filter(|p| !declined.contains(&pin_key(p)))
+                            .map(hopper::sources::carry::display_name)
+                            .collect();
+                        (s, held, None)
+                    }
+                };
+                hopper::recipe::apply_to(&r2, &code, &prev, &skip, job)?;
+                Ok(RecipeApplied { root: r2.clone(), code: code.clone(), held, declined: answer })
             };
-            hopper::recipe::apply_to(&r2, &code, &prev, &skip, job)?;
-            Ok(Msg::RecipeApplied(r2.clone(), code.clone()))
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Hopper hit a bug and stopped this task.")));
+            match r {
+                Ok(a) => Ok(Msg::RecipeApplied(Box::new(a))),
+                // The store hears about a failure too, to try again; the
+                // task keeps the same text.
+                Err(e) => {
+                    let text = format!("{e:#}");
+                    let _ = tx.send(Msg::RecipeFailed(r2.clone(), code.clone(), e, job.id()));
+                    Err(anyhow::anyhow!(text))
+                }
+            }
         });
     }
 
@@ -1311,7 +1444,9 @@ impl Store {
         self._mailbox_publish = Some(cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(PUBLISH_TICK).await;
             let read = read_at.is_none_or(|t| t.elapsed() >= FRIENDS_EVERY);
-            let got = this.update(cx, |s, _| {
+            let got = this.update(cx, |s, cx| {
+                // Follows waiting on a game, a task or a retry's delay.
+                s.follow_tick(cx);
                 let mb = s.mailbox.clone()?;
                 if !read {
                     return Some((mb, None));

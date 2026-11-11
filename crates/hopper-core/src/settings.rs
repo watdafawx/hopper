@@ -50,9 +50,22 @@ pub struct FollowedRecipe {
     pub ended: String,
     /// The friend group "Keep everyone in step" followed it through, if any.
     pub group: String,
+    /// Mods from GitHub and other links (names) the last automatic apply
+    /// left out because nobody was there to ask: Update asks about them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<String>,
+    /// Those mods the player said to skip ([`crate::recipe::pin_key`]), so
+    /// they aren't asked about again.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub declined: Vec<String>,
 }
 
 impl FollowedRecipe {
+    /// A newer code from a pack still shared isn't applied here yet.
+    pub fn waiting(&self) -> bool {
+        self.ended.is_empty() && !self.seen.is_empty() && self.seen != self.code
+    }
+
     /// Whether an incoming code from `from` for their instance `inst` (old
     /// folder name `key`) is the one this follows.
     pub fn matches(&self, from: &str, inst: &str, key: &str) -> bool {

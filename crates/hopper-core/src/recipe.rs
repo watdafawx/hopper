@@ -19,6 +19,7 @@ use crate::sharecode::{self, Base, Share};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// One instance offered to a peer: the share code plus what it could not
 /// describe, for the other side's "ask them to send these" list.
@@ -186,6 +187,15 @@ pub fn apply_to(
     }
     let mut inst = crate::instances::load(root)
         .with_context(|| format!("{} isn't an instance any more", root.display()))?;
+    // An instance whose file couldn't be read loads blank, and a blank
+    // instance fits nothing: say what's wrong instead of "this instance is
+    // Minecraft ''". A file only held open reads fine on the next try.
+    if inst.unreadable.is_some() {
+        if crate::instances::may_read_later(&inst) {
+            anyhow::bail!("Another program has this instance's files open.");
+        }
+        return Err(NoFit(format!("{}'s settings file is damaged.", inst.name)).into());
+    }
     match fit(&inst, &share) {
         Fit::Same => {}
         Fit::PackUpdate(target) => {
@@ -209,13 +219,105 @@ pub fn apply_to(
             inst = crate::instances::load(root)
                 .with_context(|| format!("{} isn't an instance any more", root.display()))?;
             if let Fit::Different(why) = fit(&inst, &share) {
-                anyhow::bail!("{why}");
+                return Err(NoFit(why).into());
             }
         }
-        Fit::Different(why) => anyhow::bail!("{why}"),
+        Fit::Different(why) => return Err(NoFit(why).into()),
     }
     sharecode::apply_existing(&mut inst, &share, prev.as_ref(), job)?;
     Ok(inst)
+}
+
+/// [`apply_to`] refused: the code doesn't fit this instance any more (see
+/// [`Fit::Different`]). Trying the same code again can't help.
+#[derive(Debug)]
+pub struct NoFit(pub String);
+
+impl std::fmt::Display for NoFit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NoFit {}
+
+/// How long a followed pack waits after its `failures`-th failed automatic
+/// apply before the next try: a few seconds at first, then every 15
+/// seconds. Most failures pass within seconds (a file another program held,
+/// the internet down for a moment); a try costs one look at the instance and
+/// the mod sites, so trying often keeps the change landing soon after the
+/// cause clears.
+pub fn retry_after(failures: u32) -> Duration {
+    const STEPS: [u64; 5] = [2, 3, 5, 10, 15];
+    let i = (failures.max(1) as usize - 1).min(STEPS.len() - 1);
+    Duration::from_secs(STEPS[i])
+}
+
+/// A followed pack whose automatic apply failed, until a try works.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Retry {
+    /// The code that failed; a newer one is tried at once.
+    pub code: String,
+    pub failures: u32,
+    /// When the next try is due; `None` when trying the same code again
+    /// can't help (it doesn't fit, see [`NoFit`]).
+    pub next: Option<Instant>,
+    /// What went wrong, for the player.
+    pub error: String,
+    /// The failed task, taken off the task list when the next try starts,
+    /// so retries don't pile up there.
+    pub job: u64,
+}
+
+impl Retry {
+    /// After a failed try of `code` (`prev`: the state before it).
+    pub fn failed(prev: Option<&Retry>, code: &str, e: &anyhow::Error, job: u64, now: Instant) -> Retry {
+        let failures = prev.filter(|p| p.code == code).map_or(0, |p| p.failures) + 1;
+        let stuck = e.downcast_ref::<NoFit>().is_some();
+        Retry {
+            code: code.to_string(),
+            failures,
+            next: (!stuck).then(|| now + retry_after(failures)),
+            error: says(e),
+            job,
+        }
+    }
+}
+
+/// Whether follow `f` has a newer code to apply by itself now: one that
+/// isn't applied yet, from a pack still shared, unless a failed try of that
+/// same code is still waiting out its delay (or can't work). `busy`: a
+/// task is changing the instance or its game is running; it waits for
+/// that to end.
+pub fn due(f: &crate::settings::FollowedRecipe, retry: Option<&Retry>, busy: bool, now: Instant) -> bool {
+    if !f.waiting() || busy {
+        return false;
+    }
+    match retry {
+        Some(r) if r.code == f.seen => r.next.is_some_and(|t| now >= t),
+        _ => true,
+    }
+}
+
+/// A failed apply in plain words: the reason it gives, or for a network
+/// problem, that the mod sites couldn't be reached.
+pub fn says(e: &anyhow::Error) -> String {
+    if let Some(n) = e.downcast_ref::<NoFit>() {
+        return n.0.clone();
+    }
+    let all = format!("{e:#}").to_lowercase();
+    let net = ["dns", "connect", "timed out", "timeout", "network", "unreachable", "connection"];
+    if net.iter().any(|w| all.contains(w)) {
+        return "Couldn't reach CurseForge or Modrinth. Check your internet connection.".into();
+    }
+    let s = e.to_string();
+    if s.ends_with('.') { s } else { format!("{s}.") }
+}
+
+/// The key a mod from GitHub or a link goes by when the player answered
+/// about it: its source and file shape, so a newer file of it counts too.
+pub fn pin_key(p: &crate::sources::carry::Pin) -> String {
+    format!("{}#{}", p.source.key(), p.source.pattern)
 }
 
 #[cfg(test)]
@@ -415,5 +517,80 @@ mod tests {
         let err = apply_to(&root, &sharecode::encode(&share), "", &[], &job()).unwrap_err();
         assert!(format!("{err:#}").contains("this instance is ATM"));
         assert!(root.join("mods/one.jar").exists());
+        // Trying it again can't help: no retry is planned.
+        let r = Retry::failed(None, "HOP-x", &err, 1, Instant::now());
+        assert_eq!(r.next, None);
+        assert!(r.error.contains("this instance is ATM"));
+    }
+
+    /// The follower's report: a friend's change failed to apply once (the
+    /// instance's file held open by another program) and showed "Update"
+    /// for good. Held open is a failure to try again, not "a different
+    /// instance", and says so.
+    #[cfg(windows)]
+    #[test]
+    fn an_instance_held_open_is_tried_again_not_called_different() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (root, _) = plain("held-open");
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(root.join(crate::instances::HOPPER_FILE))
+            .unwrap();
+        let code = plain_share(vec![Entry::Off(Target::Curse(101))]);
+        let err = apply_to(&root, &code, "", &[], &job()).unwrap_err();
+        assert!(err.downcast_ref::<NoFit>().is_none(), "{err:#}");
+        assert_eq!(says(&err), "Another program has this instance's files open.");
+        let now = Instant::now();
+        let r = Retry::failed(None, &code, &err, 1, now);
+        assert_eq!(r.next, Some(now + Duration::from_secs(2)));
+        drop(held);
+        // Once it lets go, the same code applies.
+        let inst = apply_to(&root, &code, "", &[], &job()).unwrap();
+        assert!(!inst.addons.iter().find(|a| a.project_id == 101).unwrap().enabled);
+    }
+
+    #[test]
+    fn failed_follows_wait_longer_each_time_up_to_15_seconds() {
+        let secs: Vec<u64> = (0..9).map(|n| retry_after(n).as_secs()).collect();
+        assert_eq!(secs, [2, 2, 3, 5, 10, 15, 15, 15, 15]);
+
+        let t0 = Instant::now();
+        let net = anyhow::anyhow!("dns error: no such host").context("Looking up the mods");
+        let r1 = Retry::failed(None, "HOP-1", &net, 10, t0);
+        assert_eq!((r1.failures, r1.next), (1, Some(t0 + Duration::from_secs(2))));
+        let r2 = Retry::failed(Some(&r1), "HOP-1", &net, 11, t0);
+        assert_eq!((r2.failures, r2.next), (2, Some(t0 + Duration::from_secs(3))));
+        // A newer code starts over.
+        let r3 = Retry::failed(Some(&r2), "HOP-2", &net, 12, t0);
+        assert_eq!(r3.failures, 1);
+        assert_eq!(r3.error, "Couldn't reach CurseForge or Modrinth. Check your internet connection.");
+    }
+
+    #[test]
+    fn a_follow_applies_by_itself_unless_it_waits_or_is_up_to_date() {
+        use crate::settings::FollowedRecipe;
+        let t0 = Instant::now();
+        let f = FollowedRecipe { code: "HOP-1".into(), seen: "HOP-2".into(), ..Default::default() };
+        // A new code, nothing in the way: now. On start too, as nothing
+        // in memory says otherwise.
+        assert!(due(&f, None, false, t0));
+        // The game is running or another task changes the instance.
+        assert!(!due(&f, None, true, t0));
+        // Up to date, never got a code, or the pack isn't shared any more.
+        assert!(!due(&FollowedRecipe { seen: "HOP-1".into(), ..f.clone() }, None, false, t0));
+        assert!(!due(&FollowedRecipe { code: String::new(), seen: String::new(), ..f.clone() }, None, false, t0));
+        assert!(!due(&FollowedRecipe { ended: "unshared".into(), ..f.clone() }, None, false, t0));
+
+        // Failed: waits out the delay, then goes again.
+        let e = anyhow::anyhow!("CurseForge said 503");
+        let r = Retry::failed(None, "HOP-2", &e, 1, t0);
+        assert!(!due(&f, Some(&r), false, t0 + Duration::from_secs(1)));
+        assert!(due(&f, Some(&r), false, t0 + Duration::from_secs(2)));
+        // Can't work: waits for a newer code, which goes at once.
+        let stuck = Retry::failed(None, "HOP-2", &anyhow::Error::new(NoFit("no".into())), 1, t0);
+        assert!(!due(&f, Some(&stuck), false, t0 + Duration::from_secs(3600)));
+        let newer = FollowedRecipe { seen: "HOP-3".into(), ..f.clone() };
+        assert!(due(&newer, Some(&stuck), false, t0));
     }
 }

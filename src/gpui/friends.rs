@@ -1125,28 +1125,37 @@ impl FriendsPanel {
     fn their_pack(&self, key: &str, e: &Event, by: Option<String>, new: bool, down: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let s = self.store.read(cx);
-        // Each follow here: the instance, its name, and whether a newer
-        // version than the one it has waits.
-        let follows: Vec<(PathBuf, String, bool)> = s
+        // Each follow here: the instance, its name, and how its copy is
+        // doing.
+        let follows: Vec<(PathBuf, String, CopyState)> = s
             .followers_of(&e.from, &e.inst)
             .into_iter()
             .map(|f| {
                 let root = PathBuf::from(&f.root);
                 let local = s.instance(&root).map(|i| i.name.clone()).unwrap_or_else(|| f.name.clone());
-                let waiting = f.ended.is_empty() && f.seen != f.code && !s.is_busy(&root);
-                (root, local, waiting)
+                let state = copy_state(s, f, &root);
+                (root, local, state)
             })
             .collect();
         let (icon, project) = pack_look(s, &e.code);
         let pack = pack_name(e);
         let sender = name_or(&e.from_name, "your friend");
-        let waiting = follows.iter().find(|f| f.2).cloned();
-        let sub = match (follows.first(), &waiting) {
-            (_, Some((_, local, _))) => format!("New version from {sender} · your copy: {local}"),
-            (Some((_, local, _)), None) => format!("Your copy: {local} · up to date"),
-            (None, None) if e.at > 0 => format!("Updated {}", ago(e.at)),
-            (None, None) => String::new(),
+        // The copy that needs a look first: one that failed, then one with
+        // mods to ask about, then one updating.
+        let shown = follows.iter().min_by_key(|f| f.2.rank()).cloned();
+        let sub = match &shown {
+            Some((_, local, CopyState::Updating)) => format!("Getting {sender}'s changes · your copy: {local}"),
+            Some((_, local, CopyState::AfterGame)) => format!("Gets {sender}'s changes when the game closes · your copy: {local}"),
+            Some((_, local, CopyState::Failed(..))) => format!("Your copy: {local}"),
+            Some((_, local, _)) => format!("Your copy: {local} · up to date"),
+            None if e.at > 0 => format!("Updated {}", ago(e.at)),
+            None => String::new(),
         };
+        let waiting = match &shown {
+            Some((root, _, CopyState::Held(_))) => Some(root.clone()),
+            _ => None,
+        };
+        let copy_note = shown.as_ref().and_then(|f| f.2.note(&sender));
         let sub = match by {
             Some(by) if sub.is_empty() => format!("From {by}"),
             Some(by) => format!("From {by} · {}", sub[..1].to_lowercase() + &sub[1..]),
@@ -1165,7 +1174,7 @@ impl FriendsPanel {
         )
         .text_sm();
         let action: AnyElement = match (&waiting, follows.is_empty()) {
-            (Some((root, _, _)), _) => self.update_button(format!("their-update:{key}").into(), e, root.clone(), down, cx).into_any_element(),
+            (Some(root), _) => self.update_button(format!("their-update:{key}").into(), e, root.clone(), down, cx).into_any_element(),
             (None, false) => div()
                 .id(SharedString::from(format!("following:{key}")))
                 .flex_none()
@@ -1221,27 +1230,16 @@ impl FriendsPanel {
                                 .when(waiting.is_some(), |d| d.text_color(theme.foreground)),
                         )
                     })
+                    .when_some(copy_note, |c, t| c.child(warn_line(t, cx)))
                     .when(missing > 0, |c| {
-                        c.child(
-                            h_flex()
-                                .gap_1()
-                                .items_start()
-                                .pl(rems(1.625))
-                                .child(Icon::new(IconName::TriangleAlert).xsmall().flex_none().mt(px(2.)).text_color(theme.warning))
-                                .child(
-                                    widgets::caption(
-                                        format!(
-                                            "{missing} file{} can't be downloaded from any site. Ask {sender} to send {}.",
-                                            if missing == 1 { "" } else { "s" },
-                                            if missing == 1 { "it" } else { "them" }
-                                        ),
-                                        cx,
-                                    )
-                                    .text_xs()
-                                    .flex_1()
-                                    .min_w_0(),
-                                ),
-                        )
+                        c.child(warn_line(
+                            format!(
+                                "{missing} file{} can't be downloaded from any site. Ask {sender} to send {}.",
+                                if missing == 1 { "" } else { "s" },
+                                if missing == 1 { "it" } else { "them" }
+                            ),
+                            cx,
+                        ))
                     }),
             )
             .child(action)
@@ -1259,7 +1257,7 @@ impl FriendsPanel {
             .icon(IconName::Download)
             .label("Update")
             .disabled(down)
-            .tooltip(if down { CANT_CONNECT } else { "Update your copy to their newest version" })
+            .tooltip(if down { CANT_CONNECT } else { "Asks about the mods from GitHub and other links, then adds the ones you allow" })
             .on_click(cx.listener(move |this, _, window, cx| {
                 let (handle, store, req, root) = (window.window_handle(), this.store.clone(), FollowReq::of(&e), root.clone());
                 // After the click, like the other dialogs it may open.
@@ -1275,29 +1273,32 @@ impl FriendsPanel {
     /// first: the list's top answers "has my pack changed?".
     fn following(&self, recipes: &[Event], words: &[String], down: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let s = self.store.read(cx);
-        let mut list: Vec<(Event, PathBuf, bool)> = recipes
+        let mut list: Vec<(Event, PathBuf, CopyState)> = recipes
             .iter()
             .filter(|e| hits(&pack_name(e), words))
             .filter_map(|e| {
                 let f = s.followers_of(&e.from, &e.inst).into_iter().find(|f| f.ended.is_empty())?;
                 let root = PathBuf::from(&f.root);
-                let waiting = f.seen != f.code && !s.is_busy(&root);
-                Some((e.clone(), root, waiting))
+                let state = copy_state(s, f, &root);
+                Some((e.clone(), root, state))
             })
             .collect();
-        list.sort_by_key(|(e, _, waiting)| (std::cmp::Reverse(*waiting), std::cmp::Reverse(e.at)));
+        list.sort_by_key(|(e, _, state)| (state.rank(), std::cmp::Reverse(e.at)));
         list.iter()
             .enumerate()
-            .map(|(i, (e, root, waiting))| {
+            .map(|(i, (e, root, state))| {
                 let theme = cx.theme().clone();
                 let s = self.store.read(cx);
                 let (icon, project) = pack_look(s, &e.code);
                 let sender = name_or(&e.from_name, "a friend");
-                let sub = if *waiting {
-                    format!("New version from {sender} · {}", ago(e.at))
-                } else {
-                    format!("From {sender} · up to date")
+                let sub = match state {
+                    CopyState::Updating => format!("Getting {sender}'s changes · {}", ago(e.at)),
+                    CopyState::AfterGame => format!("From {sender} · changes come when the game closes"),
+                    CopyState::Failed(..) => format!("From {sender} · changed {}", ago(e.at)),
+                    _ => format!("From {sender} · up to date"),
                 };
+                let note = state.note(&sender);
+                let waiting = matches!(state, CopyState::Held(_));
                 let view = cx.entity();
                 h_flex()
                     .id(("followed", i))
@@ -1325,10 +1326,11 @@ impl FriendsPanel {
                                     .text_xs()
                                     .truncate()
                                     .pl(rems(1.625))
-                                    .when(*waiting, |d| d.text_color(theme.foreground)),
-                            ),
+                                    .when(waiting, |d| d.text_color(theme.foreground)),
+                            )
+                            .when_some(note, |c, t| c.child(warn_line(t, cx))),
                     )
-                    .when(*waiting, |r| r.child(self.update_button(format!("followed-update:{i}").into(), e, root.clone(), down, cx)))
+                    .when(waiting, |r| r.child(self.update_button(format!("followed-update:{i}").into(), e, root.clone(), down, cx)))
                     .into_any_element()
             })
             .collect()
@@ -2684,6 +2686,75 @@ fn ago(at: u64) -> String {
     };
     let s = if n == 1 || unit == "min" || unit == "h" { "" } else { "s" };
     format!("{n} {unit}{s} ago")
+}
+
+/// How a followed copy is doing, for its row. Copies update by themselves;
+/// only mods nobody could be asked about bring back the Update button.
+#[derive(Clone, Debug, PartialEq)]
+enum CopyState {
+    UpToDate,
+    /// A newer version is being applied, or waits for another task.
+    Updating,
+    /// A newer version waits for the game to close: files the game has
+    /// open can't be changed, and the row says why nothing happens yet.
+    AfterGame,
+    /// The last try failed: why, and whether Hopper tries again by itself.
+    Failed(String, bool),
+    /// Mods from GitHub and other links left out until the player says.
+    Held(Vec<String>),
+}
+
+impl CopyState {
+    /// Which to show first: the ones that need the player.
+    fn rank(&self) -> u8 {
+        match self {
+            CopyState::Failed(..) => 0,
+            CopyState::Held(_) => 1,
+            CopyState::Updating | CopyState::AfterGame => 2,
+            CopyState::UpToDate => 3,
+        }
+    }
+
+    /// The line under the pack's name, when there's something to say.
+    fn note(&self, sender: &str) -> Option<String> {
+        match self {
+            CopyState::Failed(why, true) => Some(format!("Couldn't get {sender}'s changes: {why} Trying again soon.")),
+            CopyState::Failed(why, false) => Some(format!("Couldn't get {sender}'s changes: {why}")),
+            CopyState::Held(names) => Some(match names.as_slice() {
+                [one] => format!("{one} is from GitHub or another link, so it wasn't added. Update asks about it."),
+                many => format!("{} mods from GitHub and other links weren't added. Update asks about them.", many.len()),
+            }),
+            _ => None,
+        }
+    }
+}
+
+fn copy_state(s: &Store, f: &hopper::settings::FollowedRecipe, root: &Path) -> CopyState {
+    if let Some((why, again)) = s.follow_error(root) {
+        return CopyState::Failed(why.to_string(), again);
+    }
+    if s.follow_updating(root) {
+        if s.running(root).is_some() {
+            return CopyState::AfterGame;
+        }
+        return CopyState::Updating;
+    }
+    if !f.held.is_empty() {
+        return CopyState::Held(f.held.clone());
+    }
+    CopyState::UpToDate
+}
+
+/// A warning under a pack's name: a small triangle and a short sentence.
+fn warn_line(text: String, cx: &App) -> Div {
+    h_flex()
+        .gap_1()
+        .items_start()
+        .pl(rems(1.625))
+        .child(Icon::new(IconName::TriangleAlert).xsmall().flex_none().mt(px(2.)).text_color(cx.theme().warning))
+        // Wraps instead of cutting off: the end says whether Hopper tries
+        // again, which the player needs to read.
+        .child(div().flex_1().min_w_0().text_xs().text_color(cx.theme().muted_foreground).child(text))
 }
 
 fn name_or(name: &str, or: &str) -> String {
