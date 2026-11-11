@@ -5,6 +5,7 @@
   // panel settings have their own categories (PanelSettings.svelte).
   import Security from './Security.svelte';
   import Certificate from './Certificate.svelte';
+  import WebAccess from './WebAccess.svelte';
   import { confirmIt } from './lib/dialog.svelte.js';
   import { pathKind } from './lib/format.js';
 
@@ -118,6 +119,8 @@
     </div>
 
     <Certificate port={hello.port} />
+
+    <WebAccess />
 
     <div class="card wide">
       <h3><MonitorSmartphone size={14} />Paired devices</h3>

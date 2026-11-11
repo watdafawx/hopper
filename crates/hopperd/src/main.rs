@@ -74,6 +74,7 @@ mod tls;
 #[cfg(windows)]
 mod tray;
 mod ui;
+mod web_access;
 mod webhooks;
 mod worlds_api;
 mod zipstream;

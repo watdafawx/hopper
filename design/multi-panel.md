@@ -1,6 +1,7 @@
 # Hopper Server: several panels in one web UI, and node mode (draft)
 
-Status: design only, nothing built. Mock: `.claude/changes/multi-panel/mock.html`
+Status: B0 built (CSP, `web_origins` and CORS, the access-management
+switch; `crates/hopperd/src/web_access.rs`, `ui.rs`); the rest is design. Mock: `.claude/changes/multi-panel/mock.html`
 (published as a Design Artifact), picks in `.claude/changes/multi-panel/picks.md`.
 
 Two features share one web UI and one idea of "a place servers live":
@@ -139,7 +140,16 @@ What we do about it:
    descriptions, changelogs) and log text, so this is the real defence.
    `connect-src` has to allow other panels, so it is `'self' https: http:
    ws: wss:`; script injection is stopped by `script-src`, not by limiting
-   where the page may call.
+   where the page may call. As built (`ui::CSP`): `style-src 'self'
+   'unsafe-inline'` (Svelte writes `style="…"` attributes, and CodeMirror
+   always injects a `<style>` element into a document, so a stricter
+   `style-src-elem` broke the file editor; a per-response style nonce is the
+   upgrade if that ever matters), `img-src 'self'
+   https: http: data: blob:` (icons and pictures from CurseForge, Modrinth,
+   GitHub and authors' sites), `frame-src 'none'`, `form-action 'self'`, and
+   `X-Frame-Options: DENY` for older browsers. B0 publishes the capability
+   `web.origins` (CORS and the allowed-pages list); `web.remote` waits for
+   B1's browser sessions, so a client never sees it before sign-in works.
 2. **Storage.** Tokens in `localStorage` under the home origin, keyed by the
    other panel's origin, so they survive a reload. Optional "Don't keep me
    signed in on this browser" uses `sessionStorage` (gone when the tab
@@ -156,7 +166,9 @@ What we do about it:
    points to "Open on rig". Everything day to day (servers, files, mods,
    console, backups, schedule) works. This limits what a stolen token can do
    to lock the real owner out or plant a second way in. It costs parity (the
-   owner cannot add a user on panel B from panel A's page). Open question 1.
+   owner cannot add a user on panel B from panel A's page), so the owner can
+   turn it off per panel ("Let these pages manage who can get in", off by
+   default; open question 1, answered).
 5. **Never store a password.** An expired session shows "Sign in again" and
    asks for the password. The page does no silent retry with saved
    credentials, which also keeps the 5-wrong-tries lockout from being hit by
@@ -541,9 +553,16 @@ Sizes use AGENTS.md's S/M/L plus a day estimate for one agent with review.
 
 ## Open questions for the maintainer
 
-1. **Remote-session limits (B).** Should a browser session on another origin be
-   barred from managing users, devices, tokens, 2FA, TLS and the allowed-pages
-   list ("Open on rig" instead)? Safer, costs parity. My recommendation: yes.
+1. **Remote-session limits (B).** *Answered (maintainer, 2026-11-11): a
+   per-panel owner setting, "Let these pages manage who can get in", off by
+   default.* Off: a request from a listed other page (an `Origin` in
+   `web_origins` that isn't the panel's own) is refused for changing users,
+   devices and pairing, API tokens, passwords and two-factor, and the
+   certificate. On: those go through to the route's normal checks. The
+   allowed-pages list and this switch change only on the panel's own page
+   (its cookie session, `Origin` equal to `Host`), whatever the switch says.
+   One check, `web_access::access_refusal`, called from `security::guard`.
+   Built in B0.
 2. **Who may add a node (A).** True owner only, or managers too? I recommend
    owner only.
 3. **Panel list roaming (B).** Store the list of added panels (URLs and names,
