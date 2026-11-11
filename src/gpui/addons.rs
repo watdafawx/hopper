@@ -1132,7 +1132,7 @@ impl AddonsView {
             self.remote_icons = loose.iter().filter(|l| !l.icon.is_empty()).map(|l| (l.file.clone(), l.icon.clone())).collect();
             self.loose = (None, loose.into_iter().map(|l| l.file).collect());
         } else {
-            self.refresh_loose(&inst);
+            self.refresh_loose(&inst, cx);
         }
         if class == cf::CLASS_MODS {
             self.want_missing(&inst, cx);
@@ -1498,7 +1498,7 @@ impl AddonsView {
     }
 
     /// Re-lists untracked jars when the mods folder changed.
-    fn refresh_loose(&mut self, inst: &Instance) {
+    fn refresh_loose(&mut self, inst: &Instance, cx: &mut Context<Self>) {
         let _t = crate::frame_log::span("addons.loose");
         if self.class != cf::CLASS_MODS {
             self.loose = (None, Vec::new());
@@ -1518,10 +1518,28 @@ impl AddonsView {
         let key = mtime.map(|t| (inst.root.clone(), t, tracked));
         if key.is_none() || self.loose.0 != key {
             self.loose = (key, hopper::install::loose_jars(inst));
-            // Read each jar's looks once (kept per file version).
+            // Read each jar's looks once (kept per file version), off the UI
+            // thread: opening every jar froze the tab (about 1 ms a jar, so a
+            // pack with hundreds of loose jars stalled for a moment). Their
+            // icons fill in when it's done.
             let mods = inst.mods_dir();
-            for f in &self.loose.1 {
-                hopper::sources::looks::loose(&mods.join(f));
+            let jars: Vec<std::path::PathBuf> = self.loose.1.iter().map(|f| mods.join(f)).collect();
+            if !jars.is_empty() {
+                cx.spawn(async move |this, cx| {
+                    cx.background_spawn(async move {
+                        for jar in &jars {
+                            hopper::sources::looks::loose(jar);
+                        }
+                    })
+                    .await;
+                    this.update(cx, |this, cx| {
+                        let icons: Vec<String> = this.loose.1.iter().filter_map(|f| this.loose_icon(f)).collect();
+                        this.store.update(cx, |s, _| s.want_images_spread(&icons));
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
             }
         }
     }
