@@ -174,8 +174,8 @@ one line and report it).
 
 **Desktops after a data reset.** A Hopper that finds its saved token
 unknown to the service (`401`) signs up again, keeps its local settings and
-tells its player: "Your friends list was reset on the sync server. Invite
-your friends again." It does this at most once per run of the app; if the
+tells its player: "Your friend list was lost. Invite your friends again with
+a new code." It does this at most once per run of the app; if the
 service still answers 401 after that, the desktop shows the error and asks
 again every 30 seconds without signing up again.
 
