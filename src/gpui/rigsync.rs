@@ -3372,35 +3372,94 @@ pub fn confirm_update_server(store: &Entity<Store>, server: ServerInfo, inst: In
             .confirm()
             .ok_text("Sync to server")
             .on_ok(move |_, _, cx| {
-                let server_root = server.root.clone();
-                let s = store.read(cx);
-                let host = s.settings().server_host.clone();
-                let anyway = s.settings().sync_anyway.clone();
-                let hidden = s.settings().sync_blacklist.clone();
-                let java =
-                    hopper::launch::installer_java(Path::new(&s.settings().launcher_dir));
-                let panel = hopper::panel::for_server(s.settings(), &server);
-                // Running: its pages offer a restart once this is done.
-                let live = server_online(s, None, &server.root).then(|| server_started(s, None, &server.root));
-                let (server, inst) = (server.clone(), inst.clone());
-                let id = s.spawn_job_id(format!("Updating {}", server.name), move |job| {
-                    let r = hopper::server_update::update_server(
-                        &server, &inst, &host, &anyway, &hidden, &java, panel.as_deref(), job,
-                    )?;
-                    job.detail(r.summary());
-                    for f in &r.failed {
-                        job.note(f.clone());
-                    }
-                    Ok(match live {
-                        Some(started) if r.copied + r.removed + r.turned_off > 0 => Msg::SyncedLive(server.root.clone(), started),
-                        _ => Msg::ServersChanged,
-                    })
-                });
-                // The pack's banner follows it: progress, then the result.
-                store.update(cx, |s, cx| {
-                    s.track_server_update(&server_root, id);
-                    cx.notify();
-                });
+                start_update(&store, server.clone(), inst.clone(), cx);
+                true
+            })
+    });
+}
+
+/// Brings one server in step with the pack, as a job the pack's banner
+/// follows (progress, then the result).
+fn start_update(store: &Entity<Store>, server: ServerInfo, inst: Instance, cx: &mut App) {
+    let server_root = server.root.clone();
+    let s = store.read(cx);
+    let host = s.settings().server_host.clone();
+    let anyway = s.settings().sync_anyway.clone();
+    let hidden = s.settings().sync_blacklist.clone();
+    let java = hopper::launch::installer_java(Path::new(&s.settings().launcher_dir));
+    let panel = hopper::panel::for_server(s.settings(), &server);
+    // Running: its pages offer a restart once this is done.
+    let live = server_online(s, None, &server.root).then(|| server_started(s, None, &server.root));
+    let id = s.spawn_job_id(format!("Updating {}", server.name), move |job| {
+        let r = hopper::server_update::update_server(&server, &inst, &host, &anyway, &hidden, &java, panel.as_deref(), job)?;
+        job.detail(r.summary());
+        for f in &r.failed {
+            job.note(f.clone());
+        }
+        Ok(match live {
+            Some(started) if r.copied + r.removed + r.turned_off > 0 => Msg::SyncedLive(server.root.clone(), started),
+            _ => Msg::ServersChanged,
+        })
+    });
+    store.update(cx, |s, cx| {
+        s.track_server_update(&server_root, id);
+        cx.notify();
+    });
+}
+
+/// Asks to bring every server paired with the pack in step with it, each
+/// on its own (its own comparison and its own update job). Servers already
+/// in step are left alone.
+pub fn confirm_sync_all(store: &Entity<Store>, inst_root: &Path, window: &mut Window, cx: &mut App) {
+    let s = store.read(cx);
+    let Some(inst) = s.instance(inst_root).cloned() else { return };
+    let servers: Vec<ServerInfo> = s.servers_of(inst_root).into_iter().cloned().collect();
+    // Each server's own comparison: in step, what differs, or not known yet
+    // (that one is synced too, to be sure).
+    let rows: Vec<(ServerInfo, Option<String>)> = servers
+        .into_iter()
+        .map(|sv| {
+            let state = match s.differences(inst_root, &sv.root) {
+                Some(0) => None,
+                Some(_) => Some(s.pre_join_with(inst_root, &sv.root).map_or(String::new(), |p| p.check.summary())),
+                None => Some("not compared yet".to_string()),
+            };
+            (sv, state)
+        })
+        .collect();
+    let mut todo: Vec<ServerInfo> = rows.iter().filter(|r| r.1.is_some()).map(|r| r.0.clone()).collect();
+    if todo.is_empty() {
+        todo = rows.iter().map(|r| r.0.clone()).collect();
+    }
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|(sv, st)| match st {
+            None if todo.len() < rows.len() => format!("{}: in step, left alone", sv.name),
+            None => format!("{}: in step", sv.name),
+            Some(t) => format!("{}: {t}", sv.name),
+        })
+        .collect();
+    let body = format!(
+        "Each server gets this pack's mods: mods turned off here are turned off there too, and mods only a server has are removed. Replaced and removed files go to each server's backups.
+
+{}",
+        lines.join("
+")
+    );
+    let n = todo.len();
+    let ok = if n == 1 { format!("Sync {}", todo[0].name) } else { format!("Sync {n} servers") };
+    let store = store.clone();
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let (store, todo, inst) = (store.clone(), todo.clone(), inst.clone());
+        alert
+            .title("Sync every paired server to this pack?")
+            .description(body.clone())
+            .confirm()
+            .ok_text(ok.clone())
+            .on_ok(move |_, _, cx| {
+                for sv in &todo {
+                    start_update(&store, sv.clone(), inst.clone(), cx);
+                }
                 true
             })
     });

@@ -646,26 +646,33 @@ pub fn underline_tabs(
     on_pick: impl Fn(&usize, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
-    let theme = cx.theme();
-    let (fg, muted) = (theme.foreground, theme.muted_foreground);
+    let muted = cx.theme().muted_foreground;
     let on_pick = Rc::new(on_pick);
     h_flex().gap_1().children(tabs.into_iter().enumerate().map(|(i, (label, count))| {
         let pick = on_pick.clone();
-        h_flex()
-            .id(ElementId::Name(format!("{id}:{i}").into()))
-            .flex_none()
-            .gap_1p5()
-            .px_2()
-            .py_1p5()
-            .text_sm()
-            .font_weight(FontWeight::MEDIUM)
-            .clickable(cx)
-            .map(|t| if i == selected { tab_selected(t, cx) } else { t.text_color(muted).hover(move |s| s.text_color(fg)) })
-            .whitespace_nowrap()
+        underline_tab(ElementId::Name(format!("{id}:{i}").into()), i == selected, cx)
             .child(label)
             .when_some(count, |t, n| t.child(div().text_xs().text_color(muted).child(n.to_string())))
             .on_click(move |_, window, cx| pick(&i, window, cx))
     }))
+}
+
+/// One of [`underline_tabs`], for a tab with more in it than a label and a
+/// count (a state dot, a chip): add the children and the click.
+pub fn underline_tab(id: ElementId, selected: bool, cx: &App) -> Stateful<Div> {
+    let theme = cx.theme();
+    let (fg, muted) = (theme.foreground, theme.muted_foreground);
+    h_flex()
+        .id(id)
+        .flex_none()
+        .gap_1p5()
+        .px_2()
+        .py_1p5()
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .clickable(cx)
+        .map(|t| if selected { tab_selected(t, cx) } else { t.text_color(muted).hover(move |s| s.text_color(fg)) })
+        .whitespace_nowrap()
 }
 
 /// One option of a [`Segmented`] control. Built like gpui_kit's `Tab`

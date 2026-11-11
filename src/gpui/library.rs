@@ -1170,7 +1170,7 @@ impl LibraryView {
                         .on_click(cx.listener(move |this, _, _, cx| this.select(r.clone(), cx)))
                         .context_menu({
                             let (view, root) = (view.clone(), root.clone());
-                            move |menu, _, cx| instance_menu(menu, &view, &root, false, cx)
+                            move |menu, window, cx| instance_menu(menu, &view, &root, false, window, cx)
                         })
                         .child(widgets::thumb(icon.as_deref(), rems(2.5), cx))
                         .when(playing, |d| {
@@ -1621,7 +1621,7 @@ impl LibraryView {
                             }),
                     ),
             )
-            .context_menu(move |menu, _, cx| instance_menu(menu, &menu_view, &menu_root, false, cx))
+            .context_menu(move |menu, window, cx| instance_menu(menu, &menu_view, &menu_root, false, window, cx))
             .into_any_element()
     }
 
@@ -2047,8 +2047,8 @@ impl LibraryView {
                     .rounded_bl(px(0.))
                     .border_l_0()
                     // Right edges aligned, under the button.
-                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
-                        server_menu(menu, &view, &sroot, cx)
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
+                        server_menu(menu, &view, &sroot, window, cx)
                     });
                 Some(
                     h_flex()
@@ -2137,8 +2137,8 @@ impl LibraryView {
                                     .icon(IconName::Ellipsis)
                                     .tooltip("More")
                                     // Right-aligned to the button, off the window edge.
-                                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
-                                        instance_menu(menu, &view, &r_more, true, cx)
+                                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
+                                        instance_menu(menu, &view, &r_more, true, window, cx)
                                     }),
                             );
         self.hero(inst, icon, actions, cx)
@@ -2654,8 +2654,17 @@ impl LibraryView {
             return div().into_any_element();
         };
         let store = self.store.read(cx);
-        if store.server_of(&root).is_some() {
-            return cached(self.server.clone());
+        match store.servers_of(&root).len() {
+            0 => {}
+            // One server: the compare panel as it always was.
+            1 => return cached(self.server.clone()),
+            _ => {
+                return v_flex()
+                    .size_full()
+                    .child(self.server_strip(&root, cx))
+                    .child(div().flex_1().min_h_0().child(cached(self.server.clone())))
+                    .into_any_element();
+            }
         }
         let servers: Vec<(PathBuf, String)> = store
             .servers()
@@ -2717,6 +2726,79 @@ impl LibraryView {
                 pick,
             ))),
             )
+            .into_any_element()
+    }
+
+    /// Above the Server tab of a pack that runs on several servers: one tab
+    /// per server (its state dot and how it compares) to pick the one
+    /// shown, and what acts on them all.
+    fn server_strip(&self, root: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let store = self.store.read(cx);
+        let theme = cx.theme();
+        let shown = store.server_of(root).map(|s| (s.root.clone(), s.name.clone()));
+        let list: Vec<(PathBuf, String, Option<usize>)> = store
+            .servers_of(root)
+            .iter()
+            .map(|s| (s.root.clone(), s.name.clone(), store.differences(root, &s.root)))
+            .collect();
+        let others = pair_choices(store, root);
+        let (success, warning) = (theme.success, theme.warning);
+        // A narrow page (a 960 px window) has no room for every label: the
+        // pair and unpair buttons keep their icon and tell the rest on hover.
+        let wide = self.detail_w >= 52.;
+        let tabs = list.into_iter().enumerate().map(|(i, (sroot, name, diff))| {
+            let (dot, _, _) = self.server_state(&sroot, cx);
+            let chip = diff.map(|n| match n {
+                0 => widgets::chip(success).child("In step"),
+                n => widgets::chip(warning).child(format!("{n} differ")),
+            });
+            let selected = shown.as_ref().is_some_and(|s| s.0 == sroot);
+            let (st, r) = (self.store.clone(), root.to_path_buf());
+            widgets::underline_tab(ElementId::Name(format!("server-strip:{i}").into()), selected, cx)
+                .child(widgets::status_dot(dot))
+                .child(name)
+                .children(chip)
+                .on_click(move |_, _, cx| st.update(cx, |s, cx| s.show_server(&r, &sroot, cx)))
+        }).collect::<Vec<_>>();
+        let pair = (!others.is_empty()).then(|| {
+            let (st, r) = (self.store.clone(), root.to_path_buf());
+            let b = Button::new("server-strip-pair").ghost().small().icon(IconName::Plus);
+            (if wide { b.label("Pair another server") } else { b.tooltip("Pair another server") })
+                .dropdown_menu(move |mut menu, _, _| {
+                    for (sroot, label) in &others {
+                        let (st, r, sr) = (st.clone(), r.clone(), sroot.clone());
+                        menu = menu.item(PopupMenuItem::new(label.clone()).on_click(move |_, _, cx| st.update(cx, |s, cx| s.set_pairing(&sr, &r, cx))));
+                    }
+                    menu
+                })
+        });
+        let (st, r) = (self.store.clone(), root.to_path_buf());
+        let sync_all = Button::new("server-strip-sync-all")
+            .outline()
+            .small()
+            .icon(IconName::ServerCog)
+            .label(if wide { "Sync to all servers…" } else { "Sync all…" })
+            .tooltip("Brings every server paired with this pack in step with it (it asks first)")
+            .on_click(move |_, window, cx| crate::rigsync::confirm_sync_all(&st, &r, window, cx));
+        let unpair = shown.map(|(sroot, name)| {
+            let st = self.store.clone();
+            let b = Button::new("server-strip-unpair").ghost().small().icon(IconName::Unlink);
+            (if wide { b.label(format!("Unpair {name}")) } else { b })
+                .tooltip(format!("Unpair {name}: stops comparing this pack with it. Its files stay as they are."))
+                .on_click(move |_, _, cx| st.update(cx, |s, cx| s.unpair(&sroot, cx)))
+        });
+        h_flex()
+            .id("server-strip")
+            .flex_none()
+            .w_full()
+            .gap_1()
+            .px_4()
+            .pt_1()
+            .border_b_1()
+            .border_color(theme.border)
+            // Many or long-named servers clip the tabs, never the buttons.
+            .child(h_flex().flex_1().min_w_0().overflow_hidden().gap_1().children(tabs).children(pair))
+            .child(h_flex().flex_none().gap_1().child(sync_all).children(unpair))
             .into_any_element()
     }
 
@@ -3132,7 +3214,7 @@ impl LibraryView {
 /// The header's server ▾, read when it opens: Start, or Stop and Restart,
 /// where a panel is set up (they ask first as on the Server tab), then the
 /// Server tab's places.
-fn server_menu(menu: PopupMenu, view: &Entity<LibraryView>, root: &Path, cx: &App) -> PopupMenu {
+fn server_menu(menu: PopupMenu, view: &Entity<LibraryView>, root: &Path, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
     use hopper::panel::PanelAction;
     let control = view.read(cx).server.read(cx).control().clone();
     let ctl = control.read(cx);
@@ -3175,7 +3257,80 @@ fn server_menu(menu: PopupMenu, view: &Entity<LibraryView>, root: &Path, cx: &Ap
     if configured {
         menu = menu.item(go("Console", IconName::SquareTerminal, ServerPlace::Console));
     }
+    match view.read(cx).selected.clone() {
+        Some(inst) => pairing_items(menu, view, &inst, true, window, cx),
+        None => menu,
+    }
+}
+
+/// The pack's pairings in a menu: its servers to switch between (the
+/// header's ▾ only, `switch`), pairing another, Sync to all, and unpairing
+/// the one shown. Several servers can run one pack.
+fn pairing_items(
+    menu: PopupMenu,
+    view: &Entity<LibraryView>,
+    inst: &Path,
+    switch: bool,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let store = view.read(cx).store.clone();
+    let s = store.read(cx);
+    let mine: Vec<(PathBuf, String)> = s.servers_of(inst).iter().map(|x| (x.root.clone(), x.name.clone())).collect();
+    let shown = s.server_of(inst).map(|x| (x.root.clone(), x.name.clone()));
+    let others = pair_choices(s, inst);
+    let mut menu = menu.separator();
+    if switch && mine.len() > 1 {
+        menu = menu.label("Paired servers");
+        for (root, name) in &mine {
+            let (st, i, r) = (store.clone(), inst.to_path_buf(), root.clone());
+            menu = menu.item(
+                PopupMenuItem::new(name.clone())
+                    .checked(shown.as_ref().is_some_and(|x| x.0 == *root))
+                    .on_click(move |_, _, cx| st.update(cx, |s, cx| s.show_server(&i, &r, cx))),
+            );
+        }
+    }
+    if !others.is_empty() {
+        let (st, i) = (store.clone(), inst.to_path_buf());
+        menu = menu.submenu_with_icon(Some(Icon::new(IconName::Plus)), "Pair another server", window, cx, move |mut sub, _, _| {
+            for (root, label) in &others {
+                let (st, i, r) = (st.clone(), i.clone(), root.clone());
+                sub = sub.item(PopupMenuItem::new(label.clone()).on_click(move |_, _, cx| st.update(cx, |s, cx| s.set_pairing(&r, &i, cx))));
+            }
+            sub
+        });
+    }
+    if mine.len() > 1 {
+        let (st, i) = (store.clone(), inst.to_path_buf());
+        menu = menu.item(
+            PopupMenuItem::new("Sync to all servers…")
+                .icon(IconName::ServerCog)
+                .on_click(move |_, window, cx| crate::rigsync::confirm_sync_all(&st, &i, window, cx)),
+        );
+    }
+    if let Some((root, name)) = shown {
+        let st = store.clone();
+        menu = menu.item(
+            PopupMenuItem::new(format!("Unpair {name}"))
+                .icon(IconName::Unlink)
+                .on_click(move |_, _, cx| st.update(cx, |s, cx| s.unpair(&root, cx))),
+        );
+    }
     menu
+}
+
+/// The servers a pack could be paired with next: every server not already
+/// running it, each saying when pairing moves it off another pack.
+fn pair_choices(s: &Store, inst: &Path) -> Vec<(PathBuf, String)> {
+    s.servers()
+        .iter()
+        .filter_map(|x| match s.paired(x) {
+            Some(i) if i.root == inst => None,
+            Some(i) => Some((x.root.clone(), format!("{} (now runs {})", x.name, i.name))),
+            None => Some((x.root.clone(), x.name.clone())),
+        })
+        .collect()
 }
 
 /// An instance's menu, the same wherever it opens: right-click in the list
@@ -3187,11 +3342,14 @@ fn instance_menu(
     view: &Entity<LibraryView>,
     root: &Path,
     header: bool,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let store = view.read(cx).store.clone();
     let s = store.read(cx);
     let Some(inst) = s.instance(root) else { return menu };
+    // Paired: pair another server or unpair here; else pick one on the Server tab.
+    let paired = s.server_tools() && s.server_of(root).is_some();
     let playing = s.running(root).is_some();
     let tools = s.server_tools();
     // Snapshots and backups, counted when the menu opens.
@@ -3211,7 +3369,7 @@ fn instance_menu(
     let vr = || (v.clone(), r.clone());
     let st = || store.clone();
 
-    menu.when(!header, |m| {
+    let menu = menu.when(!header, |m| {
         let (v1, r1) = vr();
         let r2 = r.clone();
         m.item(
@@ -3268,19 +3426,25 @@ fn instance_menu(
                 crate::host_dialog::open(s.clone(), Some(r.clone()), window, cx)
             })
     })
-    .item({
+    ;
+    let menu = if paired {
+        pairing_items(menu, view, root, false, window, cx)
+    } else {
         let (v, s) = vr();
         let st2 = st();
-        PopupMenuItem::new("Pair with a server…")
-            .icon(IconName::ArrowLeftRight)
-            .on_click(move |_, _, cx| {
-                st2.update(cx, |st, cx| st.set_server_tools(true, cx));
-                v.update(cx, |this, cx| {
-                    this.select(s.clone(), cx);
-                    this.set_tab(InstTab::Server, cx);
-                })
-            })
-    })
+        menu.item(
+            PopupMenuItem::new("Pair with a server…")
+                .icon(IconName::ArrowLeftRight)
+                .on_click(move |_, _, cx| {
+                    st2.update(cx, |st, cx| st.set_server_tools(true, cx));
+                    v.update(cx, |this, cx| {
+                        this.select(s.clone(), cx);
+                        this.set_tab(InstTab::Server, cx);
+                    })
+                }),
+        )
+    };
+    menu
     // Peers is a server tool: only with them on.
     .when(tools, |m| {
         let (v, r) = vr();

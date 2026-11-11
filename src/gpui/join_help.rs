@@ -34,8 +34,9 @@ pub struct PreJoin {
 #[derive(Default)]
 pub struct Joins {
     problems: HashMap<PathBuf, Option<JoinProblem>>,
-    /// Each shown pack's comparison, kept current by [`Store::refresh_pre_joins`].
-    checks: HashMap<PathBuf, JoinWatch<Option<PreJoin>>>,
+    /// Each shown pack's comparison with each of its servers (by pack root
+    /// and server root), kept current by [`Store::refresh_pre_joins`].
+    checks: HashMap<(PathBuf, PathBuf), JoinWatch<Option<PreJoin>>>,
     /// Bumped when Hopper changed a server's files (by server root).
     server_files: HashMap<PathBuf, u64>,
     /// The last "Update server" job of each server (by server root).
@@ -81,14 +82,39 @@ impl Store {
         self.job_state(*self.joins.updating.get(server_root)?)
     }
 
-    pub fn pre_join(&self, root: &Path) -> Option<&PreJoin> {
-        self.joins.checks.get(root)?.value()?.as_ref().filter(|p| !p.check.is_empty())
+    /// The pack compared with one of its servers, when something differs.
+    pub fn pre_join_with(&self, root: &Path, server_root: &Path) -> Option<&PreJoin> {
+        self.joins
+            .checks
+            .get(&(root.to_path_buf(), server_root.to_path_buf()))?
+            .value()?
+            .as_ref()
+            .filter(|p| !p.check.is_empty())
     }
 
-    /// The pack or its server changed since the answer shown: a new
+    /// How the pack and one of its servers compare, as far as known:
+    /// `Some(0)` in step, `Some(n)` n things differ, `None` not compared
+    /// yet, being compared again, or unreachable.
+    pub fn differences(&self, root: &Path, server_root: &Path) -> Option<usize> {
+        if self.pre_join_checking(root, server_root) {
+            return None;
+        }
+        let w = self.joins.checks.get(&(root.to_path_buf(), server_root.to_path_buf()))?;
+        w.value()?.as_ref().map(|p| p.check.count())
+    }
+
+    /// Every one of the pack's servers that differs from it, the shown one first.
+    pub fn pre_joins(&self, root: &Path) -> Vec<&PreJoin> {
+        let shown = self.server_of(root).map(|s| s.root.clone());
+        let mut list: Vec<&hopper::server::ServerInfo> = self.servers_of(root);
+        list.sort_by_key(|s| Some(&s.root) != shown.as_ref());
+        list.iter().filter_map(|s| self.pre_join_with(root, &s.root)).collect()
+    }
+
+    /// The pack or that server changed since the answer shown: a new
     /// comparison is on its way.
-    pub fn pre_join_checking(&self, root: &Path) -> bool {
-        match (self.joins.checks.get(root), self.pre_join_key(root)) {
+    pub fn pre_join_checking(&self, root: &Path, server_root: &Path) -> bool {
+        match (self.joins.checks.get(&(root.to_path_buf(), server_root.to_path_buf())), self.pre_join_key(root, server_root)) {
             (Some(w), Some(key)) => w.stale(key),
             _ => false,
         }
@@ -104,8 +130,8 @@ impl Store {
     /// What a pack's comparison depends on, as one number: the pack's mods
     /// and loader, the server's revision, its mods fingerprint and whether
     /// it runs. `None`: not paired.
-    fn pre_join_key(&self, root: &Path) -> Option<u64> {
-        let server = self.server_of(root)?;
+    fn pre_join_key(&self, root: &Path, server_root: &Path) -> Option<u64> {
+        let server = self.servers_of(root).into_iter().find(|s| s.root == server_root)?;
         let inst = self.instance(root)?;
         let stats = self.panel_stats(&server.root);
         let running = match stats {
@@ -128,17 +154,27 @@ impl Store {
         )
     }
 
-    /// Compares the pack with its paired server in the background, unless
-    /// the last answer is still current.
+    /// Compares the pack with each of its paired servers in the background,
+    /// unless the last answer is still current.
     pub fn want_pre_join(&mut self, root: &Path) {
         if !self.server_tools() {
             return;
         }
-        let Some(key) = self.pre_join_key(root) else { return };
-        if !self.joins.checks.entry(root.to_path_buf()).or_default().want(key, FRESH) {
+        let servers: Vec<PathBuf> = self.servers_of(root).iter().map(|s| s.root.clone()).collect();
+        // Unpaired servers' answers go.
+        self.joins.checks.retain(|(r, s), _| r != root || servers.contains(s));
+        for s in servers {
+            self.want_pre_join_with(root, &s);
+        }
+    }
+
+    fn want_pre_join_with(&mut self, root: &Path, server_root: &Path) {
+        let Some(key) = self.pre_join_key(root, server_root) else { return };
+        if !self.joins.checks.entry((root.to_path_buf(), server_root.to_path_buf())).or_default().want(key, FRESH) {
             return;
         }
-        let (Some(server), Some(inst)) = (self.server_of(root).cloned(), self.instance(root).cloned()) else { return };
+        let server = self.servers_of(root).into_iter().find(|s| s.root == server_root).cloned();
+        let (Some(server), Some(inst)) = (server, self.instance(root).cloned()) else { return };
         let anyway = self.settings().sync_anyway.clone();
         let hidden = self.settings().sync_blacklist.clone();
         let root = root.to_path_buf();
@@ -150,7 +186,7 @@ impl Store {
                 let check = hopper::rigsync::join_check(&diff, &hidden, pack_nf, server_nf.as_deref());
                 PreJoin { server_root: server.root.clone(), server: server.name.clone(), check }
             });
-            Msg::PreJoin(root, key, found)
+            Msg::PreJoin(root, server.root.clone(), key, found)
         });
     }
 
@@ -158,22 +194,24 @@ impl Store {
     /// (after each batch of store messages and each panel poll), so the
     /// banner follows syncs, mod changes and restarts without waiting.
     pub fn refresh_pre_joins(&mut self) {
-        let roots: Vec<PathBuf> = self.joins.checks.keys().cloned().collect();
+        let mut roots: Vec<PathBuf> = self.joins.checks.keys().map(|k| k.0.clone()).collect();
+        roots.sort();
+        roots.dedup();
         for r in roots {
             if self.instance(&r).is_none() {
-                self.joins.checks.remove(&r);
+                self.joins.checks.retain(|k, _| k.0 != r);
                 continue;
             }
             self.want_pre_join(&r);
         }
     }
 
-    pub fn pre_join_done(&mut self, root: PathBuf, key: u64, p: Option<PreJoin>, cx: &mut Context<Self>) {
-        if let Some(w) = self.joins.checks.get_mut(&root) {
+    pub fn pre_join_done(&mut self, root: PathBuf, server_root: PathBuf, key: u64, p: Option<PreJoin>, cx: &mut Context<Self>) {
+        if let Some(w) = self.joins.checks.get_mut(&(root.clone(), server_root.clone())) {
             w.finish(key, p);
         }
         // The pack or server changed while it ran: once more.
-        self.want_pre_join(&root);
+        self.want_pre_join_with(&root, &server_root);
         cx.notify();
     }
 }
@@ -414,9 +452,13 @@ pub fn card<V: 'static>(store: &Entity<Store>, root: &Path, p: &JoinProblem, cx:
 pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Context<V>) -> Option<AnyElement> {
     store.update(cx, |s, _| s.want_pre_join(root));
     let s = store.read(cx);
-    let p = s.pre_join(root)?.clone();
+    let all = s.pre_joins(root);
+    let p = (*all.first()?).clone();
+    // Its other servers that differ too, named on a line of their own.
+    let others: Vec<String> = all.iter().skip(1).map(|o| o.server.clone()).collect();
+    let several = s.servers_of(root).len() > 1;
     // The pack or server changed since: its old numbers would mislead.
-    let checking = s.pre_join_checking(root);
+    let checking = s.pre_join_checking(root, &p.server_root);
     let job = s.server_update_job(&p.server_root);
     let pack_nf = s.instance(root).and_then(|i| i.loader.strip_prefix("neoforge-").map(str::to_string));
     let theme = cx.theme().clone();
@@ -466,6 +508,9 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
             Some(j) if !checking && !j.detail.is_empty() => lines.push(format!("Last update: {}.", j.detail)),
             _ => {}
         }
+        if !others.is_empty() {
+            lines.push(format!("{} differ{} from this pack too.", others.join(" and "), if others.len() == 1 { "s" } else { "" }));
+        }
         lines
     };
     let updating = job.as_ref().is_some_and(|j| !j.done);
@@ -474,7 +519,12 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
         .small()
         .primary()
         .icon(IconName::ServerCog)
-        .label(if updating { "Updating…" } else { "Update server" })
+        .label(match (updating, several) {
+            (true, _) => "Updating…".to_string(),
+            // With several servers, which one it updates.
+            (false, true) => format!("Update {}", p.server),
+            (false, false) => "Update server".to_string(),
+        })
         .loading(updating)
         .tooltip("Gives the server this pack's NeoForge and mods (it asks first)")
         .on_click(move |_, window, cx| update_server(&st, &r, &sr, window, cx));
