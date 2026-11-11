@@ -326,7 +326,7 @@ pub fn push(m: &Mirror, results: &mut [SyncResult]) {
 fn server_rel(m: &Mirror, op: &SyncOp) -> Option<String> {
     match op {
         SyncOp::Copy { dst, .. } => rel_in(m, dst),
-        SyncOp::Delete { path } | SyncOp::Disable { path } => rel_in(m, path),
+        SyncOp::Delete { path } | SyncOp::Disable { path } | SyncOp::Enable { path } => rel_in(m, path),
     }
 }
 
@@ -362,6 +362,22 @@ pub fn push_with(r: &mut dyn Remote, m: &Mirror, results: &mut [SyncResult]) {
                 }
                 r.rename(&remote, &join(&m.folder, &off)).with_context(|| format!("turning off {rel}"))?;
                 idx.remove(&rel);
+                return Ok(());
+            }
+            // Turned on: the `.disabled` copy is renamed back, unless a copy
+            // that's on is there already (the off one is then a leftover).
+            if let SyncOp::Enable { .. } = &x.op {
+                let off = format!("{rel}.disabled");
+                if idx.contains_key(&rel) {
+                    if !made_backups {
+                        r.mkdirs(&backups)?;
+                        made_backups = true;
+                    }
+                    r.rename(&join(&m.folder, &off), &join(&backups, &off.replace('/', "_"))).with_context(|| format!("keeping a backup of {off}"))?;
+                } else {
+                    r.rename(&join(&m.folder, &off), &remote).with_context(|| format!("turning on {rel}"))?;
+                }
+                idx.remove(&off);
                 return Ok(());
             }
             // What's there now goes to the server's backups first.
@@ -658,5 +674,27 @@ mod tests {
         assert_eq!(refresh_with(&mut f, &m).unwrap(), 0);
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&inst);
+    }
+
+    /// A mod off on the server and on in the pack: syncing renames it back
+    /// there too, and the mirror knows it.
+    #[test]
+    fn mirror_turns_a_jar_back_on() {
+        let mut f = Fake::default();
+        f.add("/srv/mods/magic-1.jar.disabled", "M1");
+        let root = temp("mirror-on");
+        let site = FileSite { id: "s2".into(), proto: "sftp".into(), ..Default::default() };
+        let m = Mirror { root: root.clone(), site, folder: "/srv".into() };
+        assert_eq!(refresh_with(&mut f, &m).unwrap(), 1);
+        let mut results = crate::sync::execute_local(vec![SyncOp::Enable { path: root.join("mods/magic-1.jar") }], &root);
+        assert!(results.iter().all(|r| r.ok), "{results:?}");
+        assert!(root.join("mods/magic-1.jar").is_file());
+        push_with(&mut f, &m, &mut results);
+        assert!(results.iter().all(|r| r.ok), "{results:?}");
+        assert_eq!(f.files["/srv/mods/magic-1.jar"].0, b"M1");
+        assert!(!f.files.contains_key("/srv/mods/magic-1.jar.disabled"));
+        f.log.clear();
+        assert_eq!(refresh_with(&mut f, &m).unwrap(), 0, "the renamed jar is known");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

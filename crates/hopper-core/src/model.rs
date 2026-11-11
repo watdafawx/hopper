@@ -51,6 +51,9 @@ pub enum DiffAction {
     DeleteFromServer,
     /// Turned off in the pack: turn the server's copy off too.
     DisableOnServer,
+    /// On in the pack while the server has the same file turned off: turn
+    /// it on there too.
+    EnableOnServer,
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +73,8 @@ pub enum SyncOp {
     Delete { path: PathBuf },
     /// Turns a jar off (renames it to `<name>.disabled`).
     Disable { path: PathBuf },
+    /// Turns a jar back on (renames `<name>.disabled` to `path`).
+    Enable { path: PathBuf },
 }
 
 #[derive(Clone, Debug)]

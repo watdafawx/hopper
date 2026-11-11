@@ -101,6 +101,8 @@ fn body(c: &SideCard, _: &mut Window, cx: &mut App) -> AnyElement {
     };
 
     let (tag, status) = match d.status {
+        _ if rigsync::is_on_here(&d) => (widgets::chip(cx.theme().warning), "Off on the server"),
+        _ if rigsync::is_off_here(&d) => (widgets::chip(cx.theme().warning), "Off in this instance"),
         DiffStatus::Same => (widgets::chip(cx.theme().success), "In sync"),
         DiffStatus::OnlyClient if d.skip_reason.is_some() => (widgets::chip(cx.theme().muted_foreground), "Kept off"),
         DiffStatus::OnlyClient => (widgets::chip(cx.theme().warning), "Not on the server"),
@@ -110,11 +112,8 @@ fn body(c: &SideCard, _: &mut Window, cx: &mut App) -> AnyElement {
     };
     let version = |m: &Option<hopper::model::ModInfo>| {
         m.as_ref().map_or("—".to_string(), |m| {
-            if m.version.is_empty() {
-                m.file_name.clone()
-            } else {
-                format!("v{}", m.version)
-            }
+            let v = if m.version.is_empty() { m.file_name.clone() } else { format!("v{}", m.version) };
+            if m.off { format!("{v} (off)") } else { v }
         })
     };
     let line = |label: &str, value: String| {

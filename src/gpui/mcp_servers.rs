@@ -216,15 +216,16 @@ fn sync(server: &ServerInfo, inst: &hopper::instances::Instance, anyway: &std::c
     let (rows, note) = hopper::rigsync::compare(inst, server, anyway)?;
     let mut counts = serde_json::Map::new();
     for r in &rows {
-        let k = hopper::rigsync::status_label(r.status).to_string();
+        let k = hopper::rigsync::row_label(r).to_string();
         let n = counts.get(&k).and_then(Value::as_u64).unwrap_or(0);
         counts.insert(k, json!(n + 1));
     }
-    let side = |m: &Option<hopper::model::ModInfo>| m.as_ref().map(|m| json!({ "file": m.file_name, "version": m.version, "mod_id": m.mod_id }));
+    let side = |m: &Option<hopper::model::ModInfo>| m.as_ref().map(|m| json!({ "file": m.file_name, "version": m.version, "mod_id": m.mod_id, "off": m.off }));
     let row = |r: &hopper::model::DiffEntry| {
         json!({
             "mod": r.mod_name,
-            "state": hopper::rigsync::status_label(r.status),
+            "state": hopper::rigsync::row_label(r),
+            "change": hopper::rigsync::row_change(r),
             "pack": side(&r.client),
             "server": side(&r.server),
             "stays_off_server": hopper::rigsync::is_wont(r),

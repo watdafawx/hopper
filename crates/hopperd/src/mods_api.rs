@@ -55,6 +55,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/mods/list", get(list))
         .route("/api/v1/servers/{id}/mods/meta", put(set_meta))
         .route("/api/v1/servers/{id}/mods/identify", post(identify))
+        .route("/api/v1/servers/{id}/mods/records", put(put_records))
         .route("/api/v1/servers/{id}/mods/toggle", post(toggle))
         .route("/api/v1/servers/{id}/mods/remove", post(remove))
         .route("/api/v1/servers/{id}/mods/search", get(search))
@@ -460,9 +461,39 @@ async fn identify(
         if found > 0 || moved > 0 || inst.addons.len() != before {
             forget_updates(&sid);
         }
-        Ok(json!({ "identified": found, "moved_to_curseforge": moved, "unknown": install::loose_jars(&inst).len() }))
+        Ok(json!({ "identified": found, "moved_to_curseforge": moved, "unknown": install::unnamed_jars(&inst).len() }))
     });
     Ok(Json(json!({ "job": job })))
+}
+
+#[derive(Deserialize)]
+struct RecordsBody {
+    records: Vec<hopper_core::sources::carry::IdPin>,
+}
+
+/// CurseForge / Modrinth records that came along with jars a desktop just
+/// synced here, so they show as those mods instead of bare jars. Each is
+/// attached only to a jar with its sha256 that has no record yet.
+async fn put_records(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<RecordsBody>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let sid = id.clone();
+    let attached = blocking(move || {
+        instance(&e)?;
+        let mut n = 0;
+        Instance::update_on_disk(&e.root, |i| n = hopper_core::sources::carry::attach_ids(i, &b.records))?;
+        Ok(n)
+    })
+    .await?;
+    if attached > 0 {
+        forget_updates(&sid);
+    }
+    Ok(Json(json!({ "attached": attached })))
 }
 
 #[derive(Deserialize)]

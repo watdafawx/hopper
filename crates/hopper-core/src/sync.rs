@@ -17,16 +17,20 @@ pub fn plan(diff: &[DiffEntry], client_mods: &Path, server_mods: &Path) -> Vec<S
             DiffAction::Skip => {}
             DiffAction::CopyToServer => {
                 let Some(c) = &d.client else { continue };
-                // The server's copy is turned off: the new file takes its
-                // place turned off too, and the old one goes (History keeps
-                // it), so no older copy stays beside the new one.
+                let src = client_mods.join(&c.file_name);
+                let src = if c.off { disabled_path(&src) } else { src };
+                // The server's copy is turned off: the new file goes on or
+                // off as it is in the pack, and the old one goes (History
+                // keeps it), so no older copy stays beside the new one.
                 if let Some(s) = d.server.as_ref().filter(|s| s.off) {
                     let dst = server_mods.join(&c.file_name);
-                    let src = client_mods.join(&c.file_name);
-                    ops.push(SyncOp::Copy { src: if c.off { disabled_path(&src) } else { src }, dst: dst.clone() });
-                    ops.push(SyncOp::Disable { path: dst });
-                    // Same name: the turn-off already set the old file aside.
-                    if !s.file_name.eq_ignore_ascii_case(&c.file_name) {
+                    let same_name = s.file_name.eq_ignore_ascii_case(&c.file_name);
+                    ops.push(SyncOp::Copy { src, dst: dst.clone() });
+                    if c.off {
+                        ops.push(SyncOp::Disable { path: dst });
+                    }
+                    // Turned off, the same name: the turn-off already set the old file aside.
+                    if !(c.off && same_name) {
                         ops.push(SyncOp::Delete { path: disabled_path(&server_mods.join(&s.file_name)) });
                     }
                     continue;
@@ -40,7 +44,7 @@ pub fn plan(diff: &[DiffEntry], client_mods: &Path, server_mods: &Path) -> Vec<S
                     });
                 }
                 ops.push(SyncOp::Copy {
-                    src: client_mods.join(&c.file_name),
+                    src,
                     dst: server_mods.join(&c.file_name),
                 });
             }
@@ -58,6 +62,13 @@ pub fn plan(diff: &[DiffEntry], client_mods: &Path, server_mods: &Path) -> Vec<S
                     });
                 }
             }
+            DiffAction::EnableOnServer => {
+                if let Some(s) = &d.server {
+                    ops.push(SyncOp::Enable {
+                        path: server_mods.join(&s.file_name),
+                    });
+                }
+            }
         }
     }
     ops
@@ -68,7 +79,7 @@ pub fn execute(ops: Vec<SyncOp>, server_root: &Path) -> Vec<SyncResult> {
     // A server on a Hopper Server: its side goes over the panel's API.
     let remote = ops.iter().find_map(|op| match op {
         SyncOp::Copy { src, dst } => crate::hopperd::remote_of(dst).or_else(|| crate::hopperd::remote_of(src)),
-        SyncOp::Delete { path } | SyncOp::Disable { path } => crate::hopperd::remote_of(path),
+        SyncOp::Delete { path } | SyncOp::Disable { path } | SyncOp::Enable { path } => crate::hopperd::remote_of(path),
     });
     if let Some((root, r)) = remote {
         // Local backups (a pull replacing a client file) stay local.
@@ -101,6 +112,7 @@ pub fn execute_local(ops: Vec<SyncOp>, server_root: &Path) -> Vec<SyncResult> {
                 SyncOp::Copy { src, dst } => copy(src, dst, &backup_dir),
                 SyncOp::Delete { path } => backup(path, &backup_dir),
                 SyncOp::Disable { path } => disable(path, &backup_dir),
+                SyncOp::Enable { path } => enable(path, &backup_dir),
             };
             match r {
                 Ok(backup) => SyncResult {
@@ -194,6 +206,17 @@ fn disable(path: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
     Ok(saved)
 }
 
+/// Renames `<jar>.disabled` back to the jar. A copy that's on already
+/// wins: the off one is then a leftover and goes to the backups.
+fn enable(path: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let off = disabled_path(path);
+    if path.exists() {
+        return backup(&off, backup_dir);
+    }
+    fs::rename(&off, path)?;
+    Ok(None)
+}
+
 fn copy(src: &Path, dst: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
@@ -259,6 +282,30 @@ mod tests {
         assert!(!mods.join("a.jar").exists());
         assert_eq!(fs::read(mods.join("a.jar.disabled")).unwrap(), b"now");
         assert_eq!(fs::read(r[0].backup.as_ref().unwrap()).unwrap(), b"older");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enable_renames_the_off_jar_back() {
+        let root = std::env::temp_dir().join(format!("hopper-test-on-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mods = root.join("mods");
+        fs::create_dir_all(&mods).unwrap();
+        fs::write(mods.join("a.jar.disabled"), b"off").unwrap();
+        let r = execute(vec![SyncOp::Enable { path: mods.join("a.jar") }], &root);
+        assert!(r[0].ok, "{:?}", r[0].error);
+        assert!(!mods.join("a.jar.disabled").exists());
+        assert_eq!(fs::read(mods.join("a.jar")).unwrap(), b"off");
+        assert!(r[0].backup.is_none());
+        // Already on beside a leftover off copy: the jar that's on stays, the
+        // off copy goes to the backups.
+        fs::write(mods.join("b.jar"), b"on").unwrap();
+        fs::write(mods.join("b.jar.disabled"), b"old").unwrap();
+        let r = execute(vec![SyncOp::Enable { path: mods.join("b.jar") }], &root);
+        assert!(r[0].ok, "{:?}", r[0].error);
+        assert_eq!(fs::read(mods.join("b.jar")).unwrap(), b"on");
+        assert!(!mods.join("b.jar.disabled").exists());
+        assert_eq!(fs::read(r[0].backup.as_ref().unwrap()).unwrap(), b"old");
         let _ = fs::remove_dir_all(&root);
     }
 }

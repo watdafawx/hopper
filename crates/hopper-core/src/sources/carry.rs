@@ -233,6 +233,7 @@ impl CarryReport {
 /// After a sync copied jars into `to` (an instance or a server): their
 /// pins from `from` go along. A Hopper Server gets them over its API.
 pub fn carry(from: &Path, to: &Path, files: &[String]) -> CarryReport {
+    carry_ids(from, to, files);
     let pins = pins_for(from, files);
     let sent = pins.len();
     if sent == 0 {
@@ -254,13 +255,136 @@ pub fn carry(from: &Path, to: &Path, files: &[String]) -> CarryReport {
     })
 }
 
-/// The mods jars among sync results that landed in `root` (file names).
+/// A CurseForge or Modrinth mod's record going along with its jar on a
+/// sync, so the other side lists it as that mod (icon, page, updates)
+/// instead of a bare jar. Attached only to a jar with this sha256.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IdPin {
+    pub file: String,
+    pub sha256: String,
+    pub addon: Addon,
+}
+
+/// The records for `files` (mods jars, on or off) of the folder at `root`
+/// that CurseForge or Modrinth names. Mods from links travel as [`Pin`]s
+/// instead (they wait for the other side to trust their source).
+pub fn id_pins_for(root: &Path, files: &[String]) -> Vec<IdPin> {
+    if files.is_empty() || crate::hopperd::remote_of(root).is_some() {
+        return Vec::new();
+    }
+    let Some(inst) = crate::instances::load(root) else { return Vec::new() };
+    let mods = inst.mods_dir();
+    files
+        .iter()
+        .filter_map(|f| {
+            let name = f.rsplit(['/', '\\']).next().unwrap_or(f).trim_end_matches(".disabled");
+            let a = inst.addons.iter().find(|a| a.folder() == "mods" && a.file_name.eq_ignore_ascii_case(name))?;
+            if a.source.is_some() || (a.project_id == 0 && a.mr_project.is_empty()) {
+                return None;
+            }
+            let path = [mods.join(name), mods.join(format!("{name}.disabled"))].into_iter().find(|p| p.is_file())?;
+            let sha256 = super::sha256_file(&path).ok()?;
+            let mut addon = a.clone();
+            // What the player said about it here stays here; the other side
+            // keeps its own (see `attach_ids`).
+            addon.file_name = name.to_string();
+            addon.from_pack = false;
+            addon.locked = false;
+            addon.locked_version.clear();
+            addon.cf_locked = false;
+            addon.date_added.clear();
+            // A picture in this PC's cache means nothing over there.
+            if !addon.icon.starts_with("http") {
+                addon.icon.clear();
+            }
+            Some(IdPin { file: name.to_string(), sha256, addon })
+        })
+        .collect()
+}
+
+/// Attaches records to the jars of the instance (or server) that have the
+/// pinned sha256 and no record naming them yet: a jar Hopper already knows
+/// keeps its record. A bare entry (see [`crate::install::is_bare`]) gives
+/// way, keeping what it held. Returns how many were attached.
+pub fn attach_ids(inst: &mut Instance, pins: &[IdPin]) -> usize {
+    let mods = inst.mods_dir();
+    let mut n = 0;
+    for p in pins {
+        let file = p.file.rsplit(['/', '\\']).next().unwrap_or(&p.file).trim_end_matches(".disabled").to_string();
+        if file.is_empty() || file.starts_with('.') || !file.to_ascii_lowercase().ends_with(".jar") {
+            continue;
+        }
+        let (path, on) = match (mods.join(&file), mods.join(format!("{file}.disabled"))) {
+            (a, _) if a.is_file() => (a, true),
+            (_, b) if b.is_file() => (b, false),
+            _ => continue,
+        };
+        match super::sha256_file(&path) {
+            Ok(h) if h.eq_ignore_ascii_case(&p.sha256) => {}
+            _ => continue,
+        }
+        let known = inst.addons.iter().any(|a| {
+            a.folder() == "mods" && !crate::install::is_bare(a) && a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(&file)
+        });
+        if known {
+            continue;
+        }
+        let mut a = p.addon.clone();
+        a.file_name = file;
+        a.enabled = on;
+        a.source = None;
+        a.class_id = crate::cf::CLASS_MODS;
+        if a.date_added.is_empty() {
+            a.date_added = crate::time::now_iso();
+        }
+        crate::install::put_identified(inst, a);
+        n += 1;
+    }
+    n
+}
+
+/// [`attach_ids`] on the folder at `root` (saved). Folders without a
+/// `hopper.json` are left alone.
+pub fn apply_ids(root: &Path, pins: &[IdPin]) -> anyhow::Result<usize> {
+    if pins.is_empty() || !root.join(crate::instances::HOPPER_FILE).is_file() {
+        return Ok(0);
+    }
+    let mut n = 0;
+    Instance::update_on_disk(root, |inst| n = attach_ids(inst, pins))?;
+    Ok(n)
+}
+
+/// After a sync copied jars into `to`: their CurseForge / Modrinth records
+/// from `from` go along. A Hopper Server gets them over its API (an older
+/// one without the route keeps plain jars until Identify). Returns how many
+/// were attached; failures are only logged, the sync itself went fine.
+pub fn carry_ids(from: &Path, to: &Path, files: &[String]) -> usize {
+    let pins = id_pins_for(from, files);
+    if pins.is_empty() {
+        return 0;
+    }
+    let r = match crate::hopperd::locate(to) {
+        Some(c) => c.and_then(|(client, id, _)| {
+            let a = client.put(&format!("/servers/{}/mods/records", super::enc(&id)), serde_json::json!({ "records": pins }))?;
+            Ok(a["attached"].as_u64().unwrap_or(0) as usize)
+        }),
+        None => apply_ids(to, &pins),
+    };
+    r.unwrap_or_else(|e| {
+        log::warn!("mod records didn't go along to {}: {e:#}", to.display());
+        0
+    })
+}
+
+/// The mods jars among sync results that landed in `root`, or were turned
+/// on or off there (file names): their records go along.
 pub fn copied_jars(results: &[crate::model::SyncResult], root: &Path) -> Vec<String> {
+    use crate::model::SyncOp;
     results
         .iter()
         .filter(|r| r.ok)
         .filter_map(|r| match &r.op {
-            crate::model::SyncOp::Copy { dst, .. } if dst.starts_with(root) => {
+            SyncOp::Copy { dst, .. } | SyncOp::Enable { path: dst } | SyncOp::Disable { path: dst } if dst.starts_with(root) => {
                 let parent = dst.parent()?.file_name()?.to_string_lossy().to_lowercase();
                 let name = dst.file_name()?.to_string_lossy().into_owned();
                 (parent == "mods" && name.to_lowercase().trim_end_matches(".disabled").ends_with(".jar")).then_some(name)
