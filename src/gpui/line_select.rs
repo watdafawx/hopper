@@ -2,12 +2,14 @@
 //! picked with the mouse and copied: drag, double-click for a word,
 //! triple-click for a line, Ctrl+A, Ctrl+C and a right-click menu.
 //!
-//! The view only builds the lines in sight, so a pick is kept as stable
-//! line keys and characters, not as rows: it survives scrolling, filtering
+//! Long lines wrap inside the view (a log line is cut into rows of as many
+//! characters as fit, the font being monospace) and the lines the list
+//! builds are only those in sight, so a pick is kept as stable line keys
+//! and characters, not as rows: it survives scrolling, filtering, resizing
 //! and lines arriving, and copying reads the text from the owner.
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{ActiveTheme as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -16,8 +18,12 @@ use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
 
-/// Row height, in rem.
+/// Height of one row of text, in rem. A line that wraps is several rows.
 const ROW_H: f32 = 1.25;
+
+/// Room kept free at the right of the text, so a full row never touches
+/// the scrollbar.
+const RIGHT_ROOM: f32 = 6.;
 
 /// A view's lines, as its owner keeps them.
 pub trait Lines: 'static + Sized {
@@ -45,8 +51,19 @@ pub struct LineSelect {
     char_w: Pixels,
     /// The line number column's width, from the last frame.
     gutter_w: Pixels,
+    /// Characters per row, from the last frame (a line longer than this
+    /// wraps onto more rows).
+    cols: usize,
+    /// How many lines the list was told about, and the first and last line
+    /// key, to tell lines arriving from lines replaced.
+    seen: Option<(usize, Option<usize>, Option<usize>)>,
+    /// Where the owner asked to scroll since the last frame (true: the
+    /// end), applied again once the list has been told the new lines.
+    goto: Cell<Option<bool>>,
     focus: FocusHandle,
-    pub scroll: UniformListScrollHandle,
+    /// The list: its items are lines, of whatever height their wrapping
+    /// makes them.
+    pub scroll: ListState,
 }
 
 impl LineSelect {
@@ -57,15 +74,20 @@ impl LineSelect {
             bounds: Rc::new(Cell::new(Bounds::default())),
             char_w: px(7.),
             gutter_w: px(0.),
+            cols: usize::MAX,
+            seen: None,
+            goto: Cell::new(None),
             focus: cx.focus_handle(),
-            scroll: UniformListScrollHandle::new(),
+            scroll: ListState::new(0, ListAlignment::Top, px(400.)),
         }
     }
 
-    /// Drops the pick (another file is shown, say).
+    /// Drops the pick and what is known about the lines (another file is
+    /// shown, say).
     pub fn clear(&mut self) {
         self.sel = None;
         self.dragging = false;
+        self.seen = None;
     }
 
     /// Text is picked or being picked: a live view shouldn't jump away.
@@ -73,10 +95,68 @@ impl LineSelect {
         self.sel.is_some() || self.dragging
     }
 
-    pub fn scroll_to_end(&self, rows: usize) {
-        if rows > 0 {
-            self.scroll.scroll_to_item(rows - 1, ScrollStrategy::Bottom);
+    /// Scrolls to the last row.
+    pub fn scroll_to_end(&self) {
+        self.goto.set(Some(true));
+        self.scroll.scroll_to_end();
+    }
+
+    /// Scrolls to the first row.
+    pub fn scroll_to_start(&self) {
+        self.goto.set(Some(false));
+        self.scroll.scroll_to(ListOffset { item_ix: 0, offset_in_item: px(0.) });
+    }
+
+    /// The view shows its last row (or isn't laid out yet, or has nothing
+    /// to scroll): a live view follows new lines only then.
+    pub fn at_end(&self) -> bool {
+        if self.scroll.viewport_bounds().size.height <= px(0.) {
+            return true;
         }
+        let max = self.scroll.max_offset_for_scrollbar().y;
+        let at = -self.scroll.scroll_px_offset_for_scrollbar().y;
+        max <= px(0.) || at >= max - px(2.)
+    }
+}
+
+/// Tells the list what the owner's rows are now. Lines that only arrived at
+/// the end, or went from the top, keep the reader's place; anything else
+/// is read again from where the reader was.
+fn sync<T: Lines>(this: &mut T, hint: Pixels) {
+    let n = this.row_count();
+    let first = this.row_key(0);
+    let last = n.checked_sub(1).and_then(|r| this.row_key(r));
+    let ls = this.line_select_mut();
+    let now = (n, first, last);
+    let before = ls.seen.replace(now);
+    let list = &ls.scroll;
+    match before {
+        Some(b) if b == now => {}
+        Some((n0, Some(f0), _)) if first == Some(f0) && n >= n0 => list.splice(n0..n0, n - n0),
+        Some((n0, Some(f0), _))
+            if first.is_some_and(|f| f > f0) && last.zip(first).is_some_and(|(l, f)| l + 1 - f == n) =>
+        {
+            // The oldest lines went (a console's window moved on).
+            let gone = (first.unwrap_or(f0) - f0).min(n0);
+            list.splice(0..gone, 0);
+            let kept = n0 - gone;
+            if n >= kept {
+                list.splice(kept..kept, n - kept);
+            } else {
+                list.reset(n);
+            }
+        }
+        Some(_) => {
+            let at = list.logical_scroll_top();
+            list.reset_with_uniform_height(n, hint);
+            list.scroll_to(ListOffset { item_ix: at.item_ix.min(n), ..at });
+        }
+        None => list.reset_with_uniform_height(n, hint),
+    }
+    match ls.goto.take() {
+        Some(true) => list.scroll_to_end(),
+        Some(false) => list.scroll_to(ListOffset { item_ix: 0, offset_in_item: px(0.) }),
+        None => {}
     }
 }
 
@@ -106,9 +186,20 @@ pub fn view<T: Lines>(
         .max(3);
     let ls = this.line_select_mut();
     ls.gutter_w = ls.char_w * (digits + 2) as f32;
+    // Characters per row: what the box holds beside the numbers. Until the
+    // box has been laid out once, nothing wraps.
+    let room = ls.bounds.get().size.width - ls.gutter_w - px(RIGHT_ROOM);
+    let cols = if room > ls.char_w * 4. { ((room / ls.char_w) as usize).max(4) } else { usize::MAX };
+    let ls = this.line_select_mut();
+    if ls.cols != cols {
+        ls.cols = cols;
+        ls.scroll.remeasure();
+    }
+    sync(this, rems(ROW_H).to_pixels(window.rem_size()));
     let ls = this.line_select();
     let (focus, scroll, has) = (ls.focus.clone(), ls.scroll.clone(), ls.sel.is_some());
     let view = cx.entity();
+    let weak = view.downgrade();
     div()
         .id(id)
         .flex_1()
@@ -157,10 +248,11 @@ pub fn view<T: Lines>(
                     )
                 })
                 .child(
-                    uniform_list(id, n, cx.processor(|this: &mut T, r: Range<usize>, _, cx| rows(this, r, cx)))
-                        .track_scroll(&scroll)
-                        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-                        .size_full(),
+                    list(scroll.clone(), move |ix, _, cx| {
+                        weak.update(cx, |this: &mut T, cx| row(this, ix, cx))
+                            .unwrap_or_else(|_| div().into_any_element())
+                    })
+                    .size_full(),
                 )
                 .child(drag_watch(this, cx)),
         )
@@ -168,64 +260,53 @@ pub fn view<T: Lines>(
         .into_any_element()
 }
 
-fn rows<T: Lines>(this: &mut T, range: Range<usize>, cx: &mut Context<T>) -> Vec<AnyElement> {
+/// Row `ix` of the list: one line, as the rows its wrapping makes, the
+/// number beside the first. The text goes in the column after the numbers,
+/// so the rows after the first line up under the first one's text.
+fn row<T: Lines>(this: &mut T, ix: usize, cx: &mut Context<T>) -> AnyElement {
     let (sel_bg, muted) = (cx.theme().selection, cx.theme().muted_foreground);
-    let (cw, gw) = (this.line_select().char_w, this.line_select().gutter_w);
-    range
-        .filter_map(|row| {
-            let key = this.row_key(row)?;
-            let text = this.key_text(key)?;
-            let picked = picked_cols(this.line_select().sel, key, text.chars().count());
-            Some(
-                h_flex()
-                    .w_full()
+    let ls = this.line_select();
+    let (cw, gw, cols) = (ls.char_w, ls.gutter_w, ls.cols.max(1));
+    let Some(key) = this.row_key(ix) else { return div().into_any_element() };
+    let Some(text) = this.key_text(key) else { return div().into_any_element() };
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let picked = picked_cols(this.line_select().sel, key, len);
+    let color = this.row_color(ix, cx);
+    let rows = len.div_ceil(cols).max(1);
+    h_flex()
+        .w_full()
+        .items_start()
+        .child(
+            div()
+                .w(gw)
+                .flex_none()
+                .h(rems(ROW_H))
+                .pr(cw * 2.)
+                .text_right()
+                .text_color(muted.opacity(0.6))
+                .child((key + 1).to_string()),
+        )
+        .child(
+            v_flex().flex_1().min_w_0().text_color(color).children((0..rows).map(|k| {
+                let (start, end) = (k * cols, ((k + 1) * cols).min(len));
+                // The pick runs one past a line's last character when it
+                // goes on to the next line.
+                let mark = picked.as_ref().and_then(|r| {
+                    let (a, b) = (r.start.max(start), r.end.min(if k + 1 == rows { end + 1 } else { end }));
+                    (a < b).then_some((a - start, b - start))
+                });
+                div()
+                    .relative()
                     .h(rems(ROW_H))
                     .whitespace_nowrap()
-                    .child(
-                        div()
-                            .w(gw)
-                            .flex_none()
-                            .pr(cw * 2.)
-                            .text_right()
-                            .text_color(muted.opacity(0.6))
-                            .child((key + 1).to_string()),
-                    )
-                    .child(
-                        div()
-                            .relative()
-                            .h_full()
-                            .flex_none()
-                            .text_color(this.row_color(row, cx))
-                            .when_some(picked, |d, r| {
-                                d.child(
-                                    div()
-                                        .absolute()
-                                        .top_0()
-                                        .bottom_0()
-                                        .left(cw * r.start as f32)
-                                        .w(cw * (r.end - r.start) as f32)
-                                        .bg(sel_bg),
-                                )
-                            })
-                            .child(div().relative().child(text)),
-                    )
-                    .into_any_element(),
-            )
-        })
-        .collect()
-}
-
-/// A row's height as laid out: rounded to whole pixels, so taken from the
-/// list's own content height rather than the rem size.
-fn row_height(scroll: &UniformListScrollHandle, rows: usize, window: &Window) -> Pixels {
-    scroll
-        .0
-        .borrow()
-        .last_item_size
-        .filter(|_| rows > 0)
-        .map(|s| s.contents.height / rows as f32)
-        .filter(|h| *h > px(0.))
-        .unwrap_or_else(|| rems(ROW_H).to_pixels(window.rem_size()))
+                    .when_some(mark, |d, (a, b)| {
+                        d.child(div().absolute().top_0().bottom_0().left(cw * a as f32).w(cw * (b - a) as f32).bg(sel_bg))
+                    })
+                    .child(div().relative().child(chars[start..end].iter().collect::<String>()))
+            })),
+        )
+        .into_any_element()
 }
 
 /// The picked characters of the line with key `key` (`len` long); one
@@ -240,28 +321,40 @@ fn picked_cols(sel: Option<Sel>, key: usize, len: usize) -> Option<Range<usize>>
     (start < end).then_some(start..end)
 }
 
-/// The line key and character under `pos`, clamped to the lines.
-fn hit<T: Lines>(this: &T, pos: Point<Pixels>, window: &Window) -> Option<(usize, usize)> {
+/// The line key and character under `pos`, clamped to the lines. Rows
+/// are found from where the list put the lines on screen, so wrapped
+/// lines and any zoom hit the right character.
+fn hit<T: Lines>(this: &T, pos: Point<Pixels>) -> Option<(usize, usize)> {
     let n = this.row_count();
     if n == 0 {
         return None;
     }
     let ls = this.line_select();
-    let b = ls.bounds.get();
-    let off = ls.scroll.0.borrow().base_handle.offset();
-    let lh = row_height(&ls.scroll, this.row_count(), window);
-    let y = pos.y - b.origin.y - off.y;
-    let row = if y < px(0.) { 0 } else { ((y / lh) as usize).min(n - 1) };
-    let x = (pos.x - b.origin.x - off.x - ls.gutter_w).max(px(0.));
-    let col = (x / ls.char_w).round() as usize;
-    let key = this.row_key(row)?;
+    let view = ls.scroll.viewport_bounds();
+    let y = pos.y.max(view.top()).min(view.bottom() - px(1.));
+    let mut found = None;
+    for ix in ls.scroll.logical_scroll_top().item_ix.min(n - 1)..n {
+        let Some(b) = ls.scroll.bounds_for_item(ix) else { break };
+        found = Some((ix, b));
+        if y < b.bottom() {
+            break;
+        }
+    }
+    let (ix, b) = found?;
+    let key = this.row_key(ix)?;
     let len = this.key_text(key).map_or(0, |t| t.chars().count());
-    Some((key, col.min(len)))
+    let cols = ls.cols.max(1);
+    let rows = len.div_ceil(cols).max(1);
+    let lh = b.size.height / rows as f32;
+    let k = if y < b.top() || lh <= px(0.) { 0 } else { (((y - b.top()) / lh) as usize).min(rows - 1) };
+    let x = (pos.x - view.left() - ls.gutter_w).max(px(0.));
+    let col = ((x / ls.char_w).round() as usize).min(cols);
+    Some((key, (k * cols + col).min(len)))
 }
 
 fn mouse_down<T: Lines>(this: &mut T, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<T>) {
     window.focus(&this.line_select().focus, cx);
-    let Some(at) = hit(this, e.position, window) else { return };
+    let Some(at) = hit(this, e.position) else { return };
     let text = this.key_text(at.0).unwrap_or_default();
     let ls = this.line_select_mut();
     ls.dragging = true;
@@ -280,18 +373,14 @@ fn mouse_down<T: Lines>(this: &mut T, e: &MouseDownEvent, window: &mut Window, c
 fn drag_to<T: Lines>(this: &mut T, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<T>) {
     // Past the top or bottom, the lines scroll along.
     let ls = this.line_select();
-    let b = ls.bounds.get();
-    let lh = row_height(&ls.scroll, this.row_count(), window);
-    let base = ls.scroll.0.borrow().base_handle.clone();
-    let mut off = base.offset();
-    if pos.y < b.origin.y {
-        off.y = (off.y + lh).min(px(0.));
-        base.set_offset(off);
-    } else if pos.y > b.bottom() {
-        off.y -= lh;
-        base.set_offset(off);
+    let view = ls.scroll.viewport_bounds();
+    let step = rems(ROW_H).to_pixels(window.rem_size());
+    if pos.y < view.top() {
+        ls.scroll.scroll_by(-step);
+    } else if pos.y > view.bottom() {
+        ls.scroll.scroll_by(step);
     }
-    let at = hit(this, pos, window);
+    let at = hit(this, pos);
     if let (Some(at), Some(sel)) = (at, this.line_select_mut().sel.as_mut()) {
         sel.head = at;
     }
@@ -343,7 +432,13 @@ fn drag_watch<T: Lines>(this: &T, cx: &mut Context<T>) -> impl IntoElement + use
     let bounds = this.line_select().bounds.clone();
     let view = cx.entity().downgrade();
     canvas(
-        move |b, _, _| bounds.set(b),
+        // A new width changes how lines wrap: draw again with it.
+        move |b, window, _| {
+            if bounds.get().size.width != b.size.width {
+                window.refresh();
+            }
+            bounds.set(b)
+        },
         move |_, _, window, _| {
             let v = view.clone();
             window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {

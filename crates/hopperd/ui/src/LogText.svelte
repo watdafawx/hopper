@@ -3,7 +3,10 @@
   // then what the server writes to it, read every 2 s while it runs and
   // the page is in view. Search, "Errors and warnings only", lines coloured
   // by level (desktop's hopper::logs::level). Only the lines in view are
-  // drawn, so a long log stays quick.
+  // drawn, so a long log stays quick. Long lines wrap inside the view: a
+  // line takes as many rows as its characters need (the font is monospace,
+  // so that is a sum, no measuring per line), the number stays on its first
+  // row and the rest are indented to the text.
   import { tick, onDestroy } from 'svelte';
   import { Search, X, Share2, FileText, ArrowDown, ScrollText } from '@lucide/svelte';
   import { api } from './lib/api.js';
@@ -31,6 +34,9 @@
   let box = $state();
   let top = $state(0);
   let height = $state(600);
+  let width = $state(800);
+  let probe = $state();
+  let cw = $state(7.2);
   let stuck = $state(true);
   // Bumped when the file changes: a read still out is dropped.
   let gen = 0;
@@ -124,13 +130,39 @@
   });
   const count = $derived(shown ? shown.length : lines.length);
 
-  const first = $derived(Math.max(0, Math.floor(top / ROW) - 30));
-  const last = $derived(Math.min(count, Math.ceil((top + height) / ROW) + 30));
+  // Width of one character, read from a hidden run of 100.
+  $effect(() => {
+    width;
+    if (probe) cw = probe.getBoundingClientRect().width / 100 || 7.2;
+  });
+  const gwCh = $derived(Math.max(4, String(lines.length).length) + 2);
+  // Characters per row. The row is given exactly this width (plus a pixel)
+  // so the browser wraps where the sum says it does.
+  const cols = $derived(Math.max(8, Math.floor((width - 24) / cw) - gwCh));
+  const nrows = (i) => Math.max(1, Math.ceil(lines[i].length / cols));
+  // offs[k] = top of line k; offs[count] = total height.
+  const offs = $derived.by(() => {
+    cols;
+    const o = new Float64Array(count + 1);
+    for (let k = 0; k < count; k++) o[k + 1] = o[k] + nrows(shown ? shown[k] : k) * ROW;
+    return o;
+  });
+  // The last line starting at or above y.
+  function at(y) {
+    let lo = 0, hi = count - 1;
+    while (lo < hi) {
+      const m = (lo + hi + 1) >> 1;
+      if (offs[m] <= y) lo = m; else hi = m - 1;
+    }
+    return lo;
+  }
+  const first = $derived(Math.max(0, at(top) - 30));
+  const last = $derived(Math.min(count, at(top + height) + 31));
   const rows = $derived.by(() => {
     const out = [];
     for (let k = first; k < last; k++) {
       const i = shown ? shown[k] : k;
-      out.push({ i, text: lines[i], l: levels[i] });
+      out.push({ i, k, text: lines[i].replace(/	/g, '    '), l: levels[i] });
     }
     return out;
   });
@@ -164,8 +196,9 @@
     <button class="btn sm ghost" title="Opens the file in the editor" onclick={() => openFile(path)}><FileText size={13} />Open file</button>
     <button class="btn sm" title="Upload it and get a link for Discord or a bug report. The log becomes public." onclick={() => onShare(path)}><Share2 size={13} />Share on mclo.gs</button>
   </div>
+  <span class="probe" bind:this={probe} aria-hidden="true">{'0'.repeat(100)}</span>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <div class="lines" bind:this={box} bind:clientHeight={height} onscroll={onScroll} tabindex="0" role="log" aria-label={name}>
+  <div class="lines" bind:this={box} bind:clientHeight={height} bind:clientWidth={width} onscroll={onScroll} tabindex="0" role="log" aria-label={name}>
     {#if err}<div class="err note">Couldn't read {name}: {err}</div>{/if}
     {#if loading}
       <div class="muted note row"><span class="spinner"></span>Reading {name}…</div>
@@ -177,9 +210,9 @@
       <div class="muted note">Nothing matches.</div>
     {:else}
       {#if cut}<div class="muted note tiny">The start of the file isn't shown here (it's too long). Open the file or share it for all of it.</div>{/if}
-      <div class="inner" style="height: {count * ROW}px; --gw: {Math.max(4, String(lines.length).length) + 2}ch">
-        {#each rows as r, k (r.i)}
-          <div class="ln {r.l}" class:tr={r.l && !levelOf(r.text)} style="top: {(first + k) * ROW}px" data-n={r.i + 1}>{r.text}</div>
+      <div class="inner" style="height: {offs[count]}px; --gw: {gwCh}ch">
+        {#each rows as r (r.i)}
+          <div class="ln {r.l}" class:tr={r.l && !levelOf(lines[r.i])} style="top: {offs[r.k]}px; width: {(gwCh + cols) * cw + 1}px" data-n={r.i + 1}>{r.text}</div>
         {/each}
       </div>
     {/if}
@@ -193,12 +226,13 @@
   .find { padding: 3px 8px; width: 220px; }
   .find .x { color: var(--muted); display: grid; place-items: center; }
   .only { gap: 6px; color: var(--subtle); white-space: nowrap; }
-  .lines { flex: 1; overflow: auto; padding: 10px 12px; font: 12px/19px var(--mono); color: var(--text); outline: none; }
+  .lines { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 10px 12px; font: 12px/19px var(--mono); color: var(--text); outline: none; }
   .lines:focus-visible { box-shadow: inset 0 0 0 1px var(--acc); }
   .lines .empty-state { height: 100%; }
   .note { padding-left: 2px; margin-bottom: 6px; }
-  .inner { position: relative; min-width: max-content; }
-  .ln { position: absolute; left: 0; height: 19px; padding-left: var(--gw); white-space: pre; }
+  .inner { position: relative; }
+  .ln { position: absolute; left: 0; box-sizing: border-box; padding-left: var(--gw); white-space: break-spaces; word-break: break-all; }
+  .probe { position: absolute; visibility: hidden; pointer-events: none; font: 12px/19px var(--mono); white-space: pre; }
   /* The number is drawn, not text: picking and copying leave it out. */
   .ln::before { content: attr(data-n); position: absolute; left: 0; width: calc(var(--gw) - 2ch); text-align: right; color: var(--muted); opacity: .6; user-select: none; }
   .ln::selection { background: #f9731659; }

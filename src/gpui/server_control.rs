@@ -397,12 +397,12 @@ impl ServerControl {
             && lines != self.console
         {
             // Follows new lines while at the bottom and nothing is picked.
-            let follow = !self.lines.is_active() && self.lines.scroll.is_scrolled_to_end().unwrap_or(true);
+            let follow = !self.lines.is_active() && self.lines.at_end();
             self.console_base += crate::line_select::shift(&self.console, &lines);
             self.console = lines;
             self.refilter(cx);
             if follow {
-                self.lines.scroll_to_end(self.console_rows());
+                self.lines.scroll_to_end();
             }
         }
         match &stats {
@@ -1897,7 +1897,7 @@ impl ServerControl {
                         if let Some(f) = CONSOLE_FILTERS.get(*ix) {
                             this.console_filter = *f;
                             this.refilter(cx);
-                            this.lines.scroll_to_end(this.console_rows());
+                            this.lines.scroll_to_end();
                             cx.notify();
                         }
                     })),

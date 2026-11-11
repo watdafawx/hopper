@@ -336,7 +336,7 @@ impl ServerLogsView {
                 let got = cx.background_spawn(async move { read_log(&r, rel, from) }).await;
                 let next = this.update(cx, |this, cx| {
                     // Follow only a reader who is at the bottom already.
-                    let at_end = this.lines.scroll.is_scrolled_to_end().unwrap_or(true);
+                    let at_end = this.lines.at_end();
                     let Some(log) = this.log.as_mut().filter(|l| l.rel == rel) else {
                         return None;
                     };
@@ -378,7 +378,7 @@ impl ServerLogsView {
     }
 
     fn scroll_to_end(&self) {
-        self.lines.scroll_to_end(self.line_count());
+        self.lines.scroll_to_end();
     }
 
     /// How many lines the viewer shows (all, or the filtered ones).
