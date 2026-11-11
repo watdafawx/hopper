@@ -267,6 +267,22 @@ servers but doesn't yet reattach to them after it restarts.
 Releases: pushing a `hopperd-v<version>` tag builds Windows and Linux
 downloads and the Docker image.
 
+**Updating itself.** On Windows and Linux (x64 and arm64) the panel looks
+for a new release every half hour and, with "Update by itself" on (the
+default) or when the owner picks Update now (or an older version in
+Other versions), downloads it from the project's GitHub releases, puts it
+in place of the running program and restarts once no job is running. The
+download's length is checked against what GitHub lists and it must be a
+program for the same system and CPU. On Linux the new file is written
+next to the running one and renamed over it, the version before stays
+beside it as `hopperd.old`, and the panel starts the new program in its own
+place (under systemd it keeps the same process, so the unit never sees it
+stop). For that, the folder holding `hopperd` has to be writable by the user
+the service runs as: run `sudo hopperd service install` from a program in a
+folder that user owns (for example `~/hopperd/hopperd`), not
+`/usr/local/bin`. It says why when it can't update: in Docker (pull the new
+image instead), in a development build, or in a folder it can't write to.
+
 ## Docker
 
 The image (amd64 and arm64) has Java 8, 17 and 21, so it runs servers for

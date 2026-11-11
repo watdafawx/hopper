@@ -10,6 +10,8 @@ publish = false
 
 [dependencies]
 zip.workspace = true
+# Reading the Linux release (.tar.gz) when updating itself.
+flate2.workspace = true
 hopper-core.workspace = true
 anyhow.workspace = true
 log.workspace = true
