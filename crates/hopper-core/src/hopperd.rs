@@ -13,7 +13,7 @@ use anyhow::{Context as _, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,16 @@ pub const SERVICE: &str = "_hopperd._tcp.local.";
 const CHUNK: usize = 8 * 1024 * 1024;
 /// Upload chunks for the panel's incoming folder (zips to make servers from).
 const INCOMING_CHUNK: usize = 2 * 1024 * 1024 - 64 * 1024;
+/// One chunk's limits. Sending it may take 5 minutes (8 MB at under
+/// 30 KB/s), the reply then a minute (the panel answers as soon as the
+/// chunk is written), the whole chunk 7 minutes. A connection that dies
+/// quietly mid-chunk then ends in an error the upload recovers from,
+/// instead of a wait of up to an hour that looks like a stuck task.
+const CHUNK_SEND: Duration = Duration::from_secs(300);
+const CHUNK_REPLY: Duration = Duration::from_secs(60);
+const CHUNK_WAIT: Duration = Duration::from_secs(420);
+/// Chunks in a row that may fail before an upload gives up.
+const CHUNK_TRIES: u32 = 5;
 
 /// Which Hopper Server a server is on, and its id there.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,6 +255,17 @@ fn agent_with(base: &str, trust: &Trust) -> ureq::Agent {
 /// take. `reply`: how long to wait for the reply to start. `total`: the
 /// whole request.
 fn agent_timed(base: &str, connect: Duration, reply: Option<Duration>, total: Duration, trust: &Trust) -> ureq::Agent {
+    agent_limits(base, connect, None, reply, total, trust)
+}
+
+/// An agent for upload chunks (see [`CHUNK_SEND`]).
+fn agent_chunk(base: &str, trust: &Trust) -> ureq::Agent {
+    agent_limits(base, CONNECT_WAIT, Some(CHUNK_SEND), Some(CHUNK_REPLY), CHUNK_WAIT, trust)
+}
+
+/// [`agent_timed`], with `send` limiting how long the request body may
+/// take to go out.
+fn agent_limits(base: &str, connect: Duration, send: Option<Duration>, reply: Option<Duration>, total: Duration, trust: &Trust) -> ureq::Agent {
     use ureq::tls::{Certificate, RootCerts, TlsConfig};
     let tls = match trust {
         Trust::Pinned(pem) => match Certificate::from_pem(pem.as_bytes()) {
@@ -262,6 +283,7 @@ fn agent_timed(base: &str, connect: Duration, reply: Option<Duration>, total: Du
         .timeout_global(Some(total))
         .timeout_resolve(Some(connect))
         .timeout_connect(Some(connect))
+        .timeout_send_body(send)
         .timeout_recv_response(reply)
         .user_agent(concat!("Hopper/", env!("CARGO_PKG_VERSION")))
         .proxy(proxy)
@@ -451,10 +473,12 @@ pub struct Client {
     agent: ureq::Agent,
     /// For file transfers, which take as long as they take.
     slow: ureq::Agent,
-    /// With a pinned CA: the same two agents checking with the web roots,
+    /// For upload chunks, each with its own limits.
+    chunk: ureq::Agent,
+    /// With a pinned CA: the same agents checking with the web roots,
     /// for when the panel answers with a Let's Encrypt certificate (its
     /// automatic certificate, served to the internet by IP or name).
-    web: Option<std::sync::OnceLock<(ureq::Agent, ureq::Agent)>>,
+    web: Option<std::sync::OnceLock<(ureq::Agent, ureq::Agent, ureq::Agent)>>,
     /// The last answer came with the web roots, so start with them.
     on_web: std::sync::atomic::AtomicBool,
 }
@@ -501,6 +525,17 @@ fn reply(resp: anyhow::Result<ureq::http::Response<ureq::Body>>) -> anyhow::Resu
     }
 }
 
+/// Which of a client's agents a request goes through.
+#[derive(Clone, Copy)]
+enum Lane {
+    /// A normal call, answered within seconds.
+    Call,
+    /// A whole file going one way, as long as it takes.
+    Slow,
+    /// One upload chunk.
+    Chunk,
+}
+
 impl Client {
     /// `ca`: the panel's certificate authority, pinned at pairing.
     pub fn new(url: &str, token: &str, ca: &str) -> Self {
@@ -508,9 +543,9 @@ impl Client {
         let trust = trust_for(&base, ca);
         Client {
             agent: agent_with(&base, &trust),
-            // No limit on the reply: the panel answers a chunk once it's
-            // written, and a download as long as it takes.
+            // No limit on the reply: a download takes as long as it takes.
             slow: agent_timed(&base, CONNECT_WAIT, None, Duration::from_secs(3600), &trust),
+            chunk: agent_chunk(&base, &trust),
             web: matches!(trust, Trust::Pinned(_)).then(std::sync::OnceLock::new),
             on_web: Default::default(),
             base,
@@ -575,22 +610,28 @@ impl Client {
     /// check refuses is tried with the other, which is kept for next time.
     fn send_via(
         &self,
-        slow: bool,
+        lane: Lane,
         f: impl Fn(&ureq::Agent) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
     ) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
         use std::sync::atomic::Ordering::Relaxed;
         let pick = |web: bool| -> &ureq::Agent {
-            match (&self.web, web) {
+            let (a, s, c) = match (&self.web, web) {
                 (Some(w), true) => {
-                    let (a, s) = w.get_or_init(|| {
+                    let (a, s, c) = w.get_or_init(|| {
                         (
                             agent_with(&self.base, &Trust::Web),
                             agent_timed(&self.base, CONNECT_WAIT, None, Duration::from_secs(3600), &Trust::Web),
+                            agent_chunk(&self.base, &Trust::Web),
                         )
                     });
-                    if slow { s } else { a }
+                    (a, s, c)
                 }
-                _ => if slow { &self.slow } else { &self.agent },
+                _ => (&self.agent, &self.slow, &self.chunk),
+            };
+            match lane {
+                Lane::Call => a,
+                Lane::Slow => s,
+                Lane::Chunk => c,
             }
         };
         let web = self.on_web.load(Relaxed);
@@ -607,19 +648,19 @@ impl Client {
     }
 
     pub fn get(&self, path: &str) -> anyhow::Result<Value> {
-        reply(self.send_via(false, |a| a.get(&self.url(path)).header("Authorization", &self.auth()).call()))
+        reply(self.send_via(Lane::Call, |a| a.get(&self.url(path)).header("Authorization", &self.auth()).call()))
     }
 
     pub fn post(&self, path: &str, body: Value) -> anyhow::Result<Value> {
-        reply(self.send_via(false, |a| a.post(&self.url(path)).header("Authorization", &self.auth()).send_json(&body)))
+        reply(self.send_via(Lane::Call, |a| a.post(&self.url(path)).header("Authorization", &self.auth()).send_json(&body)))
     }
 
     pub fn put(&self, path: &str, body: Value) -> anyhow::Result<Value> {
-        reply(self.send_via(false, |a| a.put(&self.url(path)).header("Authorization", &self.auth()).send_json(&body)))
+        reply(self.send_via(Lane::Call, |a| a.put(&self.url(path)).header("Authorization", &self.auth()).send_json(&body)))
     }
 
     pub fn delete(&self, path: &str) -> anyhow::Result<Value> {
-        reply(self.send_via(false, |a| a.delete(&self.url(path)).header("Authorization", &self.auth()).call()))
+        reply(self.send_via(Lane::Call, |a| a.delete(&self.url(path)).header("Authorization", &self.auth()).call()))
     }
 
     /// Unpairs this PC in the panel, so it leaves Access & devices and the
@@ -962,10 +1003,18 @@ impl Client {
     /// Uploads `local` to `rel` in the server folder, replacing what is
     /// there (the panel keeps the old file in its trash).
     pub fn upload(&self, id: &str, local: &Path, rel: &str) -> anyhow::Result<()> {
+        self.upload_with(id, local, rel, &|_| {})
+    }
+
+    /// [`Client::upload`], telling `progress` the bytes the panel has so far.
+    pub fn upload_with(&self, id: &str, local: &Path, rel: &str, progress: &dyn Fn(u64)) -> anyhow::Result<()> {
         let size = std::fs::metadata(local).with_context(|| format!("opening {}", local.display()))?.len();
-        let start = self.post(&format!("/fs/{}/uploads", enc(id)), json!({ "path": rel, "size": size, "overwrite": true }))?;
-        let up = start["id"].as_str().context("no upload id")?.to_string();
-        self.send_chunks(local, CHUNK, |offset| format!("/fs/{}/uploads/{up}?offset={offset}", enc(id)), |_| {})
+        let link = ClientLink {
+            client: self,
+            uploads: format!("/fs/{}/uploads", enc(id)),
+            start: json!({ "path": rel, "size": size, "overwrite": true }),
+        };
+        self.push(&link, local, size, CHUNK, progress).map(|_| ())
     }
 
     /// Adds jar `local` to the server's mods, as a jar dropped on its Mods
@@ -975,7 +1024,7 @@ impl Client {
         let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).context("no file name")?;
         let body = std::fs::read(local).with_context(|| format!("opening {}", local.display()))?;
         let url = self.url(&format!("/servers/{}/mods/upload?name={}&conflict=replace", enc(id), enc(&name)));
-        let v = reply(self.send_via(true, |slow| {
+        let v = reply(self.send_via(Lane::Slow, |slow| {
             slow.post(&url).header("Authorization", &self.auth()).content_type("application/octet-stream").send(&body[..])
         }))?;
         Ok(v["replaced"].as_bool().unwrap_or(false))
@@ -987,34 +1036,18 @@ impl Client {
     pub fn upload_incoming(&self, local: &Path, progress: impl Fn(u64)) -> anyhow::Result<String> {
         let size = std::fs::metadata(local).with_context(|| format!("opening {}", local.display()))?.len();
         let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).context("no file name")?;
-        let start = self.post("/incoming/uploads", json!({ "path": name, "size": size }))?;
-        let up = start["id"].as_str().context("no upload id")?.to_string();
+        let link = ClientLink { client: self, uploads: "/incoming/uploads".into(), start: json!({ "path": name, "size": size }) };
         // Older panels take at most 2 MB a chunk here.
-        self.send_chunks(local, INCOMING_CHUNK, |offset| format!("/incoming/uploads/{up}?offset={offset}"), progress)?;
+        let start = self.push(&link, local, size, INCOMING_CHUNK, &progress)?;
         Ok(start["path"].as_str().filter(|p| !p.is_empty()).unwrap_or(&name).to_string())
     }
 
-    /// Sends `local` in chunks to the upload at `chunk_path(offset)`.
-    fn send_chunks(&self, local: &Path, chunk: usize, chunk_path: impl Fn(u64) -> String, progress: impl Fn(u64)) -> anyhow::Result<()> {
+    /// Sends `local` through `link` in chunks of `chunk` bytes; the reply
+    /// that started the upload.
+    fn push(&self, link: &ClientLink, local: &Path, size: u64, chunk: usize, progress: &dyn Fn(u64)) -> anyhow::Result<Value> {
         let mut f = std::fs::File::open(local).with_context(|| format!("opening {}", local.display()))?;
-        let mut offset = 0u64;
-        let mut buf = vec![0u8; chunk];
-        loop {
-            let n = read_full(&mut f, &mut buf)?;
-            let url = self.url(&chunk_path(offset));
-            let v = reply(self.send_via(true, |slow| {
-                slow
-                    .put(&url)
-                    .header("Authorization", &self.auth())
-                    .content_type("application/octet-stream")
-                    .send(&buf[..n])
-            }))?;
-            offset = v["offset"].as_u64().unwrap_or(offset + n as u64);
-            progress(offset);
-            if v["done"].as_bool() == Some(true) || n == 0 {
-                return Ok(());
-            }
-        }
+        push_chunks(link, &mut f, size, chunk, progress, &mut std::thread::sleep)
+            .with_context(|| format!("uploading {}", local.file_name().unwrap_or_default().to_string_lossy()))
     }
 
     /// Downloads `rel` from the server folder to `local`.
@@ -1027,7 +1060,7 @@ impl Client {
     /// that looks whole.
     pub fn save_to(&self, path: &str, local: &Path) -> anyhow::Result<()> {
         let url = self.url(path);
-        let mut resp = self.send_via(true, |slow| slow.get(&url).header("Authorization", &self.auth()).call())?;
+        let mut resp = self.send_via(Lane::Slow, |slow| slow.get(&url).header("Authorization", &self.auth()).call())?;
         if !resp.status().is_success() {
             let text = resp.body_mut().read_to_string().unwrap_or_default();
             let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -1050,7 +1083,7 @@ impl Client {
     /// it, unlike the file routes).
     pub fn icon(&self, id: &str, local: &Path) -> anyhow::Result<()> {
         let url = self.url(&Self::server_path(id, "/icon"));
-        let mut resp = self.send_via(false, |a| a.get(&url).header("Authorization", &self.auth()).call())?;
+        let mut resp = self.send_via(Lane::Call, |a| a.get(&url).header("Authorization", &self.auth()).call())?;
         if !resp.status().is_success() {
             bail!("no icon ({})", resp.status());
         }
@@ -1071,7 +1104,7 @@ impl Client {
     }
 }
 
-fn read_full(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+fn read_full(f: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut n = 0;
     while n < buf.len() {
         let r = f.read(&mut buf[n..])?;
@@ -1081,6 +1114,207 @@ fn read_full(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
         n += r;
     }
     Ok(n)
+}
+
+// ---- resumable chunked uploads -------------------------------------------------------
+
+/// What a chunk's PUT came back with.
+enum Put {
+    /// Written: where the upload stands now, and whether the file is in place.
+    Took { offset: u64, done: bool },
+    /// The panel has a different number of bytes than the chunk assumed
+    /// (an older panel after a reply was lost): carry on from there.
+    Moved(u64),
+    /// No answer, or one that says it failed. `again`: worth another try
+    /// (a dropped connection, a cut-short chunk, a busy panel), as opposed
+    /// to a refusal (signed out, no such server).
+    Failed { error: anyhow::Error, again: bool },
+}
+
+/// Where an upload stands, asked after a chunk failed.
+enum Where {
+    At { offset: u64, done: bool },
+    /// The panel no longer knows it (it expired): start that file again.
+    Gone,
+    /// Couldn't ask (the connection is still down).
+    Unknown,
+}
+
+/// One upload's three calls, so [`push_chunks`] can be tested without a
+/// panel.
+trait ChunkLink {
+    /// Starts the upload; the reply, with its `id`.
+    fn start(&self) -> anyhow::Result<Value>;
+    fn put(&self, up: &str, offset: u64, data: &[u8]) -> Put;
+    fn status(&self, up: &str) -> Where;
+    /// Drops an upload that won't be finished, so its part file doesn't
+    /// sit on the panel for a day. Best effort.
+    fn cancel(&self, up: &str);
+}
+
+/// Sends `file` (`size` bytes) through `link`. A chunk that fails is never
+/// just sent again blind: the panel is asked where the upload stands (its
+/// reply may have been lost after it wrote the chunk) and sending carries
+/// on from there. [`CHUNK_TRIES`] failures in a row end it with the last
+/// error, and an upload the panel forgot starts once more from the
+/// beginning. `pause` waits between tries. Returns the reply that started
+/// the upload.
+fn push_chunks(
+    link: &dyn ChunkLink,
+    file: &mut (impl std::io::Read + std::io::Seek),
+    size: u64,
+    chunk: usize,
+    progress: &dyn Fn(u64),
+    pause: &mut dyn FnMut(Duration),
+) -> anyhow::Result<Value> {
+    let mut up = String::new();
+    let r = push_chunks_to(link, file, size, chunk, progress, pause, &mut up);
+    if r.is_err() && !up.is_empty() {
+        link.cancel(&up);
+    }
+    r
+}
+
+/// [`push_chunks`]; `up` holds the upload's id once it started.
+fn push_chunks_to(
+    link: &dyn ChunkLink,
+    file: &mut (impl std::io::Read + std::io::Seek),
+    size: u64,
+    chunk: usize,
+    progress: &dyn Fn(u64),
+    pause: &mut dyn FnMut(Duration),
+    up: &mut String,
+) -> anyhow::Result<Value> {
+    use std::io::SeekFrom;
+    let id_of = |v: &Value| v["id"].as_str().map(str::to_string).context("Hopper Server didn't start the upload");
+    let mut start = link.start()?;
+    *up = id_of(&start)?;
+    let mut offset = 0u64;
+    let mut fails = 0u32;
+    let mut restarted = false;
+    let mut buf = vec![0u8; chunk];
+    loop {
+        file.seek(SeekFrom::Start(offset))?;
+        let want = (size - offset).min(chunk as u64) as usize;
+        let n = read_full(file, &mut buf[..want])?;
+        if n < want {
+            bail!("the file got shorter while it was being sent");
+        }
+        let error = match link.put(up, offset, &buf[..n]) {
+            Put::Took { done: true, .. } => {
+                progress(size);
+                return Ok(start);
+            }
+            Put::Took { offset: o, .. } if o > offset && o <= size => {
+                offset = o;
+                fails = 0;
+                progress(o);
+                continue;
+            }
+            Put::Took { offset: o, .. } => anyhow::anyhow!("Hopper Server didn't take the chunk at {offset} (it has {o} bytes)"),
+            Put::Moved(o) if o <= size => {
+                let e = anyhow::anyhow!("Hopper Server had {o} bytes, not {offset}");
+                offset = o;
+                progress(o);
+                e
+            }
+            Put::Moved(o) => bail!("Hopper Server has more of the file than it is ({o} of {size} bytes)"),
+            Put::Failed { error, again: false } => return Err(error),
+            Put::Failed { error, .. } => error,
+        };
+        fails += 1;
+        if fails >= CHUNK_TRIES {
+            return Err(error.context(format!("gave up after {fails} tries in a row")));
+        }
+        log::warn!("upload chunk at {offset} failed (try {fails} of {CHUNK_TRIES}): {error:#}");
+        pause(Duration::from_secs(1 << fails));
+        match link.status(up) {
+            Where::At { done: true, .. } => {
+                progress(size);
+                return Ok(start);
+            }
+            Where::At { offset: o, .. } if o <= size => {
+                offset = o;
+                progress(o);
+            }
+            Where::At { .. } | Where::Unknown => {}
+            Where::Gone if restarted => return Err(error.context("Hopper Server forgot the upload twice")),
+            Where::Gone => {
+                restarted = true;
+                start = link.start()?;
+                *up = id_of(&start)?;
+                offset = 0;
+                progress(0);
+            }
+        }
+    }
+}
+
+/// [`ChunkLink`] over a panel's upload routes (`uploads`: `/fs/{id}/uploads`
+/// or `/incoming/uploads`).
+struct ClientLink<'a> {
+    client: &'a Client,
+    uploads: String,
+    start: Value,
+}
+
+impl ChunkLink for ClientLink<'_> {
+    fn start(&self) -> anyhow::Result<Value> {
+        self.client.post(&self.uploads, self.start.clone())
+    }
+
+    fn put(&self, up: &str, offset: u64, data: &[u8]) -> Put {
+        let c = self.client;
+        let url = c.url(&format!("{}/{up}?offset={offset}", self.uploads));
+        let resp = c.send_via(Lane::Chunk, |a| {
+            a.put(&url).header("Authorization", &c.auth()).content_type("application/octet-stream").send(data)
+        });
+        let mut resp = match resp {
+            Ok(r) => r,
+            Err(error) => return Put::Failed { error, again: true },
+        };
+        let status = resp.status().as_u16();
+        let text = resp.body_mut().read_to_string();
+        let v: Value = text.as_deref().ok().and_then(|t| serde_json::from_str(t).ok()).unwrap_or(Value::Null);
+        match status {
+            200..=299 => match v["offset"].as_u64() {
+                Some(offset) => Put::Took { offset, done: v["done"].as_bool() == Some(true) },
+                // The reply was cut off: ask where it stands.
+                None => Put::Failed { error: anyhow::anyhow!("the reply to a chunk was cut off"), again: true },
+            },
+            409 if v["offset"].is_u64() => Put::Moved(v["offset"].as_u64().unwrap_or(0)),
+            _ => {
+                let error = match v["error"].as_str() {
+                    Some(e) => anyhow::anyhow!("{e}"),
+                    None if status == 401 => anyhow::anyhow!("Hopper Server doesn't know this PC any more. Pair again in Settings â†’ Server panel."),
+                    // Older panels answer a chunk that didn't arrive whole
+                    // with a bare 400.
+                    None => anyhow::anyhow!("Hopper Server answered {status}"),
+                };
+                Put::Failed { error, again: !matches!(status, 401 | 403 | 404 | 413) }
+            }
+        }
+    }
+
+    fn cancel(&self, up: &str) {
+        let _ = self.client.delete(&format!("{}/{up}", self.uploads));
+    }
+
+    fn status(&self, up: &str) -> Where {
+        let c = self.client;
+        let url = c.url(&format!("{}/{up}", self.uploads));
+        let Ok(mut resp) = c.send_via(Lane::Call, |a| a.get(&url).header("Authorization", &c.auth()).call()) else {
+            return Where::Unknown;
+        };
+        let status = resp.status().as_u16();
+        let v: Value = resp.body_mut().read_to_string().ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+        match (status, v["offset"].as_u64()) {
+            (200..=299, Some(offset)) => Where::At { offset, done: v["done"].as_bool() == Some(true) },
+            // Its record is gone ("That upload has expired").
+            (400, _) => Where::Gone,
+            _ => Where::Unknown,
+        }
+    }
 }
 
 /// `s` percent-encoded for a URL path segment or query value.
@@ -1287,7 +1521,9 @@ fn remote_rel(root: &Path, p: &Path) -> Option<String> {
 /// Runs sync operations where one side is a remote server: copies to it
 /// upload, copies from it download (through the local side's backups),
 /// deletes on it go to the panel's trash.
-pub fn execute(ops: Vec<SyncOp>, remote: &Remote, root: &Path, local_root: &Path) -> Vec<SyncResult> {
+/// `progress` gets (done, total) in [`crate::sync::op_weight`]s, during
+/// each upload too.
+pub fn execute(ops: Vec<SyncOp>, remote: &Remote, root: &Path, local_root: &Path, progress: &dyn Fn(u64, u64)) -> Vec<SyncResult> {
     let client = match Client::for_remote(remote) {
         Ok(c) => c,
         Err(e) => {
@@ -1298,10 +1534,16 @@ pub fn execute(ops: Vec<SyncOp>, remote: &Remote, root: &Path, local_root: &Path
         }
     };
     let mut out = Vec::new();
+    let total: u64 = ops.iter().map(crate::sync::op_weight).sum();
+    let mut before = 0u64;
     for op in ops {
+        let weight = crate::sync::op_weight(&op);
+        let at = before;
+        before += weight;
+        progress(at, total);
         let r: anyhow::Result<()> = match &op {
             SyncOp::Copy { src, dst } if is_remote_root(dst) => match remote_rel(root, dst) {
-                Some(rel) => client.upload(&remote.id, src, &rel),
+                Some(rel) => client.upload_with(&remote.id, src, &rel, &|sent| progress(at + sent.min(weight), total)),
                 None => Err(anyhow::anyhow!("{} isn't on this server", dst.display())),
             },
             SyncOp::Copy { src, dst } if is_remote_root(src) => match remote_rel(root, src) {
@@ -1348,6 +1590,7 @@ pub fn execute(ops: Vec<SyncOp>, remote: &Remote, root: &Path, local_root: &Path
             Err(e) => SyncResult { op, ok: false, error: Some(format!("{e:#}")), backup: None },
         });
     }
+    progress(total, total);
     out
 }
 
@@ -1932,5 +2175,472 @@ mod tests {
         assert_eq!(i.remote.as_ref().unwrap().id, "tnp-limitless-8");
         assert_eq!(i.max_memory.as_deref(), Some("12G"));
         assert_eq!(i.manager, Manager::Unknown);
+    }
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// What goes wrong with one PUT.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Fault {
+        None,
+        /// The panel writes the chunk, the reply never arrives.
+        LoseReply,
+        /// The connection drops mid-chunk: nothing written, a 400.
+        CutShort,
+        /// Signed out.
+        Refused,
+        /// The panel forgets the upload (it expired) before this chunk.
+        Forget,
+    }
+
+    /// A panel's upload routes in memory. `old`: a panel from before
+    /// chunks could be sent twice (a 409 for any other offset, no record
+    /// of finished uploads).
+    struct Fake {
+        old: bool,
+        size: u64,
+        faults: RefCell<Vec<Fault>>,
+        state: RefCell<FakeState>,
+    }
+
+    #[derive(Default)]
+    struct FakeState {
+        id: u32,
+        data: Vec<u8>,
+        done: bool,
+        known: bool,
+        puts: Vec<(u64, usize)>,
+        starts: u32,
+        /// Copies of the file put in place.
+        placed: Vec<Vec<u8>>,
+        cancelled: Vec<String>,
+    }
+
+    impl Fake {
+        fn new(old: bool, size: u64, faults: &[Fault]) -> Fake {
+            let mut f = faults.to_vec();
+            f.reverse();
+            Fake { old, size, faults: RefCell::new(f), state: RefCell::default() }
+        }
+    }
+
+    impl ChunkLink for Fake {
+        fn start(&self) -> anyhow::Result<Value> {
+            let mut s = self.state.borrow_mut();
+            s.id += 1;
+            s.starts += 1;
+            s.data.clear();
+            s.done = false;
+            s.known = true;
+            Ok(json!({ "id": format!("{:x}", s.id), "path": "mods/a.jar" }))
+        }
+
+        fn put(&self, up: &str, offset: u64, data: &[u8]) -> Put {
+            let fault = self.faults.borrow_mut().pop().unwrap_or(Fault::None);
+            let mut s = self.state.borrow_mut();
+            s.puts.push((offset, data.len()));
+            if fault == Fault::Forget {
+                s.known = false;
+            }
+            if up != format!("{:x}", s.id) || (!s.known && !(s.done && !self.old)) {
+                return Put::Failed { error: anyhow::anyhow!("That upload has expired. Start it again."), again: true };
+            }
+            match fault {
+                Fault::CutShort => return Put::Failed { error: anyhow::anyhow!("Hopper Server answered 400"), again: true },
+                Fault::Refused => return Put::Failed { error: anyhow::anyhow!("signed out"), again: false },
+                _ => {}
+            }
+            let have = s.data.len() as u64;
+            if s.done {
+                return Put::Took { offset: self.size, done: true };
+            }
+            if offset > have || (self.old && offset != have) {
+                return Put::Moved(have);
+            }
+            let skip = (have - offset) as usize;
+            if skip < data.len() {
+                s.data.extend_from_slice(&data[skip..]);
+            }
+            let now = s.data.len() as u64;
+            let done = now == self.size;
+            if done {
+                s.done = true;
+                let d = s.data.clone();
+                s.placed.push(d);
+                if self.old {
+                    s.known = false;
+                }
+            }
+            if fault == Fault::LoseReply {
+                return Put::Failed { error: anyhow::anyhow!("no reply came after 60.0 s (timeout: recv_response)"), again: true };
+            }
+            Put::Took { offset: now, done }
+        }
+
+        fn cancel(&self, up: &str) {
+            self.state.borrow_mut().cancelled.push(up.to_string());
+        }
+
+        fn status(&self, up: &str) -> Where {
+            let s = self.state.borrow();
+            if up != format!("{:x}", s.id) {
+                return Where::Gone;
+            }
+            if s.done && !self.old {
+                return Where::At { offset: self.size, done: true };
+            }
+            if !s.known {
+                return Where::Gone;
+            }
+            Where::At { offset: s.data.len() as u64, done: false }
+        }
+    }
+
+    fn file(n: usize) -> Vec<u8> {
+        (0..n).map(|i| (i * 7 % 251) as u8).collect()
+    }
+
+    /// Sends a 10-byte file in 3-byte chunks; the result, the pauses taken
+    /// and the progress reported.
+    fn run(fake: &Fake) -> (anyhow::Result<Value>, Vec<Duration>, Vec<u64>) {
+        let bytes = file(fake.size as usize);
+        let mut cur = std::io::Cursor::new(bytes);
+        let mut pauses = Vec::new();
+        let seen = RefCell::new(Vec::new());
+        let r = push_chunks(fake, &mut cur, fake.size, 3, &|o| seen.borrow_mut().push(o), &mut |d| pauses.push(d));
+        (r, pauses, seen.into_inner())
+    }
+
+    #[test]
+    fn a_clean_upload_sends_each_chunk_once() {
+        let fake = Fake::new(false, 10, &[]);
+        let (r, pauses, seen) = run(&fake);
+        r.unwrap();
+        let s = fake.state.borrow();
+        assert_eq!(s.puts, vec![(0, 3), (3, 3), (6, 3), (9, 1)]);
+        assert_eq!(s.placed, vec![file(10)]);
+        assert!(pauses.is_empty() && s.cancelled.is_empty());
+        assert_eq!(seen, vec![3, 6, 9, 10]);
+    }
+
+    #[test]
+    fn a_lost_reply_asks_where_it_stands_and_goes_on() {
+        // The panel wrote chunk 2 but the reply was lost (the case behind
+        // a sync stuck at "Syncing 1 files").
+        let fake = Fake::new(false, 10, &[Fault::None, Fault::LoseReply]);
+        let (r, pauses, _) = run(&fake);
+        r.unwrap();
+        let s = fake.state.borrow();
+        assert_eq!(s.puts, vec![(0, 3), (3, 3), (6, 3), (9, 1)], "nothing sent twice");
+        assert_eq!(s.placed, vec![file(10)]);
+        assert_eq!(pauses, vec![Duration::from_secs(2)]);
+    }
+
+    #[test]
+    fn a_chunk_cut_short_is_sent_again() {
+        let fake = Fake::new(false, 10, &[Fault::None, Fault::None, Fault::CutShort]);
+        let (r, _, _) = run(&fake);
+        r.unwrap();
+        let s = fake.state.borrow();
+        assert_eq!(s.puts, vec![(0, 3), (3, 3), (6, 3), (6, 3), (9, 1)]);
+        assert_eq!(s.placed, vec![file(10)]);
+    }
+
+    #[test]
+    fn a_lost_reply_to_the_last_chunk_finishes_without_sending_it_again() {
+        let fake = Fake::new(false, 10, &[Fault::None, Fault::None, Fault::None, Fault::LoseReply]);
+        let (r, _, seen) = run(&fake);
+        r.unwrap();
+        let s = fake.state.borrow();
+        assert_eq!(s.puts.len(), 4);
+        assert_eq!(s.placed.len(), 1);
+        assert_eq!(seen.last(), Some(&10));
+    }
+
+    #[test]
+    fn an_older_panel_after_a_lost_reply_still_finishes() {
+        // An older panel answers the repeated chunk with 409 and its offset.
+        let fake = Fake::new(true, 10, &[Fault::None, Fault::LoseReply]);
+        let (r, _, _) = run(&fake);
+        r.unwrap();
+        assert_eq!(fake.state.borrow().placed, vec![file(10)]);
+        // Its last chunk's reply lost: it has no record, so the file goes again.
+        let fake = Fake::new(true, 10, &[Fault::None, Fault::None, Fault::None, Fault::LoseReply]);
+        let (r, _, _) = run(&fake);
+        r.unwrap();
+        let s = fake.state.borrow();
+        assert_eq!(s.starts, 2);
+        assert_eq!(s.placed, vec![file(10), file(10)]);
+    }
+
+    #[test]
+    fn a_forgotten_upload_starts_again_once() {
+        let fake = Fake::new(false, 10, &[Fault::None, Fault::Forget]);
+        let (r, _, seen) = run(&fake);
+        r.unwrap();
+        let s = fake.state.borrow();
+        assert_eq!(s.starts, 2);
+        assert_eq!(s.placed, vec![file(10)]);
+        assert!(seen.contains(&0), "the bar goes back when it starts over");
+        drop(s);
+        let fake = Fake::new(false, 10, &[Fault::Forget, Fault::None, Fault::Forget]);
+        let (r, _, _) = run(&fake);
+        let e = format!("{:#}", r.unwrap_err());
+        assert!(e.contains("forgot the upload twice"), "{e}");
+    }
+
+    #[test]
+    fn a_panel_that_keeps_failing_ends_with_its_error_never_hangs() {
+        let fake = Fake::new(false, 10, &[Fault::CutShort; 20]);
+        let (r, pauses, _) = run(&fake);
+        let e = format!("{:#}", r.unwrap_err());
+        assert!(e.contains("gave up after 5 tries") && e.contains("Hopper Server answered 400"), "{e}");
+        assert_eq!(fake.state.borrow().puts.len(), CHUNK_TRIES as usize);
+        assert_eq!(fake.state.borrow().cancelled, vec!["1"], "the panel drops the part file");
+        assert_eq!(pauses.len(), CHUNK_TRIES as usize - 1);
+        // Failures that come and go don't add up: each chunk gets its tries.
+        let mut f = Vec::new();
+        for _ in 0..4 {
+            f.extend([Fault::CutShort, Fault::CutShort, Fault::None]);
+        }
+        let fake = Fake::new(false, 10, &f);
+        run(&fake).0.unwrap();
+    }
+
+    #[test]
+    fn a_refusal_ends_at_once() {
+        let fake = Fake::new(false, 10, &[Fault::None, Fault::Refused]);
+        let (r, pauses, _) = run(&fake);
+        assert_eq!(r.unwrap_err().to_string(), "signed out");
+        assert!(pauses.is_empty());
+        assert!(fake.state.borrow().placed.is_empty());
+    }
+
+    #[test]
+    fn an_empty_file_is_one_empty_chunk() {
+        let fake = Fake::new(false, 0, &[]);
+        let (r, _, seen) = run(&fake);
+        r.unwrap();
+        assert_eq!(fake.state.borrow().puts, vec![(0, 0)]);
+        assert_eq!(seen, vec![0]);
+    }
+}
+
+/// Against a scratch Hopper Server (never a real one): uploads a 20 MB file
+/// through a proxy that loses the reply to one chunk and cuts the next one
+/// short (the panel answers that with a 400), then through one that cuts
+/// every chunk short. The first must arrive whole, the second must fail
+/// with a plain error, and neither may hang.
+/// `HOPPER_UPLOAD_LIVE="<base>|<server id>|<that server's folder>"`, the
+/// token in `HOPPER_PANEL_TOKEN`.
+/// `cargo test -p hopper-core --lib upload_over_a_flaky_link_live -- --ignored --nocapture`
+#[cfg(test)]
+mod chunk_live {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Cut {
+        Pass,
+        /// Forward the chunk, then close on the client instead of replying.
+        LoseReply,
+        /// Forward half the chunk and close towards the panel; pass on its answer.
+        Half,
+        /// Forward the chunk, then hold the connection open without a reply
+        /// (a link that died quietly: what used to wait for an hour).
+        Stall,
+    }
+
+    fn read_head(r: &mut impl BufRead) -> Option<Vec<u8>> {
+        let mut head = Vec::new();
+        loop {
+            let mut line = Vec::new();
+            if r.read_until(b'\n', &mut line).ok()? == 0 {
+                return None;
+            }
+            head.extend_from_slice(&line);
+            if line == b"\r\n" {
+                return Some(head);
+            }
+        }
+    }
+
+    fn header(head: &[u8], name: &str) -> Option<String> {
+        String::from_utf8_lossy(head).lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_ascii_lowercase())
+        })
+    }
+
+    /// A reply's head and body, as it came (Content-Length or chunked).
+    fn read_reply(r: &mut impl BufRead) -> Option<Vec<u8>> {
+        let mut out = read_head(r)?;
+        if let Some(n) = header(&out, "content-length").and_then(|n| n.parse::<usize>().ok()) {
+            let mut b = vec![0; n];
+            r.read_exact(&mut b).ok()?;
+            out.extend(b);
+        } else if header(&out, "transfer-encoding").is_some_and(|t| t.contains("chunked")) {
+            loop {
+                let mut line = Vec::new();
+                r.read_until(b'\n', &mut line).ok()?;
+                out.extend_from_slice(&line);
+                let n = usize::from_str_radix(String::from_utf8_lossy(&line).trim(), 16).ok()?;
+                let mut b = vec![0; n + 2];
+                r.read_exact(&mut b).ok()?;
+                out.extend(b);
+                if n == 0 {
+                    break;
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// A TLS proxy (its CA pinned by the client, as at pairing) to the
+    /// panel's plain HTTP at `to`; `plan(n)` decides what happens to the
+    /// n-th chunk. Returns its address and CA.
+    fn proxy(to: SocketAddr, plan: Arc<dyn Fn(u32) -> Cut + Send + Sync>) -> (SocketAddr, String) {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = ca.self_signed(&ca_key).unwrap();
+        let leaf_key = KeyPair::generate().unwrap();
+        let leaf = CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap().signed_by(&leaf_key, &ca, &ca_key).unwrap();
+        let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![leaf.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into()),
+            )
+            .unwrap();
+        let cfg = Arc::new(cfg);
+        let ca_pem = ca.pem();
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = l.local_addr().unwrap();
+        let count = Arc::new(AtomicU32::new(0));
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                let (plan, count, cfg) = (plan.clone(), count.clone(), cfg.clone());
+                std::thread::spawn(move || {
+                    let Ok(s) = TcpStream::connect(to) else { return };
+                    let Ok(conn) = rustls::ServerConnection::new(cfg) else { return };
+                    let mut cr = BufReader::new(rustls::StreamOwned::new(conn, c));
+                    let mut sr = BufReader::new(s.try_clone().unwrap());
+                    let mut s = s;
+                    while let Some(head) = read_head(&mut cr) {
+                        let len = header(&head, "content-length").and_then(|n| n.parse().ok()).unwrap_or(0);
+                        let mut body = vec![0u8; len];
+                        if cr.read_exact(&mut body).is_err() {
+                            return;
+                        }
+                        let line = String::from_utf8_lossy(&head[..head.iter().position(|&b| b == b'\r').unwrap_or(0)]).to_string();
+                        let cut = if line.starts_with("PUT ") && line.contains("/uploads/") {
+                            plan(count.fetch_add(1, Ordering::SeqCst) + 1)
+                        } else {
+                            Cut::Pass
+                        };
+                        let sent = if cut == Cut::Half { len / 2 } else { len };
+                        if s.write_all(&head).and_then(|_| s.write_all(&body[..sent])).is_err() {
+                            return;
+                        }
+                        if cut == Cut::Half {
+                            let _ = s.shutdown(Shutdown::Write);
+                        }
+                        let Some(reply) = read_reply(&mut sr) else { return };
+                        let c = cr.get_mut();
+                        if cut == Cut::Stall {
+                            std::thread::sleep(Duration::from_secs(150));
+                            return;
+                        }
+                        if cut == Cut::LoseReply {
+                            let _ = c.sock.shutdown(Shutdown::Both);
+                            return;
+                        }
+                        if c.write_all(&reply).and_then(|_| c.flush()).is_err() || cut == Cut::Half {
+                            c.conn.send_close_notify();
+                            let _ = c.flush();
+                            let _ = c.sock.shutdown(Shutdown::Both);
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (at, ca_pem)
+    }
+
+    #[test]
+    #[ignore]
+    fn upload_over_a_flaky_link_live() {
+        let spec = std::env::var("HOPPER_UPLOAD_LIVE").expect("HOPPER_UPLOAD_LIVE=<base>|<server id>|<server folder>");
+        let token = std::env::var("HOPPER_PANEL_TOKEN").expect("HOPPER_PANEL_TOKEN");
+        let mut parts = spec.split('|');
+        let (base, id, folder) = (parts.next().unwrap(), parts.next().unwrap(), PathBuf::from(parts.next().unwrap()));
+        let to: SocketAddr = base.trim_start_matches("http://").trim_end_matches('/').parse().expect("http://127.0.0.1:<port>");
+        let size = 20 * 1024 * 1024 + 12345;
+        let mut x = 0x2545_f491_u32;
+        let data: Vec<u8> = (0..size)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect();
+        let local = std::env::temp_dir().join(format!("hopper-flaky-{}.jar", std::process::id()));
+        std::fs::write(&local, &data).unwrap();
+
+        // 1: the reply to chunk 2 is lost, chunk 3 is cut short.
+        let (at, ca) = proxy(to, Arc::new(|n| match n {
+            2 => Cut::LoseReply,
+            3 => Cut::Half,
+            _ => Cut::Pass,
+        }));
+        let c = Client::new(&format!("https://{at}"), &token, &ca);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let t = Instant::now();
+        c.upload_with(id, &local, "mods/flaky-test.jar", &|o| seen.lock().unwrap().push(o)).expect("the upload should recover");
+        println!("recovered in {:.1} s; progress {:?}", t.elapsed().as_secs_f32(), seen.lock().unwrap());
+        assert!(t.elapsed() < Duration::from_secs(60));
+        assert_eq!(seen.lock().unwrap().last(), Some(&(size as u64)));
+        let landed = std::fs::read(folder.join("mods/flaky-test.jar")).unwrap();
+        assert!(landed == data, "the file arrived changed ({} bytes)", landed.len());
+
+        // 2: every chunk cut short: a plain error, after the tries.
+        let (at, ca) = proxy(to, Arc::new(|_| Cut::Half));
+        let c = Client::new(&format!("https://{at}"), &token, &ca);
+        let t = Instant::now();
+        let e = format!("{:#}", c.upload(id, &local, "mods/flaky-test-2.jar").unwrap_err());
+        println!("failed in {:.1} s: {e}", t.elapsed().as_secs_f32());
+        assert!(e.contains("gave up after 5 tries") && e.contains("didn't arrive whole"), "{e}");
+        assert!(t.elapsed() < Duration::from_secs(90));
+        assert!(!folder.join("mods/flaky-test-2.jar").exists());
+        let left = std::fs::read_dir(folder.join(".hopper-uploads")).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "part")).count();
+        assert_eq!(left, 0, "the failed upload's part file is dropped");
+
+        // 3: the reply to the first chunk never comes and the connection
+        // stays open: the chunk's reply limit ends it, and it goes on.
+        let (at, ca) = proxy(to, Arc::new(|n| if n == 1 { Cut::Stall } else { Cut::Pass }));
+        let c = Client::new(&format!("https://{at}"), &token, &ca);
+        let t = Instant::now();
+        c.upload(id, &local, "mods/flaky-test-3.jar").expect("the upload should go on after the stall");
+        println!("went on after a stall in {:.1} s", t.elapsed().as_secs_f32());
+        assert!(t.elapsed() < Duration::from_secs(120));
+        assert!(std::fs::read(folder.join("mods/flaky-test-3.jar")).unwrap() == data);
+
+        let _ = std::fs::remove_file(&local);
+        for f in ["flaky-test.jar", "flaky-test-3.jar"] {
+            let _ = std::fs::remove_file(folder.join("mods").join(f));
+        }
     }
 }

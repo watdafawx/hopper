@@ -6,6 +6,7 @@ use crate::files::{self, Op};
 use crate::servers::Entry;
 use crate::App;
 use axum::body::{Body, Bytes};
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -523,8 +524,8 @@ async fn upload_status(
     Path((id, up)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     let e = server(&app, &headers, &method, &id)?;
-    let (u, have) = blocking(move || files::upload_status(&e.root, &up)).await?;
-    Ok(Json(json!({ "id": u.id, "path": u.path, "size": u.size, "offset": have })))
+    let (u, have, done) = blocking(move || files::upload_status(&e.root, &up)).await?;
+    Ok(Json(json!({ "id": u.id, "path": u.path, "size": u.size, "offset": have, "done": done })))
 }
 
 async fn upload_chunk(
@@ -533,14 +534,50 @@ async fn upload_chunk(
     method: Method,
     Path((id, up)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> ApiResult<Response> {
     let e = server(&app, &headers, &method, &id)?;
-    let offset: u64 = q.get("offset").and_then(|o| o.parse().ok()).ok_or_else(|| bad("offset is required"))?;
-    match blocking(move || files::upload_chunk(&e.root, &up, offset, &body)).await? {
-        Ok(r) => Ok(Json(r).into_response()),
-        // Wrong offset (a retry after a lost reply): say where to go on.
-        Err(have) => Ok((StatusCode::CONFLICT, Json(json!({ "error": "offset mismatch", "offset": have }))).into_response()),
+    write_chunk(format!("server {id}"), e.root.clone(), up, &q, body).await
+}
+
+/// Writes one chunk of an upload in `dir` (a server's folder, or the
+/// incoming folder). Every refusal is logged with its reason: a client on a
+/// slow or dropping link otherwise only shows a bare 400 in the audit log.
+pub(crate) async fn write_chunk(
+    place: String,
+    dir: std::path::PathBuf,
+    up: String,
+    q: &HashMap<String, String>,
+    body: Result<Bytes, BytesRejection>,
+) -> ApiResult<Response> {
+    let offset: u64 = q.get("offset").and_then(|o| o.parse().ok()).ok_or_else(|| {
+        log::warn!("upload {up} to {place}: refused a chunk without an offset");
+        bad("offset is required")
+    })?;
+    // Axum's own answer here is a plain-text 400 nobody logs; the usual
+    // cause is the connection dropping while the chunk was on its way.
+    let body = body.map_err(|r| {
+        log::warn!("upload {up} to {place}: the chunk at {offset} didn't arrive whole ({}): {}", r.status(), r.body_text());
+        let msg = if r.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            format!("That chunk is bigger than Hopper Server takes ({} MB at most).", MAX_CHUNK >> 20)
+        } else {
+            "The chunk didn't arrive whole (the connection dropped while sending it). Send it again.".to_string()
+        };
+        ApiError(r.status(), msg)
+    })?;
+    let len = body.len();
+    let (u, p) = (up.clone(), place.clone());
+    match blocking(move || files::upload_chunk(&dir, &u, offset, &body)).await {
+        Ok(Ok(r)) => Ok(Json(r).into_response()),
+        // Past where the upload stands: say where to go on.
+        Ok(Err(have)) => {
+            log::info!("upload {up} to {p}: a chunk at {offset} came after the {have} bytes that arrived; told the client");
+            Ok((StatusCode::CONFLICT, Json(json!({ "error": "offset mismatch", "offset": have }))).into_response())
+        }
+        Err(err) => {
+            log::warn!("upload {up} to {p}: refused {len} bytes at {offset}: {}", err.1);
+            Err(err)
+        }
     }
 }
 

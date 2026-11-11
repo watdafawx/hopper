@@ -76,6 +76,21 @@ pub fn plan(diff: &[DiffEntry], client_mods: &Path, server_mods: &Path) -> Vec<S
 
 /// `server_root` holds the backup folder; one timestamped subfolder per run.
 pub fn execute(ops: Vec<SyncOp>, server_root: &Path) -> Vec<SyncResult> {
+    execute_with(ops, server_root, &|_, _| {})
+}
+
+/// How much of a sync's progress `op` is: a file copied counts its bytes,
+/// anything else one, so a big upload moves the bar while it's sent
+/// instead of jumping at the end.
+pub fn op_weight(op: &SyncOp) -> u64 {
+    match op {
+        SyncOp::Copy { src, .. } => fs::metadata(src).map_or(1, |m| m.len().max(1)),
+        _ => 1,
+    }
+}
+
+/// [`execute`], telling `progress` (done, total in [`op_weight`]s) as it goes.
+pub fn execute_with(ops: Vec<SyncOp>, server_root: &Path, progress: &dyn Fn(u64, u64)) -> Vec<SyncResult> {
     // A server on a Hopper Server: its side goes over the panel's API.
     let remote = ops.iter().find_map(|op| match op {
         SyncOp::Copy { src, dst } => crate::hopperd::remote_of(dst).or_else(|| crate::hopperd::remote_of(src)),
@@ -88,15 +103,19 @@ pub fn execute(ops: Vec<SyncOp>, server_root: &Path) -> Vec<SyncResult> {
         } else {
             server_root.to_path_buf()
         };
-        return crate::hopperd::execute(ops, &r, &root, &local);
+        return crate::hopperd::execute(ops, &r, &root, &local, progress);
     }
+    let total = ops.iter().map(op_weight).sum();
     // A server reached over SFTP / FTP: change Hopper's copy, then the server.
-    if let Some(m) = crate::remotefs::mirror_of(server_root) {
+    let results = if let Some(m) = crate::remotefs::mirror_of(server_root) {
         let mut results = execute_local(ops, server_root);
         crate::remotefs::push(&m, &mut results);
-        return results;
-    }
-    execute_local(ops, server_root)
+        results
+    } else {
+        execute_local(ops, server_root)
+    };
+    progress(total, total);
+    results
 }
 
 /// [`execute`] for operations on this PC's disks only.
@@ -266,6 +285,28 @@ mod tests {
         assert!(r[0].ok, "{:?}", r[0].error);
         assert_eq!(fs::read(server.join("a.jar")).unwrap(), b"new");
         assert_eq!(fs::read(r[0].backup.as_ref().unwrap()).unwrap(), b"old");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn progress_counts_bytes_copied_and_ends_full() {
+        let root = std::env::temp_dir().join(format!("hopper-test-progress-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (client, server) = (root.join("client"), root.join("server/mods"));
+        fs::create_dir_all(&client).unwrap();
+        fs::create_dir_all(&server).unwrap();
+        fs::write(client.join("big.jar"), vec![0u8; 5000]).unwrap();
+        fs::write(server.join("old.jar"), b"x").unwrap();
+        let ops = vec![
+            SyncOp::Copy { src: client.join("big.jar"), dst: server.join("big.jar") },
+            SyncOp::Delete { path: server.join("old.jar") },
+        ];
+        // A big file weighs its bytes, anything else one.
+        assert_eq!(ops.iter().map(op_weight).collect::<Vec<_>>(), vec![5000, 1]);
+        let seen = std::cell::RefCell::new(Vec::new());
+        let r = execute_with(ops, &root.join("server"), &|d, t| seen.borrow_mut().push((d, t)));
+        assert!(r.iter().all(|r| r.ok));
+        assert_eq!(seen.into_inner().last(), Some(&(5001, 5001)));
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -598,12 +598,31 @@ fn upload_paths(root: &Path, id: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
     Ok((dir.join(format!("{id}.json")), dir.join(format!("{id}.part"))))
 }
 
-/// The upload and how many bytes have arrived.
-pub fn upload_status(root: &Path, id: &str) -> anyhow::Result<(Upload, u64)> {
+/// Where a finished upload's record is kept (until the leftovers are
+/// cleared), so a client whose reply to the last chunk was lost can still
+/// ask and hear that the file arrived, instead of sending it all again.
+fn done_path(root: &Path, id: &str) -> PathBuf {
+    upload_dir(root).join(format!("{id}.done"))
+}
+
+/// The upload, how many bytes have arrived, and whether it's finished
+/// (the file is in place).
+pub fn upload_status(root: &Path, id: &str) -> anyhow::Result<(Upload, u64, bool)> {
     let (meta, part) = upload_paths(root, id)?;
-    let up: Upload = serde_json::from_str(&fs::read_to_string(meta).context("That upload has expired. Start it again.")?)?;
+    let text = match fs::read_to_string(&meta) {
+        Ok(t) => t,
+        Err(_) => {
+            if let Ok(t) = fs::read_to_string(done_path(root, id)) {
+                let up: Upload = serde_json::from_str(&t)?;
+                let size = up.size;
+                return Ok((up, size, true));
+            }
+            bail!("That upload has expired. Start it again.");
+        }
+    };
+    let up: Upload = serde_json::from_str(&text)?;
     let have = fs::metadata(part).map(|m| m.len()).unwrap_or(0);
-    Ok((up, have))
+    Ok((up, have, false))
 }
 
 #[derive(Debug, Serialize)]
@@ -612,23 +631,34 @@ pub struct ChunkResult {
     pub done: bool,
 }
 
-/// Writes `data` at `offset`, which must be where the upload stands (so a
-/// retried chunk can't leave a gap). Moves the file into place when full.
+/// Writes `data` at `offset`. A chunk past where the upload stands is
+/// refused with that place (`Err`), so nothing leaves a gap. One that
+/// starts before it is a retry whose reply was lost: the bytes already
+/// there are kept and only the rest is written, so sending a chunk twice is
+/// harmless. Moves the file into place when full.
 pub fn upload_chunk(root: &Path, id: &str, offset: u64, data: &[u8]) -> anyhow::Result<Result<ChunkResult, u64>> {
-    let (up, have) = upload_status(root, id)?;
-    if offset != have {
+    let (up, have, done) = upload_status(root, id)?;
+    if offset > have {
         return Ok(Err(have));
     }
     if offset + data.len() as u64 > up.size {
-        bail!("More data than the upload's size.");
+        bail!("More data than the upload's size ({} bytes at {offset}, the file is {} bytes).", data.len(), up.size);
     }
+    if done {
+        return Ok(Ok(ChunkResult { offset: up.size, done: true }));
+    }
+    let end = offset + data.len() as u64;
+    if end <= have && end < up.size {
+        return Ok(Ok(ChunkResult { offset: have, done: false }));
+    }
+    let new = &data[(have - offset) as usize..];
     let (meta, part) = upload_paths(root, id)?;
     let mut f = fs::OpenOptions::new().write(true).open(&part)?;
-    f.seek(SeekFrom::Start(offset))?;
-    f.write_all(data)?;
+    f.seek(SeekFrom::Start(have))?;
+    f.write_all(new)?;
     f.flush()?;
     drop(f);
-    let offset = offset + data.len() as u64;
+    let offset = have + new.len() as u64;
     if offset < up.size {
         return Ok(Ok(ChunkResult { offset, done: false }));
     }
@@ -640,7 +670,9 @@ pub fn upload_chunk(root: &Path, id: &str, offset: u64, data: &[u8]) -> anyhow::
         fs::create_dir_all(parent)?;
     }
     fs::rename(&part, &target).with_context(|| format!("saving {}", up.path))?;
-    let _ = fs::remove_file(meta);
+    if fs::rename(&meta, done_path(root, id)).is_err() {
+        let _ = fs::remove_file(meta);
+    }
     Ok(Ok(ChunkResult { offset, done: true }))
 }
 
@@ -648,6 +680,7 @@ pub fn upload_cancel(root: &Path, id: &str) -> anyhow::Result<()> {
     let (meta, part) = upload_paths(root, id)?;
     let _ = fs::remove_file(part);
     let _ = fs::remove_file(meta);
+    let _ = fs::remove_file(done_path(root, id));
     Ok(())
 }
 
@@ -797,6 +830,22 @@ mod tests {
     }
 
     #[test]
+    fn a_chunk_overlapping_what_arrived_writes_only_the_rest() {
+        let root = temp("overlap");
+        let up = upload_start(&root, "a.bin", 8, false).unwrap();
+        upload_chunk(&root, &up.id, 0, b"abcd").unwrap().unwrap();
+        // The client thinks only 2 bytes arrived and sends from there.
+        assert!(matches!(upload_chunk(&root, &up.id, 2, b"cdef").unwrap(), Ok(ChunkResult { offset: 6, done: false })));
+        assert!(matches!(upload_chunk(&root, &up.id, 6, b"gh").unwrap(), Ok(ChunkResult { offset: 8, done: true })));
+        assert_eq!(fs::read_to_string(root.join("a.bin")).unwrap(), "abcdefgh");
+        // An empty file finishes with its one empty chunk.
+        let up = upload_start(&root, "empty.txt", 0, false).unwrap();
+        assert!(matches!(upload_chunk(&root, &up.id, 0, b"").unwrap(), Ok(ChunkResult { offset: 0, done: true })));
+        assert!(root.join("empty.txt").is_file());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn uploads_resume_and_replace_safely() {
         let root = temp("upload");
         fs::create_dir_all(root.join("mods")).unwrap();
@@ -804,14 +853,24 @@ mod tests {
         assert!(upload_start(&root, "mods/x.jar", 6, false).is_err());
         let up = upload_start(&root, "mods/x.jar", 6, true).unwrap();
         assert!(matches!(upload_chunk(&root, &up.id, 0, b"abc").unwrap(), Ok(ChunkResult { offset: 3, done: false })));
-        // A retried chunk at the wrong offset is told where to continue.
-        assert_eq!(upload_chunk(&root, &up.id, 0, b"abc").unwrap().unwrap_err(), 3);
+        // A chunk sent again (its reply was lost) changes nothing and says
+        // where the upload stands; one past it is told where to continue.
+        assert!(matches!(upload_chunk(&root, &up.id, 0, b"abc").unwrap(), Ok(ChunkResult { offset: 3, done: false })));
+        assert_eq!(upload_chunk(&root, &up.id, 4, b"ef").unwrap().unwrap_err(), 3);
         assert_eq!(upload_status(&root, &up.id).unwrap().1, 3);
         assert!(upload_chunk(&root, &up.id, 3, b"defg").is_err(), "too much data");
         assert!(matches!(upload_chunk(&root, &up.id, 3, b"def").unwrap(), Ok(ChunkResult { done: true, .. })));
         assert_eq!(fs::read_to_string(root.join("mods/x.jar")).unwrap(), "abcdef");
-        // The replaced jar is in the trash, the upload's files are gone.
+        // The replaced jar is in the trash, the upload's part file is gone.
         assert_eq!(list_trash(&root).unwrap()[0].path, "mods/x.jar");
+        assert!(!upload_dir(&root).join(format!("{}.part", up.id)).exists());
+        // Asked again (the reply to the last chunk was lost): it's done, and
+        // the last chunk sent again doesn't replace the file a second time.
+        let (_, have, done) = upload_status(&root, &up.id).unwrap();
+        assert_eq!((have, done), (6, true));
+        assert!(matches!(upload_chunk(&root, &up.id, 3, b"def").unwrap(), Ok(ChunkResult { offset: 6, done: true })));
+        assert_eq!(list_trash(&root).unwrap().len(), 1);
+        upload_cancel(&root, &up.id).unwrap();
         assert!(upload_status(&root, &up.id).is_err());
         // Folder uploads make their folders.
         let up = upload_start(&root, "shaderpacks/pack/a.txt", 1, false).unwrap();

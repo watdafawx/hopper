@@ -12,8 +12,8 @@ use crate::App;
 use crate::api::{ApiResult, bad, not_found, require, require_owner};
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, Method, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::http::{HeaderMap, Method};
+use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use hopper_core::hosting::zip_import;
@@ -430,8 +430,8 @@ async fn upload_start(State(app): State<Arc<App>>, headers: HeaderMap, method: M
 async fn upload_status(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(up): Path<String>) -> ApiResult<Json<Value>> {
     require(&app, &headers, &method)?;
     let dir = incoming(&app);
-    let (u, have) = blocking(move || crate::files::upload_status(&dir, &up)).await?;
-    Ok(Json(json!({ "id": u.id, "path": u.path, "size": u.size, "offset": have })))
+    let (u, have, done) = blocking(move || crate::files::upload_status(&dir, &up)).await?;
+    Ok(Json(json!({ "id": u.id, "path": u.path, "size": u.size, "offset": have, "done": done })))
 }
 
 async fn upload_chunk(
@@ -440,15 +440,10 @@ async fn upload_chunk(
     method: Method,
     Path(up): Path<String>,
     Query(q): Query<HashMap<String, String>>,
-    body: Bytes,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> ApiResult<Response> {
     require(&app, &headers, &method)?;
-    let dir = incoming(&app);
-    let offset: u64 = q.get("offset").and_then(|o| o.parse().ok()).ok_or_else(|| bad("offset is required"))?;
-    match blocking(move || crate::files::upload_chunk(&dir, &up, offset, &body)).await? {
-        Ok(r) => Ok(Json(r).into_response()),
-        Err(have) => Ok((StatusCode::CONFLICT, Json(json!({ "error": "offset mismatch", "offset": have }))).into_response()),
-    }
+    crate::fs_api::write_chunk("the incoming folder".into(), incoming(&app), up, &q, body).await
 }
 
 async fn upload_cancel(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(up): Path<String>) -> ApiResult<Json<Value>> {

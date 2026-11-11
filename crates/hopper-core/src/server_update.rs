@@ -377,7 +377,7 @@ pub fn update_server(
     if let Some(r) = &server.remote {
         crate::hopperd::register(&server.root, r);
     }
-    let results = crate::sync::execute(ops, &server.root);
+    let results = crate::sync::execute_with(ops, &server.root, &|done, total| job.progress(done as usize, total as usize));
     crate::history::record(&server.root, "server", &server.root, &results);
     // The jars' CurseForge / Modrinth records go along, as with Sync to
     // server, so the server lists them as those mods.
