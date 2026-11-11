@@ -139,7 +139,7 @@ impl FriendsPanel {
                 let more = this
                     .update(cx, |this, cx| {
                         cx.notify();
-                        let live = this.store.read(cx).mailbox_invite().is_some();
+                        let live = this.plain_invite(cx).is_some();
                         this.ticking = live;
                         live
                     })
@@ -150,6 +150,12 @@ impl FriendsPanel {
             }
         })
         .detach();
+    }
+
+    /// The live invite made here. One made by a share code's follow part
+    /// shows in that dialog instead.
+    fn plain_invite(&self, cx: &App) -> Option<crate::store::Invite> {
+        self.store.read(cx).mailbox_invite().filter(|i| i.inst.is_empty())
     }
 
     /// Opens the follow chooser for a friend's pack.
@@ -454,7 +460,7 @@ impl FriendsPanel {
     fn invite_block(&mut self, down: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let s = self.store.read(cx);
-        if let Some(inv) = s.mailbox_invite() {
+        if let Some(inv) = self.plain_invite(cx) {
             self.tick(cx);
             let left = inv.until.saturating_duration_since(Instant::now()).as_secs();
             let shown = if inv.code.len() == 8 { format!("{} {}", &inv.code[..4], &inv.code[4..]) } else { inv.code.clone() };
