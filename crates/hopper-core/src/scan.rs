@@ -429,9 +429,60 @@ pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
+/// Checks `cmp` is a total order on random version-like strings (releases,
+/// snapshots, tags, junk, non-ASCII), the way `sort_by` needs it: a
+/// comparator that breaks it can panic the sort, and a crashed sort took
+/// the whole app down. Shared by every version compare's tests.
+#[cfg(test)]
+pub(crate) fn check_total_order(cmp: impl Fn(&str, &str) -> std::cmp::Ordering) {
+    use std::cmp::Ordering;
+    const BITS: [&str; 30] = [
+        "0", "1", "2", "9", "10", "21", "26", "007", "99999999999999999999999", ".", ".", ".", "-", "+", "v", "V", "w",
+        "a", "b", "pre", "rc", "x", "snapshot", " ", "_", "\u{e9}", "\u{6a21}", "1.21.1", "24w46a", "",
+    ];
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = move |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n as u64) as usize
+    };
+    let v: Vec<String> = (0..300).map(|_| (0..next(8)).map(|_| BITS[next(BITS.len())]).collect()).collect();
+    for a in &v {
+        assert_eq!(cmp(a, a), Ordering::Equal, "{a:?}");
+        for b in &v {
+            assert_eq!(cmp(a, b), cmp(b, a).reverse(), "{a:?} vs {b:?}");
+        }
+    }
+    for _ in 0..60_000 {
+        let (a, b, c) = (&v[next(v.len())], &v[next(v.len())], &v[next(v.len())]);
+        let (ab, bc, ac) = (cmp(a, b), cmp(b, c), cmp(a, c));
+        if ab != Ordering::Greater && bc != Ordering::Greater {
+            // a <= b <= c, so a <= c, and a == c only when all three are.
+            assert_ne!(ac, Ordering::Greater, "{a:?} <= {b:?} <= {c:?}");
+            if ac == Ordering::Equal {
+                assert!(ab == Ordering::Equal && bc == Ordering::Equal, "{a:?} {b:?} {c:?}");
+            }
+        }
+    }
+    let mut w = v.clone();
+    for _ in 0..20 {
+        let k = next(w.len());
+        w.rotate_left(k);
+        w.sort_by(|a, b| cmp(a, b));
+        assert!(w.windows(2).all(|p| cmp(&p[0], &p[1]) != Ordering::Greater));
+        w.sort_unstable_by(|a, b| cmp(b, a));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn random_versions_have_a_total_order() {
+        check_total_order(compare_versions);
+    }
 
     #[test]
     fn mods_toml_marks_client_only_mods() {
