@@ -86,6 +86,12 @@ pub struct Config {
     /// in the files (as in Hopper desktop's setting). Off until the owner
     /// turns it on; the panel then compares the old and new jar for its own mods.
     pub files_changes: bool,
+    /// Other web pages that may use this panel: exact origins
+    /// (`http://fox:8790`) whose pages get CORS answers. Empty: none.
+    pub web_origins: Vec<String>,
+    /// Let those pages also manage who can get in (users, devices, tokens,
+    /// two-factor, the certificate). Off: only this panel's own page can.
+    pub web_manage_access: bool,
 }
 
 impl Default for Config {
@@ -120,6 +126,8 @@ impl Default for Config {
             pack_update_clean: Default::default(),
             backup_retention: Default::default(),
             files_changes: false,
+            web_origins: Vec::new(),
+            web_manage_access: false,
         }
     }
 }
@@ -136,7 +144,17 @@ impl Config {
     pub fn load_or_create(dir: &Path) -> anyhow::Result<Config> {
         let path = dir.join(FILE);
         match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).with_context(|| format!("reading {}", path.display())),
+            Ok(text) => {
+                let mut c: Config = toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+                // A hand-edited list: written the way browsers send `Origin`,
+                // else it would never match. Bad entries are left out.
+                c.web_origins = c
+                    .web_origins
+                    .iter()
+                    .filter_map(|o| crate::web_access::normalize(o).inspect_err(|e| log::warn!("web_origins in {FILE}: {e} Left out.")).ok())
+                    .collect();
+                Ok(c)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let c = Config::default();
                 c.save(dir)?;

@@ -270,8 +270,24 @@ pub(crate) fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// The middleware.
+/// The middleware. API answers to a page on another origin the owner listed
+/// get CORS headers (see [`crate::web_access`]); every other answer is as
+/// before.
 pub async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Response {
+    let api = req.uri().path().starts_with("/api/");
+    let (origins, manage_from_others) = {
+        let cfg = app.cfg.read().unwrap();
+        (cfg.web_origins.clone(), cfg.web_manage_access)
+    };
+    let listed = if api { crate::web_access::listed_other(req.headers(), &origins).map(str::to_string) } else { None };
+    let had_origin = api && crate::web_access::has_origin(req.headers());
+    // A preflight is answered whole by `web_access::before`.
+    let preflight = req.method() == Method::OPTIONS && req.headers().contains_key(axum::http::header::ACCESS_CONTROL_REQUEST_METHOD) && had_origin;
+    let res = checks(app, req, next, &origins, manage_from_others).await;
+    if api && !preflight { crate::web_access::after(res, listed.as_deref(), had_origin) } else { res }
+}
+
+async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String], manage_from_others: bool) -> Response {
     let ip = req.extensions().get::<ConnectInfo<SocketAddr>>().map_or(IpAddr::from([127, 0, 0, 1]), |c| c.0.ip());
     let tls = req.extensions().get::<Transport>().is_none_or(|t| t.tls);
     let net = Net::of(ip);
@@ -290,11 +306,17 @@ pub async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Res
     }
 
     let from = crate::net::client_ip(ip, req.headers());
-    if api && !app.limiter.allow(ip, from, is_guessable(&path)) {
+    // A CORS preflight counts towards the address's limit but is never a
+    // sign-in attempt, even when it's for the sign-in route.
+    if api && !app.limiter.allow(ip, from, method != Method::OPTIONS && is_guessable(&path)) {
         return deny(StatusCode::TOO_MANY_REQUESTS, "Too many requests. Wait a minute.");
     }
     if api {
         app.limiter.note(from, &path);
+        // Preflights are answered here, before any sign-in check.
+        if let crate::web_access::Before::Answer(r) = crate::web_access::before(&mut req, origins) {
+            return r;
+        }
     }
 
     // Where the log says a request came from: the person, and the proxy
@@ -304,6 +326,13 @@ pub async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Res
     // Who's asking, for scopes and the log.
     let token = crate::api::token(req.headers()).0;
     let who = if token.is_empty() { None } else { app.auth.check(&token) };
+    // Who can get in is managed on the panel's own page (unless the owner
+    // lets listed pages do it too).
+    if api && let Some(msg) = crate::web_access::access_refusal(req.headers(), origins, manage_from_others, &method, &path) {
+        let (name, role) = who.as_ref().map_or_else(|| ("-".to_string(), String::new()), |w| (w.name(), w.role_name().to_string()));
+        app.audit.record(&Event { at: now(), who: name, role, ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status: 403 });
+        return deny(StatusCode::FORBIDDEN, msg);
+    }
     if let Some(w) = &who {
         if let Some(msg) = refusal(w, &method, &path) {
             app.audit.record(&Event { at: now(), who: w.name(), role: w.role_name().into(), ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status: 403 });
