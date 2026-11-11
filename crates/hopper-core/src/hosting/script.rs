@@ -15,6 +15,8 @@ pub const RUN_BAT: &str = "run.bat";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchTarget {
     /// NeoForge or Forge 1.17+: `@libraries/.../win_args.txt` (forward slashes).
+    /// Written as win_args; on other hosts [`launch_command`] swaps in the
+    /// `unix_args.txt` next to it.
     ArgsFile(String),
     /// `-jar <name>`: vanilla, Fabric, Quilt, old Forge.
     Jar(String),
@@ -242,7 +244,12 @@ fn launch_with(root: &Path, jvm: &JvmArgs, script_xmx: Option<u32>) -> anyhow::R
     for script in SCRIPTS {
         if let Ok(text) = fs::read_to_string(root.join(script)) {
             let text = script_xmx.and_then(|mb| script_with_memory(&text, mb)).unwrap_or(text);
-            if let Some(l) = parse_launch(&text, jvm) {
+            if let Some(mut l) = parse_launch(&text, jvm) {
+                for a in &mut l.args {
+                    if let Some(f) = a.strip_prefix('@') {
+                        *a = format!("@{}", args_file_for_host(root, f, cfg!(windows)));
+                    }
+                }
                 return Ok((l, text));
             }
         }
@@ -254,6 +261,26 @@ fn launch_with(root: &Path, jvm: &JvmArgs, script_xmx: Option<u32>) -> anyhow::R
     let mut args = jvm.args();
     args.extend(["-jar".into(), jar.into(), "nogui".into()]);
     Ok((Launch { java: "java".into(), args, note: None }, String::new()))
+}
+
+/// Forge and NeoForge (1.17+) ship `win_args.txt` (`;` between classpath
+/// entries) and `unix_args.txt` (`:`) side by side, and a pack's start script
+/// names only the one for the OS it was made on. Java on the other OS can't
+/// load that one ("Could not find or load main class
+/// cpw.mods.bootstraplauncher.BootstrapLauncher"), so this returns the file
+/// for the host (`windows`) when it sits next to the named one, else the name
+/// as given. Only those two file names are touched; the script itself stays
+/// as written, so it still works where it was made.
+fn args_file_for_host(root: &Path, file: &str, windows: bool) -> String {
+    let norm = file.replace('\\', "/");
+    let (dir, name) = norm.rsplit_once('/').unwrap_or(("", &norm));
+    let want = match name {
+        "win_args.txt" if !windows => "unix_args.txt",
+        "unix_args.txt" if windows => "win_args.txt",
+        _ => return file.to_string(),
+    };
+    let alt = if dir.is_empty() { want.to_string() } else { format!("{dir}/{want}") };
+    if root.join(&alt).is_file() { alt } else { file.to_string() }
 }
 
 /// The heap java gets (MB): the last `-Xmx` on its command line, which is
@@ -488,6 +515,73 @@ mod tests {
         // NeoForge: the args file under libraries.
         fs::write(root.join("run.bat"), "java @libraries/net/neoforged/neoforge/21.1.1/win_args.txt %*\r\n").unwrap();
         assert!(folder_problem(&root).unwrap().contains("win_args.txt is missing"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn args_fixture(tag: &str, loader_dir: &str, files: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("hopper-args-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(loader_dir)).unwrap();
+        for f in files {
+            fs::write(root.join(loader_dir).join(f), "x").unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn args_file_follows_the_host_os_for_neoforge_and_forge() {
+        for (tag, dir) in [
+            ("neo", "libraries/net/neoforged/neoforge/21.1.265"),
+            ("forge", "libraries/net/minecraftforge/forge/1.20.1-47.3.0"),
+        ] {
+            let root = args_fixture(tag, dir, &["win_args.txt", "unix_args.txt"]);
+            let (win, unix) = (format!("{dir}/win_args.txt"), format!("{dir}/unix_args.txt"));
+            assert_eq!(args_file_for_host(&root, &win, false), unix, "{tag}: windows pack on linux");
+            assert_eq!(args_file_for_host(&root, &win, true), win, "{tag}: windows pack on windows");
+            assert_eq!(args_file_for_host(&root, &unix, true), win, "{tag}: linux pack on windows");
+            assert_eq!(args_file_for_host(&root, &unix, false), unix, "{tag}: linux pack on linux");
+            // Backslashes in a hand-written script still find the sibling.
+            assert_eq!(args_file_for_host(&root, &win.replace('/', "\\"), false), unix);
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn args_file_falls_back_to_the_named_one_when_the_other_is_missing() {
+        let dir = "libraries/net/neoforged/neoforge/21.1.265";
+        let root = args_fixture("only-win", dir, &["win_args.txt"]);
+        let win = format!("{dir}/win_args.txt");
+        assert_eq!(args_file_for_host(&root, &win, false), win);
+        let _ = fs::remove_dir_all(&root);
+        let root = args_fixture("only-unix", dir, &["unix_args.txt"]);
+        let unix = format!("{dir}/unix_args.txt");
+        assert_eq!(args_file_for_host(&root, &unix, true), unix);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn args_file_leaves_other_arguments_alone() {
+        let root = args_fixture("other", "libraries", &["win_args.txt", "unix_args.txt"]);
+        assert_eq!(args_file_for_host(&root, "user_jvm_args.txt", false), "user_jvm_args.txt");
+        assert_eq!(args_file_for_host(&root, "libraries/my_win_args.txt", false), "libraries/my_win_args.txt");
+        // A bare name in the server folder.
+        fs::write(root.join("win_args.txt"), "x").unwrap();
+        fs::write(root.join("unix_args.txt"), "x").unwrap();
+        assert_eq!(args_file_for_host(&root, "win_args.txt", false), "unix_args.txt");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn launch_uses_the_args_file_for_this_os() {
+        let dir = "libraries/net/neoforged/neoforge/21.1.265";
+        let root = args_fixture("launch", dir, &["win_args.txt", "unix_args.txt"]);
+        fs::write(root.join("run.bat"), "java @user_jvm_args.txt @libraries/net/neoforged/neoforge/21.1.265/win_args.txt nogui %*\r\n").unwrap();
+        let (l, text) = read_launch(&root).unwrap();
+        let want = if cfg!(windows) { "win_args.txt" } else { "unix_args.txt" };
+        assert!(l.args.contains(&format!("@{dir}/{want}")), "{:?}", l.args);
+        // The script on disk is left as written, and folder_problem agrees.
+        assert!(text.contains("win_args.txt"));
+        assert_eq!(folder_problem(&root), None);
         let _ = fs::remove_dir_all(&root);
     }
 
