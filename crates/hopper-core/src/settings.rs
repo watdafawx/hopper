@@ -196,6 +196,14 @@ pub struct Settings {
     /// before (the CurseForge app), to give them back.
     pub links_prev_handler: Option<String>,
     pub links_enabled: bool,
+    /// Offer to open CurseForge and Modrinth links copied in other apps.
+    pub clip_links: bool,
+    /// Hopper is offered to Windows as a browser, so clicked mod links open
+    /// in it (browser.rs).
+    pub open_links: bool,
+    /// Where Hopper passes every other link: a browser's class name in
+    /// Windows; empty for the default browser before Hopper.
+    pub open_links_browser: String,
     /// Minimize Hopper while a game runs, and bring it back after.
     pub minimize_while_playing: bool,
     /// What Discord shows of what you're doing (Settings › Discord).
@@ -639,6 +647,9 @@ impl Default for Settings {
             datapack_dest: HashMap::new(),
             links_prev_handler: None,
             links_enabled: false,
+            clip_links: false,
+            open_links: false,
+            open_links_browser: String::new(),
             minimize_while_playing: false,
             discord: Default::default(),
             record_sessions: true,

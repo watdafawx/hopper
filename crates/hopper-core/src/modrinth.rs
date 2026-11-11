@@ -728,6 +728,12 @@ pub fn latest_by_sha1(
     post("/version_files/update", &body)
 }
 
+/// A project's version by its id or version number (a version page's link
+/// carries either).
+pub fn project_version(project: &str, version: &str) -> anyhow::Result<Version> {
+    get(&format!("/project/{project}/version/{version}"), &[])
+}
+
 pub fn version(id: &str) -> anyhow::Result<Version> {
     let mut v: Version = get(&format!("/version/{id}"), &[])?;
     fill_dep_projects(std::slice::from_mut(&mut v));

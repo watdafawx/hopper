@@ -641,6 +641,7 @@ impl Store {
         }
         crate::hero_drift::set_still(settings.still_header);
         crate::smooth_scroll::set_enabled(settings.smooth_scroll);
+        crate::clip_watch::set_enabled(settings.clip_links);
         let mut store = Self {
             saved_settings: serde_json::to_string(&settings).unwrap_or_default(),
             settings,
@@ -1667,6 +1668,7 @@ impl Store {
         hopper::sources::set_enabled(self.settings.allow_sources);
         crate::hero_drift::set_still(self.settings.still_header);
         crate::smooth_scroll::set_enabled(self.settings.smooth_scroll);
+        crate::clip_watch::set_enabled(self.settings.clip_links);
         let now = serde_json::to_string(&self.settings).unwrap_or_default();
         if now != self.saved_settings {
             if let Err(e) = self.settings.save_later() {

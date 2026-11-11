@@ -4505,6 +4505,7 @@ dependencies = [
  "tao",
  "trash",
  "windows 0.62.2",
+ "windows-registry 0.6.1",
  "winresource",
  "wry",
  "x11rb",
@@ -4553,6 +4554,7 @@ dependencies = [
  "webpki-roots",
  "whatlang",
  "windows 0.62.2",
+ "windows-registry 0.6.1",
  "zip 2.4.2",
 ]
 

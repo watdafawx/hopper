@@ -859,6 +859,41 @@ impl BrowseView {
         .detach();
     }
 
+    /// A CurseForge or Modrinth page link from outside Hopper (a clicked or
+    /// copied link): the project's panel, with the linked file ready to
+    /// install when the link names one. A link that finds no project goes
+    /// to the browser, so it's never lost.
+    pub fn open_web_link(&mut self, url: String, cx: &mut Context<Self>) {
+        let Some(link) = hopper::modlinks::parse(&url) else {
+            cx.open_url(&url);
+            return;
+        };
+        self.opening = Some(url.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let r = cx.background_spawn(async move { hopper::modlinks::resolve(&link) }).await;
+            this.update(cx, |this, cx| {
+                if this.opening.as_deref() != Some(url.as_str()) {
+                    return;
+                }
+                match r {
+                    Ok((m, f)) => {
+                        this.link_file = f;
+                        this.show_mod(m, cx);
+                    }
+                    Err(e) => {
+                        log::warn!("mod link {url}: {e:#}");
+                        this.opening = None;
+                        cx.open_url(&url);
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Opens a project's page, installing into `root`.
     pub fn open_project(&mut self, root: PathBuf, project: u64, cx: &mut Context<Self>) {
         self.set_target(root, cx);
@@ -4813,7 +4848,8 @@ impl BrowseView {
         Some(card.into_any_element())
     }
 
-    /// "Opened from curseforge.com": the linked file, ready to install.
+    /// "Opened from curseforge.com" (or modrinth.com): the linked file,
+    /// ready to install.
     fn link_banner(
         &self,
         m: &cf::Mod,
@@ -4834,7 +4870,11 @@ impl BrowseView {
         let key = hopper::settings::notice_key("browse", "opened-link", &f.id.to_string());
         let primary = theme.primary;
         let body = crate::crash_help::callout(theme.primary, cx)
-                .child(div().font_semibold().child("Opened from curseforge.com"))
+                .child(div().font_semibold().child(if hopper::modrinth::is_mr(m.id) {
+                    "Opened from modrinth.com"
+                } else {
+                    "Opened from curseforge.com"
+                }))
                 .child(div().text_sm().child(f.display_name.clone()))
                 .child(if have {
                     h_flex()

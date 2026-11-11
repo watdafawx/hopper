@@ -111,45 +111,10 @@ pub enum ProjectLink {
 }
 
 /// Reads a project page link ("curseforge.com/minecraft/mc-mods/jei",
-/// "modrinth.com/mod/sodium"); None for any other URL.
+/// "modrinth.com/mod/sodium"); None for any other URL. Every form the two
+/// sites use is read by [`crate::modlinks::parse`].
 pub fn project_link(url: &str) -> Option<ProjectLink> {
-    let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let rest = rest.split(['?', '#']).next()?;
-    let (host, path) = rest.split_once('/')?;
-    let host = host.to_ascii_lowercase();
-    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if host == "curseforge.com" || host.ends_with(".curseforge.com") {
-        return match segs.as_slice() {
-            ["minecraft", class, slug, ..] => {
-                let class = match *class {
-                    "mc-mods" => cf::CLASS_MODS,
-                    "modpacks" => cf::CLASS_MODPACKS,
-                    "texture-packs" => cf::CLASS_RESOURCE_PACKS,
-                    "shaders" => cf::CLASS_SHADERS,
-                    "data-packs" => cf::CLASS_DATAPACKS,
-                    "worlds" => cf::CLASS_WORLDS,
-                    _ => return None,
-                };
-                Some(ProjectLink::Cf(Some(class), slug.to_string()))
-            }
-            ["projects", p, ..] => Some(match p.parse() {
-                Ok(id) => ProjectLink::CfId(id),
-                Err(_) => ProjectLink::Cf(None, p.to_string()),
-            }),
-            _ => None,
-        };
-    }
-    if host == "modrinth.com" || host == "www.modrinth.com" {
-        return match segs.as_slice() {
-            [
-                "mod" | "modpack" | "resourcepack" | "shader" | "datapack" | "plugin" | "project",
-                slug,
-                ..,
-            ] => Some(ProjectLink::Mr(slug.to_string())),
-            _ => None,
-        };
-    }
-    None
+    crate::modlinks::parse(url).map(|l| l.project)
 }
 
 /// The project a page link points at, as an id `get_mod` takes.

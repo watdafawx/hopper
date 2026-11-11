@@ -325,9 +325,17 @@ impl AppView {
                     this.go(Page::Browse, cx);
                 }
                 StoreEvent::Link(url) => {
-                    window.activate_window();
+                    if !crate::no_focus() {
+                        window.activate_window();
+                    }
                     let url = url.clone();
-                    this.browse.update(cx, |b, cx| b.open_link(&url, cx));
+                    this.browse.update(cx, |b, cx| {
+                        if hopper::links::is_link(&url) {
+                            b.open_link(&url, cx)
+                        } else {
+                            b.open_web_link(url, cx)
+                        }
+                    });
                     this.go(Page::Browse, cx);
                 }
             }),
@@ -529,6 +537,11 @@ impl AppView {
         let args: Vec<String> = std::env::args().collect();
         if let Some(url) = args.iter().find(|a| hopper::links::is_link(a)).cloned() {
             self.browse.update(cx, |b, cx| b.open_link(&url, cx));
+            self.go(Page::Browse, cx);
+        }
+        // A clicked mod link that started Hopper (see link_open.rs).
+        if let Some(url) = crate::link_open::url_arg(&args) {
+            self.browse.update(cx, |b, cx| b.open_web_link(url, cx));
             self.go(Page::Browse, cx);
         }
         window.focus(&self.focus, cx);
