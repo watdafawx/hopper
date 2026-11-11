@@ -82,6 +82,21 @@ impl Store {
         self.disk_changed(later, cx);
     }
 
+    /// Reads instances again whose file another program held open when they
+    /// were read. Nothing else says when it's free again, and until then the
+    /// pack shows no mods and friends following it get no changes.
+    pub(super) fn retry_unreadable(&self) {
+        let roots: Vec<PathBuf> = self
+            .instances
+            .iter()
+            .filter(|i| instances::may_read_later(i) && !self.writing(&i.root))
+            .map(|i| i.root.clone())
+            .collect();
+        for root in roots {
+            self.disk_reload(root, Some(Area::Mods));
+        }
+    }
+
     /// Reads an instance again off the UI thread (a big pack's file runs to
     /// megabytes).
     fn disk_reload(&self, root: PathBuf, area: Option<Area>) {

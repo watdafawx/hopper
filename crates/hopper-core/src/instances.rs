@@ -577,8 +577,17 @@ fn read_own(root: &Path) -> Result<Option<Instance>, String> {
             .map(Some)
             .map_err(|e| format!("{HOPPER_FILE} is damaged: {e}")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{HOPPER_FILE} can't be read: {e}")),
+        Err(e) => Err(format!("{HOPPER_FILE} {CANT_READ}: {e}")),
     }
+}
+
+const CANT_READ: &str = "can't be read";
+
+/// Whether an [unreadable](Instance::unreadable) instance's file only
+/// couldn't be opened (another program, such as a backup or a virus scan,
+/// held it), not that it's damaged: reading it again later should work.
+pub fn may_read_later(inst: &Instance) -> bool {
+    inst.unreadable.as_deref().is_some_and(|e| e.contains(CANT_READ))
 }
 
 /// When each mod went into the instance (seconds since the epoch), by file
@@ -989,6 +998,32 @@ pub fn give_id(inst: &mut Instance) {
 /// A new random [`Instance::id`].
 pub fn new_id() -> String {
     crate::peer::random_hex(16)
+}
+
+/// Whether the instance `id` may still be in the folder `root`: its
+/// `hopper.json` carries that id, or can't be read or understood right now
+/// (another program has it open, or it's half written), so there's no
+/// telling. An instance that failed to load once isn't gone; a friend's
+/// share of it is only taken back as deleted once this says no.
+pub fn may_hold_id(root: &Path, id: &str) -> bool {
+    #[derive(Deserialize)]
+    struct OnlyId {
+        #[serde(default)]
+        id: String,
+    }
+    match fs::read(root.join(HOPPER_FILE)) {
+        Ok(b) => serde_json::from_slice::<OnlyId>(&b).map_or(true, |x| x.id == id),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
+/// [`may_hold_id`] for every instance folder in `dir` (an instances
+/// folder), for when where the instance was isn't known.
+pub fn folder_may_hold_id(dir: &Path, id: &str) -> bool {
+    match fs::read_dir(dir) {
+        Ok(rd) => rd.flatten().any(|e| e.path().is_dir() && may_hold_id(&e.path(), id)),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 /// An instance another launcher keeps, managed where it is: Hopper's own
@@ -1527,6 +1562,42 @@ mod tests {
         assert!(found.iter().find(|i| i.root == server).unwrap().id.is_empty());
         assert!(on_disk(&server).is_empty());
         assert!(load_managed(&server).unwrap().id.is_empty());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_instance_that_cant_be_read_may_still_be_there() {
+        let base = temp("may-hold");
+        let (pack, other) = (base.join("Pack"), base.join("Other"));
+        for (dir, id) in [(&pack, "aaaa"), (&other, "bbbb")] {
+            fs::create_dir_all(dir).unwrap();
+            Instance { root: dir.to_path_buf(), id: id.into(), format: FORMAT, ..Default::default() }.save().unwrap();
+        }
+        assert!(may_hold_id(&pack, "aaaa"));
+        assert!(!may_hold_id(&pack, "bbbb"));
+        assert!(folder_may_hold_id(&base, "bbbb"));
+        assert!(!folder_may_hold_id(&base, "cccc"));
+        // Half written: no telling, so it counts as there.
+        fs::write(other.join(HOPPER_FILE), b"{\"id\": \"bb").unwrap();
+        assert!(may_hold_id(&other, "cccc"));
+        assert!(folder_may_hold_id(&base, "cccc"));
+        // A damaged file stays damaged: no point reading it again.
+        assert!(!may_read_later(&load(&other).unwrap()));
+        // Another program holding it open: the same.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let held = fs::OpenOptions::new().read(true).share_mode(0).open(pack.join(HOPPER_FILE)).unwrap();
+            assert!(may_hold_id(&pack, "zzzz"));
+            // ...and it reads fine once that program lets go.
+            assert!(may_read_later(&load(&pack).unwrap()));
+            drop(held);
+            assert!(load(&pack).unwrap().unreadable.is_none());
+        }
+        // Deleted (to the Recycle Bin): gone.
+        fs::remove_dir_all(&pack).unwrap();
+        assert!(!may_hold_id(&pack, "aaaa"));
+        assert!(!folder_may_hold_id(&base.join("missing"), "aaaa"));
         let _ = fs::remove_dir_all(&base);
     }
 

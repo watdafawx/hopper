@@ -536,6 +536,12 @@ pub struct Store {
     mailbox_sig: u64,
     /// A publish failed then; waits a minute before trying again.
     publish_failed_at: Option<Instant>,
+    /// Where each instance (by id) was last seen, to check a shared pack
+    /// missing from the list is really gone before taking it back.
+    instance_homes: HashMap<String, PathBuf>,
+    /// A shared pack missing from the list was still on disk then (it
+    /// failed to load once); looked at again a minute later.
+    stale_held_at: Option<Instant>,
     /// Group packs ("from/inst") being installed to keep a group in step.
     auto_following: HashSet<String>,
     _mailbox_watch: Option<Task<()>>,
@@ -730,6 +736,8 @@ impl Store {
             mailbox_invites: Vec::new(),
             mailbox_sig: 0,
             publish_failed_at: None,
+            instance_homes: HashMap::new(),
+            stale_held_at: None,
             auto_following: HashSet::new(),
             _mailbox_watch: None,
             _mailbox_publish: None,

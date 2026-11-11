@@ -23,6 +23,10 @@ use std::time::{Duration, Instant};
 const GROUPS_EVERY: Duration = Duration::from_secs(60);
 /// How long a failed publish waits before it's tried again.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
+/// How often shared packs are checked for changes to publish.
+const PUBLISH_TICK: Duration = Duration::from_millis(500);
+/// How often the friend list is read from the mailbox.
+const FRIENDS_EVERY: Duration = Duration::from_secs(3);
 /// Packs from friends kept for the Friends screen.
 const RECIPES_KEPT: usize = 200;
 
@@ -1222,6 +1226,9 @@ impl Store {
             return;
         }
         let allow = self.settings.allow_sources;
+        // What was applied here last, so what they removed or turned back
+        // on since then changes here too.
+        let prev = self.follow_at(&root).map(|f| f.code.clone()).unwrap_or_default();
         let r2 = root.clone();
         self.spawn_instance_job(&root, title, move |job| {
             let skip = match skip {
@@ -1231,7 +1238,7 @@ impl Store {
                     allow,
                 ),
             };
-            hopper::recipe::apply_to(&r2, &code, &skip, job)?;
+            hopper::recipe::apply_to(&r2, &code, &prev, &skip, job)?;
             Ok(Msg::RecipeApplied(r2.clone(), code.clone()))
         });
     }
@@ -1297,37 +1304,54 @@ impl Store {
         if self._mailbox_publish.is_some() {
             return;
         }
+        // A change is looked for often, so a friend following the pack sees
+        // it within a second or two (their feed is woken at once); the
+        // friend list, a call to the mailbox, is read less often.
+        let mut read_at: Option<Instant> = None;
         self._mailbox_publish = Some(cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(3)).await;
+            cx.background_executor().timer(PUBLISH_TICK).await;
+            let read = read_at.is_none_or(|t| t.elapsed() >= FRIENDS_EVERY);
             let got = this.update(cx, |s, _| {
                 let mb = s.mailbox.clone()?;
+                if !read {
+                    return Some((mb, None));
+                }
                 s.reconcile_shares();
+                s.retry_unreadable();
                 let due = s.groups_due || s.groups_at.is_none_or(|t| t.elapsed() >= GROUPS_EVERY);
                 if due {
                     s.groups_due = false;
                     s.groups_at = Some(Instant::now());
                 }
-                Some((mb, due))
+                Some((mb, Some(due)))
             });
             let Ok(Some((mb, due))) = got else { continue };
-            let (friends, groups) = {
-                let mb = mb.clone();
-                cx.background_spawn(async move { (mb.friend_list(), due.then(|| mb.groups())) }).await
-            };
-            // The feed reports the mailbox being down.
-            let Ok((friends, max)) = friends else { continue };
-            let work = this.update(cx, |s, cx| {
-                s.got_friends(friends, max, cx);
-                match groups {
-                    Some(Ok(g)) => s.got_groups(g, cx),
-                    Some(Err(e)) => {
-                        log::warn!("reading friend groups: {e:#}");
-                        s.groups_due = true;
-                    }
-                    None => {}
+            let work = match due {
+                // Between reads: the friends known from the last one, while
+                // the mailbox answers (the feed says when it doesn't).
+                None => this.update(cx, |s, _| if s.mailbox_error.is_none() { s.publish_work() } else { None }),
+                Some(due) => {
+                    read_at = Some(Instant::now());
+                    let (friends, groups) = {
+                        let mb = mb.clone();
+                        cx.background_spawn(async move { (mb.friend_list(), due.then(|| mb.groups())) }).await
+                    };
+                    // The feed reports the mailbox being down.
+                    let Ok((friends, max)) = friends else { continue };
+                    this.update(cx, |s, cx| {
+                        s.got_friends(friends, max, cx);
+                        match groups {
+                            Some(Ok(g)) => s.got_groups(g, cx),
+                            Some(Err(e)) => {
+                                log::warn!("reading friend groups: {e:#}");
+                                s.groups_due = true;
+                            }
+                            None => {}
+                        }
+                        s.publish_work()
+                    })
                 }
-                s.publish_work()
-            });
+            };
             let Ok(Some(work)) = work else { continue };
             let done = {
                 let mb = mb.clone();
@@ -1351,6 +1375,16 @@ impl Store {
         // yet) every pack would look deleted; take nothing back then.
         let scanned = !self.instances.is_empty() && Path::new(&self.settings.instances_root).is_dir();
         let stale = if scanned { self.settings.stale_shares(&live) } else { Vec::new() };
+        for i in self.instances.iter().filter(|i| !i.id.is_empty()) {
+            if self.instance_homes.get(&i.id) != Some(&i.root) {
+                self.instance_homes.insert(i.id.clone(), i.root.clone());
+            }
+        }
+        // A pack that only looked deleted (still on disk) is looked at
+        // again after a while, not on every tick; a share turned off goes
+        // at once.
+        let held = self.stale_held_at.is_some_and(|t| t.elapsed() < RETRY_AFTER);
+        let stale_due = stale.iter().any(|(_, why)| *why != "deleted") || (!stale.is_empty() && !held);
         let sig = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1360,20 +1394,33 @@ impl Store {
             }
             h.finish()
         };
-        if sig == self.mailbox_sig && stale.is_empty() && !retry {
+        if sig == self.mailbox_sig && !stale_due && !retry {
             return None;
         }
         let packs = plan
             .into_iter()
             .filter_map(|p| Some((self.instances.iter().find(|i| i.id == p.inst)?.clone(), p)))
             .collect();
-        Some(PublishWork { sig, stale, packs })
+        // Where to look for each pack that seems deleted: where it was last
+        // seen, else the instances folder.
+        let homes = stale
+            .iter()
+            .filter(|(_, why)| *why == "deleted")
+            .map(|(s, _)| {
+                let at = self.instance_homes.get(&s.inst).cloned();
+                (s.inst.clone(), at)
+            })
+            .collect();
+        Some(PublishWork { sig, stale, packs, homes, instances_root: PathBuf::from(&self.settings.instances_root) })
     }
 
     fn publish_done(&mut self, done: PublishDone, cx: &mut Context<Self>) {
         self.mailbox_sig = done.sig;
         if done.failed {
             self.publish_failed_at = Some(Instant::now());
+        }
+        if done.held {
+            self.stale_held_at = Some(Instant::now());
         }
         self.update_settings_quietly(|st| {
             for (s, deleted) in &done.revoked {
@@ -1427,6 +1474,10 @@ struct PublishWork {
     sig: u64,
     stale: Vec<(SharedPack, &'static str)>,
     packs: Vec<(hopper::instances::Instance, PublishTo)>,
+    /// For each pack that seems deleted (by id), the folder it was last
+    /// seen in.
+    homes: HashMap<String, Option<PathBuf>>,
+    instances_root: PathBuf,
 }
 
 struct PublishDone {
@@ -1436,6 +1487,9 @@ struct PublishDone {
     /// What reached the relay (groups it skipped left out).
     sent: Vec<PublishTo>,
     failed: bool,
+    /// A pack missing from the list was still on disk, so it wasn't taken
+    /// back.
+    held: bool,
 }
 
 impl PublishWork {
@@ -1446,8 +1500,24 @@ impl PublishWork {
             revoked: Vec::new(),
             sent: Vec::new(),
             failed: false,
+            held: false,
         };
         for (s, reason) in self.stale {
+            // Missing from the list isn't deleted: a pack whose file was
+            // open in another program, or half written by the CurseForge
+            // app, fails to load once. Taking it back then would end every
+            // friend's follow and forget the share for good.
+            if reason == "deleted" {
+                let still = match self.homes.get(&s.inst).cloned().flatten() {
+                    Some(root) => hopper::instances::may_hold_id(&root, &s.inst),
+                    None => hopper::instances::folder_may_hold_id(&self.instances_root, &s.inst),
+                };
+                if still {
+                    log::info!("shared pack {} didn't load but is still on disk; not taking it back", s.inst);
+                    out.held = true;
+                    continue;
+                }
+            }
             let (to, groups) = if s.group.is_empty() {
                 (vec![s.friend.clone()], Vec::new())
             } else {
@@ -1470,7 +1540,17 @@ impl PublishWork {
             let j = jobs.start_quiet(format!("Sharing {}", inst.name));
             let made = hopper::sharecode::make(&inst, &j);
             j.finish(&Ok::<(), anyhow::Error>(()));
-            let Ok(made) = made else { continue };
+            // Making the code can need CurseForge or Modrinth (the pack's
+            // file list); if that failed, the change is sent on the retry
+            // instead of never.
+            let made = match made {
+                Ok(m) => m,
+                Err(e) => {
+                    log::warn!("making the share code of {}: {e:#}", inst.name);
+                    out.failed = true;
+                    continue;
+                }
+            };
             match mb.publish_to(&plan.to, &plan.groups, &inst.id, &key, &inst.name, &made.code, &made.left_out) {
                 Ok(sent) => {
                     plan.groups.retain(|g| !sent.skipped.contains(g));

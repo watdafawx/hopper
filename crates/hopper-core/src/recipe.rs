@@ -168,14 +168,19 @@ fn pack_name(p: &crate::instances::PackRef) -> String {
 /// the code is a newer version of the same pack. Mods from GitHub and other
 /// links in `skip` are left out (the player said no, or wasn't there to
 /// ask; see [`crate::sources::carry::auto_skip`]), with a note on the job.
+/// `prev`: the code applied here before (empty for none), so mods the
+/// sender removed or turned back on since then change here too.
 /// Returns the saved instance.
 pub fn apply_to(
     root: &Path,
     code: &str,
+    prev: &str,
     skip: &[crate::sources::carry::Pin],
     job: &Job,
 ) -> anyhow::Result<Instance> {
     let (share, note) = sharecode::without(&sharecode::decode(code)?, skip);
+    // An old code that no longer reads only means less is compared.
+    let prev = (!prev.is_empty() && prev != code).then(|| sharecode::decode(prev).ok()).flatten();
     if let Some(n) = note {
         job.note(n);
     }
@@ -209,7 +214,7 @@ pub fn apply_to(
         }
         Fit::Different(why) => anyhow::bail!("{why}"),
     }
-    sharecode::apply_existing(&mut inst, &share, job)?;
+    sharecode::apply_existing(&mut inst, &share, prev.as_ref(), job)?;
     Ok(inst)
 }
 
@@ -341,12 +346,51 @@ mod tests {
             ],
         };
         let code = sharecode::encode(&share);
-        let inst = apply_to(&root, &code, &[], &job).unwrap();
+        let inst = apply_to(&root, &code, "", &[], &job).unwrap();
         assert!(!inst.addons.iter().find(|a| a.project_id == 101).unwrap().enabled);
         assert!(inst.addons.iter().all(|a| a.project_id != 303));
         assert!(!root.join("mods/one.jar").exists());
         assert!(root.join("mods/one.jar.disabled").exists());
         assert!(!root.join("mods/two.jar").exists());
+    }
+
+    fn plain_share(entries: Vec<Entry>) -> String {
+        sharecode::encode(&Share {
+            base: Base::Plain {
+                game_version: "1.21.1".into(),
+                loader: "neoforge-21.1.265".into(),
+            },
+            name: None,
+            loader: None,
+            entries,
+        })
+    }
+
+    /// The follower's report: a mod turned off on the sender's PC went off
+    /// here, but turning it back on (and removing one) never arrived, as a
+    /// code only lists what's added or off.
+    #[test]
+    fn a_followed_pack_turns_mods_back_on_and_removes_what_they_removed() {
+        let (root, mut inst) = plain("follow-diff");
+        // As their last code left it: "one" (101) off, "two" (303, file
+        // 404) a file of theirs.
+        let i = inst.addons.iter().position(|a| a.project_id == 101).unwrap();
+        crate::install::set_enabled(&mut inst, i, false).unwrap();
+        let first = plain_share(vec![Entry::Off(Target::Curse(101)), Entry::CurseFile { file: 404, enabled: true }]);
+
+        // They turn "one" back on and remove "two": the new code lists
+        // neither. Compared with the last one, both change here.
+        let second = plain_share(Vec::new());
+        let inst = apply_to(&root, &second, &first, &[], &job()).unwrap();
+        assert!(inst.addons.iter().find(|a| a.project_id == 101).unwrap().enabled);
+        assert!(root.join("mods/one.jar").exists());
+        assert!(inst.addons.iter().all(|a| a.project_id != 303));
+        assert!(!root.join("mods/two.jar").exists());
+
+        // Without the last code nothing is guessed: what's here stays.
+        let (root, _) = plain("follow-no-prev");
+        let inst = apply_to(&root, &second, "", &[], &job()).unwrap();
+        assert_eq!(inst.addons.len(), 2);
     }
 
     #[test]
@@ -368,7 +412,7 @@ mod tests {
             loader: None,
             entries: Vec::new(),
         };
-        let err = apply_to(&root, &sharecode::encode(&share), &[], &job()).unwrap_err();
+        let err = apply_to(&root, &sharecode::encode(&share), "", &[], &job()).unwrap_err();
         assert!(format!("{err:#}").contains("this instance is ATM"));
         assert!(root.join("mods/one.jar").exists());
     }

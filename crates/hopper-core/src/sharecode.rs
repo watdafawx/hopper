@@ -728,20 +728,28 @@ pub fn install_share(instances_root: &Path, share: &Share, job: &Job) -> anyhow:
     // Following it right away needs its id before anything loads it again.
     inst.ensure_id();
     inst.save()?;
-    apply_existing(&mut inst, &share, job)?;
+    apply_existing(&mut inst, &share, None, job)?;
     Ok(inst)
 }
 
 /// Brings an instance in line with the code's entries, in place. A file
 /// that fails is noted and the rest still go in. The caller checks that the
 /// instance starts from the same pack (see [`crate::recipe::fit`]).
-pub fn apply_existing(inst: &mut Instance, share: &Share, job: &Job) -> anyhow::Result<()> {
+///
+/// `prev` is the code applied here last time, for a followed pack. A code
+/// lists added and switched-off mods, not what's gone or back to normal,
+/// so what the sender removed or turned back on since then is only seen by
+/// comparing the two.
+pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, job: &Job) -> anyhow::Result<()> {
     let find = |inst: &Instance, t: &Target| {
         inst.addons.iter().position(|a| match t {
             Target::Curse(p) => a.project_id == *p,
             Target::Named(n) => a.file_name.eq_ignore_ascii_case(n),
         })
     };
+    // Read before anything changes: the old code's files are matched to
+    // the mods here by their file ids.
+    let was = prev.map(|p| seen_in(inst, p)).unwrap_or_default();
     for e in &share.entries {
         if let Entry::Remove(t) = e
             && let Some(i) = find(inst, t)
@@ -768,31 +776,41 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, job: &Job) -> anyhow::
             owner.insert(f.id, f.mod_id);
         }
     }
-    let files: Vec<(u64, u64, bool)> = share
-        .entries
-        .iter()
-        .filter_map(|e| match e {
+    let mut now: Vec<Seen> = Vec::new();
+    let mut files: Vec<(u64, u64, bool)> = Vec::new();
+    for e in &share.entries {
+        match e {
             Entry::CurseFile { file, enabled } => match owner.get(file) {
-                Some(&p) => Some((p, *file, *enabled)),
-                None => {
-                    job.note(format!("CurseForge has no file {file} any more"));
-                    None
-                }
+                Some(&p) => files.push((p, *file, *enabled)),
+                None => job.note(format!("CurseForge has no file {file} any more")),
             },
             Entry::ModrinthFile { version, enabled } => match modrinth::version(version) {
-                Ok(v) => Some((num_id(&v.project_id), num_id(&v.id), *enabled)),
-                Err(e) => {
-                    job.note(format!("Modrinth version {version}: {e:#}"));
-                    None
-                }
+                Ok(v) => files.push((num_id(&v.project_id), num_id(&v.id), *enabled)),
+                Err(e) => job.note(format!("Modrinth version {version}: {e:#}")),
             },
-            _ => None,
-        })
-        .collect();
+            Entry::Source { pin, enabled } => now.push(Seen { who: source_who(&pin.source), own: true, on: *enabled }),
+            Entry::Remove(t) | Entry::Off(t) => now.push(Seen { who: target_who(t), own: false, on: false }),
+        }
+    }
+    now.extend(files.iter().map(|&(p, _, on)| Seen { who: Who::Project(p), own: true, on }));
+    // Gone from their copy since the last code: it goes here too. Only what
+    // the last code listed as theirs, so mods added on this PC stay.
+    let (gone, back_on) = follow_changes(&was, &now);
+    for who in &gone {
+        if let Some(i) = inst.addons.iter().position(|a| !a.from_pack && who.is(a)) {
+            let name = inst.addons[i].name.clone();
+            if let Err(e) = crate::install::remove(inst, i) {
+                job.note(format!("Couldn't remove {name}: {e:#}"));
+            }
+        }
+    }
     for (i, (project, file, enabled)) in files.iter().enumerate() {
         job.check_cancelled()?;
         job.progress(i, files.len());
-        match crate::install::install_file(inst, *project, *file, job) {
+        // Already here: nothing to download, only its switch to set.
+        let here = inst.addons.iter().any(|a| a.project_id == *project && a.file_id == *file);
+        let put = if here { Ok(String::new()) } else { crate::install::install_file(inst, *project, *file, job) };
+        match put {
             Err(e) => job.note(format!("Couldn't add a file: {e:#}")),
             Ok(_) if !enabled => {
                 if let Some(i) = inst.addons.iter().position(|a| a.project_id == *project)
@@ -823,7 +841,101 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, job: &Job) -> anyhow::
             crate::install::set_enabled(inst, i, false)?;
         }
     }
+    // Turned back on in their copy. A file put in again keeps the switch it
+    // had here, so this sets it.
+    for who in &back_on {
+        if let Some(i) = inst.addons.iter().position(|a| who.is(a))
+            && let Err(e) = crate::install::set_enabled(inst, i, true)
+        {
+            job.note(format!("Couldn't turn {} on: {e:#}", inst.addons[i].name));
+        }
+    }
     inst.save()
+}
+
+/// Which mod an entry of a code is, to compare two codes of one pack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Who {
+    /// A CurseForge or Modrinth project (Modrinth's as Hopper's number).
+    Project(u64),
+    /// A mod from GitHub or a link: its source and file shape.
+    Source(String, String),
+    /// A pack file known by name (lower case).
+    Named(String),
+}
+
+impl Who {
+    fn is(&self, a: &Addon) -> bool {
+        match self {
+            Who::Project(p) => a.project_id == *p,
+            Who::Source(url, pattern) => a.source.as_ref().is_some_and(|s| s.url == *url && s.pattern == *pattern),
+            Who::Named(n) => a.file_name.eq_ignore_ascii_case(n),
+        }
+    }
+}
+
+/// One mod as a code lists it: `own` for a file of the sender's (not a
+/// pack mod turned off or removed), and whether it's on.
+#[derive(Clone, Debug, PartialEq)]
+struct Seen {
+    who: Who,
+    own: bool,
+    on: bool,
+}
+
+fn source_who(s: &crate::sources::ModSource) -> Who {
+    Who::Source(s.url.clone(), s.pattern.clone())
+}
+
+fn target_who(t: &Target) -> Who {
+    match t {
+        Target::Curse(p) => Who::Project(*p),
+        Target::Named(n) => Who::Named(n.to_lowercase()),
+    }
+}
+
+/// The mods `prev` lists, matched to the instance's mods (a code names
+/// files, not projects). One that isn't here any more is left out.
+fn seen_in(inst: &Instance, prev: &Share) -> Vec<Seen> {
+    prev.entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::CurseFile { file, enabled } => inst
+                .addons
+                .iter()
+                .find(|a| a.file_id == *file && !is_mr(a.project_id))
+                .map(|a| Seen { who: Who::Project(a.project_id), own: true, on: *enabled }),
+            Entry::ModrinthFile { version, enabled } => inst
+                .addons
+                .iter()
+                .find(|a| a.mr_version == *version || (is_mr(a.project_id) && a.file_id == num_id(version)))
+                .map(|a| Seen { who: Who::Project(a.project_id), own: true, on: *enabled }),
+            Entry::Source { pin, enabled } => Some(Seen { who: source_who(&pin.source), own: true, on: *enabled }),
+            Entry::Remove(t) | Entry::Off(t) => Some(Seen { who: target_who(t), own: false, on: false }),
+        })
+        .collect()
+}
+
+/// What a followed pack's new code changes beyond what it lists: mods the
+/// last code had as the sender's own and this one doesn't (they removed
+/// them), and mods that were off and now aren't (a file of theirs switched
+/// on, or a pack mod no longer listed as off).
+fn follow_changes(was: &[Seen], now: &[Seen]) -> (Vec<Who>, Vec<Who>) {
+    let find = |w: &Who| now.iter().find(|n| n.who == *w);
+    let gone = was.iter().filter(|w| w.own && find(&w.who).is_none()).map(|w| w.who.clone()).collect();
+    let back_on = was
+        .iter()
+        .filter(|w| {
+            !w.on
+                && match find(&w.who) {
+                    Some(n) => n.on,
+                    // A pack mod that isn't listed is the pack's own: on.
+                    None => !w.own,
+                }
+        })
+        .map(|w| w.who.clone())
+        .collect();
+    (gone, back_on)
 }
 
 /// The sources a code's mods come from ("owner/repo" on GitHub…), for the
@@ -844,6 +956,57 @@ pub fn sources_of(share: &Share) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seen(who: Who, own: bool, on: bool) -> Seen {
+        Seen { who, own, on }
+    }
+
+    #[test]
+    fn a_followed_pack_change_is_found_by_comparing_codes() {
+        let p = Who::Project;
+        let was = vec![
+            seen(p(1), true, false), // their file, off
+            seen(p(2), true, true),  // their file, on
+            seen(p(3), false, false), // a pack mod turned off
+            seen(p(4), false, false), // a pack mod turned off
+            seen(p(5), true, false), // their file, off
+        ];
+        let now = vec![
+            seen(p(1), true, true),   // switched on
+            seen(p(4), false, false), // still off
+            seen(p(5), true, false),  // still off (maybe a newer file)
+        ];
+        let (gone, back_on) = follow_changes(&was, &now);
+        // 2 was removed; 3 isn't listed any more, so it's the pack's (on).
+        assert_eq!(gone, vec![p(2)]);
+        assert_eq!(back_on, vec![p(1), p(3)]);
+        // A pack mod they removed outright isn't switched on.
+        let (gone, back_on) = follow_changes(&[seen(p(3), false, false)], &[seen(p(3), false, false)]);
+        assert!(gone.is_empty() && back_on.is_empty());
+        // Nothing to compare with: nothing changes beyond the code.
+        assert_eq!(follow_changes(&[], &now), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn the_last_code_is_matched_to_the_mods_here_by_file() {
+        let a = |project: u64, file: u64| Addon { project_id: project, file_id: file, enabled: true, ..Default::default() };
+        let inst = Instance { addons: vec![a(10, 100), a(20, 200)], ..Default::default() };
+        let prev = Share {
+            base: Base::Plain { game_version: "1.21.1".into(), loader: String::new() },
+            name: None,
+            loader: None,
+            entries: vec![
+                Entry::CurseFile { file: 200, enabled: false },
+                // Updated here since: not matched, so never removed by it.
+                Entry::CurseFile { file: 999, enabled: true },
+                Entry::Off(Target::Named("Pack.jar".into())),
+            ],
+        };
+        assert_eq!(
+            seen_in(&inst, &prev),
+            vec![seen(Who::Project(20), true, false), seen(Who::Named("pack.jar".into()), false, false)]
+        );
+    }
 
     #[test]
     fn round_trips() {
