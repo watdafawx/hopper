@@ -25,6 +25,8 @@ use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::radio::Radio;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::cell::Cell;
+use std::rc::Rc;
 
 /// What these tabs ask the Library to do.
 pub enum ContentEvent {
@@ -607,7 +609,7 @@ impl WorldsView {
                 .flex_none()
                 .rounded(cx.theme().radius)
                 .overflow_hidden()
-                .child(img(p.clone()).size_full())
+                .child(img(p.clone()).size_full().rounded(cx.theme().radius))
                 .into_any_element(),
             None => widgets::thumb(None, rems(3.), cx),
         };
@@ -1331,7 +1333,8 @@ impl WorldsView {
     }
 
     /// The bar above the list: what's there and the ways to add more.
-    fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// `empty`: no worlds listed, so the empty state carries the one orange "Get worlds".
+    fn toolbar(&self, empty: bool, cx: &mut Context<Self>) -> AnyElement {
         let Some(root) = self.root.clone() else { return div().into_any_element() };
         let count = plural(self.worlds.len(), "world");
         if let Some(t) = self.target() {
@@ -1409,19 +1412,21 @@ impl WorldsView {
                         open_path(&backups)
                     }),
             )
-            .child(
-                Button::new("get-worlds")
-                    .primary()
-                    .small()
-                    .icon(IconName::Plus)
-                    .label("Get worlds")
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.emit(ContentEvent::Browse {
-                            class: hopper::cf::CLASS_WORLDS,
-                            dest: None,
-                        })
-                    })),
-            )
+            .when(!empty, |r| {
+                r.child(
+                    Button::new("get-worlds")
+                        .primary()
+                        .small()
+                        .icon(IconName::Plus)
+                        .label("Get worlds")
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.emit(ContentEvent::Browse {
+                                class: hopper::cf::CLASS_WORLDS,
+                                dest: None,
+                            })
+                        })),
+                )
+            })
             .into_any_element()
     }
 }
@@ -1498,7 +1503,7 @@ impl Render for WorldsView {
             .px_6()
             .pb_6()
             .gap_4()
-            .child(self.toolbar(cx))
+            .child(self.toolbar(empty, cx))
             .children(notice)
             .children(create)
             .children(state)
@@ -1532,7 +1537,7 @@ impl Render for WorldsView {
                     )
                     .child(
                         Button::new("get-worlds-empty")
-                            .outline()
+                            .primary()
                             .small()
                             .icon(IconName::Plus)
                             .label("Get worlds")
@@ -1592,6 +1597,9 @@ pub struct ScreenshotsView {
     /// Picked screenshots in the grid, by path.
     sel: Selection,
     grid_focus: FocusHandle,
+    /// The tile grid's width as last laid out, so its columns can share it
+    /// out to the right edge instead of leaving the remainder empty.
+    grid_w: Rc<Cell<Pixels>>,
 }
 
 impl ScreenshotsView {
@@ -1605,6 +1613,7 @@ impl ScreenshotsView {
             focus: cx.focus_handle(),
             sel: Selection::new(),
             grid_focus: cx.focus_handle(),
+            grid_w: Rc::default(),
         }
     }
 
@@ -1844,7 +1853,7 @@ impl ScreenshotsView {
 }
 
 impl Render for ScreenshotsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(root) = self.root.clone() else {
             return div().into_any_element();
         };
@@ -1853,14 +1862,31 @@ impl Render for ScreenshotsView {
         }
         let dir = root.join("screenshots");
         let theme = cx.theme();
+        // As many 16rem-or-wider columns as fit, sharing the width out so the
+        // last column ends at the content's right edge (16:9 tiles).
+        let rem = window.rem_size();
+        let (min_w, gap) = (rem * 16., rem * 0.75);
+        let avail = self.grid_w.get();
+        let cols = if avail > min_w { ((avail + gap) / (min_w + gap)).floor().max(1.) } else { 1. };
+        // Whole-pixel tiles, the leftover pixels one each to the first
+        // columns: the row ends 1 px short of the edge and never reaches it
+        // (landing exactly on it, a rounding error wraps the last column).
+        let (base_w, extra) = if avail > min_w {
+            let room = avail - gap * (cols - 1.) - px(1.);
+            let base = (room / cols).floor();
+            (base, f32::from((room - base * cols).floor()) as usize)
+        } else {
+            (min_w, 0)
+        };
         let tiles = self.shots.iter().enumerate().map(|(i, p)| {
             let thumb = self.thumbs.get(p).cloned();
             let key = p.display().to_string();
             let picked = self.sel.contains(&key);
+            let tile_w = if (i % cols as usize) < extra { base_w + px(1.) } else { base_w };
             div()
                 .id(ElementId::Name(format!("tile:{}", p.display()).into()))
-                .w_64()
-                .h(rems(9.))
+                .w(tile_w)
+                .h((tile_w * 0.5625).floor())
                 .flex_none()
                 .rounded(theme.radius_lg)
                 .overflow_hidden()
@@ -1888,7 +1914,10 @@ impl Render for ScreenshotsView {
                     }
                 }))
                 .when_some(thumb, |d, t| {
-                    d.child(img(crate::thumbs::source_in(crate::thumbs::Cat::Gallery, &t, crate::thumbs::Want::Px(240.), cx)).size_full().object_fit(ObjectFit::Cover))
+                    // The picture sits inside the border, so its corners are the
+                    // tile's minus the border width.
+                    let inner = theme.radius_lg - px(if picked { 2. } else { 1. });
+                    d.child(img(crate::thumbs::source_in(crate::thumbs::Cat::Gallery, &t, crate::thumbs::Want::Px(240.), cx)).size_full().rounded(inner).object_fit(ObjectFit::Cover))
                 })
         });
         let empty = self.shots.is_empty();
@@ -1940,7 +1969,27 @@ impl Render for ScreenshotsView {
                             .on_click(move |_, _, _| open_folder(&dir)),
                     ),
             )
-            .child(h_flex().flex_wrap().gap_3().children(tiles))
+            .child({
+                let (cell, entity) = (self.grid_w.clone(), cx.entity_id());
+                h_flex().relative().w_full().flex_wrap().gap_3().children(tiles).child(
+                    // Measures the row (no height of its own) and asks for
+                    // another render when its width changes.
+                    canvas(
+                        move |b, _, cx| {
+                            if cell.get() != b.size.width {
+                                cell.set(b.size.width);
+                                cx.notify(entity);
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .w_full()
+                    .h_0(),
+                )
+            })
             .when(empty, |r| {
                 r.child(widgets::empty_state(
                     IconName::Image,

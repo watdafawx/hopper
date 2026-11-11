@@ -720,7 +720,7 @@ impl Render for VersionsView {
                                 div()
                                     .text_sm()
                                     .font_medium()
-                                    .text_color(if behind == 0 { theme.success } else { theme.primary })
+                                    .text_color(if behind == 0 { theme.success } else { crate::theme::ink(theme.primary) })
                                     .child(status),
                             )
                             .when(self.pack && behind > 0 && latest_has_server, |r| {

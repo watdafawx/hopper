@@ -134,7 +134,7 @@ fn server_thumb(art: Option<&std::path::Path>, name: &str, size: Rems, light: Op
                 .overflow_hidden()
                 .bg(theme.muted)
                 .map(|d| match art {
-                    Some(p) => d.child(img(crate::thumbs::source_in(crate::thumbs::Cat::ServerArt, p, crate::thumbs::Want::Rems(size), cx)).size_full().object_fit(ObjectFit::Cover)),
+                    Some(p) => d.child(img(crate::thumbs::source_in(crate::thumbs::Cat::ServerArt, p, crate::thumbs::Want::Rems(size), cx)).size_full().rounded(theme.radius).object_fit(ObjectFit::Cover)),
                     None => d.child(letter_tile(name, size * 0.36)),
                 }),
         )

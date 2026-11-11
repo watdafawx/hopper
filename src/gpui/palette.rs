@@ -737,7 +737,7 @@ impl Render for Palette {
                                         .child(c),
                                 )
                             })
-                            .child(div().flex_1().child(crate::widgets::search_input(&self.input).appearance(false).cleanable(false))),
+                            .child(div().flex_1().child(crate::widgets::search_input_plain(&self.input).appearance(false).cleanable(false))),
                     )
                     .child(
                         div()

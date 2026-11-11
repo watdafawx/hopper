@@ -2441,7 +2441,7 @@ impl SyncPanel {
                         div()
                             .text_sm()
                             .font_semibold()
-                            .text_color(theme.primary)
+                            .text_color(crate::theme::ink(theme.primary))
                             .child(if shown { "Hide" } else { "Show" }),
                     ),
             )
@@ -2734,7 +2734,7 @@ impl SyncPanel {
                 .font_medium()
                 .truncate()
                 .when(linked, |d| {
-                    d.hover(move |s| s.text_color(primary)).tooltip(|w, cx| {
+                    d.hover(move |s| s.text_color(crate::theme::ink(primary))).tooltip(|w, cx| {
                         gpui_kit::component::tooltip::Tooltip::new("Details").build(w, cx)
                     })
                 })
@@ -2743,11 +2743,11 @@ impl SyncPanel {
         );
         let sub = why.clone().unwrap_or_else(|| m.file_name.clone());
         let fit = self.fit;
-        let side_icon = fit
-            .tags
-            .is_none()
-            .then(|| crate::side_card::side_of(&tags.env))
-            .flatten();
+        // (icon and words, whether the mod says its side); unknown is a dimmed question mark.
+        let side_icon = fit.tags.is_none().then(|| {
+            let side = crate::side_card::side_of(&tags.env);
+            (side.unwrap_or(crate::side_card::SIDE_UNKNOWN), side.is_some())
+        });
         let k2 = key.clone();
         let pickable = g.pickable();
         h_flex()
@@ -2795,12 +2795,12 @@ cx.listener(move |this, e: &ClickEvent, window, cx| {
                             .gap_1p5()
                             .child(name)
                             // No tags column: the side as an icon by the name.
-                            .when_some(side_icon, |r, (icon, what)| {
+                            .when_some(side_icon, |r, ((icon, what), known)| {
                                 r.child(
                                     div()
                                         .id(id("side-icon"))
                                         .flex_none()
-                                        .text_color(theme.muted_foreground)
+                                        .text_color(if known { theme.muted_foreground } else { theme.muted_foreground.opacity(0.75) })
                                         .child(Icon::new(icon).xsmall())
                                         .tooltip(move |w, cx| {
                                             gpui_kit::component::tooltip::Tooltip::new(what).build(w, cx)

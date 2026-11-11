@@ -589,7 +589,7 @@ impl SetupWizard {
                         .items_center()
                         .justify_center()
                         .bg(theme.primary.opacity(0.15))
-                        .text_color(theme.primary)
+                        .text_color(crate::theme::ink(theme.primary))
                         .text_xs()
                         .font_bold()
                         .child(n),

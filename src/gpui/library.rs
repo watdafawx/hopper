@@ -1344,7 +1344,7 @@ impl LibraryView {
                 .child(label)
                 .map(|d| {
                     if on {
-                        d.bg(color.opacity(0.15)).text_color(color).font_medium()
+                        d.bg(color.opacity(0.15)).text_color(crate::theme::ink(color)).font_medium()
                     } else {
                         d.text_color(muted).hover(move |s| s.bg(hover).text_color(fg))
                     }
@@ -2544,7 +2544,7 @@ impl LibraryView {
         let count = |t: InstTab| match t.class().filter(|c| *c != cf::CLASS_DATAPACKS) {
             Some(c) => {
                 let n: usize = hopper::packs::locations(inst, c).iter().filter(|l| l.key == "instance").map(|l| l.count).sum();
-                format!(" ({n})")
+                n.to_string()
             }
             None => String::new(),
         };
@@ -2555,23 +2555,30 @@ impl LibraryView {
             let n = KIND_TABS.iter().position(|k| *k == t).map_or(0, |i| ups[i]);
             let more = match n {
                 0 => String::new(),
-                1 => " · 1 update".to_string(),
-                n => format!(" · {n} updates"),
+                1 => "· 1 update".to_string(),
+                n => format!("· {n} updates"),
             };
-            count(t) + &more
+            [count(t), more].join(" ").trim().to_string()
         };
+        let muted = cx.theme().muted_foreground;
         let ix = PACKS.iter().position(|t| *t == self.tab).unwrap_or(0);
         Some(
             div()
                 .flex_none()
                 .px_6()
-                .pt_2()
+                .pt_3()
                 .child(
                     gpui_kit::component::tab::TabBar::new("pack-tabs")
                         .underline()
                         .small()
                         .selected_index(ix)
-                        .children(PACKS.iter().map(|t| gpui_kit::component::tab::Tab::new().label(format!("{}{}", t.label(), count(*t)))))
+                        // The count after the label as plain muted text, like the bar above it.
+                        .children(PACKS.iter().map(|t| {
+                            let n = count(*t);
+                            gpui_kit::component::tab::Tab::new()
+                                .label(t.label())
+                                .when(!n.is_empty(), |tab| tab.suffix(div().text_xs().text_color(muted).child(n)))
+                        }))
                         .on_click(cx.listener(|this, ix: &usize, _, cx| this.set_tab(PACKS[*ix], cx))),
                 )
                 .into_any_element(),

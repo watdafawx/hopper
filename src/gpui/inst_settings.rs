@@ -514,7 +514,7 @@ impl Render for InstanceSettings {
             });
             div()
                 .w_full().max_w(rems(FIELD_W))
-                .child(widgets::picker(
+                .child(widgets::field_picker(
                     "mc",
                     self.game_version.clone(),
                     items,
@@ -570,7 +570,7 @@ impl Render for InstanceSettings {
                     h_flex()
                         .w_full().max_w(rems(FIELD_W))
                         .gap_2()
-                        .child(div().flex_1().min_w_0().child(widgets::picker(
+                        .child(div().flex_1().min_w_0().child(widgets::field_picker(
                             "loader",
                             loader_label(&self.loader),
                             items,
@@ -580,7 +580,6 @@ impl Render for InstanceSettings {
                         .child({
                             let form = cx.entity();
                             Button::new("loader-changelog")
-                                .small()
                                 .ghost()
                                 .icon(IconName::ScrollText)
                                 .tooltip("Loader versions and changelog")
@@ -693,7 +692,7 @@ impl Render for InstanceSettings {
                     .label("Updates")
                     .items_start()
                     .description("Least stable files offered as updates. A mod already on a beta still gets newer betas.")
-                    .child(div().w_full().max_w(rems(FIELD_W)).child(widgets::picker(
+                    .child(div().w_full().max_w(rems(FIELD_W)).child(widgets::field_picker(
                         "channel",
                         channel_label,
                         channel_items,

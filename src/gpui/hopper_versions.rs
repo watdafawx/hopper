@@ -181,7 +181,7 @@ impl HopperVersions {
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(if up { theme.primary } else { theme.warning })
+                                    .text_color(if up { crate::theme::ink(theme.primary) } else { theme.warning })
                                     .child(line),
                             ),
                     )

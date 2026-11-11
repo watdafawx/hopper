@@ -419,15 +419,14 @@ impl JavaForm {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(widgets::picker("java", current, items, rem, pick)),
+                            .child(widgets::field_picker("java", current, items, rem, pick)),
                     )
                     .when_some(want, |r, major| {
-                        r.children(java_get(major, false, true, none_fit, cx))
+                        r.children(java_get_field(major, false, true, none_fit, cx))
                     })
                     .child(
                         Button::new("java-browse")
                             .outline()
-                            .small()
                             .label("Browse…")
                             .on_click(cx.listener(|_, _, _, cx| {
                                 let paths = cx.prompt_for_paths(PathPromptOptions {
@@ -912,7 +911,8 @@ pub struct JavaGet {
     label: SharedString,
     tooltip: SharedString,
     primary: std::rc::Rc<std::cell::Cell<bool>>,
-    small: bool,
+    // Set by the page that draws it: false beside a full-height field.
+    small: std::rc::Rc<std::cell::Cell<bool>>,
     _tick: Option<Task<()>>,
 }
 
@@ -964,7 +964,7 @@ impl Render for JavaGet {
         }
         let progress = running.as_ref().and_then(|j| j.progress);
         let b = Button::new(SharedString::from(format!("get:{}", self.key)))
-            .map(|b| if self.small { b.small() } else { b })
+            .map(|b| if self.small.get() { b.small() } else { b })
             .map(|b| if self.primary.get() && running.is_none() { b.primary() } else { b.outline() })
             .icon(IconName::Download)
             .tooltip(self.tooltip.clone());
@@ -1000,7 +1000,7 @@ pub fn init_java_gets(store: &Entity<Store>, cx: &mut App) {
             label,
             tooltip,
             primary: std::rc::Rc::new(std::cell::Cell::new(false)),
-            small: true,
+            small: std::rc::Rc::new(std::cell::Cell::new(true)),
             _tick: None,
         });
         map.insert((key, need), e);
@@ -1021,5 +1021,13 @@ pub fn java_get(major: u32, graal: bool, need: bool, primary: bool, cx: &App) ->
     let key = if graal { format!("graalvm-{major}") } else { format!("java-{major}") };
     let e = cx.try_global::<JavaGets>()?.0.get(&(key, need))?.clone();
     e.read(cx).primary.set(primary);
+    e.read(cx).small.set(true);
+    Some(e)
+}
+
+/// [`java_get`] at an input's height, for a row beside a [`widgets::field_picker`].
+pub fn java_get_field(major: u32, graal: bool, need: bool, primary: bool, cx: &App) -> Option<Entity<JavaGet>> {
+    let e = java_get(major, graal, need, primary, cx)?;
+    e.read(cx).small.set(false);
     Some(e)
 }

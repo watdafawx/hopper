@@ -202,11 +202,17 @@ pub fn file_name(rel: &str) -> &str {
 /// The tab bar: "Crash reports (17) · latest.log · debug.log · Older logs".
 pub fn tabs<V: Host>(id: &'static str, pane: Pane, count: usize, live: bool, cx: &mut Context<V>, on: impl Fn(&mut V, Pane, &mut Context<V>) + 'static) -> TabBar {
     let ix = Pane::ALL.iter().position(|p| *p == pane).unwrap_or(0);
+    let muted = cx.theme().muted_foreground;
     TabBar::new(id)
         .underline()
         .small()
         .selected_index(ix)
-        .child(Tab::new().label(if count == 0 { "Crash reports".to_string() } else { format!("Crash reports ({count})") }))
+        .child(
+            Tab::new()
+                .label("Crash reports")
+                // The count as plain muted text, like the other tab bars.
+                .when(count > 0, |t| t.suffix(div().text_xs().text_color(muted).child(count.to_string()))),
+        )
         .child(Tab::new().label(if live { "latest.log · live" } else { "latest.log" }))
         .child(Tab::new().label("debug.log"))
         .child(Tab::new().label("Older logs"))

@@ -24,7 +24,7 @@
   import {
     Search, Plus, ScanSearch, RefreshCw, X, Settings2, Lock, LockOpen, Download, ScrollText, Ellipsis, Trash2,
     Monitor, Server as ServerIcon, ArrowLeftRight, ArrowDown, ArrowUp, ExternalLink, Shuffle, FolderOpen, CircleCheck, Clock,
-    CircleOff, Layers, CircleArrowUp, Archive, UserPlus, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check, Columns3, RotateCcw, Info, Link, Unlink, SlidersHorizontal,
+    CircleOff, CircleQuestionMark, Layers, CircleArrowUp, Archive, UserPlus, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check, Columns3, RotateCcw, Info, Link, Unlink, SlidersHorizontal,
   } from '@lucide/svelte';
   import ModConfigPanel from './ModConfigPanel.svelte';
   import { cfg, loadIndex, modForFile } from './lib/configs.svelte.js';
@@ -771,6 +771,9 @@
   });
 
   const SIDE = { client: [Monitor, 'Client only: players need it, the server usually doesn\'t'], server: [ServerIcon, 'Server only'], both: [ArrowLeftRight, 'Client and server: both need it'] };
+  // No side given: a dimmed question mark in the same slot, so it doesn't look like a bug.
+  const SIDE_UNKNOWN = [CircleQuestionMark, "Side unknown: the mod doesn't say if it's needed on the server"];
+  const sideOf = (m) => SIDE[m.side] || SIDE_UNKNOWN;
   // Desktop's tags: Client only (gold), Server only (blue), Client + server.
   const SIDE_TAG = { client: ['Client only', 'warnc'], server: ['Server only', 'info'], both: ['Client + server', ''] };
   const ON_HEAD = "Disabled keeps the file but the server doesn't load it (renamed to .disabled). Click to sort.";
@@ -808,7 +811,7 @@
 <!-- A row's cell in a movable column. -->
 {#snippet modCell(c, m, ix, swOn)}
   {#if c === 'author'}<span class="c-author muted ell" title={m.author}>{m.author}</span>
-  {:else if c === 'side'}<span class="c-side muted" title={SIDE[m.side]?.[1] || 'Not known'}>{#if SIDE[m.side]}{@const I = SIDE[m.side][0]}<I size={13} />{/if}</span>
+  {:else if c === 'side'}{@const I = sideOf(m)[0]}<span class="c-side muted" class:unk={!SIDE[m.side]} title={sideOf(m)[1]}><I size={13} /></span>
   {:else if c === 'on'}<span class="c-on"><label class="switch" class:pend={swOn !== m.enabled} title={m.enabled ? 'Turn off' : 'Turn on'} onpointerdown={(e) => switchDown(e, m, ix)}><input type="checkbox" checked={swOn} onclick={(e) => toggle(m, e)} /><span></span></label></span>
   {:else}<span class="c-added muted" title={dateOf(m.date_added)}>{ago(m.date_added)}</span>{/if}
 {/snippet}
@@ -898,7 +901,7 @@
             <div class="c-name">
               <div class="nm">
                 <button class="nmlink ell" title={nameTip(m)} onclick={(e) => peek(m, e)}>{m.name}</button>
-                {#if hasSide && SIDE[m.side]}{@const I = SIDE[m.side][0]}<span class="side-in muted" title={SIDE[m.side][1]}><I size={12} /></span>{/if}
+                {#if hasSide}{@const I = sideOf(m)[0]}<span class="side-in muted" class:unk={!SIDE[m.side]} title={sideOf(m)[1]}><I size={12} /></span>{/if}
                 {#if m.locked}<span class="lk" title="Updates ignored. Right-click to allow them."><Lock size={11} /></span>{/if}
               </div>
               <div class="tags">
@@ -1127,6 +1130,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .nmlink { text-align: left; font-weight: 500; cursor: pointer; }
   .nm .nmlink:hover { color: var(--acc); }
   .side-in { display: none; }
+  .unk { opacity: 0.75; }
   .lk { color: var(--muted); display: grid; }
   .tags { display: flex; gap: 4px; align-items: center; margin-top: 2px; min-width: 0; overflow: hidden; flex-wrap: nowrap; }
   .tag { font-size: 10.5px; padding: 0 6px; flex: none; }

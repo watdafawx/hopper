@@ -459,10 +459,10 @@ pub fn head(store: &Store, a: &Saved, size: Rems, cx: &App) -> AnyElement {
         .overflow_hidden()
         .bg(theme.muted);
     if let Some(img_data) = drawn {
-        return frame.child(img(img_data).size_full()).into_any_element();
+        return frame.child(img(img_data).size_full().rounded(theme.radius)).into_any_element();
     }
     if let Some(p) = store.image(&a.fallback_avatar()) {
-        return frame.child(img(p.to_path_buf()).size_full()).into_any_element();
+        return frame.child(img(p.to_path_buf()).size_full().rounded(theme.radius)).into_any_element();
     }
     frame
         .flex()
@@ -2092,7 +2092,7 @@ impl AccountsView {
                         .gap_1()
                         .text_sm()
                         .when(active, |r| {
-                            r.text_color(theme.primary)
+                            r.text_color(crate::theme::ink(theme.primary))
                                 .font_semibold()
                                 .child(Icon::new(IconName::Check).xsmall())
                         })

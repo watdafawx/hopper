@@ -45,6 +45,9 @@ pub fn thumb_in(cat: crate::thumbs::Cat, path: Option<&Path>, size: Rems, cx: &A
             .child(
                 img(crate::thumbs::source_in(cat, p, crate::thumbs::Want::Rems(size), cx))
                     .size_full()
+                    // overflow_hidden clips to the rectangle only; the picture
+                    // needs the frame's corners itself.
+                    .rounded(theme.radius)
                     .object_fit(ObjectFit::Cover),
             )
             .into_any_element(),
@@ -618,6 +621,12 @@ pub fn row_selected_in<E: Styled>(el: E, color: Hsla) -> E {
     el.bg(color.opacity(alpha::SELECTED)).shadow(vec![BoxShadow::new(px(3.), px(0.), color).inset()])
 }
 
+/// `row_selected_in` for a card with a 1px border: the border is painted over
+/// the bar's first pixel, so the bar starts one pixel wider to show 3px.
+pub fn card_selected_in<E: Styled>(el: E, color: Hsla) -> E {
+    el.bg(color.opacity(alpha::SELECTED)).shadow(vec![BoxShadow::new(px(4.), px(0.), color).inset()])
+}
+
 /// A selected tab or top-nav item: full-strength text and a 2px primary
 /// underline, painted inside so nothing moves. No fill.
 pub fn tab_selected<E: Styled>(el: E, cx: &App) -> E {
@@ -888,7 +897,9 @@ fn rail_view(
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .h(px(26.))
+                    // 18px options in a 22px frame: the height of the small
+                    // buttons and search box it sits beside in the toolbar.
+                    .h(px(18.))
                     .px(px(7.))
                     .text_sm()
                     .rounded(px(crate::theme::RADIUS_SM))
@@ -1036,7 +1047,7 @@ fn count_badge_width(n: usize, rem: f32) -> f32 {
 
 /// Where a rail badge starts, from its icon's left edge and top (in rems).
 const RAIL_BADGE_LEFT: f32 = 0.6;
-const RAIL_BADGE_TOP: f32 = -0.4667;
+const RAIL_BADGE_TOP: f32 = -0.2;
 
 /// Extra right padding a rail button needs so its badge (starting 0.6 rem into
 /// the 1 rem icon) doesn't reach the next button.
@@ -1085,10 +1096,10 @@ pub trait Clickable: InteractiveElement + Styled + Sized {
 
 impl<E: InteractiveElement + Styled> Clickable for E {}
 
-/// A chip: `color` text on a faint fill of it, no border, the small
-/// radius. gpui_kit's xsmall tag size; `.small()` still works.
+/// A chip: `color` text (darkened on light themes, see `theme::ink`) on a
+/// faint fill of it, no border, the small radius. gpui_kit's xsmall tag size; `.small()` still works.
 pub fn chip(color: Hsla) -> gpui_kit::component::tag::Tag {
-    gpui_kit::component::tag::Tag::custom(color.opacity(alpha::TINT), color, gpui_kit::transparent_black())
+    gpui_kit::component::tag::Tag::custom(color.opacity(alpha::TINT), crate::theme::ink(color), gpui_kit::transparent_black())
         .xsmall()
         .flex_none()
         // A count or label in a chip stays on one line, however long.
@@ -1272,7 +1283,7 @@ pub fn summary_row(
         .child(h_flex().flex_1().min_w_0().gap_1p5().flex_wrap().child(body))
         .when_some(open, |r, open| {
             clickable(r, cx)
-                .hover(move |s| s.text_color(accent))
+                .hover(move |s| s.text_color(crate::theme::ink(accent)))
                 .child(
                     h_flex()
                         .flex_none()
@@ -1444,7 +1455,8 @@ fn picker_sized(
                     .child(i.small().flex_none())
                     .child(div().min_w_0().truncate().child(label)),
             ),
-            None => b.label(label),
+            // Truncates instead of pushing the caret out of a narrow row.
+            None => b.child(div().min_w_0().truncate().child(label)),
         })
         .dropdown_caret(true)
         .dropdown_menu(move |menu: PopupMenu, _, _| {
@@ -2335,6 +2347,7 @@ fn video_tile(
                 img(crate::thumbs::source_in(crate::thumbs::Cat::Gallery, &p, crate::thumbs::Want::Px(640.), cx))
                     .absolute()
                     .size_full()
+                    .rounded(theme.radius)
                     .object_fit(ObjectFit::Cover),
             )
         })
@@ -2519,7 +2532,7 @@ pub fn mod_link(
         let (peek, aux) = (open.clone(), open);
         let d = d
             .clickable(cx)
-            .hover(move |s| s.text_color(accent))
+            .hover(move |s| s.text_color(crate::theme::ink(accent)))
             .on_click(move |_, window, cx| peek(project, window, cx));
         // CurseForge sends a project id to the project's page.
         link_aux(
@@ -3012,6 +3025,13 @@ mod tests {
 /// boxes in Minecraft's creative inventory and JEI. Players expect it there,
 /// so search fields get it instead of the cut / copy / paste menu.
 pub fn search_input(
+    state: &Entity<gpui_kit::component::input::InputState>,
+) -> gpui_kit::component::input::Input {
+    search_input_plain(state).prefix(Icon::new(IconName::Search).small())
+}
+
+/// [`search_input`] without the magnifier, for a box that draws its own.
+pub fn search_input_plain(
     state: &Entity<gpui_kit::component::input::InputState>,
 ) -> gpui_kit::component::input::Input {
     let st = state.clone();

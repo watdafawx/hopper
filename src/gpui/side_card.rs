@@ -43,6 +43,11 @@ pub fn side_of(env: &str) -> Option<(IconName, &'static str)> {
     }
 }
 
+/// What the Side cell shows when a mod doesn't say where it runs: a dimmed
+/// question mark in the same slot, so a blank slot doesn't read as a bug.
+pub const SIDE_UNKNOWN: (IconName, &str) =
+    (IconName::CircleQuestionMark, "Side unknown: the mod doesn't say if it's needed on the server");
+
 /// `trigger` (the Side cell) opening the card on hover.
 pub fn wrap(id: ElementId, trigger: impl IntoElement + 'static, card: SideCard) -> HoverCard {
     HoverCard::new(id)
@@ -61,7 +66,7 @@ fn body(c: &SideCard, _: &mut Window, cx: &mut App) -> AnyElement {
             .text_color(theme.muted_foreground)
             .child(text)
     };
-    let (icon, side) = side_of(&c.env).unwrap_or((IconName::CircleQuestionMark, "Side unknown: the mod doesn't say"));
+    let (icon, side) = side_of(&c.env).unwrap_or(SIDE_UNKNOWN);
     let origin = if c.from_pack { "From the pack" } else { "Added by you" };
     let mut card = v_flex()
         .w(rems(21.))

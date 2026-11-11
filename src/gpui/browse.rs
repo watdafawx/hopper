@@ -1356,7 +1356,7 @@ impl BrowseView {
     /// or one built from the client pack) and one "Make a server" button.
     /// Its menu says where (this PC or a paired Hopper Server, the place
     /// Browse was opened for first) and offers the server files' download.
-    fn server_badge(&self, m: &cf::Mod, id: ElementId, _long: bool, cx: &Context<Self>) -> Option<AnyElement> {
+    fn server_badge(&self, m: &cf::Mod, id: ElementId, long: bool, cx: &Context<Self>) -> Option<AnyElement> {
         if !hopper::browse::is_modpack(m, self.class) {
             return None;
         }
@@ -1366,6 +1366,10 @@ impl BrowseView {
             return None;
         }
         let theme = cx.theme();
+        // A card beside the open side panel is narrow: the chip goes and the
+        // button is an icon (its tooltip says the same), so the title keeps
+        // its room.
+        let compact = !long && self.is_open();
         let chip = match &files {
             Some(_) => widgets::chip(theme.success).child("Server files"),
             None => widgets::chip(theme.warning).child("From client pack"),
@@ -1373,7 +1377,7 @@ impl BrowseView {
         let (store, name, pack) = (self.store.clone(), m.name.clone(), m.clone());
         let panels = paired_panels(&self.store, cx);
         let host_for = self.host_for.clone();
-        let button = Button::new(id).xsmall().outline().icon(IconName::Server).label("Make a server");
+        let button = Button::new(id).xsmall().outline().icon(IconName::Server).when(!compact, |b| b.label("Make a server"));
         let button = match (&files, panels.is_empty()) {
             // Nowhere else to put it and nothing else to offer: one click.
             (None, true) => button
@@ -1428,7 +1432,7 @@ impl BrowseView {
                 })
                 .into_any_element(),
         };
-        Some(h_flex().flex_none().gap_1p5().items_center().child(chip).child(button).into_any_element())
+        Some(h_flex().flex_none().gap_1p5().items_center().when(!compact, |r| r.child(chip)).child(button).into_any_element())
     }
 
     fn refilter(&mut self, cx: &mut Context<Self>) {
@@ -3107,8 +3111,8 @@ impl BrowseView {
             .clickable(cx)
             .border_color(theme.border)
             .when(picked, |r| match m.modrinth {
-                Some(_) => widgets::row_selected_in(r, theme.success),
-                None => widgets::row_selected(r, cx),
+                Some(_) => widgets::card_selected_in(r, theme.success),
+                None => widgets::card_selected_in(r, theme.primary).bg(theme.list_active),
             })
             .when(!picked, |r| r.hover(|s| widgets::row_hover(s, cx)))
             .on_click(cx.listener(move |this, _, _, cx| this.open_detail(open.clone(), cx)))
@@ -3777,7 +3781,7 @@ impl BrowseView {
                         .rounded(theme.radius)
                         .overflow_hidden()
                         .clickable(cx)
-                        .child(img(crate::thumbs::source_in(crate::thumbs::Cat::Gallery, &p, crate::thumbs::Want::Rems(rems(10.)), cx)).size_full().object_fit(ObjectFit::Cover))
+                        .child(img(crate::thumbs::source_in(crate::thumbs::Cat::Gallery, &p, crate::thumbs::Want::Rems(rems(10.)), cx)).size_full().rounded(theme.radius).object_fit(ObjectFit::Cover))
                         .on_click(move |_, window, cx| {
                             crate::image_viewer::open(store_e.clone(), gallery.clone(), i, window, cx)
                         })
@@ -4292,7 +4296,7 @@ impl BrowseView {
                     .bg(theme.primary.opacity(0.15))
                     .border_1()
                     .border_color(theme.primary.opacity(0.4))
-                    .text_color(theme.primary)
+                    .text_color(crate::theme::ink(theme.primary))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -5000,7 +5004,7 @@ fn stat(icon: IconName, text: impl Into<SharedString>, cx: &App) -> Div {
     h_flex()
         .gap_1()
         .flex_none()
-        .text_color(color.opacity(0.9))
+        .text_color(crate::theme::ink(color).opacity(0.9))
         .child(Icon::new(icon).xsmall().text_color(color))
         .child(text.into())
 }
