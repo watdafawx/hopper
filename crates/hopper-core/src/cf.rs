@@ -788,14 +788,16 @@ pub fn test_key(key: &str) -> anyhow::Result<()> {
 pub fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(60)))
-            // A connection that stalls gives up soon, so a retry gets its
-            // turn instead of the whole minute going to one attempt.
-            .timeout_connect(Some(Duration::from_secs(10)))
-            .user_agent(concat!("Hopper/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .into()
+        crate::net::agent(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(60)))
+                // Connecting gets a third of the minute: within it a stalled
+                // connection is dropped and a new one tried (see `net`),
+                // five tries in all, rather than one try taking it all.
+                .timeout_connect(Some(Duration::from_secs(20)))
+                .user_agent(concat!("Hopper/", env!("CARGO_PKG_VERSION")))
+                .build(),
+        )
     })
 }
 
@@ -806,13 +808,14 @@ pub fn agent() -> &'static ureq::Agent {
 pub fn download_agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        ureq::Agent::config_builder()
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_send_request(Some(Duration::from_secs(30)))
-            .timeout_recv_response(Some(Duration::from_secs(60)))
-            .user_agent(concat!("Hopper/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .into()
+        crate::net::agent(
+            ureq::Agent::config_builder()
+                .timeout_connect(Some(Duration::from_secs(30)))
+                .timeout_send_request(Some(Duration::from_secs(30)))
+                .timeout_recv_response(Some(Duration::from_secs(60)))
+                .user_agent(concat!("Hopper/", env!("CARGO_PKG_VERSION")))
+                .build(),
+        )
     })
 }
 

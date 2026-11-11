@@ -277,12 +277,13 @@ fn error_sentence(status: u16, body: &Value, doing: &str) -> String {
 fn agent() -> &'static ureq::Agent {
     static A: OnceLock<ureq::Agent> = OnceLock::new();
     A.get_or_init(|| {
-        ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(30)))
-            .http_status_as_error(false)
-            .user_agent(concat!("Hopper/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .into()
+        crate::net::agent(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(30)))
+                .http_status_as_error(false)
+                .user_agent(concat!("Hopper/", env!("CARGO_PKG_VERSION")))
+                .build(),
+        )
     })
 }
 
