@@ -17,6 +17,7 @@ mod appearance;
 mod app;
 mod brand;
 mod browse;
+mod clip_watch;
 mod config_editor;
 mod config_compare;
 mod config_pushes;
@@ -48,6 +49,7 @@ mod window_form;
 mod launchers_list;
 mod library;
 mod line_select;
+mod link_open;
 mod logos;
 mod logs;
 mod mcp;
@@ -152,6 +154,11 @@ fn main() {
             .then(|| args.get(4)?.parse().ok())
             .flatten();
         std::process::exit(video_window::run(&args[2], owner));
+    }
+    // Windows passing on a clicked link (Hopper picked for links): a mod
+    // goes to the open Hopper, anything else to the browser.
+    if let Some(link_open::Route::Done) = link_open::route(&args) {
+        return;
     }
     // A curseforge:// link while Hopper is already open: hand it over.
     if let Some(url) = std::env::args().skip(1).find(|a| hopper::links::is_link(a))

@@ -26,6 +26,7 @@ use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 
 mod minecraft;
+mod mod_links;
 mod sites;
 use std::path::Path;
 use std::rc::Rc;
@@ -117,7 +118,7 @@ impl Category {
             Category::Java => "How games start, what happens while one runs, and memory and Java for instances that don't set their own.",
             Category::Minecraft => "Your usual in-game options: sound, mouse, view and keys. Hopper sets them in each instance before it starts.",
             Category::Servers => "Your server packs, servers hosted on this PC, and the panel that runs them.",
-            Category::Content => "The CurseForge API key, where Browse looks first, and mods from GitHub and other links.",
+            Category::Content => "The CurseForge API key, where Browse looks first, mods from GitHub, and mod links from other apps.",
             Category::Discord => "What your Discord profile shows friends while you use Hopper.",
             Category::Appearance => "Theme and size.",
             Category::Updates => "Hopper's version, its updates, and installing it.",
@@ -274,6 +275,10 @@ const ENTRIES: &[Entry] = &[
     e(C::Content, "allow-sources", "Allow mods from GitHub and other links", "Lets Add content's \"From GitHub or a link\" and a mod's \"Follow a source\" get mods from there. These files skip CurseForge's and Modrinth's checks, so add them only from people you trust.", "github maven jenkins link url source release jar"),
     e(C::Content, "github-token", "GitHub token", "Optional. Without one GitHub allows 60 checks an hour; Hopper asks only when something may have changed. A token (no scopes needed) raises that to 5,000. Kept in Windows Credential Manager.", "github token api rate limit"),
     e(C::Content, "files-changes", "Changes in the files", hopper::changelog_files::SETTING_HELP, "changelog compare jar files diff what changed no changelog author scan download"),
+    e(C::Content, "clip-links", "Offer to open copied mod links", "Copy a CurseForge or Modrinth link anywhere, like in Discord, and Hopper asks if you want to open it here. Never while a game is fullscreen.", "clipboard copy copied link discord notification curseforge modrinth"),
+    e(C::Content, "open-links", "Open mod links in Hopper", "Clicked CurseForge and Modrinth links open in Hopper. Every other link goes straight to your browser.", "browser default apps link click curseforge modrinth open"),
+    e(C::Content, "open-links-browser", "Other links open in", "Your browser before Hopper.", "browser chrome firefox edge default"),
+    e(C::Content, "open-links-windows", "Pick Hopper in Windows", "", "default apps windows settings browser"),
     e(C::Discord, "discord", "Show what I'm doing on Discord", "Needs the Discord app open on this PC, with Discord's own activity sharing on. Hopper only talks to Discord on this PC.", "discord rich presence status activity profile friends playing"),
     e(C::Discord, "discord-pack", "Show the pack", "Its name and icon. Off, friends see \"Playing Minecraft\".", "discord pack name icon modpack"),
     e(C::Discord, "discord-browsing", "Show what I'm browsing", "\"Browsing modpacks on CurseForge\", or the mod you're looking at. Never what you search for.", "discord browse search mods"),
@@ -2304,7 +2309,7 @@ impl SettingsPage {
             );
         }
         rows.push(files);
-        vec![Block::card(None, rows)]
+        vec![Block::card(None, rows), self.mod_links(s, rem, cx)]
     }
 
     fn discord(&self, s: &hopper::settings::Settings, cx: &mut Context<Self>) -> Vec<Block> {

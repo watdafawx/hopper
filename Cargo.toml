@@ -83,13 +83,20 @@ discord-rich-presence = "1.1"
 # The small window that fetches website-only CurseForge files (WebView2).
 wry = "0.57"
 tao = "0.37"
+# Hopper's name on its copied-link notifications (clip_watch.rs), per user.
+windows-registry = "0.6"
 windows = { workspace = true, features = [
+    "Data_Xml_Dom",
+    "Foundation",
+    "UI_Notifications",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_DataExchange",
     "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_Storage_Xps",
     "Win32_System_LibraryLoader",
     "Win32_System_ProcessStatus",
