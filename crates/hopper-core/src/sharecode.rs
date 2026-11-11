@@ -805,7 +805,7 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     // Gone from their copy since the last code: it goes here too. Only what
     // the last code listed as theirs, so mods added on this PC stay.
     let (gone, back_on) = follow_changes(&was, &now);
-    for who in gone.iter().filter(|_| !unsure) {
+    for who in to_remove(&gone, unsure) {
         if let Some(i) = inst.addons.iter().position(|a| !a.from_pack && who.is(a)) {
             let name = inst.addons[i].name.clone();
             if let Err(e) = crate::install::remove(inst, i) {
@@ -947,6 +947,12 @@ fn follow_changes(was: &[Seen], now: &[Seen]) -> (Vec<Who>, Vec<Who>) {
     (gone, back_on)
 }
 
+/// What to remove from a followed pack: nothing while a lookup failed, since
+/// a mod missing from the new code may only be one we couldn't identify.
+fn to_remove(gone: &[Who], unsure: bool) -> &[Who] {
+    if unsure { &[] } else { gone }
+}
+
 /// The sources a code's mods come from ("owner/repo" on GitHub…), for the
 /// confirm before installing it.
 pub fn sources_of(share: &Share) -> Vec<(String, String)> {
@@ -968,6 +974,18 @@ mod tests {
 
     fn seen(who: Who, own: bool, on: bool) -> Seen {
         Seen { who, own, on }
+    }
+
+    #[test]
+    fn nothing_is_removed_when_a_file_lookup_failed() {
+        // The old code listed A and B. The new one lists only A, as B's file
+        // couldn't be looked up, so B only looks gone.
+        let was = [seen(Who::Project(1), true, true), seen(Who::Project(2), true, true)];
+        let now = [seen(Who::Project(1), true, true)];
+        let (gone, _) = follow_changes(&was, &now);
+        assert_eq!(gone, vec![Who::Project(2)]);
+        assert_eq!(to_remove(&gone, false), &[Who::Project(2)]);
+        assert!(to_remove(&gone, true).is_empty());
     }
 
     #[test]
