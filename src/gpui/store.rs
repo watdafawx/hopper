@@ -140,7 +140,7 @@ pub enum Msg {
     JoinChecked(PathBuf, Option<hopper::joinfail::JoinProblem>),
     /// The pack compared with its paired server, before it plays (and the
     /// inputs' key it was compared for).
-    PreJoin(PathBuf, u64, Option<crate::join_help::PreJoin>),
+    PreJoin(PathBuf, PathBuf, u64, Option<crate::join_help::PreJoin>),
     /// A translation finished (see `crate::translation`).
     Translated,
     /// A translation model finished downloading (by language code).
@@ -1206,7 +1206,7 @@ impl Store {
                 cx.notify();
             }
             Msg::JoinChecked(root, j) => self.join_checked(root, j, cx),
-            Msg::PreJoin(root, key, p) => self.pre_join_done(root, key, p, cx),
+            Msg::PreJoin(root, server, key, p) => self.pre_join_done(root, server, key, p, cx),
             Msg::Stuck(root, r) => self.stuck_found(root, r, cx),
             Msg::LiveWarnings(root, w) => {
                 let list = self.warnings.entry(root).or_default();
@@ -1689,7 +1689,7 @@ impl Store {
         self.update_settings_quietly(|st| {
             st.groups.remove(&key);
             st.datapack_dest.remove(&key);
-            st.pairings.retain(|_, inst| *inst != key);
+            hopper::rigsync::forget_instance(&mut st.pairings, &mut st.shown_server, root);
         });
     }
 
@@ -4193,11 +4193,32 @@ impl Store {
         hopper::rigsync::paired(&self.settings.pairings, s, &self.instances)
     }
 
-    /// The server an instance is paired with.
+    /// Every server an instance is paired with, in the servers' order.
+    pub fn servers_of(&self, inst_root: &Path) -> Vec<&ServerInfo> {
+        hopper::rigsync::servers_of(&self.settings.pairings, &self.servers, &self.instances, inst_root)
+    }
+
+    /// The server an instance's page shows: the one picked there, else its
+    /// first paired one.
     pub fn server_of(&self, inst_root: &Path) -> Option<&ServerInfo> {
-        self.servers
-            .iter()
-            .find(|s| self.paired(s).is_some_and(|i| i.root == inst_root))
+        let picked = self.settings.shown_server.get(inst_root.to_string_lossy().as_ref());
+        hopper::rigsync::shown_server(&self.servers_of(inst_root), picked.map(String::as_str))
+    }
+
+    /// Shows `server` on the instance's page (header, Server tab).
+    pub fn show_server(&mut self, inst_root: &Path, server: &Path, cx: &mut Context<Self>) {
+        let (i, s) = (inst_root.to_string_lossy().into_owned(), server.to_string_lossy().into_owned());
+        self.update_settings(|st| { st.shown_server.insert(i, s); }, cx);
+    }
+
+    /// Takes a server off its pack (the pack's other servers stay).
+    pub fn unpair(&mut self, server: &Path, cx: &mut Context<Self>) {
+        self.update_settings(|st| hopper::rigsync::unpair(&mut st.pairings, &mut st.shown_server, server), cx);
+    }
+
+    /// A deleted server: its pairing goes with it.
+    pub fn forget_server(&mut self, server: &Path) {
+        self.update_settings_quietly(|st| hopper::rigsync::forget_server(&mut st.pairings, &mut st.shown_server, server));
     }
 
     /// Puts an instance in a group (or takes it out with `None`).
@@ -4347,13 +4368,9 @@ impl Store {
     }
 
     pub fn set_pairing(&mut self, server: &Path, inst: &Path, cx: &mut Context<Self>) {
-        let (k, v) = (
-            server.to_string_lossy().into_owned(),
-            inst.to_string_lossy().into_owned(),
-        );
         self.update_settings(
             |st| {
-                st.pairings.insert(k, v);
+                hopper::rigsync::pair(&mut st.pairings, &mut st.shown_server, server, inst);
                 // Pairing is using server tools.
                 st.server_tools = Some(true);
             },

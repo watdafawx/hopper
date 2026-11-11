@@ -42,9 +42,66 @@ pub fn paired<'a>(
     instances: &'a [Instance],
 ) -> Option<&'a Instance> {
     if let Some(inst) = pairings.get(server.root.to_string_lossy().as_ref()) {
-        return instances.iter().find(|i| i.root.to_string_lossy() == *inst);
+        // An empty value is an unpaired server: no pack, and no name guess.
+        return instances.iter().find(|i| !inst.is_empty() && i.root.to_string_lossy() == *inst);
     }
     guess_pairing(&server.name, instances)
+}
+
+/// Every server that runs the instance at `inst_root` (saved pairings and
+/// name guesses alike), in the order of `servers`: one pack can run on
+/// several servers, each compared and synced on its own.
+pub fn servers_of<'a>(
+    pairings: &HashMap<String, String>,
+    servers: &'a [ServerInfo],
+    instances: &[Instance],
+    inst_root: &Path,
+) -> Vec<&'a ServerInfo> {
+    servers
+        .iter()
+        .filter(|s| paired(pairings, s, instances).is_some_and(|i| i.root == inst_root))
+        .collect()
+}
+
+/// The one of an instance's servers its page shows: the one picked last
+/// (`picked`, a server root) while it is still paired, else the first.
+pub fn shown_server<'a>(list: &[&'a ServerInfo], picked: Option<&str>) -> Option<&'a ServerInfo> {
+    picked
+        .and_then(|p| list.iter().find(|s| s.root.to_string_lossy() == p))
+        .or(list.first())
+        .copied()
+}
+
+/// Takes a server off its pack. It is kept with an empty pack rather than
+/// removed, so a server whose name shares words with the pack isn't paired
+/// again by the name guess (older versions read the empty value as "no
+/// pack" too).
+pub fn unpair(pairings: &mut HashMap<String, String>, shown: &mut HashMap<String, String>, server_root: &Path) {
+    let key = server_root.to_string_lossy().into_owned();
+    pairings.insert(key.clone(), String::new());
+    shown.retain(|_, s| *s != key);
+}
+
+/// A deleted server: its pairing and its "shown" picks go with it.
+pub fn forget_server(pairings: &mut HashMap<String, String>, shown: &mut HashMap<String, String>, server_root: &Path) {
+    let key = server_root.to_string_lossy();
+    pairings.remove(key.as_ref());
+    shown.retain(|_, s| *s != key);
+}
+
+/// A removed instance: its pairings and its pick go with it.
+pub fn forget_instance(pairings: &mut HashMap<String, String>, shown: &mut HashMap<String, String>, inst_root: &Path) {
+    let key = inst_root.to_string_lossy();
+    pairings.retain(|_, v| *v != key);
+    shown.remove(key.as_ref());
+}
+
+/// Pairs a server with a pack and shows it on the pack's page (it was just
+/// picked there).
+pub fn pair(pairings: &mut HashMap<String, String>, shown: &mut HashMap<String, String>, server_root: &Path, inst_root: &Path) {
+    let (s, i) = (server_root.to_string_lossy().into_owned(), inst_root.to_string_lossy().into_owned());
+    pairings.insert(s.clone(), i.clone());
+    shown.insert(i, s);
 }
 
 // ---- comparison --------------------------------------------------------
@@ -528,6 +585,12 @@ pub struct JoinCheck {
 impl JoinCheck {
     pub fn is_empty(&self) -> bool {
         self.loader.is_none() && self.only_pack.is_empty() && self.only_server.is_empty() && self.off_here.is_empty() && self.versions.is_empty()
+    }
+
+    /// How many things differ (a different NeoForge counts as one), for a
+    /// short "3 differ" next to a server's name.
+    pub fn count(&self) -> usize {
+        usize::from(self.loader.is_some()) + self.only_pack.len() + self.only_server.len() + self.off_here.len() + self.versions.len()
     }
 
     /// The one-line summary, for the banner.
@@ -1061,6 +1124,8 @@ mod tests {
         assert_eq!(c.only_server, ["waystones"]);
         assert_eq!(c.versions.len(), 1, "{:?}", c.versions);
         assert_eq!(c.versions[0].0, "create");
+        // NeoForge, one only in the pack, one only on the server, one version.
+        assert_eq!(c.count(), 4);
         assert!(c.summary().starts_with("The server runs NeoForge 21.1.77, this pack 21.1.215"), "{}", c.summary());
         // Same NeoForge and the same mods: nothing to say.
         let same = crate::diff::compute_diff(&server, &server);
@@ -1325,6 +1390,90 @@ mod tests {
         assert_eq!(guess_pairing("ATM10 - All Mods", &list).unwrap().name, "All the Mods 10");
         assert_eq!(guess_pairing("tnp-limitless", &list).unwrap().name, "TNP Limitless 8");
         assert!(guess_pairing("vanilla", &list).is_none());
+    }
+
+    fn srv(name: &str, root: &str) -> ServerInfo {
+        ServerInfo {
+            name: name.into(),
+            root: root.into(),
+            manager: crate::server::Manager::Unknown,
+            properties: Default::default(),
+            loader: None,
+            java: None,
+            max_memory: None,
+            remote: None,
+        }
+    }
+
+    fn inst_at(n: &str, root: &str) -> Instance {
+        Instance { name: n.into(), root: root.into(), ..Default::default() }
+    }
+
+    fn map(v: &[(&str, &str)]) -> HashMap<String, String> {
+        v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    }
+
+    #[test]
+    fn one_pack_runs_on_several_servers_in_list_order() {
+        let insts = vec![inst_at("All the Mods 10 - ATM10", "I/atm10"), inst_at("Other", "I/other")];
+        let servers = vec![srv("DrunkGamblers", "S/dg-local"), srv("Lobby", "S/lobby"), srv("dg", "hopperd:vm/dg")];
+        // The settings format is unchanged: server -> pack, so two servers name one pack.
+        let p = map(&[("S/dg-local", "I/atm10"), ("hopperd:vm/dg", "I/atm10"), ("S/lobby", "I/other")]);
+        let names: Vec<&str> = servers_of(&p, &servers, &insts, Path::new("I/atm10")).iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["DrunkGamblers", "dg"]);
+        assert_eq!(servers_of(&p, &servers, &insts, Path::new("I/other")).len(), 1);
+        assert!(servers_of(&p, &servers, &insts, Path::new("I/none")).is_empty());
+        // A name guess counts too, like `paired`.
+        let guessed = vec![srv("ATM10 survival", "S/guess")];
+        assert_eq!(servers_of(&HashMap::new(), &guessed, &insts, Path::new("I/atm10")).len(), 1);
+    }
+
+    #[test]
+    fn the_shown_server_is_the_picked_one_while_it_is_paired() {
+        let (a, b) = (srv("A", "S/a"), srv("B", "S/b"));
+        let list = vec![&a, &b];
+        assert_eq!(shown_server(&list, None).unwrap().name, "A");
+        assert_eq!(shown_server(&list, Some("S/b")).unwrap().name, "B");
+        // Picked, then unpaired or deleted: back to the first.
+        assert_eq!(shown_server(&list, Some("S/gone")).unwrap().name, "A");
+        assert!(shown_server(&[], Some("S/a")).is_none());
+    }
+
+    #[test]
+    fn unpairing_stops_the_name_guess_and_drops_the_pick() {
+        let insts = vec![inst_at("All the Mods 10", "I/atm10")];
+        let s = srv("All the Mods 10 server", "S/atm");
+        let mut p = HashMap::new();
+        let mut shown = HashMap::new();
+        assert!(paired(&p, &s, &insts).is_some(), "guessed by name");
+        pair(&mut p, &mut shown, &s.root, Path::new("I/atm10"));
+        assert_eq!(shown.get("I/atm10").map(String::as_str), Some("S/atm"));
+        unpair(&mut p, &mut shown, &s.root);
+        assert!(paired(&p, &s, &insts).is_none(), "an unpaired server isn't guessed again");
+        assert!(shown.is_empty());
+        // Pairing again works.
+        pair(&mut p, &mut shown, &s.root, Path::new("I/atm10"));
+        assert!(paired(&p, &s, &insts).is_some());
+    }
+
+    #[test]
+    fn deleted_servers_and_instances_take_their_pairings_with_them() {
+        let mut p = map(&[("S/a", "I/x"), ("S/b", "I/x"), ("S/c", "I/y")]);
+        let mut shown = map(&[("I/x", "S/b"), ("I/y", "S/c")]);
+        forget_server(&mut p, &mut shown, Path::new("S/b"));
+        assert_eq!(p, map(&[("S/a", "I/x"), ("S/c", "I/y")]));
+        assert_eq!(shown, map(&[("I/y", "S/c")]));
+        forget_instance(&mut p, &mut shown, Path::new("I/y"));
+        assert_eq!(p, map(&[("S/a", "I/x")]));
+        assert!(shown.is_empty());
+    }
+
+    #[test]
+    fn old_settings_with_one_map_still_read() {
+        // Saved before "shown_server" existed: pairings load, the pick is empty.
+        let s: crate::settings::Settings = serde_json::from_str(r#"{"pairings":{"S/a":"I/x","S/b":"I/x"}}"#).unwrap();
+        assert_eq!(s.pairings.len(), 2);
+        assert!(s.shown_server.is_empty());
     }
 
     fn entry(status: DiffStatus, side: &str, from_pack: bool) -> DiffEntry {

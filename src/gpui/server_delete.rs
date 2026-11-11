@@ -261,6 +261,7 @@ fn delete(form: &Entity<DeleteForm>, window: &mut Window, cx: &mut App) -> bool 
         return false;
     }
     let job = s.start_job(format!("Deleting {name}"));
+    let deleted = root.clone();
     cx.spawn(async move |cx| {
         let r = cx
             .background_spawn(async move {
@@ -303,7 +304,10 @@ fn delete(form: &Entity<DeleteForm>, window: &mut Window, cx: &mut App) -> bool 
             })
             .await;
         if r.is_ok() {
-            store.update(cx, |s, _| s.rediscover_servers());
+            store.update(cx, |s, _| {
+                s.forget_server(&deleted);
+                s.rediscover_servers()
+            });
         }
     })
     .detach();

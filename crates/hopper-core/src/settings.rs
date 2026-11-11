@@ -236,8 +236,13 @@ pub struct Settings {
     pub launch_picked: bool,
     /// Name of the Microsoft-signed-in profile, for display.
     pub signed_in_as: Option<String>,
-    /// Server folder -> client instance folder.
+    /// Server folder -> client instance folder. Several servers can run
+    /// one pack. An empty folder is a server unpaired on purpose (no name
+    /// guess).
     pub pairings: HashMap<String, String>,
+    /// Instance folder -> the server folder its page shows, when it has
+    /// several (else the first).
+    pub shown_server: HashMap<String, String>,
     /// Pack projects the user syncs even though the pack author excludes them.
     pub sync_anyway: HashSet<u64>,
     /// Mod ids or file names hidden from the server comparison.
@@ -656,6 +661,7 @@ impl Default for Settings {
             launch_picked: false,
             signed_in_as: None,
             pairings: HashMap::new(),
+            shown_server: HashMap::new(),
             sync_anyway: HashSet::new(),
             sync_blacklist: HashSet::new(),
             sync_while_online: true,
