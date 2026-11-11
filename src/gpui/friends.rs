@@ -1143,9 +1143,15 @@ impl FriendsPanel {
         // The copy that needs a look first: one that failed, then one with
         // mods to ask about, then one updating.
         let shown = follows.iter().min_by_key(|f| f.2.rank()).cloned();
+        // A group pack kept both ways gets everyone's changes, not just the
+        // sender's.
+        let who = match &shown {
+            Some((root, ..)) if s.group_copy(root).is_some() => "the group".to_string(),
+            _ => sender.clone(),
+        };
         let sub = match &shown {
-            Some((_, local, CopyState::Updating)) => format!("Getting {sender}'s changes · your copy: {local}"),
-            Some((_, local, CopyState::AfterGame)) => format!("Gets {sender}'s changes when the game closes · your copy: {local}"),
+            Some((_, local, CopyState::Updating)) => format!("Getting {who}'s changes · your copy: {local}"),
+            Some((_, local, CopyState::AfterGame)) => format!("Gets {who}'s changes when the game closes · your copy: {local}"),
             Some((_, local, CopyState::Failed(..))) => format!("Your copy: {local}"),
             Some((_, local, _)) => format!("Your copy: {local} · up to date"),
             None if e.at > 0 => format!("Updated {}", ago(e.at)),
@@ -1155,7 +1161,7 @@ impl FriendsPanel {
             Some((root, _, CopyState::Held(_))) => Some(root.clone()),
             _ => None,
         };
-        let copy_note = shown.as_ref().and_then(|f| f.2.note(&sender));
+        let copy_note = shown.as_ref().and_then(|f| f.2.note(&who));
         let sub = match by {
             Some(by) if sub.is_empty() => format!("From {by}"),
             Some(by) => format!("From {by} · {}", sub[..1].to_lowercase() + &sub[1..]),
@@ -1291,13 +1297,14 @@ impl FriendsPanel {
                 let s = self.store.read(cx);
                 let (icon, project) = pack_look(s, &e.code);
                 let sender = name_or(&e.from_name, "a friend");
+                let who = if s.group_copy(root).is_some() { "the group".to_string() } else { sender.clone() };
                 let sub = match state {
-                    CopyState::Updating => format!("Getting {sender}'s changes · {}", ago(e.at)),
+                    CopyState::Updating => format!("Getting {who}'s changes · {}", ago(e.at)),
                     CopyState::AfterGame => format!("From {sender} · changes come when the game closes"),
                     CopyState::Failed(..) => format!("From {sender} · changed {}", ago(e.at)),
                     _ => format!("From {sender} · up to date"),
                 };
-                let note = state.note(&sender);
+                let note = state.note(&who);
                 let waiting = matches!(state, CopyState::Held(_));
                 let view = cx.entity();
                 h_flex()
@@ -1765,7 +1772,7 @@ impl FriendsPanel {
                             .min_w_0()
                             .child(div().text_sm().font_medium().child("Keep my packs the same as the group"))
                             .child(widgets::fine_print(
-                                "When someone in the group follows one of its packs, this PC gets it too, as a new instance. Your other instances don't change. Each friend chooses this on their own PC.",
+                                "When someone in the group follows one of its packs, this PC gets it too, as a new instance. When anyone turns a mod off or on, adds, removes or updates one in a group pack, everyone's copy changes too. Your other instances don't change. Each friend chooses this on their own PC.",
                                 cx,
                             )),
                     )

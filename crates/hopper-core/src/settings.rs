@@ -184,6 +184,10 @@ pub struct Settings {
     pub mailbox_sent: Vec<SharedPack>,
     /// Friend groups this PC is in (see [`FriendGroup`]).
     pub friend_groups: Vec<FriendGroup>,
+    /// Group packs kept the same as the group, both ways (see
+    /// [`crate::groupsync`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub group_copies: Vec<crate::groupsync::PackCopy>,
     /// The newest mailbox event acted on once (a friend joining with a
     /// pack's invite, notices). Every start reads the whole feed again to
     /// list friends' packs; events up to here aren't acted on twice.
@@ -656,6 +660,7 @@ impl Default for Settings {
             shared_with: Vec::new(),
             mailbox_sent: Vec::new(),
             friend_groups: Vec::new(),
+            group_copies: Vec::new(),
             mailbox_handled: 0,
             shared_instances: Vec::new(),
             share_prompt_done: false,

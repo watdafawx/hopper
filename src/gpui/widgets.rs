@@ -359,6 +359,9 @@ pub struct ModTags<'a> {
     pub new: bool,
     /// Added on top of the pack.
     pub added: bool,
+    /// Who in the group changed it last, when it wasn't this PC ("Turned
+    /// off by Mia").
+    pub changed_by: Option<&'a str>,
     /// "client" | "server" | "both" | "".
     pub env: &'a str,
     pub categories: &'a [String],
@@ -410,6 +413,7 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         .when(t.in_use, |r| r.child(tag(info, "In use".into())))
         .when(t.new, |r| r.child(tag(ok, "New".into())))
         .when(t.added, |r| r.child(tag(warn, "Added by you".into())))
+        .when_some(t.changed_by, |r, by| r.child(tag(info, by.to_string().into())))
         .children(env)
         .children(
             t.categories

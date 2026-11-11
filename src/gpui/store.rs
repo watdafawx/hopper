@@ -22,7 +22,7 @@ mod panel_events;
 mod server_mods;
 // Invite and SyncStatus are for the Friends screen being rebuilt on top.
 #[allow(unused_imports)]
-pub use friends::{FollowReq, FollowTarget, Invite, RecipeApplied, SyncStatus, follow_pack, redeem};
+pub use friends::{FollowReq, FollowTarget, GroupMerged, Invite, RecipeApplied, SyncStatus, follow_pack, redeem};
 pub use server_mods::{RemoteLoose, remote as on_hopper_server, remote_config_files, remote_config_reset, remote_remove, remote_undo_remove};
 
 /// Results from worker threads.
@@ -76,6 +76,10 @@ pub enum Msg {
     /// Applying a followed recipe failed: the root, the code, why, and the
     /// failed task's id. Tried again later (see `hopper::recipe::Retry`).
     RecipeFailed(PathBuf, String, anyhow::Error, u64),
+    /// Other group members' changes were taken into a copy of a group
+    /// pack (or that failed: the copy's local id, why, the task's id).
+    GroupMerged(Box<friends::GroupMerged>),
+    GroupMergeFailed(String, anyhow::Error, u64),
     /// A new instance was made by following a friend's pack: remember the
     /// recipe for its root (known only once it was made).
     Followed(Box<hopper::settings::FollowedRecipe>),
@@ -556,6 +560,15 @@ pub struct Store {
     follow_applying: HashSet<PathBuf>,
     /// Follows whose last automatic apply failed, by instance root.
     follow_retry: HashMap<PathBuf, hopper::recipe::Retry>,
+    /// Group copies (local instance ids) taking in other members' changes
+    /// now, ones whose last try failed, and ones waiting for their own
+    /// change to be sent (by the `sent_seq` they waited at).
+    group_merging: HashSet<String>,
+    group_retry: HashMap<String, hopper::recipe::Retry>,
+    group_held: HashMap<String, (u64, Instant)>,
+    /// Members' copies that came before this PC's copy of the pack was
+    /// set up, by sender and pack; the newest of each.
+    group_strays: HashMap<(String, String), hopper::mailbox::Event>,
     /// Modpacks (project ids) whose server files were downloaded this run.
     server_files_got: std::collections::HashSet<u64>,
     /// Instance roots the game watcher looks for.
@@ -751,6 +764,10 @@ impl Store {
             pending_follow: Default::default(),
             follow_applying: Default::default(),
             follow_retry: Default::default(),
+            group_merging: Default::default(),
+            group_retry: Default::default(),
+            group_held: Default::default(),
+            group_strays: Default::default(),
             server_files_got: Default::default(),
             watched,
             disk: disk_sync::start(tx.clone(), wake.clone()),
@@ -1131,6 +1148,8 @@ impl Store {
             Msg::Followed(f) => self.on_followed(*f, cx),
             Msg::RecipeApplied(r) => self.on_recipe_applied(*r, cx),
             Msg::RecipeFailed(root, code, e, job) => self.on_recipe_failed(root, code, e, job, cx),
+            Msg::GroupMerged(m) => self.on_group_merged(*m, cx),
+            Msg::GroupMergeFailed(local, e, job) => self.on_group_merge_failed(local, e, job, cx),
             Msg::InstanceChanged(root) if server_mods::remote(&root).is_some() => self.refetch_server_mods(&root),
             Msg::InstanceChanged(root) => {
                 // Only Hopper's own instances get an id written; a folder
@@ -2395,7 +2414,7 @@ impl Store {
         title: impl Into<String>,
         work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
     ) {
-        let _ = self.run_job(None, title.into(), work);
+        let _ = self.run_job(None, title.into(), false, work);
     }
 
     /// Reads an instance again after a change made outside a job (History's
@@ -2413,7 +2432,18 @@ impl Store {
         title: impl Into<String>,
         work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
     ) {
-        let _ = self.run_job(Some(root.to_path_buf()), title.into(), work);
+        let _ = self.run_job(Some(root.to_path_buf()), title.into(), false, work);
+    }
+
+    /// [`spawn_instance_job`] kept off the task list unless it fails or
+    /// shows itself (`Job::show`).
+    pub fn spawn_instance_job_quiet(
+        &self,
+        root: &Path,
+        title: impl Into<String>,
+        work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
+    ) -> u64 {
+        self.run_job(Some(root.to_path_buf()), title.into(), true, work)
     }
 
     /// [`spawn_job`], returning the job's id (to follow its progress).
@@ -2422,7 +2452,7 @@ impl Store {
         title: impl Into<String>,
         work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
     ) -> u64 {
-        self.run_job(None, title.into(), work)
+        self.run_job(None, title.into(), false, work)
     }
 
     /// [`spawn_instance_job`], returning the job's id.
@@ -2432,7 +2462,7 @@ impl Store {
         title: impl Into<String>,
         work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
     ) -> u64 {
-        self.run_job(Some(root.to_path_buf()), title.into(), work)
+        self.run_job(Some(root.to_path_buf()), title.into(), false, work)
     }
 
     /// A progress job the caller runs and finishes itself (shows in Tasks).
@@ -2449,9 +2479,10 @@ impl Store {
         &self,
         root: Option<PathBuf>,
         title: String,
+        quiet: bool,
         work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
     ) -> u64 {
-        let job = self.jobs.start(title);
+        let job = if quiet { self.jobs.start_quiet(title) } else { self.jobs.start(title) };
         let id = job.id();
         crate::hero_drift::job_started();
         if let Some(r) = &root {

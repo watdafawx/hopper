@@ -300,6 +300,12 @@ impl Job {
         self.jobs.update(self.id, |j| j.notes.push(n));
     }
 
+    /// A quiet job that turned out to change something joins the task
+    /// list, so the player sees what happened.
+    pub fn show(&self) {
+        self.jobs.update(self.id, |j| j.quiet = false);
+    }
+
     /// How many notes the job has, for [`Job::drop_notes_from`].
     pub fn note_count(&self) -> usize {
         self.jobs.snapshot().iter().find(|j| j.id == self.id).map_or(0, |j| j.notes.len())
