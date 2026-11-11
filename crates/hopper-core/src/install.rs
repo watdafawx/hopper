@@ -1244,10 +1244,34 @@ pub fn loose_jars(inst: &Instance) -> Vec<String> {
         .collect()
 }
 
+/// A mods entry that names nothing: no CurseForge or Modrinth project and no
+/// source. A panel's on / off switch adds one for a jar it didn't know yet
+/// (a synced jar turned off there), so it can store the switch; it mustn't
+/// keep the jar from being identified.
+pub fn is_bare(a: &Addon) -> bool {
+    a.folder() == "mods" && a.project_id == 0 && a.mr_project.is_empty() && a.source.is_none()
+}
+
+/// The jars identify looks up: untracked ones ([`loose_jars`]) and those
+/// with only a bare entry ([`is_bare`]), as named on disk.
+pub fn unnamed_jars(inst: &Instance) -> Vec<String> {
+    let mut out = loose_jars(inst);
+    let dir = inst.mods_dir();
+    for a in inst.addons.iter().filter(|a| is_bare(a)) {
+        let on = a.file_name.trim_end_matches(".disabled").to_string();
+        let off = format!("{on}.disabled");
+        let Some(name) = [on, off].into_iter().find(|n| dir.join(n).is_file()) else { continue };
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(&name)) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 /// Identifies untracked jars by fingerprint (what CurseForge calls a scan)
 /// and adds the matches. Returns how many were identified.
 pub fn identify_loose(inst: &mut Instance, job: &Job) -> anyhow::Result<usize> {
-    let loose = loose_jars(inst);
+    let loose = unnamed_jars(inst);
     identify_jars(inst, &loose, job)
 }
 
@@ -1255,8 +1279,9 @@ pub fn identify_loose(inst: &mut Instance, job: &Job) -> anyhow::Result<usize> {
 /// way: after an older copy is put back, its record moves to that jar
 /// (the newer one's jar is gone). Returns how many were identified.
 pub fn identify_jars(inst: &mut Instance, names: &[String], job: &Job) -> anyhow::Result<usize> {
-    // Only jars with no record yet (a tracked one would get a second).
-    let untracked = loose_jars(inst);
+    // Only jars with no record naming them yet (a named one would get a
+    // second; a bare one is replaced).
+    let untracked = unnamed_jars(inst);
     let loose: Vec<String> = untracked
         .into_iter()
         .filter(|l| names.iter().any(|n| n.eq_ignore_ascii_case(l) || n.eq_ignore_ascii_case(l.trim_end_matches(".disabled"))))
@@ -1293,8 +1318,7 @@ pub fn identify_jars(inst: &mut Instance, names: &[String], job: &Job) -> anyhow
         .iter()
         .filter(|l| {
             !inst.addons.iter().any(|a| {
-                a.file_name
-                    .eq_ignore_ascii_case(l.trim_end_matches(".disabled"))
+                !is_bare(a) && a.file_name.eq_ignore_ascii_case(l.trim_end_matches(".disabled"))
             })
         })
         .map(String::as_str)
@@ -1312,7 +1336,23 @@ pub fn identify_jars(inst: &mut Instance, names: &[String], job: &Job) -> anyhow
 /// Adds an identified jar. An entry of the same project whose jar is gone
 /// (swapped for this one outside Hopper) is replaced instead of kept as a
 /// second copy.
-fn put_identified(inst: &mut Instance, mut a: Addon) {
+pub(crate) fn put_identified(inst: &mut Instance, mut a: Addon) {
+    // This jar's own bare entry (see [`is_bare`]) gives way: what it held
+    // about the jar (when added, locks, where it runs) stays.
+    if let Some(i) = inst.addons.iter().position(|o| is_bare(o) && o.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(&a.file_name)) {
+        let o = inst.addons.remove(i);
+        a.from_pack |= o.from_pack;
+        if !o.date_added.is_empty() {
+            a.date_added = o.date_added;
+        }
+        a.locked |= o.locked;
+        if a.locked_version.is_empty() {
+            a.locked_version = o.locked_version;
+        }
+        if a.env.is_empty() {
+            a.env = o.env;
+        }
+    }
     let dir = inst.mods_dir();
     let gone = |f: &str| !dir.join(f).exists() && !dir.join(format!("{f}.disabled")).exists();
     // The same mod on the other site counts too: a jar identified on
@@ -1591,8 +1631,7 @@ fn identify_on_modrinth(inst: &mut Instance, names: &[String], job: &Job) -> any
         .iter()
         .filter(|n| {
             !inst.addons.iter().any(|a| {
-                a.file_name
-                    .eq_ignore_ascii_case(n.trim_end_matches(".disabled"))
+                !is_bare(a) && a.file_name.eq_ignore_ascii_case(n.trim_end_matches(".disabled"))
             })
         })
         .collect();

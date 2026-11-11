@@ -105,7 +105,7 @@ impl Show {
 
     fn has(self, g: Group) -> bool {
         match self {
-            Show::Needs => matches!(g, Group::Add | Group::Update | Group::TurnOff | Group::ServerOnly),
+            Show::Needs => matches!(g, Group::Add | Group::Update | Group::TurnOn | Group::TurnOff | Group::ServerOnly),
             Show::Kept => g == Group::KeptOff,
             Show::InSync => g == Group::InSync,
             Show::All => true,
@@ -320,7 +320,7 @@ impl SyncPanel {
             pick_anchor: None,
             list_focus: cx.focus_handle(),
             swept: HashSet::new(),
-            open: [Group::Add, Group::Update, Group::TurnOff, Group::ServerOnly, Group::KeptOff].into(),
+            open: [Group::Add, Group::Update, Group::TurnOn, Group::TurnOff, Group::ServerOnly, Group::KeptOff].into(),
             show_kept: false,
             items: Vec::new(),
             running: false,
@@ -426,7 +426,7 @@ impl SyncPanel {
     pub fn open_sync(&mut self, cx: &mut Context<Self>) {
         self.set_section(Section::Mods, cx);
         self.show = Some(Show::Needs);
-        self.open.extend([Group::Add, Group::Update, Group::TurnOff, Group::ServerOnly]);
+        self.open.extend([Group::Add, Group::Update, Group::TurnOn, Group::TurnOff, Group::ServerOnly]);
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
     }
@@ -1100,6 +1100,7 @@ impl SyncPanel {
             Group::Add => (("Adding", "Added"), RowAct::Push),
             Group::Update if d.status == DiffStatus::ServerNewer => (("Replacing", "Replaced"), RowAct::Push),
             Group::Update => (("Updating", "Updated"), RowAct::Push),
+            Group::TurnOn => (("Turning on", "Turned on"), RowAct::Push),
             Group::TurnOff => (("Turning off", "Turned off"), RowAct::Remove),
             Group::ServerOnly => (("Removing", "Removed"), RowAct::Remove),
             Group::KeptOff if d.client.as_ref().is_some_and(|c| c.off) => return None,
@@ -1938,6 +1939,7 @@ impl SyncPanel {
         match g {
             Group::Add => theme.primary,
             Group::Update => theme.info,
+            Group::TurnOn => theme.primary,
             Group::TurnOff => theme.warning,
             Group::ServerOnly => theme.danger,
             Group::KeptOff => theme.warning,
@@ -2005,6 +2007,7 @@ impl SyncPanel {
         let to_change = whole.iter().filter(|g| Show::Needs.has(**g)).count();
         let to_remove = whole.iter().filter(|g| **g == Group::ServerOnly).count();
         let to_off = whole.iter().filter(|g| **g == Group::TurnOff).count();
+        let to_on = whole.iter().filter(|g| **g == Group::TurnOn).count();
         // Installing the pack's NeoForge is part of it too: say "Sync" then.
         let nf_differs = self.pair_header(cx).is_some_and(|(_, inst)| {
             matches!((inst.loader.strip_prefix("neoforge-"), &self.server_nf), (Some(p), Some(sv)) if p != sv)
@@ -2018,6 +2021,7 @@ impl SyncPanel {
                 .icon(IconName::ServerCog)
                 .label(match rigsync::sync_label(to_change - to_remove, to_remove) {
                     Some(_) if !nf_differs && to_off == to_change => format!("Turn off {to_off} on server"),
+                    Some(_) if !nf_differs && to_on == to_change => format!("Turn on {to_on} on server"),
                     Some(l) if !nf_differs => l,
                     _ if to_change > 0 => format!("Sync {to_change} to server"),
                     _ => "Sync to server".to_string(),
@@ -2118,8 +2122,8 @@ impl SyncPanel {
         let n_sel = picked.len();
         let n_remove = count(Group::ServerOnly, None);
         let (n_add, n_update) = (count(Group::Add, None) + count(Group::KeptOff, None), count(Group::Update, None));
-        // Turning a jar off counts with the changes, not the removals.
-        let n_off = count(Group::TurnOff, None);
+        // Turning a jar off or on counts with the changes, not the removals.
+        let n_off = count(Group::TurnOff, None) + count(Group::TurnOn, None);
         let n_push = n_add + n_update + n_off;
         let parts = action_line(picked.iter());
         let todo = action_line(self.visible(cx).into_iter());
@@ -2484,9 +2488,11 @@ impl SyncPanel {
                 Some("An older copy left behind; the pack has this mod under a newer file".into())
             }
             Group::TurnOff => Some("Turned off in this pack; the server still loads it".into()),
+            Group::TurnOn => Some("On in this pack; turned off on the server".into()),
             Group::Update if d.status == DiffStatus::ServerNewer => {
                 Some("The server has a newer version than the pack".into())
             }
+            Group::Update if rigsync::turns_on(d) => Some("On in this pack; the server's copy is turned off".into()),
             _ => None,
         };
         // Each side's version, under "Server → Pack" ("–": not there).
@@ -2495,6 +2501,7 @@ impl SyncPanel {
             (Group::Add, Some(c), _) => format!("– → {}", c.version),
             (Group::ServerOnly, _, Some(s)) => format!("{} → –", s.version),
             (Group::TurnOff, _, Some(s)) => format!("{} → off", s.version),
+            (Group::TurnOn, Some(c), _) => format!("off → {}", c.version),
             _ => m.version.clone(),
         };
         // One action per row, named for what it does to the server.
@@ -2630,6 +2637,12 @@ impl SyncPanel {
             Group::TurnOff => sweep(
                 act("TurnOff", "Turn off on server", IconName::Ban, ("Turning off", "Turned off"), RowAct::Remove, false)
                     .when(!compact, |b| b.tooltip("Turns the server's copy off too; the jar stays in its mods folder"))
+                    .into_any_element(),
+                cx,
+            ),
+            Group::TurnOn => sweep(
+                act("TurnOn", "Turn on on server", IconName::CircleCheck, ("Turning on", "Turned on"), RowAct::Push, false)
+                    .when(!compact, |b| b.tooltip("Turns the server's copy on, as it is in this pack; nothing is copied"))
                     .into_any_element(),
                 cx,
             ),
@@ -3309,17 +3322,18 @@ pub(crate) fn crash_reason(c: &ServerCrash) -> String {
 
 /// "1 to push · 1 to update · 1 to remove" for the rows given.
 fn action_line<'a>(rows: impl Iterator<Item = &'a DiffEntry>) -> String {
-    let (mut push, mut update, mut off, mut remove) = (0, 0, 0, 0);
+    let (mut push, mut update, mut on, mut off, mut remove) = (0, 0, 0, 0, 0);
     for d in rows {
         match Group::of(d) {
             Group::Add => push += 1,
             Group::Update => update += 1,
+            Group::TurnOn => on += 1,
             Group::TurnOff => off += 1,
             Group::ServerOnly => remove += 1,
             _ => {}
         }
     }
-    [("to push", push), ("to update", update), ("to turn off", off), ("to remove", remove)]
+    [("to push", push), ("to update", update), ("to turn on", on), ("to turn off", off), ("to remove", remove)]
         .into_iter()
         .filter(|(_, n)| *n > 0)
         .map(|(w, n)| format!("{n} {w}"))
@@ -3346,7 +3360,7 @@ pub fn confirm_update_server(store: &Entity<Store>, server: ServerInfo, inst: In
     let store = store.clone();
     let name = server.name.clone();
     let body = format!(
-        "This will {what} in {}: mods turned off in this pack are turned off there too, and mods only the server has are removed. Replaced and removed files go to {}.",
+        "This will {what} in {}: mods are turned on or off there to match this pack, and mods only the server has are removed. Replaced and removed files go to {}.",
         server.place(&store.read(cx).settings().hopper_panels),
         if hopper::hopperd::is_remote_root(&server.root) { "Hopper Server's trash" } else { ".hopper-backups" },
     );

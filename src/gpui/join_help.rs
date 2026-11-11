@@ -447,6 +447,9 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
         if !c.off_here.is_empty() {
             lines.push(format!("Turned off here, still on on the server: {}", list(&c.off_here)));
         }
+        if !c.off_there.is_empty() {
+            lines.push(format!("On here, turned off on the server: {}", list(&c.off_there)));
+        }
         if !c.versions.is_empty() {
             let names: Vec<String> = c.versions.iter().map(|(n, a, b)| format!("{n} ({a} here, {b} there)")).collect();
             lines.push(format!("Other versions: {}", list(&names)));

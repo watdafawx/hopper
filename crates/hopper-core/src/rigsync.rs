@@ -119,17 +119,16 @@ pub fn client_mods(inst: &Instance, sync_anyway: &HashSet<u64>) -> anyhow::Resul
     Ok((client, note))
 }
 
-/// Why a mod the server has turned off isn't added again.
-pub const OFF_ON_SERVER: &str = "Turned off on the server";
-
-/// Compares the pack's mods ([`client_mods`]) with the server's. A mod
-/// turned off in the pack that the server still runs isn't "only on the
-/// server": its row asks to turn the server's copy off too. A mod the
-/// server has turned off stays off: a different file of it in the pack
-/// replaces the server's off copy and is put there off too (an Update row
-/// whose server side is the off copy), so no older copy is left beside a
-/// new one and the mod isn't switched on. The same file turned off there is
-/// left alone.
+/// Compares the pack's mods ([`client_mods`]) with the server's. The
+/// server follows the pack's on / off state too. A mod turned off in the
+/// pack that the server still runs isn't "only on the server": its row
+/// asks to turn the server's copy off too. A mod the server has turned off
+/// while the pack has it on is out of step the same way: the same file
+/// gets a row that turns it on there ([`is_on_here`]); a different file of
+/// it replaces the server's off copy (an Update row whose server side is
+/// the off copy), put there on or off as it is in the pack, so no older
+/// copy is left beside a new one. Mods that stay off the server anyway
+/// (client-only, left out) are left alone.
 pub fn diff_mods(client: &[ModInfo], server: &[ModInfo]) -> Vec<DiffEntry> {
     let (server_off, server_on): (Vec<&ModInfo>, Vec<&ModInfo>) = server.iter().partition(|m| m.off);
     let server: Vec<ModInfo> = server_on.into_iter().cloned().collect();
@@ -150,10 +149,12 @@ pub fn diff_mods(client: &[ModInfo], server: &[ModInfo]) -> Vec<DiffEntry> {
             continue;
         };
         if o.file_name.eq_ignore_ascii_case(&c.file_name) {
-            // The very file is already there, off: nothing to do, unless the pack turned it off too.
-            if !c.off {
-                d.action = DiffAction::Skip;
-                d.skip_reason = Some(OFF_ON_SERVER.into());
+            // The very file is already there, off. Off in the pack too, or
+            // kept off the server anyway (client-only): nothing to do. On in
+            // the pack: turn it on there.
+            if !c.off && d.skip_reason.is_none() && c.wont_sync.is_none() {
+                d.server = Some(o.clone());
+                d.action = DiffAction::EnableOnServer;
             }
             continue;
         }
@@ -197,6 +198,56 @@ fn diff_on(client: &[ModInfo], server: &[ModInfo]) -> Vec<DiffEntry> {
 /// A server mod the pack has turned off: syncing turns it off there too.
 pub fn is_off_here(d: &DiffEntry) -> bool {
     d.action == DiffAction::DisableOnServer
+}
+
+/// A pack mod that's on while the server has the same file turned off:
+/// syncing turns it on there.
+pub fn is_on_here(d: &DiffEntry) -> bool {
+    d.action == DiffAction::EnableOnServer
+}
+
+/// An update whose server copy is turned off while the pack has the mod
+/// on: the new file goes there on.
+pub fn turns_on(d: &DiffEntry) -> bool {
+    matches!(d.status, DiffStatus::ClientNewer | DiffStatus::ServerNewer)
+        && d.client.as_ref().is_some_and(|c| !c.off)
+        && d.server.as_ref().is_some_and(|s| s.off)
+}
+
+/// The row's state in a few words: [`status_label`], or what differs in
+/// whether the mod is on.
+pub fn row_label(d: &DiffEntry) -> &'static str {
+    if is_on_here(d) {
+        "Off on server"
+    } else if is_off_here(d) {
+        "Off in pack"
+    } else {
+        status_label(d.status)
+    }
+}
+
+/// The mod's name for a sentence: the pack's name for it, else the file.
+fn mod_title(d: &DiffEntry) -> String {
+    let m = d.client.as_ref().or(d.server.as_ref());
+    m.map(|m| if m.mod_name.is_empty() { m.file_name.clone() } else { m.mod_name.clone() })
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| d.mod_name.clone())
+}
+
+/// What syncing does to the server for this row, as a sentence for a
+/// player ("Turn on Mekanism Magic on the server"). `None` for rows that
+/// change nothing there.
+pub fn row_change(d: &DiffEntry) -> Option<String> {
+    let name = mod_title(d);
+    Some(match Group::of(d) {
+        Group::TurnOn => format!("Turn on {name} on the server"),
+        Group::TurnOff => format!("Turn off {name} on the server"),
+        Group::Update if turns_on(d) => format!("Update {name} on the server and turn it on"),
+        Group::Update => format!("Update {name} on the server"),
+        Group::Add => format!("Add {name} to the server"),
+        Group::ServerOnly => format!("Remove {name} from the server"),
+        Group::KeptOff | Group::InSync => return None,
+    })
 }
 
 /// [`server_mods`] with the jars turned off there (`off` set), so Sync
@@ -275,7 +326,13 @@ pub fn status_label(s: DiffStatus) -> &'static str {
 pub fn explain(d: &DiffEntry) -> String {
     let v = |m: &Option<ModInfo>| m.as_ref().map_or("?".to_string(), |m| m.version.clone());
     match d.status {
+        DiffStatus::OnlyClient if is_on_here(d) => "On in this pack but turned off on the server. Turn it on there too, so both match.".into(),
         DiffStatus::OnlyClient => "In the pack but not on the server. Click to copy it to the server.".into(),
+        _ if turns_on(d) => format!(
+            "Client is v{} and on, the server has v{} turned off. Pushing puts the client's file there turned on and removes the old one.",
+            v(&d.client),
+            v(&d.server)
+        ),
         DiffStatus::OnlyServer if is_off_here(d) => "Turned off in this pack but still on on the server. Turn it off there too, so both match.".into(),
         DiffStatus::OnlyServer => "On the server but not in the pack. Click to copy it down to the pack, or select it and Remove.".into(),
         DiffStatus::ServerStale => "An older copy left on the server; the client has this mod under a newer file. Click the chip to remove the leftover.".into(),
@@ -301,6 +358,8 @@ pub enum Group {
     Add,
     /// The server has another build.
     Update,
+    /// On in the pack, turned off on the server.
+    TurnOn,
     /// Turned off in the pack, still on on the server.
     TurnOff,
     /// Only the server has it (or an old copy left behind).
@@ -312,9 +371,10 @@ pub enum Group {
 }
 
 impl Group {
-    pub const ALL: [Group; 6] = [
+    pub const ALL: [Group; 7] = [
         Group::Add,
         Group::Update,
+        Group::TurnOn,
         Group::TurnOff,
         Group::ServerOnly,
         Group::KeptOff,
@@ -323,6 +383,7 @@ impl Group {
 
     pub fn of(d: &DiffEntry) -> Group {
         match d.status {
+            DiffStatus::OnlyClient if is_on_here(d) => Group::TurnOn,
             DiffStatus::OnlyClient if is_wont(d) => Group::KeptOff,
             DiffStatus::OnlyClient => Group::Add,
             DiffStatus::ClientNewer | DiffStatus::ServerNewer => Group::Update,
@@ -336,6 +397,7 @@ impl Group {
         match self {
             Group::Add => "Will be added",
             Group::Update => "Updates",
+            Group::TurnOn => "Turned off on the server",
             Group::TurnOff => "Turned off in the pack",
             Group::ServerOnly => "Only on the server",
             Group::KeptOff => "Kept off the server",
@@ -348,6 +410,7 @@ impl Group {
         match self {
             Group::Add => "to add",
             Group::Update => "updates",
+            Group::TurnOn => "to turn on",
             Group::TurnOff => "to turn off",
             Group::ServerOnly => "only on server",
             Group::KeptOff => "kept off",
@@ -359,6 +422,7 @@ impl Group {
         match self {
             Group::Add => "In the pack, not on the server",
             Group::Update => "The server has another version",
+            Group::TurnOn => "On in the pack",
             Group::TurnOff => "Still on on the server",
             Group::ServerOnly => "Not in the pack",
             Group::KeptOff => "Client-only, turned off in the pack, or left out by its author",
@@ -368,7 +432,7 @@ impl Group {
 
     /// Whether its rows can be picked for Apply.
     pub fn pickable(self) -> bool {
-        matches!(self, Group::Add | Group::Update | Group::TurnOff | Group::ServerOnly)
+        matches!(self, Group::Add | Group::Update | Group::TurnOn | Group::TurnOff | Group::ServerOnly)
     }
 }
 
@@ -521,13 +585,20 @@ pub struct JoinCheck {
     pub only_server: Vec<String>,
     /// Mods turned off in the pack the server still runs (names).
     pub off_here: Vec<String>,
+    /// Mods on in the pack the server has turned off (names).
+    pub off_there: Vec<String>,
     /// (name, the pack's version, the server's).
     pub versions: Vec<(String, String, String)>,
 }
 
 impl JoinCheck {
     pub fn is_empty(&self) -> bool {
-        self.loader.is_none() && self.only_pack.is_empty() && self.only_server.is_empty() && self.off_here.is_empty() && self.versions.is_empty()
+        self.loader.is_none()
+            && self.only_pack.is_empty()
+            && self.only_server.is_empty()
+            && self.off_here.is_empty()
+            && self.off_there.is_empty()
+            && self.versions.is_empty()
     }
 
     /// The one-line summary, for the banner.
@@ -546,6 +617,9 @@ impl JoinCheck {
         if !self.off_here.is_empty() {
             parts.push(format!("{} turned off here but on on the server", n(self.off_here.len(), "mod", "mods")));
         }
+        if !self.off_there.is_empty() {
+            parts.push(format!("{} on here but turned off on the server", n(self.off_there.len(), "mod", "mods")));
+        }
         if !self.versions.is_empty() {
             parts.push(format!("{} at another version", n(self.versions.len(), "mod", "mods")));
         }
@@ -559,7 +633,12 @@ impl JoinCheck {
     /// A short, stable fingerprint, so a closed banner stays closed until
     /// something else differs.
     pub fn signature(&self) -> String {
-        format!("{:?}|{}|{}|{}|{}", self.loader, self.only_pack.join(","), self.only_server.join(","), self.off_here.join(","), self.versions.iter().map(|v| format!("{}:{}:{}", v.0, v.1, v.2)).collect::<Vec<_>>().join(","))
+        let mut s = format!("{:?}|{}|{}|{}|{}", self.loader, self.only_pack.join(","), self.only_server.join(","), self.off_here.join(","), self.versions.iter().map(|v| format!("{}:{}:{}", v.0, v.1, v.2)).collect::<Vec<_>>().join(","));
+        // Added at the end, so a closed banner from before stays closed.
+        if !self.off_there.is_empty() {
+            s.push_str(&format!("|on:{}", self.off_there.join(",")));
+        }
+        s
     }
 }
 
@@ -576,12 +655,21 @@ pub fn join_check(diff: &[DiffEntry], blacklist: &HashSet<String>, pack_nf: Opti
         let m = d.client.as_ref().or(d.server.as_ref());
         m.map(|m| if m.mod_name.is_empty() { m.file_name.clone() } else { m.mod_name.clone() }).filter(|n| !n.is_empty()).unwrap_or_else(|| d.mod_name.clone())
     };
+    let side = |m: &Option<ModInfo>| m.as_ref().map_or("", |m| m.side.as_str()).to_string();
     for d in diff {
-        // A mod turned off on the server isn't a version mismatch there.
-        if is_hidden(d, blacklist) || is_wont(d) || d.server.as_ref().is_some_and(|s| s.off) {
+        if is_hidden(d, blacklist) || is_wont(d) {
             continue;
         }
-        let side = |m: &Option<ModInfo>| m.as_ref().map_or("", |m| m.side.as_str()).to_string();
+        // On in the pack, off on the server: the server doesn't load it at
+        // all (whatever its version), so joining asks for it.
+        if is_on_here(d) || (turns_on(d) && side(&d.client) != "client") {
+            c.off_there.push(name(d));
+            continue;
+        }
+        // Any other mod turned off on the server isn't a version mismatch there.
+        if d.server.as_ref().is_some_and(|s| s.off) {
+            continue;
+        }
         match d.status {
             DiffStatus::OnlyServer if is_off_here(d) => c.off_here.push(name(d)),
             DiffStatus::OnlyClient if side(&d.client) != "client" => c.only_pack.push(name(d)),
@@ -596,6 +684,7 @@ pub fn join_check(diff: &[DiffEntry], blacklist: &HashSet<String>, pack_nf: Opti
     c.only_pack.sort();
     c.only_server.sort();
     c.off_here.sort();
+    c.off_there.sort();
     c.versions.sort();
     c
 }
@@ -752,14 +841,17 @@ impl Ops {
     }
 }
 
-/// Copies client files over (replacing the server's old builds).
+/// Copies client files over (replacing the server's old builds), and turns
+/// on the server's off copy of a mod that's on in the pack.
 pub fn push(rows: &[DiffEntry], inst: &Instance, server: &ServerInfo) -> Vec<SyncOp> {
     let rows: Vec<DiffEntry> = rows
         .iter()
         .filter(|d| d.client.as_ref().is_some_and(|c| !c.off || d.server.as_ref().is_some_and(|s| s.off)) && row_action(d.status) == Some(RowAct::Push))
         .cloned()
         .map(|mut d| {
-            d.action = DiffAction::CopyToServer;
+            if !is_on_here(&d) {
+                d.action = DiffAction::CopyToServer;
+            }
             d
         })
         .collect();
@@ -1218,9 +1310,10 @@ mod tests {
 
     /// TNP-LL8, 2026-11-06: Advancement Frames was off on the server; Sync
     /// added the pack's newer version on beside the old copy left off. Now
-    /// the newer file takes the off copy's place, off too.
+    /// the newer file takes the off copy's place (one file per mod), on or
+    /// off as it is in the pack.
     #[test]
-    fn a_mod_off_on_the_server_gets_the_new_file_off_not_a_second_copy() {
+    fn a_mod_off_on_the_server_gets_the_new_file_not_a_second_copy() {
         use crate::model::ModInfo;
         let m = |file: &str, version: &str, off: bool| ModInfo {
             file_name: file.into(),
@@ -1238,12 +1331,33 @@ mod tests {
         assert_eq!(diff[0].status, DiffStatus::ClientNewer);
         assert_eq!(Group::of(&diff[0]), Group::Update);
         assert!(diff[0].server.as_ref().unwrap().off);
-        // A mod that is off there isn't a version mismatch the join banner shows.
-        assert!(join_check(&diff, &HashSet::new(), None, None).versions.is_empty());
-        // The very file turned off there: nothing to do.
+        assert!(turns_on(&diff[0]));
+        assert_eq!(row_change(&diff[0]).as_deref(), Some("Update Advancement Frames on the server and turn it on"));
+        // Off there and on here: the join banner says it's off there, not
+        // that the versions differ (the server doesn't load it at all).
+        let c = join_check(&diff, &HashSet::new(), None, None);
+        assert!(c.versions.is_empty(), "{c:?}");
+        assert_eq!(c.off_there, ["Advancement Frames"]);
+        let srv = Path::new("srv").join("mods");
+        let ops = crate::sync::plan(&diff, Path::new("pack/mods"), &srv);
+        assert!(
+            matches!(&ops[..], [SyncOp::Copy { dst, .. }, SyncOp::Delete { path }]
+                if dst.ends_with("advancementframes-1.21-2.3.2-neoforge.jar") && path.ends_with("advancementframes-1.21-2.3.0-neoforge.jar.disabled")),
+            "{ops:?}"
+        );
+        // The very file turned off there: turn it on, nothing to copy.
         let diff = diff_mods(&client, &[m("advancementframes-1.21-2.3.2-neoforge.jar", "2.3.2", true)]);
-        assert_eq!(diff[0].action, DiffAction::Skip);
-        assert_eq!(diff[0].skip_reason.as_deref(), Some(OFF_ON_SERVER));
+        assert_eq!(diff.len(), 1, "{diff:?}");
+        assert_eq!(diff[0].action, DiffAction::EnableOnServer);
+        assert_eq!(Group::of(&diff[0]), Group::TurnOn);
+        assert!(Group::TurnOn.pickable());
+        assert_eq!(row_label(&diff[0]), "Off on server");
+        assert_eq!(row_change(&diff[0]).as_deref(), Some("Turn on Advancement Frames on the server"));
+        let c = join_check(&diff, &HashSet::new(), None, None);
+        assert_eq!(c.off_there, ["Advancement Frames"]);
+        assert!(c.summary().contains("1 mod on here but turned off on the server"), "{}", c.summary());
+        let ops = crate::sync::plan(&diff, Path::new("pack/mods"), &srv);
+        assert!(matches!(&ops[..], [SyncOp::Enable { path }] if path.ends_with("advancementframes-1.21-2.3.2-neoforge.jar")), "{ops:?}");
         // Not there at all: added as before.
         let diff = diff_mods(&client, &[]);
         assert_eq!(diff[0].action, DiffAction::CopyToServer, "{diff:?}");
@@ -1284,14 +1398,20 @@ mod tests {
         jar(&cm.join("lib-2.0.jar"), "lib", "2.0", 20);
         // fresh: only in the pack.
         jar(&cm.join("fresh-1.0.jar"), "fresh", "1.0", 10);
+        // magic: the same file, off on the server and turned on in the pack
+        // (TNP-LL8, 2026-11-11: Mekanism Magic).
+        jar(&sm.join("magic-1.0.jar.disabled"), "magic", "1.0", 10);
+        jar(&cm.join("magic-1.0.jar"), "magic", "1.0", 10);
         // yours: only on the server, not in the pack: not part of a push.
         jar(&sm.join("yours-1.0.jar"), "yours", "1.0", 10);
 
         let (client, _) = client_mods(&pack, &HashSet::new()).unwrap();
         let theirs = mods_with_off(&sm).unwrap();
         let diff = diff_mods(&client, &theirs);
+        let magic = diff.iter().find(|d| d.client.as_ref().is_some_and(|c| c.file_name == "magic-1.0.jar")).unwrap();
+        assert_eq!(Group::of(magic), Group::TurnOn);
         let rows: Vec<DiffEntry> = diff.into_iter().filter(|d| Group::of(d).pickable() && d.client.is_some()).collect();
-        assert_eq!(rows.len(), 4, "{rows:?}");
+        assert_eq!(rows.len(), 5, "{rows:?}");
         let ops = push(&rows, &pack, &server);
         let results = crate::sync::execute_local(ops, &server.root);
         assert!(results.iter().all(|r| r.ok), "{results:?}");
@@ -1300,8 +1420,8 @@ mod tests {
         files.sort();
         assert_eq!(
             files,
-            ["armor-2.0.jar.disabled", "frames-2.0.jar.disabled", "fresh-1.0.jar", "lib-2.0.jar", "yours-1.0.jar"],
-            "one file per mod, armor and frames still off, lib on"
+            ["armor-2.0.jar", "frames-2.0.jar.disabled", "fresh-1.0.jar", "lib-2.0.jar", "magic-1.0.jar", "yours-1.0.jar"],
+            "one file per mod, each on or off as in the pack"
         );
         // The old files are in the server's backups, so History can undo it.
         let backups = std::fs::read_dir(server.root.join(crate::sync::BACKUP_DIR)).map(|d| d.count()).unwrap_or(0);

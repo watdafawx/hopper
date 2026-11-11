@@ -184,6 +184,8 @@ pub struct Report {
     pub removed: usize,
     /// Mods turned off on the server (they're off in the pack).
     pub turned_off: usize,
+    /// Mods turned on on the server (they're on in the pack).
+    pub turned_on: usize,
     pub failed: Vec<String>,
     /// What happened to the panel's own launch command, if anything.
     pub panel: Option<String>,
@@ -196,6 +198,9 @@ impl Report {
             parts.push(format!("NeoForge {from} » {to}"));
         }
         let mut mods = vec![format!("{} mods copied", self.copied), format!("{} removed", self.removed)];
+        if self.turned_on > 0 {
+            mods.push(format!("{} turned on", self.turned_on));
+        }
         if self.turned_off > 0 {
             mods.push(format!("{} turned off", self.turned_off));
         }
@@ -353,8 +358,9 @@ pub fn update_server(
     job.detail("Comparing mods");
     // The same comparison the banner and the Sync tab show.
     let (client, _) = crate::rigsync::client_mods(inst, sync_anyway)?;
-    // Read by the panel when the server is on a Hopper Server.
-    let theirs = crate::rigsync::server_mods(server)?;
+    // Read by the panel when the server is on a Hopper Server. The ones
+    // turned off there count: the server follows the pack's on / off too.
+    let theirs = crate::rigsync::server_mods_with_off(server)?;
     let mut diff = crate::rigsync::diff_mods(&client, &theirs);
     // "Never sync" mods: neither copied nor removed.
     diff.retain(|d| !crate::rigsync::is_hidden(d, hidden));
@@ -368,13 +374,20 @@ pub fn update_server(
     }
     let ops = crate::sync::plan(&diff, &inst.mods_dir(), &server.mods_dir());
     job.detail(format!("Syncing {} files", ops.len()));
+    if let Some(r) = &server.remote {
+        crate::hopperd::register(&server.root, r);
+    }
     let results = crate::sync::execute(ops, &server.root);
     crate::history::record(&server.root, "server", &server.root, &results);
+    // The jars' CurseForge / Modrinth records go along, as with Sync to
+    // server, so the server lists them as those mods.
+    crate::sources::carry::carry_ids(&inst.root, &server.root, &crate::sources::carry::copied_jars(&results, &server.root));
     for r in results {
         match (&r.op, r.ok) {
             (crate::model::SyncOp::Copy { .. }, true) => report.copied += 1,
             (crate::model::SyncOp::Delete { .. }, true) => report.removed += 1,
             (crate::model::SyncOp::Disable { .. }, true) => report.turned_off += 1,
+            (crate::model::SyncOp::Enable { .. }, true) => report.turned_on += 1,
             (op, false) => report
                 .failed
                 .push(format!("{op:?}: {}", r.error.unwrap_or_default())),

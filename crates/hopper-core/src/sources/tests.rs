@@ -523,6 +523,78 @@ fn sync_carries_pins_to_a_server_folder() {
     }
 }
 
+/// TNP-LL8, 2026-11-11: jars synced off reached the server as bare entries
+/// ("Add a source to get updates"). Their CurseForge record goes along now,
+/// on or off, and takes the bare entry's place.
+#[test]
+fn sync_carries_curseforge_records_on_or_off() {
+    let inst_root = scratch("ids-inst");
+    let server = scratch("ids-srv");
+    let cf = |file: &str, pid: u64, on: bool| Addon {
+        project_id: pid,
+        file_id: pid * 10,
+        file_name: file.into(),
+        name: format!("Mod {pid}"),
+        icon: if pid == 1 { "C:/cache/logo.png".into() } else { "https://x/icon.png".into() },
+        enabled: on,
+        class_id: crate::cf::CLASS_MODS,
+        from_pack: true,
+        locked: true,
+        ..Default::default()
+    };
+    std::fs::write(inst_root.join("mods/magic-1.0.jar.disabled"), b"magic").unwrap();
+    std::fs::write(inst_root.join("mods/plus-3.0.jar"), b"plus").unwrap();
+    std::fs::write(inst_root.join("mods/named-1.0.jar"), b"named").unwrap();
+    std::fs::write(inst_root.join("mods/changed-1.0.jar"), b"pack copy").unwrap();
+    Instance {
+        root: inst_root.clone(),
+        addons: vec![cf("magic-1.0.jar", 1, false), cf("plus-3.0.jar", 2, true), cf("named-1.0.jar", 3, true), cf("changed-1.0.jar", 4, true)],
+        ..Default::default()
+    }
+    .save()
+    .unwrap();
+    // The server: magic arrived and was switched off through the panel (a
+    // bare entry), plus arrived on, named already has its own record, and
+    // changed holds other bytes than the pack's.
+    std::fs::write(server.join("mods/magic-1.0.jar.disabled"), b"magic").unwrap();
+    std::fs::write(server.join("mods/plus-3.0.jar"), b"plus").unwrap();
+    std::fs::write(server.join("mods/named-1.0.jar"), b"named").unwrap();
+    std::fs::write(server.join("mods/changed-1.0.jar"), b"other").unwrap();
+    let bare = Addon { file_name: "magic-1.0.jar".into(), name: "magic-1.0.jar".into(), class_id: crate::cf::CLASS_MODS, ..Default::default() };
+    assert!(crate::install::is_bare(&bare));
+    let mut own = cf("named-1.0.jar", 99, true);
+    own.name = "Server's own".into();
+    Instance { root: server.clone(), addons: vec![bare, own], ..Default::default() }.save().unwrap();
+
+    // A jar turned on there by a sync counts as well as one copied.
+    let turned_on = vec![crate::model::SyncResult {
+        op: crate::model::SyncOp::Enable { path: server.join("mods/magic-1.0.jar") },
+        ok: true,
+        error: None,
+        backup: None,
+    }];
+    assert_eq!(carry::copied_jars(&turned_on, &server), ["magic-1.0.jar"]);
+    let files: Vec<String> = ["magic-1.0.jar", "plus-3.0.jar", "named-1.0.jar", "changed-1.0.jar"].map(String::from).into();
+    assert_eq!(carry::carry_ids(&inst_root, &server, &files), 2);
+    let srv = crate::instances::load(&server).unwrap();
+    let find = |f: &str| srv.addons.iter().filter(|a| a.file_name == f).collect::<Vec<_>>();
+    let magic = find("magic-1.0.jar");
+    assert_eq!(magic.len(), 1, "the bare entry gave way: {:?}", srv.addons);
+    assert_eq!((magic[0].project_id, magic[0].enabled), (1, false));
+    assert!(magic[0].icon.is_empty(), "a picture in this PC's cache doesn't go along");
+    assert!(!magic[0].from_pack && !magic[0].locked, "the pack's own marks stay in the pack");
+    let plus = find("plus-3.0.jar");
+    assert_eq!((plus.len(), plus[0].project_id, plus[0].enabled, plus[0].icon.as_str()), (1, 2, true, "https://x/icon.png"));
+    assert_eq!(find("named-1.0.jar")[0].name, "Server's own");
+    assert!(find("changed-1.0.jar").is_empty(), "other bytes: not that mod's file");
+    // A second sync of the same files changes nothing.
+    assert_eq!(carry::carry_ids(&inst_root, &server, &files), 0);
+    assert!(crate::install::unnamed_jars(&crate::instances::load(&server).unwrap()).iter().all(|f| f.starts_with("changed")));
+    for d in [inst_root, server] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
 // ---- looks: logos, authors, versions and sides from the jar ----
 
 fn png(w: u32, h: u32) -> Vec<u8> {
