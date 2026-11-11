@@ -793,9 +793,32 @@ mod tests {
         std::thread::spawn(move || {
             for c in l.incoming() {
                 let Ok(mut c) = c else { return };
-                let mut buf = vec![0u8; 8192];
-                let n = c.read(&mut buf).unwrap_or(0);
-                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                // Read the whole request, body included: closing with unread
+                // bytes makes Windows reset the connection, and the client
+                // then sees error 10054 instead of the answer.
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let n = c.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok())?
+                            })
+                            .unwrap_or(0);
+                        if buf.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf).to_string();
                 let line = head.lines().next().unwrap_or("").to_string();
                 let (status, body) = if line.starts_with("GET /v1/friends") {
                     ("401 Unauthorized", r#"{"error":"register first","code":"unauthorized"}"#)
