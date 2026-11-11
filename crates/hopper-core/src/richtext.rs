@@ -11,6 +11,8 @@ pub struct Span {
     pub bold: bool,
     pub italic: bool,
     pub code: bool,
+    /// Struck through (`<del>`, `~~text~~`).
+    pub strike: bool,
     pub link: Option<String>,
     /// An image's URL; `text` is then its alt text.
     pub image: Option<String>,
@@ -183,6 +185,9 @@ impl Block {
     }
 }
 
+/// The deepest list nesting kept; deeper items sit at this depth.
+const MAX_LIST_DEPTH: usize = 6;
+
 #[derive(Default)]
 struct Parser {
     blocks: Vec<Block>,
@@ -190,6 +195,7 @@ struct Parser {
     bold: u32,
     italic: u32,
     code: u32,
+    strike: u32,
     /// Inside `<pre>`: text keeps its whitespace and goes into a code block.
     pre: u32,
     link: Option<String>,
@@ -253,6 +259,7 @@ impl Parser {
                     && last.bold == span.bold
                     && last.italic == span.italic
                     && last.code == span.code
+                    && last.strike == span.strike
                     && last.link == span.link =>
             {
                 last.text.push_str(&span.text)
@@ -302,6 +309,7 @@ impl Parser {
             bold: self.bold > 0,
             italic: self.italic > 0,
             code: self.code > 0,
+            strike: self.strike > 0,
             link: self.link.clone(),
             image: None,
             width: None,
@@ -420,7 +428,9 @@ impl Parser {
                 self.lists.pop();
             }
             ("li", false) => {
-                let depth = self.lists.len().saturating_sub(1) as u8;
+                // Deeper than this reads the same, and the Markdown view
+                // recurses once per level.
+                let depth = self.lists.len().saturating_sub(1).min(MAX_LIST_DEPTH) as u8;
                 self.start(if self.lists.last() == Some(&true) {
                     Kind::Numbered(depth)
                 } else {
@@ -462,8 +472,10 @@ impl Parser {
             ("strong" | "b", true) => self.bold = self.bold.saturating_sub(1),
             ("em" | "i", false) => self.italic += 1,
             ("em" | "i", true) => self.italic = self.italic.saturating_sub(1),
-            ("code", false) => self.code += 1,
-            ("code", true) => self.code = self.code.saturating_sub(1),
+            ("code" | "kbd", false) => self.code += 1,
+            ("code" | "kbd", true) => self.code = self.code.saturating_sub(1),
+            ("s" | "del" | "strike", false) => self.strike += 1,
+            ("s" | "del" | "strike", true) => self.strike = self.strike.saturating_sub(1),
             ("pre", false) => {
                 self.flush();
                 self.pre += 1;
@@ -544,8 +556,13 @@ fn px_size(v: &str) -> Option<u32> {
         return None;
     }
     let n: f32 = num.parse().ok()?;
-    (n >= 1.).then(|| n.round() as u32)
+    // Nothing is shown wider than a screen; "width=9999999999" would
+    // overflow the sizes worked out from it.
+    (n >= 1.).then(|| (n.round() as u32).min(MAX_IMAGE_PX))
 }
+
+/// The largest image size a page may give, in pixels.
+const MAX_IMAGE_PX: u32 = 8192;
 
 /// `width: 120px` (or another property) in a style attribute, in pixels.
 fn style_px(style: &str, prop: &str) -> Option<u32> {
@@ -595,8 +612,12 @@ fn unescape_tags(html: &str) -> std::borrow::Cow<'_, str> {
             let name: String = after[name_start..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
             let next = after[name_start + name.len()..].chars().next();
             // The tag ends at the next "&gt;", before any other tag starts.
-            let close = after
-                .find("&gt;")
+            // Only that near is looked at: searching the whole rest for
+            // every "&lt;" took quadratic time.
+            let near = &after.as_bytes()[..after.len().min(604)];
+            let close = near
+                .windows(4)
+                .position(|w| w == b"&gt;")
                 .filter(|&c| c < 600 && !after[..c].contains('<') && !after[..c].contains("&lt;"));
             if ESCAPED_TAGS.contains(&name.as_str())
                 && matches!(next, Some(' ' | '/' | '&' | '\n'))
@@ -722,13 +743,24 @@ pub fn parse(html: &str) -> Vec<Block> {
     let mut rest = html.as_ref();
     while !rest.is_empty() {
         match rest.find('<') {
+            // A `<` that opens no tag ("a < b", "<3") is text, as in a
+            // browser. It used to start a tag running to the end, and a
+            // lone `<` at the very end crashed.
+            Some(0) if !rest[1..].starts_with(|c: char| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?')) => {
+                p.text("&lt;");
+                rest = &rest[1..];
+            }
+            // A comment may hold `>`: it ends at `-->`.
+            Some(0) if rest.starts_with("<!--") => {
+                rest = rest[4..].find("-->").map_or("", |e| &rest[4 + e + 3..]);
+            }
             Some(0) => {
-                let end = rest.find('>').unwrap_or(rest.len() - 1);
+                let end = rest.find('>').unwrap_or(rest.len());
                 let tag = &rest[1..end];
-                if !tag.starts_with('!') {
+                if !tag.starts_with(['!', '?']) {
                     p.tag(tag.trim_end_matches('/').trim());
                 }
-                rest = &rest[end + 1..];
+                rest = rest.get(end + 1..).unwrap_or("");
             }
             Some(i) => {
                 p.text(&rest[..i]);
@@ -977,7 +1009,7 @@ pub fn restore_breaks(md: &str) -> String {
     let mut i = 0;
     while i < md.len() {
         let c = md[i..].chars().next().unwrap();
-        if marks.contains(&i) {
+        if marks.binary_search(&i).is_ok() {
             // The space before the mark is already out.
             out.truncate(out.trim_end().len());
             out.push_str("\n\n");
@@ -1080,6 +1112,21 @@ fn is_fence(line: &str, in_code: bool) -> bool {
 }
 
 fn markdown_to_html(md: &str) -> String {
+    // Reference links: `[label]: url` lines name a link's address and show
+    // nothing themselves.
+    let mut refs = Refs::new();
+    let mut lines: Vec<&str> = Vec::new();
+    let mut fenced = false;
+    for raw in md.lines() {
+        if is_fence(raw.trim_end(), fenced) {
+            fenced = !fenced;
+        } else if !fenced && let Some((label, url)) = ref_def(raw) {
+            refs.entry(label).or_insert(url);
+            continue;
+        }
+        lines.push(raw);
+    }
+    let inl = |s: &str| inline_md_with(s, &refs, 0);
     let mut out = String::new();
     let mut para: Vec<String> = Vec::new();
     // Open lists, as (indentation width, numbered?).
@@ -1089,7 +1136,7 @@ fn markdown_to_html(md: &str) -> String {
     let flush_para = |out: &mut String, para: &mut Vec<String>| {
         if !para.is_empty() {
             out.push_str("<p>");
-            out.push_str(&inline_md(&para.join(" ")));
+            out.push_str(&inl(&para.join(" ")));
             out.push_str("</p>");
             para.clear();
         }
@@ -1106,7 +1153,7 @@ fn markdown_to_html(md: &str) -> String {
             *in_table = false;
         }
     };
-    for raw in md.lines() {
+    for raw in lines {
         let line = raw.trim_end();
         if is_fence(line, in_code) {
             flush_para(&mut out, &mut para);
@@ -1140,7 +1187,7 @@ fn markdown_to_html(md: &str) -> String {
             out.push_str("<tr>");
             for cell in split_cells(inner) {
                 out.push_str("<td>");
-                out.push_str(&inline_md(cell.trim()));
+                out.push_str(&inl(cell.trim()));
                 out.push_str("</td>");
             }
             out.push_str("</tr>");
@@ -1160,7 +1207,7 @@ fn markdown_to_html(md: &str) -> String {
             close_lists(&mut out, &mut lists, 0);
             out.push_str(&format!(
                 "<h{level}>{}</h{level}>",
-                inline_md(trimmed[level + 1..].trim())
+                inl(trimmed[level + 1..].trim())
             ));
             continue;
         }
@@ -1191,18 +1238,18 @@ fn markdown_to_html(md: &str) -> String {
                 lists.push((indent, numbered));
                 out.push_str(if numbered { "<ol>" } else { "<ul>" });
             }
-            out.push_str(&format!("<li>{}</li>", inline_md(item)));
+            out.push_str(&format!("<li>{}</li>", inl(item)));
             continue;
         }
         if !lists.is_empty() && indent > 0 {
             // Continuation of a list item.
-            out.push_str(&format!("<li>{}</li>", inline_md(trimmed)));
+            out.push_str(&format!("<li>{}</li>", inl(trimmed)));
             continue;
         }
         close_lists(&mut out, &mut lists, 0);
         if let Some(q) = trimmed.strip_prefix("> ") {
             flush_para(&mut out, &mut para);
-            out.push_str(&format!("<p><i>{}</i></p>", inline_md(q)));
+            out.push_str(&format!("<p><i>{}</i></p>", inl(q)));
             continue;
         }
         para.push(trimmed.to_string());
@@ -1241,16 +1288,61 @@ fn split_cells(row: &str) -> Vec<String> {
     cells
 }
 
+/// Reference link addresses by label ([`ref_key`]).
+type Refs = std::collections::HashMap<String, String>;
+
+/// A reference label as it is looked up: case and spacing don't count.
+fn ref_key(label: &str) -> String {
+    label.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// A `[label]: url "title"` line: the label's key and the address. Only an
+/// address that reads as one counts, so a changelog's "[1]: Fixed a crash"
+/// stays text.
+fn ref_def(line: &str) -> Option<(String, String)> {
+    let t = line.trim_start();
+    if line.len() - t.len() > 3 {
+        return None;
+    }
+    let (label, rest) = t.strip_prefix('[')?.split_once("]:")?;
+    if label.trim().is_empty() || label.contains(['[', ']']) {
+        return None;
+    }
+    let rest = rest.trim();
+    let (url, title) = match rest.strip_prefix('<') {
+        Some(r) => {
+            let (u, t) = r.split_once('>')?;
+            (u, t.trim())
+        }
+        None => rest.split_once(char::is_whitespace).map_or((rest, ""), |(u, t)| (u, t.trim())),
+    };
+    let address = ["http://", "https://", "//", "/", "#", "mailto:"].iter().any(|p| url.starts_with(p));
+    let titled = title.is_empty() || title.starts_with(['"', '\'', '(']);
+    (address && titled).then(|| (ref_key(label), url.to_string()))
+}
+
+/// The longest link text read; a `[` with no `]` near it is plain text.
+/// Scanning to the end for every `[` of a long text took quadratic time.
+const MAX_LINK_TEXT: usize = 4096;
+
+/// How deep links nest in links (an image in a link is one level).
+const MAX_INLINE_DEPTH: u32 = 4;
+
 /// `[text](url "title")` at the start of `s`, with nested brackets (an image
-/// inside a link) allowed: the text, the url and the length consumed.
-fn link_at(s: &str) -> Option<(&str, &str, usize)> {
+/// inside a link) allowed, or a reference link (`[text][label]`,
+/// `[text][]`, `[label]`) to an address in `refs`: the text, the url and
+/// the length consumed.
+fn link_at<'a>(s: &'a str, refs: &Refs) -> Option<(&'a str, String, usize)> {
     let mut depth = 0usize;
     let mut close = None;
     for (i, c) in s.char_indices() {
+        if i > MAX_LINK_TEXT {
+            break;
+        }
         match c {
             '[' => depth += 1,
             ']' => {
-                depth -= 1;
+                depth = depth.saturating_sub(1);
                 if depth == 0 {
                     close = Some(i);
                     break;
@@ -1260,35 +1352,89 @@ fn link_at(s: &str) -> Option<(&str, &str, usize)> {
         }
     }
     let close = close?;
+    let text = s.get(1..close)?;
     let after = &s[close + 1..];
-    if !after.starts_with('(') {
+    if after.starts_with('(') {
+        let end = after.find(')')?;
+        let mut url = &after[1..end];
+        if let Some((u, _)) = url.split_once(' ') {
+            url = u;
+        }
+        let url = url.trim_matches(|c| c == '<' || c == '>');
+        return Some((text, url.to_string(), close + 1 + end + 1));
+    }
+    if refs.is_empty() {
         return None;
     }
-    let end = after.find(')')?;
-    let mut url = &after[1..end];
-    if let Some((u, _)) = url.split_once(' ') {
-        url = u;
+    if let Some(label) = after.strip_prefix('[').and_then(|a| a.split_once(']')).map(|(l, _)| l)
+        && !label.contains('[')
+    {
+        let key = if label.trim().is_empty() { text } else { label };
+        return refs.get(&ref_key(key)).map(|u| (text, u.clone(), close + 1 + label.len() + 2));
     }
-    let url = url.trim_matches(|c| c == '<' || c == '>');
-    Some((&s[1..close], url, close + 1 + end + 1))
+    refs.get(&ref_key(text)).map(|u| (text, u.clone(), close + 1))
 }
 
-/// Inline Markdown: code, images, links, bold, italics.
-fn inline_md(s: &str) -> String {
+/// Whether a run of `*` or `_` between `prev` and `next` may open and may
+/// close emphasis (CommonMark's flanking rules): `2 * 3` and `snake_case`
+/// are not emphasis, `*this*` and `_this_` are.
+fn emphasis_sides(prev: char, next: char, underscore: bool) -> (bool, bool) {
+    let punct = |c: char| !c.is_alphanumeric() && !c.is_whitespace();
+    let left = !next.is_whitespace() && (!punct(next) || prev.is_whitespace() || punct(prev));
+    let right = !prev.is_whitespace() && (!punct(prev) || next.is_whitespace() || punct(next));
+    if underscore {
+        (left && (!right || punct(prev)), right && (!left || punct(next)))
+    } else {
+        (left, right)
+    }
+}
+
+/// Inline Markdown: code, images, links, bold, italics, strikethrough.
+/// `depth` counts links inside links.
+fn inline_md_with(s: &str, refs: &Refs, depth: u32) -> String {
+    if depth > MAX_INLINE_DEPTH {
+        return s.replace('<', "&lt;");
+    }
     let mut out = String::new();
     let b = s.as_bytes();
     let mut i = 0;
     let mut bold = false;
     let mut italic = false;
+    let mut strike = false;
+    // How many of each marker are left from here on, so an opener with no
+    // closer after it stays text (a `*` footnote mark must not slant the
+    // rest of the paragraph).
+    let mut stars_left = s.bytes().filter(|&c| c == b'*').count();
+    let mut unders_left = s.bytes().filter(|&c| c == b'_').count();
+    let last_tilde = s.rfind("~~");
     while i < b.len() {
         let rest = &s[i..];
+        // An autolink: `<https://…>`.
+        if (rest.starts_with("<http://") || rest.starts_with("<https://"))
+            && let Some(end) = rest.find('>')
+            && !rest[1..end].contains(char::is_whitespace)
+        {
+            let u = &rest[1..end];
+            stars_left -= u.bytes().filter(|&c| c == b'*').count();
+            unders_left -= u.bytes().filter(|&c| c == b'_').count();
+            out.push_str(&format!(
+                "<a href=\"{}\">{}</a>",
+                u.replace('&', "&amp;").replace('"', "%22"),
+                u.replace('&', "&amp;")
+            ));
+            i += end + 1;
+            continue;
+        }
         // Raw HTML passes through whole: a `*` or `_` in an address is not
         // emphasis.
         if rest.starts_with('<')
             && rest[1..].starts_with(|c: char| c.is_ascii_alphabetic() || c == '/')
             && let Some(end) = rest.find('>')
         {
-            out.push_str(&rest[..=end]);
+            let tag = &rest[..=end];
+            stars_left -= tag.bytes().filter(|&c| c == b'*').count();
+            unders_left -= tag.bytes().filter(|&c| c == b'_').count();
+            out.push_str(tag);
             i += end + 1;
             continue;
         }
@@ -1303,9 +1449,12 @@ fn inline_md(s: &str) -> String {
                 !body[..*at].ends_with('`') && !body[at + n..].starts_with('`')
             });
             if let Some((end, _)) = close {
+                let code = &body[..end];
+                stars_left -= code.bytes().filter(|&c| c == b'*').count();
+                unders_left -= code.bytes().filter(|&c| c == b'_').count();
                 out.push_str(&format!(
                     "<code>{}</code>",
-                    body[..end].trim().replace('&', "&amp;").replace('<', "&lt;")
+                    code.trim().replace('&', "&amp;").replace('<', "&lt;")
                 ));
                 i += n + end + n;
                 continue;
@@ -1315,43 +1464,84 @@ fn inline_md(s: &str) -> String {
             i += n;
             continue;
         }
-        if rest.starts_with("![")
-            && let Some((alt, url, used)) = link_at(&rest[1..])
-        {
-            out.push_str(&format!(
-                "<img src=\"{}\" alt=\"{}\">",
-                url.replace('"', "%22"),
-                alt.replace('"', "&quot;")
-            ));
-            i += used + 1;
-            continue;
-        }
-        if rest.starts_with('[')
-            && let Some((text, url, used)) = link_at(rest)
-        {
-            out.push_str(&format!(
-                "<a href=\"{}\">{}</a>",
-                url.replace('"', "%22"),
-                inline_md(text)
-            ));
+        let link = if rest.starts_with("![") {
+            link_at(&rest[1..], refs).map(|(alt, url, used)| {
+                let html = format!("<img src=\"{}\" alt=\"{}\">", url.replace('"', "%22"), alt.replace('"', "&quot;"));
+                (html, used + 1)
+            })
+        } else if rest.starts_with('[') {
+            link_at(rest, refs).map(|(text, url, used)| {
+                let html =
+                    format!("<a href=\"{}\">{}</a>", url.replace('"', "%22"), inline_md_with(text, refs, depth + 1));
+                (html, used)
+            })
+        } else {
+            None
+        };
+        if let Some((html, used)) = link {
+            let taken = &rest[..used];
+            stars_left -= taken.bytes().filter(|&c| c == b'*').count();
+            unders_left -= taken.bytes().filter(|&c| c == b'_').count();
+            out.push_str(&html);
             i += used;
             continue;
         }
-        if rest.starts_with("**") || rest.starts_with("__") {
-            out.push_str(if bold { "</strong>" } else { "<strong>" });
-            bold = !bold;
+        if rest.starts_with("~~") {
+            let next = rest[2..].chars().next().unwrap_or(' ');
+            if strike {
+                out.push_str("</del>");
+                strike = false;
+            } else if !next.is_whitespace() && last_tilde.is_some_and(|l| l > i + 1) {
+                out.push_str("<del>");
+                strike = true;
+            } else {
+                out.push_str("~~");
+            }
             i += 2;
             continue;
         }
-        if rest.starts_with('*') {
-            out.push_str(if italic { "</em>" } else { "<em>" });
-            italic = !italic;
-            i += 1;
+        if rest.starts_with(['*', '_']) {
+            let c = b[i];
+            let n = rest.bytes().take_while(|&x| x == c).count();
+            let prev = s[..i].chars().next_back().unwrap_or(' ');
+            let next = rest[n..].chars().next().unwrap_or(' ');
+            let (can_open, can_close) = emphasis_sides(prev, next, c == b'_');
+            // Markers of this kind after this run.
+            let after = if c == b'*' { &mut stars_left } else { &mut unders_left };
+            *after -= n;
+            let after = *after;
+            let mut left = n;
+            while left > 0 {
+                if left >= 2 && bold && can_close {
+                    out.push_str("</strong>");
+                    bold = false;
+                    left -= 2;
+                } else if left >= 2 && !bold && can_open && after >= 2 {
+                    out.push_str("<strong>");
+                    bold = true;
+                    left -= 2;
+                } else if italic && can_close {
+                    out.push_str("</em>");
+                    italic = false;
+                    left -= 1;
+                } else if !italic && can_open && after >= 1 {
+                    out.push_str("<em>");
+                    italic = true;
+                    left -= 1;
+                } else {
+                    out.push(c as char);
+                    left -= 1;
+                }
+            }
+            i += n;
             continue;
         }
         let c = rest.chars().next().unwrap_or(' ');
         out.push(c);
         i += c.len_utf8();
+    }
+    if strike {
+        out.push_str("</del>");
     }
     if bold {
         out.push_str("</strong>");
@@ -1706,6 +1896,9 @@ pub fn to_markdown(blocks: &[Block]) -> String {
         } else {
             escape(core)
         };
+        if s.strike && !s.code {
+            t = format!("~~{t}~~");
+        }
         if s.italic {
             t = format!("*{t}*");
         }
@@ -2385,5 +2578,252 @@ Villager, Iron Golem
         assert!(matches!(&b[0].kind, Kind::Video(v) if v.url == "https://www.youtube.com/watch?v=gEnrM4tDtmM"), "{b:?}");
         assert!(!to_markdown(&b).contains("Embed Removed"));
         assert!(to_markdown(&b).contains("after"));
+    }
+
+    /// Every way a description reaches a view, so a test drives them all.
+    fn render_all(src: &str) -> Vec<Block> {
+        let mut last = Vec::new();
+        for b in [parse(src), parse_markdown(src), parse_changelog(src), parse_markdown_changelog(src)] {
+            let _ = to_segments(&b);
+            let _ = to_markdown(&b);
+            let _ = images(&b);
+            last = b;
+        }
+        let _ = advice([src]);
+        let _ = restore_breaks(src);
+        last
+    }
+
+    /// Text a player reads: everything outside code, images aside.
+    fn visible(blocks: &[Block]) -> String {
+        let mut out = String::new();
+        let mut add = |spans: &[Span]| {
+            for s in spans.iter().filter(|s| !s.code && s.image.is_none()) {
+                out.push_str(&s.text);
+                out.push('\n');
+            }
+        };
+        for b in blocks {
+            match &b.kind {
+                Kind::Code => {}
+                Kind::Row(cells) => cells.iter().for_each(|c| add(c)),
+                _ => add(&b.spans),
+            }
+        }
+        out
+    }
+
+    /// A small deterministic random sequence (xorshift), so a failure
+    /// replays.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+        fn pick<'a>(&mut self, from: &[&'a str]) -> &'a str {
+            from[self.below(from.len())]
+        }
+    }
+
+    /// Bits of HTML and Markdown, well-formed and not, that descriptions
+    /// are made of.
+    const PIECES: &[&str] = &[
+        "<p>", "</p>", "<div class=\"spoiler\">", "</div>", "<center>", "</center>", "<br>", "<br/>", "<b>", "</b>",
+        "<strong>", "</strong>", "<i>", "</i>", "<em>", "</em>", "<del>", "</del>", "<code>", "</code>", "<pre>",
+        "</pre>", "<ul>", "</ul>", "<ol>", "</ol>", "<li>", "</li>", "<h1>", "</h1>", "<h3>", "</h3>", "<table>",
+        "</table>", "<tr>", "</tr>", "<td>", "</td>", "<th>", "<details>", "<summary>", "</summary>", "</details>",
+        "<a href=\"https://x.y/a_b*c\">", "<a href=\"/linkout?remoteUrl=https%253a%252f%252fx.y\">", "<a href=",
+        "</a>", "<img src=\"https://x.y/i.png\">", "<img src=\"https://x.y/b.png\" width=\"0\" height=\"99999999999\">",
+        "<img src=\"//x.y/c.gif\" style=\"width: 120px\" height=\"48\">", "<img alt=\"no src\">",
+        "<iframe src=\"https://www.youtube.com/embed/abcDEF12345\">", "</iframe>", "<video src=\"https://x.y/v.mp4\">",
+        "<source src=\"https://x.y/w.webm\">", "</video>", "<span style=\"font-size: 24px\">", "<span class=\"embed-removed\">",
+        "</span>", "<script>", "</script>", "<style>", "</style>", "<!--", "-->", "<!-- a > b -->", "<", ">", "</", "<3",
+        "a < b", "&", "&amp;", "&lt;", "&gt;", "&lt;center&gt;", "&lt;img src=\"https://x.y/e.png\"&gt;", "&#x1F600;",
+        "&#99999999;", "&#xD800;", "&eacute;", "&nbsp;", "&;", "*", "**", "***", "_", "__", "~~", "`", "``", "```",
+        "```rust\n", "\n```\n", "[", "]", "](", ")", "![", "[x](https://x.y)", "![a](https://x.y/m.png)",
+        "[![b](https://x.y/n.png)](https://youtu.be/abcDEF12345)", "[t][1]", "[1]: https://x.y/ref", "<https://x.y/auto>",
+        "|", "| a | b |\n", "|---|---|\n", "\n", "\n\n", "  \n", "# ", "## ", "####### ", "- ", "* ", "1. ", "> ",
+        "    ", "---\n", "  - ", " ", "word", "Pok\u{e9}mon", "\u{6a21}\u{7ec4}", "\u{1F600}", "\u{200b}", "e\u{301}",
+        "\u{feff}", ":sparkles:", ":", "https://example.com/a_(b)", "http://", "1.21.1", "#", "\\", "\u{a0}",
+    ];
+
+    /// Random and hostile input must never crash the renderer: a crash in
+    /// a description took the whole app down.
+    #[test]
+    fn random_documents_render_without_panicking() {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..3000 {
+            let n = rng.below(60);
+            let doc: String = (0..n).map(|_| rng.pick(PIECES)).collect();
+            render_all(&doc);
+            // Cut anywhere, as a download cap or a trim would.
+            let cut = (0..=doc.len()).filter(|&i| doc.is_char_boundary(i)).nth(rng.below(doc.len() + 1)).unwrap_or(0);
+            render_all(&doc[..cut]);
+        }
+        // Random bytes as text.
+        for _ in 0..500 {
+            let bytes: Vec<u8> = (0..rng.below(200)).map(|_| rng.next() as u8).collect();
+            render_all(&String::from_utf8_lossy(&bytes));
+        }
+    }
+
+    /// Inputs a parser that recurses or rescans per character would choke
+    /// on. Each must finish quickly, keep list depth small enough for the
+    /// Markdown view, and not crash.
+    #[test]
+    fn deeply_nested_and_huge_inputs_render() {
+        let start = std::time::Instant::now();
+        let deep_list = "<ul><li>a".repeat(3000);
+        let b = render_all(&deep_list);
+        assert!(b.iter().all(|b| !matches!(b.kind, Kind::Bullet(d) if d as usize > MAX_LIST_DEPTH)), "{:?}", &b[..3]);
+        let md = to_markdown(&parse(&deep_list));
+        assert!(md.lines().all(|l| l.len() - l.trim_start().len() <= MAX_LIST_DEPTH * 2), "too deep");
+        let md_list: String = (0..2000).map(|i| format!("{}- item\n", " ".repeat(i * 2))).collect();
+        assert!(parse_markdown(&md_list).iter().all(|b| !matches!(b.kind, Kind::Bullet(d) if d as usize > MAX_LIST_DEPTH)));
+        render_all(&"<div>".repeat(20_000));
+        render_all(&"<details><summary>s</summary>".repeat(5000));
+        render_all(&"[".repeat(20_000));
+        render_all(&"[[[[x](https://a)](https://b)](https://c)](https://d)".repeat(200));
+        render_all(&format!("{}x{}", "[".repeat(500), "](https://a)".repeat(500)));
+        render_all(&"* ".repeat(50_000));
+        render_all(&"_a ".repeat(30_000));
+        render_all(&"~~".repeat(30_000));
+        render_all(&"<".repeat(30_000));
+        render_all(&"<a".repeat(30_000));
+        render_all(&"&lt;".repeat(30_000));
+        render_all(&"`".repeat(30_000));
+        render_all(&"| a ".repeat(20_000));
+        render_all(&"# x ".repeat(20_000));
+        render_all(&"x".repeat(1_000_000));
+        render_all(&"\u{6a21}".repeat(200_000));
+        assert!(start.elapsed() < std::time::Duration::from_secs(60), "took {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn lone_angle_brackets_are_text() {
+        // A `<` at the very end crashed; one before text swallowed it up to
+        // the next `>` (Sodium's "(for MC <1.19), to optimize the other
+        // parts" lost everything after the `<`).
+        for doc in ["<", "a <", "x\u{e9}<", "<\u{e9}", "\u{6a21}<"] {
+            render_all(doc);
+        }
+        let b = parse_markdown("Phosphor (for MC <1.19), to optimize the other parts of your game. **Done** a < b <3");
+        let t = visible(&b);
+        assert!(t.contains("(for MC <1.19), to optimize the other parts of your game."), "{t}");
+        assert!(t.contains("a < b <3"), "{t}");
+        assert!(b[0].spans.iter().any(|s| s.bold && s.text == "Done"), "{b:?}");
+        // Comments end at `-->`, whatever they hold.
+        let b = parse("<p><!-- a > b --> kept</p>");
+        assert_eq!(visible(&b).trim(), "kept");
+    }
+
+    #[test]
+    fn markdown_autolinks_keep_their_address() {
+        // Touhou Little Maid's credits: two links vanished.
+        let b = parse_markdown("- LittleMaid PEKO Sound: <https://booth.pm/ja/items/1903163>\n- Gomoku AI: <https://github.com/anlingyi/xechat-idea>");
+        assert_eq!(b.len(), 2);
+        let s = b[0].spans.iter().find(|s| s.link.is_some()).expect("a link");
+        assert_eq!(s.link.as_deref(), Some("https://booth.pm/ja/items/1903163"));
+        assert_eq!(s.text, "https://booth.pm/ja/items/1903163");
+        assert!(visible(&b).contains("github.com/anlingyi/xechat-idea"));
+    }
+
+    #[test]
+    fn markdown_reference_links() {
+        // Fabulously Optimized writes every link this way.
+        let md = "By using this modpack, [you agree to the disclaimers][16].\nSee [the wiki][] or [Docs].\n\n[16]: https://wiki.download.fo/disclaimers\n  [The Wiki]: <https://wiki.download.fo> \"Wiki\"\n[docs]: /docs\n\n[1]: Fixed a crash";
+        let b = parse_markdown(md);
+        let links: Vec<(&str, &str)> =
+            b.iter().flat_map(|b| b.spans.iter()).filter_map(|s| Some((s.text.as_str(), s.link.as_deref()?))).collect();
+        assert_eq!(
+            links,
+            [
+                ("you agree to the disclaimers", "https://wiki.download.fo/disclaimers"),
+                ("the wiki", "https://wiki.download.fo"),
+                ("Docs", "https://www.curseforge.com/docs"),
+            ],
+            "{b:?}"
+        );
+        let t = visible(&b);
+        // The definitions show nothing; a line that isn't one stays.
+        assert!(!t.contains("wiki.download.fo") && !t.contains("[16]") && t.contains("[1]: Fixed a crash"), "{t}");
+        // Without definitions, brackets are text.
+        assert!(visible(&parse_markdown("Click the [+] button, [x][y].")).contains("Click the [+] button, [x][y]."));
+    }
+
+    #[test]
+    fn markdown_emphasis_follows_word_edges() {
+        let b = parse_markdown("Check your _Video Settings_ screen, not snake_case_name or 2 * 3 * 4. *Note*");
+        let em: Vec<&str> = b[0].spans.iter().filter(|s| s.italic).map(|s| s.text.as_str()).collect();
+        assert_eq!(em, ["Video Settings", "Note"], "{b:?}");
+        assert!(visible(&b).contains("snake_case_name or 2 * 3 * 4."), "{b:?}");
+        // A lone `*` (a footnote mark) doesn't slant the rest.
+        let b = parse_markdown("Requires Fabric API* and more text");
+        assert!(b[0].spans.iter().all(|s| !s.italic), "{b:?}");
+        // Bold and italic together, either marker.
+        let b = parse_markdown("***both*** and __bold__");
+        assert!(b[0].spans.iter().any(|s| s.bold && s.italic && s.text == "both"), "{b:?}");
+        assert!(b[0].spans.iter().any(|s| s.bold && !s.italic && s.text == "bold"), "{b:?}");
+    }
+
+    #[test]
+    fn strikethrough_in_markdown_and_html() {
+        // Stellarity: "~~I honestly don't remember why I changed it.~~"
+        let b = parse_markdown("Endermen drop Chorus Fruit. ~~I honestly don't remember why.~~ Done, ~~ alone.");
+        let struck: Vec<&str> = b[0].spans.iter().filter(|s| s.strike).map(|s| s.text.as_str()).collect();
+        assert_eq!(struck, ["I honestly don't remember why."], "{b:?}");
+        assert!(!visible(&b).contains("~~I"), "{b:?}");
+        assert!(to_markdown(&b).contains("~~I honestly don't remember why.~~"), "{}", to_markdown(&b));
+        let b = parse("<p><del>old</del> <s>gone</s> <strike>x</strike> new</p>");
+        let struck: Vec<&str> = b[0].spans.iter().filter(|s| s.strike).map(|s| s.text.as_str()).collect();
+        assert_eq!(struck, ["old", "gone", "x"], "{b:?}");
+        assert!(b[0].spans.iter().any(|s| !s.strike && s.text.contains("new")));
+    }
+
+    #[test]
+    fn image_sizes_are_capped() {
+        let b = parse("<p><img src=\"https://x/a.png\" width=\"9999999999\" height=\"0\"></p>");
+        assert_eq!(b[0].spans[0].width, Some(MAX_IMAGE_PX));
+        assert_eq!(b[0].spans[0].height, None);
+    }
+
+    /// Real descriptions (trimmed) from CurseForge (`cf-*.html`) and
+    /// Modrinth (`mr-*.md`), fetched as Hopper fetches them: none may show
+    /// markup, lose an image, or crash.
+    #[test]
+    fn real_descriptions_show_no_markup() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/richtext_fixtures/descriptions");
+        let mut seen = 0;
+        let tag = regex::Regex::new(r"(?i)</?(p|div|img|a|center|details|summary|span|br|table|tr|td|ul|ol|li|h[1-6]|iframe|b|strong|em|i|code|pre)\b[^>]*>").unwrap();
+        let src_img = regex::Regex::new(r#"(?i)<img\b[^>]*?\ssrc=(?:"(https?://[^"]+)"|'(https?://[^']+)')|!\[[^\]]*\]\((https?://[^) ]+)"#).unwrap();
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let p = e.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            let src = std::fs::read_to_string(&p).unwrap();
+            let blocks = if name.ends_with(".html") { parse(&src) } else { parse_markdown(&src) };
+            render_all(&src);
+            let t = visible(&blocks);
+            assert!(!tag.is_match(&t), "{name}: markup shows: {:?}", tag.find(&t).map(|m| m.as_str()));
+            for mark in ["](http", "![", "**", "~~", "&amp;", "&lt;", "&gt;", "&nbsp;", "&quot;", "&#"] {
+                // Touhou Little Maid's CurseForge page itself holds "&amp;gt;".
+                if name == "cf-touhou-little-maid.html" && mark == "&gt;" {
+                    continue;
+                }
+                assert!(!t.contains(mark), "{name}: {mark:?} shows in {}", &t[t.find(mark).unwrap().saturating_sub(80)..]);
+            }
+            let shown: Vec<String> = images(&blocks).iter().map(|k| crate::imgcache::split_width(k).0.to_string()).collect();
+            for c in src_img.captures_iter(&src) {
+                let url = c.get(1).or(c.get(2)).or(c.get(3)).unwrap().as_str().replace("&amp;", "&");
+                assert!(shown.iter().any(|s| *s == url), "{name}: image lost: {url}");
+            }
+            seen += 1;
+        }
+        assert!(seen >= 40, "{seen} fixtures");
     }
 }
