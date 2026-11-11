@@ -34,6 +34,26 @@ const INVITE_SECS: f32 = 15. * 60.;
 /// A friend's pack nobody here follows, unchanged this long, can be hidden.
 const STALE_SECS: u64 = 30 * 24 * 3600;
 
+/// What a button says while Hopper can't reach the friends service.
+const CANT_CONNECT: &str = hopper::mailbox::CANT_CONNECT;
+
+/// The three steps, for someone opening Friends for the first time.
+fn how_it_works(cx: &App) -> Div {
+    let step = |n: &str, text: &str| {
+        h_flex()
+            .gap_2()
+            .items_start()
+            .child(div().flex_none().w(rems(1.)).text_sm().font_semibold().child(n.to_string()))
+            .child(div().flex_1().min_w_0().text_sm().text_color(cx.theme().muted_foreground).child(text.to_string()))
+    };
+    v_flex()
+        .w_full()
+        .gap_1()
+        .child(step("1", "Invite a friend. Hopper gives you a code to send them."))
+        .child(step("2", "They paste the code in their Hopper. Now you're friends."))
+        .child(step("3", "Share a pack. When you change it, their copy changes too."))
+}
+
 /// The tabs.
 const FRIENDS: usize = 0;
 const YOUR_PACKS: usize = 1;
@@ -186,7 +206,7 @@ impl FriendsPanel {
                         alert
                             .title(format!("Remove {name}?"))
                             .description(format!(
-                                "{name} stops getting changes to your packs, and you stop getting theirs. Instances you follow from {name} stay as they are. You can invite {name} again later."
+                                "{name} stops getting your packs, and you stop getting theirs. Packs you already got from {name} stay on your PC as they are. You can invite {name} again later."
                             ))
                             .confirm()
                             .ok_text("Remove friend")
@@ -346,10 +366,14 @@ impl FriendsPanel {
                     .text_sm()
                     .font_semibold()
                     .truncate()
-                    .child(format!("Who sees {}", inst.name)),
+                    .child(format!("Who gets {}", inst.name)),
             )
+            .child(div().px_2().pb_1().child(widgets::fine_print(
+                "Ticked friends get this pack and every change you make to it. Only the mod list is sent. The mods download from their own sites.",
+                cx,
+            )))
             .when(friends.is_empty(), |c| {
-                c.child(div().px_2().child(widgets::fine_print("Invite a friend first; then pick who sees this pack.", cx)))
+                c.child(div().px_2().child(widgets::fine_print("No friends yet. Invite a friend first, then pick who gets this pack.", cx)))
             })
             .when(!friends.is_empty(), |c| c.child(div().px_2().child(widgets::caption("Friends", cx).text_xs())))
             // Only the list scrolls, and only past 16rem. A plain scroll
@@ -379,9 +403,9 @@ impl FriendsPanel {
                     .border_color(theme.border)
                     .child(widgets::fine_print(
                         if takes_back {
-                            "Turning someone off stops their updates and takes the pack off their list. Their copy stays as it is."
+                            "Untick someone and they stop getting your changes. The pack leaves their list, but their copy stays on their PC."
                         } else {
-                            "Turning someone off stops new changes. They keep what they already have."
+                            "Untick someone and they stop getting your changes. Their copy stays on their PC."
                         },
                         cx,
                     ))
@@ -392,6 +416,7 @@ impl FriendsPanel {
                                 .ghost()
                                 .icon(IconName::Copy)
                                 .label("Copy a share code")
+                                .tooltip("A code anyone can paste in Hopper to install this pack, even if they aren't your friend yet")
                                 .on_click(copy),
                         ),
                     ),
@@ -459,7 +484,7 @@ impl FriendsPanel {
                         .ghost()
                         .small()
                         .icon(IconName::Plus)
-                        .tooltip("New group")
+                        .tooltip("New group: share packs with several friends at once")
                         .on_click(cx.listener(|this, _, window, cx| this.group_dialog(GroupMode::New, None, window, cx))),
                 )
             })
@@ -491,7 +516,7 @@ impl FriendsPanel {
         ))
     }
 
-    /// Friends & sync is off: what it is, and a button to turn it on.
+    /// Friends is off: what it is, and a button to turn it on.
     fn off(&self, cx: &mut Context<Self>) -> AnyElement {
         let err = self.store.read(cx).peer_error();
         v_flex()
@@ -501,16 +526,14 @@ impl FriendsPanel {
                 widgets::empty_state(
                     IconName::Users,
                     "Friends is off",
-                    Some(
-                        "Turn it on to see your friends' packs and share yours. Hopper sends mod lists through its relay; no account needed."
-                            .into(),
-                    ),
+                    Some("Turn on friends to share packs and play the same ones as your friends.".into()),
                     cx,
                 )
+                .child(div().px_4().pb_2().child(how_it_works(cx)))
                 .child(
                     Button::new("friends-on")
                         .primary()
-                        .label("Turn on")
+                        .label("Turn on friends")
                         .on_click(cx.listener(|this, _, _, cx| this.store.update(cx, |s, cx| s.set_peer_sync(true, cx)))),
                 )
                 .when_some(err, |c, e| c.child(div().text_sm().text_color(cx.theme().danger).child(e))),
@@ -528,12 +551,10 @@ impl FriendsPanel {
                 widgets::empty_state(
                     IconName::Users,
                     "Play the same packs as your friends",
-                    Some(
-                        "Follow a friend's pack and yours changes when theirs does. Only the mod list is sent; the files download from CurseForge, Modrinth and GitHub."
-                            .into(),
-                    ),
+                    None,
                     cx,
                 )
+                .child(div().px_4().child(how_it_works(cx)))
                 .pb_4(),
             )
             .child(v_flex().px_4().gap_3().child(self.invite_block(down, cx)).child(
@@ -543,7 +564,7 @@ impl FriendsPanel {
                     .child(widgets::caption("or", cx).text_xs())
                     .child(div().flex_1().h_px().bg(theme.border)),
             ).child(self.join_block(down, cx)).child(widgets::fine_print(
-                "No account needed. Codes and mod lists go through Hopper's relay; nothing else leaves this PC.",
+                "No account needed. Hopper only sends your friend codes and mod lists. Your worlds and other files stay on your PC.",
                 cx,
             )))
             .into_any_element()
@@ -566,6 +587,7 @@ impl FriendsPanel {
                 .border_1()
                 .border_color(theme.border)
                 .child(div().text_sm().font_medium().child("Send this code to your friend"))
+                .child(widgets::fine_print("They paste it under \u{201c}Got a code from a friend?\u{201d} in their Friends panel.", cx))
                 .child(
                     h_flex()
                         .gap_2()
@@ -576,9 +598,10 @@ impl FriendsPanel {
                                 .outline()
                                 .icon(IconName::Copy)
                                 .label("Copy")
+                                .tooltip("Copy the code to send it in a chat or message")
                                 .on_click(move |_, window, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                                    window.push_notification("Code copied.", cx);
+                                    window.push_notification("Code copied. Send it to your friend.", cx);
                                 }),
                         ),
                 )
@@ -591,7 +614,7 @@ impl FriendsPanel {
                         .child(div().h_full().rounded_full().bg(theme.primary).w(relative(frac))),
                 )
                 .child(widgets::fine_print(
-                    format!("Waiting for them to join · Works once · {:02}:{:02} left", left / 60, left % 60),
+                    format!("Waiting for them to join · Works for one friend · {:02}:{:02} left", left / 60, left % 60),
                     cx,
                 ))
                 .into_any_element();
@@ -600,7 +623,7 @@ impl FriendsPanel {
             return v_flex()
                 .gap_1()
                 .child(Button::new("invite").w_full().primary().label("Friend list full").disabled(true))
-                .child(widgets::fine_print("Remove a friend to add another.", cx))
+                .child(widgets::fine_print("You have as many friends as Hopper allows. Remove one to add someone new.", cx))
                 .into_any_element();
         }
         Button::new("invite")
@@ -609,7 +632,7 @@ impl FriendsPanel {
             .icon(IconName::UserPlus)
             .label("Invite a friend")
             .disabled(down)
-            .when(down, |b| b.tooltip("Hopper's relay can't be reached right now"))
+            .tooltip(if down { CANT_CONNECT } else { "Get a code to send your friend. It works once, for 15 minutes." })
             .on_click(cx.listener(|this, _, _, cx| this.store.update(cx, |s, cx| s.make_invite("", cx))))
             .into_any_element()
     }
@@ -628,6 +651,7 @@ impl FriendsPanel {
                             .outline()
                             .label("Join")
                             .disabled(down)
+                            .tooltip(if down { CANT_CONNECT } else { "Become friends with whoever sent the code" })
                             .on_click(cx.listener(|this, _, window, cx| this.join(window, cx))),
                     ),
             )
@@ -642,9 +666,9 @@ impl FriendsPanel {
             .p_3()
             .rounded(theme.radius_lg)
             .bg(theme.primary.opacity(widgets::alpha::TINT))
-            .child(div().text_sm().font_semibold().child("Your friends can't see your packs yet"))
+            .child(div().text_sm().font_semibold().child("Your friends can't get your packs yet"))
             // Muted grey drops under 4.5:1 on the orange tint in light themes.
-            .child(div().text_xs().text_color(theme.foreground.opacity(0.8)).child("Every pack starts private. Pick which ones each friend sees."))
+            .child(div().text_xs().text_color(theme.foreground.opacity(0.8)).child("Every pack starts private. Choose which friends get each one."))
             .child(
                 h_flex()
                     .gap_2()
@@ -689,12 +713,12 @@ impl FriendsPanel {
             Some(f) if down && f.last_seen == 0 => "Online status unknown".to_string(),
             Some(f) if f.last_seen > 0 => format!("Last online {}", ago(f.last_seen)),
             Some(_) => "Offline".to_string(),
-            None => "Shares through a group".to_string(),
+            None => "In a group with you".to_string(),
         };
         let sub = match (f, sees) {
             (None, _) => status,
-            (_, 0) => format!("{status} · sees none of your packs"),
-            (_, n) => format!("{status} · sees {n} of your packs"),
+            (_, 0) => format!("{status} · gets none of your packs"),
+            (_, n) => format!("{status} · gets {n} of your packs"),
         };
         let mc_id = f.map(|f| f.mc_id.clone()).unwrap_or_default();
         let head = self.head(&mc_id, name, rems(1.75), cx);
@@ -717,7 +741,7 @@ impl FriendsPanel {
                 .tooltip("More")
                 .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                     let (v1, v2, f2) = (view.clone(), view.clone(), f.clone());
-                    let mut menu = menu.item(PopupMenuItem::new(format!("Choose packs for {first}")).icon(IconName::Share2).on_click(move |_, _, cx| {
+                    let mut menu = menu.item(PopupMenuItem::new(format!("Choose packs to share with {first}")).icon(IconName::Share2).on_click(move |_, _, cx| {
                         v1.update(cx, |t, cx| {
                             t.tab = YOUR_PACKS;
                             cx.notify();
@@ -726,7 +750,7 @@ impl FriendsPanel {
                     // Groups this PC made that they aren't in yet, then a new one.
                     for (gid, gname) in &add_to {
                         let (v, gid, fid) = (view.clone(), gid.clone(), f.id.clone());
-                        menu = menu.item(PopupMenuItem::new(format!("Add to {gname}")).icon(IconName::Users).on_click(move |_, _, cx| {
+                        menu = menu.item(PopupMenuItem::new(format!("Add {first} to {gname}")).icon(IconName::Users).on_click(move |_, _, cx| {
                             let (gid, fid) = (gid.clone(), fid.clone());
                             v.update(cx, |t, cx| t.store.update(cx, |s, cx| s.add_to_group(&gid, vec![fid], cx)))
                         }));
@@ -783,7 +807,7 @@ impl FriendsPanel {
             )
             .children(pack_rows)
             .when(none && f.is_some(), |c| {
-                c.child(div().pl(rems(3.25)).pr_3().pb_1().child(widgets::fine_print(format!("{name} hasn't shared a pack yet."), cx)))
+                c.child(div().pl(rems(3.25)).pr_3().pb_1().child(widgets::fine_print(format!("{name} hasn't shared a pack with you yet."), cx)))
             })
             .into_any_element()
     }
@@ -806,8 +830,8 @@ impl FriendsPanel {
         let pack = if e.name.is_empty() { e.inst.clone() } else { e.name.clone() };
         let updated = if e.at > 0 { format!("updated {}", ago(e.at)) } else { String::new() };
         let sub = match follows.first() {
-            Some((_, local, _)) if updated.is_empty() => format!("Into {local}"),
-            Some((_, local, _)) => format!("Into {local} · {updated}"),
+            Some((_, local, _)) if updated.is_empty() => format!("Your copy: {local}"),
+            Some((_, local, _)) => format!("Your copy: {local} · {updated}"),
             None if updated.is_empty() => String::new(),
             None => capitalise(&updated),
         };
@@ -829,7 +853,12 @@ impl FriendsPanel {
         )
         .text_sm();
         let action: AnyElement = match follows.first() {
-            Some(_) => widgets::chip(theme.success).child("Following").into_any_element(),
+            Some(_) => div()
+                .id(SharedString::from(format!("following:{fi}:{pi}")))
+                .flex_none()
+                .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("You follow this pack. Your copy updates when they change theirs.").build(w, cx))
+                .child(widgets::chip(theme.success).child("Following"))
+                .into_any_element(),
             None => {
                 let e = e.clone();
                 Button::new(SharedString::from(format!("follow:{fi}:{pi}")))
@@ -837,7 +866,7 @@ impl FriendsPanel {
                     .outline()
                     .label("Follow")
                     .disabled(down)
-                    .when(down, |b| b.tooltip("Hopper's relay can't be reached right now"))
+                    .tooltip(if down { CANT_CONNECT } else { "Follow: your copy updates when they change theirs." })
                     .on_click(cx.listener(move |this, _, window, cx| this.follow(e.clone(), window, cx)))
                     .into_any_element()
             }
@@ -848,7 +877,7 @@ impl FriendsPanel {
                 .xsmall()
                 .ghost()
                 .icon(IconName::Close)
-                .tooltip("Hide until it changes")
+                .tooltip("Hide this pack until they change it")
                 .on_click(cx.listener(move |this, _, _, cx| this.store.update(cx, |s, cx| s.hide_friend_pack(&e, cx))))
         });
         h_flex()
@@ -900,7 +929,7 @@ impl FriendsPanel {
                 let who = if friends.iter().any(|x| x.id == f.peer_id) {
                     format!("{}'s {}", name_or(&f.peer_name, "A friend"), f.name)
                 } else {
-                    format!("{} · no longer your friend", name_or(&f.peer_name, "A friend"))
+                    format!("{} · not your friend any more", name_or(&f.peer_name, "A friend"))
                 };
                 (root, f.name.clone(), local, who)
             })
@@ -914,7 +943,7 @@ impl FriendsPanel {
                 .py_1()
                 .border_t_1()
                 .border_color(theme.border)
-                .child(div().px_3().pt_2().pb_1().child(widgets::caption("No more updates", cx).text_xs().font_medium()))
+                .child(div().px_3().pt_2().pb_1().child(widgets::caption("These won't change any more", cx).text_xs().font_medium()))
                 .children(ended.into_iter().enumerate().map(|(i, (root, pack, local, who))| {
                     h_flex()
                         .id(("ended", i))
@@ -927,13 +956,14 @@ impl FriendsPanel {
                                 .flex_1()
                                 .min_w_0()
                                 .child(div().text_sm().truncate().child(pack))
-                                .child(widgets::caption(format!("{who} · into {local}"), cx).text_xs()),
+                                .child(widgets::caption(format!("{who} · your copy: {local}"), cx).text_xs()),
                         )
                         .child(
                             Button::new(("stop-follow", i))
                                 .xsmall()
                                 .outline()
                                 .label("Stop following")
+                                .tooltip("Take it off this list. Your copy stays on your PC.")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     let root = root.clone();
                                     this.store.update(cx, |s, cx| s.stop_following(&root, cx))
@@ -941,7 +971,7 @@ impl FriendsPanel {
                         )
                 }))
                 .child(div().px_3().pb_1().child(widgets::fine_print(
-                    "Your instance stays as it is. Stop following to drop it from this list.",
+                    "The friend removed you, or stopped sharing the pack. Your copies stay on your PC as they are.",
                     cx,
                 )))
                 .into_any_element(),
@@ -1000,7 +1030,7 @@ impl FriendsPanel {
                     .flex_1()
                     .min_w_0()
                     .child(div().text_sm().font_medium().truncate().child(g.name.clone()))
-                    .child(div().text_xs().text_color(theme.foreground.opacity(0.8)).child(format!("{owner} asked you to join"))),
+                    .child(div().text_xs().text_color(theme.foreground.opacity(0.8)).child(format!("{owner} asked you to join their group"))),
             )
             .child(
                 Button::new(("group-join", gi))
@@ -1008,6 +1038,7 @@ impl FriendsPanel {
                     .primary()
                     .label("Join")
                     .disabled(down)
+                    .tooltip(if down { CANT_CONNECT } else { "Join the group and get the packs it shares" })
                     .on_click(cx.listener(move |this, _, _, cx| this.store.update(cx, |s, cx| s.accept_group(&j, cx)))),
             )
             .child(
@@ -1016,6 +1047,7 @@ impl FriendsPanel {
                     .ghost()
                     .label("Decline")
                     .disabled(down)
+                    .tooltip("Say no. They won't be told why.")
                     .on_click(cx.listener(move |this, _, _, cx| this.store.update(cx, |s, cx| s.leave_group(&d, cx)))),
             )
             .into_any_element()
@@ -1043,10 +1075,10 @@ impl FriendsPanel {
         let open = !self.folded.contains(&g.id);
         let mut sub = format!("{in_it} friend{}", if in_it == 1 { "" } else { "s" });
         if asked > 0 {
-            sub += &format!(" · {asked} asked");
+            sub += &format!(" · {asked} not joined yet");
         }
         if !my_packs.is_empty() {
-            sub += &format!(" · sees {} of your packs", my_packs.len());
+            sub += &format!(" · gets {} of your packs", my_packs.len());
         }
         // Up to three faces, overlapping.
         let mut faces = h_flex().flex_none();
@@ -1085,7 +1117,7 @@ impl FriendsPanel {
                             v3.update(cx, |t, cx| {
                                 t.confirm_group(
                                     format!("Delete {name}?"),
-                                    "Packs shared through it stop updating for everyone in it. Their instances stay as they are.".into(),
+                                    "The group's packs stop getting changes for everyone in it. Everyone keeps their copies.".into(),
                                     "Delete group",
                                     Rc::new(move |s, cx| s.delete_group(&id, cx)),
                                     window,
@@ -1106,7 +1138,7 @@ impl FriendsPanel {
                         v4.update(cx, |t, cx| {
                             t.confirm_group(
                                 format!("Leave {name}?"),
-                                "Packs that came only through it stop updating. Your instances stay as they are.".into(),
+                                "Packs you got only from this group stop getting changes. Your copies stay on your PC.".into(),
                                 "Leave group",
                                 Rc::new(move |s, cx| s.leave_group(&id, cx)),
                                 window,
@@ -1160,7 +1192,7 @@ impl FriendsPanel {
             .map(|(mi, m)| {
                 let name = name_or(&m.name, "A friend");
                 let status = if !m.joined {
-                    "Asked".to_string()
+                    "Not joined yet".to_string()
                 } else if m.online && !down {
                     "Online".to_string()
                 } else if m.last_seen > 0 {
@@ -1168,7 +1200,7 @@ impl FriendsPanel {
                 } else {
                     "Offline".to_string()
                 };
-                let status = if m.id == g.owner { format!("Owner · {status}") } else { status };
+                let status = if m.id == g.owner { format!("Made the group · {status}") } else { status };
                 let f = face(&self.store, &m.mc_id, &name, rems(1.25), cx);
                 let row_id = SharedString::from(format!("gm:{gi}:{mi}"));
                 let remove = (mine && m.id != g.owner).then(|| {
@@ -1183,7 +1215,7 @@ impl FriendsPanel {
                             let (id, mid) = (id.clone(), mid.clone());
                             this.confirm_group(
                                 format!("Take {who} out of {gname}?"),
-                                format!("Packs {who} gets only through {gname} stop updating for them. Their instances stay as they are."),
+                                format!("{who} stops getting changes to packs they got only from {gname}. Their copies stay on their PC."),
                                 "Take out",
                                 Rc::new(move |s, cx| s.remove_from_group(&id, vec![mid.clone()], cx)),
                                 window,
@@ -1245,6 +1277,7 @@ impl FriendsPanel {
                             .xsmall()
                             .outline()
                             .label("Change")
+                            .tooltip("Choose who gets this pack")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.tab = YOUR_PACKS;
                                 cx.notify();
@@ -1268,6 +1301,7 @@ impl FriendsPanel {
                             .icon(IconName::Plus)
                             .label("Add a friend")
                             .disabled(down)
+                            .tooltip(if down { CANT_CONNECT } else { "Invite another friend into this group" })
                             .on_click(cx.listener(move |this, _, window, cx| this.group_dialog(GroupMode::Add(id.clone()), None, window, cx))),
                     ),
                 )
@@ -1283,9 +1317,9 @@ impl FriendsPanel {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_sm().font_medium().child("Keep everyone in step"))
+                            .child(div().text_sm().font_medium().child("Keep my packs the same as the group"))
                             .child(widgets::fine_print(
-                                "When someone in the group follows one of its packs, this PC follows it too. Each friend turns this on for their own PC.",
+                                "When someone in the group follows one of its packs, this PC follows it too. Each friend chooses this on their own PC.",
                                 cx,
                             )),
                     )
@@ -1299,10 +1333,10 @@ impl FriendsPanel {
                         }),
                     ),
             )
-            .when(!pack_rows.is_empty(), |c| c.child(caption("Shared by the group", cx)).children(pack_rows))
-            .child(caption("You share with the group", cx))
+            .when(!pack_rows.is_empty(), |c| c.child(caption("Packs from the group", cx)).children(pack_rows))
+            .child(caption("Your packs in the group", cx))
             .when(my_rows.is_empty(), |c| {
-                c.child(div().pl(indent).pr_3().child(widgets::fine_print("None of your packs yet. Pick some under Your packs.", cx)))
+                c.child(div().pl(indent).pr_3().child(widgets::fine_print("You haven't shared any packs with the group. Pick some under Your packs.", cx)))
             })
             .children(my_rows)
             .into_any_element()
@@ -1358,7 +1392,7 @@ impl FriendsPanel {
         let friends = s.mailbox_friends().to_vec();
         let insts: Vec<Instance> = s.instances().iter().filter(|i| !i.id.is_empty()).cloned().collect();
         if insts.is_empty() {
-            return widgets::empty_state(IconName::Package, "No packs yet", Some("Packs you install show here, to share with friends.".into()), cx)
+            return widgets::empty_state(IconName::Package, "No packs yet", Some("Install a pack, and it shows up here to share with your friends.".into()), cx)
                 .into_any_element();
         }
         let rows: Vec<AnyElement> = insts
@@ -1379,7 +1413,7 @@ impl FriendsPanel {
                     )
                     .collect();
                 let sub = match who.len() {
-                    0 => "Only you".to_string(),
+                    0 => "Not shared".to_string(),
                     1..=3 => who.join(", "),
                     n => format!("{}, {} and {} more", who[0], who[1], n - 2),
                 };
@@ -1428,7 +1462,7 @@ impl FriendsPanel {
                                     .label("Share")
                                     .selected(open)
                                     .disabled(down)
-                                    .when(down, |b| b.tooltip("Hopper's relay can't be reached right now"))
+                                    .tooltip(if down { CANT_CONNECT } else { "Choose which friends get this pack" })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         let open = this.share_pop.as_deref() == Some(inst_id.as_str());
                                         this.set_pop((!open).then(|| inst_id.clone()), cx);
@@ -1454,7 +1488,7 @@ impl FriendsPanel {
             .collect();
         v_flex()
             .child(div().px_3().pt_3().pb_2().child(widgets::fine_print(
-                "Pick who sees each pack. They get its mod list and every change you make; files download from the mods' own sites.",
+                "Every pack starts private. Share one, and those friends get it plus every change you make. Only the mod list is sent. The mods download from their own sites.",
                 cx,
             )))
             .children(rows)
@@ -1515,13 +1549,13 @@ impl Render for FriendsPanel {
                                     v_flex()
                                         .flex_1()
                                         .min_w_0()
-                                        .child(div().text_sm().font_medium().child("Can't reach Hopper's relay"))
+                                        .child(div().text_sm().font_medium().child("Can't connect right now"))
                                         .child(widgets::fine_print(
                                             // The plain "can't reach" message would repeat the title.
-                                            match (heard, e.starts_with("Can't reach")) {
-                                                (false, _) => "Your friends show here once Hopper reaches it. It keeps trying.".to_string(),
-                                                (true, true) => "Showing what you had. Hopper keeps trying.".to_string(),
-                                                (true, false) => format!("Showing what you had. {e}"),
+                                            match (heard, e == CANT_CONNECT) {
+                                                (false, _) => "We'll keep trying. Your friends show up here once Hopper connects.".to_string(),
+                                                (true, true) => "Showing what you had last time. We'll keep trying.".to_string(),
+                                                (true, false) => format!("Showing what you had last time. {e}"),
                                             },
                                             cx,
                                         )),
@@ -1701,10 +1735,10 @@ impl Render for FollowChooser {
         let mut list = v_flex().gap_1();
         for (ix, (_, name, upd, icon)) in rows.iter().enumerate() {
             let (what, chip) = if *upd {
-                (format!("{who}'s pack is newer: yours updates first, then the mods"), (theme.primary, "Pack update"))
+                (format!("{who} has a newer version of this pack. Yours updates to it first."), (theme.primary, "Newer pack"))
             } else {
-                let what = if self.plain { "Same Minecraft and loader" } else { "Same pack" };
-                (what.to_string(), (theme.success, "Fits"))
+                let what = if self.plain { "Same Minecraft and mod loader" } else { "Same pack" };
+                (what.to_string(), (theme.success, "Matches"))
             };
             list = list.child(self.row(
                 format!("follow-at:{ix}").into(),
@@ -1721,7 +1755,7 @@ impl Render for FollowChooser {
             FollowPick::New,
             new_icon,
             "A new instance".into(),
-            "Installs their pack as a new instance. Nothing here changes.".into(),
+            "Installs a fresh copy of their pack. Your other instances don't change.".into(),
             None,
             cx,
         ));
@@ -1732,9 +1766,9 @@ impl Render for FollowChooser {
         v_flex()
             .gap_3()
             .child(div().text_sm().child(format!(
-                "When {who} changes this pack, yours changes with it. Only the mod list comes from {who}; files download from the mods' own sites."
+                "Follow: your copy updates when {who} changes theirs. Only the mod list comes from {who}. The mods download from their own sites."
             )))
-            .child(widgets::caption("Put it in", cx).text_xs().font_medium())
+            .child(widgets::caption("Where should it go?", cx).text_xs().font_medium())
             .child(list)
             .when_some(over, |c, inst| {
                 c.child(
@@ -1746,7 +1780,7 @@ impl Render for FollowChooser {
                         .bg(theme.warning.opacity(widgets::alpha::TINT))
                         .child(Icon::new(IconName::TriangleAlert).small().flex_none().text_color(theme.warning))
                         .child(div().flex_1().min_w_0().text_sm().child(format!(
-                            "Your mods and settings in {inst} are replaced with {who}'s, now and each time {who} changes the pack. History can undo each change."
+                            "{inst} gets {who}'s mods and settings now, and again each time {who} changes the pack. Your own changes there are replaced. You can undo each change in History."
                         ))),
                 )
             })
@@ -1950,19 +1984,22 @@ impl Render for GroupForm {
                     .flex_none()
                     .text_sm()
                     .font_weight(FontWeight::MEDIUM)
-                    .child("Shares"),
+                    .child("How it works"),
             )
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
                     .gap_1()
+                    .when(matches!(self.mode, GroupMode::New), |c| {
+                        c.child(widgets::fine_print(
+                            "A group shares packs with several friends at once. Turn on \u{201c}Keep my packs the same as the group\u{201d} and this PC follows every pack someone in the group follows.",
+                            cx,
+                        ))
+                    })
+                    .child(widgets::fine_print("Each friend gets an invitation. They're in the group once they say yes.", cx))
                     .child(widgets::fine_print(
-                        "Packs you share with the group go to everyone in it, and to anyone you add later. Removing someone stops their updates, unless you also share that pack with them directly.",
-                        cx,
-                    ))
-                    .child(widgets::fine_print(
-                        "Each friend gets an invitation and is in the group once they say yes.",
+                        "Everyone in the group gets the packs shared with it, including friends you add later.",
                         cx,
                     )),
             );

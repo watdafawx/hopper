@@ -87,7 +87,7 @@ impl InstTab {
             InstTab::Configs => "Configs",
             InstTab::Screenshots => "Screenshots",
             InstTab::Server => "Server",
-            InstTab::Peers => "Friends",
+            InstTab::Peers => "Friends nearby",
             InstTab::Settings => "Settings",
             InstTab::Logs => "Logs & crashes",
             InstTab::Performance => "Performance",
@@ -3265,7 +3265,7 @@ fn instance_menu(
     // Peers is a server tool: only with them on.
     .when(tools, |m| {
         let (v, r) = vr();
-        m.item(PopupMenuItem::new("Friends").icon(IconName::Users).on_click(move |_, _, cx| {
+        m.item(PopupMenuItem::new("Friends nearby").icon(IconName::Users).on_click(move |_, _, cx| {
             v.update(cx, |this, cx| {
                 this.select(r.clone(), cx);
                 this.set_tab(InstTab::Peers, cx);

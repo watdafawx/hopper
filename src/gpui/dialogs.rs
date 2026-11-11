@@ -1521,9 +1521,9 @@ impl ShareView {
                             // The copied code carries the dead part: copy again.
                             this.copied = false;
                             this.gone = Some(if used {
-                                "Someone joined with this code and follows the pack. Tick the box again for another friend."
+                                "A friend joined with this code and now gets your changes. Tick the box again to make a code for someone else."
                             } else {
-                                "The follow part ran out. Tick the box again for a new one."
+                                "The code ran out for getting your changes. Tick the box again for a new one."
                             });
                         }
                         this.until = inv.map(|i| i.until);
@@ -1545,17 +1545,17 @@ impl ShareView {
         let theme = cx.theme().clone();
         let s = self.store.read(cx);
         let why_not = match s.sync_status() {
-            SyncStatus::Off => Some("Turn on Friends to let them follow your updates."),
-            SyncStatus::Down(_) => Some("Hopper's relay can't be reached right now, so the code can't carry a follow part."),
-            _ if s.friends_full() && !self.follow => Some("Friend list full. Remove a friend to add another."),
+            SyncStatus::Off => Some("Turn on friends to let them get your changes."),
+            SyncStatus::Down(_) => Some("Can't connect right now. Try again in a moment."),
+            _ if s.friends_full() && !self.follow => Some("Your friend list is full. Remove a friend to add someone new."),
             _ => None,
         };
         let invite = self.invite(cx).filter(|_| self.follow);
         let sub = match (invite, self.asking) {
-            (_, true) => "Adding the follow part…".to_string(),
+            (_, true) => "Making the code…".to_string(),
             (Some(i), _) => {
                 let left = i.until.saturating_duration_since(std::time::Instant::now()).as_secs();
-                format!("Follow part: {:02}:{:02} left · the pack part works any time", left / 60, left % 60)
+                format!("Getting your changes: works for {:02}:{:02} more. Installing the pack: works any time.", left / 60, left % 60)
             }
             _ => String::new(),
         };
@@ -1580,10 +1580,10 @@ impl ShareView {
                     .child(
                         v_flex()
                             .gap_0p5()
-                            .child(div().text_sm().font_medium().child("Let them follow updates from this PC"))
+                            .child(div().text_sm().font_medium().child("Let them get my changes to this pack"))
                             .child(card_note(
                                 why_not.unwrap_or(
-                                    "When you change the pack, theirs changes too. The code also adds them to your friends, so it works for one person, within 15 minutes.",
+                                    "When you change the pack, their copy changes too. This also makes them your friend. It works for one person, for 15 minutes.",
                                 ),
                                 cx,
                             ))
@@ -1647,7 +1647,7 @@ impl Render for ShareView {
         v_flex()
             .gap_3()
             .child(note(
-                "Send this code to a friend. They paste it in Hopper under Install from a share code (the link button above the instance list, or Ctrl+K) and get this exact setup.",
+                "Send this code to a friend. In Hopper, they click the link button above the instance list (or press Ctrl+K) and pick Install from a share code. They get this exact pack.",
                 cx,
             ))
             .child(
@@ -1672,6 +1672,7 @@ impl Render for ShareView {
                         .primary()
                         .icon(IconName::Copy)
                         .label(if self.copied { "Copied" } else { "Copy" })
+                        .tooltip("Copy the code to send it in a chat or message")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
                             this.copied = true;
@@ -1681,13 +1682,13 @@ impl Render for ShareView {
             )
             .when(self.follow, |d| {
                 d.child(note(
-                    "Already friends in Hopper? Use Share in the Friends panel instead; it keeps working.",
+                    "Already friends in Hopper? Share it from the Friends panel instead. That never runs out.",
                     cx,
                 ))
             })
             .when(!made.left_out.is_empty(), |d| {
                 d.child(div().text_sm().text_color(theme.warning).child(format!(
-                    "Not in the code (not on CurseForge or Modrinth, so your friend adds these by hand): {}",
+                    "Your friend adds these by hand, because they aren't on CurseForge or Modrinth: {}",
                     made.left_out.join(", ")
                 )))
             })
@@ -1855,7 +1856,7 @@ impl Render for RedeemForm {
                     .child(div().text_sm().text_color(theme.success).child(format!("{what}{name}: {}.", s.summary())))
                     .when(!srcs.is_empty(), |d| {
                         d.child(div().text_sm().child(format!(
-                            "Includes mods from {}. Hopper downloads the exact files the code names and checks them by their sha256. Their updates stay off until you turn them on for each source.",
+                            "Includes mods from {}. Hopper downloads the exact files and checks nobody changed them. Updates for these mods stay off until you turn them on.",
                             srcs.iter().map(|(k, p)| format!("{k}: {p}")).collect::<Vec<_>>().join(", ")
                         )))
                     })
@@ -1892,12 +1893,12 @@ impl RedeemForm {
                     .child(
                         v_flex()
                             .gap_0p5()
-                            .child(div().text_sm().font_medium().child("Follow their updates"))
+                            .child(div().text_sm().font_medium().child("Get their changes to this pack"))
                             .child(card_note(
                                 if off {
-                                    "Turn on Friends to follow their updates. The pack installs either way."
+                                    "Turn on friends to get their changes. The pack installs either way."
                                 } else {
-                                    "Adds whoever sent the code to your friends. When they change this pack, your copy changes with it. You can stop any time from the Friends panel."
+                                    "This also makes whoever sent the code your friend. When they change the pack, your copy changes too. You can stop any time in the Friends panel."
                                 },
                                 cx,
                             )),

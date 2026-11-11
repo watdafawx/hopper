@@ -254,21 +254,53 @@ pub fn failure(e: &anyhow::Error) -> Failure {
     Failure::Other(m.message.clone())
 }
 
-/// One plain sentence for a failed mailbox call.
+/// One plain sentence for a failed mailbox call, for any player: no
+/// server words, and what to do next.
 pub fn says(e: &anyhow::Error) -> String {
+    let theirs = e.downcast_ref::<MailboxError>();
+    if let Some(t) = theirs.and_then(|m| says_code(&m.code)) {
+        return t.into();
+    }
     match failure(e) {
-        Failure::Unreachable => "Can't reach the sync service. Hopper keeps trying.".into(),
-        Failure::FriendsFull => "Friend list full. Remove a friend to add another.".into(),
-        Failure::TheirFriendsFull => "Their friend list is full.".into(),
-        Failure::InviteUnknown => {
-            "That code ran out or was already used. Ask them for a new one.".into()
+        Failure::Unreachable => CANT_CONNECT.into(),
+        Failure::FriendsFull => {
+            "Your friend list is full. Remove a friend to add someone new.".into()
         }
-        Failure::NeedsUpdate => "The sync service needs an update for groups.".into(),
+        Failure::TheirFriendsFull => {
+            "Their friend list is full. They need to remove a friend first.".into()
+        }
+        Failure::InviteUnknown => {
+            "That code doesn't work any more. Codes work once, for 15 minutes. Ask your friend for a new one.".into()
+        }
+        Failure::NeedsUpdate => {
+            "Groups don't work yet. Try again later.".into()
+        }
         Failure::InvitesFull => {
             "Too many open invites. Wait a few minutes or use one you already made.".into()
         }
+        // The service's own wording is written for us, not players.
+        Failure::Other(_) if theirs.is_some() => SOMETHING_WRONG.into(),
         Failure::Other(s) => s,
     }
+}
+
+/// Said while Hopper can't reach the friends service at all.
+pub const CANT_CONNECT: &str = "Can't connect right now. We'll keep trying.";
+
+const SOMETHING_WRONG: &str = "Something went wrong with Friends. Try again in a few minutes.";
+
+/// Plain sentences for the service's other answers.
+fn says_code(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "busy" | "internal" | "storage_full" => SOMETHING_WRONG,
+        "rate_limited" => "Too many tries. Wait a minute, then try again.",
+        "too_large" => "This pack has too many mods to share with friends.",
+        "group_full" => "That group is full.",
+        "groups_full" => "You're in as many groups as Hopper allows. Leave or delete one first.",
+        "group_packs_full" => "This group has as many packs as it can hold. Stop sharing one first.",
+        "owner_leaves" => "You made this group, so you can't leave it. Delete it instead.",
+        _ => return None,
+    })
 }
 
 pub struct Mailbox {
@@ -728,8 +760,35 @@ mod tests {
         // Context on top doesn't hide it.
         let wrapped = err(409, "friends_full").context("adding a friend");
         assert_eq!(failure(&wrapped), Failure::FriendsFull);
-        assert_eq!(says(&wrapped), "Friend list full. Remove a friend to add another.");
+        assert_eq!(says(&wrapped), "Your friend list is full. Remove a friend to add someone new.");
         assert_eq!(failure(&anyhow::anyhow!("disk full")), Failure::Other("disk full".into()));
+    }
+
+    #[test]
+    fn players_never_see_the_services_own_words() {
+        let err = |status: u16, code: &str| -> anyhow::Error {
+            MailboxError {
+                status,
+                code: code.into(),
+                message: "rate limit exceeded for token".into(),
+            }
+            .into()
+        };
+        assert_eq!(says(&err(0, "")), CANT_CONNECT);
+        assert_eq!(says(&err(403, "")), SOMETHING_WRONG);
+        assert_eq!(says(&err(503, "busy")), SOMETHING_WRONG);
+        assert_eq!(says(&err(429, "rate_limited")), "Too many tries. Wait a minute, then try again.");
+        assert_eq!(
+            says(&err(409, "owner_leaves")),
+            "You made this group, so you can't leave it. Delete it instead."
+        );
+        // Hopper's own errors already read as sentences.
+        assert_eq!(says(&anyhow::anyhow!("The pack folder is gone")), "The pack folder is gone");
+        let words = ["relay", "mailbox", "sync service", "token", "429", "409"];
+        for code in ["busy", "internal", "storage_full", "rate_limited", "too_large", "group_full", "groups_full", "group_packs_full", "owner_leaves", "friends_full", "their_friends_full", "invite_unknown", "needs_update", "invites_full", ""] {
+            let said = says(&err(409, code)).to_lowercase();
+            assert!(!words.iter().any(|w| said.contains(w)), "{code}: {said}");
+        }
     }
 
     #[test]

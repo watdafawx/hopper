@@ -169,7 +169,7 @@ pub fn redeem(store: &Entity<Store>, text: &str, window: &mut Window, cx: &mut A
             let root = PathBuf::from(&s.settings().instances_root);
             let mb = s.mailbox.clone();
             let (code, invite) = (code.clone(), invite.clone());
-            s.spawn_job("Setting up a shared pack", move |job| {
+            s.spawn_job("Installing a pack from a friend", move |job| {
                 job.announce();
                 let inst = hopper::sharecode::install_share(&root, &share, job)?;
                 job.detail(format!("Installed {}", inst.name));
@@ -181,7 +181,7 @@ pub fn redeem(store: &Entity<Store>, text: &str, window: &mut Window, cx: &mut A
                 };
                 // The pack is in either way; following needs the friend.
                 let Some(mb) = mb else {
-                    job.note("Turn on Friends & sync to get their changes to this pack.");
+                    job.note("Turn on friends to get their changes to this pack.");
                     return Ok(Msg::installed(inst.root, &[], None));
                 };
                 match mb.join(&invite) {
@@ -198,11 +198,11 @@ pub fn redeem(store: &Entity<Store>, text: &str, window: &mut Window, cx: &mut A
                     }
                     Ok(_) => Ok(Msg::installed(inst.root, &[], None)),
                     Err(e) if mailbox::failure(&e) == mailbox::Failure::InviteUnknown => {
-                        job.note("The follow part of the code ran out or was already used, so this copy doesn't follow their changes. Ask them for a new code to follow it.");
+                        job.note("This copy won't get their changes. The code ran out or was used already. Ask your friend for a new code to get them.");
                         Ok(Msg::installed(inst.root, &[], None))
                     }
                     Err(e) => {
-                        job.note(format!("Not following their changes: {}", mailbox::says(&e)));
+                        job.note(format!("This copy won't get their changes. {}", mailbox::says(&e)));
                         Ok(Msg::installed(inst.root, &[], None))
                     }
                 }
@@ -318,14 +318,14 @@ impl Store {
     pub fn make_invite(&mut self, inst: &str, cx: &mut Context<Self>) {
         let Some(mb) = self.mailbox_or_say(cx) else { return };
         if self.friends_full() {
-            cx.emit(StoreEvent::Notice("Friend list full. Remove a friend to add another.".into(), true));
+            cx.emit(StoreEvent::Notice("Your friend list is full. Remove a friend to add someone new.".into(), true));
             return;
         }
         if let Some(open) = self.reusable_invite(inst) {
             cx.write_to_clipboard(ClipboardItem::new_string(open.code.clone()));
             let left = open.until.saturating_duration_since(Instant::now()).as_secs();
             cx.emit(StoreEvent::Notice(
-                format!("Code copied again. It still works once, for {} more.", minutes(left)),
+                format!("Code copied again. It still works for one friend, for {} more.", minutes(left)),
                 false,
             ));
             return;
@@ -343,7 +343,7 @@ impl Store {
                         inst,
                     });
                     cx.emit(StoreEvent::Notice(
-                        format!("Code copied. Send it to your friend; it works once, for {}.", minutes(secs)),
+                        format!("Code copied. Send it to your friend. It works once, for {}.", minutes(secs)),
                         false,
                     ));
                     cx.notify();
@@ -362,7 +362,7 @@ impl Store {
         let Some(inst) = self.instance(root).cloned() else { return };
         let Some(mb) = self.mailbox_or_say(cx) else { return };
         if self.friends_full() {
-            cx.emit(StoreEvent::Notice("Friend list full. Remove a friend to add another.".into(), true));
+            cx.emit(StoreEvent::Notice("Your friend list is full. Remove a friend to add someone new.".into(), true));
             return;
         }
         // The pack may have changed since the last copy, so the share code is
@@ -400,7 +400,7 @@ impl Store {
                     let more = if reused { " more" } else { "" };
                     cx.emit(StoreEvent::Notice(
                         format!(
-                            "Share code copied. It works once, for {}{more}, and keeps them following this pack.",
+                            "Share code copied. It works once, for {}{more}. Whoever uses it gets your changes to this pack.",
                             minutes(secs)
                         ),
                         false,
@@ -441,7 +441,7 @@ impl Store {
         self.mailbox_do(
             move |mb| {
                 mb.remove(&id)?;
-                Ok(format!("Removed {name}. Packs you follow from them stay as they are."))
+                Ok(format!("Removed {name}. Packs you got from them stay on your PC as they are."))
             },
             move |s, cx| s.lost_friend(&id2, cx),
             cx,
@@ -455,7 +455,7 @@ impl Store {
         self.update_settings(|st| did = st.stop_following(&r), cx);
         self.pending_follow.remove(root);
         if did {
-            cx.emit(StoreEvent::Notice("Stopped following. The instance stays as it is.".into(), false));
+            cx.emit(StoreEvent::Notice("Stopped following. Your copy stays as it is and won't change when theirs does.".into(), false));
         }
     }
 
@@ -547,7 +547,7 @@ impl Store {
         self.mailbox_do(
             move |mb| {
                 mb.create_group(&name, &members)?;
-                Ok(format!("Made {name}. Your friends see an invitation to join."))
+                Ok(format!("Made {name}. Your friends get an invitation to join."))
             },
             |_, _| {},
             cx,
@@ -590,7 +590,7 @@ impl Store {
         self.mailbox_do(
             move |mb| {
                 mb.edit_group(&id, None, &[], &members)?;
-                Ok(format!("Removed from {group}."))
+                Ok(format!("Took them out of {group}."))
             },
             |_, _| {},
             cx,
@@ -602,7 +602,7 @@ impl Store {
         self.mailbox_do(
             move |mb| {
                 mb.delete_group(&id)?;
-                Ok(format!("Deleted {group}. Packs shared through it stop updating for its members."))
+                Ok(format!("Deleted {group}. Its packs stop getting changes. Everyone keeps their copies."))
             },
             |_, _| {},
             cx,
@@ -631,7 +631,7 @@ impl Store {
             move |mb| {
                 mb.leave_group(&id)?;
                 Ok(if joined {
-                    format!("Left {group}. Packs that came only through it stop updating.")
+                    format!("Left {group}. Packs you got only from the group stop getting changes. Your copies stay.")
                 } else {
                     String::new()
                 })
@@ -649,9 +649,9 @@ impl Store {
             move |mb| {
                 mb.set_in_step(&id, on)?;
                 Ok(if on {
-                    format!("{group}: packs the others follow are followed here too.")
+                    format!("{group}: your packs now stay the same as the group's.")
                 } else {
-                    format!("{group}: no longer kept in step. Packs already followed stay.")
+                    format!("{group}: your packs won't follow the group any more. Packs you already have stay.")
                 })
             },
             |_, _| {},
@@ -808,9 +808,9 @@ impl Store {
     fn mailbox_or_say(&self, cx: &mut Context<Self>) -> Option<Arc<Mailbox>> {
         if self.mailbox.is_none() {
             let text = match self.sync_status() {
-                SyncStatus::Off => "Turn on Friends & sync first.".to_string(),
+                SyncStatus::Off => "Turn on friends first.".to_string(),
                 SyncStatus::Down(e) => e,
-                _ => "Still connecting to the sync service. Try again in a moment.".to_string(),
+                _ => "Still connecting. Try again in a moment.".to_string(),
             };
             cx.emit(StoreEvent::Notice(text, true));
         }
@@ -878,7 +878,7 @@ impl Store {
                 self.lost_friend(&e.from, cx);
                 if fresh {
                     cx.emit(StoreEvent::Notice(
-                        format!("{who} removed you as a friend. Packs you follow from them stay as they are."),
+                        format!("{who} removed you as a friend. Packs you got from them stay on your PC but won't change any more."),
                         false,
                     ));
                 }
@@ -965,7 +965,7 @@ impl Store {
                 "left_group" => format!("{who}'s {pack} isn't shared with you any more."),
                 _ => format!("{who} stopped sharing {pack}."),
             };
-            cx.emit(StoreEvent::Notice(format!("{what} Your copy stays as it is."), false));
+            cx.emit(StoreEvent::Notice(format!("{what} Your copy stays on your PC but won't change any more."), false));
         }
     }
 
@@ -981,7 +981,7 @@ impl Store {
             Some(name) => {
                 let (inst, from) = (e.inst.clone(), e.from.clone());
                 self.update_settings(|st| st.set_shared(&inst, &from, true), cx);
-                cx.emit(StoreEvent::Notice(format!("{who} joined with your code and follows {name}."), false));
+                cx.emit(StoreEvent::Notice(format!("{who} joined with your code and now gets your changes to {name}."), false));
             }
             None => cx.emit(StoreEvent::Notice(format!("{who} is now your friend."), false)),
         }
@@ -1097,7 +1097,7 @@ impl Store {
         for (req, gid, gname) in todo {
             self.auto_following.insert(format!("{}/{}", req.peer_id, req.inst));
             cx.emit(StoreEvent::Notice(
-                format!("Following {}'s {} to keep {gname} in step.", req.who(), req.pack()),
+                format!("Following {}'s {}, so your packs stay the same as {gname}.", req.who(), req.pack()),
                 false,
             ));
             self.follow(req, FollowTarget::New, None, &gid, cx);

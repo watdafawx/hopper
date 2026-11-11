@@ -1402,7 +1402,7 @@ impl AppView {
                                             b.tooltip(if news {
                                                 "Friends: something new from your friends"
                                             } else {
-                                                "Friends: who you follow, and which packs you share"
+                                                "Friends: share packs and play the same ones as your friends"
                                             })
                                         })
                                         .on_click(cx.listener(|this, _, _, cx| {

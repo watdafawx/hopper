@@ -106,7 +106,7 @@ impl PeersView {
                 .await;
             this.update(cx, |this, cx| {
                 this.message = Some(
-                    r.map(|_| "Found it. Pair to sync.".to_string())
+                    r.map(|_| "Found their PC. Click Connect to share packs.".to_string())
                         .map_err(|e| format!("{addr}: {e:#}")),
                 );
                 cx.notify();
@@ -126,7 +126,7 @@ impl PeersView {
                     Ok(code) => {
                         this.codes.insert(id, code);
                     }
-                    Err(e) => this.message = Some(Err(format!("Pairing failed: {e:#}"))),
+                    Err(e) => this.message = Some(Err(format!("Couldn't connect to their PC: {e:#}"))),
                 }
                 cx.notify();
             })
@@ -286,7 +286,7 @@ impl PeersView {
                             results.iter().filter_map(|r| r.error.clone()).collect();
                         if failed.is_empty() {
                             Ok(format!(
-                                "Pulled {} files. Undo it from History.",
+                                "Got {} files from their PC. You can undo it in History.",
                                 results.len()
                             ))
                         } else {
@@ -295,7 +295,7 @@ impl PeersView {
                     } else {
                         let failed = hub.push(&id, &rinst, folder, &root, &files);
                         if failed.is_empty() {
-                            Ok(format!("Sent {} files.", files.len()))
+                            Ok(format!("Sent {} files to their PC.", files.len()))
                         } else {
                             Err(format!("{} failed: {}", failed.len(), failed[0]))
                         }
@@ -588,15 +588,15 @@ impl PeersView {
             .gap_3()
             .px_6()
             .child(Icon::new(IconName::Users).large().text_color(cx.theme().muted_foreground))
-            .child(div().text_lg().font_semibold().child("Sync with a friend"))
+            .child(div().text_lg().font_semibold().child("Friends nearby"))
             .child(
                 div().max_w(rems(38.)).text_sm().text_center().child(
-                    "Get their exact instance here, or share yours. Only the list of mods is sent — the files download from CurseForge, Modrinth and GitHub, so nothing large goes between you.",
+                    "Get a friend's exact instance, or share yours, when your PCs are on the same network. Only the mod list is sent. The mods download from CurseForge, Modrinth and GitHub.",
                 ),
             )
             .child(
                 widgets::caption(
-                    "No account needed. PCs on the same network talk to each other directly. Windows may ask to allow Hopper on private networks; allow it so the other PC can reach this one.",
+                    "No account needed. Windows may ask to let Hopper use private networks. Say yes, so the other PC can find this one.",
                     cx,
                 )
                 .text_xs(),
@@ -605,7 +605,7 @@ impl PeersView {
                 Button::new("peers-on")
                     .primary()
                     .icon(IconName::Users)
-                    .label("Turn on sync")
+                    .label("Turn on Friends nearby")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.store.update(cx, |s, cx| s.set_peer_sync(true, cx))
                     })),
@@ -628,7 +628,7 @@ impl PeersView {
             ),
             None => (
                 "No friend's PC here yet".to_string(),
-                "Turn on sync on their PC too. Both PCs need to be on the same network or Tailscale."
+                "Turn on Friends nearby in their Hopper too. Both PCs need to be on the same home network, or on Tailscale."
                     .to_string(),
             ),
         };
@@ -685,7 +685,7 @@ impl PeersView {
                     })
                     .map(|r| {
                         if p.trusted {
-                            r.child(widgets::chip(theme.success).child("Paired")).child(
+                            r.child(widgets::chip(theme.success).child("Connected")).child(
                                 Button::new(SharedString::from(format!("sync:{id1}")))
                                     .small()
                                     .outline()
@@ -713,8 +713,8 @@ impl PeersView {
                                 Button::new(SharedString::from(format!("pair:{id3}")))
                                     .small()
                                     .outline()
-                                    .label("Pair")
-                                    .tooltip("Pair once, then check the 6-digit code matches on their screen")
+                                    .label("Connect")
+                                    .tooltip("Connect once. Then check their screen shows the same 6-digit code.")
                                     .disabled(!online)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.pair(id3.clone(), cx)
@@ -757,7 +757,7 @@ impl PeersView {
                             Button::new("peer-address")
                                 .small()
                                 .outline()
-                                .label("Pair by address")
+                                .label("Connect by address")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.show_advanced = true;
                                     cx.notify();
@@ -885,8 +885,8 @@ impl PeersView {
                                     .small()
                                     .outline()
                                     .icon(IconName::Upload)
-                                    .label(format!("Push to them ({nu})"))
-                                    .tooltip("Send these files to their PC; they can undo it from History")
+                                    .label(format!("Send to their PC ({nu})"))
+                                    .tooltip("Send these files to their PC. They can undo it in History.")
                                     .disabled(nu == 0 || self.running)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.transfer(false, push.clone(), cx)
@@ -897,8 +897,8 @@ impl PeersView {
                                     .small()
                                     .primary()
                                     .icon(IconName::Download)
-                                    .label(format!("Pull to this PC ({np})"))
-                                    .tooltip("Copy their files here; what's replaced is backed up")
+                                    .label(format!("Get from their PC ({np})"))
+                                    .tooltip("Copy their files to this PC. You can undo it in History.")
                                     .disabled(np == 0 || self.running)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.transfer(true, pull.clone(), cx)
@@ -1027,7 +1027,7 @@ impl PeersView {
                                     .small()
                                     .primary()
                                     .label("Follow this instance")
-                                    .tooltip("Match this instance to theirs. Mods download from their original sites.")
+                                    .tooltip("Match this instance to theirs. The mods download from their own sites.")
                                     .disabled(self.running)
                                     .on_click(cx.listener(|this, _, _, cx| this.follow(cx))),
                             )
@@ -1052,7 +1052,7 @@ impl PeersView {
                 .when(self.show_files, |c| c.child(diff))
                 .when(!self.show_files, |c| {
                     c.child(widgets::caption(
-                        "Only the list of mods is sent. The files download from CurseForge, Modrinth and GitHub.",
+                        "Only the mod list is sent. The mods download from CurseForge, Modrinth and GitHub.",
                         cx,
                     ))
                 })
@@ -1101,7 +1101,7 @@ impl Render for PeersView {
                 .when_some(discovery, |c, e| {
                     c.child(
                         widgets::caption(
-                            "Hopper can't find PCs on this network. Pair by address instead.",
+                            "Hopper can't find other PCs on this network. Connect by address instead.",
                             cx,
                         )
                         .text_xs(),
@@ -1110,7 +1110,7 @@ impl Render for PeersView {
                 })
                 .child(
                     widgets::caption(
-                        "Windows may ask to allow Hopper on private networks; allow it so the other PC can reach this one.",
+                        "Windows may ask to let Hopper use private networks. Say yes, so the other PC can find this one.",
                         cx,
                     )
                     .text_xs(),
@@ -1157,9 +1157,9 @@ impl Render for PeersView {
                     .child(
                         v_flex()
                             .gap_0p5()
-                            .child(div().text_lg().font_semibold().child("Sync with a friend"))
+                            .child(div().text_lg().font_semibold().child("Friends nearby"))
                             .child(widgets::caption(
-                                "Share this instance with a friend's PC. Only the list of mods is sent; files download from their original sites.",
+                                "Share this instance with a friend's PC on the same network. Only the mod list is sent. The mods download from their own sites.",
                                 cx,
                             )),
                     )
@@ -1168,7 +1168,7 @@ impl Render for PeersView {
                         Button::new("peers-off")
                             .small()
                             .ghost()
-                            .label("Turn off sync")
+                            .label("Turn off Friends nearby")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.store.update(cx, |s, cx| s.set_peer_sync(false, cx))
                             })),
