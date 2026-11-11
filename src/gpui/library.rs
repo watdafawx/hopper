@@ -708,6 +708,7 @@ impl LibraryView {
     }
 
     fn select(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let _t = crate::frame_log::span("lib.select");
         self.selected = Some(root.clone());
         self.store.read(cx).watch_open(Some(root.clone()));
         self.watch_paired(true, cx);
@@ -782,6 +783,7 @@ impl LibraryView {
     }
 
     fn set_tab(&mut self, tab: InstTab, cx: &mut Context<Self>) {
+        let _t = crate::frame_log::span("lib.set_tab");
         if tab.is_pack() {
             self.last_pack = tab;
         }
@@ -841,6 +843,7 @@ impl LibraryView {
 
     /// Points the tab's view at the picked instance.
     fn want_tab_images(&mut self, cx: &mut Context<Self>) {
+        let _t = crate::frame_log::span("lib.want_tab_images");
         let Some(root) = self.selected.clone() else {
             return;
         };
@@ -2938,6 +2941,7 @@ fn new_group_dialog(store: Entity<Store>, root: PathBuf, window: &mut Window, cx
 
 impl Render for LibraryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _t = crate::frame_log::span("lib.render");
         self.view_w = window.viewport_size().width;
         self.rem = window.rem_size();
         // The work area's width in rem, for what the header has room for.
@@ -2989,10 +2993,18 @@ impl Render for LibraryView {
             .parts
             .get_or_insert_with(|| {
                 (
-                    Part::new(&view, |l, _, _, cx| l.sidebar_list(cx), cx),
                     Part::new(
                         &view,
                         |l, _, _, cx| {
+                            let _t = crate::frame_log::span("lib.sidebar");
+                            l.sidebar_list(cx)
+                        },
+                        cx,
+                    ),
+                    Part::new(
+                        &view,
+                        |l, _, _, cx| {
+                            let _t = crate::frame_log::span("lib.detail");
                             let page = l.detail(cx);
                             l.show_logos(cx);
                             page

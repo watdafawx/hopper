@@ -130,7 +130,9 @@ fn answer(app: &mut AppView, cmd: Command, window: &mut Window, cx: &mut Context
         )]),
         Command::Navigate(v) => {
             probe::begin(&v);
+            let t = std::time::Instant::now();
             navigate(app, &v, window, cx);
+            crate::frame_log::note("nav", t.elapsed().as_secs_f64() * 1000.);
             probe::handled();
             Ok(vec![text("ok")])
         }

@@ -1476,6 +1476,7 @@ impl AppView {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::frame_log::start();
+        let _t = crate::frame_log::span("app.render");
         // Cached: a page re-renders only when it (or what it reads) changes,
         // not on every frame of a dialog or spinner animating above it.
         // Browse and the Library cache their own columns instead (`part.rs`):

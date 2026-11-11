@@ -1661,6 +1661,7 @@ impl Store {
 
     /// Changes settings and writes them when they differ from the saved copy.
     pub fn update_settings(&mut self, edit: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
+        let _t = crate::frame_log::span("store.update_settings");
         edit(&mut self.settings);
         hopper::retention::set_policy(self.settings.backup_retention);
         hopper::sources::set_enabled(self.settings.allow_sources);

@@ -1045,6 +1045,7 @@ impl AddonsView {
     /// always, with `force`). All the disk reads the table needs happen
     /// here, never while rendering.
     fn sync(&mut self, force: bool, cx: &mut Context<Self>) {
+        let _t = crate::frame_log::span("addons.sync");
         // The last crash's mods, for their tag (read once, then cached). A
         // server's crash has its own strip on the Servers page.
         if let Some(root) = self.root.clone().filter(|_| !self.server) {
@@ -1209,6 +1210,7 @@ impl AddonsView {
 
     /// Re-filters and re-sorts the rows when a filter changed (in memory).
     pub(crate) fn ensure_rows(&mut self) {
+        let _t = crate::frame_log::span("addons.ensure_rows");
         let key = self.rows_key();
         if self.table.rows_for.as_ref() == Some(&key) {
             return;
@@ -1287,6 +1289,7 @@ impl AddonsView {
     }
 
     pub(crate) fn want_images(&mut self, cx: &mut Context<Self>) {
+        let _t = crate::frame_log::span("addons.want_images");
         let (Some(inst), class) = (self.table.inst.clone(), self.class) else {
             return;
         };
@@ -1496,6 +1499,7 @@ impl AddonsView {
 
     /// Re-lists untracked jars when the mods folder changed.
     fn refresh_loose(&mut self, inst: &Instance) {
+        let _t = crate::frame_log::span("addons.loose");
         if self.class != cf::CLASS_MODS {
             self.loose = (None, Vec::new());
             return;
@@ -3234,6 +3238,7 @@ impl AddonsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        let _t = crate::frame_log::span("addons.rows");
         // All from the table built in `sync`: scrolling reads no files and
         // clones no instance, only these reference counts.
         self.ensure_rows();
@@ -5741,6 +5746,7 @@ impl Picks for AddonsView {
 
 impl Render for AddonsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _t = crate::frame_log::span("addons.render");
         // The rows' logos are marked again as they lay out.
         self.logos.clear(cx.entity_id());
         let peek_open = self.peek.read(cx).is_open();
