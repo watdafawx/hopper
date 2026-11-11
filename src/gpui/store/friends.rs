@@ -50,6 +50,14 @@ pub struct Invite {
     pub inst: String,
 }
 
+/// "1 minute" / "15 minutes", rounded up, for how long a code lasts.
+fn minutes(secs: u64) -> String {
+    match secs.div_ceil(60).max(1) {
+        1 => "1 minute".into(),
+        m => format!("{m} minutes"),
+    }
+}
+
 /// A friend's pack to follow: from the mailbox feed ([`FollowReq::of`]) or
 /// from a PC on the network.
 #[derive(Clone, Debug, Default)]
@@ -257,9 +265,31 @@ impl Store {
         &self.mailbox_groups
     }
 
-    /// The invite code made last, while it lasts.
-    pub fn mailbox_invite(&self) -> Option<Invite> {
-        self.mailbox_invite.clone().filter(|i| Instant::now() < i.until)
+    /// The open invite code for `inst` (an instance id, or empty for a
+    /// plain invite), while it lasts.
+    pub fn mailbox_invite(&self, inst: &str) -> Option<Invite> {
+        let now = Instant::now();
+        self.mailbox_invites.iter().find(|i| i.inst == inst && now < i.until).cloned()
+    }
+
+    /// An open invite worth sending again: the mailbox only lets a PC keep
+    /// a few open at once, so a second click copies the same code instead
+    /// of making another. One about to run out isn't worth sending.
+    fn reusable_invite(&self, inst: &str) -> Option<Invite> {
+        self.mailbox_invite(inst)
+            .filter(|i| i.until.saturating_duration_since(Instant::now()) >= Duration::from_secs(60))
+    }
+
+    /// Keeps `inv` as the open invite for its purpose.
+    fn keep_invite(&mut self, inv: Invite) {
+        let now = Instant::now();
+        self.mailbox_invites.retain(|i| i.inst != inv.inst && now < i.until);
+        self.mailbox_invites.push(inv);
+    }
+
+    /// Forgets the invite for `inst` (it was used).
+    fn drop_invite(&mut self, inst: &str) {
+        self.mailbox_invites.retain(|i| i.inst != inst);
     }
 
     /// The local instances following a friend's pack. A follow whose
@@ -291,6 +321,15 @@ impl Store {
             cx.emit(StoreEvent::Notice("Friend list full. Remove a friend to add another.".into(), true));
             return;
         }
+        if let Some(open) = self.reusable_invite(inst) {
+            cx.write_to_clipboard(ClipboardItem::new_string(open.code.clone()));
+            let left = open.until.saturating_duration_since(Instant::now()).as_secs();
+            cx.emit(StoreEvent::Notice(
+                format!("Code copied again. It still works once, for {} more.", minutes(left)),
+                false,
+            ));
+            return;
+        }
         let inst = inst.to_string();
         cx.spawn(async move |this, cx| {
             let i2 = inst.clone();
@@ -298,12 +337,15 @@ impl Store {
             this.update(cx, |s, cx| match r {
                 Ok((code, secs)) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                    s.mailbox_invite = Some(Invite {
+                    s.keep_invite(Invite {
                         code,
                         until: Instant::now() + Duration::from_secs(secs),
                         inst,
                     });
-                    cx.emit(StoreEvent::Notice("Code copied. Send it to your friend; it works once.".into(), false));
+                    cx.emit(StoreEvent::Notice(
+                        format!("Code copied. Send it to your friend; it works once, for {}.", minutes(secs)),
+                        false,
+                    ));
                     cx.notify();
                 }
                 Err(e) => cx.emit(StoreEvent::Notice(mailbox::says(&e), true)),
@@ -323,6 +365,11 @@ impl Store {
             cx.emit(StoreEvent::Notice("Friend list full. Remove a friend to add another.".into(), true));
             return;
         }
+        // The pack may have changed since the last copy, so the share code is
+        // made fresh each time; only the follow part is reused.
+        let open = self
+            .reusable_invite(&inst.id)
+            .map(|i| (i.code, i.until.saturating_duration_since(Instant::now()).as_secs()));
         cx.spawn(async move |this, cx| {
             let id = inst.id.clone();
             let r = cx
@@ -332,22 +379,29 @@ impl Store {
                     let made = hopper::sharecode::make(&inst, &j);
                     j.finish(&Ok::<(), anyhow::Error>(()));
                     let made = made?;
-                    let (invite, secs) = mb.invite_for(&inst.id)?;
-                    anyhow::Ok((hopper::sharecode::with_follow(&made.code, &invite), invite, secs))
+                    let reused = open.is_some();
+                    let (invite, secs) = match open {
+                        Some(o) => o,
+                        None => mb.invite_for(&inst.id)?,
+                    };
+                    anyhow::Ok((hopper::sharecode::with_follow(&made.code, &invite), invite, secs, reused))
                 })
                 .await;
             this.update(cx, |s, cx| match r {
-                Ok((text, invite, secs)) => {
+                Ok((text, invite, secs, reused)) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    s.mailbox_invite = Some(Invite {
-                        code: invite,
-                        until: Instant::now() + Duration::from_secs(secs),
-                        inst: id,
-                    });
+                    if !reused {
+                        s.keep_invite(Invite {
+                            code: invite,
+                            until: Instant::now() + Duration::from_secs(secs),
+                            inst: id,
+                        });
+                    }
+                    let more = if reused { " more" } else { "" };
                     cx.emit(StoreEvent::Notice(
                         format!(
-                            "Share code copied. It works once, for {} minutes, and keeps them following this pack.",
-                            secs.div_ceil(60)
+                            "Share code copied. It works once, for {}{more}, and keeps them following this pack.",
+                            minutes(secs)
                         ),
                         false,
                     ));
@@ -693,7 +747,7 @@ impl Store {
         self.mailbox = None;
         self.mailbox_error = None;
         self.mailbox_heard = false;
-        self.mailbox_invite = None;
+        self.mailbox_invites.clear();
         self._mailbox_watch = None;
         self._mailbox_publish = None;
     }
@@ -931,7 +985,7 @@ impl Store {
             }
             None => cx.emit(StoreEvent::Notice(format!("{who} is now your friend."), false)),
         }
-        self.mailbox_invite = None;
+        self.drop_invite(&e.inst);
     }
 
     /// A friend is gone (removed here or there): their direct shares stop,
@@ -1183,13 +1237,13 @@ impl Store {
         }
         // A plain invite sends no event when it's used, so a new friend
         // turning up while one is open means it was used (codes work once).
-        if self.mailbox_invite().is_some() {
+        if self.mailbox_invite("").is_some() {
             let new: Vec<&mailbox::Friend> =
                 friends.iter().filter(|f| !self.mailbox_friends.iter().any(|o| o.id == f.id)).collect();
             if let Some(f) = new.first() {
                 let who = if f.name.is_empty() { "Your friend".to_string() } else { f.name.clone() };
                 cx.emit(StoreEvent::Notice(format!("{who} joined with your code."), false));
-                self.mailbox_invite = None;
+                self.drop_invite("");
             }
         }
         self.mailbox_friends = friends;
@@ -1423,8 +1477,17 @@ fn drop_ways(r: &mut Event, revoke: &Event) -> bool {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's own `test` macro would come with it.
-    use super::{drop_ways, newest_codes_only};
+    use super::{drop_ways, minutes, newest_codes_only};
     use hopper::mailbox::Event;
+
+    #[test]
+    fn code_lifetimes_read_as_whole_minutes() {
+        assert_eq!(minutes(900), "15 minutes");
+        assert_eq!(minutes(841), "15 minutes");
+        assert_eq!(minutes(60), "1 minute");
+        assert_eq!(minutes(40), "1 minute");
+        assert_eq!(minutes(0), "1 minute");
+    }
 
     fn ev(seq: u64, kind: &str, inst: &str, code: &str) -> Event {
         Event {

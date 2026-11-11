@@ -158,7 +158,7 @@ impl FriendsPanel {
     /// The live invite made here. One made by a share code's follow part
     /// shows in that dialog instead.
     fn plain_invite(&self, cx: &App) -> Option<crate::store::Invite> {
-        self.store.read(cx).mailbox_invite().filter(|i| i.inst.is_empty())
+        self.store.read(cx).mailbox_invite("")
     }
 
     /// Opens the follow chooser for a friend's pack.

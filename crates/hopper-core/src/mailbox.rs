@@ -209,6 +209,8 @@ pub enum Failure {
     InviteUnknown,
     /// The mailbox is older than this Hopper (no groups yet).
     NeedsUpdate,
+    /// This PC has as many open invites as the mailbox allows.
+    InvitesFull,
     /// Anything else, with the mailbox's message.
     Other(String),
 }
@@ -241,6 +243,7 @@ pub fn failure(e: &anyhow::Error) -> Failure {
         "their_friends_full" => return Failure::TheirFriendsFull,
         "invite_unknown" => return Failure::InviteUnknown,
         "needs_update" => return Failure::NeedsUpdate,
+        "invites_full" => return Failure::InvitesFull,
         _ => {}
     }
     // 0: no answer. 502-504 and Cloudflare's 52x: the tunnel is up but the
@@ -261,6 +264,9 @@ pub fn says(e: &anyhow::Error) -> String {
             "That code ran out or was already used. Ask them for a new one.".into()
         }
         Failure::NeedsUpdate => "The sync service needs an update for groups.".into(),
+        Failure::InvitesFull => {
+            "Too many open invites. Wait a few minutes or use one you already made.".into()
+        }
         Failure::Other(s) => s,
     }
 }
@@ -710,6 +716,11 @@ mod tests {
         assert_eq!(failure(&err(409, "friends_full")), Failure::FriendsFull);
         assert_eq!(failure(&err(409, "their_friends_full")), Failure::TheirFriendsFull);
         assert_eq!(failure(&err(404, "invite_unknown")), Failure::InviteUnknown);
+        assert_eq!(failure(&err(429, "invites_full")), Failure::InvitesFull);
+        assert_eq!(
+            says(&err(429, "invites_full")),
+            "Too many open invites. Wait a few minutes or use one you already made."
+        );
         assert_eq!(failure(&err(0, "")), Failure::Unreachable);
         assert_eq!(failure(&err(502, "")), Failure::Unreachable);
         assert_eq!(failure(&err(530, "")), Failure::Unreachable);

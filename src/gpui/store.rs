@@ -530,7 +530,8 @@ pub struct Store {
     /// Read the groups on the next publish tick; when they were last read.
     groups_due: bool,
     groups_at: Option<Instant>,
-    mailbox_invite: Option<friends::Invite>,
+    /// Open invite codes, one per purpose (plain, or following a pack).
+    mailbox_invites: Vec<friends::Invite>,
     /// What was last published to the mailbox, to publish on real changes.
     mailbox_sig: u64,
     /// A publish failed then; waits a minute before trying again.
@@ -725,7 +726,7 @@ impl Store {
             mailbox_groups: Vec::new(),
             groups_due: true,
             groups_at: None,
-            mailbox_invite: None,
+            mailbox_invites: Vec::new(),
             mailbox_sig: 0,
             publish_failed_at: None,
             auto_following: HashSet::new(),

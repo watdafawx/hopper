@@ -1473,7 +1473,7 @@ impl ShareView {
 
     /// The live invite that follows this pack, if one was made for it.
     fn invite(&self, cx: &App) -> Option<crate::store::Invite> {
-        self.store.read(cx).mailbox_invite().filter(|i| i.inst == self.inst_id)
+        self.store.read(cx).mailbox_invite(&self.inst_id)
     }
 
     /// The code as shown and copied: with the follow part while ticked.
