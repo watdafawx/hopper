@@ -82,6 +82,7 @@ pub mod panel;
 pub mod panic_log;
 pub mod paths;
 pub mod msauth;
+pub mod net;
 pub mod peer;
 pub mod recipe;
 pub mod proc;

@@ -91,12 +91,13 @@ pub fn shuffled(seed: u64) -> Vec<&'static str> {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(20)))
-        .http_status_as_error(false)
-        .user_agent(concat!("Hopper/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into()
+    crate::net::agent(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(20)))
+            .http_status_as_error(false)
+            .user_agent(concat!("Hopper/", env!("CARGO_PKG_VERSION")))
+            .build(),
+    )
 }
 
 /// The skins of `names` that exist, in order: from the cache, else from

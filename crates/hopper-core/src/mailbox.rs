@@ -325,11 +325,12 @@ pub struct Mailbox {
 
 impl Mailbox {
     fn new(base: &str, account: Account) -> Self {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(90)))
-            .http_status_as_error(false)
-            .build()
-            .into();
+        let agent: ureq::Agent = crate::net::agent(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(90)))
+                .http_status_as_error(false)
+                .build(),
+        );
         Self {
             base: base.trim_end_matches('/').to_string(),
             account,
