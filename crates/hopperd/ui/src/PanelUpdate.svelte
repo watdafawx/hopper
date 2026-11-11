@@ -67,7 +67,7 @@
     {:else}
       <label class="row sw-row">
         <input type="checkbox" checked={st.auto} disabled={!session.owner} onchange={(e) => setAuto(e.currentTarget.checked)} />
-        <span><span>Update by itself</span><span class="tiny muted">Installs new versions when they're out and restarts the panel once nothing is running. Minecraft servers keep running, and the tray icon comes back on the new version.</span></span>
+        <span><span>Update by itself</span><span class="tiny muted">Installs new versions when they're out and restarts the panel once nothing is running. Minecraft servers keep running{st.os === 'windows' ? ', and the tray icon comes back on the new version' : ''}.</span></span>
       </label>
       {#if st.skip}<div class="tiny muted">Rolled back: it won't install {st.skip} or older by itself. The next new release still installs.</div>{/if}
     {/if}

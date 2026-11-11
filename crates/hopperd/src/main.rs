@@ -23,6 +23,7 @@ mod api;
 mod auth;
 mod changes;
 mod autoupdate;
+mod updswap;
 mod backups_api;
 mod browse_api;
 mod config;
