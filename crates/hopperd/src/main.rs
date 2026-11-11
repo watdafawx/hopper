@@ -272,6 +272,9 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     let Some(args) = parse_args()? else { return Ok(()) };
     let boot_dir = args.data.unwrap_or_else(config::data_dir);
     std::fs::create_dir_all(&boot_dir).with_context(|| format!("creating {}", boot_dir.display()))?;
+    // Linux: the servers' console FIFOs, in the panel's own folder so a
+    // restarted panel finds them again (before any server is loaded).
+    hopper_core::hosting::process::set_stdin_dir(boot_dir.join("run"));
     let mut cfg = Config::load_or_create(&boot_dir)?;
     if let Some(h) = &args.home {
         let h = absolute(h);

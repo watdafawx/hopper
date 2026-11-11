@@ -79,6 +79,10 @@ windows = { workspace = true, features = [
 # Hopper as a browser choice in Default apps (browser.rs), per user only.
 windows-registry = "0.6"
 
+[target.'cfg(unix)'.dependencies]
+# Running servers: the stdin FIFO, setsid, waitpid and signals.
+libc = "0.2"
+
 [dev-dependencies]
 # An FTP(S) server in the tests, for the FTP client (ring, like the rest).
 libunftp = { version = "0.24", default-features = false, features = ["ring"] }

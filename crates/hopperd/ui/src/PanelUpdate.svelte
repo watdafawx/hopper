@@ -2,7 +2,8 @@
   // Hopper Server's own updates: the version, whether a newer one is out,
   // "Update now", and auto-update (on by default). An update restarts the
   // panel only; Minecraft servers keep running (on Linux the update waits for
-  // them to be stopped, or stops them when asked). The tray icon comes back on
+  // any the restarted panel couldn't take over, started by an older one, to
+  // be stopped, or stops them when asked). The tray icon comes back on
   // the new version by itself. "Other versions" opens the same window as
   // the version beside the logo (notes, and rolling back).
   import { RefreshCw, Download, ScrollText, CircleCheck, TriangleAlert, RotateCcw } from '@lucide/svelte';
@@ -84,7 +85,7 @@
     {:else}
       <label class="row sw-row">
         <input type="checkbox" checked={st.auto} disabled={!session.owner} onchange={(e) => setAuto(e.currentTarget.checked)} />
-        <span><span>Update by itself</span><span class="tiny muted">{#if st.os === 'windows'}Installs new versions when they're out and restarts the panel once nothing is running. Minecraft servers keep running, and the tray icon comes back on the new version.{:else}Installs new versions when they're out and restarts the panel once no job and no Minecraft server is running. It waits for servers to be stopped; it never stops one by itself.{/if}</span></span>
+        <span><span>Update by itself</span><span class="tiny muted">{#if st.os === 'windows'}Installs new versions when they're out and restarts the panel once nothing is running. Minecraft servers keep running, and the tray icon comes back on the new version.{:else}Installs new versions when they're out and restarts the panel once no job is running. Minecraft servers keep running. Servers started by an older version of the panel are waited for until they're stopped; it never stops one by itself.{/if}</span></span>
       </label>
       {#if st.skip}<div class="tiny muted">Rolled back: it won't install {st.skip} or older by itself. The next new release still installs.</div>{/if}
     {/if}

@@ -217,22 +217,78 @@ pub const RUN_FILE: &str = ".hopper-run.json";
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct RunInfo {
     pid: u32,
-    /// When the process was created (a Windows FILETIME), so a reused pid
-    /// isn't taken for the server.
+    /// When the process was created, so a reused pid isn't taken for the
+    /// server: a Windows FILETIME, or on Linux the start time in
+    /// `/proc/<pid>/stat` (clock ticks since boot).
     created: u64,
     /// Unix seconds.
     started: u64,
-    /// Inside the server's process: a handle to the write end of its stdin.
-    /// The server holds it, so its stdin never closes when Hopper exits,
-    /// and a new Hopper copies it back out to send commands.
+    /// Windows: inside the server's process, a handle to the write end of
+    /// its stdin. The server holds it, so its stdin never closes when Hopper
+    /// exits, and a new Hopper copies it back out to send commands.
     stdin: u64,
+    /// Unix: its stdin is the server's FIFO ([`stdin_fifo`]), which a new
+    /// Hopper opens again to send commands. False for a plain pipe: a
+    /// restarted Hopper can't reach that one's console.
+    #[serde(default)]
+    fifo: bool,
     stop_requested: bool,
 }
 
 #[cfg(windows)]
 type Proc = win::Process;
-#[cfg(not(windows))]
-type Proc = std::process::Child;
+#[cfg(unix)]
+type Proc = ux::Process;
+
+/// Where the servers' stdin FIFOs live on Unix, set by the app to a folder
+/// of its own. Not in the server folder: the file browser, SFTP and
+/// backups would open it there, hang on it and eat the server's commands.
+static STDIN_DIR: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Sets the folder for the servers' stdin FIFOs (Unix; Windows doesn't use
+/// one). Call before the first [`LocalServer::new`], with the same folder
+/// every run, so a restarted app finds the FIFOs again. Unset, it's a
+/// folder of this user's in the temp folder.
+pub fn set_stdin_dir(dir: impl Into<PathBuf>) {
+    *STDIN_DIR.write().unwrap_or_else(|e| e.into_inner()) = Some(dir.into());
+}
+
+/// The stdin FIFO for the server in `root`: one per folder, with the same
+/// name after a restart.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn stdin_fifo(root: &Path) -> PathBuf {
+    let dir = STDIN_DIR.read().unwrap_or_else(|e| e.into_inner()).clone();
+    #[cfg(unix)]
+    let dir = dir.unwrap_or_else(|| std::env::temp_dir().join(format!("hopper-stdin-{}", unsafe { libc::geteuid() })));
+    #[cfg(not(unix))]
+    let dir = dir.unwrap_or_else(std::env::temp_dir);
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    dir.join(fifo_name(&root))
+}
+
+/// FNV-1a of the folder's path: unlike std's hasher it stays the same from
+/// one build to the next, so an updated Hopper finds the FIFO too.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn fifo_name(root: &Path) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in root.to_string_lossy().bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}.stdin")
+}
+
+/// From a `/proc/<pid>/stat` line: the state letter (field 3) and the
+/// start time (field 22). The name in brackets may hold spaces and
+/// brackets itself, so the fields count from the last ')'.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn parse_proc_stat(line: &str) -> Option<(char, u64)> {
+    let rest = &line[line.rfind(')')? + 1..];
+    let mut f = rest.split_ascii_whitespace();
+    let state = f.next()?.chars().next()?;
+    let start = f.nth(18)?.parse().ok()?;
+    Some((state, start))
+}
 
 #[derive(Default)]
 struct Shared {
@@ -302,11 +358,32 @@ impl Shared {
     fn save_run(&self) {
         if let Some(info) = &self.info
             && let Ok(json) = serde_json::to_string(info)
-            && let Err(e) = std::fs::write(self.root.join(RUN_FILE), json)
+            && let Err(e) = write_private(&self.root.join(RUN_FILE), json.as_bytes())
         {
             log::warn!("saving {RUN_FILE}: {e}");
         }
     }
+}
+
+/// Writes `path` readable by this user only (Unix), never through a link.
+#[cfg(unix)]
+fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    // One made by an older Hopper may be readable by others.
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    f.write_all(data)
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, data)
 }
 
 /// The state a process left behind.
@@ -362,9 +439,17 @@ impl LocalServer {
             shared: Default::default(),
             sys: Mutex::new(sysinfo::System::new()),
         };
-        #[cfg(windows)]
         s.reattach();
         s
+    }
+
+    /// Running, and a restarted Hopper picks it up again with its console
+    /// and commands: always on Windows; on Unix when its stdin is the FIFO
+    /// (not a server started by an older Hopper, or when the FIFO failed).
+    pub fn reattachable(&self) -> bool {
+        let mut g = self.lock();
+        reap(&mut g);
+        g.proc.is_some() && (cfg!(windows) || g.info.as_ref().is_some_and(|i| i.fifo && i.created != 0))
     }
 
     pub fn root(&self) -> &Path {
@@ -613,7 +698,21 @@ impl LocalServer {
             let _ = writeln!(log, "[Hopper] {n}");
         }
         let _ = writeln!(log, "[Hopper] Starting: {} {}", launch.java.display(), launch.args.join(" "));
+        #[cfg(windows)]
         let (stdin_r, stdin_w) = stdin_pipe()?;
+        // A FIFO the server holds open itself, read and write, so it never
+        // sees its input end when Hopper exits, and a restarted Hopper opens
+        // it again. Without one, a pipe: commands end with this Hopper.
+        #[cfg(unix)]
+        let (stdin_r, stdin_w, fifo) = match ux::fifo(&stdin_fifo(&self.root)) {
+            Ok((r, w)) => (Stdio::from(r), w, true),
+            Err(e) => {
+                log::warn!("{}: no console FIFO ({e}); using a pipe", self.root.display());
+                let _ = writeln!(log, "[Hopper] If Hopper restarts while this server runs, it can't reach its console until the server is restarted.");
+                let (r, w) = stdin_pipe()?;
+                (r, w, false)
+            }
+        };
         let mut cmd = Command::new(&launch.java);
         cmd.args(&launch.args)
             .current_dir(&self.root)
@@ -634,8 +733,22 @@ impl LocalServer {
                 Err(_) => cmd.creation_flags(flags).spawn().with_context(|| format!("starting {}", launch.java.display()))?,
             }
         };
-        #[cfg(not(windows))]
-        let child = cmd.spawn().with_context(|| format!("starting {}", launch.java.display()))?;
+        #[cfg(unix)]
+        let child = {
+            use std::os::unix::process::CommandExt;
+            // Its own session: Ctrl+C in Hopper's terminal, the terminal
+            // closing, or a signal to Hopper's process group (a service
+            // manager stopping Hopper) doesn't reach the server.
+            unsafe {
+                cmd.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            cmd.spawn().with_context(|| format!("starting {}", launch.java.display()))?
+        };
         drop(cmd);
         let pid = child.id();
         let started = SystemTime::now();
@@ -653,12 +766,27 @@ impl LocalServer {
                 created: proc.created(),
                 started: started.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),
                 stdin,
+                fifo: false,
                 stop_requested: false,
             };
             (proc, Some(info))
         };
-        #[cfg(not(windows))]
-        let (proc, info) = (child, None);
+        #[cfg(unix)]
+        let (proc, info) = {
+            // Watched by pid from here (waitpid while it's Hopper's child,
+            // /proc once it isn't), the same as one picked up again.
+            drop(child);
+            let proc = ux::Process::spawned(pid);
+            let info = RunInfo {
+                pid,
+                created: proc.created(),
+                started: started.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+                stdin: 0,
+                fifo,
+                stop_requested: false,
+            };
+            (proc, Some(info))
+        };
         let stamp = crate::disk_watch::content_stamp(&self.root);
         let run = {
             let mut g = self.lock();
@@ -683,28 +811,60 @@ impl LocalServer {
         Ok(())
     }
 
-    /// Picks up the server an earlier Hopper started, if it still runs.
+    /// The process `info` names, if it is still this server's, and a way to
+    /// send it commands if there is one.
     #[cfg(windows)]
+    fn adopt(&self, info: &mut RunInfo) -> Option<(Proc, Option<File>)> {
+        let proc = win::Process::open(info.pid)
+            .filter(|p| info.created != 0 && p.created() == info.created)
+            .and_then(|mut p| matches!(p.try_wait(), Ok(None)).then_some(p))?;
+        let stdin = (info.stdin != 0)
+            .then(|| proc.fetch(info.stdin))
+            .flatten()
+            .map(File::from);
+        Some((proc, stdin))
+    }
+
+    /// The same on Unix. The run file is in the server folder, where people
+    /// can edit files, so its pid is only taken when that process started
+    /// when the file says, runs in this server's folder, and (for commands)
+    /// reads this server's FIFO; anything else could be some other program.
+    #[cfg(unix)]
+    fn adopt(&self, info: &mut RunInfo) -> Option<(Proc, Option<File>)> {
+        if info.created == 0 {
+            return None;
+        }
+        let proc = ux::Process::open(info.pid, info.created)?;
+        if !ux::runs_in(info.pid, &self.root) {
+            return None;
+        }
+        let fifo = stdin_fifo(&self.root);
+        let stdin = if info.fifo && ux::stdin_is(info.pid, &fifo) {
+            ux::writer(&fifo).map_err(|e| log::warn!("opening {}: {e}", fifo.display())).ok()
+        } else {
+            None
+        };
+        // What the next Hopper can count on.
+        info.fifo = stdin.is_some();
+        Some((proc, stdin))
+    }
+
+    /// Picks up the server an earlier Hopper started, if it still runs.
     fn reattach(&self) {
         let run_file = self.root.join(RUN_FILE);
-        let Some(info) = std::fs::read_to_string(&run_file)
+        let Some(mut info) = std::fs::read_to_string(&run_file)
             .ok()
             .and_then(|s| serde_json::from_str::<RunInfo>(&s).ok())
         else {
             return;
         };
-        let proc = win::Process::open(info.pid)
-            .filter(|p| info.created != 0 && p.created() == info.created)
-            .and_then(|mut p| matches!(p.try_wait(), Ok(None)).then_some(p));
-        let Some(proc) = proc else {
+        let Some((proc, stdin)) = self.adopt(&mut info) else {
             let _ = std::fs::remove_file(&run_file);
+            #[cfg(unix)]
+            ux::remove_fifo(&stdin_fifo(&self.root));
             return;
         };
         let path = self.root.join(CONSOLE_FILE);
-        let stdin = (info.stdin != 0)
-            .then(|| proc.fetch(info.stdin))
-            .flatten()
-            .map(File::from);
         if stdin.is_none() {
             log::warn!("{}: no way to send commands to the running server", self.root.display());
         }
@@ -730,6 +890,7 @@ impl LocalServer {
             g.started_with = Some(crate::disk_watch::content_stamp(&self.root));
             g.root = self.root.clone();
             g.info = Some(info);
+            g.save_run();
             g.note("[Hopper] Reconnected to the running server.");
             g.run
         };
@@ -780,7 +941,7 @@ impl LocalServer {
             return Ok(());
         }
         let run = self.lock().run;
-        if self.command("stop").is_err() {
+        if self.command("stop").is_err() && !self.terminate() {
             return self.kill();
         }
         let shared = self.shared.clone();
@@ -824,6 +985,31 @@ impl LocalServer {
                 }
             })?;
         Ok(())
+    }
+
+    /// No console to send "stop" to (a server picked up without one): asks
+    /// Java to shut down instead (SIGTERM), which runs Minecraft's own stop
+    /// and saves the worlds. The stop's waits and kill follow as usual.
+    #[cfg(unix)]
+    fn terminate(&self) -> bool {
+        let mut g = self.lock();
+        reap(&mut g);
+        if !g.proc.as_ref().is_some_and(|p| p.terminate()) {
+            return false;
+        }
+        g.note("[Hopper] No console to send \"stop\" to: asked the server to shut down.");
+        g.stop_requested = true;
+        g.tracker.halt.began.get_or_insert(Instant::now());
+        if let Some(i) = g.info.as_mut() {
+            i.stop_requested = true;
+        }
+        g.save_run();
+        true
+    }
+
+    #[cfg(not(unix))]
+    fn terminate(&self) -> bool {
+        false
     }
 
     /// The longest [`Self::stop`] can take, for callers that wait for it.
@@ -904,21 +1090,15 @@ fn stdin_pipe() -> anyhow::Result<(Stdio, File)> {
     Ok((Stdio::from(r), File::from(w)))
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn stdin_pipe() -> anyhow::Result<(Stdio, File)> {
     use std::os::fd::OwnedFd;
     let (r, w) = std::io::pipe()?;
     Ok((Stdio::from(r), File::from(OwnedFd::from(w))))
 }
 
-#[cfg(windows)]
 fn try_wait(p: &mut Proc) -> std::io::Result<Option<Option<i32>>> {
     p.try_wait()
-}
-
-#[cfg(not(windows))]
-fn try_wait(p: &mut Proc) -> std::io::Result<Option<Option<i32>>> {
-    Ok(p.try_wait()?.map(|s| s.code()))
 }
 
 /// Notes the exit if the process has ended.
@@ -939,6 +1119,8 @@ fn reap(g: &mut Shared) {
             g.info = None;
             if !g.root.as_os_str().is_empty() {
                 let _ = std::fs::remove_file(g.root.join(RUN_FILE));
+                #[cfg(unix)]
+                ux::remove_fifo(&stdin_fifo(&g.root));
                 // Stopped when asked, cleanly: the last start that worked,
                 // for crash help's "changed since" (see crashengine).
                 if g.stop_requested && code == Some(0) {
@@ -978,13 +1160,7 @@ fn end_lingering(g: &mut Shared) {
 
 fn end_process(g: &mut Shared) {
     if let Some(p) = g.proc.as_mut() {
-        #[cfg(windows)]
         p.kill();
-        #[cfg(not(windows))]
-        {
-            let _ = p.kill();
-            let _ = p.wait();
-        }
     }
     reap(g);
 }
@@ -1169,6 +1345,185 @@ mod win {
             }
             .ok()?;
             Some(unsafe { OwnedHandle::from_raw_handle(out.0) })
+        }
+    }
+}
+
+/// The server's process by pid on Unix, so a restarted Hopper can watch,
+/// stop and talk to a server it didn't start (or did, before an update
+/// started the new program in its place).
+#[cfg(unix)]
+mod ux {
+    use std::fs::{File, Metadata, OpenOptions};
+    use std::io;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    fn me() -> u32 {
+        unsafe { libc::geteuid() }
+    }
+
+    /// The process's state letter and start time, from /proc.
+    fn stat(pid: u32) -> Option<(char, u64)> {
+        super::parse_proc_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+    }
+
+    pub struct Process {
+        pid: u32,
+        /// Its start time ([`stat`]), 0 when /proc couldn't say.
+        start: u64,
+        ended: Option<Option<i32>>,
+    }
+
+    impl Process {
+        /// Process `pid`, if it is running and started at `start` (a reused
+        /// pid belongs to some other program).
+        pub fn open(pid: u32, start: u64) -> Option<Process> {
+            let p = Process { pid, start, ended: None };
+            p.same().then_some(p)
+        }
+
+        /// A child just started.
+        pub fn spawned(pid: u32) -> Process {
+            Process { pid, start: stat(pid).map_or(0, |(_, s)| s), ended: None }
+        }
+
+        pub fn created(&self) -> u64 {
+            self.start
+        }
+
+        /// Still the process it was: there, not ended, the same start time.
+        fn same(&self) -> bool {
+            self.start != 0 && matches!(stat(self.pid), Some((st, s)) if s == self.start && !matches!(st, 'Z' | 'X' | 'x'))
+        }
+
+        /// `Some(exit code)` once it has ended. A process Hopper didn't start
+        /// (in this program) has no exit code to read: just "ended".
+        pub fn try_wait(&mut self) -> io::Result<Option<Option<i32>>> {
+            if let Some(e) = self.ended {
+                return Ok(Some(e));
+            }
+            let mut status = 0;
+            let r = unsafe { libc::waitpid(self.pid as libc::pid_t, &mut status, libc::WNOHANG) };
+            let ended = if r == self.pid as libc::pid_t {
+                Some(libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status)))
+            } else if r == 0 {
+                None
+            } else {
+                // Not Hopper's child: /proc says whether it still runs.
+                (!self.same()).then_some(None)
+            };
+            self.ended = ended;
+            Ok(ended)
+        }
+
+        fn signal(&self, sig: libc::c_int) -> bool {
+            self.ended.is_none() && self.same() && unsafe { libc::kill(self.pid as libc::pid_t, sig) } == 0
+        }
+
+        /// Asks it to shut down (SIGTERM).
+        pub fn terminate(&self) -> bool {
+            self.signal(libc::SIGTERM)
+        }
+
+        /// Ends it (SIGKILL) and waits up to 5 s for it to go.
+        pub fn kill(&mut self) {
+            self.signal(libc::SIGKILL);
+            let end = Instant::now() + Duration::from_secs(5);
+            while matches!(self.try_wait(), Ok(None)) && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    /// The process runs in the server folder `root`.
+    pub fn runs_in(pid: u32, root: &Path) -> bool {
+        match (std::fs::read_link(format!("/proc/{pid}/cwd")), std::fs::canonicalize(root)) {
+            (Ok(cwd), Ok(root)) => cwd == root,
+            _ => false,
+        }
+    }
+
+    fn same_file(a: &Metadata, b: &Metadata) -> bool {
+        a.dev() == b.dev() && a.ino() == b.ino()
+    }
+
+    /// The process's stdin is the FIFO at `fifo`.
+    pub fn stdin_is(pid: u32, fifo: &Path) -> bool {
+        match (std::fs::metadata(format!("/proc/{pid}/fd/0")), std::fs::symlink_metadata(fifo)) {
+            (Ok(a), Ok(b)) => b.file_type().is_fifo() && same_file(&a, &b),
+            _ => false,
+        }
+    }
+
+    /// Makes `dir` (0700) if it's missing, and refuses it unless it is this
+    /// user's own folder, not a link, that nobody else can get into.
+    fn private_dir(dir: &Path) -> io::Result<()> {
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        let m = std::fs::symlink_metadata(dir)?;
+        if !m.is_dir() || m.uid() != me() || m.mode() & 0o077 != 0 {
+            return Err(io::Error::other(format!("{} isn't a folder only this user can open", dir.display())));
+        }
+        Ok(())
+    }
+
+    /// Opens the FIFO at `path` without following a link, checks it's this
+    /// user's FIFO, makes it owner-only and blocking again (the open itself
+    /// is non-blocking so it can't hang).
+    fn open_fifo(path: &Path, read: bool) -> io::Result<File> {
+        let f = OpenOptions::new()
+            .read(read)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?;
+        let m = f.metadata()?;
+        if !m.file_type().is_fifo() || m.uid() != me() {
+            return Err(io::Error::other(format!("{} isn't Hopper's console FIFO", path.display())));
+        }
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        let fd = f.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(f)
+    }
+
+    /// The FIFO at `path`, made or reused (an old one holds nothing once
+    /// nobody has it open): the server's end, opened read-write so its
+    /// input never ends while it runs, and Hopper's write end. Something
+    /// else at `path` (a file, a link) is left alone and refused.
+    pub fn fifo(path: &Path) -> io::Result<(File, File)> {
+        private_dir(path.parent().ok_or_else(|| io::Error::other("no folder for the FIFO"))?)?;
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_fifo() && m.uid() == me() => {}
+            Ok(_) => return Err(io::Error::other(format!("{} is in the way", path.display()))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                use std::os::unix::ffi::OsStrExt;
+                let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)?;
+                if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Err(e) => return Err(e),
+        }
+        let server = open_fifo(path, true)?;
+        let hopper = writer(path)?;
+        Ok((server, hopper))
+    }
+
+    /// Hopper's write end of a running server's FIFO. Fails (rather than
+    /// waits) when nothing reads it any more.
+    pub fn writer(path: &Path) -> io::Result<File> {
+        open_fifo(path, false)
+    }
+
+    /// Removes the FIFO at `path`, and nothing else that might be there.
+    pub fn remove_fifo(path: &Path) {
+        if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_fifo()) {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -1575,6 +1930,172 @@ mod tests {
         assert!(!dir.join(RUN_FILE).exists());
         // Nothing left to pick up.
         assert!(!LocalServer::new(&dir).state().is_alive());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn proc_stat_gives_the_state_and_start_time() {
+        // Field 22 is 987654; the name has spaces and brackets of its own.
+        let line = "1234 (java (x) y) S 1 1234 1234 0 -1 4194560 100 0 0 0 10 5 0 0 20 0 30 0 987654 123456 789 18446744073709551615";
+        assert_eq!(parse_proc_stat(line), Some(('S', 987654)));
+        assert_eq!(parse_proc_stat("1 (init) Z 0 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 42\n"), Some(('Z', 42)));
+        assert_eq!(parse_proc_stat("1 (short) S 0 1"), None);
+        assert_eq!(parse_proc_stat("no brackets"), None);
+    }
+
+    #[test]
+    fn fifo_names_are_stable_and_per_folder() {
+        // FNV-1a: fixed values, so a new build finds an old run's FIFO.
+        assert_eq!(fifo_name(Path::new("")), "cbf29ce484222325.stdin");
+        assert_eq!(fifo_name(Path::new("a")), "af63dc4c8601ec8c.stdin");
+        assert_ne!(fifo_name(Path::new("/srv/one")), fifo_name(Path::new("/srv/two")));
+    }
+
+    /// A scratch folder for the FIFOs, set once for every test (the setting
+    /// is global; each server's FIFO is named by its own folder).
+    #[cfg(unix)]
+    fn test_stdin_dir() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| set_stdin_dir(std::env::temp_dir().join(format!("hopper-test-stdin-{}", std::process::id()))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifos_are_made_reused_and_never_taken_over() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("hopper-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let fifo = dir.join("x.stdin");
+        let (server, hopper) = ux::fifo(&fifo).unwrap();
+        let m = std::fs::symlink_metadata(&fifo).unwrap();
+        assert!(m.file_type().is_fifo());
+        assert_eq!(m.permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        drop((server, hopper));
+        // Left over from an earlier run: used again.
+        let (mut server, mut hopper) = ux::fifo(&fifo).unwrap();
+        hopper.write_all(b"list\n").unwrap();
+        let mut buf = [0u8; 5];
+        server.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"list\n");
+        // Hopper's end closing doesn't end the server's input: a new one writes on.
+        drop(hopper);
+        ux::writer(&fifo).unwrap().write_all(b"stop\n").unwrap();
+        server.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"stop\n");
+        drop(server);
+        // Nothing reads it any more: no writer (rather than a hang).
+        assert!(ux::writer(&fifo).is_err());
+        ux::remove_fifo(&fifo);
+        assert!(!fifo.exists());
+        // A file or a link in its place is refused and left alone.
+        std::fs::write(&fifo, "keep").unwrap();
+        assert!(ux::fifo(&fifo).is_err());
+        assert!(ux::writer(&fifo).is_err());
+        ux::remove_fifo(&fifo);
+        assert_eq!(std::fs::read_to_string(&fifo).unwrap(), "keep");
+        std::fs::remove_file(&fifo).unwrap();
+        let target = dir.join("target");
+        std::fs::write(&target, "keep").unwrap();
+        std::os::unix::fs::symlink(&target, &fifo).unwrap();
+        assert!(ux::fifo(&fifo).is_err());
+        assert!(ux::writer(&fifo).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        // A folder others can open is refused.
+        let open = dir.join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ux::fifo(&open.join("y.stdin")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A run file pointing at some other process (a reused pid, a hand
+    /// edit) is never taken for the server.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_file_for_another_process_is_ignored() {
+        test_stdin_dir();
+        let dir = std::env::temp_dir().join(format!("hopper-host-notours-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // This test program: running, but not in the server folder, and
+        // with the wrong start time.
+        let info = RunInfo { pid: std::process::id(), created: 1, started: 0, stdin: 0, fifo: true, stop_requested: false };
+        std::fs::write(dir.join(RUN_FILE), serde_json::to_string(&info).unwrap()).unwrap();
+        let s = LocalServer::new(&dir);
+        assert!(!s.state().is_alive());
+        assert!(!dir.join(RUN_FILE).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unix: a new LocalServer (a restarted Hopper) picks up a process the
+    /// old one started: console from the start, commands through the FIFO,
+    /// kill, and the FIFO removed once it has ended.
+    #[cfg(unix)]
+    #[test]
+    fn reattaches_after_hopper_restarts_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        test_stdin_dir();
+        let dir = std::env::temp_dir().join(format!("hopper-host-reattach-unix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = LocalServer::new(&dir);
+        // Echoes every stdin line, like a console answering.
+        let echo = "while IFS= read -r l; do echo \"got $l\"; done";
+        first.spawn(&Launch { note: None, java: "sh".into(), args: vec!["-c".into(), echo.into()] }).unwrap();
+        assert!(first.reattachable());
+        first.command("hello").unwrap();
+        assert!(wait_for(&first, "got hello"), "{:?}", first.console());
+        let pid = first.pid().unwrap();
+        drop(first);
+        assert!(dir.join(RUN_FILE).exists());
+        assert_eq!(std::fs::metadata(dir.join(RUN_FILE)).unwrap().permissions().mode() & 0o777, 0o600);
+        // Its own session, away from Hopper's process group.
+        assert_eq!(unsafe { libc::getsid(pid as libc::pid_t) }, pid as libc::pid_t);
+
+        let second = LocalServer::new(&dir);
+        assert!(second.state().is_alive());
+        assert_eq!(second.pid(), Some(pid));
+        assert!(second.reattachable());
+        assert!(wait_for(&second, "got hello"), "{:?}", second.console());
+        second.command("world").unwrap();
+        assert!(wait_for(&second, "got world"), "{:?}", second.console());
+        assert!(second.console().iter().any(|l| l == "> world"));
+        second.kill().unwrap();
+        assert_eq!(second.state(), ServerState::Stopped);
+        assert!(!dir.join(RUN_FILE).exists());
+        assert!(!stdin_fifo(&dir).exists(), "the FIFO goes with the server");
+        assert!(!LocalServer::new(&dir).state().is_alive());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Picked up without a console (its FIFO gone): Stop asks the process
+    /// to shut down (SIGTERM) instead of killing it at once.
+    #[cfg(unix)]
+    #[test]
+    fn a_server_without_a_console_is_stopped_by_signal() {
+        test_stdin_dir();
+        let dir = std::env::temp_dir().join(format!("hopper-host-sigterm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = LocalServer::new(&dir);
+        let script = "trap 'echo bye; exit 0' TERM; echo up; while :; do sleep 0.1; done";
+        first.spawn(&Launch { note: None, java: "sh".into(), args: vec!["-c".into(), script.into()] }).unwrap();
+        assert!(wait_for(&first, "up"), "{:?}", first.console());
+        drop(first);
+        ux::remove_fifo(&stdin_fifo(&dir));
+
+        let second = LocalServer::new(&dir);
+        assert!(second.state().is_alive());
+        assert!(!second.reattachable(), "no console: an update would have to wait for it");
+        assert!(second.command("list").is_err());
+        second.stop().unwrap();
+        assert!(wait_for(&second, "bye"), "{:?}", second.console());
+        let end = Instant::now() + Duration::from_secs(10);
+        while second.state().is_alive() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(second.state(), ServerState::Stopped);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
