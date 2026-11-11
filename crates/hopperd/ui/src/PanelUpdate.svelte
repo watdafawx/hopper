@@ -1,7 +1,8 @@
 <script>
   // Hopper Server's own updates: the version, whether a newer one is out,
   // "Update now", and auto-update (on by default). An update restarts the
-  // panel only; Minecraft servers keep running. The tray icon comes back on
+  // panel only; Minecraft servers keep running (on Linux the update waits for
+  // them to be stopped, or stops them when asked). The tray icon comes back on
   // the new version by itself. "Other versions" opens the same window as
   // the version beside the logo (notes, and rolling back).
   import { RefreshCw, Download, ScrollText, CircleCheck, TriangleAlert, RotateCcw } from '@lucide/svelte';
@@ -9,7 +10,7 @@
   import { api, post } from './lib/api.js';
   import { session } from './lib/me.svelte.js';
   import { say } from './lib/toast.svelte.js';
-  import { upd, followUpdate, loadUpdate } from './lib/panelupdate.svelte.js';
+  import { upd, followUpdate, loadUpdate, askAboutServers } from './lib/panelupdate.svelte.js';
 
   onDestroy(followUpdate());
   const st = $derived(upd.st);
@@ -25,8 +26,22 @@
 
   async function now() {
     try {
-      await post('/panel/update/now');
+      const a = await askAboutServers(st);
+      if (!a) return;
+      await post('/panel/update/now', a.stop ? { stop_servers: true } : undefined);
       st.state = 'checking';
+      loadUpdate();
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
+
+  // While the update waits for running servers: stop them now instead.
+  async function stopThem() {
+    try {
+      const a = await askAboutServers(st);
+      if (!a?.stop) return;
+      await post('/panel/update/now', { stop_servers: true });
       loadUpdate();
     } catch (e) {
       say(e.message, true);
@@ -60,14 +75,16 @@
         {:else}<button class="btn sm" disabled={st.state === 'checking'} onclick={now}><RefreshCw size={13} />Check now</button>{/if}
       {/if}
     </div>
-    {#if STATE[st.state]}<div class="small gold row"><span class="spin"></span>{STATE[st.state]}</div>
+    {#if STATE[st.state]}<div class="small gold row"><span class="spin"></span>{st.state === 'waiting' && st.waiting_for ? `Update ready: waiting for ${st.waiting_for}…` : STATE[st.state]}
+        {#if st.state === 'waiting' && st.running_servers?.length && session.owner}<button class="btn sm" onclick={stopThem}>Stop servers and update</button>{/if}
+      </div>
     {:else if st.state === 'error'}<div class="small red row"><TriangleAlert size={13} />{st.error}</div>
     {:else}<div class="tiny muted">Last checked {ago(st.checked)}.</div>{/if}
     {#if st.why_not}<div class="tiny muted">{st.why_not}</div>
     {:else}
       <label class="row sw-row">
         <input type="checkbox" checked={st.auto} disabled={!session.owner} onchange={(e) => setAuto(e.currentTarget.checked)} />
-        <span><span>Update by itself</span><span class="tiny muted">Installs new versions when they're out and restarts the panel once nothing is running. Minecraft servers keep running{st.os === 'windows' ? ', and the tray icon comes back on the new version' : ''}.</span></span>
+        <span><span>Update by itself</span><span class="tiny muted">{#if st.os === 'windows'}Installs new versions when they're out and restarts the panel once nothing is running. Minecraft servers keep running, and the tray icon comes back on the new version.{:else}Installs new versions when they're out and restarts the panel once no job and no Minecraft server is running. It waits for servers to be stopped; it never stops one by itself.{/if}</span></span>
       </label>
       {#if st.skip}<div class="tiny muted">Rolled back: it won't install {st.skip} or older by itself. The next new release still installs.</div>{/if}
     {/if}

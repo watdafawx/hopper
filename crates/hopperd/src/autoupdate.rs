@@ -9,9 +9,10 @@
 //! be renamed, not overwritten; Linux renames the new file over it, see
 //! `updswap`) and restarts once no job is running. Minecraft servers keep
 //! running through it.
-//! The download is trusted as far as GitHub's HTTPS release and its listed
-//! length go (Windows and Linux alike), and must be a program for this OS and
-//! CPU. There's no checksum or signature to compare against.
+//! The download comes from GitHub's HTTPS release; its length and the
+//! SHA-256 GitHub lists for the asset (`digest`; releases without one are
+//! checked by length only, and that is logged) must match, and it must be a
+//! program for this OS and CPU (Windows and Linux alike).
 //! - On Linux: the panel starts the new program in its own place (same
 //!   process id, so systemd keeps watching it). If that fails under systemd
 //!   it exits with 75 and the unit restarts it (`Restart=on-failure`).
@@ -75,6 +76,8 @@ pub struct Status {
     pub error: Option<String>,
     /// The version being installed (an update, or an older one).
     pub target: String,
+    /// While "waiting": what for, e.g. "2 running servers to stop".
+    pub waiting_for: String,
 }
 
 static STATUS: Mutex<Option<Status>> = Mutex::new(None);
@@ -195,6 +198,9 @@ struct GhAsset {
     browser_download_url: String,
     #[serde(default)]
     size: u64,
+    /// "sha256:<hex>" (GitHub lists it for newer assets).
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 #[derive(Clone)]
@@ -202,6 +208,9 @@ struct Release {
     version: String,
     url: String,
     size: u64,
+    /// The download's SHA-256 as GitHub lists it; `None` for releases
+    /// without one (then only the length is checked).
+    sha256: Option<String>,
     notes: String,
     page: String,
     /// 2026-10-18T09:08:51Z.
@@ -221,6 +230,7 @@ fn parse_releases(all: Vec<GhRelease>, suffix: &str) -> Vec<Release> {
                 version,
                 url: a.browser_download_url.clone(),
                 size: a.size,
+                sha256: crate::updswap::expected_sha256(a.digest.as_deref()),
                 notes: r.body.unwrap_or_default(),
                 page: r.html_url,
                 published: r.published_at.unwrap_or_default(),
@@ -329,11 +339,19 @@ fn exe_from_zip(zip: &Path) -> anyhow::Result<Vec<u8>> {
 
 /// Downloads `r` (to `tmp`, removed after) and returns the program in it
 /// (hopperd.exe from the zip, hopperd from the tar.gz). Only GitHub's
-/// release over HTTPS, its length checked against what GitHub lists, and
-/// the file must be a program for this OS and CPU.
+/// release over HTTPS; its length and, when GitHub lists one, its SHA-256
+/// must match; and the file must be a program for this OS and CPU.
 fn fetch(r: &Release, tmp: &Path) -> anyhow::Result<Vec<u8>> {
     hopper_core::cf::download_checked(&r.url, tmp, &hopper_core::cf::Expect { len: r.size, ..Default::default() }, None, |_| {})
         .context("downloading the update")?;
+    match crate::updswap::verify_sha256(tmp, r.sha256.as_deref()) {
+        Ok(crate::updswap::Checked::Matched) => {}
+        Ok(crate::updswap::Checked::NotListed) => log::info!("Hopper Server {}: GitHub lists no checksum for this download; only its size was checked", r.version),
+        Err(e) => {
+            let _ = std::fs::remove_file(tmp);
+            return Err(e);
+        }
+    }
     let bytes = if cfg!(windows) { exe_from_zip(tmp) } else { crate::updswap::file_from_targz(tmp, "hopperd") };
     let _ = std::fs::remove_file(tmp);
     let bytes = bytes?;
@@ -416,7 +434,7 @@ fn run_once(app: &Arc<App>, install_it: bool, asked: bool) {
     if BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
-    let _guard = scopeguard(|| BUSY.store(false, Ordering::SeqCst));
+    let _guard = scopeguard(idle);
     set(|s| {
         s.state = "checking".into();
         s.error = None;
@@ -469,13 +487,13 @@ fn install_version(app: &Arc<App>, version: &str) -> anyhow::Result<()> {
     let r = match r {
         Ok(r) => r,
         Err(e) => {
-            BUSY.store(false, Ordering::SeqCst);
+            idle();
             return Err(e);
         }
     };
     let a = app.clone();
     std::thread::spawn(move || {
-        let _guard = scopeguard(|| BUSY.store(false, Ordering::SeqCst));
+        let _guard = scopeguard(idle);
         set(|s| s.error = None);
         install_and_restart(&a, &r);
     });
@@ -513,12 +531,93 @@ fn install_and_restart(app: &Arc<App>, r: &Release) {
             }
         }
     }
-    // Long work (a pack update, a backup) finishes first.
+    // Long work (a pack update, a backup) finishes first. On Linux so do the
+    // Minecraft servers: a restarted panel doesn't take over servers it
+    // finds running (Windows does), so none may be running at the restart.
     set(|s| s.state = "waiting".into());
-    while app.jobs.snapshot().iter().any(|j| !j.done) {
-        std::thread::sleep(Duration::from_secs(20));
+    let mut told = false;
+    loop {
+        let jobs = app.jobs.snapshot().iter().filter(|j| !j.done).count();
+        let running = running_servers(app);
+        let g = gate(cfg!(windows), STOP_SERVERS.load(Ordering::SeqCst), &running);
+        if let Gate::StopThem(n) = g
+            && !told
+        {
+            told = true;
+            log::warn!("stopping {n} running server(s) for the update");
+            stop_servers(app);
+        }
+        if jobs == 0 && g == Gate::Go {
+            break;
+        }
+        let what = waiting_text(jobs, g);
+        set(|s| s.waiting_for = what);
+        std::thread::sleep(Duration::from_secs(3));
     }
+    set(|s| s.waiting_for = String::new());
     restart_into(app, &r.version, &exe);
+}
+
+/// Whether running Minecraft servers hold the restart back.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum Gate {
+    /// None to wait for.
+    Go,
+    /// This many are running: wait for them to be stopped.
+    Wait(usize),
+    /// This many are running and someone said to stop them: do that, then go.
+    StopThem(usize),
+}
+
+/// Windows reattaches to servers it finds running, so they never hold a
+/// restart back there. Elsewhere any running server does: nothing stops one
+/// unless `consent` (someone picked "Stop servers and update").
+fn gate(windows: bool, consent: bool, running: &[String]) -> Gate {
+    match (windows, running.len(), consent) {
+        (true, _, _) | (_, 0, _) => Gate::Go,
+        (_, n, false) => Gate::Wait(n),
+        (_, n, true) => Gate::StopThem(n),
+    }
+}
+
+/// What the update is waiting for, for the panel to say.
+fn waiting_text(jobs: usize, g: Gate) -> String {
+    let servers = match g {
+        Gate::Wait(n) | Gate::StopThem(n) => Some(format!("{n} running server{} to stop", if n == 1 { "" } else { "s" })),
+        Gate::Go => None,
+    };
+    let jobs = (jobs > 0).then(|| format!("{jobs} running job{} to finish", if jobs == 1 { "" } else { "s" }));
+    [servers, jobs].into_iter().flatten().collect::<Vec<_>>().join(" and ")
+}
+
+/// Set by "Stop servers and update"; read by the wait. Cleared when the
+/// update run ends, so it never carries over to a later one.
+static STOP_SERVERS: AtomicBool = AtomicBool::new(false);
+
+/// The names of this panel's servers that are starting, running or stopping
+/// (empty on Windows, where they don't matter).
+pub fn running_servers(app: &App) -> Vec<String> {
+    if cfg!(windows) {
+        return Vec::new();
+    }
+    app.servers.list().iter().filter(|e| e.server.state().is_alive()).map(|e| e.name.clone()).collect()
+}
+
+/// The normal stop for each server still running (saves its worlds first).
+fn stop_servers(app: &App) {
+    for e in app.servers.list().iter() {
+        if matches!(e.server.state(), hopper_core::hosting::ServerState::Starting | hopper_core::hosting::ServerState::Running)
+            && let Err(err) = e.server.stop()
+        {
+            log::warn!("stopping {}: {err:#}", e.name);
+        }
+    }
+}
+
+/// The run is over: nothing is busy, and a "stop the servers" answer is spent.
+fn idle() {
+    STOP_SERVERS.store(false, Ordering::SeqCst);
+    BUSY.store(false, Ordering::SeqCst);
 }
 
 /// How the panel moves onto the new program.
@@ -636,7 +735,8 @@ async fn get_status(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
     let s = status();
     Ok(Json(json!({
         "current": current(), "latest": s.latest, "notes": hopper_core::selfupdate::clean_notes(&s.notes), "page": s.page, "checked": s.checked,
-        "state": s.state, "error": s.error, "target": s.target,
+        "state": s.state, "error": s.error, "target": s.target, "waiting_for": s.waiting_for,
+        "running_servers": running_servers(&app),
         "auto": app.cfg.read().unwrap().auto_update,
         "skip": app.cfg.read().unwrap().skip_auto_up_to,
         "why_not": why_not(), "os": std::env::consts::OS,
@@ -683,6 +783,9 @@ async fn list_releases(State(app): State<Arc<App>>, headers: HeaderMap, method: 
 #[derive(Deserialize)]
 struct InstallBody {
     version: String,
+    /// "Stop servers and update" (Linux; see [`gate`]).
+    #[serde(default)]
+    stop_servers: bool,
 }
 
 /// "Update to X" / "Roll back to X" from the version window.
@@ -690,6 +793,9 @@ async fn install_one(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     require_owner(&app, &headers, &method)?;
     if let Some(w) = why_not() {
         return Err(bad(w));
+    }
+    if b.stop_servers {
+        STOP_SERVERS.store(true, Ordering::SeqCst);
     }
     let a = app.clone();
     let v = b.version.trim().to_string();
@@ -713,10 +819,20 @@ async fn put_auto(State(app): State<Arc<App>>, headers: HeaderMap, method: Metho
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn now(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+#[derive(Deserialize, Default)]
+struct NowBody {
+    #[serde(default)]
+    stop_servers: bool,
+}
+
+async fn now(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, body: Option<Json<NowBody>>) -> ApiResult<Json<Value>> {
     require_owner(&app, &headers, &method)?;
     if let Some(w) = why_not() {
         return Err(bad(w));
+    }
+    // Without this the update waits for running servers to stop on their own.
+    if body.is_some_and(|b| b.stop_servers) {
+        STOP_SERVERS.store(true, Ordering::SeqCst);
     }
     let a = app.clone();
     std::thread::spawn(move || run_once(&a, true, true));
@@ -823,6 +939,48 @@ mod tests {
         h.container = true;
         assert!(why_not_for(&h).unwrap().contains("Docker"));
         assert_eq!(why_not_for(&host("windows", "x86_64", Path::new(r"C:\Program Files\Hopper Server\hopperd.exe"))), None);
+    }
+
+    #[test]
+    fn running_servers_hold_a_linux_restart_back() {
+        use super::{Gate, gate, waiting_text};
+        let none: Vec<String> = vec![];
+        let two = vec!["Survival".to_string(), "Creative".to_string()];
+        // Nothing running: go.
+        assert_eq!(gate(false, false, &none), Gate::Go);
+        assert_eq!(gate(false, true, &none), Gate::Go);
+        // Running, nobody said to stop them (automatic, or "wait"): wait.
+        assert_eq!(gate(false, false, &two), Gate::Wait(2));
+        // "Stop servers and update": stop them, then go.
+        assert_eq!(gate(false, true, &two), Gate::StopThem(2));
+        // Windows reattaches to running servers, so they never hold it back.
+        assert_eq!(gate(true, false, &two), Gate::Go);
+        assert_eq!(gate(true, true, &two), Gate::Go);
+        // What the panel says.
+        assert_eq!(waiting_text(0, Gate::Wait(2)), "2 running servers to stop");
+        assert_eq!(waiting_text(0, Gate::StopThem(1)), "1 running server to stop");
+        assert_eq!(waiting_text(1, Gate::Go), "1 running job to finish");
+        assert_eq!(waiting_text(3, Gate::Wait(1)), "1 running server to stop and 3 running jobs to finish");
+        assert_eq!(waiting_text(0, Gate::Go), "");
+    }
+
+    #[test]
+    fn the_checksum_github_lists_rides_along_with_the_release() {
+        let gh: Vec<super::GhRelease> = serde_json::from_value(serde_json::json!([
+            { "tag_name": "hopperd-v0.55.0", "assets": [
+                { "name": "hopperd-0.55.0-linux-x64.tar.gz", "browser_download_url": "u", "size": 3,
+                  "digest": "sha256:BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD" }] },
+            { "tag_name": "hopperd-v0.54.0", "assets": [
+                { "name": "hopperd-0.54.0-linux-x64.tar.gz", "browser_download_url": "u", "digest": null }] },
+            { "tag_name": "hopperd-v0.53.0", "assets": [
+                { "name": "hopperd-0.53.0-linux-x64.tar.gz", "browser_download_url": "u" }] }
+        ]))
+        .unwrap();
+        let list = super::parse_releases(gh, "-linux-x64.tar.gz");
+        assert_eq!(list[0].sha256.as_deref(), Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+        // Older releases list none: only the length is checked.
+        assert_eq!(list[1].sha256, None);
+        assert_eq!(list[2].sha256, None);
     }
 
     #[test]

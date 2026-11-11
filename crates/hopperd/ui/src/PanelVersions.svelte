@@ -13,7 +13,7 @@
   import { session } from './lib/me.svelte.js';
   import { confirmIt, dialog } from './lib/dialog.svelte.js';
   import Changelog from './lib/Changelog.svelte';
-  import { upd, loadUpdate, isNewer } from './lib/panelupdate.svelte.js';
+  import { upd, loadUpdate, isNewer, askAboutServers } from './lib/panelupdate.svelte.js';
 
   const PAGE = 10;
   const REPO_PAGE = 'https://github.com/watdafawx/hopper/releases';
@@ -86,14 +86,16 @@
     const v = pick.version;
     if (!up) {
       const ok = await confirmIt(`Roll back to Hopper Server ${v}?`, {
-        body: `The panel downloads ${v}, puts it in place and restarts. Minecraft servers keep running. "Update by itself" won't install ${top} or older again; the next new release still installs.`,
+        body: `The panel downloads ${v}, puts it in place and restarts.${st?.os === 'windows' ? ' Minecraft servers keep running.' : ''} "Update by itself" won't install ${top} or older again; the next new release still installs.`,
         ok: 'Roll back',
         danger: true,
       });
       if (!ok) return;
     }
     try {
-      await post('/panel/update/install', { version: v });
+      const a = await askAboutServers(st);
+      if (!a) return;
+      await post('/panel/update/install', a.stop ? { version: v, stop_servers: true } : { version: v });
       if (upd.st) {
         upd.st.state = 'downloading';
         upd.st.target = v;
@@ -191,7 +193,7 @@
               {#if st?.why_not}<span>{st.why_not}</span>
               {:else if !session.owner}<span>Only the owner or a manager can change the panel's version.</span>
               {:else}
-                <span>The panel restarts into it once running jobs finish. Minecraft servers keep running, and the panel finds them again.</span>
+                <span>{st?.os === 'windows' ? 'The panel restarts into it once running jobs finish. Minecraft servers keep running, and the panel finds them again.' : 'The panel restarts into it once running jobs finish and no Minecraft server is running.'}</span>
                 {#if !up}
                   <span>"Update by itself" won't install {top} or older again; the next new release still installs.</span>
                   <span>To come back, click the version beside the logo and update.</span>

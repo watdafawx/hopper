@@ -5,6 +5,7 @@
 // the page (the new version brings its own web UI).
 import { api } from './api.js';
 import { check, expectRestart } from './boot.svelte.js';
+import { choose } from './dialog.svelte.js';
 
 export const upd = $state({ st: null, open: false });
 
@@ -18,6 +19,24 @@ export function isNewer(a, b) {
     if (d) return d > 0;
   }
   return false;
+}
+
+/**
+ * Before an update starts: on Linux a restarted panel can't take over
+ * servers that are running, so with some running it asks. Resolves to
+ * `{ stop }` (stop them first, or wait until they're stopped), or null when
+ * cancelled. Nothing running: `{ stop: false }` without asking.
+ */
+export async function askAboutServers(st) {
+  const names = st?.running_servers || [];
+  if (!names.length) return { stop: false };
+  const list = names.length > 3 ? `${names.slice(0, 3).join(', ')} and ${names.length - 3} more` : names.join(', ');
+  const r = await choose(`${names.length === 1 ? '1 server is' : `${names.length} servers are`} running`, {
+    body: `${list}. If the panel restarted now it would lose its console and controls for ${names.length === 1 ? 'it' : 'them'} until ${names.length === 1 ? 'it is' : 'they are'} started again. Stop ${names.length === 1 ? 'it' : 'them'} first and the panel updates once ${names.length === 1 ? 'it has' : 'they have'} stopped and saved (start ${names.length === 1 ? 'it' : 'them'} again afterwards), or let the update wait until you stop ${names.length === 1 ? 'it' : 'them'} yourself.`,
+    ok: 'Stop servers and update',
+    alt: 'Wait for them to stop',
+  });
+  return r ? { stop: r === 'ok' } : null;
 }
 
 /** States while an update runs. */

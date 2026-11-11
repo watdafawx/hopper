@@ -8,7 +8,7 @@
   import { post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { session } from './lib/me.svelte.js';
-  import { upd, followUpdate, loadUpdate } from './lib/panelupdate.svelte.js';
+  import { upd, followUpdate, loadUpdate, askAboutServers } from './lib/panelupdate.svelte.js';
 
   onDestroy(followUpdate());
 
@@ -25,7 +25,9 @@
 
   async function update() {
     try {
-      await post('/panel/update/install', { version: st.latest });
+      const a = await askAboutServers(st);
+      if (!a) return;
+      await post('/panel/update/install', a.stop ? { version: st.latest, stop_servers: true } : { version: st.latest });
       st.state = 'downloading';
       st.target = st.latest;
       loadUpdate();
@@ -43,7 +45,7 @@
     </button>
   {:else if st.latest && canUpdate}
     <span class="split">
-      <button class="go" title="Download Hopper Server {st.latest} and restart into it. Minecraft servers keep running." onclick={update}><RotateCcw size={12} />Update to {st.latest}</button>
+      <button class="go" title={st.os === 'windows' ? `Download Hopper Server ${st.latest} and restart into it. Minecraft servers keep running.` : `Download Hopper Server ${st.latest} and restart into it once no Minecraft server is running.`} onclick={update}><RotateCcw size={12} />Update to {st.latest}</button>
       <button class="nt" title="What's new in {st.latest}" aria-label="What's new in {st.latest}" onclick={() => (upd.open = true)}><ScrollText size={12} /></button>
     </span>
   {:else}

@@ -19,6 +19,47 @@ pub fn beside(exe: &Path, suffix: &str) -> PathBuf {
     exe.with_file_name(name)
 }
 
+// ---- The checksum ----------------------------------------------------------------------------
+
+/// The lower-case hex out of GitHub's asset `digest` ("sha256:..."); `None`
+/// when the release lists none (older releases) or another kind.
+pub fn expected_sha256(digest: Option<&str>) -> Option<String> {
+    let d = digest?.trim();
+    let (kind, hex) = d.split_once(':')?;
+    kind.eq_ignore_ascii_case("sha256").then(|| hex.trim().to_ascii_lowercase())
+}
+
+/// What a check found.
+#[derive(Debug, PartialEq)]
+pub enum Checked {
+    /// The file is the one GitHub lists.
+    Matched,
+    /// GitHub lists no checksum for it: only the length was checked.
+    NotListed,
+}
+
+/// Checks the file at `path` against the checksum GitHub lists for it. A
+/// listed checksum that doesn't match is an error (nothing gets installed).
+pub fn verify_sha256(path: &Path, expected: Option<&str>) -> anyhow::Result<Checked> {
+    use sha2::{Digest, Sha256};
+    let Some(want) = expected else { return Ok(Checked::NotListed) };
+    let mut f = std::fs::File::open(path).context("checking the download")?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = f.read(&mut buf).context("checking the download")?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    let got: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    if got != want {
+        bail!("The download doesn't match the checksum GitHub lists for it, so it wasn't installed.");
+    }
+    Ok(Checked::Matched)
+}
+
 // ---- The download ----------------------------------------------------------------------------
 
 fn octal(field: &[u8]) -> anyhow::Result<u64> {
@@ -192,6 +233,30 @@ mod tests {
         let mut v: Vec<u8> = entries.concat();
         v.extend([0u8; 1024]);
         v
+    }
+
+    #[test]
+    fn checksum_from_github_is_checked_against_the_file() {
+        let d = std::env::temp_dir().join(format!("hopperd-sha-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("asset.bin");
+        std::fs::write(&p, b"abc").unwrap();
+        // sha256("abc")
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let listed = expected_sha256(Some(&format!("sha256:{}", abc.to_uppercase())));
+        assert_eq!(listed.as_deref(), Some(abc));
+        assert_eq!(verify_sha256(&p, listed.as_deref()).unwrap(), Checked::Matched);
+        // A different file under the same listing is refused, with a plain message.
+        std::fs::write(&p, b"abd").unwrap();
+        let e = verify_sha256(&p, listed.as_deref()).unwrap_err().to_string();
+        assert!(e.contains("doesn't match the checksum"), "{e}");
+        // Garbage in the listing doesn't pass either.
+        assert!(verify_sha256(&p, expected_sha256(Some("sha256:nothex")).as_deref()).is_err());
+        // Nothing listed (older release), or another kind: the length check stands alone.
+        assert_eq!(verify_sha256(&p, expected_sha256(None).as_deref()).unwrap(), Checked::NotListed);
+        assert_eq!(expected_sha256(Some("")), None);
+        assert_eq!(expected_sha256(Some("sha512:abcd")), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
