@@ -65,6 +65,11 @@ pub struct Instance {
     /// with Hopper). Shown until the player picks one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cf_change: Option<CfChange>,
+    /// Mods kept only on this PC (see [`crate::onlyhere`]), by
+    /// [`crate::groupsync::addon_key`]: friends sync leaves them alone and
+    /// publishes them as friends last had them. Never put in a code.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub only_here: std::collections::BTreeMap<String, crate::onlyhere::Kept>,
 }
 
 /// The CurseForge app's values when they disagree with Hopper's record (see
@@ -879,6 +884,10 @@ fn merge_concurrent(out: &mut Instance, disk: Instance, touched: &[String]) {
     if out.id.is_empty() {
         out.id = disk.id;
     }
+    // A mod marked "Only on this PC" while the job ran stays marked.
+    for (k, v) in disk.only_here {
+        out.only_here.entry(k).or_insert(v);
+    }
 }
 
 /// The instance in `root`, importing (or re-importing) CurseForge's files
@@ -1376,6 +1385,7 @@ fn import_curseforge(root: &Path) -> Option<Imported> {
         applied_options: Default::default(),
         unreadable: None,
         cf_change: None,
+        only_here: Default::default(),
     };
     Some(Imported { inst, cf_manifest, disk_manifest: manifest })
 }

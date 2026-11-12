@@ -1043,6 +1043,10 @@ impl Store {
     /// "Turned off by Mia".
     pub fn group_mark(&self, root: &Path, a: &hopper::instances::Addon) -> Option<String> {
         use groupsync::Kind;
+        // Kept only on this PC: what others did to it didn't happen here.
+        if self.instance(root).is_some_and(|i| hopper::onlyhere::is_kept(i, a)) {
+            return None;
+        }
         let m = self.group_copy(root)?.marks.get(&groupsync::addon_key(a))?;
         if m.name.is_empty() || m.by == self.mailbox_id() {
             return None;
@@ -1910,6 +1914,7 @@ impl Store {
             i.name.hash(&mut h);
             i.game_version.hash(&mut h);
             i.loader.hash(&mut h);
+            i.only_here.keys().for_each(|k| k.hash(&mut h));
             if let Some(p) = &i.pack {
                 p.project_id.hash(&mut h);
                 p.file_id.hash(&mut h);

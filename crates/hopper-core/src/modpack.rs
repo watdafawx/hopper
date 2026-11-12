@@ -2,7 +2,7 @@
 
 use crate::cf;
 use crate::install::addon_from;
-use crate::instances::{Instance, LaunchSettings, PackManifest, PackRef, folder_for_class};
+use crate::instances::{Addon, Instance, LaunchSettings, PackManifest, PackRef, folder_for_class};
 use crate::jobs::Job;
 use anyhow::Context;
 use std::collections::{HashMap, HashSet};
@@ -93,6 +93,25 @@ pub struct Overrides {
     pub keep_dropped: HashSet<String>,
     /// A clean update: History marks what it set aside "by Clean update".
     pub clean: bool,
+    /// Mods kept only on this PC ([`crate::groupsync::addon_key`]), for an
+    /// update a follow brings: left as they are, and kept out when removed.
+    pub only_here: HashSet<String>,
+}
+
+impl Overrides {
+    /// A mod kept only on this PC, which this update leaves alone.
+    fn leaves(&self, a: &Addon) -> bool {
+        !self.only_here.is_empty() && self.only_here.contains(&crate::groupsync::addon_key(a))
+    }
+}
+
+fn leaves(overrides: Option<&Overrides>, a: &Addon) -> bool {
+    overrides.is_some_and(|o| o.leaves(a))
+}
+
+/// A pack project kept only on this PC.
+fn leaves_project(overrides: Option<&Overrides>, project: u64) -> bool {
+    overrides.is_some_and(|o| o.only_here.contains(&format!("p:{project}")))
 }
 
 /// Pack mods leaving with an update that you chose to keep (see
@@ -1071,6 +1090,8 @@ fn apply_pack(
         .files
         .iter()
         .filter(|f| !overrides.is_some_and(|o| o.leave_out.contains(&format!("r:{}", f.project_id))))
+        // Kept only on this PC and removed here: it stays out.
+        .filter(|f| !leaves_project(overrides, f.project_id) || inst.addons.iter().any(|a| a.project_id == f.project_id))
         .map(|f| (f.project_id, f.file_id))
         .collect();
 
@@ -1081,6 +1102,7 @@ fn apply_pack(
         .filter(|(p, f)| {
             // A mod you updated yourself keeps your file, if you chose so.
             !overrides.is_some_and(|o| o.keep_mine.contains(p))
+                && !leaves_project(overrides, **p)
                 && !inst
                     .addons
                     .iter()
@@ -1168,7 +1190,7 @@ fn apply_pack(
     inst.cf_change = None;
     adopt_kept(inst, overrides);
     commit(inst, staged, |a| {
-        a.from_pack && !wanted.contains_key(&a.project_id)
+        a.from_pack && !wanted.contains_key(&a.project_id) && !leaves(overrides, a)
     })?;
     drop(staging);
     note_pending(job, &pending, true);
@@ -2462,7 +2484,7 @@ pub fn update_any(
     // Mods you had turned off stay off unless you chose to turn them on.
     if !overrides.enable.is_empty() {
         for pid in &overrides.enable {
-            if let Some(i) = inst.addons.iter().position(|a| a.project_id == *pid && !a.enabled) {
+            if let Some(i) = inst.addons.iter().position(|a| a.project_id == *pid && !a.enabled && !overrides.leaves(a)) {
                 // History notes it was off, so Undo turns it off again.
                 let a = &inst.addons[i];
                 let jar = inst.root.join(a.folder()).join(&a.file_name);
@@ -2476,6 +2498,17 @@ pub fn update_any(
         inst.save()?;
     }
     Ok(())
+}
+
+/// [`update_any`] for the pack version a followed or group pack moved to:
+/// the usual choices (mods you turned off stay off, removed ones stay
+/// out), and mods kept only on this PC stay exactly as they are. An update
+/// the player starts goes through [`update_any`] and may change them.
+pub fn update_any_synced(inst: &mut Instance, pack_id: u64, file: &cf::File, job: &Job) -> anyhow::Result<()> {
+    let plan = crate::packdiff::plan(inst, file, true, job)?;
+    let mut o = plan.decisions_with(&plan.default_take(), &plan.default_choices());
+    o.only_here = inst.only_here.keys().cloned().collect();
+    update_any(inst, pack_id, file, Some(&o), job)
 }
 
 /// A pack path that stays inside the instance: relative, no `..`, no
@@ -2611,6 +2644,10 @@ fn apply_mrpack_with(
         if overrides.is_some_and(|o| o.leave_out.contains(&format!("rp:{}", f.path))) {
             continue;
         }
+        // A file kept only on this PC (known by its name) stays as it is.
+        if overrides.is_some_and(|o| o.only_here.contains(&format!("n:{}", f.file_name().to_lowercase()))) {
+            continue;
+        }
         files.push(f.clone());
     }
     let keep: HashSet<String> = files.iter().map(|f| f.file_name().to_lowercase()).collect();
@@ -2720,6 +2757,8 @@ fn apply_mrpack_with(
         a.env = crate::modrinth::env(&p.client_side, &p.server_side).to_string();
         *plain = a;
     }
+    // Mods kept only on this PC keep their file (or stay out).
+    staged.retain(|s| !s.addon.as_ref().is_some_and(|a| leaves(overrides, a)));
 
     // Everything is here: now change the instance. Pack files the new
     // version dropped go to backups; files you added stay.
@@ -2730,7 +2769,7 @@ fn apply_mrpack_with(
     inst.cf_change = None;
     adopt_kept(inst, overrides);
     commit(inst, staged, |a| {
-        a.from_pack && !keep.contains(&a.file_name.to_lowercase())
+        a.from_pack && !keep.contains(&a.file_name.to_lowercase()) && !leaves(overrides, a)
     })?;
     drop(staging);
     note_pending(job, &pending, false);
@@ -2964,17 +3003,58 @@ mod pack_fix_tests {
     }
 
     fn apply(inst: &mut Instance, idx: &MrIndex, zip: &Path, job: &Job) -> anyhow::Result<()> {
+        apply_with(inst, idx, zip, None, job)
+    }
+
+    fn apply_with(inst: &mut Instance, idx: &MrIndex, zip: &Path, o: Option<&Overrides>, job: &Job) -> anyhow::Result<()> {
         apply_mrpack_with(
             inst,
             &cf::Mod::default(),
             &cf::File::default(),
             zip,
             idx,
-            None,
+            o,
             job,
             &fake_download,
             &nobody_knows,
         )
+    }
+
+    #[test]
+    fn a_sync_update_leaves_mods_kept_only_on_this_pc() {
+        let dir = temp("kept");
+        let zip = dir.join("pack.mrpack");
+        zip_with(&zip, &[("modrinth.index.json", b"{}")]);
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        let mut inst = Instance { name: "T".into(), root: dir.join("inst"), ..Default::default() };
+        fs::create_dir_all(&inst.root).unwrap();
+        let v1 = index(&[("mods/a.jar", "a1"), ("mods/b.jar", "b1"), ("mods/c.jar", "c1")], "");
+        apply(&mut inst, &v1, &zip, &job).unwrap();
+        // b is kept and turned off here; c is kept and removed here.
+        let at = |inst: &Instance, f: &str| inst.addons.iter().position(|a| a.file_name == f).unwrap();
+        let i = at(&inst, "b.jar");
+        crate::install::set_enabled(&mut inst, i, false).unwrap();
+        let i = at(&inst, "c.jar");
+        crate::install::remove(&mut inst, i).unwrap();
+        let o = Overrides { only_here: ["n:b.jar", "n:c.jar"].map(String::from).into(), ..Default::default() };
+
+        // The pack changes a and b and still has c: only a changes here.
+        let v2 = index(&[("mods/a.jar", "a2"), ("mods/b.jar", "b2"), ("mods/c.jar", "c2")], "");
+        apply_with(&mut inst, &v2, &zip, Some(&o), &job).unwrap();
+        assert_eq!(mods(&inst), ["a.jar", "b.jar.disabled"]);
+        assert_eq!(fs::read(inst.mods_dir().join("a.jar")).unwrap(), b"a2");
+        assert_eq!(fs::read(inst.mods_dir().join("b.jar.disabled")).unwrap(), b"b1");
+
+        // The pack drops b: it stays.
+        let v3 = index(&[("mods/a.jar", "a2")], "");
+        apply_with(&mut inst, &v3, &zip, Some(&o), &job).unwrap();
+        assert_eq!(mods(&inst), ["a.jar", "b.jar.disabled"]);
+
+        // An update the player starts doesn't keep it.
+        apply(&mut inst, &v3, &zip, &job).unwrap();
+        assert_eq!(mods(&inst), ["a.jar"]);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn mods(inst: &Instance) -> Vec<String> {

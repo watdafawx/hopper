@@ -492,7 +492,12 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, job
     let found = projects_of(&inst, &all);
     let here = mods(&here, lookup(&found));
     let sent = sent.map(|s| mods(&s, lookup(&found)));
-    let (todo, merged) = plan(copy, &here, sent.as_ref(), |c| read(c).map(|s| mods(&s, lookup(&found))));
+    let (todo, mut merged) = plan(copy, &here, sent.as_ref(), |c| read(c).map(|s| mods(&s, lookup(&found))));
+    // Mods kept only on this PC only learn how the others have them.
+    let (todo, kept) = crate::onlyhere::split(&mut inst, todo, &mut merged);
+    if kept && todo.is_empty() {
+        inst.save()?;
+    }
     if !todo.is_empty() {
         // Only a merge that changes something shows in Tasks; most codes
         // are echoes of changes already here.

@@ -82,6 +82,7 @@ pub mod modrinth;
 pub mod packdiff;
 pub mod packs;
 pub mod pack_where;
+pub mod onlyhere;
 pub mod panel;
 pub mod panic_log;
 pub mod paths;

@@ -206,7 +206,7 @@ pub fn apply_to(
                 PackTarget::Curse { project, file } => {
                     let f = crate::cf::file(project, file)
                         .context("The pack version they use isn't on CurseForge any more")?;
-                    crate::modpack::update_any(&mut inst, project, &f, None, job)?;
+                    crate::modpack::update_any_synced(&mut inst, project, &f, job)?;
                 }
                 PackTarget::Modrinth { project, version } => {
                     let (p, v) = (
@@ -215,7 +215,7 @@ pub fn apply_to(
                     );
                     let f = crate::source::file(p, v)
                         .context("The pack version they use isn't on Modrinth any more")?;
-                    crate::modpack::update_any(&mut inst, p, &f, None, job)?;
+                    crate::modpack::update_any_synced(&mut inst, p, &f, job)?;
                 }
             }
             inst = crate::instances::load(root)

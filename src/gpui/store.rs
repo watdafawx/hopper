@@ -18,11 +18,13 @@ use std::time::{Duration, Instant};
 
 mod disk_sync;
 mod friends;
+mod only_here;
 mod panel_events;
 mod server_mods;
 // Invite and SyncStatus are for the Friends screen being rebuilt on top.
 #[allow(unused_imports)]
 pub use friends::{FollowReq, FollowTarget, GroupMerged, Invite, RecipeApplied, SyncStatus, follow_pack, redeem};
+pub use only_here::{LockedChange, and_list};
 pub use server_mods::{RemoteLoose, remote as on_hopper_server, remote_config_files, remote_config_reset, remote_remove, remote_undo_remove};
 
 /// Results from worker threads.

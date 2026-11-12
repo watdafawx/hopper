@@ -2462,6 +2462,21 @@ impl Render for UpdatePreview {
                 };
                 let changes = self.changes(&plan, cx);
                 let stays = self.stays(&plan, cx);
+                // Mods kept only on this PC: friends sync leaves them alone,
+                // but an update the player starts can change them.
+                let kept: Vec<String> = if server_mode {
+                    Vec::new()
+                } else {
+                    self.store.read(cx).instance(&self.root).map_or_else(Vec::new, |i| {
+                        i.only_here
+                            .iter()
+                            .map(|(k, kept)| {
+                                i.addons.iter().find(|a| hopper::groupsync::addon_key(a) == *k).map_or_else(|| kept.name.clone(), |a| a.name.clone())
+                            })
+                            .filter(|n| !n.is_empty())
+                            .collect()
+                    })
+                };
                 v_flex()
                     .gap_4()
                     .when_some(mc_change, |c, (from, to)| {
@@ -2498,6 +2513,22 @@ impl Render for UpdatePreview {
                     .children(mine)
                     .child(changes)
                     .child(stays)
+                    .when(!kept.is_empty(), |c| {
+                        let n = kept.len();
+                        c.child(
+                            h_flex()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(Icon::new(IconName::Monitor).xsmall().flex_none())
+                                .child(format!(
+                                    "Only on this PC: {}. Friends' changes skip {}, but this update can change {} like any mod.",
+                                    crate::store::and_list(&kept),
+                                    if n == 1 { "it" } else { "them" },
+                                    if n == 1 { "it" } else { "them" },
+                                )),
+                        )
+                    })
                     .when(!server_mode, |c| {
                         c.child(
                             h_flex()

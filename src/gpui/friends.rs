@@ -459,6 +459,48 @@ impl FriendsPanel {
                     .into_any_element(),
             );
         }
+        // Mods kept only on this PC: how they are here, and Sync again.
+        let kept: Vec<AnyElement> = inst
+            .only_here
+            .iter()
+            .enumerate()
+            .map(|(i, (key, k))| {
+                let a = inst.addons.iter().find(|a| hopper::groupsync::addon_key(a) == *key);
+                let name = a.map(|a| a.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| k.name.clone());
+                let name = if name.is_empty() { "A mod".to_string() } else { name };
+                let here = match a {
+                    None => "removed here",
+                    Some(a) if !a.enabled => "off here",
+                    Some(_) => "on here",
+                };
+                let icon = a.and_then(|a| self.store.read(cx).image(&a.icon)).map(Path::to_path_buf);
+                let (store, root, key) = (self.store.clone(), inst.root.clone(), key.clone());
+                let (view, pid) = (me.clone(), a.map_or(0, |a| a.project_id));
+                h_flex()
+                    .id(("kept-row", i))
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded(theme.radius)
+                    .hover(|s| widgets::row_hover(s, cx))
+                    .child(div().flex_1().min_w_0().child(
+                        widgets::mod_link(("kept-name", i), name, icon.as_deref(), pid, move |p, _, cx| view.update(cx, |_, cx| cx.emit(FriendsEvent::Project(p))), cx)
+                            .text_sm(),
+                    ))
+                    .child(widgets::caption(here, cx).text_xs().flex_none())
+                    .child(
+                        Button::new(("kept-sync", i))
+                            .xsmall()
+                            .ghost()
+                            .label("Sync again")
+                            .tooltip("Put it back the way friends have it")
+                            .on_click(move |_, window, cx| {
+                                crate::addons::confirm_sync_again(store.clone(), root.clone(), vec![key.clone()], window, cx)
+                            }),
+                    )
+                    .into_any_element()
+            })
+            .collect();
         let paint_end = self.paint.clone();
         let copy = {
             let (store, root) = (self.store.clone(), inst.root.clone());
@@ -522,6 +564,20 @@ impl FriendsPanel {
                         c.child(div().px_2().pt_1().child(widgets::caption("Groups", cx).text_xs())).children(grows)
                     }),
             )
+            .when(!kept.is_empty(), |c| {
+                c.child(
+                    v_flex()
+                        .flex_none()
+                        .gap_1()
+                        .mt_1()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(div().px_2().text_sm().font_semibold().child("Only on this PC"))
+                        .child(div().px_2().pb_1().child(widgets::fine_print("Friends keep these as they have them.", cx)))
+                        .children(kept),
+                )
+            })
             .child(
                 v_flex()
                     .flex_none()
@@ -1324,6 +1380,8 @@ impl FriendsPanel {
                     CopyState::Held(_) => format!("From {sender}"),
                     CopyState::UpToDate => format!("From {sender} · up to date"),
                 };
+                let kept = s.instance(root).map_or(0, |i| i.only_here.len());
+                let sub = if kept > 0 { format!("{sub} · {kept} only on this PC") } else { sub };
                 let note = state.note(&who);
                 let changed = changed_by(s, root, &s.mailbox_id());
                 let waiting = matches!(state, CopyState::Held(_));
@@ -1911,6 +1969,7 @@ impl FriendsPanel {
                 let s = self.store.read(cx);
                 let icon = inst.icon.as_deref().and_then(|u| s.image(u)).map(Path::to_path_buf);
                 let open = self.share_pop.as_deref() == Some(inst.id.as_str());
+                let kept = inst.only_here.len();
                 let (root, inst_id) = (inst.root.clone(), inst.id.clone());
                 let anchors = self.anchors.clone();
                 let key = inst.id.clone();
@@ -1936,11 +1995,30 @@ impl FriendsPanel {
                                     }),
                             )
                             .child(
-                                widgets::caption(sub, cx)
-                                    .text_xs()
-                                    .truncate()
+                                h_flex()
+                                    .min_w_0()
+                                    .gap_1()
                                     .pl(rems(1.625))
-                                    .when(!who.is_empty(), |d| d.text_color(theme.foreground)),
+                                    .child(
+                                        widgets::caption(sub, cx)
+                                            .text_xs()
+                                            .truncate()
+                                            .when(!who.is_empty(), |d| d.text_color(theme.foreground)),
+                                    )
+                                    .when(kept > 0, |r| {
+                                        let id = inst.id.clone();
+                                        r.child(widgets::caption("·", cx).text_xs().flex_none()).child(
+                                            div()
+                                                .id(("my-pack-kept", i))
+                                                .flex_none()
+                                                .text_xs()
+                                                .text_color(crate::theme::ink(theme.info))
+                                                .clickable(cx)
+                                                .hover(|s| s.underline())
+                                                .child(format!("{kept} mod{} only on this PC", if kept == 1 { "" } else { "s" }))
+                                                .on_click(cx.listener(move |this, _, _, cx| this.set_pop(Some(id.clone()), cx))),
+                                        )
+                                    }),
                             ),
                     )
                     .children(faces)
@@ -3206,9 +3284,12 @@ fn alert_of<'a>(rows: impl Iterator<Item = &'a SyncRow>, cx: &App) -> Option<Til
 /// ago". Changes this PC made aren't news, so they're skipped.
 fn changed_by(s: &Store, root: &Path, me: &str) -> Option<String> {
     let c = s.group_copy(root)?;
-    let last = c.marks.values().filter(|m| m.by != me).max_by_key(|m| (m.at, m.seq))?;
+    // What others did to a mod kept only on this PC didn't happen here.
+    let kept = s.instance(root).map(|i| &i.only_here);
+    let marks = || c.marks.iter().filter(|(k, _)| !kept.is_some_and(|o| o.contains_key(*k))).map(|(_, m)| m);
+    let last = marks().filter(|m| m.by != me).max_by_key(|m| (m.at, m.seq))?;
     // The mods that one change touched the same way.
-    let n = c.marks.values().filter(|m| m.by == last.by && m.seq == last.seq && m.kind == last.kind).count();
+    let n = marks().filter(|m| m.by == last.by && m.seq == last.seq && m.kind == last.kind).count();
     let verb = match last.kind {
         Kind::Added => "added",
         Kind::Removed => "took out",
