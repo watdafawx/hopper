@@ -90,6 +90,10 @@ pub fn show_window() -> bool {
     if h == 0 {
         return false;
     }
+    // A test run leaves the player's windows alone: the window is open, that's all.
+    if crate::no_focus() {
+        return true;
+    }
     #[cfg(windows)]
     unsafe {
         use windows::Win32::Foundation::HWND;
