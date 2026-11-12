@@ -195,7 +195,13 @@ pub fn split(inst: &mut Instance, todo: Vec<Change>, merged: &mut Merged) -> (Ve
     let mut rest = Vec::new();
     let mut touched = false;
     for c in todo {
-        match inst.only_here.get_mut(&c.key) {
+        // A code may name the mod differently from its mark here (a pack
+        // mod by file name), so the mark is found through the mod.
+        let key = match inst.only_here.contains_key(&c.key) {
+            true => c.key.clone(),
+            false => groupsync::find_addon(inst, &c.key).map(|i| groupsync::addon_key(&inst.addons[i])).unwrap_or_else(|| c.key.clone()),
+        };
+        match inst.only_here.get_mut(&key) {
             Some(kept) => {
                 kept.theirs = c.entry;
                 touched = true;
@@ -375,7 +381,7 @@ mod tests {
     }
 
     fn got(code: &Share, seq: u64, name: &str) -> Got {
-        Got { code: crate::sharecode::encode(code), seq, at: seq, name: name.into() }
+        Got { code: crate::sharecode::encode(code), seq, at: seq, name: name.into(), ..Default::default() }
     }
 
     #[test]
@@ -395,7 +401,7 @@ mod tests {
         let (_j, job) = job();
         let here = crate::sharecode::make(&inst, &job).unwrap().share;
         let read = |c: &str| crate::sharecode::decode(c).ok().map(|s| mods_of(&s));
-        let (todo, mut merged) = groupsync::plan(&copy, &mods_of(&here), Some(&mods_of(&before)), read);
+        let (todo, mut merged) = groupsync::plan(&copy, &mods_of(&here), Some(&mods_of(&before)), false, read);
         assert_eq!(todo.len(), 2);
         let (todo, touched) = split(&mut inst, todo, &mut merged);
         assert!(touched);
@@ -431,7 +437,7 @@ mod tests {
         copy.arrive("me", got(&after, 2, "Me"));
         let mut inst = inst_with(vec![addon(1, 10, true, false)]);
         let read = |c: &str| crate::sharecode::decode(c).ok().map(|s| mods_of(&s));
-        let (todo, mut merged) = groupsync::plan(&copy, &mods_of(&before), None, read);
+        let (todo, mut merged) = groupsync::plan(&copy, &mods_of(&before), None, false, read);
         let (todo, touched) = split(&mut inst, todo, &mut merged);
         assert!(!touched);
         assert_eq!(todo.len(), 1);

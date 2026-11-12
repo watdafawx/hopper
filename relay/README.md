@@ -55,7 +55,7 @@ All routes except `register` and `health` need
 | `POST /v1/join` | `{code}` → `{friend, inst}`; 409 `friends_full` / `their_friends_full` |
 | `GET /v1/friends` | `{friends: [{id,name,mc_id,online,last_seen}], max}` |
 | `POST /v1/remove` | `{id}`; also leaves each other's groups |
-| `POST /v1/recipes` | `{to: [ids], groups: [ids], inst, key, name, code, left_out}` → `{seq, sent, skipped}`; one event per person |
+| `POST /v1/recipes` | `{to: [ids], groups: [ids], inst, key, name, code, left_out, marks?}` → `{seq, sent, skipped}`; one event per person |
 | `POST /v1/revoke` | `{inst, to: [ids], groups: [ids], reason}` (`unshared` / `deleted`) |
 | `GET /v1/recipes?after=N&wait=60&v=2` | `{seq, events}`; long-polls. Without `v=2` only `recipe` events |
 | `GET /v1/groups` | groups you own, belong to or are invited to |
@@ -96,7 +96,8 @@ Minecraft id. The protocol, event kinds and limits are in
 | Shutting down | new requests while the last save is written | `503` `busy` |
 
 `429` and `503` answers carry `Retry-After`. `left_out` is cut at 100
-entries of 400 bytes, names at 64 characters. Unexpected errors are a JSON
+entries of 400 bytes, names at 64 characters, `marks` (a group copy's
+stamps, `{key: {seq, by}}`) at 2000 entries; bad ones are dropped. Unexpected errors are a JSON
 `500` with `code: internal` and one log line; a dropped connection is one log
 line too.
 Set `HOPPER_MAILBOX_REGISTER_LIMIT`, `HOPPER_MAILBOX_MAX_CONNECTIONS`,

@@ -80,7 +80,7 @@ Removing a friend also takes each out of the other's groups and queues an
 
 | Route | Body → answer |
 |---|---|
-| `POST /v1/recipes` | `{to: [ids], groups: [ids], inst, key, name, code, left_out}` → `{seq, sent, skipped}` |
+| `POST /v1/recipes` | `{to: [ids], groups: [ids], inst, key, name, code, left_out, marks?}` → `{seq, sent, skipped}` |
 | `POST /v1/revoke` | `{inst, to: [ids], groups: [ids], reason}` |
 | `GET /v1/recipes?after=N&wait=60&v=2` | `{seq, events}`, long-polls up to `wait` seconds |
 
@@ -91,6 +91,15 @@ is skipped and listed in `skipped`; the rest still goes. A pack shared with
 a group is stored on the group (latest code), so members who join later get
 it. A recipe event replaces older queued recipes of the same pack for that
 person: only the newest code waits.
+
+`marks` (optional, group copies only) dates each mod in the code:
+`{mod key: {seq, by}}`, the event number and member of the change that made
+it that way. The relay passes it on as it is (cut to 2000 entries) and an
+older relay drops it. A member who passes on a change it took late then
+can't undo a newer one: its copy's change is dated by the stamp, not by the
+number of its own, later event. A member's first code is taken in only for
+its stamped mods, since an unstamped difference may just be that member
+being behind. Without stamps it all works as before.
 
 `reason` is `unshared` (the share was turned off) or `deleted` (the pack is
 gone on the sender's PC); anything else becomes `unshared`. The desktop
@@ -159,7 +168,7 @@ Every event has `seq`, `kind`, `from`, `from_name`, `at`. Without `v=2` only
 
 | kind | fields | the desktop |
 |---|---|---|
-| `recipe` | `inst, key, name, code, left_out, direct, groups` | lists it; applies it to every local follow |
+| `recipe` | `inst, key, name, code, left_out, direct, groups`, `marks` when sent | lists it; applies it to every local follow |
 | `revoke` | `inst, reason, direct, groups` | removes those ways in; once none is left the pack leaves the list and its follows end (`ended` = reason), keeping their last version |
 | `group` | `group` | reads the groups again |
 | `group_follow` | `group, pack_from, inst` | reads the groups again; keeping in step follows from there |
@@ -227,8 +236,8 @@ in `relay/hopper_mailbox.py` (constants at the top) and listed in
 - **Open invites**: 20 per account; run-out invites are swept on every
   invite and join.
 - **Sizes**: bytes, not characters: share code 20000 (larger is `413`),
-  each `left_out` entry 400 (100 entries), names 256. `inst` may not
-  contain `/`.
+  each `left_out` entry 400 (100 entries), names 256, `marks` 2000
+  entries (keys 600 bytes, `by` 64 characters). `inst` may not contain `/`.
 - **Connections**: 2000 at once (`503` above), 30 s socket timeout and 30 s
   for a whole request, header names must be tokens, 3 long-polls per
   account (a fourth ends the oldest, which is answered `409

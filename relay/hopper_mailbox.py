@@ -94,6 +94,8 @@ MAX_GROUPS_OWNED = 20
 MAX_GROUP_MEMBERS = 50
 MAX_GROUP_PACKS = 100
 MAX_GROUPS_PER_POST = 20
+# Stamps one group copy's code may carry (one per mod changed from the pack).
+MAX_MARKS = 2000
 # Abuse limits.
 SOCKET_TIMEOUT = 30           # seconds a read or write may stall
 REQUEST_DEADLINE = 30         # seconds for a whole request's headers and body
@@ -658,21 +660,43 @@ def make_event(to, kind, frm, **fields):
     return ev
 
 
+def marks_of(v):
+    """A group copy's stamps, passed on as they are: {mod key: {seq, by}},
+    when each mod got the way the code has it. Cut to MAX_MARKS; anything
+    else is dropped."""
+    if not isinstance(v, dict):
+        return {}
+    out = {}
+    for k, m in list(v.items())[:MAX_MARKS]:
+        if not isinstance(m, dict):
+            continue
+        seq = m.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+            continue
+        out[text(k, 300, 600)] = {"seq": min(seq, 2 ** 53), "by": text(m.get("by"), 64)}
+    return out
+
+
 def recipe_fields(body):
     left = body.get("left_out")
     if not isinstance(left, list):
         left = []
-    return {
+    fields = {
         "inst": text(body.get("inst"), 128),
         "key": text(body.get("key"), 128),
         "code": text(body.get("code"), 20000, 20000),
         "name": text(body.get("name"), 128),
         "left_out": [text(x, 200, 400) for x in left[:100]],
     }
+    marks = marks_of(body.get("marks"))
+    if marks:
+        fields["marks"] = marks
+    return fields
 
 
 def pack_bytes(p):
-    return size_of([p.get("inst", ""), p.get("key", ""), p.get("name", ""), p.get("code", ""), p.get("left_out", [])])
+    return size_of([p.get("inst", ""), p.get("key", ""), p.get("name", ""), p.get("code", ""), p.get("left_out", []),
+                    p.get("marks", {})])
 
 
 def pack_usage(uid):
@@ -793,7 +817,7 @@ def group_pack_events(uid, after):
             if p["from"] != uid and p.get("seq", 0) <= since:
                 ev = {"seq": since, "kind": "recipe", "from": p["from"], "at": p.get("at", 0),
                       "direct": False, "groups": [gid]}
-                for f in ("inst", "key", "code", "name", "left_out"):
+                for f in ("inst", "key", "code", "name", "left_out", "marks"):
                     if f in p:
                         ev[f] = p[f]
                 out.append(ev)

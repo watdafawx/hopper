@@ -94,6 +94,10 @@ pub struct Event {
     /// Group_follow: who shares the pack (`from` is the member who
     /// followed it).
     pub pack_from: String,
+    /// Recipe of a group pack kept both ways: when each mod got the way
+    /// the code has it ([`crate::groupsync::Stamp`]). Empty from an older
+    /// Hopper or mailbox.
+    pub marks: std::collections::BTreeMap<String, crate::groupsync::Stamp>,
 }
 
 impl Default for Event {
@@ -115,6 +119,7 @@ impl Default for Event {
             reason: String::new(),
             group: String::new(),
             pack_from: String::new(),
+            marks: Default::default(),
         }
     }
 }
@@ -533,6 +538,7 @@ impl Mailbox {
         name: &str,
         code: &str,
         left_out: &[String],
+        marks: &std::collections::BTreeMap<String, crate::groupsync::Stamp>,
     ) -> anyhow::Result<Sent> {
         if !self.has_groups()? {
             // An old mailbox takes one friend per call and knows no groups.
@@ -552,18 +558,21 @@ impl Mailbox {
             }
             return Ok(out);
         }
-        let v = self.call(
-            "/v1/recipes",
-            serde_json::json!({
-                "to": to,
-                "groups": groups,
-                "inst": inst,
-                "key": key,
-                "name": name,
-                "code": code,
-                "left_out": left_out,
-            }),
-        )?;
+        let mut body = serde_json::json!({
+            "to": to,
+            "groups": groups,
+            "inst": inst,
+            "key": key,
+            "name": name,
+            "code": code,
+            "left_out": left_out,
+        });
+        // Only a group pack kept both ways has any. An older mailbox drops
+        // them, and the copies then work as they did before.
+        if !marks.is_empty() {
+            body["marks"] = serde_json::to_value(marks)?;
+        }
+        let v = self.call("/v1/recipes", body)?;
         Ok(Sent {
             seq: v["seq"].as_u64().unwrap_or(0),
             sent: v["sent"].as_u64().unwrap_or(0) as usize,
@@ -993,7 +1002,7 @@ mod tests {
         // Single use.
         assert_eq!(failure(&b.join(&code).unwrap_err()), Failure::InviteUnknown);
         let to = [b.account().id.clone()];
-        let sent = a.publish_to(&to, &[], "pack-1", "TNP", "ATM", "HOP-test", &[]).unwrap();
+        let sent = a.publish_to(&to, &[], "pack-1", "TNP", "ATM", "HOP-test", &[], &Default::default()).unwrap();
         assert_eq!(sent.sent, 1);
         assert!(a.revoke("pack-1", &to, &[], "unshared").unwrap());
         let (_, events) = b.events(0, 5).unwrap();
@@ -1025,7 +1034,7 @@ mod tests {
         }
         c.set_in_step(&g.id, true).unwrap();
         let sent = a
-            .publish_to(&[b.account().id.clone()], &[g.id.clone()], "pack-1", "TNP", "ATM", "HOP-x", &[])
+            .publish_to(&[b.account().id.clone()], &[g.id.clone()], "pack-1", "TNP", "ATM", "HOP-x", &[], &Default::default())
             .unwrap();
         assert_eq!(sent.sent, 2);
         let (after, events) = b.events(0, 0).unwrap();

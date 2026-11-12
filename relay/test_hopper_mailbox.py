@@ -1194,6 +1194,30 @@ class ResilienceTest(Base):
         self.assertEqual(len([e for e in self.b.events() if e["kind"] == "recipe"]), 30)
         self.assertEqual([e for e in self.b.events() if e["kind"] == "recipe"], [])
 
+    def test_a_copys_stamps_go_along_and_bad_ones_are_dropped(self):
+        self.a.befriend(self.b)
+        gid = self.make_group(self.a, [self.b])
+        marks = {
+            "p:1": {"seq": 40, "by": "sam"},
+            "p:2": {"seq": True, "by": "x"},      # not a number
+            "p:3": {"seq": -1, "by": "x"},
+            "p:4": "40",
+            "n:" + "x" * 900: {"seq": 7, "by": "y" * 100},
+        }
+        self.a.post("/v1/recipes", dict(recipe("p1", marks=marks), to=[], groups=[gid]))
+        self.b.post("/v1/groups/%s/accept" % gid)
+        e = [e for e in self.b.events() if e["kind"] == "recipe"][-1]
+        self.assertEqual(e["marks"]["p:1"], {"seq": 40, "by": "sam"})
+        self.assertEqual(len(e["marks"]), 2)
+        long = [k for k in e["marks"] if k.startswith("n:")][0]
+        self.assertLessEqual(len(long.encode()), 600)
+        self.assertEqual(len(e["marks"][long]["by"]), 64)
+        # Through the queue too, and a code without stamps has none.
+        self.a.post("/v1/recipes", dict(recipe("p1", code="HOP-2", marks={"p:1": {"seq": 41, "by": "a"}}), to=[], groups=[gid]))
+        self.assertEqual(self.b.events()[-1]["marks"], {"p:1": {"seq": 41, "by": "a"}})
+        self.a.post("/v1/recipes", dict(recipe("p1", code="HOP-3"), to=[], groups=[gid]))
+        self.assertNotIn("marks", self.b.events()[-1])
+
     def test_a_pack_published_after_joining_comes_once_through_the_queue(self):
         self.a.befriend(self.b)
         gid = self.make_group(self.a, [self.b])

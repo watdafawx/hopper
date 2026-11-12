@@ -771,7 +771,13 @@ impl Store {
                         // The service lost its data: friends are gone there,
                         // and its event numbers start over.
                         s.mailbox_seq = 0;
-                        s.update_settings(|st| st.mailbox_handled = 0, cx);
+                        s.update_settings(
+                            |st| {
+                                st.mailbox_handled = 0;
+                                st.group_copies.iter_mut().for_each(|c| c.relay_reset());
+                            },
+                            cx,
+                        );
                         cx.emit(StoreEvent::Notice(
                             "Your friend list was lost. Invite your friends again with a new code.".into(),
                             true,
@@ -1047,7 +1053,11 @@ impl Store {
         if self.instance(root).is_some_and(|i| hopper::onlyhere::is_kept(i, a)) {
             return None;
         }
-        let m = self.group_copy(root)?.marks.get(&groupsync::addon_key(a))?;
+        // A pack mod may be marked by its file name, as codes name it.
+        let marks = &self.group_copy(root)?.marks;
+        let m = marks
+            .get(&groupsync::addon_key(a))
+            .or_else(|| marks.get(&format!("n:{}", a.file_name.trim_end_matches(".disabled").to_lowercase())))?;
         if m.name.is_empty() || m.by == self.mailbox_id() {
             return None;
         }
@@ -1080,7 +1090,7 @@ impl Store {
             let strays: Vec<Event> = self.group_strays.iter().filter(|((_, i), _)| *i == c.inst).map(|(_, e)| e.clone()).collect();
             for e in strays {
                 self.group_strays.remove(&(e.from.clone(), e.inst.clone()));
-                c.arrive(&e.from, Got { code: e.code, seq: e.seq, at: e.at, name: e.from_name });
+                c.arrive(&e.from, Got { code: e.code, seq: e.seq, at: e.at, name: e.from_name, stamps: e.marks });
             }
         }
         if copies != self.settings.group_copies {
@@ -1112,7 +1122,7 @@ impl Store {
             return;
         }
         let name = if e.from_name.is_empty() { self.friend_name(&e.from) } else { e.from_name.clone() };
-        let g = Got { code: e.code.clone(), seq: e.seq, at: e.at, name };
+        let g = Got { code: e.code.clone(), seq: e.seq, at: e.at, name, stamps: e.marks.clone() };
         if self.settings.group_copies.iter().any(|c| c.inst == e.inst) {
             self.update_settings_quietly(|st| {
                 for c in st.group_copies.iter_mut().filter(|c| c.inst == e.inst) {
@@ -1167,10 +1177,12 @@ impl Store {
         let mut sent_seq = 0;
         self.update_settings_quietly(|st| {
             let Some(c) = st.group_copies.iter_mut().find(|c| c.local == local) else { return };
+            let mut taken: Vec<(String, String)> = Vec::new();
             for (from, g) in merged.taken {
                 if c.waiting.get(&from).is_some_and(|w| w.seq == g.seq) {
                     c.waiting.remove(&from);
                 }
+                taken.push((from.clone(), g.code.clone()));
                 c.got.insert(from, g);
             }
             for (k, mk) in merged.marks {
@@ -1179,6 +1191,12 @@ impl Store {
                 }
             }
             sent_seq = c.sent_seq;
+            // The sharer's code is in: the follow has it applied now.
+            for f in st.followed_recipes.iter_mut().filter(|f| f.local == local) {
+                if let Some((_, code)) = taken.iter().find(|(from, _)| *from == f.peer_id) {
+                    f.code = code.clone();
+                }
+            }
         });
         if merged.held {
             if self.group_held.get(&local).is_none_or(|(s, _)| *s != sent_seq) {
@@ -1339,15 +1357,13 @@ impl Store {
         self.sync_copies();
         if self.settings.group_copies.iter().any(|c| c.inst == e.inst && c.local != c.inst) {
             let name = if e.from_name.is_empty() { self.friend_name(&e.from) } else { e.from_name.clone() };
-            let g = Got { code: e.code.clone(), seq: e.seq, at: e.at, name };
+            let g = Got { code: e.code.clone(), seq: e.seq, at: e.at, name, stamps: e.marks.clone() };
+            // The follow's applied code moves on once the merge took it in
+            // (`on_group_merged`), not now: a copy set up again from the
+            // follow would start from a code whose changes never went in.
             self.update_settings_quietly(|st| {
-                let mut two_way = Vec::new();
                 for c in st.group_copies.iter_mut().filter(|c| c.inst == e.inst && c.local != c.inst) {
                     c.arrive(&e.from, g.clone());
-                    two_way.push(c.local.clone());
-                }
-                for f in st.followed_recipes.iter_mut().filter(|f| f.inst == e.inst && two_way.contains(&f.local)) {
-                    f.code = e.code.clone();
                 }
             });
         }
@@ -2045,7 +2061,10 @@ impl PublishWork {
                     continue;
                 }
             };
-            match mb.publish_to(&plan.to, &plan.groups, &relay_inst, &key, &inst.name, &made.code, &made.left_out) {
+            // A group copy says when each mod got the way it is, so a change
+            // it only passes on keeps its own date (see `groupsync::Stamp`).
+            let marks = copy.as_ref().map(|c| groupsync::stamps(&inst, &c.copy, &made.share)).unwrap_or_default();
+            match mb.publish_to(&plan.to, &plan.groups, &relay_inst, &key, &inst.name, &made.code, &made.left_out, &marks) {
                 Ok(sent) => {
                     if let Some(c) = &copy
                         && !sent.skipped.contains(&c.copy.group)
