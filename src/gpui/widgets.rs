@@ -362,6 +362,8 @@ pub struct ModTags<'a> {
     /// Who in the group changed it last, when it wasn't this PC ("Turned
     /// off by Mia").
     pub changed_by: Option<&'a str>,
+    /// Kept only on this PC: friends sync leaves it alone.
+    pub only_here: bool,
     /// "client" | "server" | "both" | "".
     pub env: &'a str,
     pub categories: &'a [String],
@@ -414,6 +416,18 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         .when(t.new, |r| r.child(tag(ok, "New".into())))
         .when(t.added, |r| r.child(tag(warn, "Added by you".into())))
         .when_some(t.changed_by, |r, by| r.child(tag(info, by.to_string().into())))
+        .when(t.only_here, |r| {
+            r.child(
+                div()
+                    .id(ElementId::Name(format!("only-here:{}", t.key).into()))
+                    .flex_none()
+                    .child(chip(info).child("Only on this PC"))
+                    .tooltip(|w, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Friends' changes skip it here, and yours stay here. Right-click to sync it again.")
+                            .build(w, cx)
+                    }),
+            )
+        })
         .children(env)
         .children(
             t.categories

@@ -49,13 +49,13 @@ pub enum Base {
 }
 
 /// A pack mod, by CurseForge project or by file name.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Target {
     Curse(u64),
     Named(String),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Entry {
     /// This CurseForge file, in place of whatever file of its project is there.
     CurseFile { file: u64, enabled: bool },
@@ -506,6 +506,10 @@ pub fn make(inst: &Instance, job: &Job) -> anyhow::Result<Made> {
         if a.class_id == cf::CLASS_MODPACKS || (pack_project != 0 && a.project_id == pack_project) {
             continue;
         }
+        // Kept only on this PC: sent as friends last had it, below.
+        if crate::onlyhere::is_kept(inst, a) {
+            continue;
+        }
         if let Some(pf) = &pack {
             let in_pack = if !is_mr(a.project_id) && a.project_id != 0 && pf.curse.get(&a.project_id) == Some(&a.file_id) {
                 kept_cf.insert(a.project_id);
@@ -547,7 +551,7 @@ pub fn make(inst: &Instance, job: &Job) -> anyhow::Result<Made> {
         let mut removed: Vec<u64> = pf
             .curse
             .keys()
-            .filter(|p| !kept_cf.contains(p) && !present.contains(p))
+            .filter(|p| !kept_cf.contains(p) && !present.contains(p) && !inst.only_here.contains_key(&format!("p:{p}")))
             .copied()
             .collect();
         removed.sort_unstable();
@@ -557,7 +561,11 @@ pub fn make(inst: &Instance, job: &Job) -> anyhow::Result<Made> {
         let mut gone: Vec<&String> = pf
             .sha1
             .iter()
-            .filter(|(h, name)| !kept_sha1.contains(*h) && !present_names.contains(&name.to_lowercase()))
+            .filter(|(h, name)| {
+                !kept_sha1.contains(*h)
+                    && !present_names.contains(&name.to_lowercase())
+                    && !inst.only_here.contains_key(&format!("n:{}", name.to_lowercase()))
+            })
             .map(|(_, name)| name)
             .collect();
         gone.sort();
@@ -566,6 +574,7 @@ pub fn make(inst: &Instance, job: &Job) -> anyhow::Result<Made> {
             loader = Some(inst.loader.clone());
         }
     }
+    entries.extend(crate::onlyhere::theirs(inst));
     let pack_name = inst.pack.as_ref().map(|p| p.name.as_str()).unwrap_or("");
     let name = (inst.name != pack_name && !inst.name.is_empty()).then(|| inst.name.clone());
     let share = Share { base, name, loader, entries };
@@ -573,7 +582,7 @@ pub fn make(inst: &Instance, job: &Job) -> anyhow::Result<Made> {
 }
 
 /// The file entry for an addon, or `None` when it's on neither site.
-fn file_entry(a: &Addon) -> Option<Entry> {
+pub(crate) fn file_entry(a: &Addon) -> Option<Entry> {
     if crate::sources::is_src(a.project_id) {
         return None;
     }
@@ -750,8 +759,21 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     // Read before anything changes: the old code's files are matched to
     // the mods here by their file ids.
     let was = prev.map(|p| seen_in(inst, p)).unwrap_or_default();
+    // Mods kept only on this PC are left alone; what the code says about
+    // them is only remembered as how friends have them (`listed`).
+    let kept = |inst: &Instance, who: &Who| inst.only_here.contains_key(&who.key());
+    let mut listed: HashMap<String, Entry> = HashMap::new();
+    for e in &share.entries {
+        if let Entry::Remove(t) | Entry::Off(t) = e {
+            listed.insert(target_who(t).key(), e.clone());
+        }
+        if let Entry::Source { pin, .. } = e {
+            listed.insert(source_who(&pin.source).key(), e.clone());
+        }
+    }
     for e in &share.entries {
         if let Entry::Remove(t) = e
+            && !kept(inst, &target_who(t))
             && let Some(i) = find(inst, t)
         {
             let name = inst.addons[i].name.clone();
@@ -784,14 +806,20 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     for e in &share.entries {
         match e {
             Entry::CurseFile { file, enabled } => match owner.get(file) {
-                Some(&p) => files.push((p, *file, *enabled)),
+                Some(&p) => {
+                    listed.insert(Who::Project(p).key(), e.clone());
+                    files.push((p, *file, *enabled))
+                }
                 None => {
                     unsure = true;
                     job.note(format!("CurseForge has no file {file} any more"))
                 }
             },
             Entry::ModrinthFile { version, enabled } => match modrinth::version(version) {
-                Ok(v) => files.push((num_id(&v.project_id), num_id(&v.id), *enabled)),
+                Ok(v) => {
+                    listed.insert(Who::Project(num_id(&v.project_id)).key(), e.clone());
+                    files.push((num_id(&v.project_id), num_id(&v.id), *enabled))
+                }
                 Err(e) => {
                     unsure = true;
                     job.note(format!("Modrinth version {version}: {e:#}"))
@@ -805,7 +833,8 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     // Gone from their copy since the last code: it goes here too. Only what
     // the last code listed as theirs, so mods added on this PC stay.
     let (gone, back_on) = follow_changes(&was, &now);
-    for who in to_remove(&gone, unsure) {
+    let gone: Vec<Who> = to_remove(&gone, unsure).iter().filter(|w| !kept(inst, w)).cloned().collect();
+    for who in &gone {
         if let Some(i) = inst.addons.iter().position(|a| !a.from_pack && who.is(a)) {
             let name = inst.addons[i].name.clone();
             if let Err(e) = crate::install::remove(inst, i) {
@@ -816,6 +845,9 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     for (i, (project, file, enabled)) in files.iter().enumerate() {
         job.check_cancelled()?;
         job.progress(i, files.len());
+        if kept(inst, &Who::Project(*project)) {
+            continue;
+        }
         // Already here: nothing to download, only its switch to set.
         let here = inst.addons.iter().any(|a| a.project_id == *project && a.file_id == *file);
         let put = if here { Ok(String::new()) } else { crate::install::install_file(inst, *project, *file, job) };
@@ -835,7 +867,9 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     // its sha256. The source isn't trusted by this; updates wait for the
     // player to confirm it.
     for e in &share.entries {
-        if let Entry::Source { pin, enabled } = e {
+        if let Entry::Source { pin, enabled } = e
+            && !kept(inst, &source_who(&pin.source))
+        {
             job.check_cancelled()?;
             job.detail(format!("Getting {} from {}", pin.file, pin.source.publisher));
             if let Err(e) = crate::sources::install_pinned(inst, pin, *enabled, job) {
@@ -845,6 +879,7 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     }
     for e in &share.entries {
         if let Entry::Off(t) = e
+            && !kept(inst, &target_who(t))
             && let Some(i) = find(inst, t)
         {
             crate::install::set_enabled(inst, i, false)?;
@@ -852,11 +887,21 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     }
     // Turned back on in their copy. A file put in again keeps the switch it
     // had here, so this sets it.
+    let back_on: Vec<Who> = back_on.into_iter().filter(|w| !kept(inst, w)).collect();
     for who in &back_on {
         if let Some(i) = inst.addons.iter().position(|a| who.is(a))
             && let Err(e) = crate::install::set_enabled(inst, i, true)
         {
             job.note(format!("Couldn't turn {} on: {e:#}", inst.addons[i].name));
+        }
+    }
+    // How friends have the kept mods now. One the code doesn't list is
+    // the pack's own or not theirs, unless a lookup failed.
+    for (k, kept) in inst.only_here.iter_mut() {
+        match listed.get(k) {
+            Some(e) => kept.theirs = Some(e.clone()),
+            None if !unsure => kept.theirs = None,
+            None => {}
         }
     }
     inst.save()
@@ -874,6 +919,15 @@ enum Who {
 }
 
 impl Who {
+    /// The same mod's [`crate::groupsync::addon_key`].
+    fn key(&self) -> String {
+        match self {
+            Who::Project(p) => format!("p:{p}"),
+            Who::Source(url, pattern) => format!("s:{url}#{pattern}"),
+            Who::Named(n) => format!("n:{n}"),
+        }
+    }
+
     fn is(&self, a: &Addon) -> bool {
         match self {
             Who::Project(p) => a.project_id == *p,

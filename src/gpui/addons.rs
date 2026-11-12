@@ -543,6 +543,59 @@ fn peek_links(key: &str, lead: String, mods: &[(String, u64)], cap: usize, peek:
         })
 }
 
+/// "Sync with friends again" for kept mods (by key): puts each back the way
+/// friends have it. Asks first when that changes something here, naming
+/// what; otherwise just takes the marks off.
+pub(crate) fn confirm_sync_again(store: Entity<Store>, root: PathBuf, keys: Vec<String>, window: &mut Window, cx: &mut App) {
+    let (changes, what) = {
+        let s = store.read(cx);
+        let Some(inst) = s.instance(&root) else { return };
+        let mut changes: Vec<String> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        for k in &keys {
+            let Some(kept) = inst.only_here.get(k) else { continue };
+            let a = inst.addons.iter().find(|a| hopper::groupsync::addon_key(a) == *k);
+            let name = a.map(|a| a.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| kept.name.clone());
+            let name = if name.is_empty() { "A mod".to_string() } else { name };
+            if let Some(does) = hopper::onlyhere::sync_again_does(a, kept.theirs.as_ref()) {
+                changes.push(format!("{name} {does}"));
+            }
+            names.push(name);
+        }
+        let what = if names.len() == 1 { names[0].clone() } else { format!("{} mods", names.len()) };
+        (changes, what)
+    };
+    if changes.is_empty() {
+        store.read(cx).sync_again(&root, keys, &what);
+        return;
+    }
+    window.open_dialog(cx, move |dialog, window, _| {
+        let (store, root, keys, what) = (store.clone(), root.clone(), keys.clone(), what.clone());
+        dialog
+            .title(format!("Sync {what} with friends again?"))
+            .w(rems(30.).to_pixels(window.rem_size()))
+            .margin_top(rems(crate::widgets::DIALOG_TOP).to_pixels(window.rem_size()))
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(div().text_sm().child("It goes back the way friends have it, and their changes reach this PC again. Here:"))
+                    .children(changes.iter().map(|c| div().text_sm().child(format!("• {c}")))),
+            )
+            .footer(
+                DialogFooter::new()
+                    .child(DialogClose::new().child(Button::new("sync-again-cancel").ghost().label("Cancel")))
+                    .child(DialogAction::new().child(Button::new("sync-again-ok").primary().label("Sync again"))),
+            )
+            .on_ok(move |_, _, cx| {
+                store.read(cx).sync_again(&root, keys.clone(), &what);
+                true
+            })
+    });
+}
+
+/// Names the "Turned off … · Just for me" toast, one per instance.
+struct LockedToast;
+
 /// What removing `n` files does, for the remove dialogs: deleted for good,
 /// undone from History by downloading again; `unknown` (no download
 /// source) are the only ones History keeps a copy of.
@@ -752,6 +805,9 @@ pub struct AddonsView {
     pick_anchor: Option<usize>,
     /// The files a switch or Update drag will act on when let go.
     swept: HashSet<String>,
+    /// The open "Turned off … · Just for me" toast: its instance, whether it
+    /// was a remove, and what Just for me keeps (`None` once used).
+    locked_open: Option<(PathBuf, bool, Rc<std::cell::RefCell<Option<crate::store::LockedChange>>>)>,
     /// Jars in the mods folder Hopper doesn't track, by folder mtime.
     /// Keyed by folder, its mtime and the tracked file names (identifying
     /// jars tracks them without touching the folder).
@@ -918,6 +974,7 @@ impl AddonsView {
             pick: PickState::default(),
             pick_anchor: None,
             swept: HashSet::new(),
+            locked_open: None,
             loose: (None, Vec::new()),
             table: Table::default(),
             scroll: UniformListScrollHandle::new(),
@@ -1875,6 +1932,135 @@ impl AddonsView {
         self.store.update(cx, |s, cx| s.update_settings(|st| st.dependents = mode, cx));
     }
 
+    /// Opens a mod named in a dialog in the panel beside the page, leaving
+    /// the dialog open.
+    fn dialog_peek(&self, cx: &mut Context<Self>) -> Peek {
+        let view = cx.entity();
+        let store = self.store.read(cx);
+        let icons: HashMap<u64, PathBuf> = self
+            .root
+            .as_ref()
+            .and_then(|r| store.instance(r))
+            .map(|i| {
+                i.addons
+                    .iter()
+                    .filter(|a| a.project_id != 0)
+                    .filter_map(|a| Some((a.project_id, store.image(&a.icon)?.to_path_buf())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Peek {
+            open: Rc::new(move |pid, window, cx| {
+                view.update(cx, |v, cx| v.open_peek(pid, cx));
+                window.refresh();
+            }),
+            icons: Rc::new(icons),
+        }
+    }
+
+    /// Before turning off or removing files: the locked mods among them
+    /// that the change reaches friends with. Packs' other places, global
+    /// folders, servers and Hopper Server have no friends to reach.
+    fn locked_change(&self, files: &[String], remove: bool, cx: &mut Context<Self>) -> Option<crate::store::LockedChange> {
+        if self.server || self.remote || self.where_mode() || self.order_mode() || self.global_dir().is_some() {
+            return None;
+        }
+        let root = self.root.as_ref()?;
+        self.store.read(cx).locked_change(root, files, remove)
+    }
+
+    /// After turning off or removing locked mods in a pack friends keep the
+    /// same: one toast for the lot ("Turned off Sodium for Weekend crew"),
+    /// whose "Just for me" puts them back for everyone and keeps the change
+    /// only on this PC. No question first: most changes are meant for
+    /// everyone, and a dialog every time would be noise. It stays until
+    /// closed (Just for me has no other way back), and a second change while
+    /// it's open joins it rather than stacking a second toast.
+    fn locked_toast(&mut self, mut change: crate::store::LockedChange, remove: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        if let Some((r, rm, open)) = self.locked_open.take()
+            && r == root
+            && rm == remove
+            && let Some(prev) = open.borrow_mut().take()
+        {
+            // The earlier freeze is how friends had those before either change.
+            for (k, v) in prev.kept {
+                change.kept.insert(k, v);
+            }
+            let mut names = prev.names;
+            names.extend(change.names.into_iter().filter(|n| !names.contains(n)).collect::<Vec<_>>());
+            change.names = names;
+        }
+        let one = change.names.len() == 1;
+        let what = if one { change.names[0].clone() } else { format!("{} locked mods", change.names.len()) };
+        let mut text = format!("{} {what} for {}.", if remove { "Removed" } else { "Turned off" }, change.with.for_whom());
+        if remove {
+            text.push_str(" Undo in ⋯ › History.");
+        }
+        let tip = if remove {
+            "Back for everyone else, removed only on this PC"
+        } else {
+            "Back on for everyone else, off only on this PC"
+        };
+        let store = self.store.clone();
+        let kept = Rc::new(std::cell::RefCell::new(Some(change)));
+        self.locked_open = Some((root.clone(), remove, kept.clone()));
+        let id = root.to_string_lossy().to_string();
+        let closed = kept.clone();
+        let note = Notification::success(text)
+            .id1::<LockedToast>(SharedString::from(id))
+            // Closed without it: the next change gets a toast of its own.
+            .on_close(move |_, _| {
+                closed.borrow_mut().take();
+            })
+            .action(move |_, _, cx| {
+                let (store, root, kept) = (store.clone(), root.clone(), kept.clone());
+                let done = kept.borrow().is_none();
+                Button::new("locked-just-me")
+                    .label("Just for me")
+                    .tooltip(tip)
+                    .disabled(done)
+                    .on_click(cx.listener(move |note, _, window, cx| {
+                        if let Some(c) = kept.borrow_mut().take() {
+                            let r = store.update(cx, |s, cx| {
+                                let r = s.keep_only_here_as(&root, c.kept);
+                                cx.notify();
+                                r
+                            });
+                            if let Err(e) = r {
+                                window.push_notification(Notification::error(e), cx);
+                            }
+                        }
+                        note.dismiss(window, cx);
+                    }))
+            });
+        window.push_notification(note, cx);
+    }
+
+    /// Marks files' mods "Only on this PC". Returns whether it worked.
+    fn keep_only_here(&mut self, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(root) = self.root.clone() else { return false };
+        let r = self.store.update(cx, |s, cx| {
+            let r = s.keep_only_here(&root, &files);
+            cx.notify();
+            r
+        });
+        let ok = r.is_ok();
+        self.report(r, window, cx);
+        ok
+    }
+
+    /// "Sync with friends again" for files' mods.
+    fn ask_sync_again(&mut self, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let keys: Vec<String> = {
+            let s = self.store.read(cx);
+            let Some(inst) = s.instance(&root) else { return };
+            files.iter().filter_map(|f| inst.addon_by_file(f)).map(hopper::groupsync::addon_key).collect()
+        };
+        confirm_sync_again(self.store.clone(), root, keys, window, cx);
+    }
+
     pub(crate) fn set_enabled(
         &mut self,
         files: Vec<String>,
@@ -1893,11 +2079,15 @@ impl AddonsView {
         let Some(root) = self.root.clone() else {
             return;
         };
+        let locked = if on { None } else { self.locked_change(&files, false, cx) };
         let r = self.store.update(cx, |s, cx| {
             let r = s.set_enabled(&root, &files, on);
             cx.notify();
             r
         });
+        if let (Ok(()), Some(change)) = (&r, locked) {
+            self.locked_toast(change, false, window, cx);
+        }
         self.report(r, window, cx);
     }
 
@@ -1990,29 +2180,7 @@ impl AddonsView {
             remove_intro(files.len(), &unknown)
         };
         let body_focus = cx.focus_handle();
-        let peek: Peek = {
-            let view = view.clone();
-            let store = self.store.read(cx);
-            let icons: HashMap<u64, PathBuf> = self
-                .root
-                .as_ref()
-                .and_then(|r| store.instance(r))
-                .map(|i| {
-                    i.addons
-                        .iter()
-                        .filter(|a| a.project_id != 0)
-                        .filter_map(|a| Some((a.project_id, store.image(&a.icon)?.to_path_buf())))
-                        .collect()
-                })
-                .unwrap_or_default();
-            Peek {
-                open: Rc::new(move |pid, window, cx| {
-                    view.update(cx, |v, cx| v.open_peek(pid, cx));
-                    window.refresh();
-                }),
-                icons: Rc::new(icons),
-            }
-        };
+        let peek: Peek = self.dialog_peek(cx);
         let focus_later = body_focus.clone();
         window.open_dialog(cx, move |dialog, window, cx| {
             let with = {
@@ -2193,6 +2361,7 @@ impl AddonsView {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs())
             .saturating_sub(1);
+        let locked = self.locked_change(&files, true, cx);
         let r = store.update(cx, |s, cx| {
             let r = s.remove_files(&root, &files);
             cx.notify();
@@ -2213,7 +2382,11 @@ impl AddonsView {
         if let Err(e) = r {
             window.push_notification(Notification::error(e), cx);
         }
-        if !moved.is_empty() {
+        // Locked mods friends had too: that toast, with "Just for me" (Undo
+        // stays in History), rather than two toasts.
+        if let Some(change) = locked.filter(|_| !moved.is_empty()) {
+            self.locked_toast(change, true, window, cx);
+        } else if !moved.is_empty() {
             let n = moved.len();
             let undone = Rc::new(std::cell::Cell::new(false));
             let note = Notification::success(if n == 1 {
@@ -3002,6 +3175,31 @@ impl AddonsView {
             .iter()
             .filter_map(|f| inst.addon_by_file(f))
             .all(|a| a.locked);
+        // In a pack friends keep the same: keep the picked mods only on this
+        // PC, or sync them again when every one is kept.
+        let synced = self.store.read(cx).synced_with(&inst.root).is_some();
+        let all_kept = files.iter().filter_map(|f| inst.addon_by_file(f)).all(|a| hopper::onlyhere::is_kept(inst, a));
+        let keep_btn = (synced || all_kept).then(|| {
+            let f = files.clone();
+            Button::new("bulk-only-here")
+                .small()
+                .ghost()
+                .icon(if all_kept { IconName::RefreshCw } else { IconName::Monitor })
+                .label(if all_kept { "Sync again" } else { "Only on this PC" })
+                .tooltip(if all_kept {
+                    "Put them back the way friends have them"
+                } else {
+                    "Friends' changes skip them here, and yours stay here"
+                })
+                .on_click(cx.listener(move |this, _, w, cx| {
+                    if all_kept {
+                        this.ask_sync_again(f.clone(), w, cx)
+                    } else {
+                        this.keep_only_here(f.clone(), w, cx);
+                    }
+                }))
+                .into_any_element()
+        });
         let (f1, f2, f3, f4) = (files.clone(), files.clone(), files.clone(), files);
         let mut extra = vec![
             Button::new("bulk-enable")
@@ -3027,6 +3225,7 @@ impl AddonsView {
                 .on_click(cx.listener(move |this, _, w, cx| this.set_locks(f4.clone(), !all_locked, w, cx)))
                 .into_any_element(),
         ];
+        extra.extend(keep_btn);
         if !ups.is_empty() {
             let n = ups.len();
             extra.push(
@@ -3889,6 +4088,10 @@ impl AddonsView {
         let lock_line = update.is_some() && (vlocked || !breaks.is_empty() || needs.is_some());
         // A group pack kept both ways: who changed this mod last.
         let changed_by = self.root.as_ref().and_then(|r| store.group_mark(r, a));
+        // Kept only on this PC; and in a pack friends keep the same, the
+        // row menu offers to keep it (or sync it again).
+        let kept = !global && self.root.as_ref().and_then(|r| store.instance(r)).is_some_and(|i| hopper::onlyhere::is_kept(i, a));
+        let keep_menu = (!global && (kept || self.root.as_ref().is_some_and(|r| store.synced_with(r).is_some()))).then_some(kept);
         let tags = widgets::mod_tags(
             widgets::ModTags {
                 key: &file,
@@ -3898,13 +4101,14 @@ impl AddonsView {
                 new: flags.new && !flags.added,
                 added: flags.added,
                 changed_by: changed_by.as_deref(),
+                only_here: kept,
                 env: &a.env,
                 // Narrow, the categories give the version chip room.
                 categories: if self.compact { &[] } else { store.categories(a) },
                 modrinth: !a.mr_project.is_empty(),
                 crashed: self.crashed.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).map(String::as_str),
                 // One category fewer next to who changed it.
-                max_categories: if lock_line { Some(0) } else { changed_by.is_some().then_some(1) },
+                max_categories: if lock_line { Some(0) } else { (changed_by.is_some() || kept).then_some(1) },
                 source: a.source.as_ref().map(|s| s.kind.label()),
                 source_changed: update.is_some_and(|u| u.file.source.as_ref().is_some_and(|s| s.changed)),
             },
@@ -4234,6 +4438,7 @@ It stays disabled after updating: turn it on in the On column.")
             (pid_menu, locked, mr, has_project, global, on),
             update.map(|u| (u.versions(), u.file.file_name.clone(), vlocked)),
             src_menu,
+            keep_menu,
         );
         h_flex()
             .id(id("row"))
@@ -4664,6 +4869,52 @@ Change version", a.file_name).into()
 
     /// Beside the version chip: what the update breaks (each mod with its
     /// icon, opening its page) and Lock, or the locked tag (a click unlocks).
+    /// In a pack friends keep the same: the mods that only change this
+    /// player's own game (CurseForge and Modrinth tag them client-side),
+    /// offered to keep only on this PC. Nothing is marked until they pick;
+    /// Review picks them in the list, next to the selection's "Only on
+    /// this PC". Shown once per pack.
+    fn only_here_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.server || self.remote || self.class != cf::CLASS_MODS || self.global_dir().is_some() {
+            return None;
+        }
+        // Marks live in the store; the table's copy can be a step behind.
+        let store = self.store.read(cx);
+        let marked = |a: &Addon| store.instance(&inst.root).unwrap_or(inst).only_here.contains_key(&hopper::groupsync::addon_key(a));
+        let client: Vec<&Addon> = inst
+            .addons
+            .iter()
+            .filter(|a| in_class(a, cf::CLASS_MODS) && a.env == "client" && !hidden_copy(&self.table.extra, &a.file_name))
+            .filter(|a| !marked(a))
+            .collect();
+        if client.is_empty() || store.synced_with(&inst.root).is_none() {
+            return None;
+        }
+        let theme = cx.theme();
+        let n = client.len();
+        let names: Vec<String> = client.iter().map(|a| a.name.clone()).collect();
+        let text = format!(
+            "{} only change{} your own game ({}). Keep {} only on this PC?",
+            if n == 1 { "1 mod".to_string() } else { format!("{n} mods") },
+            if n == 1 { "s" } else { "" },
+            crate::store::and_list(&names),
+            if n == 1 { "it" } else { "them" },
+        );
+        let key = hopper::settings::notice_key(&inst.root.to_string_lossy(), "only-here", "");
+        let files: Vec<String> = client.iter().map(|a| a.file_name.clone()).collect();
+        let body = crate::crash_help::callout(theme.info, cx)
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(div().flex_1().text_sm().child(text))
+            .child(Button::new("only-here-review").small().outline().label("Review").on_click(cx.listener(move |this, _, _, cx| {
+                this.selected = files.iter().cloned().collect();
+                cx.notify();
+            })));
+        let notice = widgets::closable_notice(body, key, widgets::Closed::Gone, "", theme.info, &self.store, cx)?;
+        Some(div().px_6().child(notice).into_any_element())
+    }
+
     /// A server's mods: "N client-only mods on", as Hopper Server's web UI
     /// says, with Show (the Client-only filter). Hidden once closed, until
     /// the count changes.
@@ -4912,6 +5163,9 @@ Change version", a.file_name).into()
         // The offered update's (versions, file name, locked out).
         vlock: Option<((String, String), String, bool)>,
         src_menu: Option<SrcMenu>,
+        // In a pack friends keep the same: whether this mod is kept only
+        // on this PC.
+        keep: Option<bool>,
     ) -> Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu> {
             // A source-tracked mod isn't on either site.
             let followed = src_menu.as_ref().is_some_and(|s| s.source.is_some());
@@ -5033,6 +5287,22 @@ Change version", a.file_name).into()
                         })
                     }),
                 ))
+                .when_some(keep, |m, kept| {
+                    let (v, f) = (view.clone(), f_menu.clone());
+                    m.item(
+                        PopupMenuItem::new(if kept { "Sync with friends again" } else { "Only on this PC" })
+                            .icon(if kept { IconName::RefreshCw } else { IconName::Monitor })
+                            .on_click(move |_, window, cx| {
+                                v.update(cx, |this, cx| {
+                                    if kept {
+                                        this.ask_sync_again(vec![f.clone()], window, cx)
+                                    } else {
+                                        this.keep_only_here(vec![f.clone()], window, cx);
+                                    }
+                                })
+                            }),
+                    )
+                })
                 .item(
                     PopupMenuItem::new(if on { "Disable" } else { "Enable" }).on_click(
                         move |_, window, cx| {
@@ -5834,6 +6104,7 @@ impl Render for AddonsView {
         let shaders = self.shader_notes(&inst, cx);
         let restart = self.restart_note(&inst, cx);
         let client_on = self.client_on_note(&inst, cx);
+        let only_here = self.only_here_note(&inst, cx);
         let updates = self.table.updates.clone();
         let rows = self.table.rows.clone();
         // Narrow with the instance list open: offer its room, once.
@@ -5974,6 +6245,7 @@ impl Render for AddonsView {
             .child(toolbar)
             .children(restart)
             .children(client_on)
+            .children(only_here)
             .children(blockers)
             .children(dups)
             .children(missing)
