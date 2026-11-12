@@ -144,6 +144,10 @@ pub fn sync_again_does(a: Option<&Addon>, theirs: Option<&Entry>) -> Option<&'st
 /// friends have it. The marks come off even when a change fails (it's
 /// noted and the error returned); the mod is then an ordinary synced one.
 pub fn sync_again(inst: &mut Instance, keys: &[String], job: &Job) -> anyhow::Result<()> {
+    // The copy handed in can be older than the folder (an update or merge may
+    // have finished since), so start from what's on disk.
+    let _edit = crate::instances::edit_lock(&inst.root);
+    crate::instances::reload(inst);
     let mut todo = Vec::new();
     for k in keys {
         let Some(kept) = inst.only_here.remove(k) else { continue };

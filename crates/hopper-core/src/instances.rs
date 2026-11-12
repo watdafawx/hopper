@@ -559,23 +559,93 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     }
 }
 
-/// The in-process lock for one instance folder.
-fn root_lock(root: &Path) -> Arc<Mutex<()>> {
-    static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
-        LazyLock::new(Default::default);
-    // Windows paths are case-insensitive; one lock per folder however spelled.
-    let key = PathBuf::from(
+/// What one instance folder's locks go by. Windows paths are
+/// case-insensitive: one lock per folder however spelled.
+fn lock_key(root: &Path) -> PathBuf {
+    PathBuf::from(
         root.to_string_lossy()
             .trim_end_matches(['\\', '/'])
             .replace('/', "\\")
             .to_lowercase(),
-    );
+    )
+}
+
+/// The in-process lock for one instance folder.
+fn root_lock(root: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+        LazyLock::new(Default::default);
     LOCKS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .entry(key)
+        .entry(lock_key(root))
         .or_default()
         .clone()
+}
+
+/// Which thread is changing each instance's mods, and how many times it
+/// took the lock.
+type Editing = (Mutex<HashMap<PathBuf, (std::thread::ThreadId, usize)>>, std::sync::Condvar);
+static EDITING: LazyLock<Editing> = LazyLock::new(Default::default);
+
+/// Held by a job while it changes an instance's mods (an update, a group's
+/// changes, a followed pack's): another such job waits, then reads the
+/// instance again and starts from what the first one left. Two at once each
+/// saved its own list over the other's: the jar one put in stayed in the
+/// folder unlisted beside the other's, and the file one replaced was already
+/// gone, so History had no row for it.
+///
+/// The thread holding it may take it again (a job's steps do). It's not
+/// the lock [`Instance::update_on_disk`] takes: a quick change from the
+/// window never waits for a long job.
+pub fn edit_lock(root: &Path) -> EditGuard {
+    let key = lock_key(root);
+    let me = std::thread::current().id();
+    let (held, freed) = &*EDITING;
+    let mut map = held.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        match map.get(&key).map(|(who, _)| *who == me) {
+            None => {
+                map.insert(key.clone(), (me, 1));
+                break;
+            }
+            Some(true) => {
+                if let Some((_, n)) = map.get_mut(&key) {
+                    *n += 1;
+                }
+                break;
+            }
+            Some(false) => map = freed.wait(map).unwrap_or_else(|e| e.into_inner()),
+        }
+    }
+    EditGuard { key }
+}
+
+/// See [`edit_lock`]; let go when dropped.
+pub struct EditGuard {
+    key: PathBuf,
+}
+
+impl Drop for EditGuard {
+    fn drop(&mut self) {
+        let (held, freed) = &*EDITING;
+        let mut map = held.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, n)) = map.get_mut(&self.key) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.key);
+            }
+        }
+        freed.notify_all();
+    }
+}
+
+/// `inst` read again from disk, when it reads: a job's copy (taken when the
+/// job started, or the window's) may be older than what another job saved
+/// since. Call it holding [`edit_lock`].
+pub fn reload(inst: &mut Instance) {
+    if let Some(fresh) = load(&inst.root).filter(|i| i.unreadable.is_none()) {
+        *inst = fresh;
+    }
 }
 
 /// `hopper.json` as saved: `Ok(None)` when there is none, `Err` when it
@@ -1410,6 +1480,24 @@ impl Instance {
 
 #[cfg(test)]
 mod tests {
+    /// A job's own steps take the lock again freely; another job on the same
+    /// folder (however the path is spelled) waits until it's let go.
+    #[test]
+    fn edit_lock_waits_for_other_threads_only() {
+        use std::time::Duration;
+        let outer = super::edit_lock(Path::new("/hopper-edit-lock-test"));
+        drop(super::edit_lock(Path::new("/hopper-edit-lock-test")));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let other = std::thread::spawn(move || {
+            let _held = super::edit_lock(Path::new("/HOPPER-edit-lock-test/"));
+            tx.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "took the lock while another thread held it");
+        drop(outer);
+        rx.recv_timeout(Duration::from_secs(10)).expect("never got the lock after it was let go");
+        other.join().unwrap();
+    }
+
     #[test]
     fn window_instance_wins_then_global_then_stock() {
         let own = WindowSetting { mode: WindowMode::Fullscreen, width: 1920, height: 1080 };

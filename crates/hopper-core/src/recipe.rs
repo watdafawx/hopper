@@ -185,6 +185,9 @@ pub fn apply_to(
     if let Some(n) = note {
         job.note(n);
     }
+    // Same reason as groupsync::merge: nothing else changes the mods while
+    // this copy is the one being applied and saved.
+    let _edit = crate::instances::edit_lock(root);
     let mut inst = crate::instances::load(root)
         .with_context(|| format!("{} isn't an instance any more", root.display()))?;
     // An instance whose file couldn't be read loads blank, and a blank

@@ -285,7 +285,34 @@ fn place_file(
         s.prev_project = o.prev_project;
         s.prev_mr_project = o.prev_mr_project.clone();
     }
-    replace_addon(inst, old, new, dest)
+    let (source, folder) = (new.source.clone(), new.folder());
+    replace_addon(inst, old, new, dest)?;
+    match source {
+        Some(s) => set_aside_strays(inst, folder, &s.pattern),
+        None => Ok(()),
+    }
+}
+
+/// Other files of a mod from GitHub or a link that lie in the mods folder
+/// with no entry (a list saved over by an older copy of the instance kept
+/// one out): they go to backups, so the mod is in once after an update.
+/// Only a file shape that names the mod counts ("foxstweaks-#+neoforge-#.jar",
+/// not "#.jar"), and only files no entry has.
+fn set_aside_strays(inst: &Instance, folder: &str, pattern: &str) -> anyhow::Result<()> {
+    let names_mod = pattern.split('#').next().is_some_and(|head| head.chars().filter(char::is_ascii_alphabetic).count() >= 3);
+    if !names_mod {
+        return Ok(());
+    }
+    let Ok(entries) = fs::read_dir(inst.root.join(folder)) else { return Ok(()) };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let base = name.strip_suffix(".disabled").unwrap_or(&name);
+        if !e.path().is_file() || !crate::sources::matches_pattern(pattern, base) || inst.addon_by_file(base).is_some() {
+            continue;
+        }
+        move_out(&inst.root, &e.path(), false)?;
+    }
+    Ok(())
 }
 
 fn add_pending_note(root: &std::path::Path, p: crate::modpack::Pending, job: &Job) -> anyhow::Result<()> {
@@ -1058,11 +1085,41 @@ pub fn apply_updates_with(
             on(u.project_id, Some((n as f32 / total).min(1.0)))
         })
     });
+    let fetched = todo.into_iter().zip(got).map(|((m, u, from_pack), r)| (m, u, from_pack, r)).collect();
+    let pages = place_fetched(inst, fetched, job, on)?;
+    job.check_cancelled()?;
+    Ok(pages)
+}
+
+/// An update's download, ready to go in: the project, the update, whether
+/// it's a pack mod, and what [`fetch_file`] got.
+type Download<'a> = (cf::Mod, &'a Update, bool, anyhow::Result<Fetched>);
+
+/// Puts downloaded updates in place and saves. The instance is read again
+/// first, under its [edit lock](crate::instances::edit_lock): the copy the
+/// update started from may be older than what another job (a group's
+/// changes, say) saved while the files downloaded, and replacing from that
+/// copy would leave the other job's file in the folder beside this one.
+fn place_fetched(
+    inst: &mut Instance,
+    fetched: Vec<Download<'_>>,
+    job: &Job,
+    on: &(dyn Fn(u64, Option<f32>) + Sync),
+) -> anyhow::Result<Vec<String>> {
+    let _edit = crate::instances::edit_lock(&inst.root);
+    crate::instances::reload(inst);
     let mut pages = Vec::new();
-    for ((m, u, from_pack), r) in todo.iter().zip(got) {
+    for (m, u, from_pack, r) in fetched {
         // A disabled mod stays disabled (see `keep_history`).
         let r = r.and_then(|f| match f {
-            Fetched::File(dest) => place_file(inst, m, &u.file, *from_pack, &dest).map(|_| true),
+            Fetched::File(dest) => match moved_on(inst, u) {
+                Some(why) => {
+                    discard_download(inst, &dest);
+                    job.note(format!("{}: {why}", u.name));
+                    Ok(false)
+                }
+                None => place_file(inst, &m, &u.file, from_pack, &dest).map(|_| true),
+            },
             // Hopper's download window gets it; no note to act on.
             Fetched::Pending(p) => {
                 pages.push(p.url.clone());
@@ -1081,8 +1138,31 @@ pub fn apply_updates_with(
     }
     // Keep what was done before a cancel.
     inst.save()?;
-    job.check_cancelled()?;
     Ok(pages)
+}
+
+/// Why an update no longer fits the mod as the instance has it now: it was
+/// offered for one file, and meanwhile the mod went to another (a friend's
+/// change) or was removed. Putting it in then would undo that change.
+fn moved_on(inst: &Instance, u: &Update) -> Option<&'static str> {
+    if u.from.is_empty() {
+        return None;
+    }
+    let now: Vec<&Addon> = inst.addons.iter().filter(|a| a.project_id == u.project_id).collect();
+    if now.is_empty() {
+        return Some("it was removed while the update downloaded, so it wasn't put back.");
+    }
+    if now.iter().any(|a| a.file_name.eq_ignore_ascii_case(&u.from) || a.file_name.eq_ignore_ascii_case(&u.file.file_name)) {
+        return None;
+    }
+    Some("it changed to another file while the update downloaded, so the update was left out. Check for updates again.")
+}
+
+/// Deletes a download that isn't going in, unless a mod's file is there.
+fn discard_download(inst: &Instance, dest: &std::path::Path) {
+    if !inst.addons.iter().any(|a| same_path(&inst.addon_path(a), dest)) {
+        let _ = fs::remove_file(dest);
+    }
 }
 
 /// Installs one specific file of a project (CurseForge or Modrinth),
@@ -2319,5 +2399,168 @@ mod off_copies_tests {
         // Unknown jars (no project) never pair up.
         let unknown = [addon("x.jar", 0, 0, true), addon("y.jar", 0, 0, false)];
         assert!(off_copies(&unknown).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod stale_copy_tests {
+    //! An update of a GitHub mod that started from an older copy of the
+    //! instance (another job saved while it downloaded) still leaves the mod
+    //! in once, with the file it replaced as one History row.
+    use super::{Fetched, Update, place_fetched};
+    use crate::cf;
+    use crate::instances::{Addon, Instance};
+    use crate::sources::{Kind, ModSource, SrcFile};
+    use std::path::{Path, PathBuf};
+
+    fn jar(version: &str) -> String {
+        format!("foxstweaks-{version}+neoforge-1.21.1.jar")
+    }
+
+    fn fox_id() -> u64 {
+        crate::sources::src_id("github:owner/foxs-tweaks")
+    }
+
+    fn source() -> ModSource {
+        ModSource { kind: Kind::GitHub, url: "owner/foxs-tweaks".into(), pattern: crate::sources::pattern_of(&jar("1.22.0")), ..Default::default() }
+    }
+
+    fn fox(version: &str) -> Addon {
+        Addon {
+            project_id: fox_id(),
+            file_name: jar(version),
+            name: "Fox's Tweaks".into(),
+            enabled: true,
+            class_id: cf::CLASS_MODS,
+            source: Some(source()),
+            ..Default::default()
+        }
+    }
+
+    fn other(file: &str) -> Addon {
+        Addon { project_id: 238222, file_name: file.into(), name: file.into(), enabled: true, class_id: cf::CLASS_MODS, ..Default::default() }
+    }
+
+    /// An instance saved with `addons`, each with its jar in the folder.
+    fn saved(tag: &str, addons: Vec<Addon>) -> Instance {
+        let root = std::env::temp_dir().join(format!("hopper-stale-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        let inst = Instance { root, name: "Test".into(), addons, ..Default::default() };
+        for a in &inst.addons {
+            std::fs::write(inst.addon_path(a), a.file_name.as_bytes()).unwrap();
+        }
+        inst.save().unwrap();
+        inst
+    }
+
+    /// The update from `from` to `to`, downloaded the way `fetch_file`
+    /// leaves a source file.
+    fn downloaded(inst: &Instance, from: &str, to: &str) -> (cf::Mod, Update, PathBuf) {
+        let src = SrcFile { source: source(), ..Default::default() };
+        let file = cf::File { mod_id: fox_id(), file_name: jar(to), source: Some(Box::new(src)), ..Default::default() };
+        let dest = inst.mods_dir().join(format!("{}.hopper-download", jar(to)));
+        std::fs::write(&dest, b"new").unwrap();
+        let m = cf::Mod { id: fox_id(), name: "Fox's Tweaks".into(), class_id: Some(cf::CLASS_MODS), ..Default::default() };
+        (m, Update { project_id: fox_id(), name: "Fox's Tweaks".into(), from: jar(from), file }, dest)
+    }
+
+    fn place(inst: &mut Instance, from: &str, to: &str, job: &crate::jobs::Job) {
+        let (m, u, dest) = downloaded(inst, from, to);
+        place_fetched(inst, vec![(m, &u, false, Ok(Fetched::File(dest)))], job, &|_, _| {}).unwrap();
+    }
+
+    fn fox_jars(root: &Path) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(root.join("mods"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("foxstweaks"))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Every History row (folder) and the files in it.
+    fn history(root: &Path) -> Vec<Vec<String>> {
+        let Ok(rows) = std::fs::read_dir(root.join(crate::sync::BACKUP_DIR)) else { return Vec::new() };
+        rows.flatten()
+            .filter(|r| r.path().is_dir())
+            .map(|r| {
+                std::fs::read_dir(r.path())
+                    .unwrap()
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.starts_with("foxstweaks"))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn job() -> (crate::jobs::Jobs, crate::jobs::Job) {
+        let jobs = crate::jobs::Jobs::default();
+        let j = jobs.start("t");
+        (jobs, j)
+    }
+
+    /// The update began before a friend's change added a mod; the copy it
+    /// holds doesn't have that mod. The update still replaces the jar on
+    /// disk, and the friend's mod stays listed.
+    #[test]
+    fn an_update_from_an_older_copy_replaces_the_jar_once() {
+        let stale = saved("older", vec![fox("1.22.0")]);
+        let mut on_disk = stale.clone();
+        on_disk.addons.push(other("jei.jar"));
+        std::fs::write(on_disk.addon_path(&on_disk.addons[1]), b"jei").unwrap();
+        on_disk.save().unwrap();
+        let (_jobs, job) = job();
+        let mut inst = stale;
+        place(&mut inst, "1.22.0", "1.23.0", &job);
+
+        let root = inst.root.clone();
+        assert_eq!(fox_jars(&root), vec![jar("1.23.0")]);
+        let back = crate::instances::load(&root).unwrap();
+        let foxes: Vec<&str> = back.addons.iter().filter(|a| a.project_id == fox_id()).map(|a| a.file_name.as_str()).collect();
+        assert_eq!(foxes, vec![jar("1.23.0")]);
+        assert!(back.addon_by_file("jei.jar").is_some(), "the friend's mod was saved over");
+        assert_eq!(history(&root), vec![vec![jar("1.22.0")]]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A jar of the mod left in the folder with no entry (a list saved over
+    /// by an older copy, before the fix) goes to History with the replaced
+    /// one, so the mod is in once.
+    #[test]
+    fn a_leftover_jar_of_the_mod_goes_to_history() {
+        let mut inst = saved("leftover", vec![fox("1.22.0"), other("jei.jar")]);
+        std::fs::write(inst.mods_dir().join(jar("1.20.0")), b"old").unwrap();
+        let (_jobs, job) = job();
+        place(&mut inst, "1.22.0", "1.23.0", &job);
+
+        let root = inst.root.clone();
+        assert_eq!(fox_jars(&root), vec![jar("1.23.0")]);
+        let mut kept: Vec<String> = history(&root).concat();
+        kept.sort();
+        assert_eq!(kept, vec![jar("1.20.0"), jar("1.22.0")]);
+        assert!(root.join("mods/jei.jar").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The update was offered for 1.20.0, and while it downloaded a friend's
+    /// change moved the mod to 1.22.0. Putting 1.23.0 in now would undo that
+    /// change unasked, so it's left out with a note and the download goes.
+    #[test]
+    fn an_update_for_a_file_that_changed_meanwhile_is_left_out() {
+        let mut stale = saved("moved", vec![fox("1.22.0")]);
+        stale.addons[0] = fox("1.20.0");
+        let (_jobs, job) = job();
+        place(&mut stale, "1.20.0", "1.23.0", &job);
+
+        let root = stale.root.clone();
+        assert_eq!(fox_jars(&root), vec![jar("1.22.0")]);
+        assert_eq!(stale.addons.iter().map(|a| a.file_name.clone()).collect::<Vec<_>>(), vec![jar("1.22.0")]);
+        assert_eq!(job.note_count(), 1);
+        assert!(history(&root).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

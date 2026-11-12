@@ -475,6 +475,9 @@ fn claim_changes(inst: &Instance, todo: &[Change], merged: &Merged, group: &str)
 /// `ignore_unsent`: a change here waited for its publish too long; the
 /// other members' changes go in anyway.
 pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, job: &Job) -> anyhow::Result<Merged> {
+    // Held to the end: an update that finished meanwhile would otherwise be
+    // undone by this older copy, with its new jar left behind unlisted.
+    let _edit = crate::instances::edit_lock(root);
     let mut inst = crate::instances::load(root).with_context(|| format!("{} isn't an instance any more", root.display()))?;
     if inst.unreadable.is_some() {
         if crate::instances::may_read_later(&inst) {
