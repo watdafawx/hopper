@@ -19,14 +19,16 @@ pub struct SyncedWith {
 }
 
 impl SyncedWith {
-    /// Who a change went to, after "for": "Weekend crew", "Mia's pack",
-    /// "Mia and Sam's packs".
+    /// Who a change reaches, after "for": the group by name ("Weekend
+    /// crew"), one friend by name ("Mia"), several as a count ("3 friends").
     pub fn for_whom(&self) -> String {
-        match (self.groups.is_empty(), self.friends.as_slice()) {
-            (true, [one]) => format!("{one}'s pack"),
-            (true, many) if !many.is_empty() => format!("{}'s packs", and_list(many)),
-            _ => self.label.clone(),
-        }
+        let friends = match self.friends.as_slice() {
+            [] => None,
+            [one] => Some(one.clone()),
+            many => Some(format!("{} friends", many.len())),
+        };
+        let names: Vec<String> = self.groups.iter().cloned().chain(friends).collect();
+        and_list(&names)
     }
 }
 
@@ -162,8 +164,9 @@ mod tests {
                 .for_whom()
         };
         assert_eq!(w(&["drunk gamblers"], &[]), "drunk gamblers");
-        assert_eq!(w(&[], &["Mia"]), "Mia's pack");
-        assert_eq!(w(&[], &["Mia", "Sam"]), "Mia and Sam's packs");
-        assert_eq!(w(&["drunk gamblers"], &["Mia"]), "Mia and drunk gamblers");
+        assert_eq!(w(&[], &["Mia"]), "Mia");
+        assert_eq!(w(&[], &["Mia", "Sam", "Ana"]), "3 friends");
+        assert_eq!(w(&["drunk gamblers"], &["Mia"]), "drunk gamblers and Mia");
+        assert_eq!(w(&["drunk gamblers"], &["Mia", "Sam"]), "drunk gamblers and 2 friends");
     }
 }
