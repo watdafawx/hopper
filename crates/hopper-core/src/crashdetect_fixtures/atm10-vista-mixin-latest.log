@@ -1,0 +1,70 @@
+[12Nov2026 06:28:24.052] [main/WARN] [mixin/]: Reference map 'connectivity.refmap.json' for connectivity.mixins.json could not be read. If this is a development environment you can ignore this message
+[12Nov2026 06:28:24.056] [main/WARN] [mixin/]: Reference map 'vista_advanced_player.refmap.json' for vista_advanced_player.mixins.json could not be read. If this is a development environment you can ignore this message
+[12Nov2026 06:28:26.370] [main/WARN] [mixin/]: @Mixin target com.animenkin.vistaplus.urlcassette.UrlRewriter was not found vista_advanced_player.mixins.json:UrlRewriterMixin from mod vista_advanced_player
+[12Nov2026 06:29:44.538] [Render thread/WARN] [ModernFix/]: Game took 111.847 seconds to start
+[12Nov2026 06:31:57.385] [Render thread/FATAL] [mixin/]: Mixin apply for mod vista_advanced_player failed vista_advanced_player.mixins.json:WebUrlVideoSourceMixin from mod vista_advanced_player -> net.mehvahdjukaar.vista.client.video_source.WebUrlVideoSource: org.spongepowered.asm.mixin.transformer.throwables.InvalidMixinException @Shadow field projectorID was not located in the target class net.mehvahdjukaar.vista.client.video_source.WebUrlVideoSource. No refMap loaded.
+org.spongepowered.asm.mixin.transformer.throwables.InvalidMixinException: @Shadow field projectorID was not located in the target class net.mehvahdjukaar.vista.client.video_source.WebUrlVideoSource. No refMap loaded.
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.attachFields(MixinPreProcessorStandard.java:624) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.attach(MixinPreProcessorStandard.java:302) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.createContextFor(MixinPreProcessorStandard.java:277) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinInfo.createContextFor(MixinInfo.java:1292) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinApplicatorStandard.apply(MixinApplicatorStandard.java:203) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.TargetClassContext.apply(TargetClassContext.java:437) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.TargetClassContext.applyMixins(TargetClassContext.java:418) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:352) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	... 52 more
+Caused by: org.spongepowered.asm.mixin.throwables.MixinApplyError: Mixin [vista_advanced_player.mixins.json:WebUrlVideoSourceMixin from mod vista_advanced_player] from phase [DEFAULT] in config [vista_advanced_player.mixins.json] FAILED during APPLY
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.handleMixinError(MixinProcessor.java:686) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.handleMixinApplyError(MixinProcessor.java:637) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:368) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	... 52 more
+Caused by: org.spongepowered.asm.mixin.transformer.throwables.InvalidMixinException: @Shadow field projectorID was not located in the target class net.mehvahdjukaar.vista.client.video_source.WebUrlVideoSource. No refMap loaded.
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.attachFields(MixinPreProcessorStandard.java:624) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.attach(MixinPreProcessorStandard.java:302) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.createContextFor(MixinPreProcessorStandard.java:277) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinInfo.createContextFor(MixinInfo.java:1292) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinApplicatorStandard.apply(MixinApplicatorStandard.java:203) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.TargetClassContext.apply(TargetClassContext.java:437) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.TargetClassContext.applyMixins(TargetClassContext.java:418) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:352) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	... 52 more
+[12Nov2026 06:32:00.413] [Netty Client IO #2/ERROR] [net.minecraft.network.Connection/]: Exception caught in connection
+io.netty.handler.codec.DecoderException: Failed to decode packet 'clientbound/minecraft:custom_payload'
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.codec.IdDispatchCodec.decode(IdDispatchCodec.java:38) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.codec.IdDispatchCodec.decode(IdDispatchCodec.java:14) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.PacketDecoder.redirect$zzl000$connectivity$checkDecodingError(PacketDecoder.java:558) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.PacketDecoder.decode(PacketDecoder.java:31) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at MC-BOOTSTRAP/io.netty.codec@4.1.97.Final/io.netty.handler.codec.ByteToMessageDecoder.decodeRemovalReentryProtection(ByteToMessageDecoder.java:529) ~[netty-codec-4.1.97.Final.jar%23156!/:4.1.97.Final]
+	at MC-BOOTSTRAP/io.netty.codec@4.1.97.Final/io.netty.handler.codec.ByteToMessageDecoder.callDecode(ByteToMessageDecoder.java:468) ~[netty-codec-4.1.97.Final.jar%23156!/:4.1.97.Final]
+	at MC-BOOTSTRAP/io.netty.codec@4.1.97.Final/io.netty.handler.codec.ByteToMessageDecoder.channelRead(ByteToMessageDecoder.java:290) ~[netty-codec-4.1.97.Final.jar%23156!/:4.1.97.Final]
+	at MC-BOOTSTRAP/io.netty.transport@4.1.97.Final/io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:444) ~[netty-transport-4.1.97.Final.jar%23162!/:4.1.97.Final]
+	at MC-BOOTSTRAP/io.netty.transport@4.1.97.Final/io.netty.channel.AbstractChannelHandlerContext.invokeChannelRead(AbstractChannelHandlerContext.java:420) ~[netty-transport-4.1.97.Final.jar%23162!/:4.1.97.Final]
+	at MC-BOOTSTRAP/io.netty.transport@4.1.97.Final/io.netty.channel.AbstractChannelHandlerContext.fireChannelRead(AbstractChannelHandlerContext.java:412) ~[netty-transport-4.1.97.Final.jar%23162!/:4.1.97.Final]
+	at MC-BOOTSTRAP/io.netty.handler@4.1.97.Final/io.netty.handler.flow.FlowControlHandler.dequeue(FlowControlHandler.java:202) ~[netty-handler-4.1.97.Final.jar%23158!/:4.1.97.Final]
+	at MC-BOOTSTRAP/io.netty.transport@4.1.97.Final/io.netty.channel.nio.NioEventLoop.run(NioEventLoop.java:562) ~[netty-transport-4.1.97.Final.jar%23162!/:4.1.97.Final]
+	at MC-BOOTSTRAP/io.netty.common@4.1.97.Final/io.netty.util.concurrent.SingleThreadEventExecutor$4.run(SingleThreadEventExecutor.java:997) ~[netty-common-4.1.97.Final.jar%23157!/:4.1.97.Final]
+	at MC-BOOTSTRAP/io.netty.common@4.1.97.Final/io.netty.util.internal.ThreadExecutorMap$2.run(ThreadExecutorMap.java:74) ~[netty-common-4.1.97.Final.jar%23157!/:4.1.97.Final]
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?]
+Caused by: java.lang.RuntimeException: Failed decoding custom payload curios:sync_stack: java.lang.IllegalArgumentException: No value with id 41090
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.protocol.common.custom.CustomPacketPayload$1.decode(CustomPacketPayload.java:55) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.protocol.common.custom.CustomPacketPayload$1.decode(CustomPacketPayload.java:29) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.codec.StreamCodec$4.decode(StreamCodec.java:76) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.codec.StreamCodec$5.decode(StreamCodec.java:91) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.codec.StreamCodec$5.decode(StreamCodec.java:87) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.codec.IdDispatchCodec.decode(IdDispatchCodec.java:36) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	... 46 more
+Caused by: java.lang.IllegalArgumentException: No value with id 41090
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.IdMap.byIdOrThrow(IdMap.java:19) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.codec.ByteBufCodecs$25.decode(ByteBufCodecs.java:475) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.codec.ByteBufCodecs$25.decode(ByteBufCodecs.java:464) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.ItemStack$1.decode(ItemStack.java:139) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.ItemStack$1.decode(ItemStack.java:131) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.codec.StreamCodec$12.decode(StreamCodec.java:258) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.protocol.common.custom.CustomPacketPayload$1.decode(CustomPacketPayload.java:53) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.protocol.common.custom.CustomPacketPayload$1.decode(CustomPacketPayload.java:29) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.codec.StreamCodec$4.decode(StreamCodec.java:76) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.codec.StreamCodec$5.decode(StreamCodec.java:91) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.codec.StreamCodec$5.decode(StreamCodec.java:87) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.codec.IdDispatchCodec.decode(IdDispatchCodec.java:36) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?]
+	... 46 more
+[12Nov2026 06:32:06.130] [Render thread/INFO] [STDOUT/]: [net.minecraft.server.Bootstrap:realStdoutPrintln:135]: #@!@# Game crashed! Crash report saved to: #@!@# C:\instances\ATM10\crash-reports\crash-2026-11-12_06.32.00-client.txt

@@ -1,0 +1,8 @@
+side = "client"
+mods = "a10f1a5608"
+report = "crash-2026-11-12_06.32.00-client.txt"
+problem = 18
+expect = ["vista_advanced_player"]
+at_least = "Certain"
+pass = true
+note = "Vista: Advanced Player has a mixin that looks for projectorID in Vista's WebUrlVideoSource; Vista 5.6.x doesn't have it. The crash names Vista's class while loading a block entity in the world."

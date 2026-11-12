@@ -720,7 +720,25 @@ async fn crash(
     require(&app, &headers, &method)?;
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
     let root = e.root.clone();
-    let c = tokio::task::spawn_blocking(move || hopper_core::crashdetect::server(&root)).await.map_err(bad)?;
+    // The last update check: an "Update X" step shows only while a newer X is out.
+    let ups: Option<std::collections::HashSet<u64>> = crate::mods_api::cached_updates(&id)
+        .map(|v| v.iter().filter_map(|u| u["project_id"].as_str()?.parse().ok()).collect());
+    let c = tokio::task::spawn_blocking(move || {
+        let mut c = hopper_core::crashdetect::server(&root)?;
+        let inst = hopper_core::instances::load(&root);
+        let mods = root.join("mods");
+        for s in &mut c.suspects {
+            let pid = inst
+                .as_ref()
+                .and_then(|i| i.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(s.file_name.trim_end_matches(".disabled"))))
+                .map_or(0, |a| a.project_id);
+            let newer = ups.as_ref().and_then(|u| (pid != 0).then(|| u.contains(&pid)));
+            s.steps = hopper_core::crashdetect::steps_shown(s, &mods, newer);
+        }
+        Some(c)
+    })
+    .await
+    .map_err(bad)?;
     let report = c
         .as_ref()
         .and_then(|c| c.source.strip_prefix(&e.root).ok())

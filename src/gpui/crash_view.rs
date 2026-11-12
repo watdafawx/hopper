@@ -73,12 +73,13 @@ pub fn partner_line(s: &Suspect, link: Link, cx: &App) -> Option<AnyElement> {
 
 /// The suspect's next steps, numbered: what to update, change or remove.
 /// `readable` turns mod ids in them into names.
-pub fn steps_list(s: &Suspect, readable: &dyn Fn(&str) -> String, cx: &App) -> Option<AnyElement> {
-    if s.steps.is_empty() {
+pub fn steps_list(s: &Suspect, mods_dir: &std::path::Path, newer: Option<bool>, readable: &dyn Fn(&str) -> String, cx: &App) -> Option<AnyElement> {
+    let steps = hopper::crashdetect::steps_shown(s, mods_dir, newer);
+    if steps.is_empty() {
         return None;
     }
     let theme = cx.theme();
-    let rows = s.steps.iter().enumerate().map(|(i, t)| {
+    let rows = steps.iter().enumerate().map(|(i, t)| {
         h_flex()
             .gap_1p5()
             .items_start()
@@ -93,6 +94,14 @@ pub fn steps_list(s: &Suspect, readable: &dyn Fn(&str) -> String, cx: &App) -> O
             .children(rows)
             .into_any_element(),
     )
+}
+
+/// Whether a newer version of a mod is out, from the instance's last
+/// update check: None when there's been no check or the mod isn't from a
+/// site, so an "Update it" step stays.
+pub fn newer_out(updates: Option<&crate::store::Updates>, project_id: u64) -> Option<bool> {
+    let list = updates?.ready()?;
+    (project_id != 0).then(|| list.iter().any(|u| u.project_id == project_id))
 }
 
 /// The mods "Turn off…" would turn off, before it does: each with a tick
