@@ -3,7 +3,8 @@
 A free, open source Minecraft modpack launcher and mod manager for Windows
 (CurseForge and Modrinth packs): fast and native, in Rust on
 [GPUI](https://www.gpui.rs/). It keeps hundreds of mods up to date, explains
-crashes and keeps servers in step with their pack. Plus **Hopper Server**: a self-hosted Minecraft server
+crashes, keeps servers in step with their pack, and keeps packs in step with
+friends. Plus **Hopper Server**: a self-hosted Minecraft server
 panel you use from any browser, on Windows, Linux (x64 and ARM64) or Docker.
 Hopper is built for playing packs fast, and keeps your Minecraft servers in
 step with them.
@@ -34,7 +35,8 @@ In the open: most of Hopper's code is written with help from AI, Anthropic's Cla
 - **Accounts**: several Microsoft accounts; try skins on an animated 3D model (walk, run, swim, dance and more), then change your skin (file, link or player name), cape and name.
 - **Ctrl+K**: jump to any instance, tab, server or mod, or run an action.
 - **Ctrl+,**: Settings, with a search over every setting (Ctrl+F there too).
-- **Peers**: sync an instance with a friend's PC on your network.
+- **Friends**: share packs with friends and groups. Invite with a code, follow a friend's pack, or keep a group's packs the same for everyone. Changes arrive by themselves, even while you play, and any mod can stay Only on this PC.
+- **History**: every change with who made it (you, a friend or a group), with a filter by person. Undo one change or a whole batch.
 - **Themes**: 19 themes, dark and light, plus your own theme files.
 
 ## Screenshots
@@ -49,6 +51,14 @@ In the open: most of Hopper's code is written with help from AI, Anthropic's Cla
 | Browse CurseForge and Modrinth | Ctrl+K: jump anywhere or run an action |
 | ![A running server through Crafty](docs/screenshots/servers.png) | ![Server sync](docs/screenshots/sync.png) |
 | A running server through its panel | Server sync: a server against its pack |
+| ![Friends: Everyone, your groups and your packs](docs/screenshots/friends-panel.png) | ![Packs from friends, with what changed and who changed it](docs/screenshots/friends-packs.png) |
+| Friends: Everyone, your groups and your packs in one rail | Packs from friends, with what changed and who changed it |
+| ![Changes while the game runs](docs/screenshots/mods-changes-while-playing.png) | ![Just for me on a shared mod](docs/screenshots/mods-just-for-me.png) |
+| Changes while the game runs: a mod it holds open waits | Just for me: a shared mod goes back for friends, off here |
+| ![Only on this PC](docs/screenshots/mods-only-on-this-pc.png) | ![History with who changed what](docs/screenshots/history-who.png) |
+| Only on this PC: never goes to friends | History: who changed what, with a filter by person |
+| ![Hopper Server's History](docs/screenshots/panel-history-who.png) | |
+| The same History in Hopper Server's panel | |
 | ![Logs & crashes](docs/screenshots/logs.png) | |
 | Logs & crashes, with Crash help | |
 
