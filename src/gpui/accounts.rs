@@ -13,7 +13,6 @@ use anyhow::{Context as _, bail};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
@@ -499,6 +498,15 @@ enum NameCheck {
     Failed(String),
 }
 
+/// Looking up a player (or a link) from the Change skin field.
+enum Lookup {
+    Idle,
+    Looking,
+    /// On the preview now: whose skin, or the link's.
+    Found(String),
+    Failed(String),
+}
+
 /// A skin on the preview, not worn yet.
 struct Pending {
     label: String,
@@ -571,7 +579,7 @@ pub struct AccountsView {
     discover_next: usize,
     discover_loading: bool,
     discover_error: Option<String>,
-    show_url: bool,
+    lookup: Lookup,
     name_input: Entity<InputState>,
     url_input: Entity<InputState>,
     name_check: NameCheck,
@@ -583,7 +591,7 @@ impl AccountsView {
     fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("New name"));
         let url_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Skin URL, NameMC link or player name")
+            InputState::new(window, cx).placeholder("Player name or link")
         });
         let viewer = cx.new(SkinViewer::new);
         let subs = vec![
@@ -604,10 +612,14 @@ impl AccountsView {
                     this.check_name_soon(cx);
                 }
             }),
-            cx.subscribe_in(&url_input, window, |this, _, e: &InputEvent, window, cx| {
-                if matches!(e, InputEvent::PressEnter { .. }) {
-                    this.apply_url(window, cx);
+            cx.subscribe_in(&url_input, window, |this, _, e: &InputEvent, window, cx| match e {
+                InputEvent::PressEnter { .. } => this.look_up(window, cx),
+                // An old answer no longer fits what's typed.
+                InputEvent::Change if !matches!(this.lookup, Lookup::Looking) => {
+                    this.lookup = Lookup::Idle;
+                    cx.notify();
                 }
+                _ => {}
             }),
         ];
         let mut view = Self {
@@ -632,7 +644,7 @@ impl AccountsView {
             discover_next: 0,
             discover_loading: false,
             discover_error: None,
-            show_url: false,
+            lookup: Lookup::Idle,
             name_input,
             url_input,
             name_check: NameCheck::Empty,
@@ -974,7 +986,12 @@ impl AccountsView {
         .detach();
     }
 
-    fn apply_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Looks up the player name or link typed in the Change skin field
+    /// and puts the skin on the preview, with the arms the player uses.
+    fn look_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.lookup, Lookup::Looking) {
+            return;
+        }
         let input = self.url_input.read(cx).value().trim().to_string();
         if input.is_empty() {
             return;
@@ -982,20 +999,43 @@ impl AccountsView {
         let link = match mcprofile::parse_skin_link(&input) {
             Ok(l) => l,
             Err(e) => {
-                window.push_notification(Notification::error(e), cx);
+                self.lookup = Lookup::Failed(e);
+                cx.notify();
                 return;
             }
         };
-        let label = match &link {
-            SkinLink::Player(n) => format!("{n}'s skin"),
-            SkinLink::Png(_) => "Skin from a link".to_string(),
+        let doing = match &link {
+            SkinLink::Player(n) => format!("Looking up {n}…"),
+            SkinLink::Png(_) => "Fetching the skin…".to_string(),
         };
-        self.show_url = false;
-        self.url_input.update(cx, |s, cx| s.set_value("", window, cx));
-        self.load_pending("Fetching the skin", label, window, cx, move || {
-            let (bytes, variant) = mcprofile::fetch_skin(&link)?;
-            Ok((bytes, variant, None))
-        });
+        self.lookup = Lookup::Looking;
+        self.loading = Some(doing.into());
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    let f = mcprofile::fetch_skin(&link)?;
+                    let label = match &f.player {
+                        Some(n) => format!("{n}'s skin"),
+                        None => "Skin from a link".to_string(),
+                    };
+                    Pending::new(label, f.png, f.variant, None)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.loading = None;
+                match r {
+                    Ok(p) => {
+                        this.lookup = Lookup::Found(p.label.clone());
+                        this.pending = Some(p);
+                    }
+                    Err(e) => this.lookup = Lookup::Failed(format!("{e:#}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Wears the skin on the preview.
@@ -1596,32 +1636,20 @@ impl AccountsView {
             Pose::LookAround => IconName::Eye,
             Pose::Cycle => IconName::Repeat,
         };
-        // One menu of poses, so the animation doesn't dominate the tab.
-        let poses = {
+        // Every pose at once, in the picker's three groups; one click
+        // switches. Each group wraps on its own when the column is narrow.
+        let poses = h_flex().flex_wrap().gap_1p5().children(Pose::GROUPS.iter().enumerate().map(|(g, (_, list))| {
+            let list: &'static [Pose] = list;
             let viewer = self.viewer.clone();
-            Button::new("pose-menu")
-                .small()
-                .outline()
-                .icon(pose_icon(pose))
-                .label(pose.label())
-                .dropdown_menu(move |menu, _, _| {
-                    let mut menu = menu;
-                    for (i, (_, list)) in Pose::GROUPS.iter().enumerate() {
-                        if i > 0 {
-                            menu = menu.separator();
-                        }
-                        for &p in list.iter() {
-                            let viewer = viewer.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(p.label())
-                                    .icon(pose_icon(p))
-                                    .on_click(move |_, _, cx| viewer.update(cx, |v, cx| v.set_pose(p, cx))),
-                            );
-                        }
-                    }
-                    menu
+            widgets::Segmented::new(("pose-group", g))
+                .wrap()
+                .when_some(list.iter().position(|&p| p == pose), |s, ix| s.selected_index(ix))
+                .children(list.iter().map(|&p| widgets::SegItem::new().icon(pose_icon(p)).label(p.label())))
+                .on_click(move |ix: &usize, _, cx| {
+                    let p = list[*ix];
+                    viewer.update(cx, |v, cx| v.set_pose(p, cx));
                 })
-        };
+        }));
 
         // The worn skin beside the previewed one.
         let compare = self.pending.as_ref().map(|pend| {
@@ -1656,11 +1684,27 @@ impl AccountsView {
                 )
         });
 
+        // How the last lookup went, under the field (like the Name tab's check).
+        let looking = matches!(self.lookup, Lookup::Looking);
+        let lookup_line = match &self.lookup {
+            // Only while that skin is still the one on the preview.
+            Lookup::Found(label) if self.pending.as_ref().is_some_and(|p| &p.label == label) => Some((IconName::CircleCheck, format!("{label} is on the preview"), theme.success)),
+            Lookup::Failed(e) => Some((IconName::CircleX, e.clone(), theme.danger)),
+            _ => None,
+        }
+        .map(|(icon, text, color)| {
+            h_flex()
+                .gap_1p5()
+                .text_sm()
+                .text_color(color)
+                .child(Icon::new(icon).xsmall().flex_none())
+                .child(div().min_w_0().child(text))
+        });
         let controls = v_flex()
             .flex_1()
             .min_w_0()
             .gap_4()
-            .child(v_flex().gap_1p5().child(section_title("Preview", cx)).child(h_flex().child(poses)))
+            .child(v_flex().gap_1p5().child(section_title("Preview", cx)).child(poses))
             .child(
                 v_flex()
                     .gap_1p5()
@@ -1683,6 +1727,31 @@ impl AccountsView {
                     .child(
                         h_flex()
                             .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    // A single-line input passes Enter on, and the
+                                    // dialog takes it as OK and closes; Enter here
+                                    // looks the name up instead (PressEnter).
+                                    .on_action(|_: &gpui_kit::component::dialog::Confirm, _, _| {})
+                                    .child(Input::new(&self.url_input).small().disabled(busy)),
+                            )
+                            .child(
+                                Button::new("look-up-skin")
+                                    .small()
+                                    .outline()
+                                    .icon(IconName::Search)
+                                    .label("Look up")
+                                    .loading(looking)
+                                    .disabled(busy || looking)
+                                    .on_click(cx.listener(|this, _, window, cx| this.look_up(window, cx))),
+                            ),
+                    )
+                    .children(lookup_line)
+                    .child(
+                        h_flex()
+                            .gap_2()
                             .flex_wrap()
                             .child(
                                 Button::new("upload-skin")
@@ -1693,21 +1762,6 @@ impl AccountsView {
                                     .disabled(busy)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.pick_skin_file(window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("skin-url")
-                                    .small()
-                                    .outline()
-                                    .icon(IconName::Link)
-                                    .label("From a link or name")
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.show_url = !this.show_url;
-                                        if this.show_url {
-                                            this.url_input.update(cx, |s, cx| s.focus(window, cx));
-                                        }
-                                        cx.notify();
                                     })),
                             )
                             .child(
@@ -1722,34 +1776,8 @@ impl AccountsView {
                                     })),
                             ),
                     )
-                    .when(self.show_url, |r| {
-                        r.child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        // A single-line input passes Enter on, and the
-                                        // dialog takes it as OK and closes; Enter here
-                                        // previews the link instead (PressEnter).
-                                        .on_action(|_: &gpui_kit::component::dialog::Confirm, _, _| {})
-                                        .child(Input::new(&self.url_input).small()),
-                                )
-                                .child(
-                                    Button::new("apply-url")
-                                        .small()
-                                        .outline()
-
-                                        .label("Preview")
-                                        .disabled(busy)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.apply_url(window, cx)
-                                        })),
-                                ),
-                        )
-                    })
                     .child(note(
-                        "Open a 64×64 PNG, drop one on the preview, or paste a skin URL, a NameMC link or a player name. Nothing changes on your account until you press Apply.",
+                        "Type a player's name to copy their skin, or paste a skin URL or a NameMC link. You can also open a 64×64 PNG or drop one on the preview. Nothing changes on your account until you press Apply.",
                         cx,
                     )),
             )

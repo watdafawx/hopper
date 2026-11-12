@@ -784,12 +784,13 @@ pub struct Segmented {
     selected: Option<usize>,
     xsmall: bool,
     rail: bool,
+    wrap: bool,
     on_click: Option<Rc<dyn Fn(&usize, &mut Window, &mut App)>>,
 }
 
 impl Segmented {
     pub fn new(id: impl Into<ElementId>) -> Self {
-        Self { id: id.into(), items: Vec::new(), selected: None, xsmall: false, rail: false, on_click: None }
+        Self { id: id.into(), items: Vec::new(), selected: None, xsmall: false, rail: false, wrap: false, on_click: None }
     }
 
     /// Icon buttons in one rounded group: only the picked (or toggled-on)
@@ -815,6 +816,13 @@ impl Segmented {
         self
     }
 
+    /// Options that don't fit the width go on to more rows inside the
+    /// frame, for a long set of choices (the skin preview's poses).
+    pub fn wrap(mut self) -> Self {
+        self.wrap = true;
+        self
+    }
+
     /// The smaller size, for controls inside list rows.
     pub fn xsmall(mut self) -> Self {
         self.xsmall = true;
@@ -832,16 +840,17 @@ impl RenderOnce for Segmented {
         let theme = cx.theme();
         let (fg, muted, border, wash) = (theme.foreground, theme.muted_foreground, theme.border, theme.list_hover);
         let tint = theme.primary.opacity(alpha::SELECTED);
-        let (id, selected, xsmall, on_click) = (self.id, self.selected, self.xsmall, self.on_click);
+        let (id, selected, xsmall, wrap, on_click) = (self.id, self.selected, self.xsmall, self.wrap, self.on_click);
         if self.rail {
             return rail_view(id, self.items, selected, on_click, cx).into_any_element();
         }
         // A row around the frame keeps it as wide as its options inside a
         // full-width column (a form field), instead of stretching.
-        h_flex().child(
+        // Wrapping, the frame may shrink to the room it has.
+        h_flex().when(wrap, |r| r.min_w_0().max_w_full()).child(
         h_flex()
             .id(id.clone())
-            .flex_none()
+            .map(|f| if wrap { f.flex_wrap().min_w_0() } else { f.flex_none() })
             .p(px(2.))
             .gap(px(2.))
             .border_1()
@@ -850,7 +859,7 @@ impl RenderOnce for Segmented {
             .children(self.items.into_iter().enumerate().map(|(i, item)| {
                 let on = selected == Some(i);
                 let pick = on_click.clone();
-                let SegItem { base, label, disabled, .. } = item;
+                let SegItem { base, label, disabled, icon, .. } = item;
                 // Small: 26px options in a 32px frame, an input's height.
                 base.id(ElementId::Integer(i as u64))
                     .flex_none()
@@ -867,6 +876,9 @@ impl RenderOnce for Segmented {
                                 f(&i, window, cx)
                             }
                         })
+                    })
+                    .when_some(icon, |el, icon| {
+                        el.gap_1p5().child(Icon::new(icon).map(|i| if xsmall { i.xsmall() } else { i.small() }))
                     })
                     .child(label)
             })),

@@ -443,8 +443,12 @@ pub fn parse_skin_link(input: &str) -> Result<SkinLink, String> {
     if validate_name(s).is_ok() {
         return Ok(SkinLink::Player(s.to_string()));
     }
-    let Some(rest) = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://")) else {
-        return Err("Paste a skin URL (https://…), a NameMC link or a player name.".into());
+    // A link copied from the address bar may have lost its "https://".
+    let schemed = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://"));
+    let lower = s.to_ascii_lowercase();
+    let bare = schemed.is_none() && (lower.starts_with("namemc.com/") || lower.contains(".namemc.com/"));
+    let Some(rest) = schemed.or_else(|| bare.then_some(s)) else {
+        return Err("Type a player name, or paste a skin link (https://…) or a NameMC link.".into());
     };
     let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
     let host = host.to_ascii_lowercase();
@@ -463,18 +467,26 @@ pub fn parse_skin_link(input: &str) -> Result<SkinLink, String> {
             _ => Err("That NameMC page isn't a skin or a profile.".into()),
         };
     }
-    Ok(SkinLink::Png(s.to_string()))
+    Ok(SkinLink::Png(if bare { format!("https://{s}") } else { s.to_string() }))
 }
 
 fn get(url: &str) -> anyhow::Result<Response> {
     agent().get(url).call().with_context(|| format!("Couldn't reach {url}"))
 }
 
-/// The PNG behind a link, with the arms Mojang says the player uses (for
-/// player links). Blocking.
-pub fn fetch_skin(link: &SkinLink) -> anyhow::Result<(Vec<u8>, Option<Variant>)> {
-    let (url, variant) = match link {
-        SkinLink::Png(u) => (u.clone(), None),
+/// A skin fetched from a link.
+pub struct FetchedSkin {
+    pub png: Vec<u8>,
+    /// The arms Mojang says the player uses (player links only).
+    pub variant: Option<Variant>,
+    /// The player's name as Mojang spells it ("notch" finds "Notch").
+    pub player: Option<String>,
+}
+
+/// The PNG behind a link. Blocking.
+pub fn fetch_skin(link: &SkinLink) -> anyhow::Result<FetchedSkin> {
+    let (url, variant, player) = match link {
+        SkinLink::Png(u) => (u.clone(), None, None),
         SkinLink::Player(name) => {
             let mut r = get(&format!("https://api.mojang.com/users/profiles/minecraft/{name}"))?;
             if matches!(r.status().as_u16(), 204 | 404) {
@@ -485,12 +497,15 @@ pub fn fetch_skin(link: &SkinLink) -> anyhow::Result<(Vec<u8>, Option<Variant>)>
             }
             let v: Value = r.body_mut().read_json()?;
             let id = v["id"].as_str().context("Mojang sent no player id")?;
+            let name = v["name"].as_str().unwrap_or(name).to_string();
             let mut r = get(&format!("https://sessionserver.mojang.com/session/minecraft/profile/{id}"))?;
             if !r.status().is_success() {
                 bail!("Mojang answered {} reading {name}'s skin.", r.status().as_u16());
             }
             let v: Value = r.body_mut().read_json()?;
-            skin_from_session_profile(&v).with_context(|| format!("{name} has no skin Hopper can read"))?
+            let (url, variant) =
+                skin_from_session_profile(&v).with_context(|| format!("{name} has no skin Hopper can read"))?;
+            (url, variant, Some(name))
         }
     };
     let mut r = get(&url)?;
@@ -499,7 +514,7 @@ pub fn fetch_skin(link: &SkinLink) -> anyhow::Result<(Vec<u8>, Option<Variant>)>
     }
     let bytes = r.body_mut().with_config().limit(1 << 20).read_to_vec()?;
     check_skin_png(&bytes)?;
-    Ok((bytes, variant))
+    Ok(FetchedSkin { png: bytes, variant, player })
 }
 
 /// The skin URL and arms in a session server profile (its base64 textures).
@@ -538,6 +553,22 @@ mod tests {
         assert_eq!(parse_skin_link("http://x.y/s.png"), Ok(Png("http://x.y/s.png".into())));
         assert!(parse_skin_link("not a link").is_err());
         assert!(parse_skin_link("https://namemc.com/server/x").is_err());
+        // Names in any case and with spaces around them.
+        assert_eq!(parse_skin_link("nOtCh"), Ok(Player("nOtCh".into())));
+        assert_eq!(parse_skin_link("\t Notch \n"), Ok(Player("Notch".into())));
+        assert!(parse_skin_link("ab").is_err());
+        assert!(parse_skin_link("Not ch").is_err());
+        // NameMC links copied without "https://".
+        assert_eq!(parse_skin_link("namemc.com/profile/jeb_"), Ok(Player("jeb_".into())));
+        assert_eq!(parse_skin_link("NameMC.com/profile/Notch.2"), Ok(Player("Notch".into())));
+        assert_eq!(parse_skin_link("www.namemc.com/profile/Notch"), Ok(Player("Notch".into())));
+        assert_eq!(
+            parse_skin_link("namemc.com/skin/b5b2b4f09c6d4b39"),
+            Ok(Png("https://s.namemc.com/i/b5b2b4f09c6d4b39.png".into()))
+        );
+        assert_eq!(parse_skin_link("s.namemc.com/i/abc.png"), Ok(Png("https://s.namemc.com/i/abc.png".into())));
+        // Other bare hosts still need their scheme.
+        assert!(parse_skin_link("example.com/skin.png").is_err());
     }
 
     #[test]
