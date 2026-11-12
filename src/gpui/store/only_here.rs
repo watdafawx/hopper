@@ -9,9 +9,6 @@ use std::path::Path;
 
 /// Who keeps a pack the same as this PC.
 pub struct SyncedWith {
-    /// The friends and groups, as a sentence names them: "Weekend crew",
-    /// "Mia and Sam".
-    pub label: String,
     /// The groups among them, by name.
     pub groups: Vec<String>,
     /// The friends it's shared with directly, by name.
@@ -84,8 +81,7 @@ impl Store {
             .filter(|g| copy.as_deref() == Some(g.id.as_str()) || self.settings().shares_with_group(&inst.id, &g.id))
             .map(|g| name_or(&g.name, "your group"))
             .collect();
-        let names: Vec<String> = friends.iter().chain(&groups).cloned().collect();
-        (!names.is_empty()).then(|| SyncedWith { label: and_list(&names), groups, friends })
+        (!friends.is_empty() || !groups.is_empty()).then_some(SyncedWith { groups, friends })
     }
 
     /// Before turning off (`remove`: removing) these files: the locked mods
@@ -158,11 +154,7 @@ mod tests {
     #[test]
     fn a_change_names_who_it_went_to() {
         let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let w = |groups: &[&str], friends: &[&str]| {
-            let all: Vec<String> = s(friends).into_iter().chain(s(groups)).collect();
-            super::SyncedWith { label: and_list(&all), groups: s(groups), friends: s(friends) }
-                .for_whom()
-        };
+        let w = |groups: &[&str], friends: &[&str]| super::SyncedWith { groups: s(groups), friends: s(friends) }.for_whom();
         assert_eq!(w(&["drunk gamblers"], &[]), "drunk gamblers");
         assert_eq!(w(&[], &["Mia"]), "Mia");
         assert_eq!(w(&[], &["Mia", "Sam", "Ana"]), "3 friends");
