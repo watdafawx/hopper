@@ -428,7 +428,7 @@ pub fn apply(inst: &mut Instance, todo: &[Change], skip_sources: &[crate::source
         let name = at.map(|i| inst.addons[i].name.clone()).unwrap_or_else(|| c.key.clone());
         let r: anyhow::Result<()> = match (&c.now, &c.entry) {
             (State::Off, _) => match at {
-                Some(i) => crate::install::set_enabled(inst, i, false),
+                Some(i) => crate::install::set_enabled_later(inst, i, false),
                 None => Ok(()),
             },
             (State::Removed, _) => match at {
@@ -436,7 +436,7 @@ pub fn apply(inst: &mut Instance, todo: &[Change], skip_sources: &[crate::source
                 None => Ok(()),
             },
             (State::Unlisted, _) => match (&c.was, at) {
-                (State::Off, Some(i)) => crate::install::set_enabled(inst, i, true),
+                (State::Off, Some(i)) => crate::install::set_enabled_later(inst, i, true),
                 (State::File { .. }, Some(i)) if !inst.addons[i].from_pack => crate::install::remove(inst, i),
                 (State::File { .. } | State::Removed, _) => {
                     job.note(format!("{name}: putting back the modpack's own file isn't done by sync"));
@@ -590,7 +590,7 @@ fn file_change(
     if let Some(i) = inst.addons.iter().position(|a| a.project_id == project)
         && inst.addons[i].enabled != on
     {
-        crate::install::set_enabled(inst, i, on)?;
+        crate::install::set_enabled_later(inst, i, on)?;
     }
     Ok(())
 }

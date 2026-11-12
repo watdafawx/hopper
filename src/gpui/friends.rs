@@ -661,12 +661,6 @@ impl FriendsPanel {
                 "Needs your answer",
                 more(top.state.note(&top.who).map(|n| format!("{}: {n}", top.name)).unwrap_or_default()),
             ),
-            CopyState::AfterGame => (
-                IconName::Clock,
-                theme.muted_foreground,
-                "After the game",
-                format!("{} gets {}'s changes when Minecraft closes.", top.name, top.who),
-            ),
             CopyState::Updating => (IconName::RefreshCw, theme.primary, "Syncing", format!("Getting {}'s changes for {}.", top.who, top.name)),
             CopyState::UpToDate => (
                 IconName::CircleCheck,
@@ -1175,7 +1169,6 @@ impl FriendsPanel {
         };
         let sub = match &shown {
             Some((_, local, CopyState::Updating)) => format!("Getting {who}'s changes · your copy: {local}"),
-            Some((_, local, CopyState::AfterGame)) => format!("Gets {who}'s changes when the game closes · your copy: {local}"),
             // The note under it says what's wrong: not "up to date".
             Some((_, local, CopyState::Failed(..) | CopyState::Held(_))) => format!("Your copy: {local}"),
             Some((_, local, _)) => format!("Your copy: {local} · up to date"),
@@ -1327,7 +1320,6 @@ impl FriendsPanel {
                 let who = if s.group_copy(root).is_some() { "the group".to_string() } else { sender.clone() };
                 let sub = match state {
                     CopyState::Updating => format!("Getting {who}'s changes · {}", ago(e.at)),
-                    CopyState::AfterGame => format!("From {sender} · changes come when the game closes"),
                     CopyState::Failed(..) => format!("From {sender} · changed {}", ago(e.at)),
                     CopyState::Held(_) => format!("From {sender}"),
                     CopyState::UpToDate => format!("From {sender} · up to date"),
@@ -3125,9 +3117,6 @@ enum CopyState {
     UpToDate,
     /// A newer version is being applied, or waits for another task.
     Updating,
-    /// A newer version waits for the game to close: files the game has
-    /// open can't be changed, and the row says why nothing happens yet.
-    AfterGame,
     /// The last try failed: why, and whether Hopper tries again by itself.
     Failed(String, bool),
     /// Mods from GitHub and other links left out until the player says.
@@ -3140,7 +3129,7 @@ impl CopyState {
         match self {
             CopyState::Failed(..) => 0,
             CopyState::Held(_) => 1,
-            CopyState::Updating | CopyState::AfterGame => 2,
+            CopyState::Updating => 2,
             CopyState::UpToDate => 3,
         }
     }
@@ -3164,9 +3153,6 @@ fn copy_state(s: &Store, f: &hopper::settings::FollowedRecipe, root: &Path) -> C
         return CopyState::Failed(why.to_string(), again);
     }
     if s.follow_updating(root) {
-        if s.running(root).is_some() {
-            return CopyState::AfterGame;
-        }
         return CopyState::Updating;
     }
     if !f.held.is_empty() {
