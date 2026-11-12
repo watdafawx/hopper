@@ -213,6 +213,9 @@ on screen, not just the tests:
     `<scratch>\data\settings.json` (settings anywhere else fall back to
     defaults, which find the real instances). Check the app's `state` shows
     only your throwaway instance before doing anything.
+  - Run desktop test builds with `HOPPER_TEST_WINDOW=1`: the window opens
+    on a monitor other than the primary one and nothing takes focus, so
+    testing never interrupts the person using the PC.
   - Run test builds and scratch servers with `HOPPER_LOOPBACK=1`
     (127.0.0.1 only, no LAN discovery, no firewall prompts). Never bind
     0.0.0.0 in tests.

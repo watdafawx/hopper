@@ -287,8 +287,10 @@ impl Retry {
 /// Whether follow `f` has a newer code to apply by itself now: one that
 /// isn't applied yet, from a pack still shared, unless a failed try of that
 /// same code is still waiting out its delay (or can't work). `busy`: a
-/// task is changing the instance or its game is running; it waits for
-/// that to end.
+/// task is changing the instance or its game is launching; it waits for
+/// that to end. A game that is running doesn't count: the follow applies
+/// while it plays, and a jar it holds open changes when it closes
+/// ([`crate::locked`]).
 pub fn due(f: &crate::settings::FollowedRecipe, retry: Option<&Retry>, busy: bool, now: Instant) -> bool {
     if !f.waiting() || busy {
         return false;
@@ -575,7 +577,7 @@ mod tests {
         // A new code, nothing in the way: now. On start too, as nothing
         // in memory says otherwise.
         assert!(due(&f, None, false, t0));
-        // The game is running or another task changes the instance.
+        // Another task changes the instance or its game is launching.
         assert!(!due(&f, None, true, t0));
         // Up to date, never got a code, or the pack isn't shared any more.
         assert!(!due(&FollowedRecipe { seen: "HOP-1".into(), ..f.clone() }, None, false, t0));

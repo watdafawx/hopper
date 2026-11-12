@@ -21,6 +21,7 @@ function Mcp($name, $json = "{}") {
 }
 $env:HOPPER_DATA_DIR = $Scratch
 $env:HOPPER_LOOPBACK = "1"
+$env:HOPPER_TEST_WINDOW = "1"
 $env:HOPPER_MCP_PORT = "$Port"
 $p = Start-Process $Exe -ArgumentList "--mcp" -PassThru
 try {

@@ -428,6 +428,10 @@ fn fingerprint(store: &Store, root: &Path, class: u32) -> Option<u64> {
         (a.enabled, a.from_pack, a.locked, a.class_id, &a.env, &a.date_added).hash(&mut h);
         (&a.mr_project, &a.page, &a.locked_version).hash(&mut h);
     }
+    // Switches waiting for the game show on the switch and in the notice.
+    let mut waiting: Vec<_> = store.waiting_switches(root).into_iter().flatten().collect();
+    waiting.sort();
+    waiting.hash(&mut h);
     match store.updates(root) {
         None => 0u8.hash(&mut h),
         Some(u) => {
@@ -779,6 +783,9 @@ pub struct AddonsView {
     pub(crate) remote: bool,
     /// Icons of the untracked jars on a Hopper Server, by file.
     remote_icons: HashMap<String, String>,
+    /// Mods switched while the game holds their jar, by lower-case file name
+    /// without `.disabled`: what they turn into once it lets go.
+    pub(crate) waiting: HashMap<String, bool>,
     pub(crate) globals: crate::addons_extra::GlobalPacks,
     /// Each mod's state on the paired server, by lower-case file name, for
     /// the server root and [`marks_key`] it was compared at.
@@ -950,6 +957,7 @@ impl AddonsView {
             server: false,
             remote: false,
             remote_icons: HashMap::new(),
+            waiting: HashMap::new(),
             globals: Default::default(),
             folder: None,
             folder_packs: None,
@@ -1191,6 +1199,7 @@ impl AddonsView {
         } else {
             self.refresh_loose(&inst, cx);
         }
+        self.waiting = self.store.read(cx).waiting_switches(&root).cloned().unwrap_or_default();
         if class == cf::CLASS_MODS {
             self.want_missing(&inst, cx);
         }

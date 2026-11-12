@@ -4,7 +4,7 @@
 param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string]$Data, [string]$Label = "", [int]$Port = 47855, [int]$IdleSecs = 180, [string]$Out = "")
 if ($Port -in 47801, 47802) { throw "reserved port" }
 $ErrorActionPreference = "Stop"
-$env:HOPPER_DATA_DIR = $Data; $env:HOPPER_LOOPBACK = "1"; $env:HOPPER_MCP_PORT = "$Port"
+$env:HOPPER_DATA_DIR = $Data; $env:HOPPER_LOOPBACK = "1"; $env:HOPPER_TEST_WINDOW = "1"; $env:HOPPER_MCP_PORT = "$Port"
 $name = [IO.Path]::GetFileNameWithoutExtension($Exe)
 function Mcp($n, $j = '{}') { $b = '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"' + $n + '","arguments":' + $j + '}}'; Invoke-RestMethod -Uri "http://127.0.0.1:$Port/mcp" -Method Post -ContentType application/json -Body $b -TimeoutSec 60 }
 $rows = @(); $t0 = Get-Date

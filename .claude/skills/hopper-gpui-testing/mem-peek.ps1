@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 if ($Port -in 47801, 47802) { throw "port reserved" }
 $url = "http://127.0.0.1:$Port/mcp"
 function Mcp($n, $j = '{}') { $b = '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"' + $n + '","arguments":' + $j + '}}'; Invoke-RestMethod -Uri $url -Method Post -ContentType application/json -Body $b -TimeoutSec 60 }
-$env:HOPPER_DATA_DIR = $Scratch; $env:HOPPER_LOOPBACK = "1"; $env:HOPPER_MCP_PORT = "$Port"
+$env:HOPPER_DATA_DIR = $Scratch; $env:HOPPER_LOOPBACK = "1"; $env:HOPPER_TEST_WINDOW = "1"; $env:HOPPER_MCP_PORT = "$Port"
 $p = Start-Process $Exe -ArgumentList "--mcp" -PassThru
 $rows = @()
 function Sample($step, $wait) {

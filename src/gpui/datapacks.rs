@@ -640,7 +640,9 @@ impl AddonsView {
             return self.where_group(&a.file_name) != hopper::pack_where::Group::Off;
         }
         if !self.order_mode() {
-            return a.enabled;
+            // A switch waiting for the game to let go of the jar shows as done.
+            let key = a.file_name.trim_end_matches(".disabled").to_lowercase();
+            return self.waiting.get(&key).copied().unwrap_or(a.enabled);
         }
         let f = a.file_name.trim_end_matches(".disabled").to_lowercase();
         a.enabled && self.rp_order.iter().any(|e| norm(e) == f)

@@ -14,7 +14,7 @@ HOPPERD_SERVICE=hopperd-test HOPPER_LOOPBACK=1 hopperd --data <scratch>\pdata --
 - When the web UI changed, build it first: `pnpm build` in `crates/hopperd/ui`. If you start a Vite dev server, stop it before you finish: a left-over vite/esbuild process locks the worktree folder.
 
 ## Test servers
-- Make a small scratch server under `<scratch>\srv`, vanilla or a small Fabric pack. Pair a scratch desktop instance to it (desktop test build per skill `hopper-gpui-testing`).
+- Make a small scratch server under `<scratch>\srv`, vanilla or a small Fabric pack. Pair a scratch desktop instance to it (desktop test build per skill `hopper-gpui-testing`: launch it with `HOPPER_TEST_WINDOW=1` so it opens on the second monitor and takes no focus).
 - Starting and stopping your scratch server is fine. Never start, stop, kill or edit real servers or a real Hopper Server install (see `CLAUDE.local.md` for which hosts are real).
 
 ## Check the web UI

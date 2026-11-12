@@ -515,6 +515,9 @@ pub struct Store {
     _self_update_watch: Option<Task<()>>,
     /// Bumped whenever servers change on disk.
     server_rev: u64,
+    /// Per instance, mods switched while the game holds their jar: what they
+    /// turn into once it lets go (`hopper::locked::switches`).
+    waiting: HashMap<PathBuf, HashMap<String, bool>>,
     peer_hub: Option<std::sync::Arc<hopper::peer::Hub>>,
     peer_error: Option<String>,
     /// What the hub last shared, to update it when instances change.
@@ -740,6 +743,7 @@ impl Store {
             _ping_watch: None,
             _self_update_watch: None,
             server_rev: 0,
+            waiting: HashMap::new(),
             peer_hub: None,
             peer_error: None,
             shared_sig: 0,
@@ -1163,6 +1167,7 @@ impl Store {
                 }
                 self.prune_fetches(&root);
                 self.note_content(&root);
+                self.read_waiting(&root);
             }
             Msg::Disk(changes) => self.disk_changed(changes, cx),
             Msg::DiskLoaded(root, new, area) => self.disk_loaded(root, new, area, cx),
@@ -1522,6 +1527,7 @@ impl Store {
     fn put_instance(&mut self, new: Instance) {
         let root = new.root.clone();
         self.read_pending(&new);
+        self.read_waiting(&root);
         // Updates stay listed while their old file is still
         // there (also while a check runs); asking CurseForge
         // again would blank the list.
@@ -2666,7 +2672,12 @@ impl Store {
     pub fn play(&mut self, root: &Path) -> Result<(), String> {
         // Old jars a previous game held open, so the new game doesn't load
         // two versions of a mod.
-        hopper::locked::flush(root);
+        // A queued switch also changed the instance's file: launch with that.
+        if hopper::locked::flush(root) > 0 {
+            if let Some(new) = instances::load(root) {
+                self.put_instance(new);
+            }
+        }
         let Some(mut full) = self.instance(root).cloned() else {
             return Err("That instance is gone.".into());
         };
@@ -3272,19 +3283,41 @@ impl Store {
         }
     }
 
-    /// Switches files on or off (renames to and from `.disabled`).
+    /// Switches files on or off (renames to and from `.disabled`). A jar the
+    /// running game holds open switches once the game lets go; the Mods tab
+    /// shows it switched and says when.
     pub fn set_enabled(&mut self, root: &Path, files: &[String], on: bool) -> Result<(), String> {
         if server_mods::remote(root).is_some() {
             self.remote_set_enabled(root, files, on);
             return Ok(());
         }
         let inst = self.inst_mut(root).ok_or("That instance is gone.")?;
+        let mut r = Ok(());
         for f in files {
-            if let Some(i) = inst.addons.iter().position(|a| &a.file_name == f) {
-                install::set_enabled(inst, i, on).map_err(|e| format!("{:#}", install::explain_locked(e)))?;
+            if let Some(i) = inst.addons.iter().position(|a| &a.file_name == f)
+                && let Err(e) = install::set_enabled_later(inst, i, on)
+            {
+                r = Err(format!("{e:#}"));
+                break;
             }
         }
-        Ok(())
+        self.read_waiting(root);
+        r
+    }
+
+    /// Reads which switches wait for the game to let go of a jar.
+    pub(crate) fn read_waiting(&mut self, root: &Path) {
+        let w = hopper::locked::switches(root);
+        if w.is_empty() {
+            self.waiting.remove(root);
+        } else {
+            self.waiting.insert(root.to_path_buf(), w);
+        }
+    }
+
+    /// Mods switched while the game holds their jar, and what they turn into.
+    pub fn waiting_switches(&self, root: &Path) -> Option<&HashMap<String, bool>> {
+        self.waiting.get(root)
     }
 
     /// Removes files for good; History keeps where to download each again
