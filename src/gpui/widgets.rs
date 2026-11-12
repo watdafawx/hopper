@@ -203,23 +203,15 @@ pub fn split_alone(
 /// text off; a grey fill, a ✓ and full-strength text on. Grey, not orange,
 /// so it never reads as one of the toolbar's action buttons.
 pub fn toggle_chip(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool, cx: &App) -> Button {
-    toggle_chip_base(Button::new(id).label(label), on, cx)
-}
-
-/// A [`toggle_chip`] for a person: their face before the name.
-pub fn toggle_chip_face(id: impl Into<ElementId>, face: AnyElement, label: impl Into<SharedString>, on: bool, cx: &App) -> Button {
-    let name: SharedString = label.into();
-    toggle_chip_base(Button::new(id).child(h_flex().gap_1p5().items_center().child(face).child(name)), on, cx)
-}
-
-fn toggle_chip_base(b: Button, on: bool, cx: &App) -> Button {
     let theme = cx.theme();
     let variant = gpui_kit::component::button::ButtonCustomVariant::new(cx)
         .color(theme.transparent)
         .foreground(if on { theme.foreground } else { theme.muted_foreground })
         .hover(if on { theme.secondary_active } else { theme.secondary_hover })
         .active(theme.secondary_active);
-    b.small()
+    Button::new(id)
+        .small()
+        .label(label)
         .custom(variant)
         .border_1()
         .when(on, |b| b.icon(IconName::Check).bg(theme.secondary_active).border_color(theme.muted_foreground.opacity(0.55)))

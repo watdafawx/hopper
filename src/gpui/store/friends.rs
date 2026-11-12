@@ -1624,9 +1624,10 @@ impl Store {
             .map(|f| (f.code.clone(), f.declined.clone()))
             .unwrap_or_default();
         // History names the friend on what this changes, and only on that.
-        let who = self
-            .follow_at(&root)
-            .map(|f| hopper::actor::Who::friend(&f.peer_name, &f.peer_id, &f.group, &f.name));
+        let who = self.follow_at(&root).map(|f| {
+            let mc = self.mailbox_friends().iter().find(|m| m.id == f.peer_id).map(|m| m.mc_id.clone()).unwrap_or_default();
+            hopper::actor::Who::friend(&f.peer_name, &f.peer_id, &f.group, &f.name).with_face(&mc)
+        });
         let (tx, r2) = (self.tx.clone(), root.clone());
         self.spawn_instance_job(&root, title, move |job| {
             let work = || -> anyhow::Result<RecipeApplied> {

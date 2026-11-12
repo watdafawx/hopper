@@ -71,12 +71,12 @@ pub(crate) fn entry(app: &App, headers: &HeaderMap, method: &Method, id: &str) -
 }
 
 /// Who History names on what this request changes: the signed-in panel
-/// user's name when the panel has users besides the owner, "You" when
-/// it's only ever the owner. It only reads who is asking; access is
-/// checked as before.
+/// user, "Owner", or a paired desktop ("Hopper on FOX", the name it paired
+/// with) when the panel has people besides the owner; "You" when it's only
+/// ever the owner. It only reads who is asking; access is checked as before.
 pub(crate) fn changer(app: &App, headers: &HeaderMap, method: &Method) -> hopper_core::actor::Who {
     use crate::auth::Who as By;
-    if app.auth.users().is_empty() {
+    if !names_people(app) {
         return hopper_core::actor::Who::you();
     }
     match require(app, headers, method) {
@@ -84,6 +84,12 @@ pub(crate) fn changer(app: &App, headers: &HeaderMap, method: &Method) -> hopper
         Ok(By::Owner) => hopper_core::actor::Who::panel("Owner"),
         Err(_) => hopper_core::actor::Who::you(),
     }
+}
+
+/// Whether more than the owner can change this panel's servers (users or
+/// paired desktops), so History names who did what.
+pub(crate) fn names_people(app: &App) -> bool {
+    !app.auth.users().is_empty() || !app.auth.devices().is_empty()
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {

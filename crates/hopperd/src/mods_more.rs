@@ -221,7 +221,8 @@ async fn config_reset(State(app): State<Arc<App>>, headers: HeaderMap, method: M
 
 async fn backup_list(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
-    let (sets, usage, copies) = blocking(move || {
+    let named = crate::mods_api::names_people(&app);
+    let (mut sets, usage, copies) = blocking(move || {
         let r = hopper_core::retention::policy();
         Ok((
             backups::history(&e.root),
@@ -231,6 +232,14 @@ async fn backup_list(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     })
     .await?;
     let (u, would, r) = usage;
+    // With several people on the panel, "You" would read as whoever is
+    // looking. A change nobody was noted on (made before people were added,
+    // or by a part of the panel that doesn't note it yet) says the panel.
+    if named {
+        for w in sets.iter_mut().flat_map(|s| s.files.iter_mut()).filter_map(|f| f.who.as_mut()).filter(|w| w.is_you()) {
+            *w = hopper_core::actor::Who::panel("Hopper Server");
+        }
+    }
     let total: u64 = sets.iter().map(|s| s.size()).sum();
     // History: what happened, the mod, its versions (shared with Hopper desktop).
     let rows: Vec<Value> = sets.iter().map(backups::Set::to_json).collect();

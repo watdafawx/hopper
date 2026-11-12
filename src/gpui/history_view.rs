@@ -38,6 +38,49 @@ fn person_key(w: &Who) -> String {
 /// The size of the face before a row.
 const FACE: f32 = 1.5;
 
+/// Someone with no face to show (not signed in to Minecraft, or a Hopper
+/// Server user): their initial on a tinted tile, yours in the primary tint,
+/// as Hopper Server's History shows them.
+fn letter_face(w: &Who, size: Rems, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let color = if w.is_you() { theme.primary } else { theme.muted_foreground };
+    let initial: String = w.label().chars().find(|c| c.is_alphanumeric()).into_iter().flat_map(char::to_uppercase).collect();
+    div()
+        .flex_none()
+        .size(size)
+        .rounded(theme.radius)
+        .bg(color.opacity(widgets::alpha::TINT * 2.))
+        .text_color(crate::theme::ink(color))
+        .text_size(rems(size.0 * 0.5))
+        .font_semibold()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(initial)
+        .into_any_element()
+}
+
+/// One person in History's filter: a tinted chip (`widgets::chip`), the
+/// picked one in the primary tint, their face before the name.
+fn who_chip(id: impl Into<ElementId>, face: Option<AnyElement>, label: String, on: bool, cx: &App) -> Stateful<Div> {
+    let theme = cx.theme();
+    let wash = theme.list_hover;
+    // A filter is a control: one height for every chip (Hopper Server's
+    // 26px), with or without a face, and the 12px label.
+    let chip = widgets::chip(if on { theme.primary } else { theme.muted_foreground })
+        .small()
+        .h(rems(1.625))
+        .text_xs()
+        .child(h_flex().gap_1().items_center().children(face).child(label));
+    div()
+        .id(id.into())
+        .flex_none()
+        .rounded(crate::theme::radius_sm())
+        .clickable(cx)
+        .when(!on, |d| d.hover(move |s| s.bg(wash)))
+        .child(chip)
+}
+
 /// "14:02".
 fn hm(when: i64) -> String {
     let c = hopper::time::clock(when);
@@ -108,10 +151,11 @@ impl BackupsView {
         out
     }
 
-    /// "Everyone · You · Mia · Robin": whose changes History shows.
+    /// "Everyone · You · Mia · Robin": whose changes History shows. Tinted
+    /// chips, the picked one in the primary tint, as Hopper Server's.
     fn who_filter(&self, people: &[Who], cx: &mut Context<Self>) -> AnyElement {
         let mut row = h_flex().gap_1p5().flex_wrap().pb_2().child(
-            widgets::toggle_chip("hist-who-all", "Everyone", self.who_pick.is_none(), cx)
+            who_chip("hist-who-all", None, "Everyone".into(), self.who_pick.is_none(), cx)
                 .on_click(cx.listener(|this, _, _, cx| this.pick_who(None, cx))),
         );
         for (i, w) in people.iter().enumerate() {
@@ -119,7 +163,7 @@ impl BackupsView {
             let on = self.who_pick.as_ref() == Some(&k);
             let face = self.who_face(w, rems(1.), cx);
             row = row.child(
-                widgets::toggle_chip_face(("hist-who", i), face, w.label(), on, cx)
+                who_chip(("hist-who", i), Some(face), w.label(), on, cx)
                     .on_click(cx.listener(move |this, _, _, cx| this.pick_who(Some(k.clone()), cx))),
             );
         }
@@ -138,7 +182,9 @@ impl BackupsView {
     /// plain person shape otherwise.
     fn who_face(&self, w: &Who, size: Rems, cx: &mut Context<Self>) -> AnyElement {
         let s = self.store.read(cx);
-        let mc = if w.is_you() {
+        let mc = if !w.mc.is_empty() {
+            w.mc.clone()
+        } else if w.is_you() {
             s.accounts().active().map(|a| a.id.clone()).unwrap_or_default()
         } else {
             s.mailbox_friends()
@@ -148,6 +194,9 @@ impl BackupsView {
                 .or_else(|| s.mailbox_groups().iter().flat_map(|g| &g.members).find(|m| m.id == w.id).map(|m| m.mc_id.clone()))
                 .unwrap_or_default()
         };
+        if mc.is_empty() {
+            return letter_face(w, size, cx);
+        }
         crate::friends::face(&self.store, &mc, &w.label(), size, cx)
     }
 

@@ -35,6 +35,10 @@ pub struct Who {
     /// The followed pack's name, for "Updated from Robin's All the Mods 10".
     #[serde(skip_serializing_if = "String::is_empty")]
     pub pack: String,
+    /// Their Minecraft profile id when they were signed in, so History
+    /// shows their face even after they stop being a friend.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub mc: String,
 }
 
 impl Who {
@@ -44,7 +48,13 @@ impl Who {
 
     /// A friend: their pack you follow (`pack`), or a group's copy (`group`).
     pub fn friend(name: &str, id: &str, group: &str, pack: &str) -> Who {
-        Who { name: name.to_string(), id: id.to_string(), group: group.to_string(), pack: pack.to_string() }
+        Who { name: name.to_string(), id: id.to_string(), group: group.to_string(), pack: pack.to_string(), mc: String::new() }
+    }
+
+    /// The same person with their Minecraft profile id, for their face.
+    pub fn with_face(mut self, mc: &str) -> Who {
+        self.mc = mc.to_string();
+        self
     }
 
     /// A Hopper Server panel user.
