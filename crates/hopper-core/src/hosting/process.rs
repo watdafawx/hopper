@@ -650,6 +650,9 @@ impl LocalServer {
         if self.state().is_alive() {
             bail!("{} is already running", self.name());
         }
+        // Jars the last run held open while mods were removed, updated or
+        // switched: stopped now, so they change before Java loads them.
+        crate::locked::flush(&self.root);
         // Before anything reads server.properties, so what the hook writes
         // (RCON, say) is in this run.
         let hook = BEFORE_START.read().unwrap_or_else(|e| e.into_inner()).clone();
