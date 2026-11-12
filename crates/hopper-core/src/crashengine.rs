@@ -702,6 +702,87 @@ pub fn mismatches(text: &str) -> Vec<(MissingPart, String)> {
     out
 }
 
+/// A mixin that looked for a part of the class it changes and didn't find
+/// it: `@Shadow field projectorID was not located in the target class
+/// x.y.WebUrlVideoSource`, or an `@Inject` with no target method. The
+/// class's own mod changed (or is another version than the mixin was made
+/// for); the mixin's mod is the one that doesn't fit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MixinMiss {
+    /// The mod whose mixin it is.
+    pub mod_id: String,
+    /// The class it changes (`net.mehvahdjukaar.vista.client.video_source.WebUrlVideoSource`).
+    pub class: String,
+    /// The part it looked for (`projectorID`, `tick`).
+    pub member: String,
+}
+
+/// `@Shadow field projectorID was not located in the target class a.b.C`
+/// (also `@Shadow method`).
+static SHADOW_MISS: LazyLock<Regex> =
+    LazyLock::new(|| re(r"@Shadow (?:field|method) ([\w$<>]+) was not located in the target class ([\w.$/]+)"));
+/// `@Inject annotation on onTick could not find any targets matching 'tick' in a.b.C`.
+static INJECT_MISS: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"@(?:Inject|Redirect|ModifyVariable|ModifyArg|ModifyArgs|ModifyConstant|WrapOperation|WrapWithCondition|ModifyExpressionValue|ModifyReturnValue) annotation on [\w$]+ could not find any targets matching '([^']+)' in (?:the target class )?([\w.$/]+)")
+});
+/// The mixin's mod, on the line or just above: `… from mod vista_advanced_player`.
+static FROM_MOD: LazyLock<Regex> = LazyLock::new(|| re(r"(?:from mod|Mixin apply for mod) ([\w.-]+)"));
+
+/// Each mixin in `text` that didn't find a part of the class it changes,
+/// once per mod, class and part.
+pub fn mixin_misses(text: &str) -> Vec<MixinMiss> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: Vec<MixinMiss> = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let (member, class) = if let Some(m) = SHADOW_MISS.captures(l) {
+            (m[1].to_string(), m[2].to_string())
+        } else if let Some(m) = INJECT_MISS.captures(l) {
+            // `Lnet/x/Y;tick()V` → `tick`.
+            let t = m[1].split('(').next().unwrap_or(&m[1]);
+            let t = t.rsplit([';', '.']).next().unwrap_or(t);
+            (t.to_string(), m[2].to_string())
+        } else {
+            continue;
+        };
+        let class = class.trim_end_matches('.').replace('/', ".");
+        // The mod: on this line (the log's FATAL line, Mixin's own
+        // `[PREINJECT … -> x.mixins.json:AMixin from mod x …]`), else the
+        // `MixinApplyError: Mixin [… from mod x]` a few lines above.
+        let Some(mod_id) = std::iter::once(*l)
+            .chain(lines[i.saturating_sub(8)..i].iter().rev().copied())
+            .find_map(|l| FROM_MOD.captures(l).map(|m| m[1].to_string()))
+        else {
+            continue;
+        };
+        if !is_mod(&mod_id) || member.is_empty() {
+            continue;
+        }
+        let miss = MixinMiss { mod_id, class, member };
+        if !out.contains(&miss) {
+            out.push(miss);
+        }
+    }
+    out
+}
+
+/// The mod a crash report lists with `id`, and its version, from the
+/// report's own mod list (`vista-1.21.1-5.6.8-neoforge.jar |Vista |vista
+/// |1.21.1-5.6.8 |…`) or a frame of its code (`TRANSFORMER/vista@1.21.1-5.6.8/`).
+pub fn version_in_report(text: &str, id: &str) -> Option<String> {
+    for l in text.lines() {
+        let cols: Vec<&str> = l.split('|').map(str::trim).collect();
+        if cols.len() >= 4 && cols[2].eq_ignore_ascii_case(id) && !cols[3].is_empty() {
+            return Some(cols[3].to_string());
+        }
+    }
+    let at = format!("/{id}@");
+    text.lines().find_map(|l| {
+        let rest = &l[l.find(&at)? + at.len()..];
+        let v = rest.split('/').next()?;
+        (!v.is_empty()).then(|| v.to_string())
+    })
+}
+
 /// A jar's version for people: the one its metadata gives, unless the
 /// file name has one other version (a jar whose metadata wasn't updated
 /// for its release says the older one inside).
@@ -848,6 +929,29 @@ pub fn referencers(mods_dir: &Path, mods: &[String], ns: &str, full: &str, owner
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mixin_s_missing_part_and_its_mod() {
+        // The report's cause chain: the mod is two lines above.
+        let report = "Caused by: org.spongepowered.asm.mixin.throwables.MixinApplyError: Mixin [vista_advanced_player.mixins.json:WebUrlVideoSourceMixin from mod vista_advanced_player] from phase [DEFAULT] in config [vista_advanced_player.mixins.json] FAILED during APPLY\n\
+\tat x.y(Z.java:1)\n\
+Caused by: org.spongepowered.asm.mixin.transformer.throwables.InvalidMixinException: @Shadow field projectorID was not located in the target class net.mehvahdjukaar.vista.client.video_source.WebUrlVideoSource. No refMap loaded.\n";
+        let want = MixinMiss {
+            mod_id: "vista_advanced_player".into(),
+            class: "net.mehvahdjukaar.vista.client.video_source.WebUrlVideoSource".into(),
+            member: "projectorID".into(),
+        };
+        assert_eq!(mixin_misses(report), [want.clone()]);
+        // The log's one line has both.
+        let log = "[06:31:57] [Render thread/FATAL] [mixin/]: Mixin apply for mod vista_advanced_player failed vista_advanced_player.mixins.json:WebUrlVideoSourceMixin from mod vista_advanced_player -> net.mehvahdjukaar.vista.client.video_source.WebUrlVideoSource: org.spongepowered.asm.mixin.transformer.throwables.InvalidMixinException @Shadow field projectorID was not located in the target class net.mehvahdjukaar.vista.client.video_source.WebUrlVideoSource. No refMap loaded.\n";
+        assert_eq!(mixin_misses(log), [want]);
+        // An @Inject with no target method.
+        let inject = "InvalidInjectionException: Critical injection failure: @Inject annotation on onTick could not find any targets matching 'Lcom/x/Y;tick()V' in com.x.Y. Using refmap fancymod.refmap.json [PREINJECT Applicator Phase -> fancymod.mixins.json:EntityMixin from mod fancymod -> Prepare Injections]\n";
+        assert_eq!(mixin_misses(inject), [MixinMiss { mod_id: "fancymod".into(), class: "com.x.Y".into(), member: "tick".into() }]);
+        // Version from the report's own mod list, else a frame.
+        assert_eq!(version_in_report("\t\tvista-1.21.1-5.6.8-neoforge.jar  |Vista  |vista  |1.21.1-5.6.8  |Manifest: NOSIGNATURE\n", "vista").as_deref(), Some("1.21.1-5.6.8"));
+        assert_eq!(version_in_report("\tat TRANSFORMER/vista@1.21.1-5.6.5/net.x.Y.z(Y.java:1)\n", "vista").as_deref(), Some("1.21.1-5.6.5"));
+    }
 
     #[test]
     fn namespaced_ids_skip_the_game_and_times() {

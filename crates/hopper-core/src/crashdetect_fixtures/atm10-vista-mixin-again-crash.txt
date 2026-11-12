@@ -1,0 +1,120 @@
+---- Minecraft Crash Report ----
+
+!!! Invasive Optimizations is installed! Check its section for a list of affected mods.
+
+
+// Why did you do that?
+
+Time: 2026-11-12 06:50:30
+Description: Unexpected error
+
+org.spongepowered.asm.mixin.transformer.throwables.MixinTransformerError: An unexpected critical error was encountered
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:381) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinTransformer.transformClass(MixinTransformer.java:253) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.service.modlauncher.MixinTransformationHandler.processClass(MixinTransformationHandler.java:131) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.launch.MixinLaunchPluginLegacy.processClass(MixinLaunchPluginLegacy.java:131) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.serviceapi.ILaunchPluginService.processClassWithFlags(ILaunchPluginService.java:156) ~[modlauncher-11.0.5.jar:11.0.5+main.901c6ea8] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchPluginHandler.offerClassNodeToPlugins(LaunchPluginHandler.java:94) ~[modlauncher-11.0.5.jar:?] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.ClassTransformer.transform(ClassTransformer.java:120) ~[modlauncher-11.0.5.jar:?] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.TransformingClassLoader.maybeTransformClassBytes(TransformingClassLoader.java:57) ~[modlauncher-11.0.5.jar:?] {}
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.readerToClass(ModuleClassLoader.java:190) ~[securejarhandler-3.0.8.jar:?] {}
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.lambda$findClass$20(ModuleClassLoader.java:298) ~[securejarhandler-3.0.8.jar:?] {}
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.loadFromModule(ModuleClassLoader.java:311) ~[securejarhandler-3.0.8.jar:?] {}
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.findClass(ModuleClassLoader.java:298) ~[securejarhandler-3.0.8.jar:?] {}
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.loadClass(ModuleClassLoader.java:214) ~[securejarhandler-3.0.8.jar:?] {}
+	at java.base/java.lang.ClassLoader.loadClass(ClassLoader.java:526) ~[?:?] {}
+	at TRANSFORMER/vista@1.21.1-5.6.5/net.mehvahdjukaar.vista.common.wave_gate.WaveGateBlockEntity.setUrl(WaveGateBlockEntity.java:97) ~[vista-1.21.1-5.6.5-neoforge.jar%231258!/:1.21.1-5.6.5] {re:mixin,re:classloading}
+	at TRANSFORMER/vista@1.21.1-5.6.5/net.mehvahdjukaar.vista.common.wave_gate.WaveGateBlockEntity.loadAdditional(WaveGateBlockEntity.java:72) ~[vista-1.21.1-5.6.5-neoforge.jar%231258!/:1.21.1-5.6.5] {re:mixin,re:classloading}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.level.block.entity.BlockEntity.loadWithComponents(BlockEntity.java:83) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,re:computing_frames,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:fabric-block-view-api-v2.mixins.json:BlockEntityMixin from mod fabric_block_view_api_v2,pl:mixin:APP:fabric-rendering-data-attachment-v1.mixins.json:BlockEntityMixin from mod fabric_rendering_data_attachment_v1,pl:mixin:APP:the_bumblezone-common.mixins.json:blocks.BlockEntityAccessor from mod the_bumblezone,pl:mixin:APP:copycats-common.mixins.json:foundation.copycat.BlockEntityAccessor from mod copycats,pl:mixin:APP:kaleidoscope_compat.mixins.json:kaleidoscope_cookery.accessor.BlockEntityAccessor from mod kaleidoscope_compat,pl:mixin:APP:common_storage_lib_data.mixins.json:BlockEntityMixin from mod common_storage_lib_data,pl:mixin:APP:oritech.mixins.json:MachineControllerLifecycleMixin from mod oritech,pl:mixin:APP:refurbished_furniture.common.mixins.json:BlockEntityMixin from mod refurbished_furniture,pl:mixin:APP:owo.mixins.json:ui.access.BlockEntityAccessor from mod owo,pl:mixin:APP:amendments-common.mixins.json:BlockEntityUpdateMixin from mod amendments,pl:mixin:APP:aeinfinitybooster.mixins.json:MixinWirelessBlockEntityRemove from mod aeinfinitybooster,pl:mixin:APP:flywheel.impl.mixins.json:visualmanage.BlockEntityMixin from mod flywheel,pl:mixin:A}
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.common.extensions.IBlockEntityExtension.handleUpdateTag(IBlockEntityExtension.java:50) ~[neoforge-21.1.265-universal.jar%23736!/:?] {re:computing_frames,re:mixin,re:classloading}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.level.chunk.LevelChunk.lambda$replaceWithPacketData$3(LevelChunk.java:509) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:connectivity.mixins.json:ChunkSectionReadSkipMixin from mod connectivity,pl:mixin:APP:mffs.mixins.json:LevelChunkMixin from mod mffs,pl:mixin:APP:observerlib.mixins.json:MixinLevelChunk from mod observerlib,pl:mixin:APP:corgilib-common.mixins.json:chunk.MixinLevelChunk from mod corgilib,pl:mixin:APP:lootr-common.mixins.json:ticker.MixinLevelChunk from mod lootr,pl:mixin:APP:copycats-common.mixins.json:foundation.copycat.migration.LevelChunkMixin from mod copycats,pl:mixin:APP:eternal_starlight-common.mixins.json:LevelChunkMixin from mod eternal_starlight,pl:mixin:APP:ohthetreesyoullgrow.mixins.json:chunk.MixinLevelChunk from mod ohthetreesyoullgrow,pl:mixin:APP:astralsorcery.mixins.json:MixinLevelChunk from mod astralsorcery,pl:mixin:APP:refurbished_furniture.common.mixins.json:LevelChunkMixin from mod refurbished_furniture,pl:mixin:APP:moonlight-common.mixins.json:LevelChunkMixin from mod moonlight,pl:mixin:APP:flywheel.impl.mixins.json:visualmanage.LevelChunkMixin from mod flywheel,pl:mixin:APP:faunaengine.neoforge.mixins.json:ClientBlockChangeMixin from mod faunaengine,pl:mixin:APP:the_bumblezone-common.mixins.json:logging.LevelChunkMixin from mod the_bumblezone,pl:mixin:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.protocol.game.ClientboundLevelChunkPacketData.getBlockEntitiesTags(ClientboundLevelChunkPacketData.java:110) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:connectivity.mixins.json:ClientBoundLevelChunkPacketDataLimitMixin from mod connectivity,pl:mixin:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.protocol.game.ClientboundLevelChunkPacketData.lambda$getBlockEntitiesTagsConsumer$0(ClientboundLevelChunkPacketData.java:99) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:connectivity.mixins.json:ClientBoundLevelChunkPacketDataLimitMixin from mod connectivity,pl:mixin:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.level.chunk.LevelChunk.replaceWithPacketData(LevelChunk.java:506) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:connectivity.mixins.json:ChunkSectionReadSkipMixin from mod connectivity,pl:mixin:APP:mffs.mixins.json:LevelChunkMixin from mod mffs,pl:mixin:APP:observerlib.mixins.json:MixinLevelChunk from mod observerlib,pl:mixin:APP:corgilib-common.mixins.json:chunk.MixinLevelChunk from mod corgilib,pl:mixin:APP:lootr-common.mixins.json:ticker.MixinLevelChunk from mod lootr,pl:mixin:APP:copycats-common.mixins.json:foundation.copycat.migration.LevelChunkMixin from mod copycats,pl:mixin:APP:eternal_starlight-common.mixins.json:LevelChunkMixin from mod eternal_starlight,pl:mixin:APP:ohthetreesyoullgrow.mixins.json:chunk.MixinLevelChunk from mod ohthetreesyoullgrow,pl:mixin:APP:astralsorcery.mixins.json:MixinLevelChunk from mod astralsorcery,pl:mixin:APP:refurbished_furniture.common.mixins.json:LevelChunkMixin from mod refurbished_furniture,pl:mixin:APP:moonlight-common.mixins.json:LevelChunkMixin from mod moonlight,pl:mixin:APP:flywheel.impl.mixins.json:visualmanage.LevelChunkMixin from mod flywheel,pl:mixin:APP:faunaengine.neoforge.mixins.json:ClientBlockChangeMixin from mod faunaengine,pl:mixin:APP:the_bumblezone-common.mixins.json:logging.LevelChunkMixin from mod the_bumblezone,pl:mixin:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.multiplayer.ClientChunkCache.replaceWithPacketData(ClientChunkCache.java:120) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,pl:runtimedistcleaner:A,re:classloading,pl:accesstransformer:B,pl:mixin:APP:vista-common.mixins.json:ClientChunkCacheMixin from mod vista,pl:mixin:APP:sodium-common.mixins.json:core.world.map.ClientChunkCacheMixin from mod sodium,pl:mixin:APP:flywheel.impl.mixins.json:ClientChunkCacheMixin from mod flywheel,pl:mixin:APP:securitycraft.mixins.json:camera.ClientChunkCacheMixin from mod securitycraft,pl:mixin:APP:ars_nouveau.mixins.json:camera.ClientChunkCacheMixin from mod ars_nouveau,pl:mixin:A,pl:runtimedistcleaner:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.multiplayer.ClientPacketListener.updateLevelChunk(ClientPacketListener.java:760) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,pl:runtimedistcleaner:A,re:classloading,pl:accesstransformer:B,pl:mixin:A,pl:runtimedistcleaner:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.multiplayer.ClientPacketListener.handleLevelChunkWithLight(ClientPacketListener.java:712) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,pl:runtimedistcleaner:A,re:classloading,pl:accesstransformer:B,pl:mixin:A,pl:runtimedistcleaner:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket.handle(ClientboundLevelChunkWithLightPacket.java:53) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,re:classloading}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket.handle(ClientboundLevelChunkWithLightPacket.java:14) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,re:classloading}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.multiplayer.ClientPacketListener.handleBundlePacket(ClientPacketListener.java:2290) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,pl:runtimedistcleaner:A,re:classloading,pl:accesstransformer:B,pl:mixin:A,pl:runtimedistcleaner:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.protocol.game.ClientboundBundlePacket.handle(ClientboundBundlePacket.java:19) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:classloading}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.protocol.game.ClientboundBundlePacket.handle(ClientboundBundlePacket.java:7) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:classloading}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.protocol.PacketUtils.lambda$ensureRunningOnSameThread$0(PacketUtils.java:27) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,re:classloading,pl:mixin:APP:connectivity.mixins.json:PacketUtilsMixin from mod connectivity,pl:mixin:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.BlockableEventLoop.doRunTask(BlockableEventLoop.java:148) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,re:computing_frames,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.ReentrantBlockableEventLoop.doRunTask(ReentrantBlockableEventLoop.java:23) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,re:computing_frames,re:classloading}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.BlockableEventLoop.pollTask(BlockableEventLoop.java:122) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,re:computing_frames,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.BlockableEventLoop.runAllTasks(BlockableEventLoop.java:111) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,re:computing_frames,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.runTick(Minecraft.java:1155) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,pl:runtimedistcleaner:A,re:computing_frames,pl:accesstransformer:B,pl:runtimedistcleaner:A,re:classloading,pl:accesstransformer:B,pl:mixin:A,pl:runtimedistcleaner:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.run(Minecraft.java:807) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:accesstransformer:B,pl:runtimedistcleaner:A,re:computing_frames,pl:accesstransformer:B,pl:runtimedistcleaner:A,re:classloading,pl:accesstransformer:B,pl:mixin:A,pl:runtimedistcleaner:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.main.Main.main(Main.java:230) ~[client-1.21.1-20240808.144430-srg.jar%23735!/:?] {re:mixin,pl:runtimedistcleaner:A,re:classloading,pl:mixin:APP:euphoria_patcher.mixins.json:EuphoriaPatcherMixin from mod euphoria_patcher,pl:mixin:APP:DistantHorizons.neoforge.mixins.json:client.MixinMain from mod distanthorizons,pl:mixin:APP:cryonicconfig.mixins.json:client.MainMixin from mod cryonicconfig,pl:mixin:A,pl:runtimedistcleaner:A}
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103) ~[?:?] {}
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580) ~[?:?] {}
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonLaunchHandler.runTarget(CommonLaunchHandler.java:136) ~[loader-4.0.45.jar%23107!/:4.0] {}
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonLaunchHandler.clientService(CommonLaunchHandler.java:124) ~[loader-4.0.45.jar%23107!/:4.0] {}
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonClientLaunchHandler.runService(CommonClientLaunchHandler.java:32) ~[loader-4.0.45.jar%23107!/:4.0] {}
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonLaunchHandler.lambda$launchService$4(CommonLaunchHandler.java:118) ~[loader-4.0.45.jar%23107!/:4.0] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchServiceHandlerDecorator.launch(LaunchServiceHandlerDecorator.java:30) [modlauncher-11.0.5.jar%23112!/:?] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchServiceHandler.launch(LaunchServiceHandler.java:53) [modlauncher-11.0.5.jar%23112!/:?] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchServiceHandler.launch(LaunchServiceHandler.java:71) [modlauncher-11.0.5.jar%23112!/:?] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.Launcher.run(Launcher.java:103) [modlauncher-11.0.5.jar%23112!/:?] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.Launcher.main(Launcher.java:74) [modlauncher-11.0.5.jar%23112!/:?] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(BootstrapLaunchConsumer.java:26) [modlauncher-11.0.5.jar%23112!/:?] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(BootstrapLaunchConsumer.java:23) [modlauncher-11.0.5.jar%23112!/:?] {}
+	at cpw.mods.bootstraplauncher@2.0.2/cpw.mods.bootstraplauncher.BootstrapLauncher.run(BootstrapLauncher.java:210) [bootstraplauncher-2.0.2.jar:?] {}
+	at cpw.mods.bootstraplauncher@2.0.2/cpw.mods.bootstraplauncher.BootstrapLauncher.main(BootstrapLauncher.java:69) [bootstraplauncher-2.0.2.jar:?] {}
+Caused by: org.spongepowered.asm.mixin.throwables.MixinApplyError: Mixin [vista_advanced_player.mixins.json:WebUrlVideoSourceMixin from mod vista_advanced_player] from phase [DEFAULT] in config [vista_advanced_player.mixins.json] FAILED during APPLY
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.handleMixinError(MixinProcessor.java:686) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.handleMixinApplyError(MixinProcessor.java:637) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:368) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	... 52 more
+Caused by: org.spongepowered.asm.mixin.transformer.throwables.InvalidMixinException: @Shadow field projectorID was not located in the target class net.mehvahdjukaar.vista.client.video_source.WebUrlVideoSource. No refMap loaded.
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.attachFields(MixinPreProcessorStandard.java:624) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.attach(MixinPreProcessorStandard.java:302) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.createContextFor(MixinPreProcessorStandard.java:277) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinInfo.createContextFor(MixinInfo.java:1292) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinApplicatorStandard.apply(MixinApplicatorStandard.java:203) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.TargetClassContext.apply(TargetClassContext.java:437) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.TargetClassContext.applyMixins(TargetClassContext.java:418) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:352) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	... 52 more
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: Render thread
+Stacktrace:
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:381) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinTransformer.transformClass(MixinTransformer.java:253) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.service.modlauncher.MixinTransformationHandler.processClass(MixinTransformationHandler.java:131) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.launch.MixinLaunchPluginLegacy.processClass(MixinLaunchPluginLegacy.java:131) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.serviceapi.ILaunchPluginService.processClassWithFlags(ILaunchPluginService.java:156) ~[modlauncher-11.0.5.jar:11.0.5+main.901c6ea8] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchPluginHandler.offerClassNodeToPlugins(LaunchPluginHandler.java:94) ~[modlauncher-11.0.5.jar:?] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.ClassTransformer.transform(ClassTransformer.java:120) ~[modlauncher-11.0.5.jar:?] {}
+
+
+-- Affected level --
+Details:
+	All players: 1 total; [LocalPlayer['Player'/2513, l='ClientLevel', x=3258.50, y=83.00, z=939.50]]
+	Chunk stats: 529, 0
+	Level dimension: minecraft:overworld
+	Level spawn location: World: (1216,63,1008), Section: (at 0,15,0 in 76,3,63; chunk contains blocks 1216,-64,1008 to 1231,319,1023), Region: (2,1; contains chunks 64,32 to 95,63, blocks 1024,-64,512 to 1535,319,1023)
+	Level time: 4848792 game time, 6084337 day time
+	Server brand: neoforge
+	Server type: Non-integrated multiplayer server
+	Tracked entity count: 1
+
+-- Last reload --
+Details:
+	Reload number: 1
+	Reload reason: initial
+	Finished: Yes
+
+-- System Details --
+Details:
+	Minecraft Version: 1.21.1
+	Mod List: 
+		connectivity-1.21.1-7.7.jar                       |Connectivity Mod              |connectivity                  |7.7                 |Manifest: NOSIGNATURE
+		vista-1.21.1-5.6.5-neoforge.jar                   |Vista                         |vista                         |1.21.1-5.6.5        |Manifest: NOSIGNATURE
+		vista-advanced-player-1.21.1-1.0.1.jar            |Vista: Advanced Player        |vista_advanced_player         |1.0.1               |Manifest: NOSIGNATURE

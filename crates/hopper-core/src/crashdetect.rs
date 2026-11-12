@@ -1847,6 +1847,20 @@ fn analyze(
     for s in suspects.iter_mut().filter(|s| s.certainty == Certainty::Certain) {
         s.changed = what_changed(root, s, mods, &sets);
     }
+    // A mixin that didn't find a part of another mod's class: that mod
+    // changed, or is another version than the mixin was made for.
+    if engine {
+        for miss in [text, log].iter().flat_map(|t| crate::crashengine::mixin_misses(t)).fold(Vec::new(), |mut v, m| {
+            if !v.contains(&m) {
+                v.push(m);
+            }
+            v
+        }) {
+            let idx = get();
+            let Some(owner) = idx.jar_of_class(&miss.class).map(str::to_string) else { continue };
+            mixin_target(root, text, before, &miss, &owner, &mut suspects, &sets);
+        }
+    }
     // The mod that owns an unbound value: say what to do about it.
     for s in suspects.iter_mut().filter(|s| s.why.starts_with(UNBOUND_OWNER_WHY) && s.steps.is_empty()) {
         let name = jar_name(&root.join("mods"), &s.file_name);
@@ -1861,6 +1875,164 @@ fn analyze(
         s.steps = default_steps(s, &jar_name(&dir, &s.file_name));
     }
     (suspects, stopped)
+}
+
+/// How far back History and older crash reports count for "what changed".
+const RECENT: i64 = 14 * 86_400;
+
+/// Facts left by [`mixin_target`].
+pub const MIXIN_TARGET: &str = "mixin_target";
+
+/// Mod A's mixin looked for a part of mod B's class that isn't there
+/// (`@Shadow field projectorID was not located in the target class` of
+/// Vista's): A was made for another version of B. B did nothing wrong,
+/// even though its code was running. The card says which, and what to do:
+/// - the same miss in an earlier report, with B at another version: A
+///   doesn't work with any B tried, so turn A off (no rollback offer);
+/// - else B changed lately (a History entry): say so, turn A off first,
+///   and undoing B's change second (it may help: A may be older still);
+/// - else: A was made for another version of B; turn it off.
+fn mixin_target(root: &Path, text: &str, before: i64, miss: &crate::crashengine::MixinMiss, owner: &str, suspects: &mut Vec<Suspect>, sets: &[crate::backups::Set]) {
+    let Some(a) = suspects.iter().position(|s| s.mod_id.eq_ignore_ascii_case(&miss.mod_id) && !s.knock_on) else { return };
+    if suspects[a].file_name == owner {
+        return;
+    }
+    let dir = root.join("mods");
+    let caller = jar_name(&dir, &suspects[a].file_name);
+    let oname = jar_name(&dir, owner);
+    let owner_ids = crate::deps::own_ids(&dir.join(owner)).0;
+    let report_ver = |t: &str| owner_ids.iter().find_map(|id| crate::crashengine::version_in_report(t, id)).map(|v| crate::undo::version_of(&v));
+    let now_ver = report_ver(text).unwrap_or_else(|| crate::crashengine::shown_version(&dir, owner));
+    let member = &miss.member;
+    // The versions of B this mixin already failed on: earlier reports with
+    // the same miss (the crash list groups these as "×2").
+    let mut tried: Vec<String> = Vec::new();
+    let mut earlier: Vec<(i64, PathBuf)> = crate::logs::crash_reports(root)
+        .into_iter()
+        .filter_map(|p| Some((modified_secs(&p)?, p)))
+        .filter(|(t, _)| *t < before - 1 && *t > before - RECENT)
+        .collect();
+    earlier.sort();
+    for (_, p) in earlier.iter().rev().take(20).rev() {
+        let Ok(t) = fs::read_to_string(p) else { continue };
+        if !t.contains(member.as_str()) || !crate::crashengine::mixin_misses(&t).contains(miss) {
+            continue;
+        }
+        if let Some(v) = report_ver(&t)
+            && !tried.contains(&v)
+        {
+            tried.push(v);
+        }
+    }
+    tried.retain(|v| *v != now_ver);
+    let repeated = !tried.is_empty() && !now_ver.is_empty();
+    // B's latest change in History, before this crash.
+    let changed = if repeated {
+        None
+    } else {
+        sets.iter().filter(|s| s.when > before - RECENT).find_map(|set| {
+            let f = set.files.iter().find(|f| {
+                f.restore_to.starts_with("mods/")
+                    && f.name.to_ascii_lowercase().trim_end_matches(".disabled").ends_with(".jar")
+                    && f.name.trim_end_matches(".disabled") != owner
+                    && (f.now.as_deref() == Some(owner)
+                        || f.title().eq_ignore_ascii_case(&oname)
+                        || crate::deps::own_ids(&f.path).0.iter().any(|i| owner_ids.contains(i)))
+            })?;
+            let from = crate::undo::version_of(f.name.trim_end_matches(".disabled"));
+            (from != now_ver).then(|| Changed { file_name: owner.to_string(), name: oname.clone(), from, to: now_ver.clone(), when: set.when, backup: f.path.clone() })
+        })
+    };
+    let ofull = if now_ver.is_empty() { oname.clone() } else { format!("{oname} {now_ver}") };
+    let (why, steps, look, b_why) = if repeated {
+        let mut all = tried.clone();
+        all.push(now_ver.clone());
+        let list = match all.as_slice() {
+            [x, y] => format!("{x} and {y}"),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+            [] => String::new(),
+        };
+        let neither = if all.len() == 2 { format!("neither {oname} {} nor {} has", all[0], all[1]) } else { format!("none of {oname} {list} has") };
+        (
+            format!("{caller} doesn't work with this {oname} (tried {list}). Turn it off until it's updated."),
+            vec![format!("Turn off {caller} until it's updated. {oname} can stay.")],
+            format!("It looks for {member} in {oname}, which {neither}."),
+            format!("{caller} changes its code, but {neither} the part it looks for ({member}). Nothing is wrong with {oname} itself."),
+        )
+    } else if let Some(ch) = &changed {
+        let when = crate::time::relative_secs(ch.when).to_lowercase();
+        let versions = if ch.from.is_empty() || ch.to.is_empty() { String::new() } else { format!(" ({} → {})", ch.from, ch.to) };
+        let back = if ch.from.is_empty() { "the version you had before".to_string() } else { ch.from.clone() };
+        (
+            format!("{oname} was updated {when}{versions}. {caller} was made for an older {oname}."),
+            vec![
+                format!("Turn off {caller} and play. {oname} can stay."),
+                format!("Or undo the {oname} update (back to {back}). This may help, if {caller} was made for that version."),
+            ],
+            format!("It looks for {member} in {oname}, which this {oname} no longer has."),
+            format!("Changed by an update: {ofull} doesn't have {member}, which {caller} looks for. Nothing is wrong with {oname} itself."),
+        )
+    } else {
+        (
+            format!("{caller} was made for a different version of {oname} (you have {now_ver}): it looks for {member} in {oname}, which this {oname} doesn't have."),
+            vec![
+                format!("Turn off {caller} until there's a version made for {ofull}. {oname} can stay."),
+                format!("Or update {caller}, if a newer version is out."),
+            ],
+            format!("It looks for {member} in {oname}, which this {oname} doesn't have."),
+            format!("{caller} changes its code and didn't find {member} there. Nothing is wrong with {oname} itself."),
+        )
+    };
+    // A mixin only applies when the game first uses the class: in the
+    // world, minutes after the game started fine.
+    let in_world = text.contains("-- Affected level --");
+    let s = &mut suspects[a];
+    s.why = why;
+    s.steps = steps;
+    s.changed = changed;
+    s.partner = Some(Partner { file_name: owner.to_string(), name: oname.clone(), version: now_ver.clone() });
+    s.facts.insert(0, Fact { rule: crate::crashengine::MISMATCH.into(), weight: 0, text: look });
+    if in_world {
+        s.facts.push(Fact {
+            rule: crate::crashengine::MISMATCH.into(),
+            weight: 0,
+            text: format!("The game started fine: a change like this only fails when the game first uses that part of {oname}, here in the world."),
+        });
+    }
+    if let Some(b) = suspects.iter_mut().find(|s| s.file_name == owner) {
+        b.certainty = Certainty::Possible;
+        b.changed = None;
+        b.steps.clear();
+        b.why = b_why.clone();
+        b.facts.retain(|f| f.rule != crate::crashengine::HINT);
+        b.facts.insert(0, Fact { rule: MIXIN_TARGET.into(), weight: 0, text: b_why });
+    }
+}
+
+/// A suspect's steps to show. `newer`: whether a newer version of it is
+/// out, when the app knows (from its own update check; `None`: unknown).
+/// With none out, "Update <mod>" goes, and the "Or …" step after it leads.
+pub fn steps_shown(s: &Suspect, mods_dir: &Path, newer: Option<bool>) -> Vec<String> {
+    if newer != Some(false) {
+        return s.steps.clone();
+    }
+    let name = jar_name(mods_dir, &s.file_name).to_lowercase();
+    let mut out: Vec<String> = s
+        .steps
+        .iter()
+        .filter(|t| {
+            let l = t.to_lowercase();
+            !(l.starts_with(&format!("update {name}")) || l.starts_with(&format!("or update {name}")))
+        })
+        .cloned()
+        .collect();
+    if let Some(first) = out.first_mut()
+        && let Some(rest) = first.strip_prefix("Or ")
+    {
+        let mut c = rest.chars();
+        *first = c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default();
+    }
+    out
 }
 
 /// Mods start in parallel, and some mod's setup code reads a shared list
@@ -2500,7 +2672,7 @@ impl LiveWatch {
         if len > g.log_read {
             let text = read_from(&log, g.log_read, 1 << 20);
             g.log_read = len;
-            for r in signals(&text).into_iter().filter(|r| r.why.contains("mixin")) {
+            for r in mixin_failures(&text) {
                 let Some(file) = match_jar(&r, mods, &ids) else { continue };
                 if g.warned.contains(&file) {
                     continue;
@@ -2521,6 +2693,30 @@ impl LiveWatch {
         }
         news
     }
+}
+
+/// The mods whose mixins really failed to apply in a stretch of log: Mixin's
+/// own "Mixin apply for mod x failed", "… FAILED during APPLY" and "Attach
+/// error … from mod x" lines. Not what only looks like one: "Reference map
+/// 'x.refmap.json' … could not be read" (most mods print it, harmless),
+/// "@Mixin target … was not found" (a mixin for a mod that isn't
+/// installed, skipped on purpose), or a mod's mixin that is only a frame in
+/// a crash's trace printed to the log.
+fn mixin_failures(text: &str) -> Vec<Raw> {
+    let mut out: Vec<Raw> = Vec::new();
+    for l in text.lines() {
+        let id = MIXIN_FAILED
+            .captures(l)
+            .or_else(|| MIXIN_ERROR.captures(l))
+            .or_else(|| MIXIN_ATTACH.captures(l))
+            .map(|m| m[1].to_string());
+        if let Some(id) = id
+            && !out.iter().any(|r| r.mod_id == id)
+        {
+            out.push(Raw { mod_id: id, jar: String::new(), certainty: Certainty::Possible, why: MIXIN_WARNED_WHY.into(), class: String::new(), needs: Vec::new() });
+        }
+    }
+    out
 }
 
 /// Up to `max` bytes of `p` from `from` (the newest ones when there are
@@ -4187,5 +4383,148 @@ net.neoforged.neoforge.logging.CrashReportExtender$ModLoadingCrashException: Mod
                 }
             }
         }
+    }
+
+    const VISTA_REPORT: &str = include_str!("crashdetect_fixtures/atm10-vista-mixin-crash.txt");
+    const VISTA_AGAIN_REPORT: &str = include_str!("crashdetect_fixtures/atm10-vista-mixin-again-crash.txt");
+    const VISTA_LOG: &str = include_str!("crashdetect_fixtures/atm10-vista-mixin-latest.log");
+
+    /// A jar with mod metadata, a version and these (empty) classes.
+    fn versioned_jar(p: &Path, id: &str, name: &str, ver: &str, classes: &[&str]) {
+        use std::io::Write;
+        let mut z = zip::ZipWriter::new(fs::File::create(p).unwrap());
+        z.start_file::<_, ()>("META-INF/neoforge.mods.toml", Default::default()).unwrap();
+        write!(z, "modLoader=\"javafml\"\n[[mods]]\nmodId=\"{id}\"\nversion=\"{ver}\"\ndisplayName=\"{name}\"\n").unwrap();
+        for c in classes {
+            z.start_file::<_, ()>(format!("{}.class", c.replace('.', "/")), Default::default()).unwrap();
+            z.write_all(b"\xca\xfe\xba\xbe").unwrap();
+        }
+        z.finish().unwrap();
+    }
+
+    /// All the Mods 10, 2026-11-12: Vista: Advanced Player's mixin, with
+    /// `@Shadow projectorID`, and Vista installed at `vista_ver`; History
+    /// holds the Vista jar `set_aside`, set aside 4 hours before.
+    fn vista_root(tag: &str, vista_ver: &str, set_aside: &str) -> (PathBuf, Vec<String>) {
+        let root = std::env::temp_dir().join(format!("hopper-vista-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["crash-reports", "logs", "mods"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let dir = root.join("mods");
+        let vista = format!("vista-1.21.1-{vista_ver}-neoforge.jar");
+        let class = "net.mehvahdjukaar.vista.client.video_source.WebUrlVideoSource";
+        versioned_jar(&dir.join(&vista), "vista", "Vista", &format!("1.21.1-{vista_ver}"), &[class, "net.mehvahdjukaar.vista.common.wave_gate.WaveGateBlockEntity"]);
+        versioned_jar(&dir.join("vista-advanced-player-1.21.1-1.0.1.jar"), "vista_advanced_player", "Vista: Advanced Player", "1.0.1", &["com.animenkin.vistaplus.mixin.WebUrlVideoSourceMixin"]);
+        versioned_jar(&dir.join("connectivity-1.21.1-7.7.jar"), "connectivity", "Connectivity Mod", "7.7", &["com.connectivity.Connectivity"]);
+        let old_ver = set_aside.split('-').nth(2).unwrap_or_default();
+        let set = root.join(crate::sync::BACKUP_DIR).join((crate::time::now() - 4 * 3600).to_string());
+        fs::create_dir_all(&set).unwrap();
+        let old = set.join(set_aside);
+        versioned_jar(&old, "vista", "Vista", &format!("1.21.1-{old_ver}"), &[class]);
+        crate::backups::record(&set, &old, &format!("mods/{set_aside}"));
+        let mods: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        (root, mods)
+    }
+
+    /// The "While you last played" box: only Vista: Advanced Player's
+    /// mixin failed. Connectivity's refmap warning (181 mods print one), its
+    /// mixin frame in a later network error's trace, and the mixin whose
+    /// target mod isn't installed (`@Mixin target … was not found`) don't
+    /// count.
+    #[test]
+    fn only_real_mixin_failures_are_warned_about() {
+        let ids: Vec<String> = mixin_failures(VISTA_LOG).into_iter().map(|r| r.mod_id).collect();
+        assert_eq!(ids, ["vista_advanced_player"]);
+        // A log of just the harmless lines: nothing.
+        let harmless: String = VISTA_LOG
+            .lines()
+            .filter(|l| l.contains("refmap") || l.contains("was not found") || l.contains("connectivity$"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert!(harmless.contains("connectivity.refmap.json") && harmless.contains("redirect$zzl000$connectivity"));
+        assert!(mixin_failures(&harmless).is_empty(), "{:?}", mixin_failures(&harmless));
+
+        // The live watch, end to end, on a copy of the log.
+        let (root, mods) = vista_root("live", "5.6.8", "vista-1.21.1-5.6.5-neoforge.jar");
+        fs::write(root.join("logs/latest.log"), VISTA_LOG).unwrap();
+        let dir = root.join("mods");
+        let news = LiveWatch::default().look(&root, crate::time::now() - 600, &mods, |f| crate::deps::own_ids(&dir.join(f)).0);
+        let warned: Vec<&str> = news.warnings.iter().map(|s| s.file_name.as_str()).collect();
+        assert_eq!(warned, ["vista-advanced-player-1.21.1-1.0.1.jar"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The first crash: Vista was updated 5.6.5 → 5.6.8 at 02:55, and its
+    /// add-on's mixin looks for a field 5.6.8 doesn't have. The add-on is
+    /// certain; Vista only changed (possible, not "its code was running").
+    /// Turning the add-on off comes first; undoing the Vista update is the
+    /// second, "may help" option.
+    #[test]
+    fn a_mixin_into_an_updated_mod_names_the_update() {
+        let (root, mods) = vista_root("updated", "5.6.8", "vista-1.21.1-5.6.5-neoforge.jar");
+        let report = root.join("crash-reports/crash-2026-11-12_06.32.00-client.txt");
+        fs::write(&report, VISTA_REPORT).unwrap();
+        fs::write(root.join("logs/latest.log"), VISTA_LOG).unwrap();
+        let dir = root.join("mods");
+        let c = from_report(&root, &report, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+        let addon = &c.suspects[0];
+        assert_eq!((addon.file_name.as_str(), addon.certainty), ("vista-advanced-player-1.21.1-1.0.1.jar", Certainty::Certain));
+        assert_eq!(addon.why, "Vista was updated today (5.6.5 → 5.6.8). Vista: Advanced Player was made for an older Vista.");
+        assert!(addon.steps[0].starts_with("Turn off Vista: Advanced Player"), "{:?}", addon.steps);
+        assert!(addon.steps[1].starts_with("Or undo the Vista update (back to 5.6.5). This may help"), "{:?}", addon.steps);
+        assert!(!addon.steps.iter().any(|s| s.starts_with("Update ")), "{:?}", addon.steps);
+        let ch = addon.changed.as_ref().expect("the Vista update");
+        assert_eq!((ch.file_name.as_str(), ch.from.as_str(), ch.to.as_str()), ("vista-1.21.1-5.6.8-neoforge.jar", "5.6.5", "5.6.8"));
+        assert_eq!(addon.partner.as_ref().map(|p| p.name.as_str()), Some("Vista"));
+        assert!(addon.facts.iter().any(|f| f.text == "It looks for projectorID in Vista, which this Vista no longer has."), "{:?}", addon.facts);
+        assert!(addon.facts.iter().any(|f| f.text.contains("here in the world")), "the crash came in the world, not at start");
+        let vista = c.suspects.iter().find(|s| s.file_name.starts_with("vista-1.21.1")).expect("Vista is named");
+        assert_eq!(vista.certainty, Certainty::Possible);
+        assert!(vista.why.starts_with("Changed by an update: Vista 5.6.8 doesn't have projectorID"), "{}", vista.why);
+        assert!(!vista.why.contains("was running"), "{}", vista.why);
+        assert!(vista.steps.is_empty() && vista.changed.is_none());
+        assert_eq!(to_turn_off(&c).iter().map(|s| s.file_name.as_str()).collect::<Vec<_>>(), ["vista-advanced-player-1.21.1-1.0.1.jar"]);
+        let name = |s: &Suspect| jar_name(&dir, &s.file_name);
+        assert_eq!(verdict(&c, &name), "Vista: Advanced Player doesn't match Vista", "not \"failed to load\": it crashed in the world");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The second crash, 06:50: the player put Vista 5.6.5 back and the
+    /// same mixin failed the same way. The add-on fits neither version: no
+    /// rollback offer, just turn it off.
+    #[test]
+    fn the_same_mixin_failing_after_a_rollback_drops_the_rollback() {
+        let (root, mods) = vista_root("again", "5.6.5", "vista-1.21.1-5.6.8-neoforge.jar");
+        let first = root.join("crash-reports/crash-2026-11-12_06.32.00-client.txt");
+        fs::write(&first, VISTA_REPORT).unwrap();
+        set_mtime(&first, std::time::SystemTime::now() - std::time::Duration::from_secs(1110));
+        let report = root.join("crash-reports/crash-2026-11-12_06.50.30-client.txt");
+        fs::write(&report, VISTA_AGAIN_REPORT).unwrap();
+        let dir = root.join("mods");
+        let c = from_report(&root, &report, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+        let addon = &c.suspects[0];
+        assert_eq!((addon.file_name.as_str(), addon.certainty), ("vista-advanced-player-1.21.1-1.0.1.jar", Certainty::Certain));
+        assert_eq!(addon.why, "Vista: Advanced Player doesn't work with this Vista (tried 5.6.8 and 5.6.5). Turn it off until it's updated.");
+        assert_eq!(addon.steps, ["Turn off Vista: Advanced Player until it's updated. Vista can stay."]);
+        assert!(addon.changed.is_none(), "no rollback offer");
+        assert!(addon.facts.iter().any(|f| f.text == "It looks for projectorID in Vista, which neither Vista 5.6.8 nor 5.6.5 has."), "{:?}", addon.facts);
+        let vista = c.suspects.iter().find(|s| s.file_name.starts_with("vista-1.21.1")).expect("Vista is named");
+        assert_eq!(vista.certainty, Certainty::Possible);
+        assert!(vista.why.contains("Nothing is wrong with Vista itself"), "{}", vista.why);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn update_steps_go_when_no_newer_version_is_out() {
+        let dir = std::env::temp_dir().join(format!("hopper-steps-{}", std::process::id()));
+        let s = Suspect {
+            file_name: "coolmod.jar".into(),
+            steps: vec!["Update coolmod: a newer version may fix this.".into(), "Or turn off coolmod and start again (mods that need it go too).".into()],
+            ..Default::default()
+        };
+        assert_eq!(steps_shown(&s, &dir, None), s.steps, "unknown: kept");
+        assert_eq!(steps_shown(&s, &dir, Some(true)), s.steps);
+        assert_eq!(steps_shown(&s, &dir, Some(false)), ["Turn off coolmod and start again (mods that need it go too)."]);
     }
 }

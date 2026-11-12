@@ -674,7 +674,8 @@ impl LogsView {
                 let store3 = self.store.clone();
                 let link_of = |file: &str, key: &str, cx: &App| crash_story::mod_ref(&store3, root, file, key, cx);
                 below.extend(crate::crash_view::partner_line(s, &link_of, cx));
-                below.extend(crate::crash_view::steps_list(s, &readable, cx));
+                let newer = crate::crash_view::newer_out(store.updates(root), pid);
+                below.extend(crate::crash_view::steps_list(s, &root.join("mods"), newer, &readable, cx));
                 below.extend(crate::crash_view::why_fold(ElementId::Name(format!("crash-why:{i}").into()), s, open, &readable, toggle, cx));
                 crate::crash_view::suspect_row(link, s, why, below, cx).into_any_element()
             })
@@ -873,7 +874,18 @@ impl LogsView {
             .filter(|s| s.certainty <= Certainty::Likely)
             .filter_map(|s| store.revert_offer(root, s.file_name.trim_end_matches(".disabled")))
             .collect();
-        if can_turn_off == 0 && turned == 0 && reverts.is_empty() {
+        // A mod made for an older version of the mod it changes, after that
+        // mod was updated: undoing the update is the second choice, after
+        // turning the mod off (only while History still has the older copy).
+        let undos: Vec<hopper::crashdetect::Changed> = c
+            .suspects
+            .iter()
+            .filter(|s| s.partner.is_some())
+            .filter_map(|s| s.changed.clone())
+            .filter(|ch| ch.backup.exists())
+            .take(1)
+            .collect();
+        if can_turn_off == 0 && turned == 0 && reverts.is_empty() && undos.is_empty() {
             return None;
         }
         let (r1, r2, r3) = (root.to_path_buf(), root.to_path_buf(), root.to_path_buf());
@@ -971,6 +983,22 @@ impl LogsView {
                                 cx.notify();
                             })),
                     )
+                })
+                .when(turned == 0, |r| {
+                    r.children(undos.into_iter().map(|ch| {
+                        let root = root.to_path_buf();
+                        Button::new("crash-undo-update")
+                            .small()
+                            .outline()
+                            .icon(IconName::Undo2)
+                            .label(format!("Undo the {} update", ch.name))
+                            .tooltip(format!("Puts back {} {} from History. It may help.", ch.name, ch.from))
+                            .disabled(playing)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let store = this.store.clone();
+                                crate::crash_help::undo_changed(&store, &root, &ch, window, cx);
+                            }))
+                    }))
                 })
                 .when(turned > 0, |r| {
                     r.child(

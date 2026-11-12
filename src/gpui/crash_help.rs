@@ -42,6 +42,52 @@ pub fn put_back_changed(
     }
 }
 
+/// Undoes the History entry of a mod change a crash names ("Undo the
+/// Vista update"), as History's own Undo does: a mod from a site downloads
+/// again with its old entry, and what's there now goes to History. Runs in
+/// the background; says why in a notification when it can't.
+pub fn undo_changed(store: &Entity<Store>, root: &Path, ch: &hopper::crashdetect::Changed, window: &mut Window, cx: &mut App) {
+    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::component::notification::Notification;
+    let s = store.read(cx);
+    if let Some(why) = s.edit_hold_reason(root) {
+        window.push_notification(Notification::error(format!("Can't undo now: {why}.")), cx);
+        return;
+    }
+    let Some(mut inst) = s.instance(root).cloned() else { return };
+    let saved = hopper::backups::list(root).into_iter().flat_map(|s| s.files).find(|f| f.path == ch.backup);
+    let Some(saved) = saved else {
+        window.push_notification(Notification::warning(format!("The older copy of {} isn't in History any more.", ch.name)), cx);
+        return;
+    };
+    // A kept copy with no site file behind it: History's own undo would put
+    // it beside the newer jar, so swap the two instead.
+    if saved.src.is_none() {
+        if put_back_changed(store, root, ch, window, cx) {
+            window.push_notification(Notification::success(format!("Put back the older {}.", ch.name)), cx);
+        }
+        return;
+    }
+    let (store, root, name) = (store.clone(), root.to_path_buf(), ch.name.clone());
+    window
+        .spawn(cx, async move |cx| {
+            let done = cx.background_spawn(async move { hopper::undo::undo(&mut inst, &saved).map_err(|e| format!("{e:#}")) }).await;
+            cx.update(|window, cx| match done {
+                Ok(p) => {
+                    let jars: Vec<String> = p.file_name().map(|n| n.to_string_lossy().into_owned()).into_iter().collect();
+                    store.update(cx, |s, cx| {
+                        s.reload_instance(&root, cx);
+                        s.identify_jars(&root, jars);
+                    });
+                    window.push_notification(Notification::success(format!("Put back the older {name}.")), cx);
+                }
+                Err(e) => window.push_notification(Notification::error(format!("{name}: {e}")), cx),
+            })
+            .ok();
+        })
+        .detach();
+}
+
 /// A bordered, tinted box that calls attention to one thing.
 pub fn callout(color: Hsla, cx: &App) -> Div {
     v_flex()

@@ -230,6 +230,41 @@ Tests: `crashpacks::tests`,
 `a_resource_pack_turned_on_before_a_drawing_crash_is_the_trigger`
 (`atm10-pack-overlay-*`).
 
+## A mixin into a mod that changed (2026-11-12: built; `crashdetect::mixin_target`)
+
+Case: Vista: Advanced Player has a mixin with `@Shadow projectorID` into
+Vista's `WebUrlVideoSource`. Vista was updated 5.6.5 → 5.6.8, and the game
+crashed in the world (a block entity loaded the class), not at start. Put
+back to 5.6.5, it crashed the same way: the addon was made for an older Vista.
+
+- `crashengine::mixin_misses` reads the missing piece ("@Shadow field X was
+  not located in the target class C", an injector that "could not find any
+  targets matching 'm' in C") and the mod it's from. The target class's jar
+  (mod index) is the mod B it changes.
+- The mod with the mixin (A) stays Certain, with B as its partner ("A
+  doesn't match B"). B is Possible: "Changed by an update: B 5.6.8 doesn't
+  have X, which A looks for. Nothing is wrong with B itself."
+- B updated within 14 days (History in `mods/`): the story names the update;
+  steps lead with "Turn off A. B can stay."; "Or undo the B update" is the
+  second, "may help" step, and a secondary button on the card.
+- The same miss in an earlier crash report (14 days) with another B version:
+  "A doesn't work with this B (tried 5.6.8 and 5.6.5). Turn it off until
+  it's updated." No undo.
+- A report with "-- Affected level --" adds "The game started fine: ... here
+  in the world."
+- `steps_shown`: an "Update A" step shows only when the last update check
+  has a newer A (no network in the engine; unknown keeps it).
+- "While you play" (`LiveWatch`) counts only real mixin apply failures
+  (`MIXIN_FAILED` / `ERROR` / `ATTACH`), not a refmap warning, a "@Mixin
+  target ... was not found", or a mixin frame in a later stack trace (that
+  flagged Connectivity here).
+
+Tests: `a_mixin_into_an_updated_mod_names_the_update`,
+`the_same_mixin_failing_after_a_rollback_drops_the_rollback`,
+`only_real_mixin_failures_are_warned_about`,
+`update_steps_go_when_no_newer_version_is_out` (`atm10-vista-mixin-*`);
+corpus `atm10-vista-1112-0632` / `-0650`.
+
 ## The engine: weighing evidence (2026-11-03: built; `crashengine.rs`, `modindex.rs`)
 
 The rules above each decided a mod's certainty and wrote its sentence, and

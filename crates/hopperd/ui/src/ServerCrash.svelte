@@ -115,6 +115,10 @@
   // The change the error names; once put back from here the crash no
   // longer names it, so the card keeps it to say so.
   const changed = $derived(rootSuspect?.changed || (st && back ? back.ch : null));
+  // A mod made for an older version of the mod it changes, after that mod
+  // was updated: undoing the update is the second choice, after turning
+  // the mod off (same as the desktop card).
+  const undoUpdate = $derived(st ? null : suspects.find((s) => s.partner && s.changed)?.changed || null);
   // Certain and Likely, apart from errors that only followed from another mod's failure (knock-on: never turned off).
   const likely = $derived(suspects.filter((s) => s.certainty !== 'Possible' && !s.knock_on));
   // Turned off, or removed: Certain and Likely mods still on and here, apart from client-only ones (they go) and a timing problem inside a mod (start again first, same as hopper-core's `to_turn_off`).
@@ -439,7 +443,13 @@
         <div class="switches fixfirst"><b class="tiny muted">What to do</b>{@render switchRows()}</div>
         {#if toTurnOff.length || offAlready.length}<div class="row acts or"><span class="tiny muted">Or</span>{@render actions()}</div>{@render picker()}{/if}
       {:else}
-        {#if canFix && (toTurnOff.length || offAlready.length)}<div class="row acts">{@render actions()}</div>{@render picker()}{/if}
+        {#if canFix && (toTurnOff.length || offAlready.length || (undoUpdate && !offAlready.length))}
+          <div class="row acts">
+            {@render actions()}
+            {#if undoUpdate && !offAlready.length}<button class="btn sm" disabled={busy || alive} title={alive ? 'Stop the server first' : `Puts back ${undoUpdate.name} ${undoUpdate.from} from History. It may help.`} onclick={() => putBack(undoUpdate)}><Undo2 size={13} />Undo the {undoUpdate.name} update</button>{/if}
+          </div>
+          {@render picker()}
+        {/if}
         {#if canFix && (switches.length || switchedOff.length)}<div class="switches">{@render switchRows()}</div>{/if}
       {/if}
     {/if}

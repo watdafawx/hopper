@@ -481,6 +481,7 @@ impl ServerLogsView {
             let store = self.store.read(cx);
             store.server(root).and_then(|sv| store.paired(sv)).map(|i| i.root.clone())
         };
+        let pack_updates = pack_root.clone();
         let names = card.names.clone();
         let display = |f: &str| named(&addons, &names, f).0;
         let link = {
@@ -693,7 +694,12 @@ impl ServerLogsView {
             .map(|(i, s)| {
                 let mut below: Vec<AnyElement> = Vec::new();
                 below.extend(crash_view::partner_line(s, &link, cx));
-                below.extend(crash_view::steps_list(s, &readable, cx));
+                // The pack's last update check says whether "Update it" can help.
+                let newer = pack_updates.as_ref().and_then(|p| {
+                    let pid = named(&addons, &names, &s.file_name).1.map_or(0, |a| a.project_id);
+                    crash_view::newer_out(self.store.read(cx).updates(p), pid)
+                });
+                below.extend(crash_view::steps_list(s, &root.join("mods"), newer, &readable, cx));
                 let key = s.file_name.clone();
                 let open = self.why_open.contains(&key);
                 let toggle = cx.listener(move |this, _, _, cx| {
