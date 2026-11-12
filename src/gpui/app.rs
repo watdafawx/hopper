@@ -258,7 +258,7 @@ impl AppView {
                 }
                 StoreEvent::GamesEnded => {
                     if this.store.read(cx).settings().minimize_while_playing {
-                        window.activate_window();
+                        crate::activate(window);
                     }
                 }
                 StoreEvent::PairRequest(req) => {
@@ -325,7 +325,7 @@ impl AppView {
                     this.go(Page::Browse, cx);
                 }
                 StoreEvent::Link(url) => {
-                    window.activate_window();
+                    crate::activate(window);
                     let url = url.clone();
                     this.browse.update(cx, |b, cx| b.open_link(&url, cx));
                     this.go(Page::Browse, cx);
@@ -1040,7 +1040,7 @@ impl AppView {
                     .await;
                 for e in events.try_iter() {
                     let ok = cx.update(|window, cx| match e {
-                        crate::tray::TrayEvent::Show => window.activate_window(),
+                        crate::tray::TrayEvent::Show => crate::activate(window),
                         crate::tray::TrayEvent::Quit => {
                             if quit_ok(window, cx) {
                                 cx.quit()

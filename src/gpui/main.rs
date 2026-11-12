@@ -182,12 +182,22 @@ fn main() {
                 .as_ref()
                 .map_or((String::new(), 0, 100), |s| (s.theme_name.clone(), s.theme, s.zoom));
             theme::apply(&name, mode, zoom, cx);
+            // A test window (`HOPPER_TEST_WINDOW=1`) goes to a monitor the
+            // player isn't working on; with one monitor it stays on the primary.
+            let other = test_display(cx);
             let options = WindowOptions {
                 window_background: theme::appearance(theme::backdrop(&name, mode, cx)),
-                window_bounds: Some(match dev_size() {
-                    Some(s) => WindowBounds::Windowed(Bounds::centered(None, s, cx)),
-                    None => app::start_bounds(saved.and_then(|s| s.window), cx),
+                window_bounds: Some(match (other, dev_size()) {
+                    (Some((id, room)), s) => {
+                        let want = s.unwrap_or(size(px(1440.), px(900.)));
+                        // Leaves a margin so the title bar and edges stay on that monitor.
+                        let fit = size(want.width.min(room.width - px(80.)), want.height.min(room.height - px(120.)));
+                        WindowBounds::Windowed(Bounds::centered(Some(id), fit, cx))
+                    }
+                    (None, Some(s)) => WindowBounds::Windowed(Bounds::centered(None, s, cx)),
+                    (None, None) => app::start_bounds(saved.and_then(|s| s.window), cx),
                 }),
+                display_id: other.map(|(id, _)| id),
                 window_min_size: Some(size(px(960.), px(600.))),
                 focus: !no_focus(),
                 ..TitleBar::window_options()
@@ -206,7 +216,36 @@ fn main() {
 /// in front. The window opens behind it without activating, and `--mcp`
 /// input goes straight to Hopper instead of bringing it forward first.
 pub(crate) fn no_focus() -> bool {
-    std::env::args().any(|a| a == "--no-focus")
+    test_window() || std::env::args().any(|a| a == "--no-focus")
+}
+
+/// `HOPPER_TEST_WINDOW=1`: a test build that must not disturb the player.
+/// Its window opens on a monitor other than the primary one (when there
+/// is one) and nothing in Hopper takes the keyboard or comes to the front,
+/// so everything `--no-focus` does applies too.
+pub(crate) fn test_window() -> bool {
+    std::env::var("HOPPER_TEST_WINDOW").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Brings Hopper's window to the front, except in a test run that must
+/// leave the player's windows alone.
+pub(crate) fn activate(window: &Window) {
+    if !no_focus() {
+        window.activate_window();
+    }
+}
+
+/// The first monitor that isn't the primary one, with its size, for
+/// [`test_window`] runs. `None` when not a test run or with one monitor.
+fn test_display(cx: &App) -> Option<(DisplayId, Size<Pixels>)> {
+    if !test_window() {
+        return None;
+    }
+    let primary = cx.primary_display().map(|d| d.id());
+    cx.displays()
+        .into_iter()
+        .find(|d| Some(d.id()) != primary)
+        .map(|d| (d.id(), d.bounds().size))
 }
 
 /// `--size 1100x700`: a window of that size for this run (screenshots),

@@ -12,9 +12,15 @@ Machine-specific commands (build wrapper, ports, real instance folders) are in `
 
 ## Run it isolated (every time)
 1. Make a scratch data root `X` and write `X\data\settings.json` first. Settings directly in `X` fall back to defaults, which find the user's real CurseForge instances.
-2. Launch with `HOPPER_DATA_DIR=X`, `HOPPER_LOOPBACK=1`, your own `HOPPER_MCP_PORT`, and `--mcp`. Check the port is free; never use the user's Hopper's port (47801) or its link handler (47802).
+2. Launch with `HOPPER_DATA_DIR=X`, `HOPPER_LOOPBACK=1`, **`HOPPER_TEST_WINDOW=1`**, your own `HOPPER_MCP_PORT`, and `--mcp`. Check the port is free; never use the user's Hopper's port (47801) or its link handler (47802). Every test launch sets `HOPPER_TEST_WINDOW=1`, including helper scripts.
 3. Call MCP `state` first. If any real instance shows, kill the exe at once.
 - Loopback binds everything to 127.0.0.1 with no LAN discovery, so there are no firewall prompts. Never bind 0.0.0.0.
+
+## HOPPER_TEST_WINDOW=1: don't disturb the user
+- The user works on the primary monitor. With the var set the window opens centred on the first non-primary monitor (the primary one if there's only one), opens without activating, and nothing takes focus or comes to the front: MCP click / type / key / drag / navigate / screenshot, the tray's Show, a clicked link, "Show window" for the download window, and the fetch window (`--fetch`) all skip activation. The window stays visible, so `screenshot` (PrintWindow) works while it's covered or unfocused.
+- Check, don't assume: before launch read `GetForegroundWindow` (user32), after launch and after MCP input read it again; it must be the same window. Hopper's rect should fall inside the other monitor's bounds.
+- Still steals focus: native OS dialogs (file pickers, `MessageBox`) and anything the user triggers by hand (tray menu). Avoid them in tests.
+- `--no-focus` (flag) does the focus half only; the var includes it.
 
 ## Never touch real data
 - Never test on the user's packs. Build a throwaway instance (a few jars plus a filtered `minecraftinstance.json`) in the scratch root, and delete it (Recycle Bin) afterwards.
