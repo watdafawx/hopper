@@ -643,6 +643,21 @@ impl Store {
         );
     }
 
+    /// Adds and takes out members without a notice of its own, for the
+    /// Friends panel's drags and menus: their toast already says it and
+    /// offers Undo. Errors still show.
+    pub fn edit_members(&mut self, id: &str, add: Vec<String>, out: Vec<String>, cx: &mut Context<Self>) {
+        let id = id.to_string();
+        self.mailbox_do(
+            move |mb| {
+                mb.edit_group(&id, None, &add, &out)?;
+                Ok(String::new())
+            },
+            |_, _| {},
+            cx,
+        );
+    }
+
     /// Takes members out of a group (owner only); what came through it
     /// stops for them.
     pub fn remove_from_group(&mut self, id: &str, members: Vec<String>, cx: &mut Context<Self>) {

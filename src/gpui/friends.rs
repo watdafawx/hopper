@@ -10,8 +10,10 @@ use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::radio::Radio;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
@@ -140,6 +142,13 @@ pub struct FriendsPanel {
     pack_search_for: String,
     /// Holds the keyboard on a page, so Escape goes back to the list.
     focus: FocusHandle,
+    /// The friend being dragged, so the rail can say where they can go.
+    dragging: Option<FriendDrag>,
+    /// The drop spots drawn this frame, for the drag's hint.
+    spots: Rc<RefCell<Vec<DropSpot>>>,
+    /// Take-outs waiting for Undo: (group, friend, token).
+    pending_out: Vec<(String, String, u64)>,
+    out_token: u64,
     _subs: Vec<Subscription>,
 }
 
@@ -178,6 +187,10 @@ impl FriendsPanel {
             invite_hidden: false,
             pack_search_for: String::new(),
             focus: cx.focus_handle(),
+            dragging: None,
+            spots: Rc::default(),
+            pending_out: Vec::new(),
+            out_token: 0,
             _subs: subs,
         }
     }
@@ -859,14 +872,8 @@ impl FriendsPanel {
 
     /// A friend's ⋯: share with them, groups, remove.
     fn friend_menu(&self, id: SharedString, f: Friend, name: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let s = self.store.read(cx);
-        let me = s.mailbox_id();
-        let add_to: Vec<(String, String)> = s
-            .mailbox_groups()
-            .iter()
-            .filter(|g| g.owner == me && g.me.joined && !g.members.iter().any(|m| m.id == f.id))
-            .map(|g| (g.id.clone(), g.name.clone()))
-            .collect();
+        let drag = self.drag_of(&f.id, name, None);
+        let add_to = self.group_choices(&drag, false, cx);
         let can_group = self.can_group(cx);
         let view = cx.entity();
         let first = name.to_string();
@@ -875,7 +882,7 @@ impl FriendsPanel {
             .xsmall()
             .icon(IconName::Ellipsis)
             .tooltip("More")
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
                 let (v1, v2, f2) = (view.clone(), view.clone(), f.clone());
                 let mut menu = menu.item(PopupMenuItem::new(format!("Choose packs to share with {first}")).icon(IconName::Share2).on_click(move |_, _, cx| {
                     v1.update(cx, |t, cx| {
@@ -883,13 +890,9 @@ impl FriendsPanel {
                         cx.notify();
                     })
                 }));
-                // Groups this PC made that they aren't in yet, then a new one.
-                for (gid, gname) in &add_to {
-                    let (v, gid, fid) = (view.clone(), gid.clone(), f.id.clone());
-                    menu = menu.item(PopupMenuItem::new(format!("Add {first} to {gname}")).icon(IconName::Users).on_click(move |_, _, cx| {
-                        let (gid, fid) = (gid.clone(), fid.clone());
-                        v.update(cx, |t, cx| t.store.update(cx, |s, cx| s.add_to_group(&gid, vec![fid], cx)))
-                    }));
+                // Every group, the ones that can't take them saying why, then a new one.
+                if !add_to.is_empty() {
+                    menu = group_submenu(menu, "Add to group", &view, &add_to, &drag, true, window, cx);
                 }
                 if can_group {
                     let (v, fid) = (view.clone(), f.id.clone());
@@ -930,15 +933,20 @@ impl FriendsPanel {
             widgets::reveal_on_hover(row_id.clone(), SharedString::from(format!("friend-menu-at:{ix}")), m, window, cx)
         });
         let id = p.id.clone();
-        h_flex()
+        let drag = p.friend.is_some().then(|| self.drag_of(&p.id, &p.name, None));
+        let row = h_flex()
             .id(row_id.clone())
             .group(row_id)
             .gap_2()
             .px_3()
             .py_1p5()
             .clickable(cx)
-            .hover(|s| widgets::row_hover(s, cx))
-            .on_click(cx.listener(move |this, _, window, cx| this.open(Page::Friend(id.clone()), window, cx)))
+            .hover(|s| widgets::row_hover(s, cx));
+        let row = match drag {
+            Some(d) => self.start_drag(row, d, cx),
+            None => row,
+        };
+        row.on_click(cx.listener(move |this, _, window, cx| this.open(Page::Friend(id.clone()), window, cx)))
             .child(with_dot(head, online, cx))
             .child(
                 v_flex()
@@ -1379,7 +1387,8 @@ impl FriendsPanel {
     fn group_look(&self, g: &Group, recipes: &[Event], size: Rems, cx: &mut Context<Self>) -> (Div, String) {
         let s = self.store.read(cx);
         let me = s.mailbox_id();
-        let others: Vec<_> = g.members.iter().filter(|m| m.id != me).cloned().collect();
+        // Someone being taken out (Undo still open) already counts as gone.
+        let others: Vec<_> = g.members.iter().filter(|m| m.id != me && !self.leaving(&g.id, &m.id)).cloned().collect();
         let in_it = others.iter().filter(|m| m.joined).count();
         let asked = others.len() - in_it;
         let mine = s.instances().iter().filter(|i| !i.id.is_empty() && s.settings().shares_with_group(&i.id, &g.id)).count();
@@ -1497,7 +1506,7 @@ impl FriendsPanel {
             .collect();
         let can_add = mine && s.mailbox_friends().iter().any(|f| !g.members.iter().any(|m| m.id == f.id));
         // You first, then whoever made it, then the rest.
-        let mut members: Vec<_> = g.members.clone();
+        let mut members: Vec<_> = g.members.iter().filter(|m| !self.leaving(&g.id, &m.id)).cloned().collect();
         members.sort_by_key(|m| (m.id != me, m.id != g.owner));
         let member_rows: Vec<AnyElement> = members
             .iter()
@@ -1523,39 +1532,29 @@ impl FriendsPanel {
                 };
                 let f = face(&self.store, &m.mc_id, &m.name, rems(1.25), cx);
                 let row_id = SharedString::from(format!("gm:{mi}"));
-                let remove = (mine && m.id != g.owner && !you).then(|| {
-                    let (id, mid, gname, who) = (g.id.clone(), m.id.clone(), g.name.clone(), name.clone());
-                    let b = Button::new(SharedString::from(format!("gm-x:{mi}")))
-                        .xsmall()
-                        .ghost()
-                        .icon(IconName::Close)
-                        .tooltip(format!("Take {who} out of {gname}"))
-                        .disabled(down)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            let (id, mid) = (id.clone(), mid.clone());
-                            this.confirm_group(
-                                format!("Take {who} out of {gname}?"),
-                                format!("{who} stops getting changes to packs they got only from {gname}. Their copies stay on their PC."),
-                                "Take out",
-                                Rc::new(move |s, cx| s.remove_from_group(&id, vec![mid.clone()], cx)),
-                                window,
-                                cx,
-                            )
-                        }));
-                    widgets::reveal_on_hover(row_id.clone(), SharedString::from(format!("gm-x-at:{mi}")), b, window, cx)
+                // Dragged off a group this PC made, they move; off another
+                // group, they're added where they land.
+                let drag = (!you).then(|| self.drag_of(&m.id, &name, mine.then(|| g.id.clone())));
+                let menu = drag.clone().map(|d| {
+                    let b = self.member_menu(SharedString::from(format!("gm-menu:{mi}")), g, d, down, cx);
+                    widgets::reveal_on_hover(row_id.clone(), SharedString::from(format!("gm-menu-at:{mi}")), b, window, cx)
                 });
-                h_flex()
+                let row = h_flex()
                     .id(row_id.clone())
                     .group(row_id.clone())
                     .gap_2()
                     .px_3()
                     .py_1()
-                    .hover(|s| widgets::row_hover(s, cx))
-                    .child(f)
+                    .hover(|s| widgets::row_hover(s, cx));
+                let row = match drag {
+                    Some(d) if !down => self.start_drag(row, d, cx),
+                    _ => row,
+                };
+                row.child(f)
                     .child(div().flex_1().min_w_0().truncate().text_sm().child(name))
                     .when(!m.joined, |r| r.child(widgets::chip(theme.muted_foreground).child("Invited")))
                     .when(!status.is_empty(), |r| r.child(widgets::caption(status, cx).text_xs().flex_none()))
-                    .children(remove)
+                    .children(menu)
                     .into_any_element()
             })
             .collect();
@@ -1650,6 +1649,11 @@ impl FriendsPanel {
                 }))
         });
         let ask = (!g.me.joined).then(|| self.invitation(0, g, down, cx));
+        let zone = self.take_out_zone(g, cx);
+        let top = match zone {
+            Some(z) => v_flex().flex_none().child(top).child(z).into_any_element(),
+            None => top,
+        };
         let body = v_flex()
             .pb_2()
             .children(ask)
@@ -2057,7 +2061,11 @@ impl FriendsPanel {
             } else {
                 (format!("{}: you're asked to join", g.name), Some(TileMark::Dot(theme.primary)))
             };
-            tiles.push(self.tile(format!("rail-g:{}", g.id).into(), open, tip.into(), art, mark, Some(Page::Group(g.id.clone())), cx).into_any_element());
+            let t = self.tile(format!("rail-g:{}", g.id).into(), open, tip.into(), art, mark, Some(Page::Group(g.id.clone())), cx);
+            let texts = self.dragging.as_ref().map(|d| self.drop_text(g, d, cx));
+            let gid = g.id.clone();
+            let t = self.drop_target(t, texts, move |this, d, window, cx| this.drop_on(&gid, d, window.modifiers().control, window, cx), cx);
+            tiles.push(t.into_any_element());
         }
         let can_group = self.can_group(cx);
         let plus = self
@@ -2074,6 +2082,21 @@ impl FriendsPanel {
             .when(can_group, |d| {
                 d.clickable(cx).on_click(cx.listener(|this, _, window, cx| this.group_dialog(GroupMode::New, None, window, cx)))
             });
+        // Dropped on +: a new group with them in it.
+        let texts = self.dragging.as_ref().map(|d| {
+            let t = if can_group { format!("New group with {}", d.name) } else { CANT_CONNECT.to_string() };
+            (t.clone(), t, can_group)
+        });
+        let plus = self.drop_target(
+            plus,
+            texts,
+            |this, d, window, cx| {
+                if this.can_group(cx) {
+                    this.group_dialog(GroupMode::New, Some(d.id.clone()), window, cx)
+                }
+            },
+            cx,
+        );
         let packs_open = self.page == Page::Packs;
         v_flex()
             .flex_none()
@@ -2333,6 +2356,10 @@ fn faces_of(store: &Entity<Store>, people: &[(String, String)], ring: Hsla, size
 impl Render for FriendsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        self.spots.borrow_mut().clear();
+        if self.dragging.is_some() && !cx.has_active_drag() {
+            self.dragging = None;
+        }
         let s = self.store.read(cx);
         let status = s.sync_status();
         let heard = !s.mailbox_friends().is_empty() || !s.mailbox_recipes().is_empty() || !s.mailbox_groups().is_empty();
@@ -2395,6 +2422,11 @@ impl Render for FriendsPanel {
         let content = v_flex()
             .size_full()
             .track_focus(&self.focus)
+            .on_modifiers_changed(cx.listener(|this, _, window, _| {
+                if this.dragging.is_some() {
+                    window.refresh();
+                }
+            }))
             // Escape on a page goes back to everyone.
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
                 if e.keystroke.key != "escape" {
@@ -3012,6 +3044,454 @@ fn warn_line(text: String, cx: &App) -> Div {
         // Wraps instead of cutting off: the end says whether Hopper tries
         // again, which the player needs to read.
         .child(div().flex_1().min_w_0().text_xs().text_color(cx.theme().muted_foreground).child(text))
+}
+
+// ---- dragging friends onto groups, and Undo ------------------------------------
+
+/// How long a take-out waits for Undo before it's sent: as long as its
+/// toast stays up (gpui-kit hides it after 5 s), and a little more.
+const UNDO_SECS: u64 = 6;
+
+/// A friend dragged onto a group's tile, or out of a group's page.
+#[derive(Clone)]
+struct FriendDrag {
+    id: String,
+    name: SharedString,
+    /// The group page they were dragged from, when this PC made that group:
+    /// a plain drop moves them, Ctrl+drop keeps them there too.
+    from_group: Option<String>,
+    /// Where they can land and what that does, filled in as the panel draws.
+    spots: Rc<RefCell<Vec<DropSpot>>>,
+    /// Where in the row the pointer took hold: the drag is drawn that far
+    /// up and left of the pointer, so the card moves it back beside it.
+    grab: Point<Pixels>,
+}
+
+/// A place a dragged friend can land: its bounds, what dropping does
+/// (adding, and moving when dragged out of a group), and whether it can.
+#[derive(Clone)]
+struct DropSpot {
+    at: Bounds<Pixels>,
+    add: SharedString,
+    moved: SharedString,
+    ok: bool,
+}
+
+impl Render for FriendDrag {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let at = window.mouse_position();
+        let keep = window.modifiers().control;
+        // What the spot under the pointer would do, said beside the name, as
+        // a tooltip would if one could show while dragging.
+        let hint = self.spots.borrow().iter().find(|s| s.at.contains(&at)).map(|s| {
+            let text = if self.from_group.is_some() && !keep { s.moved.clone() } else { s.add.clone() };
+            (text, s.ok)
+        });
+        let card = |d: Div| d.px_2p5().py_1().rounded(theme.radius).bg(theme.popover).border_1().border_color(theme.border).shadow_md();
+        v_flex()
+            .pl(self.grab.x + px(14.))
+            .pt(self.grab.y + px(10.))
+            // Drawn outside the window's tree: nothing to inherit a colour from.
+            .text_color(theme.popover_foreground)
+            .gap_1()
+            .items_start()
+            .child(card(div()).text_sm().font_medium().child(self.name.clone()))
+            .when_some(hint, |c, (text, ok)| {
+                c.child(
+                    card(h_flex().gap_1p5())
+                        .text_xs()
+                        .text_color(if ok { theme.popover_foreground } else { theme.muted_foreground })
+                        .when(!ok, |d| d.child(Icon::new(IconName::Lock).xsmall()))
+                        .child(text),
+                )
+            })
+    }
+}
+
+impl FriendsPanel {
+    /// A drag (or a menu's move) of this friend, from `from_group`.
+    fn drag_of(&self, id: &str, name: &str, from_group: Option<String>) -> FriendDrag {
+        FriendDrag { id: id.to_string(), name: name.to_string().into(), from_group, spots: self.spots.clone(), grab: Point::default() }
+    }
+
+    /// Starts dragging a row: the rail lights up the groups it can go to.
+    fn start_drag<E: StatefulInteractiveElement>(&self, el: E, drag: FriendDrag, cx: &mut Context<Self>) -> E {
+        let view = cx.entity();
+        el.on_drag(drag, move |d, grab, _, cx| {
+            let d = FriendDrag { grab, ..d.clone() };
+            let d2 = d.clone();
+            view.update(cx, |this, cx| {
+                this.dragging = Some(d2);
+                cx.notify();
+            });
+            cx.new(|_| d)
+        })
+    }
+
+    /// A take-out still waiting for Undo hides the member already.
+    fn leaving(&self, gid: &str, id: &str) -> bool {
+        self.pending_out.iter().any(|p| p.0 == gid && p.1 == id)
+    }
+
+    /// What dropping `d` on group `g` does: (adding, moving, allowed).
+    /// When it isn't allowed, both say why.
+    fn drop_text(&self, g: &Group, d: &FriendDrag, cx: &App) -> (String, String, bool) {
+        let s = self.store.read(cx);
+        let me = s.mailbox_id();
+        let (who, gname) = (d.name.to_string(), g.name.clone());
+        let no = |t: String| (t.clone(), t, false);
+        if !g.me.joined {
+            return no(format!("Join {gname} first"));
+        }
+        if g.owner != me {
+            let owner = g.members.iter().find(|m| m.id == g.owner).map(|m| name_or(&m.name, "its maker")).unwrap_or_else(|| "its maker".into());
+            return no(format!("Only {owner} can add people"));
+        }
+        if g.members.iter().any(|m| m.id == d.id) && !self.leaving(&g.id, &d.id) {
+            return no(format!("{who} is already in {gname}"));
+        }
+        if !s.mailbox_friends().iter().any(|f| f.id == d.id) {
+            return no(format!("{who} isn't your friend yet"));
+        }
+        if !matches!(s.sync_status(), SyncStatus::Ok) {
+            return no(CANT_CONNECT.to_string());
+        }
+        (format!("Add {who} to {gname}"), format!("Move {who} to {gname}"), true)
+    }
+
+    /// Puts a friend in a group: they get an invite. A plain drop from a
+    /// group page also takes them out of that group once Undo has passed.
+    /// `keep`: Ctrl was held, or the menu's Add: they stay where they were.
+    fn drop_on(&mut self, gid: &str, d: &FriendDrag, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let s = self.store.read(cx);
+        let Some(g) = s.mailbox_groups().iter().find(|g| g.id == gid).cloned() else { return };
+        if !self.drop_text(&g, d, cx).2 {
+            return;
+        }
+        let from = if keep { None } else { d.from_group.clone().filter(|f| f != gid) };
+        let from_name = from.as_ref().and_then(|f| s.mailbox_groups().iter().find(|x| &x.id == f).map(|x| x.name.clone()));
+        let (id, who) = (d.id.clone(), d.name.to_string());
+        // Dropped back on a group they're leaving: they just stay.
+        let stays = self.cancel_out(gid, &id);
+        if !stays {
+            self.store.update(cx, |s, cx| s.edit_members(gid, vec![id.clone()], Vec::new(), cx));
+        }
+        let token = from.as_ref().map(|f| self.take_out_later(f, &id, cx));
+        let msg = match (&from_name, stays) {
+            (_, true) => format!("{who} stays in {}.", g.name),
+            (Some(f), _) => format!("{who} is invited to {} and out of {f}. They're in once they say yes.", g.name),
+            (None, _) => format!("{who} is invited to {}. They're in once they say yes.", g.name),
+        };
+        let gid = gid.to_string();
+        self.undo_toast(
+            msg,
+            move |this, cx| {
+                if stays {
+                    this.take_out_later(&gid, &id, cx);
+                } else {
+                    this.store.update(cx, |s, cx| s.edit_members(&gid, Vec::new(), vec![id.clone()], cx));
+                }
+                if let (Some(f), Some(t)) = (&from, token) {
+                    // Too late to stop the take-out: invite them back.
+                    if !this.cancel_token(t) {
+                        this.store.update(cx, |s, cx| s.edit_members(f, vec![id.clone()], Vec::new(), cx));
+                    }
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Takes `d` out of the group whose page they were dragged off.
+    fn take_out_now(&mut self, gid: &str, d: &FriendDrag, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(gname) = self.store.read(cx).mailbox_groups().iter().find(|g| g.id == gid).map(|g| g.name.clone()) else { return };
+        let (gid, id) = (gid.to_string(), d.id.clone());
+        let token = self.take_out_later(&gid, &id, cx);
+        self.undo_toast(
+            format!("{} is out of {gname}.", d.name),
+            move |this, cx| {
+                if !this.cancel_token(token) {
+                    this.store.update(cx, |s, cx| s.edit_members(&gid, vec![id.clone()], Vec::new(), cx));
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Takes `id` out of `gid` after Undo's time, unless undone first.
+    fn take_out_later(&mut self, gid: &str, id: &str, cx: &mut Context<Self>) -> u64 {
+        self.out_token += 1;
+        let token = self.out_token;
+        self.pending_out.push((gid.to_string(), id.to_string(), token));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(UNDO_SECS)).await;
+            this.update(cx, |this, cx| {
+                if let Some(i) = this.pending_out.iter().position(|p| p.2 == token) {
+                    let (gid, id, _) = this.pending_out.remove(i);
+                    this.store.update(cx, |s, cx| s.edit_members(&gid, Vec::new(), vec![id], cx));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+        token
+    }
+
+    /// Stops a waiting take-out; false once it has been sent.
+    fn cancel_token(&mut self, token: u64) -> bool {
+        let before = self.pending_out.len();
+        self.pending_out.retain(|p| p.2 != token);
+        before != self.pending_out.len()
+    }
+
+    /// Stops a waiting take-out of `id` from `gid`; false when none waits.
+    fn cancel_out(&mut self, gid: &str, id: &str) -> bool {
+        let before = self.pending_out.len();
+        self.pending_out.retain(|p| !(p.0 == gid && p.1 == id));
+        before != self.pending_out.len()
+    }
+
+    /// A toast saying what just happened, with Undo.
+    fn undo_toast(&mut self, msg: String, undo: impl Fn(&mut Self, &mut Context<Self>) + 'static, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.entity();
+        let done = Rc::new(std::cell::Cell::new(false));
+        let undo = Rc::new(undo);
+        let note = Notification::success(msg)
+            .action(move |_, _, cx| {
+                let (view, done, undo) = (view.clone(), done.clone(), undo.clone());
+                Button::new("friends-undo").label("Undo").disabled(done.get()).on_click(cx.listener(move |note, _, window, cx| {
+                    if !done.replace(true) {
+                        view.update(cx, |this, cx| undo(this, cx));
+                    }
+                    note.dismiss(window, cx);
+                }))
+            })
+            .autohide(true);
+        window.push_notification(note, cx);
+    }
+
+    /// Taking someone out from a menu asks first, with a tick box to take
+    /// them out of this PC's other groups too. No typing.
+    fn confirm_take_out(&mut self, g: &Group, id: String, who: String, window: &Window, cx: &mut Context<Self>) {
+        let s = self.store.read(cx);
+        let me = s.mailbox_id();
+        let (others, other_names): (Vec<String>, Vec<String>) = s
+            .mailbox_groups()
+            .iter()
+            .filter(|x| x.owner == me && x.id != g.id && x.members.iter().any(|m| m.id == id) && !self.leaving(&x.id, &id))
+            .map(|x| (x.id.clone(), x.name.clone()))
+            .unzip();
+        // One other group is named; more are counted.
+        let also = match other_names.as_slice() {
+            [one] => format!("Also take {who} out of {one}"),
+            _ => format!("Also take {who} out of your {} other groups", other_names.len()),
+        };
+        let (gid, gname) = (g.id.clone(), g.name.clone());
+        let handle = window.window_handle();
+        let store = self.store.clone();
+        cx.defer(move |cx| {
+            handle
+                .update(cx, |_, window, cx| {
+                    let every = Rc::new(std::cell::Cell::new(false));
+                    window.open_dialog(cx, move |dialog, window, _| {
+                        let n = others.len();
+                        let all = every.get();
+                        let tick = every.clone();
+                        let (store, gid, id, others2, every2) = (store.clone(), gid.clone(), id.clone(), others.clone(), every.clone());
+                        dialog
+                            .title(format!("Take {who} out of {gname}?"))
+                            .w(rems(28.).to_pixels(window.rem_size()))
+                            .margin_top(rems(widgets::DIALOG_TOP).to_pixels(window.rem_size()))
+                            .child(
+                                v_flex()
+                                    .gap_3()
+                                    .child(div().text_sm().child(if all {
+                                        format!("{who} stops getting changes to packs they got only from these groups. Their copies stay on their PC.")
+                                    } else {
+                                        format!("{who} stops getting changes to packs they got only from {gname}. Their copies stay on their PC.")
+                                    }))
+                                    .when(n > 0, |c| {
+                                        c.child(
+                                            Checkbox::new("take-out-all")
+                                                .label(also.clone())
+                                                .checked(all)
+                                                .on_change(move |v: &bool, window, _| {
+                                                    tick.set(*v);
+                                                    window.refresh();
+                                                }),
+                                        )
+                                    }),
+                            )
+                            .footer(
+                                DialogFooter::new()
+                                    .child(DialogClose::new().child(Button::new("dialog-cancel").outline().label("Cancel")))
+                                    .child(DialogAction::new().child(Button::new("dialog-ok").danger().label(if all {
+                                        format!("Take out of {} groups", n + 1)
+                                    } else {
+                                        "Take out".to_string()
+                                    }))),
+                            )
+                            .on_ok(move |_, _, cx| {
+                                let all = every2.get();
+                                store.update(cx, |s, cx| {
+                                    s.remove_from_group(&gid, vec![id.clone()], cx);
+                                    if all {
+                                        for o in &others2 {
+                                            s.remove_from_group(o, vec![id.clone()], cx);
+                                        }
+                                    }
+                                });
+                                true
+                            })
+                    });
+                })
+                .ok();
+        });
+    }
+
+    /// A member's ⋯ on a group page: move or add them to another group,
+    /// or take them out. The keyboard's way to do what dragging does.
+    fn member_menu(&self, id: SharedString, g: &Group, d: FriendDrag, down: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let mine = d.from_group.is_some();
+        let moves = if mine { self.group_choices(&d, true, cx) } else { Vec::new() };
+        let adds = self.group_choices(&d, false, cx);
+        let view = cx.entity();
+        let (g2, who) = (g.clone(), d.name.to_string());
+        Button::new(id)
+            .ghost()
+            .xsmall()
+            .icon(IconName::Ellipsis)
+            .tooltip("More")
+            .disabled(down)
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, window, cx| {
+                if !moves.is_empty() {
+                    menu = group_submenu(menu, "Move to", &view, &moves, &d, false, window, cx);
+                }
+                if !adds.is_empty() {
+                    menu = group_submenu(menu, "Add to group", &view, &adds, &d, true, window, cx);
+                }
+                if mine {
+                    let (v, g, id, who) = (view.clone(), g2.clone(), d.id.clone(), who.clone());
+                    menu = menu.separator().item(PopupMenuItem::new(format!("Take {who} out…")).icon(IconName::UserMinus).on_click(move |_, window, cx| {
+                        v.update(cx, |t, cx| t.confirm_take_out(&g, id.clone(), who.clone(), window, cx))
+                    }));
+                }
+                menu
+            })
+    }
+
+    /// While a member of this PC's group is dragged, the top of its page
+    /// takes them out when they're dropped there.
+    fn take_out_zone(&self, g: &Group, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let d = self.dragging.clone().filter(|d| d.from_group.as_deref() == Some(g.id.as_str()))?;
+        let theme = cx.theme().clone();
+        // The theme's red is too dark to read on a dark panel (3.8:1); lifted, it reads at 4.5:1 or more.
+        let red = if theme.mode.is_dark() {
+            let c = theme.danger;
+            hsla(c.h, c.s, c.l.max(0.68), 1.)
+        } else {
+            crate::theme::ink(theme.danger)
+        };
+        let gid = g.id.clone();
+        Some(
+            div()
+                .id("take-out-zone")
+                .relative()
+                .mx_3()
+                .mt_2()
+                .px_3()
+                .py_2()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_dashed()
+                .border_color(theme.danger)
+                .text_sm()
+                .text_color(red)
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::new(IconName::UserMinus).small())
+                .child(format!("Drop here to take {} out of the group", d.name))
+                .drag_over::<FriendDrag>(move |s, _, _, _| s.bg(theme.danger.opacity(widgets::alpha::TINT)))
+                .on_drop(cx.listener(move |this, d: &FriendDrag, window, cx| this.take_out_now(&gid, d, window, cx)))
+                .into_any_element(),
+        )
+    }
+
+    /// A rail tile a dragged friend can land on: dimmed when they can't,
+    /// tinted under the pointer when they can. `act` runs on the drop. It
+    /// takes drops before the panel has drawn the drag (a quick flick),
+    /// so `act` checks again.
+    fn drop_target(
+        &self,
+        el: Stateful<Div>,
+        texts: Option<(String, String, bool)>,
+        act: impl Fn(&mut Self, &FriendDrag, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let theme = cx.theme().clone();
+        let ok = texts.as_ref().is_none_or(|t| t.2);
+        let el = el
+            .when(ok, |d| d.drag_over::<FriendDrag>(move |s, _, _, _| s.bg(theme.primary.opacity(widgets::alpha::SELECTED))))
+            .on_drop(cx.listener(move |this, d: &FriendDrag, window, cx| act(this, d, window, cx)));
+        let Some((add, moved, ok)) = texts else { return el };
+        let spots = self.spots.clone();
+        let (add, moved): (SharedString, SharedString) = (add.into(), moved.into());
+        el.relative().when(!ok, |d| d.opacity(0.4)).child(
+            canvas(
+                move |b, _, _| spots.borrow_mut().push(DropSpot { at: b, add: add.clone(), moved: moved.clone(), ok }),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        )
+    }
+
+    /// The groups a friend can be added to or moved to, for a menu:
+    /// (group, label, allowed). The ones that can't take them say why.
+    fn group_choices(&self, d: &FriendDrag, moving: bool, cx: &App) -> Vec<(String, String, bool)> {
+        let s = self.store.read(cx);
+        s.mailbox_groups()
+            .iter()
+            .filter(|g| g.me.joined && d.from_group.as_deref() != Some(g.id.as_str()))
+            .map(|g| {
+                let (add, moved, ok) = self.drop_text(g, d, cx);
+                let label = if ok { g.name.clone() } else { format!("{} · {}", g.name, if moving { moved } else { add }) };
+                (g.id.clone(), label, ok)
+            })
+            .collect()
+    }
+}
+
+/// "Add to group" / "Move to": one item per group, as dropping on its tile.
+#[allow(clippy::too_many_arguments)]
+fn group_submenu(
+    menu: PopupMenu,
+    label: &str,
+    view: &Entity<FriendsPanel>,
+    choices: &[(String, String, bool)],
+    drag: &FriendDrag,
+    keep: bool,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let (view, choices, drag) = (view.clone(), choices.to_vec(), drag.clone());
+    menu.submenu_with_icon(Some(Icon::new(IconName::Users)), label.to_string(), window, cx, move |mut sub, _, _| {
+        for (gid, label, ok) in &choices {
+            let (v, gid, d) = (view.clone(), gid.clone(), drag.clone());
+            sub = sub.item(PopupMenuItem::new(label.clone()).disabled(!ok).on_click(move |_, window, cx| {
+                v.update(cx, |t, cx| t.drop_on(&gid, &d, keep, window, cx))
+            }));
+        }
+        sub
+    })
 }
 
 fn name_or(name: &str, or: &str) -> String {
