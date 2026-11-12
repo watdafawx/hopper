@@ -1554,6 +1554,7 @@ impl AddonsView {
         let store = self.store.read(cx);
         if let Some(mut inst) = store.instance(&root).cloned() {
             store.spawn_job(format!("Switching to profile {name}"), move |job| {
+                let _one = hopper::actor::batch(&inst.root, hopper::actor::Who::you());
                 let n = hopper::install::apply_profile(&mut inst, &name)?;
                 job.detail(format!("{} changed", hopper::words::count(n, "mod")));
                 Ok(crate::store::Msg::InstanceChanged(inst.root.clone()))

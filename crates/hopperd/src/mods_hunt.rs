@@ -104,7 +104,9 @@ async fn use_profile(
     let e = entry(&app, &headers, &method, &id)?;
     let running = e.server.state().is_alive();
     log::info!("{}: switching to mod profile {}", e.name, b.name);
+    let by = crate::mods_api::changer(&app, &headers, &method);
     let n = blocking(move || {
+        let _by = hopper_core::actor::batch(&e.root, by);
         let mut inst = crate::mods_api::instance_of(&e)?;
         install::apply_profile(&mut inst, &b.name).map_err(install::explain_locked)
     })

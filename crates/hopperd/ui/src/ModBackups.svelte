@@ -43,7 +43,7 @@
   async function undo(set, file = null) {
     busy = true;
     try {
-      const r = await post(`${base}/mod-backups/undo`, { when: set.when, name: file?.name ?? null });
+      const r = await post(`${base}/mod-backups/undo`, { when: set.when, name: file?.name ?? (set.files.length === 1 ? set.files[0].name : null) });
       if (r.restored.length) say(`Put back ${r.restored.join(', ')}.${r.restart_needed ? ' Restart the server to load it.' : ''}`);
       for (const e of r.errors) say(e, true);
       if (r.gone) {
@@ -66,12 +66,45 @@
   // as desktop's History tab. Keys are "<when>:<file name>".
   const sel = new Selection();
   const keyOf = (s, f) => `${s.when}:${f.name}`;
+  // A set's own key: a batch and loose files can share a time.
+  const setKey = (s) => `${s.when}:${s.files[0]?.batch ?? ''}:${s.files[0]?.name ?? ''}`;
+  // Who made a change, as desktop's History: "You" (who.name empty), a
+  // panel user, or nobody known (older entries).
+  const label = (w) => (w?.name ? w.name : 'You');
+  const personOf = (w) => (w?.name ? w.id || `n:${w.name}` : 'you');
+  const people = $derived.by(() => {
+    const seen = new Map();
+    for (const s of data?.sets ?? []) for (const f of s.files) if (f.who && !seen.has(personOf(f.who))) seen.set(personOf(f.who), f.who);
+    return [...seen.entries()].sort((a, b) => (b[0] === 'you') - (a[0] === 'you'));
+  });
+  const faces = $derived(people.length > 0);
+  // The person History shows; null is everyone.
+  let whoPick = $state(null);
+  const shown = (s) => whoPick === null || s.files.some((f) => f.who && personOf(f.who) === whoPick);
+  function pickWho(k) {
+    sel.clear();
+    whoPick = k;
+  }
+  // Everyone in a set, once each.
+  function setPeople(s) {
+    const m = new Map();
+    for (const f of s.files) if (f.who) m.set(personOf(f.who), f.who);
+    return [...m.values()];
+  }
+  // "Updated from Robin's All the Mods 10", the name picked out to bold.
+  function headParts(s) {
+    const ps = setPeople(s);
+    const who = ps.length ? label(ps[0]) : '';
+    const at = who ? s.head.indexOf(who) : -1;
+    return at < 0 ? [s.head, '', ''] : [s.head.slice(0, at), who, s.head.slice(at + who.length)];
+  }
   // The rows shown, in order (a fold's files count once it is open).
   const order = $derived.by(() => {
     const out = [];
     for (const s of data?.sets ?? []) {
+      if (!shown(s)) continue;
       if (s.files.length === 1) out.push(keyOf(s, s.files[0]));
-      else if (open.has(s.when)) for (const f of s.files) out.push(keyOf(s, f));
+      else if (open.has(setKey(s))) for (const f of s.files) out.push(keyOf(s, f));
     }
     return out;
   });
@@ -106,7 +139,7 @@
       const next = new Set(sel.keys);
       for (const k of kids) all ? next.delete(k) : next.add(k);
       sel.keys = next;
-    } else flip(s.when);
+    } else flip(setKey(s));
   }
   function headEnter(e, s) {
     if (held && start && e.buttons & 1) addKeys([start, ...kidsOf(s)]);
@@ -122,7 +155,7 @@
     let restart = false;
     try {
       for (const [s, f] of rows) {
-        const r = await post(`${base}/mod-backups/undo`, { when: s.when, name: s.files.length > 1 ? f.name : null });
+        const r = await post(`${base}/mod-backups/undo`, { when: s.when, name: f.name });
         restored.push(...r.restored);
         restart ||= r.restart_needed;
         for (const e of r.errors) say(e, true);
@@ -207,11 +240,12 @@
     return days <= 0 ? 'Today' : days === 1 ? 'Yesterday' : dateOf(iso(t));
   }
   const hm = (t) => new Date(t * 1000).toTimeString().slice(0, 5);
-  const tone = (c) => ({ Removed: 'red', Updated: 'blue', 'Rolled back': 'warn', 'Turned on': 'green', 'Turned off': 'muted' })[c] ?? 'pri';
+  const tone = (c) => ({ Removed: 'red', Updated: 'blue', 'Rolled back': 'warn', 'Turned on': 'green', Added: 'green', 'Turned off': 'muted' })[c] ?? 'pri';
   // Sets grouped under their day.
   const days = $derived.by(() => {
     const out = [];
     for (const s of data?.sets ?? []) {
+      if (!shown(s)) continue;
       const d = dayOf(s.when);
       if (out.at(-1)?.day !== d) out.push({ day: d, sets: [] });
       out.at(-1).sets.push(s);
@@ -229,13 +263,19 @@
   $effect(() => onChange(sid, ['mods'], load));
 </script>
 
+{#snippet face(w, small)}
+  {#if w}<span class="face" class:small class:you={!w.name} aria-hidden="true">{label(w).slice(0, 1).toUpperCase()}</span>{:else}<span class="face blank" class:small aria-hidden="true"></span>{/if}
+{/snippet}
+
 {#snippet entry(s, f, nested)}
   {@const k = keyOf(s, f)}
   {@const i = order.indexOf(k)}
+  {@const w = nested ? null : f.who}
   <div class="row ent row-hover" class:nested class:row-sel={sel.has(k)} role="presentation" onpointerdown={(e) => down(e, i)} onpointerenter={(e) => paintOver(e, 'hist', i, setAt)} onclick={(e) => rowClick(e, k)}>
+    {#if faces && !nested}{@render face(w, false)}{/if}
     <div class="col grow">
       <div class="row t">
-        <span class="ch {tone(f.change)}">{f.change}</span>
+        {#if w}<b class="who">{label(w)}</b><span class="verb">{f.verb}</span>{:else}<span class="ch {tone(f.change)}">{f.change}</span>{/if}
         {#if f.icon}<img src={f.icon} alt="" width="16" height="16" loading="lazy" />{/if}
         <span class="ell" title={f.name}>{f.title}</span>
       </div>
@@ -258,26 +298,44 @@
   {:else if !data.sets.length}
     <div class="empty-state"><span class="es-ic"><History size={20} /></span><b>Nothing yet</b><p>Mods you remove, update or roll back, and configs Hopper changes, show up here with Undo.</p></div>
   {:else}
+    {#if people.length > 1}
+      <div class="row whos" role="group" aria-label="Whose changes">
+        <button class="chip wchip" class:on={whoPick === null} aria-pressed={whoPick === null} onclick={() => pickWho(null)}>Everyone</button>
+        {#each people as [k, w] (k)}
+          <button class="chip wchip" class:on={whoPick === k} aria-pressed={whoPick === k} onclick={() => pickWho(k)}>{@render face(w, true)}{label(w)}</button>
+        {/each}
+      </div>
+    {/if}
     <div class="list">
       {#each days as d (d.day)}
         <div class="day tiny">{d.day}</div>
-        {#each d.sets as s (s.when)}
+        {#each d.sets as s (setKey(s))}
           {#if s.files.length === 1}
             {@render entry(s, s.files[0], false)}
           {:else}
+            {@const ps = setPeople(s)}
+            {@const names = s.files.slice(0, 3).map((f) => f.title).join(', ') + (s.files.length > 3 ? '…' : '')}
             <div class="row ent row-hover" class:row-sel={headPicked(s)} role="presentation" onpointerdown={(e) => { if (e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey) { held = true; start = null; window.addEventListener('pointerup', () => { held = false; start = null; }, { once: true, capture: true }); } }} onpointerenter={(e) => headEnter(e, s)}>
               <button class="nm grow" onclick={(e) => headClick(e, s)}>
-                {#if open.has(s.when)}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
+                {#if faces}
+                  {#if ps.length > 1}<span class="faces">{#each ps.slice(0, 3) as w, j (j)}{@render face(w, true)}{/each}</span>{:else}{@render face(ps[0], false)}{/if}
+                {:else if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
                 <span class="col grow">
-                  <span class="row t"><span class="ch {same(s) ? tone(s.files[0].change) : 'muted'}">{same(s) ? s.files[0].change : 'Changed'}</span>{s.files.length} {s.files.every((f) => f.project_id) ? 'mods' : 'files'}</span>
-                  <span class="tiny muted ell">{s.files.slice(0, 3).map((f) => f.title).join(', ')}{s.files.length > 3 ? '…' : ''}</span>
+                  {#if faces && s.head}
+                    {@const [a, who, b] = headParts(s)}
+                    <span class="row t"><span class="ell">{a}{#if who}<b class="who">{who}</b>{/if}{b}</span><span class="chev">{#if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}</span></span>
+                    <span class="tiny muted ell">{!same(s) || ps[0]?.pack ? `${s.summary} · ` : ''}{names}</span>
+                  {:else}
+                    <span class="row t"><span class="ch {same(s) ? tone(s.files[0].change) : 'muted'}">{same(s) ? s.files[0].change : 'Changed'}</span>{s.files.length} {s.files.every((f) => f.project_id) ? 'mods' : 'files'}{#if faces}<span class="chev">{#if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}</span>{/if}</span>
+                    <span class="tiny muted ell">{names}</span>
+                  {/if}
                 </span>
               </button>
               <span class="tiny muted">{hm(s.when)}</span>
               <button class="btn sm" disabled={busy} onclick={() => undo(s)}>Undo all</button>
             </div>
-            {#if open.has(s.when)}
-              {#each s.files as f (f.name)}{@render entry(s, f, true)}{/each}
+            {#if open.has(setKey(s))}
+              {#each s.files as f, j (j)}{@render entry(s, f, true)}{/each}
             {/if}
           {/if}
         {/each}
@@ -329,7 +387,8 @@
   .list { border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 6px; }
   .day { padding: 8px 8px 4px; color: var(--subtle); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
   .ent { gap: 10px; padding: 6px 8px; border-radius: var(--radius); }
-  .ent.nested { padding-left: 32px; }
+  /* Under the head's text: past its face and gap. */
+  .ent.nested { padding-left: 42px; }
   .t { gap: 6px; min-width: 0; }
   .ch { flex: none; font-weight: 500; }
   .ch.red { color: var(--red); }
@@ -338,7 +397,20 @@
   .ch.pri { color: var(--accent); }
   .ch.muted { color: var(--subtle); }
   .ch.green { color: var(--green, #6cc788); }
-  .nm { display: flex; align-items: center; gap: 8px; text-align: left; min-width: 0; }
+  .nm { display: flex; align-items: center; gap: 10px; text-align: left; min-width: 0; }
+  .who { font-weight: 600; }
+  .verb { color: var(--subtle); flex: none; }
+  .chev { display: inline-flex; color: var(--subtle); flex: none; }
+  .whos { gap: 6px; flex-wrap: wrap; }
+  .wchip { cursor: pointer; height: 26px; padding: 0 10px 2px 6px; font-size: 12px; gap: 6px; }
+  .wchip:first-child { padding-left: 10px; }
+  /* Who made a change: a panel user's initial (desktop shows a friend's head). */
+  .face { flex: none; width: 24px; height: 24px; border-radius: var(--radius-sm); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: var(--muted); background: #9a9aa333; }
+  .face.you { color: var(--acc); background: var(--acc-dim); }
+  .face.blank { background: none; }
+  .face.small { width: 16px; height: 16px; font-size: 10px; border-radius: 4px; }
+  .faces { display: inline-flex; width: 24px; flex: none; }
+  .faces .face + .face { margin-left: -8px; box-shadow: 0 0 0 2px var(--bg-1, #17181c); }
   .grow { flex: 1; min-width: 0; }
   .col { display: flex; flex-direction: column; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

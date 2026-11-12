@@ -2990,6 +2990,8 @@ impl Store {
             // No snapshot first: backups are the player's to make. The
             // old jars still go to .hopper-backups, so Undo works.
             let mut clear = ClearQueue(queue.clone(), Some(inst.root.clone()));
+            // One History row for the whole run, however many it updates.
+            let _one = hopper::actor::batch(&inst.root, hopper::actor::Who::you());
             // Only mods whose new file is in place leave the update list. A
             // website-only file is still on its way (the download window gets
             // it) and a failed one never came, so those rows stay.
@@ -3277,6 +3279,8 @@ impl Store {
             return Ok(());
         }
         let inst = self.inst_mut(root).ok_or("That instance is gone.")?;
+        // Switching many at once (drag across, Select all) is one History row.
+        let _one = (files.len() > 1).then(|| hopper::actor::batch(root, hopper::actor::Who::you()));
         for f in files {
             if let Some(i) = inst.addons.iter().position(|a| &a.file_name == f) {
                 install::set_enabled(inst, i, on).map_err(|e| format!("{:#}", install::explain_locked(e)))?;
@@ -3296,6 +3300,7 @@ impl Store {
             .filter(|a| files.contains(&a.file_name))
             .map(|a| a.project_id)
             .collect();
+        let _one = (files.len() > 1).then(|| hopper::actor::batch(root, hopper::actor::Who::you()));
         for f in files {
             match inst.addons.iter().position(|a| &a.file_name == f) {
                 Some(i) => install::remove(inst, i),

@@ -224,7 +224,7 @@ async fn backup_list(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     let (sets, usage, copies) = blocking(move || {
         let r = hopper_core::retention::policy();
         Ok((
-            backups::list(&e.root),
+            backups::history(&e.root),
             (hopper_core::retention::usage(&e.root), hopper_core::retention::preview(&e.root), r),
             backups::copies_size(&e.root),
         ))
@@ -349,8 +349,14 @@ async fn history_undo(State(app): State<Arc<App>>, headers: HeaderMap, method: M
     let e = entry(&app, &headers, &method, &id)?;
     let running = e.server.state().is_alive();
     let (done, gone, errors) = blocking(move || {
-        let set = backups::list(&e.root).into_iter().find(|s| s.when == b.when).ok_or_else(|| anyhow::anyhow!("That History entry is gone."))?;
-        let files: Vec<_> = set.files.iter().filter(|f| b.name.as_ref().is_none_or(|n| *n == f.name)).cloned().collect();
+        let sets: Vec<_> = backups::history(&e.root).into_iter().filter(|s| s.when == b.when).collect();
+        anyhow::ensure!(!sets.is_empty(), "That History entry is gone.");
+        // A name picks that entry out of whichever set has it; no name is
+        // the whole (first) set.
+        let files: Vec<_> = match &b.name {
+            Some(n) => sets.iter().flat_map(|s| &s.files).filter(|f| f.name == *n).take(1).cloned().collect(),
+            None => sets[0].files.clone(),
+        };
         anyhow::ensure!(!files.is_empty(), "Nothing to undo.");
         let mut inst = crate::mods_api::instance_of(&e)?;
         let (mut done, mut gone, mut errors) = (Vec::new(), None, Vec::new());

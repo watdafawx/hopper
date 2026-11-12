@@ -398,10 +398,15 @@ impl Instance {
                 self.root.join(HOPPER_FILE).display()
             );
         }
+        // What's on disk now, to note in History what this save adds or
+        // switches (records only: nothing is copied).
+        let old = crate::actor::recording().then(|| read_own(&self.root).ok().flatten()).flatten();
         write_atomic(
             &self.root.join(HOPPER_FILE),
             &serde_json::to_vec_pretty(self)?,
-        )
+        )?;
+        crate::actor::note_save(old.as_ref(), self);
+        Ok(())
     }
 
     /// Loads `root`'s instance fresh from disk, applies `f`, and saves it,

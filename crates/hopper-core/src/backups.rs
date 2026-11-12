@@ -353,6 +353,14 @@ pub fn record(backup_dir: &Path, saved: &Path, original_rel: &str) {
     let name = saved.file_name().unwrap_or_default().to_string_lossy().into_owned();
     map.insert(name, original_rel.replace('\\', "/").into());
     let _ = fs::write(&p, serde_json::to_vec_pretty(&map).unwrap_or_default());
+    if let Some(root) = crate::actor::root_of(backup_dir) {
+        crate::actor::note_set_aside(&root, backup_dir, saved, original_rel);
+    }
+}
+
+/// A History folder's own notes, not entries.
+fn is_bookkeeping(name: &str) -> bool {
+    matches!(name, ORIGINS | IDS | CHECKED | REASON | crate::actor::WHO_FILE)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -376,6 +384,13 @@ pub struct Saved {
     pub now_site: &'static str,
     /// What set it aside, when not the user ("Clean update").
     pub reason: String,
+    /// Who made the change; None for entries from before Hopper noted it.
+    pub who: Option<crate::actor::Who>,
+    /// The sync or bulk action it was part of (one row in History).
+    pub batch: String,
+    /// A record-only entry (added, turned on or off): what it was and the
+    /// mod's key. Nothing was set aside; Undo switches it back.
+    pub record: Option<(crate::actor::Did, String)>,
 }
 
 impl Saved {
@@ -403,6 +418,8 @@ impl Saved {
     pub fn detail(&self) -> String {
         let base = self.name.trim_end_matches(".disabled");
         let line = match (self.change, &self.now, &self.src) {
+            // A record of a mod from a link: no site to name, no copy kept.
+            (_, _, None) if self.record.is_some() => crate::undo::version_of(base),
             // Only turned on or off: the same file, so no "X → X".
             (Change::TurnedOn | Change::TurnedOff, _, Some(_)) => format!("{} · {}", crate::undo::version_of(base), self.site()),
             (Change::Updated | Change::RolledBack | Change::Switched, Some(now), _) => {
@@ -449,6 +466,8 @@ pub enum Change {
     Edited,
     /// Something else of the same name is there now.
     Replaced,
+    /// Put in (a record: nothing set aside).
+    Added,
 }
 
 impl Change {
@@ -462,6 +481,22 @@ impl Change {
             Change::TurnedOff => "Turned off",
             Change::Edited => "Changed",
             Change::Replaced => "Replaced",
+            Change::Added => "Added",
+        }
+    }
+
+    /// The label as a verb after a name: "Mia turned off Sodium".
+    pub fn verb(self) -> &'static str {
+        match self {
+            Change::Removed => "removed",
+            Change::Updated => "updated",
+            Change::RolledBack => "rolled back",
+            Change::Switched => "switched",
+            Change::TurnedOn => "turned on",
+            Change::TurnedOff => "turned off",
+            Change::Edited => "changed",
+            Change::Replaced => "replaced",
+            Change::Added => "added",
         }
     }
 
@@ -475,6 +510,7 @@ impl Change {
             "Turned off" => Change::TurnedOff,
             "Changed" => Change::Edited,
             "Replaced" => Change::Replaced,
+            "Added" => Change::Added,
             _ => Change::Removed,
         }
     }
@@ -542,6 +578,86 @@ impl Set {
         self.files.iter().map(|f| f.size).sum()
     }
 
+    /// The one person behind every entry, when there is one.
+    pub fn who(&self) -> Option<&crate::actor::Who> {
+        let first = self.files.first()?.who.as_ref()?;
+        self.files.iter().all(|f| f.who.as_ref().is_some_and(|w| w.name == first.name && w.id == first.id)).then_some(first)
+    }
+
+    /// The people behind its entries, in order, each once.
+    pub fn people(&self) -> Vec<crate::actor::Who> {
+        let mut out: Vec<crate::actor::Who> = Vec::new();
+        for w in self.files.iter().filter_map(|f| f.who.as_ref()) {
+            if !out.iter().any(|o| o.name == w.name && o.id == w.id) {
+                out.push(w.clone());
+            }
+        }
+        out
+    }
+
+    /// What its entries did, counted: "3 mods updated, 1 added".
+    pub fn summary(&self) -> String {
+        const ORDER: [Change; 9] = [
+            Change::Updated,
+            Change::Added,
+            Change::Removed,
+            Change::TurnedOff,
+            Change::TurnedOn,
+            Change::RolledBack,
+            Change::Switched,
+            Change::Edited,
+            Change::Replaced,
+        ];
+        let mods = self.files.iter().all(|f| f.src.is_some() || is_jar(&f.name));
+        let mut parts = Vec::new();
+        for c in ORDER {
+            let n = self.files.iter().filter(|f| f.change == c).count();
+            if n == 0 {
+                continue;
+            }
+            if parts.is_empty() {
+                let what = match (mods, n) {
+                    (true, 1) => "mod",
+                    (true, _) => "mods",
+                    (false, 1) => "file",
+                    (false, _) => "files",
+                };
+                parts.push(format!("{n} {what} {}", c.verb()));
+            } else {
+                parts.push(format!("{n} {}", c.verb()));
+            }
+        }
+        parts.join(", ")
+    }
+
+    /// The line a set of several entries shows: "Updated from Robin's All
+    /// the Mods 10", "Mia turned off 3 mods", "You changed 20 mods". None
+    /// when nobody is known (entries from before Hopper noted it).
+    pub fn headline(&self) -> Option<String> {
+        let n = self.files.len();
+        let mods = self.files.iter().all(|f| f.src.is_some() || is_jar(&f.name));
+        let what = match (mods, n) {
+            (true, 1) => "1 mod".to_string(),
+            (true, _) => format!("{n} mods"),
+            (false, 1) => "1 file".to_string(),
+            (false, _) => format!("{n} files"),
+        };
+        let same = self.files.iter().all(|f| f.change == self.files[0].change);
+        let verb = if same { self.files[0].change.verb() } else { "changed" };
+        if let Some(w) = self.who() {
+            if !w.pack.is_empty() && !w.is_you() {
+                return Some(format!("Updated from {}'s {}", w.name, w.pack));
+            }
+            return Some(format!("{} {verb} {what}", w.label()));
+        }
+        let people = self.people();
+        match people.as_slice() {
+            [] => None,
+            [a, b] => Some(format!("{} and {} {verb} {what}", a.label(), b.label())),
+            [a, ..] => Some(format!("{} and others {verb} {what}", a.label())),
+        }
+    }
+
     /// The set as Hopper Server sends it (`GET /servers/{id}/mod-backups`),
     /// so Hopper desktop shows a panel server's History with the same rows
     /// as an instance's.
@@ -556,7 +672,11 @@ impl Set {
                 "icon": f.src.as_ref().and_then(|r| r.addon.as_ref()).map(|a| a.icon.clone()).unwrap_or_default(),
                 // The rest of the entry, for Hopper desktop.
                 "src": f.src, "now": f.now, "now_site": f.now_site, "reason": f.reason,
+                // Who did it ("" name: you), and for a record what Undo switches back.
+                "who": f.who, "verb": f.change.verb(), "batch": f.batch,
+                "record": f.record.as_ref().map(|(d, k)| serde_json::json!({ "did": d, "key": k })),
             })).collect::<Vec<_>>(),
+            "head": self.headline(), "summary": self.summary(),
         })
     }
 
@@ -583,6 +703,9 @@ impl Set {
                     _ => "",
                 },
                 reason: s(f, "reason"),
+                who: serde_json::from_value(f["who"].clone()).ok(),
+                batch: s(f, "batch"),
+                record: serde_json::from_value(f["record"]["did"].clone()).ok().map(|d| (d, s(&f["record"], "key"))),
             })
             .collect();
         // Sets are told apart by their time; there is no folder here.
@@ -627,7 +750,7 @@ pub fn count_since(root: &Path, since: i64) -> (usize, i64) {
             .into_iter()
             .flatten()
             .flatten()
-            .any(|f| !matches!(f.file_name().to_string_lossy().as_ref(), ORIGINS | IDS | CHECKED | REASON));
+            .any(|f| !is_bookkeeping(&f.file_name().to_string_lossy()));
         if !has_file {
             continue;
         }
@@ -659,14 +782,120 @@ pub fn list(root: &Path) -> Vec<Set> {
             let mut files = Vec::new();
             walk(&dir, &dir, &origins, &ids, &mut files);
             let reason = fs::read_to_string(dir.join(REASON)).unwrap_or_default();
+            let tags = crate::actor::read_tags(&dir);
             for f in &mut files {
                 f.reason = reason.clone();
+                if let Some(t) = tags.get(&f.name) {
+                    f.who = Some(t.who.clone());
+                    f.batch = t.batch.clone();
+                }
                 judge(root, inst.as_ref(), f);
             }
             files.sort_by_key(|f| f.name.to_lowercase());
             (!files.is_empty()).then_some(Set { dir, when, files })
         })
         .collect();
+    out.sort_by_key(|s| std::cmp::Reverse(s.when));
+    out
+}
+
+/// Everything History shows for an instance, newest first: what [`list`]
+/// has, plus mods added, turned on or off (records, nothing set aside),
+/// with one set per sync or bulk action however many seconds it took.
+pub fn history(root: &Path) -> Vec<Set> {
+    let mut sets = list(root);
+    let base = root.join(crate::sync::BACKUP_DIR);
+    for e in fs::read_dir(&base).into_iter().flatten().flatten() {
+        let Ok(when) = e.file_name().to_string_lossy().parse::<i64>() else { continue };
+        let dir = e.path();
+        let recs = crate::actor::read_records(&dir);
+        if recs.is_empty() {
+            continue;
+        }
+        let files: Vec<Saved> = recs.iter().map(|r| record_entry(&dir, r)).collect();
+        match sets.iter_mut().find(|s| s.dir == dir) {
+            Some(s) => {
+                // A modpack update notes "turned on" by setting a note aside
+                // too: that entry stays, the record goes.
+                let shown: Vec<String> = s.files.iter().map(|f| f.name.trim_end_matches(".disabled").to_lowercase()).collect();
+                s.files.extend(files.into_iter().filter(|f| !shown.contains(&f.name.to_lowercase())));
+            }
+            None => sets.push(Set { dir, when, files }),
+        }
+    }
+    group_batches(sets)
+}
+
+/// A record as a History entry.
+fn record_entry(dir: &Path, r: &crate::actor::Record) -> Saved {
+    let a = &r.addon;
+    let file = a.file_name.trim_end_matches(".disabled").to_string();
+    let src = (a.project_id != 0).then(|| Ref {
+        project_id: a.project_id,
+        file_id: a.file_id,
+        file_name: file.clone(),
+        sha1: String::new(),
+        size: 0,
+        mr_version: a.mr_version.clone(),
+        mr_project: a.mr_project.clone(),
+        name: a.name.clone(),
+        addon: Some(a.clone()),
+    });
+    let change = match r.did {
+        crate::actor::Did::Added => Change::Added,
+        crate::actor::Did::On => Change::TurnedOn,
+        crate::actor::Did::Off => Change::TurnedOff,
+    };
+    Saved {
+        path: dir.join(crate::actor::RECORDS_FILE),
+        name: file.clone(),
+        size: 0,
+        restore_to: format!("{}/{file}", a.folder()),
+        download: false,
+        src,
+        change,
+        now: None,
+        now_site: "",
+        reason: String::new(),
+        who: Some(r.who.clone()),
+        batch: r.batch.clone(),
+        record: Some((r.did, r.key.clone())),
+    }
+}
+
+/// Splits and joins sets so each holds one batch: a sync's or a bulk
+/// action's entries over several seconds become one set, and a change of
+/// yours in the same second as a sync's stays out of it. Newest first.
+fn group_batches(sets: Vec<Set>) -> Vec<Set> {
+    let mut out: Vec<Set> = Vec::new();
+    let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for s in sets {
+        let mut plain = Vec::new();
+        for f in s.files {
+            if f.batch.is_empty() {
+                plain.push(f);
+                continue;
+            }
+            match at.get(&f.batch) {
+                Some(&i) => {
+                    out[i].when = out[i].when.max(s.when);
+                    out[i].files.push(f);
+                }
+                None => {
+                    at.insert(f.batch.clone(), out.len());
+                    // Its own key: the folder it started in, and the batch.
+                    let dir = PathBuf::from(format!("{}#{}", s.dir.display(), f.batch));
+                    out.push(Set { dir, when: s.when, files: vec![f] });
+                }
+            }
+        }
+        if !plain.is_empty() {
+            out.push(Set { dir: s.dir, when: s.when, files: plain });
+        }
+    }
+    for s in &mut out {
+        s.files.sort_by_key(|f| f.name.to_lowercase());
+    }
     out.sort_by_key(|s| std::cmp::Reverse(s.when));
     out
 }
@@ -681,7 +910,7 @@ fn walk(
     for e in fs::read_dir(dir).into_iter().flatten().flatten() {
         let p = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
-        if name == ORIGINS || name == IDS || name == CHECKED || name == REASON {
+        if is_bookkeeping(&name) || name == crate::actor::RECORDS_FILE {
             continue;
         }
         if p.is_dir() {
@@ -713,7 +942,21 @@ fn walk(
             None if rel.contains('/') => rel.clone(),
             None => guess(&p, &name),
         };
-        out.push(Saved { size, name, path: p, restore_to, download, src, change: Change::Removed, now: None, now_site: "", reason: String::new() });
+        out.push(Saved {
+            size,
+            name,
+            path: p,
+            restore_to,
+            download,
+            src,
+            change: Change::Removed,
+            now: None,
+            now_site: "",
+            reason: String::new(),
+            who: None,
+            batch: String::new(),
+            record: None,
+        });
     }
 }
 
@@ -743,7 +986,7 @@ pub fn restore(root: &Path, f: &Saved) -> anyhow::Result<PathBuf> {
 
 /// Removes a History folder that holds nothing but its own notes.
 pub(crate) fn drop_if_empty(dir: &Path) {
-    if fs::read_dir(dir).is_ok_and(|mut d| d.all(|e| e.is_ok_and(|e| e.file_name() == ORIGINS || e.file_name() == IDS || e.file_name() == CHECKED || e.file_name() == REASON))) {
+    if fs::read_dir(dir).is_ok_and(|mut d| d.all(|e| e.is_ok_and(|e| is_bookkeeping(&e.file_name().to_string_lossy())))) {
         let _ = fs::remove_dir_all(dir);
     }
 }
@@ -1186,6 +1429,9 @@ mod tests {
             now: Some(now.into()),
             now_site: "CurseForge",
             reason: String::new(),
+            who: None,
+            batch: String::new(),
+            record: None,
         }
     }
 
@@ -1271,6 +1517,9 @@ mod tests {
                 now: Some("jei-1.3.jar".into()),
                 now_site: "CurseForge",
                 reason: "Clean update".into(),
+                who: Some(crate::actor::Who::friend("Mia", "mb1", "", "")),
+                batch: "b1".into(),
+                record: None,
             }],
         };
         let back = Set::from_json(&set.to_json()).unwrap();

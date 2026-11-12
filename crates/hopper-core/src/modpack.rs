@@ -54,6 +54,8 @@ fn in_new_folder<T>(dir: &Path, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow
         fs::create_dir_all(p)?;
     }
     fs::create_dir(dir).with_context(|| format!("creating {}", dir.display()))?;
+    // A new instance's first mods aren't changes for History.
+    let _quiet = crate::actor::quiet(dir);
     let r = f();
     if r.is_err()
         && let Err(e) = fs::remove_dir_all(dir)

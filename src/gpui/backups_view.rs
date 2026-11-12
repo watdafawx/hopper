@@ -50,6 +50,9 @@ pub struct BackupsView {
     /// for (a group stands for its children).
     pub(crate) hpaint: crate::drag_pick::Paint,
     pub(crate) hstart: Option<Vec<String>>,
+    /// The person History shows changes of (a [`crate::history_view`]
+    /// person key); `None` shows everyone's.
+    pub(crate) who_pick: Option<String>,
     mode: Mode,
     /// `None` while loading.
     snaps: Option<Vec<Snapshot>>,
@@ -85,7 +88,7 @@ impl BackupsView {
         cx.spawn(async move |this, cx| {
             let (sets, projects, copies) = cx
                 .background_spawn(async move {
-                    (hopper::backups::list(&root), hopper::snapshots::projects_seen(&root), hopper::backups::copies_size(&root))
+                    (hopper::backups::history(&root), hopper::snapshots::projects_seen(&root), hopper::backups::copies_size(&root))
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -928,6 +931,7 @@ fn open_with(store: Entity<Store>, root: PathBuf, panel: Option<crate::panel_tab
             sel: Default::default(),
             hpaint: Default::default(),
             hstart: None,
+            who_pick: None,
             mode: if snap.is_some() { Mode::Snapshots } else { Mode::History },
             snaps: None,
             usage: None,

@@ -13,6 +13,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use hopper::actor::Who;
 use hopper::backups::{Change, Saved, Set};
 use hopper::undo::Gone;
 use std::rc::Rc;
@@ -21,6 +22,21 @@ use std::rc::Rc;
 fn day_of(when: i64) -> String {
     hopper::time::relative_secs(when)
 }
+
+/// Who a person chip stands for: "you", or the friend's (or panel
+/// user's) id.
+fn person_key(w: &Who) -> String {
+    if w.is_you() {
+        "you".into()
+    } else if w.id.is_empty() {
+        format!("n:{}", w.name)
+    } else {
+        w.id.clone()
+    }
+}
+
+/// The size of the face before a row.
+const FACE: f32 = 1.5;
 
 /// "14:02".
 fn hm(when: i64) -> String {
@@ -44,8 +60,16 @@ impl BackupsView {
             .into_any_element();
         }
         let mut col = v_flex().gap_0p5();
+        let people = self.people();
+        if people.len() > 1 {
+            col = col.child(self.who_filter(&people, cx));
+        }
+        let faces = !people.is_empty();
         let mut day = String::new();
         for (i, set) in self.sets.iter().enumerate() {
+            if !self.shown(set) {
+                continue;
+            }
             let d = day_of(set.when);
             if d != day {
                 col = col.child(
@@ -59,15 +83,89 @@ impl BackupsView {
                 );
                 day = d;
             }
-            col = col.child(self.set_rows(i, set, cx));
+            col = col.child(self.set_rows(i, set, faces, cx));
         }
         col.into_any_element()
+    }
+
+    /// Whether a set shows under the person filter.
+    fn shown(&self, set: &Set) -> bool {
+        match &self.who_pick {
+            None => true,
+            Some(k) => set.files.iter().any(|f| f.who.as_ref().is_some_and(|w| &person_key(w) == k)),
+        }
+    }
+
+    /// Everyone with a change in History, you first.
+    fn people(&self) -> Vec<Who> {
+        let mut out: Vec<Who> = Vec::new();
+        for w in self.sets.iter().flat_map(|s| s.people()) {
+            if !out.iter().any(|o| person_key(o) == person_key(&w)) {
+                out.push(w);
+            }
+        }
+        out.sort_by_key(|w| !w.is_you());
+        out
+    }
+
+    /// "Everyone · You · Mia · Robin": whose changes History shows.
+    fn who_filter(&self, people: &[Who], cx: &mut Context<Self>) -> AnyElement {
+        let mut row = h_flex().gap_1p5().flex_wrap().pb_2().child(
+            widgets::toggle_chip("hist-who-all", "Everyone", self.who_pick.is_none(), cx)
+                .on_click(cx.listener(|this, _, _, cx| this.pick_who(None, cx))),
+        );
+        for (i, w) in people.iter().enumerate() {
+            let k = person_key(w);
+            let on = self.who_pick.as_ref() == Some(&k);
+            let face = self.who_face(w, rems(1.), cx);
+            row = row.child(
+                widgets::toggle_chip_face(("hist-who", i), face, w.label(), on, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_who(Some(k.clone()), cx))),
+            );
+        }
+        row.into_any_element()
+    }
+
+    fn pick_who(&mut self, k: Option<String>, cx: &mut Context<Self>) {
+        // Picked rows the filter hides would still be undone: start over.
+        self.sel.clear();
+        self.who_pick = k;
+        cx.notify();
+    }
+
+    /// The face of whoever made a change: a friend's or panel user's
+    /// Minecraft head when this PC knows it, your account's for you, a
+    /// plain person shape otherwise.
+    fn who_face(&self, w: &Who, size: Rems, cx: &mut Context<Self>) -> AnyElement {
+        let s = self.store.read(cx);
+        let mc = if w.is_you() {
+            s.accounts().active().map(|a| a.id.clone()).unwrap_or_default()
+        } else {
+            s.mailbox_friends()
+                .iter()
+                .find(|f| f.id == w.id)
+                .map(|f| f.mc_id.clone())
+                .or_else(|| s.mailbox_groups().iter().flat_map(|g| &g.members).find(|m| m.id == w.id).map(|m| m.mc_id.clone()))
+                .unwrap_or_default()
+        };
+        crate::friends::face(&self.store, &mc, &w.label(), size, cx)
+    }
+
+    /// The group a friend's change came through, by name.
+    fn group_name(&self, w: &Who, cx: &App) -> Option<String> {
+        (!w.group.is_empty())
+            .then(|| self.store.read(cx).mailbox_groups().iter().find(|g| g.id == w.group).map(|g| g.name.clone()))
+            .flatten()
+            .filter(|n| !n.is_empty())
     }
 
     /// Row keys in display order (what Shift-click ranges run over).
     fn order(&self) -> Vec<String> {
         let mut out = Vec::new();
         for (i, set) in self.sets.iter().enumerate() {
+            if !self.shown(set) {
+                continue;
+            }
             match set.files.as_slice() {
                 [_] => out.push((i * 10_000).to_string()),
                 files if self.open.contains(&set.dir) => out.extend((0..files.len()).map(|j| (i * 10_000 + j + 1).to_string())),
@@ -179,9 +277,10 @@ impl BackupsView {
     }
 
     /// One action: a row, or a fold of rows when it touched several files.
-    fn set_rows(&self, i: usize, set: &Set, cx: &mut Context<Self>) -> AnyElement {
+    /// `faces`: History names people, so each row starts with one.
+    fn set_rows(&self, i: usize, set: &Set, faces: bool, cx: &mut Context<Self>) -> AnyElement {
         if let [f] = set.files.as_slice() {
-            return self.entry_row(i * 10_000, f, set.when, false, cx).into_any_element();
+            return self.entry_row(i * 10_000, f, set.when, false, faces, cx).into_any_element();
         }
         let open = self.open.contains(&set.dir);
         let dir = set.dir.clone();
@@ -215,39 +314,62 @@ impl BackupsView {
             cx,
         );
         let head = if all_picked { widgets::row_selected(head, cx) } else { head };
+        let chevron = gpui_kit::component::Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small();
+        let names = set.files.iter().take(3).map(Saved::title).collect::<Vec<_>>().join(", ") + if n > 3 { "…" } else { "" };
+        // Who did it, when History knows: "Updated from Robin's All the
+        // Mods 10", their name in bold, and what it came to below.
+        let headline = faces.then(|| set.headline()).flatten();
+        let people = set.people();
+        let lead = if !faces {
+            div().size(rems(FACE)).flex_none().flex().items_center().justify_center().child(chevron.clone()).into_any_element()
+        } else if let [w] = people.as_slice() {
+            self.who_face(w, rems(FACE), cx)
+        } else if !people.is_empty() {
+            let small = rems(FACE * 0.8);
+            let fs: Vec<AnyElement> = people.iter().take(3).map(|w| self.who_face(w, small, cx)).collect();
+            div()
+                .size(rems(FACE))
+                .flex_none()
+                .flex()
+                .items_center()
+                .child(widgets::face_stack(fs, cx.theme().background, small, cx.theme().radius))
+                .into_any_element()
+        } else {
+            div().size(rems(FACE)).flex_none().into_any_element()
+        };
+        let title = match &headline {
+            Some(h) => {
+                let who = set.who().or(people.first()).map(Who::label).unwrap_or_default();
+                let (a, b) = match h.find(&who).filter(|_| !who.is_empty()) {
+                    Some(at) => (&h[..at], &h[at + who.len()..]),
+                    None => (h.as_str(), ""),
+                };
+                let found = a.len() < h.len();
+                h_flex()
+                    .gap_0()
+                    .min_w_0()
+                    .text_sm()
+                    .child(div().flex_none().whitespace_nowrap().child(a.to_string()))
+                    .when(found, |r| r.child(div().flex_none().font_semibold().child(who.clone())))
+                    .child(div().min_w_0().truncate().whitespace_nowrap().child(b.to_string()))
+                    .child(div().flex_none().pl_1().text_color(cx.theme().muted_foreground).child(chevron))
+            }
+            None => h_flex()
+                .gap_1p5()
+                .text_sm()
+                .child(div().text_color(change_color(set.files[0].change, same, cx)).child(label))
+                .child(what)
+                .when(faces, |r| r.child(div().text_color(cx.theme().muted_foreground).child(chevron))),
+        };
+        // The counts, unless the headline already says them ("You turned
+        // off 2 mods").
+        let counts = headline.is_some() && (!same || set.who().is_some_and(|w| !w.pack.is_empty()));
+        let caption = if counts { format!("{} · {names}", set.summary()) } else { names };
         v_flex()
             .child(
                 head
-                    .child(
-                        div()
-                            .size(rems(1.5))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(gpui_kit::component::Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small()),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                h_flex()
-                                    .gap_1p5()
-                                    .text_sm()
-                                    .child(div().text_color(change_color(set.files[0].change, same, cx)).child(label))
-                                    .child(what),
-                            )
-                            .child(
-                                widgets::caption(
-                                    set.files.iter().take(3).map(Saved::title).collect::<Vec<_>>().join(", ")
-                                        + if n > 3 { "…" } else { "" },
-                                    cx,
-                                )
-                                .text_xs()
-                                .truncate(),
-                            ),
-                    )
+                    .child(lead)
+                    .child(v_flex().flex_1().min_w_0().child(title).child(widgets::caption(caption, cx).text_xs().truncate()))
                     .child(widgets::caption(hm(set.when), cx).text_xs())
                     .child(
                         widgets::row_actions(("hist-set-actions", i)).child(
@@ -261,13 +383,15 @@ impl BackupsView {
                     ),
             )
             .when(open, |c| {
-                c.children(set.files.iter().enumerate().map(|(j, f)| self.entry_row(i * 10_000 + j + 1, f, set.when, true, cx)))
+                c.children(set.files.iter().enumerate().map(|(j, f)| self.entry_row(i * 10_000 + j + 1, f, set.when, true, faces, cx)))
             })
             .into_any_element()
     }
 
     /// One file: what happened to it, its versions, when, and Undo.
-    fn entry_row(&self, key: usize, f: &Saved, when: i64, nested: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// `faces`: rows start with whoever made the change ("Mia turned off
+    /// Sodium"); entries from before History noted that keep a blank there.
+    fn entry_row(&self, key: usize, f: &Saved, when: i64, nested: bool, faces: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let (pid, icon, name) = match &f.src {
             Some(r) => {
                 let known = self.project_of(&f.name, cx);
@@ -288,13 +412,31 @@ impl BackupsView {
             .gap_2()
             .px_2()
             .py_1p5()
-            .when(nested, |r| r.pl_8())
+            // Under the head's text: past its face (or chevron) and gap.
+            .when(nested, |r| r.pl(rems(FACE + 1.)))
             .rounded(cx.theme().radius)
             .hover(|s| widgets::row_hover(s, cx))
             .clickable(cx);
         let row = self.pickable(row, vec![key.to_string()], None, cx);
         let row = if picked { widgets::row_selected(row, cx) } else { row };
-        row
+        let who = f.who.as_ref().filter(|_| !nested);
+        let lead = (faces && !nested).then(|| match who {
+            Some(w) => self.who_face(w, rems(FACE), cx),
+            None => div().size(rems(FACE)).flex_none().into_any_element(),
+        });
+        let what = match who {
+            Some(w) => h_flex()
+                .flex_none()
+                .gap_1p5()
+                .child(div().font_semibold().child(w.label()))
+                .child(div().text_color(cx.theme().muted_foreground).child(f.change.verb())),
+            None => h_flex().flex_none().child(div().text_color(change_color(f.change, true, cx)).child(f.change.label())),
+        };
+        let mut detail = f.detail();
+        if let Some(g) = who.and_then(|w| self.group_name(w, cx)) {
+            detail = if detail.is_empty() { format!("group {g}") } else { format!("{detail} · group {g}") };
+        }
+        row.children(lead)
             .child(
                 v_flex()
                     .flex_1()
@@ -304,10 +446,10 @@ impl BackupsView {
                             .gap_1p5()
                             .min_w_0()
                             .text_sm()
-                            .child(div().flex_none().text_color(change_color(f.change, true, cx)).child(f.change.label()))
+                            .child(what)
                             .child(self.mod_cell(ElementId::Name(format!("hist-mod:{key}").into()), name, pid, &icon, true, cx)),
                     )
-                    .child(widgets::caption(f.detail(), cx).text_xs().truncate()),
+                    .child(widgets::caption(detail, cx).text_xs().truncate()),
             )
             .when(!nested, |r| r.child(widgets::caption(hm(when), cx).text_xs()))
             .child(
@@ -699,7 +841,7 @@ fn change_color(c: Change, same: bool, cx: &App) -> Hsla {
         Change::Updated => t.info,
         Change::RolledBack => t.warning,
         Change::Edited | Change::Switched | Change::Replaced => t.primary,
-        Change::TurnedOn => t.success,
+        Change::TurnedOn | Change::Added => t.success,
         Change::TurnedOff => t.muted_foreground,
     }
 }

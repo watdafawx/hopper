@@ -1619,6 +1619,10 @@ impl Store {
             .follow_at(&root)
             .map(|f| (f.code.clone(), f.declined.clone()))
             .unwrap_or_default();
+        // History names the friend on what this changes, and only on that.
+        let who = self
+            .follow_at(&root)
+            .map(|f| hopper::actor::Who::friend(&f.peer_name, &f.peer_id, &f.group, &f.name));
         let (tx, r2) = (self.tx.clone(), root.clone());
         self.spawn_instance_job(&root, title, move |job| {
             let work = || -> anyhow::Result<RecipeApplied> {
@@ -1641,6 +1645,7 @@ impl Store {
                         (s, held, None)
                     }
                 };
+                let _who = hopper::actor::begin(&r2, who.clone());
                 hopper::recipe::apply_to(&r2, &code, &prev, &skip, job)?;
                 Ok(RecipeApplied { root: r2.clone(), code: code.clone(), held, declined: answer })
             };

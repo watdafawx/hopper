@@ -727,6 +727,8 @@ pub fn install_share(instances_root: &Path, share: &Share, job: &Job) -> anyhow:
     }
     // Following it right away needs its id before anything loads it again.
     inst.ensure_id();
+    // Its first mods aren't changes for History.
+    let _quiet = crate::actor::quiet(&inst.root);
     inst.save()?;
     apply_existing(&mut inst, &share, None, job)?;
     Ok(inst)
@@ -755,6 +757,7 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
             && let Some(i) = find(inst, t)
         {
             let name = inst.addons[i].name.clone();
+            crate::actor::claim_addon(&inst.addons[i]);
             if let Err(e) = crate::install::remove(inst, i) {
                 job.note(format!("Couldn't remove {name}: {e:#}"));
             }
@@ -808,6 +811,7 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     for who in to_remove(&gone, unsure) {
         if let Some(i) = inst.addons.iter().position(|a| !a.from_pack && who.is(a)) {
             let name = inst.addons[i].name.clone();
+            crate::actor::claim_addon(&inst.addons[i]);
             if let Err(e) = crate::install::remove(inst, i) {
                 job.note(format!("Couldn't remove {name}: {e:#}"));
             }
@@ -816,6 +820,11 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     for (i, (project, file, enabled)) in files.iter().enumerate() {
         job.check_cancelled()?;
         job.progress(i, files.len());
+        // History names who changed it (see crate::actor).
+        crate::actor::claim_key(&format!("p:{project}"));
+        if let Some(a) = inst.addons.iter().find(|a| a.project_id == *project) {
+            crate::actor::claim_addon(a);
+        }
         // Already here: nothing to download, only its switch to set.
         let here = inst.addons.iter().any(|a| a.project_id == *project && a.file_id == *file);
         let put = if here { Ok(String::new()) } else { crate::install::install_file(inst, *project, *file, job) };
@@ -838,6 +847,7 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
         if let Entry::Source { pin, enabled } = e {
             job.check_cancelled()?;
             job.detail(format!("Getting {} from {}", pin.file, pin.source.publisher));
+            crate::actor::claim_key(&format!("s:{}#{}", pin.source.url, pin.source.pattern));
             if let Err(e) = crate::sources::install_pinned(inst, pin, *enabled, job) {
                 job.note(format!("{}: {e:#}", pin.file));
             }
@@ -847,6 +857,7 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
         if let Entry::Off(t) = e
             && let Some(i) = find(inst, t)
         {
+            crate::actor::claim_addon(&inst.addons[i]);
             crate::install::set_enabled(inst, i, false)?;
         }
     }
@@ -854,7 +865,10 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     // had here, so this sets it.
     for who in &back_on {
         if let Some(i) = inst.addons.iter().position(|a| who.is(a))
-            && let Err(e) = crate::install::set_enabled(inst, i, true)
+            && let Err(e) = {
+                crate::actor::claim_addon(&inst.addons[i]);
+                crate::install::set_enabled(inst, i, true)
+            }
         {
             job.note(format!("Couldn't turn {} on: {e:#}", inst.addons[i].name));
         }

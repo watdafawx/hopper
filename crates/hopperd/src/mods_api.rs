@@ -70,6 +70,22 @@ pub(crate) fn entry(app: &App, headers: &HeaderMap, method: &Method, id: &str) -
     app.servers.get(id).ok_or_else(|| not_found("server"))
 }
 
+/// Who History names on what this request changes: the signed-in panel
+/// user's name when the panel has users besides the owner, "You" when
+/// it's only ever the owner. It only reads who is asking; access is
+/// checked as before.
+pub(crate) fn changer(app: &App, headers: &HeaderMap, method: &Method) -> hopper_core::actor::Who {
+    use crate::auth::Who as By;
+    if app.auth.users().is_empty() {
+        return hopper_core::actor::Who::you();
+    }
+    match require(app, headers, method) {
+        Ok(By::User { name, .. } | By::Device { name, .. } | By::Token { name, .. }) => hopper_core::actor::Who::panel(&name),
+        Ok(By::Owner) => hopper_core::actor::Who::panel("Owner"),
+        Err(_) => hopper_core::actor::Who::you(),
+    }
+}
+
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {
     tokio::task::spawn_blocking(f).await.map_err(bad)?.map_err(|e| bad(format!("{e:#}")))
 }
@@ -530,8 +546,10 @@ async fn toggle(
     Json(b): Json<FileBody>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
+    let by = changer(&app, &headers, &method);
     let running = e.server.state().is_alive();
     blocking(move || {
+        let _by = hopper_core::actor::batch(&e.root, by);
         let mut inst = instance(&e)?;
         let i = index_of(&mut inst, &b.file)?;
         install::set_enabled(&mut inst, i, b.enabled).map_err(install::explain_locked)
@@ -551,7 +569,9 @@ async fn remove(
     drop_updates_for(&id, std::slice::from_ref(&b.file));
     let running = e.server.state().is_alive();
     log::info!("{}: removing {}", e.name, b.file);
+    let by = changer(&app, &headers, &method);
     blocking(move || {
+        let _by = hopper_core::actor::batch(&e.root, by);
         let mut inst = instance(&e)?;
         let i = index_of(&mut inst, &b.file)?;
         install::remove(&mut inst, i).map_err(install::explain_locked)
@@ -630,7 +650,9 @@ async fn install_mod(
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
     forget_updates(&id);
+    let by = changer(&app, &headers, &method);
     let job = crate::pack_api::spawn(&app, format!("Adding a mod to {}", e.name), move |job| {
+        let _by = hopper_core::actor::batch(&e.root, by);
         let mut inst = instance(&e)?;
         known_version(&inst)?;
         let m = hopper_core::source::get_mod(b.project_id)?;
@@ -759,7 +781,10 @@ async fn update(
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
     let sid = id.clone();
+    let by = changer(&app, &headers, &method);
     let job = crate::pack_api::spawn(&app, format!("Updating {}'s mods", e.name), move |job| {
+        // One History row for the whole run.
+        let _by = hopper_core::actor::batch(&e.root, by);
         let mut inst = instance(&e)?;
         let pack = PackMods::of(&inst);
         // The offers the last check found; only a mod it didn't cover is

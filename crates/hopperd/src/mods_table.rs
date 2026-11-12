@@ -304,7 +304,10 @@ async fn toggle_many(
     let e = entry(&app, &headers, &method, &id)?;
     let running = e.server.state().is_alive();
     log::info!("{}: turning {} {} mods", e.name, if b.enabled { "on" } else { "off" }, b.files.len());
+    let by = crate::mods_api::changer(&app, &headers, &method);
     let n = blocking(move || {
+        // All of them are one History row.
+        let _by = hopper_core::actor::batch(&e.root, by);
         let mut inst = crate::mods_api::instance_of(&e)?;
         let mut n = 0;
         for f in &b.files {
@@ -332,7 +335,9 @@ async fn remove_many(
     let running = e.server.state().is_alive();
     log::info!("{}: removing {} mods", e.name, b.files.len());
     let sid = id.clone();
+    let by = crate::mods_api::changer(&app, &headers, &method);
     let (n, undo) = blocking(move || {
+        let _by = hopper_core::actor::batch(&e.root, by);
         let mut inst = crate::mods_api::instance_of(&e)?;
         let since = crate::parity_mods::undo_since();
         // Where each jar was and its entry, for the toast's Undo.

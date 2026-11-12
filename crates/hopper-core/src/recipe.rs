@@ -200,6 +200,8 @@ pub fn apply_to(
         Fit::Same => {}
         Fit::PackUpdate(target) => {
             job.detail("Updating the pack to their version");
+            // Whatever the pack's new version changes is the sender's in History.
+            let _own = crate::actor::own_all();
             match target {
                 PackTarget::Curse { project, file } => {
                     let f = crate::cf::file(project, file)

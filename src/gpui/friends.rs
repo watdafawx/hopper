@@ -2664,7 +2664,7 @@ fn search_box(state: &Entity<InputState>) -> Div {
 /// A friend's face, from their Minecraft account; a plain square in the
 /// same shape when they aren't signed in. Its edge line keeps it visible on
 /// a light theme, where the fill is almost the panel's own colour.
-fn face(store: &Entity<Store>, mc_id: &str, name: &str, size: Rems, cx: &mut App) -> AnyElement {
+pub(crate) fn face(store: &Entity<Store>, mc_id: &str, name: &str, size: Rems, cx: &mut App) -> AnyElement {
     if mc_id.is_empty() {
         let theme = cx.theme();
         return div()

@@ -458,6 +458,17 @@ pub fn apply(inst: &mut Instance, todo: &[Change], skip_sources: &[crate::source
     }
 }
 
+/// Claims each change for History ([`crate::actor`]) as the member's whose
+/// change won, with the file it replaces here.
+fn claim_changes(inst: &Instance, todo: &[Change], merged: &Merged, group: &str) {
+    for c in todo {
+        let Some((_, m)) = merged.marks.iter().rev().find(|(k, _)| *k == c.key) else { continue };
+        let who = crate::actor::Who::friend(&m.name, &m.by, group, "");
+        let file = inst.addons.iter().find(|a| addon_key(a) == c.key).map(|a| a.file_name.as_str());
+        crate::actor::claim(&c.key, file, &who);
+    }
+}
+
 /// Takes the waiting codes into the instance at `root`: works out each
 /// member's changes and makes the ones that win here. Runs off the UI
 /// thread. `allow`: mods from other links may be put in by themselves.
@@ -498,6 +509,10 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, job
             })
             .collect();
         let skip = crate::sources::carry::auto_skip(&pins, allow);
+        // History names the member behind each change; only these mods
+        // are theirs, whatever else changes here meanwhile.
+        let _scope = crate::actor::begin(root, None);
+        claim_changes(&inst, &todo, &merged, &copy.group);
         apply(&mut inst, &todo, &skip, job)?;
     }
     Ok(merged)

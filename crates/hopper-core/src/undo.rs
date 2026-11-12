@@ -172,6 +172,11 @@ fn entry_of(r: &Ref) -> Addon {
 /// Undoes one History entry in `inst`; returns where the file went back.
 /// The caller saves nothing: the instance is saved here.
 pub fn undo(inst: &mut Instance, f: &Saved) -> anyhow::Result<PathBuf> {
+    if let Some((did, key)) = &f.record {
+        return undo_record(inst, f, *did, key);
+    }
+    // Putting it back isn't a new change for History to note.
+    let _quiet = crate::actor::quiet(&inst.root);
     let dest = inst.root.join(&f.restore_to);
     let jar = f.restore_to.to_lowercase().trim_end_matches(".disabled").ends_with(".jar");
     match (&f.src, jar) {
@@ -202,6 +207,29 @@ pub fn undo(inst: &mut Instance, f: &Saved) -> anyhow::Result<PathBuf> {
             Ok(dest)
         }
     }
+}
+
+/// Undoes a record-only entry: removes a mod that was added (it goes to
+/// History like any removal), or switches it back. A mod no longer there
+/// only drops the entry.
+fn undo_record(inst: &mut Instance, f: &Saved, did: crate::actor::Did, key: &str) -> anyhow::Result<PathBuf> {
+    use crate::actor::Did;
+    let _quiet = crate::actor::quiet(&inst.root);
+    let at = inst
+        .addons
+        .iter()
+        .position(|a| crate::groupsync::addon_key(a) == key)
+        .or_else(|| inst.addons.iter().position(|a| a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(&f.name)));
+    match (did, at) {
+        (Did::Added, Some(i)) => crate::install::remove(inst, i)?,
+        (Did::On, Some(i)) => crate::install::set_enabled(inst, i, false)?,
+        (Did::Off, Some(i)) => crate::install::set_enabled(inst, i, true)?,
+        (_, None) => {}
+    }
+    if let Some(dir) = f.path.parent() {
+        crate::actor::forget_record(dir, key, did);
+    }
+    Ok(inst.root.join(&f.restore_to))
 }
 
 /// Puts `new` (its file downloaded to `tmp`) in place of whatever file of
