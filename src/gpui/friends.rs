@@ -21,6 +21,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use hopper::groupsync::Kind;
 use hopper::instances::Instance;
 use hopper::mailbox::{Event, Friend, Group};
 use std::cell::RefCell;
@@ -634,14 +635,73 @@ impl FriendsPanel {
         });
     }
 
+    /// How the packs this PC follows are doing, in one chip beside the
+    /// title: the one that needs the player most. Clicking it opens Packs,
+    /// where the card says which pack and why.
+    fn sync_chip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let s = self.store.read(cx);
+        if s.sync_status() != SyncStatus::Ok {
+            return None;
+        }
+        let rows = sync_rows(s);
+        let top = rows.first()?;
+        let theme = cx.theme().clone();
+        let need = rows.iter().filter(|r| r.state.rank() <= 1).count();
+        let more = |one: String| if need > 1 { format!("{one} {} more need a look.", need - 1) } else { one };
+        let (icon, color, label, tip) = match &top.state {
+            CopyState::Failed(..) => (
+                IconName::TriangleAlert,
+                theme.danger,
+                "Couldn't update",
+                more(top.state.note(&top.who).map(|n| format!("{}: {n}", top.name)).unwrap_or_default()),
+            ),
+            CopyState::Held(_) => (
+                IconName::Info,
+                theme.warning,
+                "Needs your answer",
+                more(top.state.note(&top.who).map(|n| format!("{}: {n}", top.name)).unwrap_or_default()),
+            ),
+            CopyState::AfterGame => (
+                IconName::Clock,
+                theme.muted_foreground,
+                "After the game",
+                format!("{} gets {}'s changes when Minecraft closes.", top.name, top.who),
+            ),
+            CopyState::Updating => (IconName::RefreshCw, theme.primary, "Syncing", format!("Getting {}'s changes for {}.", top.who, top.name)),
+            CopyState::UpToDate => (
+                IconName::CircleCheck,
+                theme.success,
+                "In sync",
+                if rows.len() == 1 { "The pack you follow is up to date.".to_string() } else { format!("All {} packs you follow are up to date.", rows.len()) },
+            ),
+        };
+        // Red text on its own dark tint reads too dim (3.8:1): lift it, as
+        // the drop zone does.
+        let color = if theme.mode.is_dark() && color == theme.danger { hsla(color.h, color.s, color.l.max(0.68), 1.) } else { color };
+        let tip: SharedString = tip.into();
+        Some(
+            div()
+                .id("friends-sync")
+                .flex_none()
+                .rounded(crate::theme::radius_sm())
+                .clickable(cx)
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                .on_click(cx.listener(|this, _, window, cx| this.open(Page::Packs, window, cx)))
+                .child(widgets::chip(color).child(h_flex().gap_1().child(Icon::new(icon).xsmall()).child(label)))
+                .into_any_element(),
+        )
+    }
+
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let chip = self.sync_chip(cx);
         let theme = cx.theme();
         h_flex()
             .flex_none()
             .h(rems(3.))
             .px_3()
             .gap_2()
-            .child(div().flex_1().text_base().font_semibold().child("Friends"))
+            .child(div().flex_1().min_w_0().truncate().text_base().font_semibold().child("Friends"))
+            .children(chip)
             // The empty page has its own Invite button.
             .when(self.store.read(cx).sync_status() != SyncStatus::Off && !self.nobody(cx), |h| {
                 let anchor = self.plus_anchor.clone();
@@ -1116,7 +1176,8 @@ impl FriendsPanel {
         let sub = match &shown {
             Some((_, local, CopyState::Updating)) => format!("Getting {who}'s changes · your copy: {local}"),
             Some((_, local, CopyState::AfterGame)) => format!("Gets {who}'s changes when the game closes · your copy: {local}"),
-            Some((_, local, CopyState::Failed(..))) => format!("Your copy: {local}"),
+            // The note under it says what's wrong: not "up to date".
+            Some((_, local, CopyState::Failed(..) | CopyState::Held(_))) => format!("Your copy: {local}"),
             Some((_, local, _)) => format!("Your copy: {local} · up to date"),
             None if e.at > 0 => format!("Updated {}", ago(e.at)),
             None => String::new(),
@@ -1126,6 +1187,7 @@ impl FriendsPanel {
             _ => None,
         };
         let copy_note = shown.as_ref().and_then(|f| f.2.note(&who));
+        let changed = shown.as_ref().and_then(|f| changed_by(s, &f.0, &s.mailbox_id()));
         let sub = match by {
             Some(by) if sub.is_empty() => format!("From {by}"),
             Some(by) => format!("From {by} · {}", sub[..1].to_lowercase() + &sub[1..]),
@@ -1200,6 +1262,7 @@ impl FriendsPanel {
                                 .when(waiting.is_some(), |d| d.text_color(theme.foreground)),
                         )
                     })
+                    .when_some(changed, |c, t| c.child(widgets::caption(t, cx).text_xs().truncate().pl(rems(1.625))))
                     .when_some(copy_note, |c, t| c.child(warn_line(t, cx)))
                     .when(missing > 0, |c| {
                         c.child(warn_line(
@@ -1266,9 +1329,11 @@ impl FriendsPanel {
                     CopyState::Updating => format!("Getting {who}'s changes · {}", ago(e.at)),
                     CopyState::AfterGame => format!("From {sender} · changes come when the game closes"),
                     CopyState::Failed(..) => format!("From {sender} · changed {}", ago(e.at)),
-                    _ => format!("From {sender} · up to date"),
+                    CopyState::Held(_) => format!("From {sender}"),
+                    CopyState::UpToDate => format!("From {sender} · up to date"),
                 };
                 let note = state.note(&who);
+                let changed = changed_by(s, root, &s.mailbox_id());
                 let waiting = matches!(state, CopyState::Held(_));
                 let view = cx.entity();
                 h_flex()
@@ -1299,6 +1364,7 @@ impl FriendsPanel {
                                     .pl(rems(1.625))
                                     .when(waiting, |d| d.text_color(theme.foreground)),
                             )
+                            .when_some(changed, |c, t| c.child(widgets::caption(t, cx).text_xs().truncate().pl(rems(1.625))))
                             .when_some(note, |c, t| c.child(warn_line(t, cx))),
                     )
                     .when(waiting, |r| r.child(self.update_button(format!("followed-update:{i}").into(), e, root.clone(), down, cx)))
@@ -1956,9 +2022,7 @@ impl FriendsPanel {
 
 // ---- the rail and its pages ----------------------------------------------------
 
-/// A small mark on a rail tile: news (a dot) or something to look at.
-// Alert is for the sync status badges (phase 3).
-#[allow(dead_code)]
+/// A small mark on a rail tile: news (a dot), or a pack that needs a look.
 #[derive(Clone, Copy)]
 enum TileMark {
     Dot(Hsla),
@@ -2052,12 +2116,17 @@ impl FriendsPanel {
         let everyone = matches!(self.page, Page::Everyone | Page::Friend(_));
         let mut order: Vec<&Group> = groups.iter().filter(|g| !g.me.joined).collect();
         order.extend(groups.iter().filter(|g| g.me.joined));
+        let sync = sync_rows(self.store.read(cx));
         let mut tiles: Vec<AnyElement> = Vec::new();
         for g in order {
             let open = self.page == Page::Group(g.id.clone());
             let art = self.group_art(g, theme.background, cx);
+            let alert = alert_of(sync.iter().filter(|r| r.group == g.id), cx);
             let (tip, mark) = if g.me.joined {
-                (g.name.clone(), None)
+                match alert {
+                    Some(_) => (format!("{}: a pack needs a look", g.name), alert),
+                    None => (g.name.clone(), None),
+                }
             } else {
                 (format!("{}: you're asked to join", g.name), Some(TileMark::Dot(theme.primary)))
             };
@@ -2098,6 +2167,7 @@ impl FriendsPanel {
             cx,
         );
         let packs_open = self.page == Page::Packs;
+        let packs_alert = alert_of(sync.iter(), cx);
         v_flex()
             .flex_none()
             .w(rems(RAIL_W))
@@ -2120,9 +2190,9 @@ impl FriendsPanel {
             .child(self.tile(
                 "rail-packs".into(),
                 packs_open,
-                "Packs: yours and your friends'".into(),
+                if packs_alert.is_some() { "Packs: one needs a look".into() } else { "Packs: yours and your friends'".into() },
                 Icon::new(IconName::Package).small().into_any_element(),
-                None,
+                packs_alert,
                 Some(Page::Packs),
                 cx,
             ))
@@ -2243,6 +2313,75 @@ impl FriendsPanel {
 
     /// The Packs page: this PC's packs and who gets each, the friends'
     /// packs (followed ones first), and the follows that stopped.
+    /// The top of the Packs page when a followed copy needs the player:
+    /// which pack, why, and the way on. Copies that are fine or only wait
+    /// for the game aren't listed; the header's chip covers those.
+    fn sync_card(&self, recipes: &[Event], down: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let s = self.store.read(cx);
+        let need: Vec<SyncRow> = sync_rows(s).into_iter().filter(|r| r.state.rank() <= 1).collect();
+        if need.is_empty() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let failed = matches!(need[0].state, CopyState::Failed(..));
+        let tint = if failed { theme.danger } else { theme.warning };
+        let title = match need.len() {
+            1 => "A pack you follow needs a look".to_string(),
+            n => format!("{n} packs you follow need a look"),
+        };
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (i, r) in need.iter().enumerate() {
+            let s = self.store.read(cx);
+            let note = r.state.note(&r.who).unwrap_or_default();
+            // Mods to ask about: Update asks. Anything else: the pack's page.
+            let held_event = matches!(r.state, CopyState::Held(_))
+                .then(|| recipes.iter().find(|e| s.followers_of(&e.from, &e.inst).iter().any(|f| Path::new(&f.root) == r.root)).cloned())
+                .flatten();
+            let action: AnyElement = match held_event {
+                Some(e) => self.update_button(format!("sync-update:{i}").into(), &e, r.root.clone(), down, cx).into_any_element(),
+                None => {
+                    let root = r.root.clone();
+                    Button::new(("sync-open", i))
+                        .xsmall()
+                        .outline()
+                        .label("Open")
+                        .tooltip("Open the pack's page")
+                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(FriendsEvent::Show(root.clone()))))
+                        .into_any_element()
+                }
+            };
+            let icon = if matches!(r.state, CopyState::Failed(..)) { (IconName::TriangleAlert, theme.danger) } else { (IconName::Info, theme.warning) };
+            rows.push(
+                h_flex()
+                    .gap_2()
+                    .items_start()
+                    .child(Icon::new(icon.0).xsmall().flex_none().mt(px(3.)).text_color(chip_ink(icon.1, cx)))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_sm().font_medium().truncate().child(r.name.clone()))
+                            .child(div().text_xs().text_color(theme.muted_foreground).child(note)),
+                    )
+                    .child(action)
+                    .into_any_element(),
+            );
+        }
+        Some(
+            v_flex()
+                .mx_3()
+                .mt_2()
+                .mb_1()
+                .p_2()
+                .gap_2()
+                .rounded(theme.radius)
+                .bg(tint.opacity(widgets::alpha::TINT))
+                .child(div().text_sm().font_semibold().child(title))
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
     fn packs_view(&mut self, friends: &[Friend], recipes: &[Event], all_recipes: &[Event], down: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mine = self.my_packs(down, cx);
         let me = self.store.read(cx).mailbox_id();
@@ -2262,8 +2401,10 @@ impl FriendsPanel {
         let ended = self.ended_list(friends, all_recipes, cx);
         let ended_rows = self.ended_rows(ended, cx);
         let nothing_in = following.is_empty() && rest_rows.is_empty();
+        let card = self.sync_card(recipes, down, cx);
         v_flex()
             .pb_2()
+            .children(card)
             .child(mine)
             .child(cap("From friends", (!nothing_in).then_some(following.len() + rest_rows.len()), None, cx))
             .when(nothing_in, |c| c.child(div().px_3().pb_1().child(widgets::fine_print("Packs your friends share with you show up here.", cx))))
@@ -3032,6 +3173,66 @@ fn copy_state(s: &Store, f: &hopper::settings::FollowedRecipe, root: &Path) -> C
         return CopyState::Held(f.held.clone());
     }
     CopyState::UpToDate
+}
+
+/// One followed copy and how it's doing: what the header's chip, the Packs
+/// page's card and the rail's badges are made from.
+struct SyncRow {
+    root: PathBuf,
+    /// The pack's name, as the friends' list shows it.
+    name: String,
+    /// Whose changes it gets: the sender, or "the group".
+    who: String,
+    /// The group it's kept in step with, if any.
+    group: String,
+    state: CopyState,
+}
+
+/// Every copy this PC still follows, the ones that need the player first.
+fn sync_rows(s: &Store) -> Vec<SyncRow> {
+    let mut rows: Vec<SyncRow> = s
+        .settings()
+        .followed_recipes
+        .iter()
+        .filter(|f| f.ended.is_empty())
+        .map(|f| {
+            let root = PathBuf::from(&f.root);
+            let name = f.name.clone();
+            let who = if s.group_copy(&root).is_some() { "the group".to_string() } else { name_or(&f.peer_name, "your friend") };
+            SyncRow { state: copy_state(s, f, &root), root, name, who, group: f.group.clone() }
+        })
+        .collect();
+    rows.sort_by_key(|r| r.state.rank());
+    rows
+}
+
+/// The badge for a tile whose packs need the player: red when one failed,
+/// amber when one waits for an answer.
+fn alert_of<'a>(rows: impl Iterator<Item = &'a SyncRow>, cx: &App) -> Option<TileMark> {
+    match rows.map(|r| r.state.rank()).min()? {
+        0 => Some(TileMark::Alert(cx.theme().danger)),
+        1 => Some(TileMark::Alert(cx.theme().warning)),
+        _ => None,
+    }
+}
+
+/// Who changed a group pack last, and how: "Mia turned off 2 mods · 3 h
+/// ago". Changes this PC made aren't news, so they're skipped.
+fn changed_by(s: &Store, root: &Path, me: &str) -> Option<String> {
+    let c = s.group_copy(root)?;
+    let last = c.marks.values().filter(|m| m.by != me).max_by_key(|m| (m.at, m.seq))?;
+    // The mods that one change touched the same way.
+    let n = c.marks.values().filter(|m| m.by == last.by && m.seq == last.seq && m.kind == last.kind).count();
+    let verb = match last.kind {
+        Kind::Added => "added",
+        Kind::Removed => "took out",
+        Kind::On => "turned on",
+        Kind::Off => "turned off",
+        Kind::Updated => "updated",
+    };
+    let what = if n == 1 { "a mod".to_string() } else { format!("{n} mods") };
+    let when = if last.at > 0 { format!(" · {}", ago(last.at)) } else { String::new() };
+    Some(format!("{} {verb} {what}{when}", name_or(&last.name, "Someone")))
 }
 
 /// A warning under a pack's name: a small triangle and a short sentence.
