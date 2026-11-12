@@ -725,6 +725,27 @@ mod tests {
         assert!(v.contains("https://a.b"));
     }
 
+    /// The web UI shows a table as a screenshot grid only when every cell
+    /// holds images or nothing. A page's `&emsp;` spacer cells used to read
+    /// as text and turned the banners into a plain table of tiny images.
+    #[test]
+    fn spaced_banner_table_rows_hold_only_images_and_blanks() {
+        let html = include_str!("../../hopper-core/src/richtext_fixtures/descriptions/cf-enchantment-switch.html");
+        let v = blocks_json(&richtext::parse(html));
+        let rows: Vec<&Value> = v.as_array().unwrap().iter().filter(|b| b["k"] == "row").collect();
+        assert_eq!(rows.len(), 5);
+        for r in rows {
+            let cells = r["cells"].as_array().unwrap();
+            let with_images: Vec<_> = cells.iter().filter(|c| !c.as_array().unwrap().is_empty()).collect();
+            assert_eq!(with_images.len(), 2, "{r}");
+            for c in cells {
+                // Whitespace between an image and its cell's end is fine (the UI's `shots` allows it).
+                let ok = |s: &Value| (s["img"].is_string() && s["href"].is_string()) || s["t"].as_str().is_some_and(|t| t.trim().is_empty());
+                assert!(c.as_array().unwrap().iter().all(ok), "{r}");
+            }
+        }
+    }
+
     #[test]
     fn loaders_from_tags() {
         let tags = vec!["1.21.1".to_string(), "NeoForge".to_string()];

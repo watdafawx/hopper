@@ -1594,7 +1594,10 @@ pub fn decode_entities(s: &str) -> String {
             "gt" => Some('>'),
             "quot" => Some('"'),
             "apos" | "#39" => Some('\''),
-            "nbsp" => Some(' '),
+            // Spacing entities pages use to pad cells and space badges
+            // apart; unknown, they stayed as text and made a "spacer" cell
+            // or a badge row look like it held words.
+            "nbsp" | "ensp" | "emsp" | "thinsp" | "hairsp" | "numsp" | "puncsp" | "emsp13" | "emsp14" => Some(' '),
             "rsquo" | "lsquo" => Some('\''),
             "ldquo" | "rdquo" => Some('"'),
             "mdash" => Some('—'),
@@ -1680,11 +1683,13 @@ fn image_cell(spans: &[Span]) -> Option<Vec<Badge>> {
 }
 
 /// The cells of a table row made only of images (empty cells allowed, at
-/// least one image).
+/// least one image). Empty cells are dropped: pages pad a row with blank
+/// "spacer" cells (`<td>&emsp;</td>`) that would otherwise count as columns.
 fn image_row(b: &Block) -> Option<Vec<Vec<Badge>>> {
     let Kind::Row(cells) = &b.kind else { return None };
     let row: Vec<Vec<Badge>> = cells.iter().map(|c| image_cell(c)).collect::<Option<_>>()?;
-    row.iter().any(|c| !c.is_empty()).then_some(row)
+    let row: Vec<Vec<Badge>> = row.into_iter().filter(|c| !c.is_empty()).collect();
+    (!row.is_empty()).then_some(row)
 }
 
 /// The badges of a paragraph holding two or more images and nothing else
@@ -2033,6 +2038,69 @@ mod tests {
         // The banner below keeps its page-given "100%" (no pixel width), so
         // the view treats it as a hero.
         assert!(segs.iter().skip(1).any(|s| matches!(s, Segment::Markdown(m) if m.contains("banner.png"))));
+    }
+
+    /// Enchantment Switch (CurseForge): a table of linked 410x115 banners,
+    /// two per row with an `&emsp;` spacer cell between them, and rows of
+    /// `&nbsp;` cells (or no cells at all) between the rows of banners.
+    /// All of it is one grid of two columns; none of it may fall back to a
+    /// Markdown table, which shows the images as tiny icons.
+    #[test]
+    fn spaced_banner_table_is_one_two_column_grid() {
+        let html = include_str!("richtext_fixtures/descriptions/cf-enchantment-switch.html");
+        let segs = to_segments(&parse(html));
+        let grids: Vec<&Vec<Vec<Vec<Badge>>>> =
+            segs.iter().filter_map(|s| if let Segment::Grid(g) = s { Some(g) } else { None }).collect();
+        assert_eq!(grids.len(), 1, "{segs:?}");
+        let rows = grids[0];
+        assert_eq!(rows.len(), 5, "a banner row per two mods, no spacer rows");
+        for row in rows {
+            assert_eq!(row.len(), 2, "two banners, no phantom spacer column: {row:?}");
+            for cell in row {
+                let [b] = cell.as_slice() else { panic!("one banner a cell: {cell:?}") };
+                assert_eq!((b.width, b.height), (Some(410), Some(115)));
+                assert!(b.link.as_deref().is_some_and(|l| l.starts_with("https://www.curseforge.com/minecraft/mc-mods/")));
+                assert!(b.url.ends_with("/banner.png"));
+            }
+        }
+        assert!(rows[0][0][0].link.as_deref().unwrap().ends_with("/pick-up-notifier"));
+        assert!(rows[0][1][0].link.as_deref().unwrap().ends_with("/ender-zoology"));
+        // No table is left behind for the Markdown view to squash.
+        let md: String =
+            segs.iter().filter_map(|s| if let Segment::Markdown(m) = s { Some(m.as_str()) } else { None }).collect();
+        assert!(!md.contains("pick-up-notifier") && !md.contains("leaves-be-gone") && !md.contains('|'), "{md}");
+    }
+
+    /// However a page pads an image table (blank cells, blank rows, space
+    /// entities, paragraphs inside cells) the images stay one grid with only
+    /// the cells that hold images.
+    #[test]
+    fn padded_image_tables_have_no_phantom_columns() {
+        let a = r#"<a href="https://x/a"><img src="https://x/a.png" width="300" height="80"></a>"#;
+        let b = r#"<img src="https://x/b.png" width="300" height="80">"#;
+        let html = format!(
+            r#"<table><tr><td><p>{a}</p></td><td></td><td> </td><td width="20">&ensp;</td><td><div>{b}</div></td><td>&#8195;</td></tr>
+<tr><td colspan="6">&nbsp;</td></tr><tr></tr>
+<tr><td>{b}</td><td>&thinsp;</td><td>{a}</td></tr></table>"#
+        );
+        let segs = to_segments(&parse(&html));
+        let [Segment::Grid(rows)] = segs.as_slice() else { panic!("{segs:?}") };
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows.iter().all(|r| r.len() == 2 && r.iter().all(|c| c.len() == 1)), "{rows:?}");
+        assert_eq!(rows[0][0][0].link.as_deref(), Some("https://x/a"), "the link on the image stays");
+        assert_eq!((rows[0][1][0].width, rows[0][1][0].height), (Some(300), Some(80)));
+    }
+
+    /// Pages pad with any of the space entities, not just `&nbsp;`.
+    #[test]
+    fn space_entities_are_blank() {
+        for ent in ["nbsp", "ensp", "emsp", "thinsp", "#8195", "#x2003"] {
+            assert!(decode_entities(&format!("&{ent};")).trim().is_empty(), "{ent}");
+        }
+        // Badges spaced apart with them are still one badge row.
+        let html = r#"<p><a href="https://x/a"><img src="https://x/a.png" width="50" height="20"></a>&emsp;<img src="https://x/b.png" width="50" height="20">&ensp;&thinsp;</p>"#;
+        let segs = to_segments(&parse(html));
+        assert!(matches!(segs.as_slice(), [Segment::Badges(b)] if b.len() == 2), "{segs:?}");
     }
 
     #[test]

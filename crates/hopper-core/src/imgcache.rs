@@ -221,6 +221,28 @@ pub fn maybe_animated(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("gif") || e.eq_ignore_ascii_case("webp"))
 }
 
+/// Whether the bytes are an SVG (a badge from shields.io, say). The cache
+/// names files by address, so the name says nothing; the first bytes do.
+pub fn is_svg_bytes(head: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(&head[..head.len().min(1024)]).to_ascii_lowercase();
+    let head = head.trim_start_matches('\u{feff}').trim_start();
+    head.starts_with("<svg") || (head.starts_with("<?xml") && head.contains("<svg"))
+}
+
+/// Whether the cached file at `path` is an SVG. Looked at once per file.
+pub fn is_svg(path: &Path) -> bool {
+    use std::collections::HashMap;
+    use std::io::Read;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    let Ok(mut seen) = SEEN.get_or_init(Default::default).lock() else { return false };
+    *seen.entry(path.to_path_buf()).or_insert_with(|| {
+        let mut head = [0u8; 1024];
+        let n = std::fs::File::open(path).and_then(|mut f| f.read(&mut head)).unwrap_or(0);
+        is_svg_bytes(&head[..n])
+    })
+}
+
 /// The first frame of a cached GIF or WebP as a PNG next to it, made once.
 /// An animated icon makes a UI redraw every frame for as long as it shows;
 /// a still one costs nothing. Other images come back as they are.
@@ -426,6 +448,15 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn svg_is_known_by_its_first_bytes() {
+        assert!(is_svg_bytes(b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"117\">"));
+        assert!(is_svg_bytes(b"\xef\xbb\xbf  <?xml version=\"1.0\"?>\n<!-- x --><svg>"));
+        assert!(!is_svg_bytes(b"\x89PNG\r\n\x1a\n"));
+        assert!(!is_svg_bytes(b"<html><body><svg>"));
+        assert!(!is_svg_bytes(b""));
+    }
 
     #[test]
     fn local_paths_map_to_themselves() {

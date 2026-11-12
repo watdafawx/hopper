@@ -257,7 +257,9 @@ pub fn source_in(cat: Cat, path: &Path, want: Want, cx: &App) -> ImageSource {
     let Some(cache) = cx.try_global::<Holder>().map(|g| g.0.clone()) else {
         return plain();
     };
-    if hopper::imgcache::maybe_animated(path) {
+    // GIFs and SVGs aren't decoded here: the first plays, the second is
+    // drawn by GPUI itself (the decoder below only reads raster images).
+    if hopper::imgcache::maybe_animated(path) || hopper::imgcache::is_svg(path) {
         return plain();
     }
     let path: PathBuf = path.to_path_buf();

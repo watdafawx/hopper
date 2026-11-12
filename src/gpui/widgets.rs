@@ -2173,6 +2173,8 @@ pub fn description_view(
                     let h = match (b.width, b.height, ratio) {
                         (None, Some(h), _) => h as f32,
                         (_, _, Some(r)) => w / r,
+                        // An SVG has no size we can read: the page's own.
+                        (Some(_), Some(h), None) => h as f32,
                         _ => 20.,
                     };
                     let target = b.link.clone().unwrap_or_else(|| b.url.clone());
