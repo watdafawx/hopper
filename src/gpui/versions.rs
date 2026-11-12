@@ -15,6 +15,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::cf;
+use hopper::file_age::Age;
 use hopper::install::{ChangelogEntry, Update};
 use hopper::instances::Instance;
 use hopper::server::ServerInfo;
@@ -74,14 +75,19 @@ impl VersionsView {
                     let marker = server.as_ref().and_then(hopper::server_pack_update::recorded_on);
                     let on = marker.as_ref().map_or(0, |m| m.pack_file_id);
                     let installed = if on != 0 { on } else { installed };
+                    // File ids only order CurseForge files (`file_age`); for the
+                    // other sources the offer is the source's own newer release.
+                    let have = Age::installed(&inst, pid, installed, &[]);
+                    let on_inst = Age::of_id(inst_file(&inst));
                     let mut update = update;
-                    if server.is_some() && installed != inst_file(&inst) && inst_file(&inst) > installed {
-                        if update.as_ref().is_none_or(|u| u.id < inst_file(&inst)) {
+                    if server.is_some() && installed != inst_file(&inst) && on_inst.newer_than(&Age::of_id(installed)) {
+                        if update.as_ref().is_none_or(|u| on_inst.newer_than(&u.age())) {
                             update = hopper::source::file(pid, inst_file(&inst)).ok().or(update);
                         }
                     }
-                    let to = update.as_ref().filter(|u| u.id > installed).map(|u| u.file_name.clone());
-                    hopper::install::changelogs(&inst, pid, installed, update.as_ref().filter(|u| u.id > installed), pack)
+                    let update = update.filter(|u| !have.id_orders() || u.age().newer_than(&have));
+                    let to = update.as_ref().map(|u| u.file_name.clone());
+                    hopper::install::changelogs(&inst, pid, installed, update.as_ref(), pack)
                         .map(|r| (r, installed, on != 0, to))
                 })
                 .await;
@@ -427,10 +433,16 @@ impl Render for VersionsView {
                     entries.iter().map(|(e, _)| e.name.as_str()).collect();
                 // Without an update offer (a locked mod has none) newer files
                 // are only in "Other versions"; count them too.
+                // Which files are newer: not by file id, which only orders
+                // CurseForge files (a GitHub file's id is a hash).
+                let have = match self.store.read(cx).instance(&self.root) {
+                    Some(inst) => Age::installed(inst, self.project_id, self.installed_file, &self.all),
+                    None => Age::of_id_in(self.installed_file, &self.all),
+                };
                 let newer_others: Vec<&cf::File> = self
                     .all
                     .iter()
-                    .filter(|f| f.id > self.installed_file && !shown.contains(f.display_name.as_str()))
+                    .filter(|f| f.age().newer_than(&have) && !shown.contains(f.display_name.as_str()))
                     .collect();
                 let behind = entries.iter().filter(|(e, _)| !e.installed).count() + newer_others.len();
                 let status = match behind {
@@ -442,7 +454,7 @@ impl Render for VersionsView {
                     .all
                     .iter()
                     .find(|f| Some(&f.file_name) == self.to.as_ref())
-                    .or_else(|| newer_others.iter().copied().max_by_key(|f| f.id))
+                    .or_else(|| hopper::file_age::newest(newer_others.iter().copied()))
                     .cloned();
                 let others: Vec<cf::File> = self
                     .all
@@ -571,7 +583,7 @@ impl Render for VersionsView {
                 });
                 let clean = self.store.read(cx).settings().clean_update(self.mode_root());
                 let other_cards = others.into_iter().map(|f| {
-                    let older = f.id < self.installed_file;
+                    let older = have.newer_than(&f.age());
                     let open = self.others.get(&f.id);
                     let view = cx.entity();
                     let block = self.server_block(&f, cx);

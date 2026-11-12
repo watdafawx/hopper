@@ -1296,8 +1296,7 @@ fn cf_mod_changes(
                 key: format!("u:{}", f.mod_id),
                 project: f.mod_id,
                 icon: if a.icon.is_empty() { logo(f.mod_id) } else { a.icon.clone() },
-                // CurseForge file ids grow with time.
-                pack_newer: f.id > a.file_id,
+                pack_newer: f.age().newer_than(&crate::file_age::Age::of_addon(a)),
             });
             continue;
         }

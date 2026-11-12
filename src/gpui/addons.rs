@@ -1211,7 +1211,7 @@ impl AddonsView {
         updates.retain(|_, u| {
             let Some(shown) = extra.iter().find(|(_, v)| v.contains(&u.from)).map(|(k, _)| k) else { return true };
             match inst.addons.iter().find(|a| &a.file_name == shown) {
-                Some(a) if a.file_id < u.file.id => {
+                Some(a) if u.file.age().newer_than(&hopper::file_age::Age::of_addon(a)) => {
                     u.from = shown.clone();
                     true
                 }

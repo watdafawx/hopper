@@ -112,7 +112,10 @@ async fn changelogs(
         let update = offer.and_then(|f| source::file(a.project_id, f).ok());
         let (entries, mut all) = install::changelogs(&inst, a.project_id, a.file_id, update.as_ref(), false)?;
         all.retain(|f| f.is_server_pack != Some(true));
-        let installed_date = all.iter().find(|f| f.id == a.file_id).map(|f| f.file_date.clone()).unwrap_or_default();
+        // File ids only order CurseForge files: GitHub and Modrinth files
+        // are told apart by release tag and date (hopper_core::file_age).
+        let have = hopper_core::file_age::Age::installed(&inst, a.project_id, a.file_id, &all);
+        let newer_than_installed = |f: &hopper_core::cf::File| f.age().newer_than(&have);
         let shown: HashSet<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         let mut md_seen: Vec<(String, String)> = Vec::new();
         let rows: Vec<Value> = entries
@@ -143,22 +146,20 @@ async fn changelogs(
                 json!({
                     "file_id": f.id.to_string(), "name": f.display_name, "date": f.file_date, "release": f.release_name(),
                     "version": hopper_core::scan::short_version(&f.file_name),
-                    "older": !installed_date.is_empty() && f.file_date < installed_date,
+                    "older": have.newer_than(&f.age()),
                 })
             })
             .collect();
         let behind = entries.iter().filter(|e| !e.installed).count()
             + all
                 .iter()
-                .filter(|f| !shown.contains(f.display_name.as_str()) && !installed_date.is_empty() && f.file_date > installed_date)
+                .filter(|f| !shown.contains(f.display_name.as_str()) && newer_than_installed(f))
                 .count();
         let latest = update
             .as_ref()
             .map(|f| (f.id, hopper_core::scan::short_version(&f.file_name)))
             .or_else(|| {
-                all.iter()
-                    .filter(|f| !installed_date.is_empty() && f.file_date > installed_date)
-                    .max_by(|x, y| x.file_date.cmp(&y.file_date))
+                hopper_core::file_age::newest(all.iter().filter(|f| newer_than_installed(f)))
                     .map(|f| (f.id, hopper_core::scan::short_version(&f.file_name)))
             });
         Ok(json!({

@@ -4972,15 +4972,11 @@ struct Sticky {
     height: Rc<Cell<Pixels>>,
 }
 
-/// Whether file `f` is newer or older than the installed one: CurseForge
-/// ids grow with each upload; Modrinth's are hashes, so its files go by
-/// date.
+/// Whether file `f` is newer or older than the installed one: only
+/// CurseForge ids grow with each upload; Modrinth, GitHub and link files go
+/// by tag and date (`hopper::file_age`).
 fn file_age(f: &cf::File, a: &hopper::instances::Addon) -> std::cmp::Ordering {
-    if hopper::modrinth::is_mr(f.id) || hopper::modrinth::is_mr(a.file_id) {
-        f.file_date.as_str().cmp(a.file_date.as_str())
-    } else {
-        f.id.cmp(&a.file_id)
-    }
+    f.age().cmp(&hopper::file_age::Age::of_addon(a))
 }
 
 /// How long the bar takes to fade and slide in or out.

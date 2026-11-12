@@ -112,8 +112,8 @@ fn closest(r: &Ref, files: &[cf::File]) -> usize {
         }
         return files.len().saturating_sub(1);
     }
-    if r.mr_version.is_empty() {
-        // CurseForge file ids grow over time.
+    if r.mr_version.is_empty() && !crate::sources::is_src(r.project_id) {
+        // CurseForge file ids grow over time; a GitHub / link file's are hashes.
         if let Some(i) = files.iter().position(|f| f.id <= r.file_id) {
             return i;
         }

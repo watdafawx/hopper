@@ -40,6 +40,7 @@ pub mod discord;
 pub mod disk_watch;
 pub mod env;
 pub mod extlog;
+pub mod file_age;
 pub mod folderrules;
 pub mod fuzzy;
 pub mod listorder;

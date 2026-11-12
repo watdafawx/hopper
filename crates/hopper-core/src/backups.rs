@@ -538,7 +538,8 @@ fn judge(root: &Path, inst: Option<&crate::instances::Instance>, f: &mut Saved) 
             let old_date = r.addon.as_ref().map(|o| o.file_date.as_str()).unwrap_or("");
             let newer = if !old_date.is_empty() && !a.file_date.is_empty() && r.mr_version.is_empty() == a.mr_version.is_empty() {
                 a.file_date.as_str().cmp(old_date)
-            } else if r.mr_version.is_empty() && a.mr_version.is_empty() {
+            } else if r.mr_version.is_empty() && a.mr_version.is_empty() && a.source.is_none() && !crate::sources::is_src(a.project_id) {
+                // Only CurseForge file ids grow with time.
                 a.file_id.cmp(&r.file_id)
             } else {
                 std::cmp::Ordering::Equal

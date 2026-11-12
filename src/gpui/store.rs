@@ -3,6 +3,7 @@
 //! threads report back through `Msg`.
 
 use gpui_kit::*;
+use hopper::file_age::Age;
 use hopper::game::Running;
 use hopper::install::{self, Update};
 use hopper::instances::{self, Instance};
@@ -1363,12 +1364,12 @@ impl Store {
                             let current = inst
                                 .addons
                                 .iter()
-                                .any(|a| a.project_id == o.project_id && !a.locked && a.file_id < o.file.id);
+                                .any(|a| a.project_id == o.project_id && !a.locked && o.file.age().newer_than(&Age::of_addon(a)));
                             if !current {
                                 continue;
                             }
                             match u.iter_mut().find(|n| n.project_id == o.project_id) {
-                                Some(n) if n.file.id < o.file.id => *n = o.clone(),
+                                Some(n) if o.file.newer_than(&n.file) => *n = o.clone(),
                                 Some(_) => {}
                                 None => u.push(o.clone()),
                             }
@@ -2943,10 +2944,13 @@ impl Store {
             return false;
         };
         let max = inst.settings.release_channel.max(a.release_type).max(1);
-        let Some(f) = files
-            .iter()
-            .filter(|f| f.id > a.file_id && f.release_type <= max)
-            .max_by_key(|f| f.id)
+        // A stale cache is CurseForge's; GitHub, Maven and link mods get
+        // their offers from their own source, which knows the file shape.
+        let have = Age::of_addon(a);
+        if !have.id_orders() {
+            return false;
+        }
+        let Some(f) = hopper::file_age::newest(files.iter().filter(|f| f.release_type <= max && f.age().newer_than(&have)))
         else {
             return false;
         };
@@ -2959,7 +2963,7 @@ impl Store {
         let Some(list) = self.updates.get_mut(root).and_then(|u| u.list.as_mut()) else {
             return false;
         };
-        if list.iter().any(|u| u.project_id == project_id && u.file.id >= new.file.id) {
+        if list.iter().any(|u| u.project_id == project_id && !new.file.newer_than(&u.file)) {
             return false;
         }
         list.retain(|u| u.project_id != project_id);

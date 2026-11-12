@@ -12,6 +12,7 @@
 //! The last list is also saved, so a fresh start shows the last known
 //! updates instead of none until the first check finishes.
 
+use crate::file_age::Age;
 use crate::install::Update;
 use crate::instances::Addon;
 use std::collections::{HashMap, HashSet};
@@ -132,7 +133,7 @@ fn still_applies(u: &mut Update, addons: &[Addon]) -> bool {
     if a.file_name == u.from {
         return true;
     }
-    if a.file_name == u.file.file_name || !older_than(a, u.file.id, &u.file.file_date) {
+    if a.file_name == u.file.file_name || !Age::of(&u.file).newer_than(&Age::of_addon(a)) {
         return false;
     }
     u.from = a.file_name.clone();
@@ -140,18 +141,12 @@ fn still_applies(u: &mut Update, addons: &[Addon]) -> bool {
 }
 
 /// The installed file is older than an offered file (its id and release
-/// date). CurseForge's file ids grow over time; elsewhere the release dates
-/// tell. Unknown counts as not older, so the offer goes until the next
-/// check, as before.
+/// date). Only CurseForge's file ids grow over time; other sources go by
+/// release tag and date (see [`crate::file_age`]). Unknown counts as not
+/// older, so the offer goes until the next check, as before.
 pub fn older_than(a: &Addon, file_id: u64, file_date: &str) -> bool {
-    let cf = !crate::modrinth::is_mr(a.project_id) && !crate::sources::is_src(a.project_id);
-    if cf && a.file_id != 0 && file_id != 0 {
-        return a.file_id < file_id;
-    }
-    match (crate::time::parse_iso(&a.file_date), crate::time::parse_iso(file_date)) {
-        (Some(have), Some(new)) => have < new,
-        _ => false,
-    }
+    let have = Age::of_addon(a);
+    have.offer_like(file_id, file_date).newer_than(&have)
 }
 
 /// A mod went back to an older file that no offer covers (it was up to
@@ -163,7 +158,7 @@ pub fn rolled_back_unlisted(old: &[Addon], new: &[Addon], offers: Option<&[Updat
         !listed
             && old
                 .iter()
-                .any(|o| o.project_id == a.project_id && o.file_name != a.file_name && older_than(a, o.file_id, &o.file_date))
+                .any(|o| o.project_id == a.project_id && o.file_name != a.file_name && Age::of_addon(o).newer_than(&Age::of_addon(a)))
     })
 }
 

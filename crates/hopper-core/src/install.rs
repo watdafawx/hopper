@@ -1533,12 +1533,20 @@ pub fn changelogs(
         Loader::Any
     };
     let listed = crate::source::files(project_id, &inst.game_version, loader)?;
+    // File ids only order CurseForge files; see `file_age`.
+    let have = crate::file_age::Age::installed(inst, project_id, installed_file, &listed);
     let mut between: Vec<cf::File> = match update {
-        Some(u) => listed
-            .iter()
-            .filter(|f| f.id > installed_file && f.id <= u.id)
-            .cloned()
-            .collect(),
+        Some(u) => {
+            let to = u.age();
+            listed
+                .iter()
+                .filter(|f| {
+                    let a = f.age();
+                    a.newer_than(&have) && !a.newer_than(&to)
+                })
+                .cloned()
+                .collect()
+        }
         None => Vec::new(),
     };
     if let Some(u) = update
