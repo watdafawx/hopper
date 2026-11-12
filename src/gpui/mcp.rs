@@ -202,18 +202,22 @@ fn input(cmd: Command, window: &mut Window, cx: &mut App) -> Reply {
             }
             done()
         }
-        Command::Drag { from, to } => {
+        Command::Drag { from, to, hold, resume } => {
             let start = at(from.0, from.1);
-            move_to(start, window, cx);
-            window.dispatch_event(
-                PlatformInput::MouseDown(MouseDownEvent {
-                    button: MouseButton::Left,
-                    position: start,
-                    click_count: 1,
-                    ..Default::default()
-                }),
-                cx,
-            );
+            if !resume {
+                move_to(start, window, cx);
+                window.dispatch_event(
+                    PlatformInput::MouseDown(MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: start,
+                        click_count: 1,
+                        // Held through `modifiers`, as for a Ctrl+drop.
+                        modifiers: window.modifiers(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            }
             const STEPS: usize = 8;
             let mut position = start;
             for i in 1..=STEPS {
@@ -223,20 +227,24 @@ fn input(cmd: Command, window: &mut Window, cx: &mut App) -> Reply {
                     PlatformInput::MouseMove(MouseMoveEvent {
                         position,
                         pressed_button: Some(MouseButton::Left),
+                        modifiers: window.modifiers(),
                         ..Default::default()
                     }),
                     cx,
                 );
             }
-            window.dispatch_event(
-                PlatformInput::MouseUp(MouseUpEvent {
-                    button: MouseButton::Left,
-                    position,
-                    click_count: 1,
-                    ..Default::default()
-                }),
-                cx,
-            );
+            if !hold {
+                window.dispatch_event(
+                    PlatformInput::MouseUp(MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        click_count: 1,
+                        modifiers: window.modifiers(),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            }
             done()
         }
         Command::Scroll { x, y, dy, notches } => {

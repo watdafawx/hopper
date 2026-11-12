@@ -81,6 +81,10 @@ pub enum Command {
     Drag {
         from: (f32, f32),
         to: (f32, f32),
+        /// Keep the button down at the end, to screenshot mid-drag.
+        hold: bool,
+        /// Carry on a held drag: no press, just the moves and letting go.
+        resume: bool,
     },
     Scroll {
         x: f32,
@@ -362,10 +366,11 @@ fn window_tools() -> Value {
         },
         {
             "name": "drag",
-            "description": "Press the left button at (x0, y0), move to (x1, y1) in steps and let go, in screenshot pixel coordinates. For resize handles and drag and drop.",
+            "description": "Press the left button at (x0, y0), move to (x1, y1) in steps and let go, in screenshot pixel coordinates. For resize handles and drag and drop. hold: true keeps the button down at the end (screenshot mid-drag); a later drag with resume: true moves on from there and lets go.",
             "inputSchema": { "type": "object", "required": ["x0", "y0", "x1", "y1"], "properties": {
                 "x0": { "type": "number" }, "y0": { "type": "number" },
-                "x1": { "type": "number" }, "y1": { "type": "number" }
+                "x1": { "type": "number" }, "y1": { "type": "number" },
+                "hold": { "type": "boolean" }, "resume": { "type": "boolean" }
             } }
         },
         {
@@ -438,6 +443,8 @@ fn command_for(name: &str, args: &Value) -> Result<Command, String> {
         "drag" => Command::Drag {
             from: (num("x0")?, num("y0")?),
             to: (num("x1")?, num("y1")?),
+            hold: args["hold"].as_bool().unwrap_or(false),
+            resume: args["resume"].as_bool().unwrap_or(false),
         },
         "hover" => Command::Hover {
             x: num("x")?,
