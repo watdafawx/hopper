@@ -98,11 +98,18 @@ pub fn run(dir: PathBuf, urls: Vec<String>, parallel: usize) -> i32 {
     let event_loop = EventLoopBuilder::<Ev>::with_user_event().build();
     let proxy = event_loop.create_proxy();
     let size = if k == 1 { LogicalSize::new(960.0, 680.0) } else { LogicalSize::new(1280.0, 860.0) };
-    let Ok(window) = WindowBuilder::new()
-        .with_title(title(0))
-        .with_inner_size(size)
-        .build(&event_loop)
-    else {
+    let mut builder = WindowBuilder::new().with_title(title(0)).with_inner_size(size);
+    // A test run (`HOPPER_TEST_WINDOW=1`): off the primary monitor and not
+    // taking the keyboard. The env var comes from the app that started us.
+    if crate::test_window() {
+        builder = builder.with_focused(false);
+        let primary = event_loop.primary_monitor();
+        if let Some(m) = event_loop.available_monitors().find(|m| Some(m) != primary.as_ref()) {
+            let p = m.position();
+            builder = builder.with_position(tao::dpi::PhysicalPosition::new(p.x + 40, p.y + 40));
+        }
+    }
+    let Ok(window) = builder.build(&event_loop) else {
         return 2;
     };
     say(Say::Window(window.hwnd() as i64));

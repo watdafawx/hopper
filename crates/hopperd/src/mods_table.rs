@@ -312,10 +312,11 @@ async fn toggle_many(
         let mut n = 0;
         for f in &b.files {
             let i = crate::mods_api::index_of(&mut inst, f)?;
-            if inst.addons[i].enabled != b.enabled {
-                install::set_enabled(&mut inst, i, b.enabled).map_err(install::explain_locked)?;
-                n += 1;
-            }
+            // A jar the running server holds switches on its next start; one
+            // already as asked still goes through, to drop such a switch.
+            let changes = inst.addons[i].enabled != b.enabled;
+            install::set_enabled_later(&mut inst, i, b.enabled)?;
+            n += usize::from(changes);
         }
         Ok(n)
     })

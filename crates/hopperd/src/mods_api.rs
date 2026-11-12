@@ -552,7 +552,8 @@ async fn toggle(
         let _by = hopper_core::actor::batch(&e.root, by);
         let mut inst = instance(&e)?;
         let i = index_of(&mut inst, &b.file)?;
-        install::set_enabled(&mut inst, i, b.enabled).map_err(install::explain_locked)
+        // A jar the running server holds switches on its next start.
+        install::set_enabled_later(&mut inst, i, b.enabled)
     })
     .await?;
     Ok(Json(json!({ "ok": true, "restart_needed": running })))

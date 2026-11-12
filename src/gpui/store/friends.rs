@@ -929,7 +929,7 @@ impl Store {
     }
 
     /// Whether the follow at `root` is being updated now, or will be as
-    /// soon as its game closes or another task on it ends.
+    /// soon as another task on it ends or its game finishes launching.
     pub fn follow_updating(&self, root: &Path) -> bool {
         if let Some(c) = self.group_copy(root) {
             return self.group_merging.contains(&c.local) || (!c.waiting.is_empty() && self.follow_error(root).is_none());
@@ -957,14 +957,18 @@ impl Store {
         }
     }
 
-    /// A game running or a task changing the instance: a follow waits.
+    /// A task changing the instance, or its game launching (reading the
+    /// mods folder): a follow waits. A running game doesn't stop it, as with
+    /// Update mods: the changes load on the game's next start, the Mods tab
+    /// says so, and a jar the game holds open changes once it lets go
+    /// (`hopper::locked`).
     fn follow_busy(&self, root: &Path) -> bool {
-        self.is_busy(root) || self.running(root).is_some() || self.is_launching(root)
+        self.is_busy(root) || self.is_launching(root)
     }
 
     /// Applies every follow whose newest code isn't applied yet and can be
-    /// now: a code that just came, one that waited for its game to close or
-    /// a task to end, one Hopper was closed before applying (on start), and
+    /// now: a code that just came, one that waited for a task to end or a
+    /// launch, one Hopper was closed before applying (on start), and
     /// failed tries once their wait is over (`hopper::recipe::due`). Runs
     /// on the store's wake-ups and twice a second while friends sync runs.
     pub(super) fn follow_tick(&mut self, cx: &mut Context<Self>) {

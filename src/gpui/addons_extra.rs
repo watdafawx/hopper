@@ -130,6 +130,10 @@ pub struct MissingDeps {
     pub blockers: Vec<hopper::deps::Blocker>,
     /// Old files a running game holds, leaving when it closes.
     pub queued: usize,
+    /// Mods a running game holds that turn off / on when it closes (switched
+    /// here, or by a followed or group pack, meanwhile).
+    pub switch_off: usize,
+    pub switch_on: usize,
     /// When the game last loaded fine with these exact mods: the banners
     /// then say "may", not "will" (metadata misses runtime stand-ins).
     pub loaded_fine: Option<i64>,
@@ -225,12 +229,18 @@ impl AddonsView {
         let mtime = std::fs::metadata(inst.mods_dir()).and_then(|m| m.modified()).ok();
         let listed = if panel.is_some() { listed_key(inst) } else { 0 };
         let against = (inst.loader.clone(), inst.game_version.clone());
+        // A switch waiting for the game changes no file in the mods folder.
+        let switch_off = self.waiting.values().filter(|on| !**on).count();
+        let switch_on = self.waiting.len() - switch_off;
         if self.missing.root.as_ref() == Some(&inst.root) && self.missing.mtime == mtime && self.missing.listed == listed && self.missing.against == against {
+            self.missing.switch_off = switch_off;
+            self.missing.switch_on = switch_on;
             return;
         }
         // Same instance: the old list stays up while the folder is read
         // again, so the banner doesn't flash on every update.
         let same = self.missing.root.as_ref() == Some(&inst.root);
+        let waiting = hopper::locked::list(&inst.root);
         self.missing = MissingDeps {
             root: Some(inst.root.clone()),
             mtime,
@@ -238,7 +248,9 @@ impl AddonsView {
             list: if same { std::mem::take(&mut self.missing.list) } else { Vec::new() },
             dups: if same { std::mem::take(&mut self.missing.dups) } else { Vec::new() },
             blockers: if same { std::mem::take(&mut self.missing.blockers) } else { Vec::new() },
-            queued: hopper::locked::list(&inst.root).len(),
+            queued: waiting.iter().filter(|q| q.to.is_none()).count(),
+            switch_off,
+            switch_on,
             loaded_fine: if same { self.missing.loaded_fine } else { None },
             against: against.clone(),
             ghosts: if same { std::mem::take(&mut self.missing.ghosts) } else { Default::default() },
@@ -447,16 +459,25 @@ impl AddonsView {
         }
         let dups = &self.missing.dups;
         let queued = self.missing.queued;
-        if dups.is_empty() && queued == 0 {
+        let (off, on) = (self.missing.switch_off, self.missing.switch_on);
+        if dups.is_empty() && queued + off + on == 0 {
             return None;
         }
         let theme = cx.theme();
         let place = inst.root.to_string_lossy();
         if dups.is_empty() {
-            let text = format!(
-                "{queued} old file{} the game still has open will be removed when it closes.",
-                if queued == 1 { "" } else { "s" }
-            );
+            let s = |n: usize| if n == 1 { "" } else { "s" };
+            let mut said = Vec::new();
+            if queued > 0 {
+                said.push(format!("{queued} old file{} the game still has open will be removed when it closes.", s(queued)));
+            }
+            if off > 0 {
+                said.push(format!("{off} mod{} the game has open will be turned off when it closes.", s(off)));
+            }
+            if on > 0 {
+                said.push(format!("{on} mod{} the game has open will be turned on when it closes.", s(on)));
+            }
+            let text = said.join(" ");
             let key = hopper::settings::notice_key(&place, "queued", &text);
             let body = callout(theme.info, cx).child(div().text_sm().child(text));
             let notice = widgets::closable_notice(body, key, widgets::Closed::Gone, "", theme.info, &self.store, cx)?;

@@ -601,6 +601,23 @@ pub fn set_enabled(inst: &mut Instance, idx: usize, enabled: bool) -> anyhow::Re
     inst.save()
 }
 
+/// [`set_enabled`] while the game may be running (the Mods tab, a followed
+/// pack, a group's changes): a jar the game holds open is switched once the
+/// game lets go ([`crate::locked`]) instead of failing. Until then the mod
+/// keeps its switch here, as that is what the game has loaded.
+pub fn set_enabled_later(inst: &mut Instance, idx: usize, enabled: bool) -> anyhow::Result<()> {
+    let a = inst.addons.get(idx).context("no such mod")?.clone();
+    // This switch replaces one still waiting for the game.
+    crate::locked::unqueue_rename(&inst.root, &inst.addon_path(&a));
+    match set_enabled(inst, idx, enabled) {
+        Err(e) if crate::locked::is_locked(&e) => {
+            let want = crate::instances::Addon { enabled, ..a.clone() };
+            crate::locked::queue_rename(&inst.root, &inst.addon_path(&a), &inst.addon_path(&want))
+        }
+        r => r,
+    }
+}
+
 pub fn remove(inst: &mut Instance, idx: usize) -> anyhow::Result<()> {
     let a = inst.addons.get(idx).context("no such mod")?.clone();
     move_out(&inst.root, &inst.addon_path(&a), false)?;

@@ -832,7 +832,7 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
             Err(e) => job.note(format!("Couldn't add a file: {e:#}")),
             Ok(_) if !enabled => {
                 if let Some(i) = inst.addons.iter().position(|a| a.project_id == *project)
-                    && let Err(e) = crate::install::set_enabled(inst, i, false)
+                    && let Err(e) = crate::install::set_enabled_later(inst, i, false)
                 {
                     job.note(format!("Couldn't turn {} off: {e:#}", inst.addons[i].name));
                 }
@@ -858,7 +858,7 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
             && let Some(i) = find(inst, t)
         {
             crate::actor::claim_addon(&inst.addons[i]);
-            crate::install::set_enabled(inst, i, false)?;
+            crate::install::set_enabled_later(inst, i, false)?;
         }
     }
     // Turned back on in their copy. A file put in again keeps the switch it
@@ -867,7 +867,7 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
         if let Some(i) = inst.addons.iter().position(|a| who.is(a))
             && let Err(e) = {
                 crate::actor::claim_addon(&inst.addons[i]);
-                crate::install::set_enabled(inst, i, true)
+                crate::install::set_enabled_later(inst, i, true)
             }
         {
             job.note(format!("Couldn't turn {} on: {e:#}", inst.addons[i].name));
