@@ -1,5 +1,6 @@
 <script module>
   import { FolderCog, Shield, Globe, Compass, Lock, Users as UsersIcon, Webhook, BellRing, CloudUpload, UserRound, Download, Zap, ServerCog } from '@lucide/svelte';
+  import { NODES_SHOWN } from './lib/nodes.js';
 
   // The panel's settings, by category, like Hopper desktop's Settings page
   // (src/gpui/settings_page.rs): a list of categories on the left, the
@@ -22,7 +23,7 @@
 
   /** The categories this person sees. Nodes is the real owner's only:
    * a node runs code for this panel, so managers don't add or remove them. */
-  export const catsFor = (owner, trueOwner = false) => CATS.filter((c) => c.owner === owner && (!c.trueOwner || trueOwner));
+  export const catsFor = (owner, trueOwner = false) => CATS.filter((c) => c.owner === owner && (!c.trueOwner || trueOwner) && (c.id !== 'nodes' || NODES_SHOWN));
 </script>
 
 <script>

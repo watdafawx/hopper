@@ -8,6 +8,7 @@
   import { hello } from './lib/boot.svelte.js';
   import { check, addPanel } from './lib/panels.svelte.js';
   import { say } from './lib/toast.svelte.js';
+  import { NODES_SHOWN } from './lib/nodes.js';
 
   let { onClose } = $props();
 
@@ -34,7 +35,7 @@
   // "Add it as a node instead" (design/multi-panel.md, A) only shows once
   // this panel can have nodes; until then nothing points at it.
   let nodes = $state(false);
-  hello().then((h) => (nodes = !!h.capabilities?.includes('nodes')), () => {});
+  hello().then((h) => (nodes = NODES_SHOWN && !!h.capabilities?.includes('nodes')), () => {});
 
   $effect(() => {
     tick().then(() => field?.focus());
