@@ -971,6 +971,46 @@ The web UI uses B1. Mock: Option A (groups in the one server list).
   across a reload, "add it as a node instead" (needs phase A), server
   alerts on other panels' pages.
 
+## B3 as built (2026-11-13)
+
+Bulk actions and filters in the web UI's server list. No new backend route.
+
+- **Calls**: each server gets the same call a single click on its page
+  sends (`POST /servers/{id}/power`, `POST /servers/{id}/command`), to its
+  own panel with that panel's own sign-in (`post(path, body, { panel })`).
+  So every panel checks the role itself (`security::refusal`) and writes
+  its own audit log. Panels run side by side; on one panel the servers go
+  one after another. The plan and the skip rules are in `lib/bulk.js`
+  (unit tests in `tests/bulk.test.mjs`).
+- **Skipped, never sent**: every server on a panel where the account is a
+  viewer ("Your account on X can only look."), signed out ("Sign in to X
+  again first.") or down ("Can't reach X right now."); a server that is
+  stopping; start of a running server, stop or command to a stopped one.
+  The server still refuses anything a client gets wrong. Restart of a
+  stopped server sends `start` and says so in the question.
+- **Selection** (`ServerList.svelte`): a "Select" icon button in the list
+  header turns on tick boxes; click or drag across rows in every group
+  (`lib/dragpick.svelte.js`, `lib/selection.svelte.js`), Ctrl+A picks all
+  shown, Esc stops. Only shown rows count: a pick hidden by a filter or a
+  folded group isn't acted on. The shared `SelectionBar` holds Start, Stop,
+  Restart, Command (two rows at the list's width; under 760 px the count
+  and close on one row, the four actions on the next).
+- **One question per action** (`BulkAction.svelte`): grouped by panel,
+  each row says what happens or why it is skipped. Players online on
+  servers that would stop or restart need a tick ("N players are online.
+  Restart anyway"), never typed names. The same dialog then shows each
+  server's result (done, failed with the panel's reason, skipped) and a
+  tally ("2 done · 1 failed · 1 skipped").
+- **Filters**: by panel (a dropdown, when there are added panels) and by
+  state (All, Running, Stopped, Crashed: starting and stopping count as
+  running, a failed wake as crashed). Saved per browser
+  (`hopperd.servers.filter`). The folded rail ignores filters and has no
+  selection.
+- **Desktop**: Hopper desktop's server list has no selection or bulk
+  actions yet; this is web UI only for now.
+- **Not yet**: an "All on <panel>" pick from a group's ⋯ menu, bulk
+  backups, a players-online check seen on screen (covered by a unit test).
+
 ## Open questions for the maintainer
 
 1. **Remote-session limits (B).** *Answered (maintainer, 2026-11-11): a

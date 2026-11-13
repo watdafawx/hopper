@@ -11,8 +11,15 @@
   // its health (version and round trip) or what's wrong, in place. Each
   // group loads on its own (lib/panels.svelte.js), so a dead one never
   // holds the list.
+  //
+  // Select (the tick-list button) picks servers across every group: click
+  // or drag across rows, Shift+click for a range, Ctrl+A for all shown.
+  // The bar under the list then starts, stops, restarts or sends a command
+  // to them, after one question that lists what happens on each panel
+  // (BulkAction.svelte). Filters above the rows narrow to one panel or one
+  // state.
   import { tick } from 'svelte';
-  import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy, Compass, ChevronRight, ChevronDown, Ellipsis, ExternalLink, LogOut, Trash2 } from '@lucide/svelte';
+  import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy, Compass, ChevronRight, ChevronDown, Ellipsis, ExternalLink, LogOut, Trash2, ListChecks, Terminal } from '@lucide/svelte';
   import { panels, retry, signOut, removePanel } from './lib/panels.svelte.js';
   import { tokenFor } from './lib/panelTokens.js';
   import { roleLabel } from './lib/me.svelte.js';
@@ -27,6 +34,11 @@
   import Avatar from './Avatar.svelte';
   import Progress from './Progress.svelte';
   import { making, cancel, forget } from './lib/making.svelte.js';
+  import { startPick, clickSwallowed, tickLabel } from './lib/dragpick.svelte.js';
+  import { Selection } from './lib/selection.svelte.js';
+  import { passes } from './lib/bulk.js';
+  import SelectionBar from './lib/SelectionBar.svelte';
+  import BulkAction from './BulkAction.svelte';
 
   let { selected = null, selectedPanel = null, owner = false, canPower = true, homeName = '', homeVersion = '', homeRole = '', onNew, onRescan } = $props();
 
@@ -94,6 +106,98 @@
   const openMade = (m) => { forget(m.job); if (m.id) location.hash = `/server/${encodeURIComponent(m.id)}/console`; };
   const startMade = (m) => { forget(m.job); if (m.id) { power({ id: m.id, name: m.name, state: 'stopped' }, 'start'); location.hash = `/server/${encodeURIComponent(m.id)}/console`; } };
   const loading = $derived(!live.connected && !live.servers.length);
+
+  // ---- filters: one panel, one state (kept per browser) ----
+  const FILTER = 'hopperd.servers.filter';
+  let filter = $state((() => {
+    try {
+      const f = JSON.parse(localStorage.getItem(FILTER) || '{}');
+      return { panel: typeof f.panel === 'string' ? f.panel : 'all', state: typeof f.state === 'string' ? f.state : 'all' };
+    } catch {
+      return { panel: 'all', state: 'all' };
+    }
+  })());
+  function setFilter(k, v) {
+    filter[k] = v;
+    try {
+      localStorage.setItem(FILTER, JSON.stringify(filter));
+    } catch {
+      // private window: not kept
+    }
+  }
+  const STATES = [['all', 'All'], ['running', 'Running'], ['stopped', 'Stopped'], ['crashed', 'Crashed']];
+  // A saved filter for a panel that's no longer on the page shows them all.
+  const panelFilter = $derived(!grouped ? 'all' : filter.panel === 'home' || panels.list.some((p) => p.id === filter.panel) ? filter.panel : 'all');
+  const showGroup = (id) => panelFilter === 'all' || panelFilter === id;
+  const homeRows = $derived(shown.filter((s) => passes(s, filter.state)));
+  const rowsOf = (p) => sorted(p.servers).filter((s) => passes(s, filter.state));
+  const noneText = $derived(`No ${filter.state} servers here.`);
+  const anyServers = $derived(live.servers.length > 0 || panels.list.some((p) => p.servers.length));
+
+  // ---- picking servers for a bulk action ----
+  let selecting = $state(false);
+  let picked = $state(new Set());
+  const picks = new Selection({ get: () => picked, set: (v) => (picked = v) });
+  const keyOf = (p, s) => `${p ? p.id : ''}|${s.id}`;
+  /** Every row the list shows, in order: for Shift ranges and drags. */
+  const flat = $derived.by(() => {
+    const out = [];
+    if (showGroup('home') && (!grouped || !fold.home)) for (const s of homeRows) out.push({ key: keyOf(null, s), p: null, s });
+    for (const p of panels.list) {
+      if (!showGroup(p.id) || p.state === 'signin' || fold[p.id]) continue;
+      for (const s of rowsOf(p)) out.push({ key: keyOf(p, s), p, s });
+    }
+    return out;
+  });
+  const order = $derived(flat.map((r) => r.key));
+  const ixOf = $derived(new Map(order.map((k, i) => [k, i])));
+  // Only what is still shown counts: a filter or a fold lets go of the rest.
+  const pickedRows = $derived(flat.filter((r) => picked.has(r.key)));
+
+  function stopSelecting() {
+    selecting = false;
+    picked = new Set();
+  }
+
+  /** A row's click while selecting: tick it (Shift: the rows from the last one). */
+  function rowClick(e, p, s) {
+    if (!selecting) return;
+    e.preventDefault();
+    if (clickSwallowed()) return;
+    picks.tick(keyOf(p, s), e, order);
+  }
+
+  /** Pressing a row while selecting and dragging ticks every row it crosses.
+   * Not on touch: there a drag scrolls, and a tap ticks. */
+  function rowDown(e, p, s) {
+    if (!selecting || e.shiftKey || e.pointerType === 'touch') return;
+    const key = keyOf(p, s);
+    const on = !picked.has(key);
+    startPick(e, { list: 'servers', kind: 'tick', ix: ixOf.get(key), on, selected: picked, keyAt: (i) => order[i] ?? null, onTick: (v) => (picked = v), label: tickLabel(on) });
+  }
+
+  function listKey(e) {
+    if (!selecting) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      stopSelecting();
+      return;
+    }
+    picks.onKey(e, order, { arrows: false });
+  }
+
+  let bulk = $state(null); // { action, groups } while its question is open
+
+  /** Opens the one question for `action` on the picked servers, grouped by panel. */
+  function openBulk(action) {
+    const groups = [
+      { key: 'home', name: homeName || 'This panel', panel: null, role: canPower ? homeRole || 'owner' : 'viewer', state: 'ok', servers: [] },
+      ...panels.list.map((p) => ({ key: p.id, name: p.name, panel: p, role: p.role, state: p.state, servers: [] })),
+    ];
+    const at = new Map(groups.map((g) => [g.key, g]));
+    for (const r of pickedRows) at.get(r.p ? r.p.id : 'home')?.servers.push($state.snapshot(r.s));
+    bulk = { action, groups };
+  }
 
   /** The pill: players while it runs, else its state; none when stopped. */
   function pill(s) {
@@ -228,9 +332,14 @@
   {@const pl = pill(s)}
   {@const cap = caption(s)}
   {@const up = p ? null : packUpdates.byId[s.id]}
-  {@const sel = isSel(p, s)}
-  <a class="srv" class:dim={p && dim(p)} class:row-sel={sel} class:row-hover={!sel} href={serverHref(p, s)} oncontextmenu={(e) => openMenu(e, s, p)}>
+  {@const key = keyOf(p, s)}
+  {@const ticked = selecting && picked.has(key)}
+  {@const sel = selecting ? ticked : isSel(p, s)}
+  <a class="srv" class:picking={selecting} class:dim={p && dim(p)} class:row-sel={sel} class:row-hover={!sel} href={serverHref(p, s)} data-pick-ix={ixOf.get(key)}
+    role={selecting ? 'checkbox' : undefined} aria-checked={selecting ? ticked : undefined} draggable={selecting ? 'false' : undefined}
+    onclick={(e) => rowClick(e, p, s)} onpointerdown={(e) => rowDown(e, p, s)} ondragstart={(e) => selecting && e.preventDefault()} oncontextmenu={(e) => openMenu(e, s, p)}>
     <div class="line">
+      {#if selecting}<input class="ck" type="checkbox" tabindex="-1" aria-hidden="true" checked={ticked} />{/if}
       <span class="dot {p && dim(p) ? '' : stateKey(s)}"></span>
       <Avatar server={s} cls="sic" panel={p} />
       <span class="nm">{s.name}</span>
@@ -256,7 +365,8 @@
   </div>
 {/snippet}
 
-<aside class="list" class:rail={collapsed} style:width="{collapsed ? RAIL : width}px">
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<aside class="list" class:rail={collapsed} style:width="{collapsed ? RAIL : width}px" data-pick-list="servers" onkeydown={listKey}>
   {#if collapsed}
     <button class="btn ghost icon" title="Show server list" onclick={toggle}><PanelLeftOpen size={15} /></button>
     {#each servers as s (s.id)}
@@ -280,13 +390,29 @@
       {#if owner}<button class="btn ghost icon" title="Look for new server folders" onclick={onRescan}><RefreshCw size={14} /></button>{/if}
       <a class="btn ghost icon" title="Browse modpacks to make a server from" href="#/browse"><Compass size={15} /></a>
       <button class="btn ghost icon" title="New server" onclick={onNew}><Plus size={15} /></button>
+      {#if anyServers}<button class="btn ghost icon" class:on={selecting} aria-pressed={selecting} title={selecting ? 'Stop selecting (Esc)' : 'Select servers to start, stop or restart together'} onclick={() => (selecting ? stopSelecting() : (selecting = true))}><ListChecks size={15} /></button>{/if}
       <button class="btn ghost icon" title="Hide server list" onclick={toggle}><PanelLeftClose size={15} /></button>
     </div>
-    {#if grouped}
+    {#if anyServers}
+      <div class="fbar">
+        {#if grouped}
+          <select class="sel" aria-label="Show the servers of" value={panelFilter} onchange={(e) => setFilter('panel', e.currentTarget.value)}>
+            <option value="all">All panels</option>
+            <option value="home">{homeName || 'This panel'}</option>
+            {#each panels.list as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+          </select>
+        {/if}
+        <div class="seg" role="group" aria-label="Show servers that are">
+          {#each STATES as [k, l] (k)}<button aria-pressed={filter.state === k} onclick={() => setFilter('state', k)}>{l}</button>{/each}
+        </div>
+      </div>
+      {#if selecting && !pickedRows.length}<div class="hint">Click or drag across servers to pick them.</div>{/if}
+    {/if}
+    {#if grouped && showGroup('home')}
       {@render head('home', homeName || 'This panel', homeRole, live.connected ? 'running' : 'starting', null)}
       <div class="health">Hopper Server · {live.servers.length} · this panel{homeVersion ? ` · ${homeVersion}` : ''}</div>
     {/if}
-    {#if !grouped || !fold.home}
+    {#if showGroup('home') && (!grouped || !fold.home)}
       {#if loading}
         <div class="skels">{#each [0, 1, 2] as i (i)}<div class="skel"><i></i></div>{/each}</div>
       {/if}
@@ -310,10 +436,12 @@
           </div>
         </div>
       {/each}
-      {#each shown as s (s.id)}
+      {#each homeRows as s (s.id)}
         {@render row(s, null)}
       {:else}
-        {#if !loading && !making.length}
+        {#if shown.length}
+          <div class="cap none" class:flat={!grouped}>{noneText}</div>
+        {:else if !loading && !making.length}
           <div class="empty-state">
             <span class="es-ic"><Server size={18} /></span>
             <b>No servers yet</b>
@@ -325,8 +453,8 @@
       {/each}
     {/if}
 
-    {#each panels.list as p (p.id)}
-      <div class="gsep"></div>
+    {#each panels.list.filter((q) => showGroup(q.id)) as p, i (p.id)}
+      {#if showGroup('home') || i > 0}<div class="gsep"></div>{/if}
       {@render head(p.id, p.name, p.me && p.state !== 'signin' ? p.role : '', light(p), p)}
       {#if p.state === 'ok'}
         <div class="health">Hopper Server · {p.servers.length}{p.version ? ` · ${p.version}` : ''}{p.ping != null ? ` · ${p.ping} ms` : ''}</div>
@@ -344,16 +472,25 @@
       {#if p.state === 'signin'}
         <PanelSignIn panel={p} />
       {:else if !fold[p.id]}
-        {#each sorted(p.servers) as s (s.id)}
+        {#each rowsOf(p) as s (s.id)}
           {@render row(s, p)}
         {:else}
-          {#if p.state === 'ok'}<div class="cap none">No servers on it yet.</div>{/if}
+          {#if p.servers.length}<div class="cap none">{noneText}</div>
+          {:else if p.state === 'ok'}<div class="cap none">No servers on it yet.</div>{/if}
         {/each}
       {/if}
     {/each}
 
     {#if canAdd}
       <button class="btn sm ghost addp" onclick={() => (adding = true)}><Plus size={13} />Add a Hopper Server</button>
+    {/if}
+    {#if selecting && pickedRows.length}
+      <SelectionBar n={pickedRows.length} onClear={stopSelecting}>
+        <button class="btn sm ghost" onclick={() => openBulk('start')}><Play size={13} />Start</button>
+        <button class="btn sm ghost" onclick={() => openBulk('stop')}><Square size={13} />Stop</button>
+        <button class="btn sm ghost" onclick={() => openBulk('restart')}><RotateCw size={13} />Restart</button>
+        <button class="btn sm ghost" onclick={() => openBulk('command')}><Terminal size={13} />Command</button>
+      </SelectionBar>
     {/if}
   {/if}
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
@@ -363,6 +500,7 @@
 <svelte:window onpointerdown={away} onresize={closeMenu} onblur={closeMenu} />
 
 {#if adding}<AddPanel onClose={() => (adding = false)} />{/if}
+{#if bulk}<BulkAction action={bulk.action} groups={bulk.groups} onClose={() => (bulk = null)} />{/if}
 
 {#if menu?.g}
   {@const g = menu.g}
@@ -431,6 +569,28 @@
   .gsep { height: 1px; background: var(--line); margin: 8px 4px 4px; flex: none; }
   .srv.dim, .tile.dim { opacity: .55; }
   .cap.none { padding: 2px 10px 6px 32px; }
+  .cap.none.flat { padding-left: 10px; }
+  /* Selecting: a tick box leads each row; the row itself is what's pressed. */
+  .srv.picking { cursor: default; user-select: none; }
+  .ck { width: 15px; height: 15px; margin: 0; flex: none; accent-color: var(--acc); pointer-events: none; }
+  .srv.picking .cap { padding-left: 67px; }
+  .hint { padding: 0 10px 6px; font-size: 11.5px; color: var(--muted); }
+  /* The bulk bar in a list this narrow: "3 selected" and clear on top, the four actions in two columns under it,
+     instead of one long row that wraps unevenly. */
+  .list :global(.selb) { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: 2px; width: 100%; box-sizing: border-box; }
+  .list :global(.selb > b) { grid-column: 1; grid-row: 1; padding: 0 6px; }
+  .list :global(.selb > .vr) { display: none; }
+  .list :global(.selb > button:last-child) { grid-column: 2; grid-row: 1; justify-self: end; }
+  .list :global(.selb > button:not(:last-child)) { justify-content: flex-start; }
+  /* Filters: which panel, then a segmented state pick (the chosen one in the selected tint). */
+  .fbar { display: flex; flex-direction: column; gap: 6px; padding: 0 4px 8px; }
+  .fbar .sel { width: 100%; height: 28px; background: var(--base); border: 1px solid var(--line2); border-radius: var(--radius); padding: 0 6px; color: var(--text); font: inherit; font-size: 12.5px; }
+  .seg { display: flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; }
+  .seg button { flex: 1 1 0; min-width: 0; height: 26px; padding: 0 4px; font-size: 12px; color: var(--subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .seg button + button { border-left: 1px solid var(--line2); }
+  .seg button:hover:not([aria-pressed='true']) { background: var(--hover); color: var(--text); }
+  .seg button[aria-pressed='true'] { background: var(--sel); color: var(--text); font-weight: 600; }
+  .seg button:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
   .addp { align-self: flex-start; margin: 10px 0 0 4px; color: var(--subtle); }
   .rsep { width: 28px; height: 1px; background: var(--line); flex: none; }
   .rmenu { position: fixed; z-index: 66; }
@@ -444,6 +604,11 @@
   @media (max-width: 760px) {
     .list { width: 100% !important; height: auto; max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--line); }
     .list.rail { flex-direction: row; flex-wrap: wrap; padding: 8px 16px; }
+    /* Full width here: the four actions fit on one row under the count, so the
+       bar covers less of the short list. */
+    .list :global(.selb) { grid-template-columns: repeat(4, 1fr); }
+    .list :global(.selb > b) { grid-column: 1 / 4; }
+    .list :global(.selb > button:last-child) { grid-column: 4; }
     .grip { display: none; }
   }
 </style>
