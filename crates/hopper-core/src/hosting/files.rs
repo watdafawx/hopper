@@ -684,6 +684,47 @@ pub fn upload_cancel(root: &Path, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Puts the file at `url` at `rel` as an upload of it would: downloaded
+/// here (only from the mod hosts, see [`crate::modfetch`]), checked
+/// against `size` and `sha1`, and moved in whole, the file it replaces
+/// going to the trash. Hopper sends a link instead of the jar when it has
+/// one, since the server's own connection is usually far faster.
+pub fn fetch_into(root: &Path, rel: &str, url: &str, size: u64, sha1: &str) -> anyhow::Result<()> {
+    if !crate::modfetch::allowed(url) {
+        bail!("Hopper Server only downloads mods from CurseForge, Modrinth and GitHub.");
+    }
+    if sha1.len() != 40 || !sha1.chars().all(|c| c.is_ascii_hexdigit()) || size == 0 {
+        bail!("The file's size and sha1 are needed to check the download.");
+    }
+    let target = resolve(root, rel)?;
+    let rel = rel_of(root, &target);
+    for c in rel.split('/') {
+        check_name(c)?;
+    }
+    if target.is_dir() {
+        bail!("{rel} is a folder.");
+    }
+    let dir = upload_dir(root);
+    fs::create_dir_all(&dir)?;
+    let part = dir.join(format!("{}.fetch", crate::peer::random_hex(12)));
+    let expect = crate::cf::Expect { len: size, sha1: sha1.to_ascii_lowercase() };
+    crate::modfetch::fetch(url, &part, &expect)?;
+    let placed = (|| -> anyhow::Result<()> {
+        if target.exists() {
+            trash(root, &rel).with_context(|| format!("replacing {rel}"))?;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&part, &target).with_context(|| format!("saving {rel}"))?;
+        Ok(())
+    })();
+    if placed.is_err() {
+        let _ = fs::remove_file(&part);
+    }
+    placed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,6 +746,22 @@ mod tests {
         for bad in ["../x", "config/../../x", "C:/Windows", "c:\\x", "..", "a/../.."] {
             assert!(resolve(&root, bad).is_err(), "{bad}");
         }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fetch_refuses_other_hosts_unchecked_files_and_paths_out() {
+        let root = temp("fetch");
+        let sha = "a".repeat(40);
+        let ok_url = "https://cdn.modrinth.com/data/x/versions/y/a.jar";
+        let err = |r: anyhow::Result<()>| format!("{:#}", r.unwrap_err());
+        assert!(err(fetch_into(&root, "mods/a.jar", "https://evil.net/a.jar", 10, &sha)).contains("only downloads mods"));
+        assert!(err(fetch_into(&root, "mods/a.jar", "http://cdn.modrinth.com/a.jar", 10, &sha)).contains("only downloads mods"));
+        assert!(err(fetch_into(&root, "mods/a.jar", ok_url, 10, "")).contains("size and sha1"));
+        assert!(err(fetch_into(&root, "mods/a.jar", ok_url, 0, &sha)).contains("size and sha1"));
+        assert!(fetch_into(&root, "../a.jar", ok_url, 10, &sha).is_err());
+        assert!(fetch_into(&root, "C:/a.jar", ok_url, 10, &sha).is_err());
+        assert!(!root.join("mods").exists(), "nothing written");
         let _ = fs::remove_dir_all(&root);
     }
 

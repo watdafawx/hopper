@@ -89,8 +89,39 @@ pub fn op_weight(op: &SyncOp) -> u64 {
     }
 }
 
+/// Where a sync run is, for [`execute_watch`]: operation `index` (from 0)
+/// of `count` is under way, `done` of `total` [`op_weight`]s are through.
+/// `op` is `None` once it all ended.
+pub struct Step<'a> {
+    pub index: usize,
+    pub count: usize,
+    pub op: Option<&'a SyncOp>,
+    pub done: u64,
+    pub total: u64,
+    /// A Hopper Server is downloading the file itself, from here
+    /// ("Modrinth"); `None` while Hopper sends it (or for anything else).
+    pub from: Option<&'static str>,
+}
+
 /// [`execute`], telling `progress` (done, total in [`op_weight`]s) as it goes.
 pub fn execute_with(ops: Vec<SyncOp>, server_root: &Path, progress: &dyn Fn(u64, u64)) -> Vec<SyncResult> {
+    execute_watch(ops, server_root, &|s| progress(s.done, s.total))
+}
+
+/// [`execute`], telling `watch` each operation as it starts (and, for an
+/// upload to a Hopper Server, the bytes as they go), and once more at the end.
+pub fn execute_watch(ops: Vec<SyncOp>, server_root: &Path, watch: &dyn Fn(Step)) -> Vec<SyncResult> {
+    execute_links(ops, server_root, &Default::default(), watch)
+}
+
+/// [`execute_watch`]; a Hopper Server downloads the files that have a link
+/// in `links` (by source path) itself, see [`crate::modfetch`].
+pub fn execute_links(
+    ops: Vec<SyncOp>,
+    server_root: &Path,
+    links: &std::collections::HashMap<PathBuf, crate::modfetch::Link>,
+    watch: &dyn Fn(Step),
+) -> Vec<SyncResult> {
     // A server on a Hopper Server: its side goes over the panel's API.
     let remote = ops.iter().find_map(|op| match op {
         SyncOp::Copy { src, dst } => crate::hopperd::remote_of(dst).or_else(|| crate::hopperd::remote_of(src)),
@@ -103,30 +134,40 @@ pub fn execute_with(ops: Vec<SyncOp>, server_root: &Path, progress: &dyn Fn(u64,
         } else {
             server_root.to_path_buf()
         };
-        return crate::hopperd::execute(ops, &r, &root, &local, progress);
+        return crate::hopperd::execute(ops, &r, &root, &local, links, watch);
     }
-    let total = ops.iter().map(op_weight).sum();
+    let weights: Vec<u64> = ops.iter().map(op_weight).collect();
+    let (count, total) = (ops.len(), weights.iter().sum());
+    let before = |i: usize| weights[..i].iter().sum::<u64>();
+    let each = |i: usize, op: &SyncOp| watch(Step { index: i, count, op: Some(op), done: before(i), total, from: None });
     // A server reached over SFTP / FTP: change Hopper's copy, then the server.
     let results = if let Some(m) = crate::remotefs::mirror_of(server_root) {
-        let mut results = execute_local(ops, server_root);
+        let mut results = execute_local_watch(ops, server_root, &each);
         crate::remotefs::push(&m, &mut results);
         results
     } else {
-        execute_local(ops, server_root)
+        execute_local_watch(ops, server_root, &each)
     };
-    progress(total, total);
+    watch(Step { index: count, count, op: None, done: total, total, from: None });
     results
 }
 
 /// [`execute`] for operations on this PC's disks only.
 pub fn execute_local(ops: Vec<SyncOp>, server_root: &Path) -> Vec<SyncResult> {
+    execute_local_watch(ops, server_root, &|_, _| {})
+}
+
+/// [`execute_local`], telling `each` the operation it starts (by index).
+fn execute_local_watch(ops: Vec<SyncOp>, server_root: &Path, each: &dyn Fn(usize, &SyncOp)) -> Vec<SyncResult> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     let backup_dir = server_root.join(BACKUP_DIR).join(stamp.to_string());
     crate::retention::schedule(server_root);
     ops.into_iter()
-        .map(|op| {
+        .enumerate()
+        .map(|(i, op)| {
+            each(i, &op);
             let r = match &op {
                 SyncOp::Copy { src, dst } => copy(src, dst, &backup_dir),
                 SyncOp::Delete { path } => backup(path, &backup_dir),

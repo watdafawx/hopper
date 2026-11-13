@@ -12,7 +12,7 @@ use crate::server::{Manager, ServerInfo};
 use anyhow::{Context as _, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -1020,6 +1020,30 @@ impl Client {
         self.push(&link, local, size, CHUNK, progress).map(|_| ())
     }
 
+    /// Has the panel download `link` to `rel` in the server folder itself
+    /// (checked against its sha1 and size there), replacing what is there.
+    /// `Ok(false)` when the panel is older than that and the file has to be
+    /// uploaded instead.
+    pub fn fetch_file(&self, id: &str, rel: &str, link: &crate::modfetch::Link) -> anyhow::Result<bool> {
+        if !self.can("files.fetch") {
+            return Ok(false);
+        }
+        let url = self.url(&Client::fs_path(id, "/fetch"));
+        let body = json!({ "path": rel, "url": link.url, "size": link.size, "sha1": link.sha1 });
+        // The panel answers once the file is in: as long as its download takes.
+        let wait = Duration::from_secs(120) + Duration::from_secs(link.size / (256 * 1024));
+        reply(self.send_via(Lane::Slow, |slow| {
+            slow.post(&url)
+                .config()
+                .timeout_global(Some(wait))
+                .build()
+                .header("Authorization", &self.auth())
+                .send_json(&body)
+        }))
+        .with_context(|| format!("Hopper Server downloading {rel}"))?;
+        Ok(true)
+    }
+
     /// Adds jar `local` to the server's mods, as a jar dropped on its Mods
     /// tab: another version of a mod it has replaces that one (kept in the
     /// panel's backups). Answers whether one was replaced.
@@ -1258,7 +1282,9 @@ enum Where {
 trait ChunkLink {
     /// Starts the upload; the reply, with its `id`.
     fn start(&self) -> anyhow::Result<Value>;
-    fn put(&self, up: &str, offset: u64, data: &[u8]) -> Put;
+    /// Sends one chunk; `sent` hears how many of its bytes have gone out
+    /// while it goes, so a jar smaller than a chunk still shows progress.
+    fn put(&self, up: &str, offset: u64, data: &[u8], sent: &dyn Fn(u64)) -> Put;
     fn status(&self, up: &str) -> Where;
     /// Drops an upload that won't be finished, so its part file doesn't
     /// sit on the panel for a day. Best effort.
@@ -1313,7 +1339,16 @@ fn push_chunks_to(
         if n < want {
             bail!("the file got shorter while it was being sent");
         }
-        let error = match link.put(up, offset, &buf[..n]) {
+        // Bytes on their way count, short of the chunk's end: that one
+        // waits for the panel's answer.
+        let at = offset;
+        let sent = |b: u64| {
+            let b = b.min((n as u64).saturating_sub(1));
+            if b > 0 {
+                progress(at + b);
+            }
+        };
+        let error = match link.put(up, offset, &buf[..n], &sent) {
             Put::Took { done: true, .. } => {
                 progress(size);
                 return Ok(start);
@@ -1371,16 +1406,43 @@ struct ClientLink<'a> {
     start: Value,
 }
 
+/// A chunk's bytes as they're read onto the connection, telling `sent`
+/// how far it got (a few times a second at most).
+struct Counted<'a> {
+    data: &'a [u8],
+    at: usize,
+    told: Option<Instant>,
+    sent: &'a dyn Fn(u64),
+}
+
+impl std::io::Read for Counted<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = (self.data.len() - self.at).min(buf.len());
+        buf[..n].copy_from_slice(&self.data[self.at..self.at + n]);
+        self.at += n;
+        if self.told.is_none_or(|t| t.elapsed() >= Duration::from_millis(200)) {
+            self.told = Some(Instant::now());
+            (self.sent)(self.at as u64);
+        }
+        Ok(n)
+    }
+}
+
 impl ChunkLink for ClientLink<'_> {
     fn start(&self) -> anyhow::Result<Value> {
         self.client.post(&self.uploads, self.start.clone())
     }
 
-    fn put(&self, up: &str, offset: u64, data: &[u8]) -> Put {
+    fn put(&self, up: &str, offset: u64, data: &[u8], sent: &dyn Fn(u64)) -> Put {
         let c = self.client;
         let url = c.url(&format!("{}/{up}?offset={offset}", self.uploads));
         let resp = c.send_via(Lane::Chunk, |a| {
-            a.put(&url).header("Authorization", &c.auth()).content_type("application/octet-stream").send(data)
+            let mut body = Counted { data, at: 0, told: None, sent };
+            a.put(&url)
+                .header("Authorization", &c.auth())
+                .header("Content-Length", data.len().to_string())
+                .content_type("application/octet-stream")
+                .send(ureq::SendBody::from_reader(&mut body))
         });
         let mut resp = match resp {
             Ok(r) => r,
@@ -1634,9 +1696,18 @@ fn remote_rel(root: &Path, p: &Path) -> Option<String> {
 /// Runs sync operations where one side is a remote server: copies to it
 /// upload, copies from it download (through the local side's backups),
 /// deletes on it go to the panel's trash.
-/// `progress` gets (done, total) in [`crate::sync::op_weight`]s, during
-/// each upload too.
-pub fn execute(ops: Vec<SyncOp>, remote: &Remote, root: &Path, local_root: &Path, progress: &dyn Fn(u64, u64)) -> Vec<SyncResult> {
+/// `watch` gets each operation as it starts and the bytes of each upload
+/// as they go (see [`crate::sync::Step`]). A copy whose source has a link
+/// in `links` is downloaded by the panel itself; it's uploaded when the
+/// panel can't (an older one, or its download failed).
+pub fn execute(
+    ops: Vec<SyncOp>,
+    remote: &Remote,
+    root: &Path,
+    local_root: &Path,
+    links: &HashMap<PathBuf, crate::modfetch::Link>,
+    watch: &dyn Fn(crate::sync::Step),
+) -> Vec<SyncResult> {
     let client = match Client::for_remote(remote) {
         Ok(c) => c,
         Err(e) => {
@@ -1648,15 +1719,32 @@ pub fn execute(ops: Vec<SyncOp>, remote: &Remote, root: &Path, local_root: &Path
     };
     let mut out = Vec::new();
     let total: u64 = ops.iter().map(crate::sync::op_weight).sum();
+    let count = ops.len();
     let mut before = 0u64;
-    for op in ops {
+    for (index, op) in ops.into_iter().enumerate() {
         let weight = crate::sync::op_weight(&op);
         let at = before;
         before += weight;
-        progress(at, total);
+        let step = |done, from| crate::sync::Step { index, count, op: Some(&op), done, total, from };
+        watch(step(at, None));
         let r: anyhow::Result<()> = match &op {
             SyncOp::Copy { src, dst } if is_remote_root(dst) => match remote_rel(root, dst) {
-                Some(rel) => client.upload_with(&remote.id, src, &rel, &|sent| progress(at + sent.min(weight), total)),
+                Some(rel) => {
+                    let fetched = links.get(src).map(|l| {
+                        watch(step(at, Some(l.from)));
+                        client.fetch_file(&remote.id, &rel, l)
+                    });
+                    match fetched {
+                        Some(Ok(true)) => Ok(()),
+                        other => {
+                            if let Some(Err(e)) = other {
+                                log::warn!("{rel}: Hopper Server couldn't download it, uploading it instead: {e:#}");
+                            }
+                            watch(step(at, None));
+                            client.upload_with(&remote.id, src, &rel, &|sent| watch(step(at + sent.min(weight), None)))
+                        }
+                    }
+                }
                 None => Err(anyhow::anyhow!("{} isn't on this server", dst.display())),
             },
             SyncOp::Copy { src, dst } if is_remote_root(src) => match remote_rel(root, src) {
@@ -1703,7 +1791,7 @@ pub fn execute(ops: Vec<SyncOp>, remote: &Remote, root: &Path, local_root: &Path
             Err(e) => SyncResult { op, ok: false, error: Some(format!("{e:#}")), backup: None },
         });
     }
-    progress(total, total);
+    watch(crate::sync::Step { index: count, count, op: None, done: total, total, from: None });
     out
 }
 
@@ -2352,7 +2440,8 @@ mod chunk_tests {
             Ok(json!({ "id": format!("{:x}", s.id), "path": "mods/a.jar" }))
         }
 
-        fn put(&self, up: &str, offset: u64, data: &[u8]) -> Put {
+        fn put(&self, up: &str, offset: u64, data: &[u8], sent: &dyn Fn(u64)) -> Put {
+            sent(1);
             let fault = self.faults.borrow_mut().pop().unwrap_or(Fault::None);
             let mut s = self.state.borrow_mut();
             s.puts.push((offset, data.len()));
@@ -2437,7 +2526,7 @@ mod chunk_tests {
         assert_eq!(s.puts, vec![(0, 3), (3, 3), (6, 3), (9, 1)]);
         assert_eq!(s.placed, vec![file(10)]);
         assert!(pauses.is_empty() && s.cancelled.is_empty());
-        assert_eq!(seen, vec![3, 6, 9, 10]);
+        assert_eq!(seen, vec![1, 3, 4, 6, 7, 9, 10], "bytes on their way count, short of each chunk's end");
     }
 
     #[test]
