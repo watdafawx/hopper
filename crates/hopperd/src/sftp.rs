@@ -120,6 +120,8 @@ impl russh::server::Handler for SshSession {
             method: "SFTP".into(),
             path: "sign-in".into(),
             status: if ok { 200 } else { 401 },
+            node: String::new(),
+            node_name: String::new(),
         });
         match res {
             Ok(w) => {
@@ -270,6 +272,8 @@ impl Sftp {
             method: "SFTP".into(),
             path: format!("{what} {server}/{rel}"),
             status: 200,
+            node: String::new(),
+            node_name: String::new(),
         });
     }
 }

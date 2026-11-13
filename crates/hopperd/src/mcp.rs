@@ -6,6 +6,11 @@
 //! `Authorization: Bearer …`), and each tool call is checked as the
 //! matching API request would be: a read-only token can't start servers,
 //! a token or person limited to some servers only sees those.
+//!
+//! A node's servers (design/multi-panel.md, A4) are listed with the rest
+//! and every tool works on them: the call becomes the API request it stands
+//! for and goes through `relay::forward`, so the node's ceiling, the
+//! allowlist and the node's own checks apply exactly as for the web UI.
 
 use crate::App;
 use crate::api::{ApiError, require};
@@ -44,7 +49,7 @@ fn tools() -> Vec<Value> {
     let server = json!({ "type": "string", "description": "Server id, from list_servers" });
     let path = json!({ "type": "string", "description": "Path inside the server folder, like config/create.toml" });
     vec![
-        tool("list_servers", "Every server: id, name, state, players, memory, version.", json!({}), &[], true),
+        tool("list_servers", "Every server: id, name, state, players, memory, version. A node's servers have ids like `ab12cd34ef56:tnp` and name their node.", json!({}), &[], true),
         tool(
             "console",
             "The newest lines of a server's console.",
@@ -134,20 +139,20 @@ async fn handle(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
     if let Value::Array(items) = msg {
         let mut out = Vec::new();
         for m in items {
-            if let Some(r) = one(&app, &who, m).await {
+            if let Some(r) = one(&app, &who, &headers, m).await {
                 out.push(r);
             }
         }
         return if out.is_empty() { StatusCode::ACCEPTED.into_response() } else { Json(Value::Array(out)).into_response() };
     }
-    match one(&app, &who, msg).await {
+    match one(&app, &who, &headers, msg).await {
         Some(r) => Json(r).into_response(),
         None => StatusCode::ACCEPTED.into_response(),
     }
 }
 
 /// One JSON-RPC message; `None` for notifications.
-async fn one(app: &Arc<App>, who: &Who, msg: Value) -> Option<Value> {
+async fn one(app: &Arc<App>, who: &Who, headers: &HeaderMap, msg: Value) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let id = id?;
@@ -169,10 +174,129 @@ async fn one(app: &Arc<App>, who: &Who, msg: Value) -> Option<Value> {
         "tools/call" => {
             let name = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("").to_string();
             let args = msg.pointer("/params/arguments").cloned().unwrap_or(json!({}));
-            rpc_ok(&id, call(app, who, &name, &args).await)
+            rpc_ok(&id, call(app, who, headers, &name, &args).await)
         }
         _ => rpc_err(&id, -32601, "Unknown method."),
     })
+}
+
+/// A query value, percent-encoded.
+fn enc(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/') { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
+}
+
+/// One API request relayed to a node's server, as the web UI would send
+/// it (same sign-in headers, same checks on both sides): its status and
+/// JSON answer.
+async fn ask_node(app: &Arc<App>, headers: &HeaderMap, m: Method, path_q: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let (path, query) = path_q.split_once('?').map_or((path_q, None), |(p, q)| (p, Some(q)));
+    let Some(t) = crate::relay::target(path, query) else { return (StatusCode::NOT_FOUND, json!({ "error": "No server with that id." })) };
+    let mut req = axum::http::Request::builder().method(m).uri(path_q);
+    for (k, v) in headers {
+        if k != axum::http::header::CONTENT_LENGTH && k != axum::http::header::CONTENT_TYPE {
+            req = req.header(k, v);
+        }
+    }
+    let body = match body {
+        Some(b) => {
+            req = req.header(axum::http::header::CONTENT_TYPE, "application/json");
+            axum::body::Body::from(serde_json::to_vec(&b).unwrap_or_default())
+        }
+        None => axum::body::Body::empty(),
+    };
+    let Ok(req) = req.body(body) else { return (StatusCode::BAD_REQUEST, json!({ "error": "That request can't be made." })) };
+    let res = crate::relay::forward(app.clone(), t, req).await;
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), 16 * 1024 * 1024).await.unwrap_or_default();
+    (status, serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({ "text": String::from_utf8_lossy(&bytes) })))
+}
+
+/// A tool call on a node's server: the API request it stands for, sent
+/// through the node relay. Changes go in this panel's audit log with the
+/// node named, as the web UI's do.
+async fn node_call(app: &Arc<App>, who: &Who, headers: &HeaderMap, name: &str, sid: &str, args: &Value) -> Value {
+    let s = enc(sid);
+    let p = enc(arg(args, "path"));
+    let (m, path_q, body) = match name {
+        "console" => (Method::GET, format!("/api/v1/servers/{s}/console"), None),
+        "power" => {
+            let action = arg(args, "action");
+            if !matches!(action, "start" | "stop" | "restart" | "kill") {
+                return tool_error(format!("Unknown action \"{action}\"."));
+            }
+            (Method::POST, format!("/api/v1/servers/{s}/power"), Some(json!({ "action": action })))
+        }
+        "send_command" => (Method::POST, format!("/api/v1/servers/{s}/command"), Some(json!({ "line": arg(args, "command").trim().trim_start_matches('/') }))),
+        "list_files" => (Method::GET, format!("/api/v1/fs/{s}/list?path={p}"), None),
+        "read_file" => (Method::GET, format!("/api/v1/fs/{s}/text?path={p}"), None),
+        "write_file" => (Method::PUT, format!("/api/v1/fs/{s}/text"), Some(json!({ "path": arg(args, "path"), "content": arg(args, "content") }))),
+        "search_files" => {
+            let q = arg(args, "query");
+            if q.trim().len() < 2 {
+                return tool_error("Search for at least 2 characters.");
+            }
+            let regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
+            (Method::GET, format!("/api/v1/fs/{s}/search?q={}&path={p}&regex={}", enc(q), if regex { "1" } else { "0" }), None)
+        }
+        "list_mods" => (Method::GET, format!("/api/v1/servers/{s}/mods"), None),
+        "last_crash" => (Method::GET, format!("/api/v1/servers/{s}/crash"), None),
+        "list_backups" => (Method::GET, format!("/api/v1/servers/{s}/backups"), None),
+        other => return tool_error(format!("Unknown tool \"{other}\".")),
+    };
+    let path = path_q.split('?').next().unwrap_or("").to_string();
+    if let Err(e) = allowed(app, who, m.clone(), path.clone()) {
+        return tool_error(e);
+    }
+    // The console's length before a command, to show only what it answered.
+    let before = if name == "send_command" {
+        ask_node(app, headers, Method::GET, &format!("/api/v1/servers/{s}/console?since={}", u64::MAX), None).await.1["total"].as_u64()
+    } else {
+        None
+    };
+    let (status, v) = ask_node(app, headers, m.clone(), &path_q, body).await;
+    if m != Method::GET {
+        let (node, node_name) = crate::security::node_named(app, &path, None);
+        app.audit.record(&crate::security::Event {
+            at: crate::security::now(),
+            who: who.name(),
+            role: who.role_name().into(),
+            ip: "mcp".into(),
+            proxy: String::new(),
+            net: crate::net::Net::Local,
+            method: m.to_string(),
+            path,
+            status: status.as_u16(),
+            node,
+            node_name,
+        });
+    }
+    if !status.is_success() {
+        return tool_error(v["error"].as_str().map_or_else(|| format!("The node answered {status}."), str::to_string));
+    }
+    let lines_of = |v: &Value| -> Vec<String> { v["lines"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default() };
+    match name {
+        "console" => {
+            let n = args.get("lines").and_then(Value::as_u64).unwrap_or(100).clamp(1, 1000) as usize;
+            let lines = lines_of(&v);
+            let start = lines.len().saturating_sub(n);
+            text(if lines.is_empty() { "(nothing in the console; the server may be stopped)".into() } else { lines[start..].join("\n") })
+        }
+        "power" => text(format!("{} {sid}: done.", arg(args, "action"))),
+        "send_command" => {
+            // Give it a moment to answer.
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            let lines = match before {
+                Some(b) => lines_of(&ask_node(app, headers, Method::GET, &format!("/api/v1/servers/{s}/console?since={b}"), None).await.1),
+                None => Vec::new(),
+            };
+            text(if lines.is_empty() { "Sent. (No console output yet.)".to_string() } else { format!("Sent. Console:\n{}", lines.join("\n")) })
+        }
+        "read_file" => text(v["content"].as_str().unwrap_or_default()),
+        "list_files" => as_text(&v["entries"]),
+        _ => as_text(&v),
+    }
 }
 
 fn arg<'a>(args: &'a Value, key: &str) -> &'a str {
@@ -192,14 +316,23 @@ fn allowed(app: &App, who: &Who, method: Method, path: String) -> Result<(), Str
             method: method.to_string(),
             path,
             status: 403,
+            node: String::new(),
+            node_name: String::new(),
         });
         return Err(msg.to_string());
     }
     Ok(())
 }
 
-async fn call(app: &Arc<App>, who: &Who, name: &str, args: &Value) -> Value {
+async fn call(app: &Arc<App>, who: &Who, headers: &HeaderMap, name: &str, args: &Value) -> Value {
     let sid = arg(args, "server").to_string();
+    // A node's server: the same tool, through the node relay.
+    if name != "list_servers" && crate::relay::split(&sid).is_some() {
+        if !who.sees(&sid) {
+            return tool_error(format!("No server \"{sid}\". Use list_servers for the ids."));
+        }
+        return node_call(app, who, headers, name, &sid, args).await;
+    }
     // Every tool but list_servers is about one server.
     let entry = if name == "list_servers" {
         None
@@ -229,7 +362,9 @@ async fn call(app: &Arc<App>, who: &Who, name: &str, args: &Value) -> Value {
         Ok(match name.as_str() {
             "list_servers" => {
                 let snap = app.snapshot.borrow().clone();
-                let mine: Vec<_> = snap.servers.iter().filter(|s| who.sees(&s.id)).collect();
+                let mut mine: Vec<Value> = snap.servers.iter().filter(|s| who.sees(&s.id)).map(|s| json!(s)).collect();
+                // A node's servers too, their node named (ids are `<node>:<id>`).
+                mine.extend(app.nodes.servers_for(&who));
                 as_text(&mine)
             }
             "console" => {

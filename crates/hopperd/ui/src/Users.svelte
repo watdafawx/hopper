@@ -7,6 +7,8 @@
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
   import { session, roleLabel } from './lib/me.svelte.js';
+  import ServerScope from './lib/ServerScope.svelte';
+  import { scopeText } from './lib/scope.js';
 
   const ALL_ROLES = [
     { id: 'manager', label: 'Manager', about: 'Everything the owner can do, on every server, except managing the owner and other managers.' },
@@ -32,8 +34,6 @@
   function edit(u) {
     form = u ? { id: u.id, name: u.name, password: '', role: u.role, servers: [...u.servers] } : { name: '', password: '', role: 'operator', servers: [] };
   }
-
-  const flip = (list, v) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
 
   async function save(e) {
     e.preventDefault();
@@ -70,7 +70,6 @@
   }
 
   const when = (t) => (t ? new Date(t * 1000).toLocaleString() : 'never');
-  const names = (ids) => ids.map((id) => live.servers.find((s) => s.id === id)?.name || id).join(', ');
 
   onMount(load);
 
@@ -94,12 +93,8 @@
           </button>
         {/each}
       </div>
-      {#if live.servers.length > 1 && form.role !== 'manager'}
-        <div class="row wrap"><span class="tiny muted">Servers {form.servers.length ? '' : '(all)'}</span>
-          {#each live.servers as s (s.id)}
-            <button type="button" class="chip" class:acc={form.servers.includes(s.id)} onclick={() => (form.servers = flip(form.servers, s.id))}>{s.name}</button>
-          {/each}
-        </div>
+      {#if (live.servers.length > 1 || live.nodes.length) && form.role !== 'manager'}
+        <ServerScope bind:value={form.servers} />
       {/if}
       <div class="row"><span class="sp"></span>
         <button type="button" class="btn sm" onclick={() => (form = null)}>Cancel</button>
@@ -110,7 +105,7 @@
       <div class="u">
         <div class="grow">
           <div>{u.name} <span class="chip">{roleLabel(u.role)}</span>{#if u.two_factor}<span class="chip running">2FA</span>{/if}</div>
-          <div class="tiny muted ell">{u.servers.length && u.role !== 'manager' ? names(u.servers) : 'All servers'} · last seen {when(u.last_seen)}</div>
+          <div class="tiny muted ell">{u.role !== 'manager' ? scopeText(u.servers, live.servers, live.nodes) : 'All servers'} · last seen {when(u.last_seen)}</div>
         </div>
         {#if canManage(u)}
         {#if u.two_factor}<button class="btn sm icon ghost" title="Turn off their two-factor sign-in" onclick={() => reset2fa(u)}><ShieldOff size={13} /></button>{/if}
@@ -127,7 +122,6 @@
 <style>
   .col { display: flex; flex-direction: column; gap: 8px; }
   .grow { flex: 1; min-width: 0; }
-  .wrap { flex-wrap: wrap; }
   .roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px; }
   .role { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 8px; border: 1px solid var(--line2); border-radius: var(--radius-lg); }
   .role.on { border-color: var(--acc); background: var(--acc-dim); }

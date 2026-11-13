@@ -1875,6 +1875,157 @@ changed here:
    node's ceiling stays in the web UI (Settings › Nodes, "Open in browser"
    in the group's menu).
 
+## A4 as built (2026-11-14)
+
+Node-scoped access, bulk actions through the main, the node ceiling from
+the API and the CLI, MCP on node servers, and two A3 leftovers. Change card
+`.claude/changes/multi-panel-a4/card.md`.
+
+### Node-scoped access
+
+- **One more kind of entry.** A user's or API token's server list (empty =
+  every server) can now hold `node:<node id>`: every server on that node,
+  including servers made there later. A node server's id stays
+  `<node id>:<server id>`. Local ids are slugs without `:` and node ids are
+  12 hex characters, so no entry can be read as another kind
+  (`auth::scope_node`, `list_covers`).
+- **Only narrows.** The entry is checked in the same place as a server id
+  (`Who::sees`, used by `security::refusal`, the live feed, `GET /servers`,
+  `/nodes/live`, MCP), before the request is relayed. Roles stay as they
+  are, and the relay still caps every request at the node's ceiling
+  (`relay::forward`, `role_on_node`).
+- **Saving a list** (`POST/PUT /users`, `POST /tokens`): a `node:` entry
+  must name a node this panel has (`api::server_list`); an empty or bare
+  `node:` entry is refused.
+- **Removing a node** takes it out of every user's and token's list
+  (`Auth::drop_node_scope`, from `DELETE /nodes/{id}`). A list that had
+  only that node's entries gets `none:` (matches no server) instead of
+  becoming empty, which would mean every server.
+- **Web UI.** One picker for people and tokens (`lib/ServerScope.svelte`,
+  logic in `lib/scope.js`, mock B): a row for this panel and one per node,
+  with "All on <node>" first; servers it covers show picked and greyed. The
+  line under it says what the choice covers ("Survival, all on
+  vm-frankfurt. A whole node includes servers made there later."). Rows in
+  Users and Security and the access lines (Access, the account menu) use
+  the same wording.
+
+### Bulk actions across the main and its nodes
+
+- Nodes are groups in the bulk plan (`bulk.js nodeGroup`): each node's
+  servers go through the main's relay as the single-server buttons do, one
+  request per server, so the node's guard and the ceiling apply to each.
+- Rows are skipped with the reason: a node that needs an update, can't be
+  reached, lets this panel only look, is under maintenance (start and
+  restart), or a person who can only look.
+- The node's "..." menu has "Select all on <node>" for everyone who sees
+  the node; the owner items (maintenance, update, settings) stay owner-only.
+  The menu's items now act on the node they were opened for; before, they
+  read a value that was already cleared when the menu closed, so "Pause
+  node" and "Update" from that menu did nothing (A2/A3 bug, fixed here).
+- The group head reads "vm-frankfurt · node" (the space was lost to
+  Svelte's whitespace trimming in the first build).
+- **Audit.** Every audit event has `node` and `node_name` when the request
+  went to a node; `GET /audit?node=<id>` filters (`Audit::recent_for_node`).
+  Security › Audit log has "Everything" plus one tab per node (on a phone
+  the tabs get their own line under the title), and a node chip on each
+  row.
+
+### API, CLI, MCP
+
+- `PUT /api/v1/nodes/{id}/ceiling {"ceiling":"look"|"operate"}`, owner
+  only like the other node settings: lowers what this panel lets itself do
+  on the node. Raising it is refused with how to do it (leave and join
+  again on the node: the node must agree). Audited
+  `node "<name>" level manage -> look`.
+- `hopperd node ceiling [look|operate|manage]` on the node: no level shows
+  the current one; a lower level rewrites `node.json` and the running
+  tunnel picks it up on the next request (`ceiling_now`); a higher one is
+  refused with the leave-and-join steps.
+- MCP: `list_servers` includes node servers (their ids and node named).
+  Every per-server tool (console, power, send_command, list/read/write/
+  search files, list_mods, last_crash, list_backups) works on a node server
+  by sending the same API request through the relay (`mcp::node_call`), so
+  scope, role and ceiling are checked exactly as for the web UI. Changes
+  are audited with the node named (`ip` "mcp").
+
+### A3 leftovers
+
+- **A failed update survives a restart of the main.** The last update
+  result per node is saved with the node (`Nodes::keep_update`) once it has
+  ended (failed or done) and read back on start, so the row keeps "Update
+  failed: ..." instead of going back to "Update available".
+- **`--home` adopts a left-behind `node.json`.** A node started with
+  `--home` after joining without it finds `node.json` in the start folder,
+  moves it into the data folder and connects (`tunnel::node::adopt_left_behind`).
+  Tested, and checked live on the scratch nodes.
+
+### Measured
+
+Real browser (headless Chromium, 1280 and 375 px, Hopper Dark and Light),
+scratch main + two scratch nodes on 127.0.0.1:
+
+- Users picker: no chip past the card (card 372–1140, every chip inside;
+  at 375: 16–359). Row label and chips on one line: label caps y 322–329,
+  "Lobby" caps y 320–329 (centres 1 px apart; was 2.5 px before
+  `line-height: 20px`).
+- Users rows: "Survival, all on vm-frankfurt" and "All on vm-jeddah", no
+  truncation (scrollWidth = clientWidth = 668).
+- Bulk restart of Lobby + all on vm-frankfurt + Skyblock: dialog "Restart 4
+  servers?", groups fox (1), vm-frankfurt · node (3), vm-jeddah · node
+  (1 skipped: "vm-jeddah lets this panel only look."); no row overflows at
+  1280 or 375.
+- Audit filter vm-frankfurt: only the node rows (three from the bulk
+  restart, one from the desktop's token), each with its node chip. At 375
+  px "Refresh" sits at x 295-334 in a card ending at 358.
+- Scoped user mia (Operator; Survival + all on vm-frankfurt) sees Survival,
+  ATM10, Later, TNP (Later made after the scope was set), nothing on
+  vm-jeddah, no Lobby.
+
+Tests: `relay_tests` A4 section (node scope covers later servers, a
+node-scoped token is refused on another node, removing a node drops its
+scope, a bulk restart is audited with the node named, MCP in scope only,
+the ceiling route only lowers, a failed update survives a restart);
+`tunnel::node` (left-behind `node.json`, the ceiling command only lowers);
+`ui/tests/scope.test.mjs`, `bulk.test.mjs` node group.
+
+### Hopper desktop
+
+- No code change. Paired with an API token scoped to "All on vm-frankfurt",
+  the Servers list shows the main's group with 0 servers and the
+  vm-frankfurt group with its three servers, nothing from vm-jeddah.
+  Overview, Files, Logs & crashes load through the node; Start reaches the
+  node and shows its answer; the main's audit log has the token's request
+  with the node named.
+- Desktop's Servers list has **no multi-select**, so no bulk actions there
+  (only content, files, backups, configs, history and crash lists use
+  `selection.rs`). Bulk across main and nodes is web-only for now.
+- Changing who sees what (users, tokens, their scope) stays in the web UI;
+  desktop has no Users or API token screens.
+
+### Left (not done in A4)
+
+1. **Desktop bulk actions** on the Servers list (above).
+2. **Audit rows at 375 px** scroll sideways inside the log (the table is
+   as before A4); only the header was fixed to keep Refresh in view.
+3. **The overview's Start button shows on a Look-only node's server**
+   (Skyblock on vm-jeddah); pressing it is refused. Seen, not changed.
+4. **A node's start error names its full folder path** ("C:\...\ATM10 has
+   no run.bat, start.bat or server.jar to start"), on desktop and web; the
+   path is the node's, shown to anyone allowed to start it. Seen, not
+   changed.
+
+### A4 security review (2026-11-14)
+
+| # | Rank | Finding | Status |
+|---|---|---|---|
+| 1 | — | **Namespaced-id scope bypass.** Could a list entry or a crafted id reach a server it shouldn't (`node:` read as a server id, a local id with `:`, `<nodeA>:x` matching `node:<nodeB>`)? The node part is split from the id by the same `relay::split` the relay uses to route, and compared whole; local ids never contain `:`; `node:` with nothing after it matches nothing and can't be saved. The check runs on the main before relaying, and the node checks its own folder paths again. | Sound; tested (`a_node_token_is_refused_elsewhere`, `scope.test.mjs`). |
+| 2 | — | **Scope on tokens vs users.** Both are the same `servers` list on `Who`, checked by the same `sees`; a token can't hold more than its maker picked, and a read-only token stays read-only on nodes (the role is capped before the ceiling). Managers and the owner are never limited, as before. | Sound. |
+| 3 | — | **Ceiling interaction.** Scope only picks which servers; the role on a node is still `min(role, ceiling)` in `relay::forward`, and the node caps again by its own `node.json`. The new ceiling route and CLI only lower; raising needs the node to join again. | Sound; tested (`the_ceiling_route_only_lowers`, `the_ceiling_command_only_lowers`). |
+| 4 | Low | **Removed nodes.** A removed node leaves every list; a list left empty gets `none:` so it never turns into "every server". A node that joins again gets a new id, so old entries can't come back to life. A list saved while the node was being removed would be refused (`server_list`). | Sound; tested (`removing_a_node_drops_its_scope`). |
+| 5 | Low | **Audit gaps.** The main writes node requests (web, bulk, MCP) with the node named; the node writes them in its own log as the main's tunnel. Reads aren't audited (as on the main). An MCP change shows `ip` "mcp" rather than the caller's address, as MCP changes on local servers already did. | Listed. |
+| 6 | — | **MCP.** Node tools build the same API request the web UI sends and run it through `security::refusal` (`allowed`) and the relay, so there is no second permission path; unknown tools and actions are refused before anything is sent. | Sound; tested (`mcp_works_on_node_servers_in_scope_only`). |
+| 7 | Low | **Bulk.** Each row is its own request with the person's own session, so a bulk action can't do more than clicking each server; skipped rows are decided in the browser only to explain, the server refuses the same rows anyway. | Sound. |
+
 ## Open questions for the maintainer
 
 1. **Remote-session limits (B).** *Answered (maintainer, 2026-11-11): a

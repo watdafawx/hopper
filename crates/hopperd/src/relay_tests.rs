@@ -580,3 +580,229 @@ mod stream;
 
 #[path = "relay_skew_tests.rs"]
 mod skew;
+
+// ---- node-scoped access, bulk and MCP (A4) ----
+
+/// A second node joined to the main but never connected: another node's id
+/// to aim at.
+fn other_node(p: &Pair) -> String {
+    let (_, key, _) = p.main.app.nodes.make_key(Ceiling::Manage, "owner");
+    p.main.app.nodes.use_key(&key, "vm2", "10.0.0.8".parse().unwrap(), "").unwrap().0.id
+}
+
+/// A new server folder on the node, as if made there after the scope was
+/// given; waits until the main lists it.
+async fn new_node_server(p: &Pair, folder: &str) -> String {
+    let srv = p.node.dir.join("servers").join(folder);
+    std::fs::create_dir_all(&srv).unwrap();
+    std::fs::write(srv.join("server.properties"), "motd=later\n").unwrap();
+    p.node.app.rescan();
+    let snap = p.node.app.take_snapshot();
+    p.node.app.snapshot.send_replace(Arc::new(snap));
+    let local = p.node.app.servers.list().into_iter().find(|e| e.name == folder).expect("the new server").id.clone();
+    let ns = crate::relay::join(&p.id, &local);
+    for _ in 0..150 {
+        if p.main.app.nodes.servers_for(&Who::Owner).iter().any(|s| s["id"] == ns.as_str()) {
+            return ns;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // The live loop didn't send it yet: hand the list over as it would.
+    let list: Vec<Value> = p.node.app.snapshot.borrow().servers.iter().map(|s| json!(s)).collect();
+    crate::nodes::took_for_test(&p.main.app, &p.id, list);
+    ns
+}
+
+/// Someone given "all servers on node X" sees a server made there later,
+/// and nothing on another node or on the main.
+#[tokio::test]
+async fn a_node_scope_covers_servers_made_later() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let y = other_node(&p);
+    let (s, u) = send(&p.main, &p.main_cookie, "POST", "/api/v1/users", Some(json!({ "name": "nia", "password": "niapass12", "role": "operator", "servers": [format!("node:{}", p.id)] }))).await;
+    assert_eq!(s, StatusCode::OK, "{u}");
+    let later = new_node_server(&p, "Later Server").await;
+    let nia = crate::cross_origin_tests::user_cookie(&p.main, "nia", "niapass12").await;
+    let (s, list) = send(&p.main, &nia, "GET", "/api/v1/servers", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let ids: Vec<&str> = list.as_array().unwrap().iter().filter_map(|s| s["id"].as_str()).collect();
+    assert!(ids.contains(&later.as_str()) && ids.contains(&p.ns().as_str()), "{ids:?}");
+    assert!(!ids.contains(&p.main.server.as_str()), "{ids:?}");
+    // Their own role on it: an Operator can look, not open secrets.
+    let (s, b) = send(&p.main, &nia, "GET", &format!("/api/v1/fs/{later}/list?path="), None).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let (s, _) = send(&p.main, &nia, "GET", &format!("/api/v1/servers/{}/console", p.main.server), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = send(&p.main, &nia, "GET", &format!("/api/v1/servers/{y}:x/console"), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    // The live feed's heads: node X only, even before Y has servers.
+    let who = Who::User { id: "u".into(), name: "nia".into(), role: Role::Operator, servers: vec![format!("node:{}", p.id)] };
+    let (servers, heads) = p.main.app.nodes.live_view(&who);
+    assert_eq!(heads.iter().map(|h| h["id"].as_str().unwrap()).collect::<Vec<_>>(), vec![p.id.as_str()]);
+    assert!(servers.iter().all(|s| s["node"] == p.id.as_str()));
+    let only_y = Who::User { id: "u".into(), name: "nia".into(), role: Role::Operator, servers: vec![format!("node:{y}")] };
+    let (servers, heads) = p.main.app.nodes.live_view(&only_y);
+    assert!(servers.is_empty() && heads.len() == 1 && heads[0]["id"] == y.as_str());
+}
+
+/// A token for node X is refused on node Y, on the main's own servers and
+/// on node Y's jobs; it works on X.
+#[tokio::test]
+async fn a_node_token_is_refused_elsewhere() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let y = other_node(&p);
+    let (s, b) = send(&p.main, &p.main_cookie, "POST", "/api/v1/tokens", Some(json!({ "name": "x only", "servers": [format!("node:{}", p.id)] }))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let token = b["token"].as_str().unwrap().to_string();
+    let get = |path: String| {
+        let token = token.clone();
+        let main = &p.main;
+        async move {
+            let (s, _, _) = call("GET", path).bearer(&token).send(main).await;
+            s
+        }
+    };
+    assert_eq!(get(format!("/api/v1/fs/{}/text?path=hello.txt", p.ns())).await, StatusCode::OK);
+    assert_eq!(get(format!("/api/v1/servers/{}/console", p.main.server)).await, StatusCode::FORBIDDEN);
+    assert_eq!(get(format!("/api/v1/servers/{y}:x/console")).await, StatusCode::FORBIDDEN);
+    assert_eq!(get(format!("/api/v1/jobs/{y}:1")).await, StatusCode::FORBIDDEN);
+    // A scope for a node that isn't joined is refused when it's given.
+    let (s, b) = send(&p.main, &p.main_cookie, "POST", "/api/v1/tokens", Some(json!({ "name": "gone", "servers": ["node:abcdefabcdef"] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+    let (s, _) = send(&p.main, &p.main_cookie, "POST", "/api/v1/tokens", Some(json!({ "name": "bare", "servers": ["node:"] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+/// Removing a node drops its scope entries; a list left empty matches
+/// nothing rather than widening to every server.
+#[tokio::test]
+async fn removing_a_node_drops_its_scope() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let y = other_node(&p);
+    let mixed = vec![format!("node:{y}"), p.main.server.clone(), format!("{y}:tnp")];
+    let only_y = vec![format!("node:{y}")];
+    p.main.app.auth.user_create("mixed", "mixedpass1", Role::Operator, mixed).unwrap();
+    p.main.app.auth.user_create("onlyy", "onlyypass1", Role::Operator, only_y.clone()).unwrap();
+    p.main.app.auth.token_create("y token", false, only_y, None).unwrap();
+    let (s, _) = send(&p.main, &p.main_cookie, "DELETE", &format!("/api/v1/nodes/{y}"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let users = p.main.app.auth.users();
+    let of = |n: &str| users.iter().find(|u| u.name == n).unwrap().servers.clone();
+    assert_eq!(of("mixed"), vec![p.main.server.clone()]);
+    assert_eq!(of("onlyy"), vec![crate::auth::NO_SERVERS.to_string()]);
+    let t = p.main.app.auth.tokens();
+    assert_eq!(t.iter().find(|t| t.name == "y token").unwrap().servers, vec![crate::auth::NO_SERVERS.to_string()]);
+    let nobody = Who::User { id: "u".into(), name: "onlyy".into(), role: Role::Operator, servers: of("onlyy") };
+    assert!(!nobody.sees(&p.main.server) && !nobody.sees(&p.ns()));
+    let (servers, heads) = p.main.app.nodes.live_view(&nobody);
+    assert!(servers.is_empty() && heads.is_empty());
+}
+
+/// A bulk restart across the main and a node (one request per server, as
+/// the web UI sends them) lands in the main's one audit log, the node
+/// named; the node filter shows only that node's lines.
+#[tokio::test]
+async fn a_bulk_restart_is_audited_with_the_node_named() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    for id in [p.main.server.clone(), p.ns()] {
+        // The test servers have nothing to run: the answer may be a refusal
+        // to start, but the attempt is what the log must show.
+        send(&p.main, &p.main_cookie, "POST", &format!("/api/v1/servers/{id}/power"), Some(json!({ "action": "restart" }))).await;
+    }
+    let (s, all) = send(&p.main, &p.main_cookie, "GET", "/api/v1/audit?limit=50", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let power: Vec<&Value> = all.as_array().unwrap().iter().filter(|e| e["path"].as_str().is_some_and(|x| x.ends_with("/power"))).collect();
+    assert_eq!(power.len(), 2, "{all}");
+    let on_node = power.iter().find(|e| e["path"].as_str().unwrap().contains(&p.ns())).unwrap();
+    assert_eq!((on_node["node"].as_str(), on_node["node_name"].as_str()), (Some(p.id.as_str()), Some("vm")));
+    let local = power.iter().find(|e| e["path"].as_str().unwrap().contains(&format!("/servers/{}/", p.main.server))).unwrap();
+    assert!(local.get("node").is_none(), "{local}");
+    let (_, only) = send(&p.main, &p.main_cookie, "GET", &format!("/api/v1/audit?node={}", p.id), None).await;
+    let only = only.as_array().unwrap();
+    assert!(!only.is_empty() && only.iter().all(|e| e["node"] == p.id.as_str()), "{only:?}");
+    // A refusal on a node is logged with the node named too.
+    p.main.app.auth.user_create("vic", "vicpass123", Role::Viewer, vec![]).unwrap();
+    let vic = crate::cross_origin_tests::user_cookie(&p.main, "vic", "vicpass123").await;
+    let (s, _) = send(&p.main, &vic, "POST", &format!("/api/v1/servers/{}/power", p.ns()), Some(json!({ "action": "restart" }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (_, only) = send(&p.main, &p.main_cookie, "GET", &format!("/api/v1/audit?node={}", p.id), None).await;
+    assert!(only.as_array().unwrap().iter().any(|e| e["who"].as_str().is_some_and(|w| w.contains("vic")) && e["status"] == 403), "{only}");
+}
+
+async fn mcp(p: &Pair, token: &str, tool: &str, args: Value) -> Value {
+    let rpc = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": tool, "arguments": args } });
+    let (s, _, b) = call("POST", "/api/v1/mcp").bearer(token).json(rpc).send(&p.main).await;
+    assert_eq!(s, StatusCode::OK);
+    body(&b)["result"].clone()
+}
+
+/// The MCP tools list and act on node servers in scope, and refuse the
+/// rest with the same checks as the web UI.
+#[tokio::test]
+async fn mcp_works_on_node_servers_in_scope_only() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let y = other_node(&p);
+    let (_, b) = send(&p.main, &p.main_cookie, "POST", "/api/v1/tokens", Some(json!({ "name": "agent", "servers": [format!("node:{}", p.id)] }))).await;
+    let token = b["token"].as_str().unwrap().to_string();
+    let r = mcp(&p, &token, "list_servers", json!({})).await;
+    let listed = r["content"][0]["text"].as_str().unwrap();
+    assert!(listed.contains(&p.ns()) && !listed.contains(&format!("\"{}\"", p.main.server)), "{listed}");
+    let r = mcp(&p, &token, "read_file", json!({ "server": p.ns(), "path": "hello.txt" })).await;
+    assert_eq!(r["content"][0]["text"], "hello from the server", "{r}");
+    let r = mcp(&p, &token, "write_file", json!({ "server": p.ns(), "path": "hello.txt", "content": "from mcp" })).await;
+    assert!(r.get("isError").is_none(), "{r}");
+    assert_eq!(std::fs::read_to_string(p.node.dir.join("servers").join("Test Server").join("hello.txt")).unwrap(), "from mcp");
+    for server in [p.main.server.clone(), format!("{y}:x")] {
+        let r = mcp(&p, &token, "read_file", json!({ "server": server, "path": "hello.txt" })).await;
+        assert_eq!(r["isError"], true, "{server}: {r}");
+    }
+    // Path checks still apply on the node.
+    let r = mcp(&p, &token, "read_file", json!({ "server": p.ns(), "path": "../outside.txt" })).await;
+    assert_eq!(r["isError"], true, "{r}");
+    // A read-only token can't write through MCP either.
+    let (_, b) = send(&p.main, &p.main_cookie, "POST", "/api/v1/tokens", Some(json!({ "name": "look", "read_only": true, "servers": [format!("node:{}", p.id)] }))).await;
+    let look = b["token"].as_str().unwrap().to_string();
+    let r = mcp(&p, &look, "write_file", json!({ "server": p.ns(), "path": "hello.txt", "content": "no" })).await;
+    assert_eq!(r["isError"], true, "{r}");
+    // A node at Look refuses MCP writes too (the ceiling caps everything).
+    *p.ceiling.lock().unwrap() = Some(Role::Viewer);
+    let r = mcp(&p, &token, "write_file", json!({ "server": p.ns(), "path": "hello.txt", "content": "no" })).await;
+    assert_eq!(r["isError"], true, "{r}");
+    assert_eq!(std::fs::read_to_string(p.node.dir.join("servers").join("Test Server").join("hello.txt")).unwrap(), "from mcp");
+}
+
+/// The ceiling route only lowers, and only the owner may use it.
+#[tokio::test]
+async fn the_ceiling_route_only_lowers() {
+    let p = pair(Ceiling::Operate, Some(Role::Operator)).await;
+    let path = format!("/api/v1/nodes/{}/ceiling", p.id);
+    let (s, b) = send(&p.main, &p.main_cookie, "PUT", &path, Some(json!({ "ceiling": "manage" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+    assert!(b["error"].as_str().unwrap().contains("join again"), "{b}");
+    p.main.app.auth.user_create("ada", "adapass123", Role::Admin, vec![]).unwrap();
+    let ada = crate::cross_origin_tests::user_cookie(&p.main, "ada", "adapass123").await;
+    let (s, _) = send(&p.main, &ada, "PUT", &path, Some(json!({ "ceiling": "look" }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, b) = send(&p.main, &p.main_cookie, "PUT", &path, Some(json!({ "ceiling": "look" }))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let (_, heads) = p.main.app.nodes.live_view(&Who::Owner);
+    assert_eq!(heads[0]["ceiling"], "look");
+    let (s, _) = send(&p.main, &p.main_cookie, "POST", &format!("/api/v1/servers/{}/power", p.ns()), Some(json!({ "action": "start" }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+/// A failed node update is still shown after the main restarts; a later
+/// success clears it.
+#[tokio::test]
+async fn a_failed_update_survives_a_restart_of_the_main() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    crate::nodes::update_ended_for_test(&p.main.app, &p.id, "failed");
+    let again = crate::nodes::Nodes::new(&p.main.app.data_dir);
+    let (_, heads) = again.live_view(&Who::Owner);
+    assert_eq!(heads[0]["update"]["state"], "failed", "{}", heads[0]);
+    assert_eq!(heads[0]["update"]["message"], "it didn't start");
+    crate::nodes::update_ended_for_test(&p.main.app, &p.id, "done");
+    let again = crate::nodes::Nodes::new(&p.main.app.data_dir);
+    let (_, heads) = again.live_view(&Who::Owner);
+    assert!(heads[0]["update"].is_null(), "{}", heads[0]);
+}

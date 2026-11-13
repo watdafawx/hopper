@@ -69,6 +69,32 @@ impl Ceiling {
             Ceiling::Manage => "manage",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Ceiling> {
+        match s {
+            "look" => Some(Ceiling::Look),
+            "operate" => Some(Ceiling::Operate),
+            "manage" => Some(Ceiling::Manage),
+            _ => None,
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Ceiling::Look => 0,
+            Ceiling::Operate => 1,
+            Ceiling::Manage => 2,
+        }
+    }
+
+    /// The level as the web UI names it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Ceiling::Look => "Look only",
+            Ceiling::Operate => "Operate",
+            Ceiling::Manage => "Manage",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -94,6 +120,11 @@ pub struct Node {
     /// there from this main, until it's ended (design/multi-panel.md, A2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<Maintenance>,
+    /// The last update asked from here, when it failed: kept over a restart
+    /// of this panel so the row still says so (A3 left 2). Cleared by the
+    /// next update that works.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_update: Option<Update>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -245,7 +276,7 @@ impl Skew {
 }
 
 /// An update this panel asked of a node.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Update {
     /// "updating", "done" or "failed".
     pub state: String,
@@ -674,7 +705,7 @@ impl Nodes {
                     "capabilities": live.map(|l| &l.caps),
                     "outdated": outdated(&n.version),
                     "can_update": self.can_update(&g, n).is_ok(),
-                    "update": g.updates.get(&n.id),
+                    "update": g.updates.get(&n.id).or(n.failed_update.as_ref()),
                 })
             })
             .collect();
@@ -750,6 +781,44 @@ impl Nodes {
         if let Some(u) = self.lock().updates.get_mut(id) {
             f(u);
         }
+    }
+
+    /// An update ended: a failure is saved with the node (so the row still
+    /// shows it after this panel restarts), anything else clears it.
+    fn keep_update(&self, id: &str) {
+        let mut g = self.lock();
+        let failed = g.updates.get(id).filter(|u| u.state == "failed").cloned();
+        let Some(n) = g.stored.nodes.iter_mut().find(|n| n.id == id) else { return };
+        if n.failed_update != failed {
+            n.failed_update = failed;
+            self.save(&g);
+        }
+    }
+
+    /// The node's name, while it's joined.
+    pub fn name_of(&self, id: &str) -> Option<String> {
+        self.lock().stored.nodes.iter().find(|n| n.id == id).map(|n| n.name.clone())
+    }
+
+    /// Lowers what this panel lets itself do on a node (the node caps it by
+    /// its own `node.json` too). Raising it needs the node's say: on the
+    /// node, leave and join again at the higher level. Returns the node's
+    /// name and the level it had.
+    pub fn lower_ceiling(&self, id: &str, to: Ceiling) -> Result<(String, Ceiling), String> {
+        let mut g = self.lock();
+        let n = g.stored.nodes.iter_mut().find(|n| n.id == id).ok_or("No node with that id.")?;
+        let before = n.ceiling;
+        if to.rank() > before.rank() {
+            return Err(format!(
+                "{} was joined at {}. To allow more, leave on the node and join again at the higher level: the node has to agree to it.",
+                n.name,
+                before.label()
+            ));
+        }
+        n.ceiling = to;
+        let name = n.name.clone();
+        self.save(&g);
+        Ok((name, before))
     }
 
     /// The nodes "Update all" would update, in list order.
@@ -835,7 +904,9 @@ impl Nodes {
             let up = live.is_some() && matches!(state, NodeState::Connected | NodeState::Reconnecting);
             let snap = g.snaps.get(&n.id);
             let mine = snap.map(|s| Self::servers_of(&n.id, s, up, who)).unwrap_or_default();
-            if limited && mine.is_empty() {
+            // Someone limited sees a node when it's in their list as a
+            // whole (even with no servers yet) or holds one of theirs.
+            if limited && !who.sees_node(&n.id) {
                 continue;
             }
             // RAM promised: what the node's servers may take at most.
@@ -857,7 +928,7 @@ impl Nodes {
                 "skew": g.skew.get(&n.id).map(|s| s.text(&n.name)),
                 "outdated": outdated(&n.version),
                 "can_update": self.can_update(&g, n).is_ok(),
-                "update": g.updates.get(&n.id),
+                "update": g.updates.get(&n.id).or(n.failed_update.as_ref()),
             }));
             servers.extend(mine);
         }
@@ -890,6 +961,7 @@ fn new_node(name: &str, ceiling: Ceiling, by: &str, via: &str, ip: IpAddr, versi
         version: clean_version(version),
         last_seen: 0,
         maintenance: None,
+        failed_update: None,
     };
     (token, node)
 }
@@ -930,6 +1002,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/nodes/pending/{id}/answer", post(pending_answer))
         .route("/api/v1/nodes/{id}", delete(node_remove))
         .route("/api/v1/nodes/{id}/maintenance", axum::routing::put(maintenance))
+        .route("/api/v1/nodes/{id}/ceiling", axum::routing::put(ceiling))
         .route("/api/v1/nodes/{id}/update", post(node_update))
         .route("/api/v1/nodes/update-all", post(nodes_update_all))
         // What nodes call (no session: a join key, a code request or a node token).
@@ -999,6 +1072,7 @@ pub async fn update_node(app: &Arc<App>, id: &str, who: &crate::auth::Who) -> Re
         u.message = message.clone();
         u.at = now();
     });
+    app.nodes.keep_update(id);
     app.changes.emit(None, &["list"], None);
     log::info!("node \"{name}\": update to {target}: {message}");
     r
@@ -1128,6 +1202,22 @@ async fn nodes_update_all(State(app): State<Arc<App>>, headers: HeaderMap, metho
 }
 
 #[derive(Deserialize)]
+struct CeilingBody {
+    ceiling: String,
+}
+
+/// Lowers what this panel may do on a node (look, operate, manage). Only
+/// the true owner, like every other node setting; raising is refused (see
+/// [`Nodes::lower_ceiling`]).
+async fn ceiling(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Json(b): Json<CeilingBody>) -> ApiResult<Response> {
+    owner_only(&app, &headers, &method)?;
+    let to = Ceiling::parse(&b.ceiling).ok_or_else(|| crate::api::bad("The level is look, operate or manage."))?;
+    let (name, before) = app.nodes.lower_ceiling(&id, to).map_err(|e| if e.starts_with("No node") { not_found("node") } else { crate::api::bad(e) })?;
+    app.changes.emit(None, &["list"], None);
+    Ok(noted(json!({ "ok": true, "ceiling": to.id() }), format!("node \"{name}\" level {} -> {}", before.id(), to.id())))
+}
+
+#[derive(Deserialize)]
 struct MaintenanceBody {
     on: bool,
 }
@@ -1220,6 +1310,9 @@ async fn pending_answer(
 async fn node_remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Response> {
     owner_only(&app, &headers, &method)?;
     let (node, live) = app.nodes.remove(&id).ok_or_else(|| not_found("node"))?;
+    // "All servers on this node" and its servers leave every user's and
+    // token's list; a list left empty matches nothing, never "all".
+    app.auth.drop_node_scope(&node.id);
     if let Some(h) = live {
         // The node stops when it reads this; its next try would get a 401 anyway.
         h.close("removed").await;
@@ -1334,6 +1427,8 @@ fn audit(app: &App, addr: SocketAddr, headers: &HeaderMap, who: &str, path: Stri
         method: "GET".into(),
         path,
         status,
+        node: String::new(),
+        node_name: String::new(),
     });
 }
 
@@ -1500,6 +1595,19 @@ pub(crate) fn attach_for_test(app: &Arc<App>, node: &Node, handle: Handle) -> Fo
 #[cfg(test)]
 pub(crate) fn detach_for_test(app: &Arc<App>, id: &str) {
     app.nodes.lock().live.remove(id);
+}
+
+/// The node's live feed sent this server list (relay tests).
+#[cfg(test)]
+pub(crate) fn took_for_test(app: &App, id: &str, servers: Vec<Value>) {
+    app.nodes.took(id, servers, Value::Null);
+}
+
+/// An update of this node ended with `state` (A4 tests: a failure is kept).
+#[cfg(test)]
+pub(crate) fn update_ended_for_test(app: &App, id: &str, state: &str) {
+    app.nodes.lock().updates.insert(id.into(), Update { state: state.into(), target: "9.9.9".into(), message: "it didn't start".into(), at: 1, by: "owner".into() });
+    app.nodes.keep_update(id);
 }
 
 /// The same, for a node that says it runs `version` and has `caps`.

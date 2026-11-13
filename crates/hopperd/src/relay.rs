@@ -988,6 +988,8 @@ async fn serve_update(app: Arc<App>, ceiling: Role, main: String, head: Head, mu
         method: "POST".into(),
         path,
         status: if started.is_ok() { 200 } else { 400 },
+        node: String::new(),
+        node_name: String::new(),
     });
     if let Err(e) = started {
         line(&mut s.tx, json!({ "state": "refused", "error": format!("{e:#}") })).await;
@@ -1018,6 +1020,8 @@ fn record_refusal(app: &App, who: &Who, method: &Method, route: &str) {
         method: method.to_string(),
         path: format!("{route} (refused: not relayed)"),
         status: 403,
+        node: String::new(),
+        node_name: String::new(),
     });
 }
 
