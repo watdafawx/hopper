@@ -6,11 +6,13 @@
   import { AlertTriangle, X, Share2, Info } from '@lucide/svelte';
   import ShareLog from './ShareLog.svelte';
   import { alerts, alertsFor, watchAlerts, dismissAlert, refreshAlerts } from './lib/alerts.svelte.js';
-  import { post } from './lib/api.js';
+  import { post, target } from './lib/api.js';
   import { tpsLevel } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
 
   let { server, part = 'chip' } = $props();
+  // Alerts are this panel's own; another panel's server shows none here (yet).
+  const remote = !!target.panel;
   const id = $derived(server.id);
   const tps = $derived(alerts.tps[id]);
   const running = $derived(server.state === 'running');
@@ -52,7 +54,7 @@
   onMount(watchAlerts);
 </script>
 
-{#if part === 'chip'}
+{#if remote}{:else if part === 'chip'}
   {#if running && tps}
     <span class="chip tps {level}" title={tpsTitle(tps) || 'Ticks per second'}>TPS {tps.tps.toFixed(1)}</span>
   {:else if running}

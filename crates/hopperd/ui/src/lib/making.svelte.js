@@ -15,7 +15,7 @@ export function track(job, name, start = false) {
     const m = find(job);
     if (!m) return;
     try {
-      const st = await api(`/jobs/${job}`, { poll: true });
+      const st = await api(`/jobs/${job}`, { poll: true, home: true });
       m.detail = st.detail || '';
       m.progress = st.progress;
       if (!st.done) return setTimeout(poll, 600);
@@ -23,7 +23,7 @@ export function track(job, name, start = false) {
       else if (st.error) Object.assign(m, { state: 'failed', error: st.error });
       else {
         Object.assign(m, { state: 'ready', id: st.result?.id || null });
-        if (m.start && m.id) post(`/servers/${encodeURIComponent(m.id)}/power`, { action: 'start' }).catch(() => {});
+        if (m.start && m.id) post(`/servers/${encodeURIComponent(m.id)}/power`, { action: 'start' }, { home: true }).catch(() => {});
       }
     } catch (e) {
       Object.assign(m, { state: 'failed', error: e.message });
@@ -33,7 +33,7 @@ export function track(job, name, start = false) {
 }
 
 /** Stops a server being made. */
-export const cancel = (job) => post(`/jobs/${job}/cancel`, {}).catch(() => {});
+export const cancel = (job) => post(`/jobs/${job}/cancel`, {}, { home: true }).catch(() => {});
 
 /** Takes a row off the list. */
 export function forget(job) {

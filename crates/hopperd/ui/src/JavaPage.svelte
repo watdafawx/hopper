@@ -7,7 +7,7 @@
   import { FileCode, TriangleAlert, ChevronDown, ChevronRight, Info } from '@lucide/svelte';
   import MemoryRange from './MemoryRange.svelte';
   import JvmArgsEditor from './JvmArgsEditor.svelte';
-  import { api } from './lib/api.js';
+  import { api, here } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { flagsToText } from './lib/jvm.js';
 
@@ -63,7 +63,7 @@
   // link to the args file, which is shown apart (the flags live only there).
   const start = $derived(view?.start || jvm?.start || null);
   const files = $derived(jvm?.files || []);
-  const editHref = (f) => `#/server/${encodeURIComponent(server.id)}/edit/${encodeURIComponent(f)}`;
+  const editHref = (f) => `#${here()}/server/${encodeURIComponent(server.id)}/edit/${encodeURIComponent(f)}`;
   const lineParts = $derived(
     (start?.line || '').split(/(@user_jvm_args\.txt|!ARGS!|%ARGS%)/i).filter(Boolean)
       .map((text) => ({ text, file: start?.reads_args_file && /^(@user_jvm_args\.txt|!ARGS!|%ARGS%)$/i.test(text) })),

@@ -39,6 +39,7 @@
   import VersionChip from './VersionChip.svelte';
   import PanelVersions from './PanelVersions.svelte';
   import { upd } from './lib/panelupdate.svelte.js';
+  import { panels, loadPanels, byId } from './lib/panels.svelte.js';
 
   let { hello, me, onSignOut } = $props();
   // The panel's version doesn't change under an open page (it reloads on update).
@@ -51,6 +52,7 @@
   $effect(() => {
     session.owner = owner;
     session.trueOwner = me?.role === 'owner';
+    session.role = me?.role || '';
     session.home = me?.panel_folder || '';
     session.servers = me?.servers_folder || '';
   });
@@ -154,9 +156,15 @@
       : route === '/access' ? (owner ? 'access' : 'account')
       : (route === '/panel-folder' || route === '/servers-folder') && owner ? 'panel-folder' : null,
   );
-  const page = $derived(route.startsWith('/server/') ? 'server' : route === '/browse' || route.startsWith('/browse/') ? 'browse' : settingsCat != null ? 'settings' : 'overview');
+  // Another panel's server: #/p/<panel>/server/<id>/... (server ids repeat
+  // across panels; this panel's keep #/server/<id> so old links work).
+  const remoteRoute = $derived(route.match(/^\/p\/([^/]+)(\/server\/.*)$/));
+  const panelKey = $derived(remoteRoute ? decodeURIComponent(remoteRoute[1]) : null);
+  const panelHere = $derived(panelKey ? byId(panelKey) : null);
+  const local = $derived(remoteRoute ? remoteRoute[2] : route);
+  const page = $derived(local.startsWith('/server/') ? 'server' : local === '/browse' || local.startsWith('/browse/') ? 'browse' : settingsCat != null ? 'settings' : 'overview');
   // #/server/<id>/<tab>/<path...>
-  const segs = $derived(route.split('/').slice(2).map(decodeURIComponent));
+  const segs = $derived(local.split('/').slice(2).map(decodeURIComponent));
   const serverId = $derived(page === 'server' ? segs[0] : null);
   const tab = $derived(page === 'server' ? segs[1] || 'console' : null);
   const subpath = $derived(page === 'server' ? segs.slice(2).join('/') : '');
@@ -173,24 +181,30 @@
     location.hash = r;
   }
 
+  /** New server is made on this panel: from another panel's page, go home first. */
+  function newServer() {
+    if (panelKey) go('/');
+    making = true;
+  }
+
   async function checkPending() {
     if (document.hidden) return;
     try {
-      pending = await api('/pair/pending');
+      pending = await api('/pair/pending', { home: true });
     } catch {
       // devices can't list; ignore
     }
   }
 
   async function signOut() {
-    await post('/auth/logout').catch(() => {});
+    await post('/auth/logout', {}, { home: true }).catch(() => {});
     disconnect();
     onSignOut();
   }
 
   async function rescan() {
     try {
-      const r = await post('/servers/rescan');
+      const r = await post('/servers/rescan', {}, { home: true });
       say(`Found ${r.servers} server${r.servers === 1 ? '' : 's'}.`);
     } catch (e) {
       say(e.message, true);
@@ -200,8 +214,8 @@
   /** What the palette offers, as of opening it. */
   function paletteItems() {
     const v = [];
-    const here = live.servers.find((s) => s.id === serverId);
-    v.push({ id: 'new', section: 'Actions', icon: Plus, title: 'New server…', words: 'create host make add', run: () => (making = true) });
+    const here = panelKey ? null : live.servers.find((s) => s.id === serverId);
+    v.push({ id: 'new', section: 'Actions', icon: Plus, title: 'New server…', words: 'create host make add', run: newServer });
     if (here) {
       const up = here.state === 'running' || here.state === 'starting';
       if (!canPower) {
@@ -233,7 +247,7 @@
 
   function openPalette() {
     menu = false;
-    palette = palette ? null : { items: paletteItems(), context: live.servers.find((s) => s.id === serverId)?.name || '' };
+    palette = palette ? null : { items: paletteItems(), context: (panelHere ?? live).servers.find((s) => s.id === serverId)?.name || '' };
   }
 
   /** The next or previous server in the list (Ctrl+Up / Ctrl+Down). */
@@ -241,7 +255,7 @@
     const alive = (s) => s.state === 'running' || s.state === 'starting' || s.state === 'stopping';
     const list = [...live.servers].sort((a, b) => Number(alive(b)) - Number(alive(a)));
     if (!list.length) return;
-    const i = list.findIndex((s) => s.id === serverId);
+    const i = panelKey ? -1 : list.findIndex((s) => s.id === serverId);
     const j = i < 0 ? (d > 0 ? 0 : list.length - 1) : (i + d + list.length) % list.length;
     const n = list[j];
     go(`/server/${encodeURIComponent(n.id)}${tab && tab !== 'console' ? `/${tab}` : ''}`);
@@ -317,6 +331,9 @@
     addEventListener('pointerdown', outside);
     connect();
     pingTimer = startPing();
+    // Other panels added to this page: each loads on its own, after this
+    // panel's list is up, and never holds it.
+    loadPanels();
     // Servers with a newer modpack version: the panel checks stale ones in
     // the background, so look again shortly after the first call.
     refreshPackUpdates();
@@ -409,13 +426,15 @@
   {/if}
   <div class="body">
     {#if page !== 'settings'}
-      <ServerList selected={serverId} {owner} {canPower} onNew={() => (making = true)} onRescan={rescan} />
+      <ServerList selected={serverId} selectedPanel={panelKey} {owner} {canPower} homeName={hello.name} homeVersion={hello.version} homeRole={me?.role} onNew={newServer} onRescan={rescan} />
     {/if}
     <main class="content">
       {#if page === 'browse'}
         <Browse segs={segs} />
+      {:else if page === 'server' && panelKey && !panelHere}
+        <div class="pad muted">{panels.loaded ? 'That panel isn’t on this page any more.' : 'Loading…'}</div>
       {:else if page === 'server'}
-        {#key serverId}<ServerPage id={serverId} {tab} path={subpath} />{/key}
+        {#key `${panelKey}|${serverId}`}<ServerPage id={serverId} {tab} path={subpath} panel={panelHere} />{/key}
       {:else if page === 'settings'}
         <PanelSettings cat={settingsCat} {hello} {me} bind:pending />
       {:else}

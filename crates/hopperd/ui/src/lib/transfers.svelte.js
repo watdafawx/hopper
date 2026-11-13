@@ -2,7 +2,8 @@
 // A chunk that fails is retried; a paused or dropped upload asks the panel
 // how far it got and carries on from there.
 
-import { api, post, del } from './api.js';
+import { api, post, del, target, apiBase, headersFor } from './api.js';
+import { say } from './toast.svelte.js';
 
 const CHUNK = 8 * 1024 * 1024;
 const PARALLEL = 3;
@@ -44,6 +45,8 @@ export function queueUploads(server, items, overwrite = false) {
     const id = nextId++;
     files.set(id, file);
     transfers.list.push({
+      // The panel whose page queued it (another panel: its address and token).
+      panel: target.panel,
       id, kind: 'up', server, path, name: file.name, size: file.size, done: 0, speed: 0,
       state: 'queued', error: '', upload: null, overwrite, samples: [], gen: 0,
     });
@@ -69,8 +72,8 @@ function putChunk(t, offset, blob) {
   return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
     xhrs.set(t.id, x);
-    x.open('PUT', `/api/v1/fs/${encodeURIComponent(t.server)}/uploads/${t.upload}?offset=${offset}`);
-    x.setRequestHeader('X-Hopperd', '1');
+    x.open('PUT', `${apiBase(t.panel)}/fs/${encodeURIComponent(t.server)}/uploads/${t.upload}?offset=${offset}`);
+    for (const [k, v] of Object.entries(headersFor(t.panel))) x.setRequestHeader(k, v);
     x.setRequestHeader('Content-Type', 'application/octet-stream');
     x.upload.onprogress = (e) => {
       const tt = find(t.id);
@@ -100,11 +103,11 @@ async function run(id) {
   try {
     let offset = 0;
     if (!t.upload) {
-      const r = await post(`/fs/${encodeURIComponent(t.server)}/uploads`, { path: t.path, size: file.size, overwrite: t.overwrite });
+      const r = await post(`/fs/${encodeURIComponent(t.server)}/uploads`, { path: t.path, size: file.size, overwrite: t.overwrite }, { panel: t.panel });
       if (t.gen !== gen) return;
       t.upload = r.id;
     } else {
-      offset = (await api(`/fs/${encodeURIComponent(t.server)}/uploads/${t.upload}`)).offset;
+      offset = (await api(`/fs/${encodeURIComponent(t.server)}/uploads/${t.upload}`, { panel: t.panel })).offset;
     }
     let fails = 0;
     if (file.size === 0) {
@@ -124,7 +127,7 @@ async function run(id) {
         if (!e.network || ++fails > RETRIES) throw e;
         t.error = `Connection lost, retrying (${fails}/${RETRIES})…`;
         await new Promise((r) => setTimeout(r, 500 * 2 ** fails));
-        offset = (await api(`/fs/${encodeURIComponent(t.server)}/uploads/${t.upload}`)).offset;
+        offset = (await api(`/fs/${encodeURIComponent(t.server)}/uploads/${t.upload}`, { panel: t.panel })).offset;
         t.error = '';
       }
     }
@@ -177,7 +180,7 @@ export async function cancel(id) {
   t.state = 'cancelled';
   xhrs.get(id)?.abort();
   files.delete(id);
-  if (t.upload && was !== 'done') await del(`/fs/${encodeURIComponent(t.server)}/uploads/${t.upload}`).catch(() => {});
+  if (t.upload && was !== 'done') await del(`/fs/${encodeURIComponent(t.server)}/uploads/${t.upload}`, { panel: t.panel }).catch(() => {});
   transfers.list = transfers.list.filter((x) => x.id !== id);
   pump();
 }
@@ -187,7 +190,26 @@ export function clearDone() {
 }
 
 /** Starts a browser download (the panel supports ranges, so it resumes). */
-export function download(url) {
+export async function download(url) {
+  // Another panel's file: this page has no cookie there, so it asks that
+  // panel for a one-use link (60 s, this file only) and follows that.
+  const p = target.panel;
+  if (p) {
+    const m = url.match(/^\/api\/v1\/fs\/([^/?]+)\/(file|zip)\?(.*)$/);
+    if (!m) {
+      say(`This download only works on ${p.name}'s own page for now.`, true);
+      return;
+    }
+    const q = new URLSearchParams(m[3]);
+    const body = m[2] === 'file' ? { path: q.get('path') } : { paths: q.getAll('path'), zip: true };
+    try {
+      const r = await post(`/fs/${m[1]}/link`, body);
+      url = `${p.url}${r.url}`;
+    } catch (e) {
+      say(e.message, true);
+      return;
+    }
+  }
   const a = document.createElement('a');
   a.href = url;
   a.download = '';

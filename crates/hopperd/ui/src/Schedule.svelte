@@ -5,7 +5,7 @@
   // plus scheduled backups. Save and Discard only light up once
   // something changed.
   import { CalendarClock, Save, RotateCcw } from '@lucide/svelte';
-  import { api } from './lib/api.js';
+  import { api, here } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { fullDate } from './lib/worlds.js';
 
@@ -101,7 +101,7 @@
 
     {#if server.sleep_after_minutes}
       <div class="f"><div><div>Sleep</div><div class="tiny muted">Stops after {server.sleep_after_minutes} min with nobody on, and starts when someone joins.</div></div>
-        <a class="small" href="#/server/{encodeURIComponent(server.id)}/settings">Settings › Address</a></div>
+        <a class="small" href="#{here()}/server/{encodeURIComponent(server.id)}/settings">Settings › Address</a></div>
     {/if}
 
     <div class="sec lbl">Backups</div>

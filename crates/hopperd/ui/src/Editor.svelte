@@ -10,7 +10,7 @@
   import ShareLog from './ShareLog.svelte';
   import ModPeek from './ModPeek.svelte';
   import ConfigSettings from './ConfigSettings.svelte';
-  import { api, post } from './lib/api.js';
+  import { api, post, here } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt, choose, dialog } from './lib/dialog.svelte.js';
   import { leave } from './lib/leave.js';
@@ -227,7 +227,7 @@
     if (rel === path) return;
     if (dirty && !(await confirmIt(`Open ${rel.split('/').pop()} without saving ${name}?`, { body: 'Your changes here are dropped.', ok: 'Discard changes', danger: true }))) return;
     leaving = true;
-    location.hash = `/server/${[server.id, 'edit', ...rel.split('/')].map(encodeURIComponent).join('/')}`;
+    location.hash = `${here()}/server/${[server.id, 'edit', ...rel.split('/')].map(encodeURIComponent).join('/')}`;
   }
 
   function keys(e) {
@@ -409,7 +409,7 @@
   </div>
 </div>
 {#if peek && peekMod}
-  <ModPeek {server} mod={owners.mods.get(peekMod.file)} onClose={() => (peek = false)} onChanged={async () => (owners = await configOwners(server.id, true))} onUpdate={() => (location.hash = `/server/${encodeURIComponent(server.id)}/mods`)} />
+  <ModPeek {server} mod={owners.mods.get(peekMod.file)} onClose={() => (peek = false)} onChanged={async () => (owners = await configOwners(server.id, true))} onUpdate={() => (location.hash = `${here()}/server/${encodeURIComponent(server.id)}/mods`)} />
 {/if}
 </div>
 

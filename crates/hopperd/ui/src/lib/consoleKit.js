@@ -80,14 +80,16 @@ export function powerQuestion(server, action) {
  * Starts, stops, restarts or kills the server, asking first where it costs
  * something (see powerQuestion). True when it was sent.
  */
-export async function askPower(server, action) {
+/** `panel`: the panel the server is on (lib/panels.svelte.js; null for this
+ * one); left out, the one whose page is open. */
+export async function askPower(server, action, panel) {
   const name = server.name;
   const text = powerQuestion(server, action);
   if (text && !(await confirmIt(`${LABEL[action]} the server?`, { body: text, ok: LABEL[action], danger: action === 'kill' }))) {
     return false;
   }
   try {
-    await post(`/servers/${encodeURIComponent(server.id)}/power`, { action });
+    await post(`/servers/${encodeURIComponent(server.id)}/power`, { action }, { panel });
     say(`${DONE[action]} ${name}`);
     return true;
   } catch (e) {

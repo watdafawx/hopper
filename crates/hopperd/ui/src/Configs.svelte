@@ -13,7 +13,7 @@
   import ConfigBar from './lib/ConfigBar.svelte';
   import PushPlayers from './lib/PushPlayers.svelte';
   import { ago } from './lib/browse.js';
-  import { api } from './lib/api.js';
+  import { api, here } from './lib/api.js';
   import { cfg, loadIndex, loadPlayers, playersDiffer, pendingList, SIDES, shortRel, fileRow } from './lib/configs.svelte.js';
   import { configOwners } from './lib/files-config.js';
   import { marks, searchWords } from './lib/mark.js';
@@ -152,7 +152,7 @@
     jump.path = rel;
     jump.line = line || 0;
     jump.text = true;
-    location.hash = `/server/${[server.id, 'edit', ...rel.split('/')].map(encodeURIComponent).join('/')}`;
+    location.hash = `${here()}/server/${[server.id, 'edit', ...rel.split('/')].map(encodeURIComponent).join('/')}`;
   }
   const initials = (n) => n.replace(/[^A-Za-z0-9 ]/g, '').split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase() || '?';
 

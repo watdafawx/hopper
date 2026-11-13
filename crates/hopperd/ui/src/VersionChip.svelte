@@ -27,7 +27,7 @@
     try {
       const a = await askAboutServers(st);
       if (!a) return;
-      await post('/panel/update/install', a.stop ? { version: st.latest, stop_servers: true } : { version: st.latest });
+      await post('/panel/update/install', a.stop ? { version: st.latest, stop_servers: true } : { version: st.latest }, { home: true });
       st.state = 'downloading';
       st.target = st.latest;
       loadUpdate();
