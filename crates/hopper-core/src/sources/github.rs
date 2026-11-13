@@ -96,7 +96,7 @@ fn releases_url(repo: &str) -> String {
 
 /// Every jar of the repo's recent releases, newest release first.
 pub fn candidates(src: &ModSource) -> anyhow::Result<Vec<Candidate>> {
-    let body = super::http::get_text(&releases_url(&src.url), true)?;
+    let body = super::http::get_text_fresh(&releases_url(&src.url), true, super::http::LIST_FRESH)?;
     let releases = parse_releases(&body)?;
     Ok(from_releases_for(&releases, src.class))
 }
@@ -106,7 +106,7 @@ pub fn candidates(src: &ModSource) -> anyhow::Result<Vec<Candidate>> {
 pub fn release_by_tag(src: &ModSource, tag: &str) -> anyhow::Result<Vec<Candidate>> {
     let tag_path: String = tag.split('/').map(|p| p.to_string()).collect::<Vec<_>>().join("%2F");
     let url = format!("https://api.github.com/repos/{}/releases/tags/{tag_path}", src.url);
-    let r: Release = serde_json::from_str(&super::http::get_text(&url, true)?)?;
+    let r: Release = serde_json::from_str(&super::http::get_text_fresh(&url, true, super::http::TAG_FRESH)?)?;
     Ok(from_releases_for(std::slice::from_ref(&r), src.class))
 }
 

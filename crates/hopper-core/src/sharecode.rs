@@ -874,7 +874,8 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
     }
     // Mods from GitHub and other links: the pinned file, checked against
     // its sha256. The source isn't trusted by this; updates wait for the
-    // player to confirm it.
+    // player to confirm it. A GitHub rate limit is said once, not per mod.
+    let mut limited: Option<(crate::sources::http::RateLimited, usize)> = None;
     for e in &share.entries {
         if let Entry::Source { pin, enabled } = e
             && !kept(inst, &source_who(&pin.source))
@@ -883,9 +884,16 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
             job.detail(format!("Getting {} from {}", pin.file, pin.source.publisher));
             crate::actor::claim_key(&format!("s:{}#{}", pin.source.url, pin.source.pattern));
             if let Err(e) = crate::sources::install_pinned(inst, pin, *enabled, job) {
-                job.note(format!("{}: {e:#}", pin.file));
+                match crate::sources::http::rate_limited(&e) {
+                    Some(r) => limited = Some((r, limited.map_or(0, |(_, n)| n) + 1)),
+                    None => job.note(format!("{}: {e:#}", pin.file)),
+                }
             }
         }
+    }
+    if let Some((r, n)) = limited {
+        let what = if n == 1 { "1 mod from GitHub isn't in yet".to_string() } else { format!("{n} mods from GitHub aren't in yet") };
+        job.note(format!("{what}: GitHub is limiting downloads until {}. Update again after that.", r.at()));
     }
     for e in &share.entries {
         if let Entry::Off(t) = e
