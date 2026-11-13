@@ -1,0 +1,81 @@
+{
+ "total_count": 605,
+ "incomplete_results": false,
+ "items": [
+  {
+   "html_url": "https://github.com/CaffeineMC/sodium/issues/3940",
+   "number": 3940,
+   "title": "FRAPI: copyFrom() and load() don't restore normalFace, causing \"facing is null\" NPE in BakedChunkModelBuilder",
+   "user": {
+    "login": "james14348-ux"
+   },
+   "labels": [
+    {
+     "name": "S-needs-triage",
+     "color": "272702"
+    }
+   ],
+   "state": "open",
+   "comments": 0,
+   "created_at": "2026-10-06T05:16:14Z",
+   "updated_at": "2026-10-06T05:16:14Z",
+   "closed_at": null,
+   "state_reason": null
+  },
+  {
+   "html_url": "https://github.com/CaffeineMC/sodium/issues/3868",
+   "number": 3868,
+   "title": "Section culling produces errors when beneath the world",
+   "user": {
+    "login": "djmrFunnyMan"
+   },
+   "labels": [
+    {
+     "name": "T-bug",
+     "color": "d73a4a"
+    }
+   ],
+   "state": "open",
+   "comments": 0,
+   "created_at": "2026-08-07T18:46:28Z",
+   "updated_at": "2026-08-15T15:31:25Z",
+   "closed_at": null,
+   "state_reason": null
+  },
+  {
+   "html_url": "https://github.com/CaffeineMC/sodium/issues/3964",
+   "number": 3964,
+   "title": "Crash on title screen after manual resource reload: IllegalStateException: Image is not allocated",
+   "user": {
+    "login": "Rhaaaaaast1"
+   },
+   "labels": [],
+   "state": "open",
+   "comments": 1,
+   "created_at": "2026-10-28T11:50:19Z",
+   "updated_at": "2026-10-28T12:31:28Z",
+   "closed_at": null,
+   "state_reason": null
+  },
+  {
+   "html_url": "https://github.com/CaffeineMC/sodium/issues/3909",
+   "number": 3909,
+   "title": "GLSL compilation error on Intel iGPU with Vulkan backend: non-opaque uniforms outside a block",
+   "user": {
+    "login": "onyx1110"
+   },
+   "labels": [
+    {
+     "name": "S-needs-triage",
+     "color": "272702"
+    }
+   ],
+   "state": "open",
+   "comments": 2,
+   "created_at": "2026-09-12T21:03:53Z",
+   "updated_at": "2026-09-26T11:38:11Z",
+   "closed_at": null,
+   "state_reason": null
+  }
+ ]
+}

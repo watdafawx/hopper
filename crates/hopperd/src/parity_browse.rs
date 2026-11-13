@@ -23,6 +23,80 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/browse/author", get(author))
         .route("/api/v1/browse/link", get(link))
         .route("/api/v1/browse/comments", get(comments))
+        .route("/api/v1/browse/issues", get(issues))
+        .route("/api/v1/browse/issues/repo", get(issues_repo))
+}
+
+/// The GitHub repo whose issues project `q.project` shows (its tracker
+/// link, or a GitHub mod's own repo), worked out here from the project so
+/// the browser never names a repo: the panel only ever asks api.github.com
+/// about a repo a project points at.
+fn repo_of_project(project: u64) -> anyhow::Result<Option<String>> {
+    Ok(hopper_core::ghissues::repo_of_mod(&source::get_mod(project)?))
+}
+
+/// Whether a project has a GitHub Issues tab: `{repo}` or `{repo: null}`.
+async fn issues_repo(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Query(q): Q) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let project = project_of(&q)?;
+    let repo = blocking(move || repo_of_project(project)).await?;
+    Ok(Json(json!({ "repo": repo })))
+}
+
+fn issue_json(i: &hopper_core::ghissues::Issue) -> Value {
+    json!({
+        "number": i.number,
+        "title": i.title,
+        "url": i.url,
+        "open": i.open,
+        "labels": i.labels.iter().map(|l| json!({ "name": l.name, "color": l.color })).collect::<Vec<_>>(),
+        "comments": i.comments,
+        // Seconds, as the browse routes' other dates.
+        "created": i.created,
+        "closed": i.closed,
+        "author": i.author,
+    })
+}
+
+/// One page (from 1) of a project's GitHub issues (desktop's Issues tab):
+/// `state` open / closed / all, `q` search words. GitHub's limit comes
+/// back as `error: "busy"`, any other failure as `"failed"`, so the page
+/// can say which.
+async fn issues(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Query(q): Q) -> ApiResult<Json<Value>> {
+    use hopper_core::ghissues::{self, Error, Filter};
+    require(&app, &headers, &method)?;
+    let project = project_of(&q)?;
+    let filter = match arg(&q, "state").as_str() {
+        "" => Filter::Open,
+        s => Filter::parse(s).ok_or_else(|| bad("Open, closed or all?"))?,
+    };
+    // A search is a few words; GitHub takes no more than 256 characters.
+    let words: String = arg(&q, "q").chars().take(200).collect();
+    let page: u32 = arg(&q, "page").parse().unwrap_or(1).clamp(1, 50);
+    let v = blocking(move || {
+        let Some(repo) = repo_of_project(project)? else {
+            return Ok(json!({ "repo": null, "issues": [], "more": false, "error": "failed" }));
+        };
+        let site = ghissues::site_url(&repo, filter, &words);
+        Ok(match ghissues::page(&repo, filter, &words, page) {
+            Ok(p) => json!({
+                "repo": repo,
+                "site": site,
+                "issues": p.issues.iter().map(issue_json).collect::<Vec<_>>(),
+                "more": p.more,
+                "total": p.total,
+            }),
+            Err(e) => json!({
+                "repo": repo,
+                "site": site,
+                "issues": [],
+                "more": false,
+                "error": if e == Error::Busy { "busy" } else { "failed" },
+            }),
+        })
+    })
+    .await?;
+    Ok(Json(v))
 }
 
 fn project_of(q: &std::collections::HashMap<String, String>) -> ApiResult<u64> {

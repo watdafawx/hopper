@@ -20,6 +20,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const FILE: &str = "auth.json";
 /// Browser sessions end after this long unused.
 const SESSION_IDLE: u64 = 30 * 24 * 3600;
+/// Sessions a page on another origin holds (design/multi-panel.md, B1):
+/// the page can read their token, so they live shorter.
+pub const REMOTE_IDLE: u64 = 7 * 24 * 3600;
+/// Most sessions one listed page may hold for one account; the oldest go.
+const MAX_REMOTE_PER_ACCOUNT: usize = 20;
 /// Failed logins from one address before it has to wait.
 const MAX_FAILS: u32 = 5;
 const LOCKOUT: Duration = Duration::from_secs(10 * 60);
@@ -39,7 +44,7 @@ pub fn random_hex(n: usize) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn hash_token(token: &str) -> String {
+pub(crate) fn hash_token(token: &str) -> String {
     Sha256::digest(token.as_bytes()).iter().map(|x| format!("{x:02x}")).collect()
 }
 
@@ -96,6 +101,66 @@ pub struct Session {
     pub created: u64,
     pub last_seen: u64,
     pub ip: String,
+    /// A browser session for a page on another origin (its exact origin):
+    /// the token is only accepted with that `Origin`, lives 7 days from
+    /// last use, and ends when the owner takes the origin off the list.
+    /// `None`: the panel's own cookie session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
+    /// The browser it was made in ("Chrome", "Firefox"), for the list.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    agent: String,
+}
+
+impl Session {
+    fn idle_limit(&self) -> u64 {
+        if self.origin.is_some() { REMOTE_IDLE } else { SESSION_IDLE }
+    }
+
+    /// A short id for listing and revoking: the start of the token's hash,
+    /// which says nothing about the token itself.
+    fn id(&self) -> &str {
+        &self.hash[..16.min(self.hash.len())]
+    }
+}
+
+/// A sign-in session as the list in Settings › Access shows it.
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionInfo {
+    pub id: String,
+    /// The user's id; the owner's when `None`.
+    pub user: Option<String>,
+    /// "browser" for a page on another origin, "cookie" for the panel's own page.
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    pub agent: String,
+    pub created: u64,
+    pub last_seen: u64,
+    pub ip: String,
+    /// Unix seconds it ends if unused.
+    pub expires: u64,
+}
+
+/// The browser's family from its User-Agent, for the session list only.
+pub fn agent_label(ua: &str) -> String {
+    let ua = ua.to_ascii_lowercase();
+    let name = if ua.contains("edg/") {
+        "Edge"
+    } else if ua.contains("opr/") || ua.contains("opera") {
+        "Opera"
+    } else if ua.contains("firefox/") {
+        "Firefox"
+    } else if ua.contains("chrome/") || ua.contains("chromium/") {
+        "Chrome"
+    } else if ua.contains("safari/") {
+        "Safari"
+    } else if ua.is_empty() {
+        ""
+    } else {
+        "Browser"
+    };
+    name.to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -484,6 +549,13 @@ impl Auth {
 
     /// Signs in the owner (empty `name`, or "owner") or the user called `name`.
     pub fn login_as(&self, name: &str, password: &str, code: Option<&str>, ip: IpAddr, private: bool) -> Result<String, LoginError> {
+        self.login_with(name, password, code, ip, private, None)
+    }
+
+    /// The same sign-in, every check and the lockout included, with the
+    /// session made for a page on another origin (`remote` = origin and
+    /// browser label): see [`Session::origin`].
+    pub fn login_with(&self, name: &str, password: &str, code: Option<&str>, ip: IpAddr, private: bool, remote: Option<(&str, &str)>) -> Result<String, LoginError> {
         self.check_lockout(ip).map_err(|e| LoginError::Refused(e.to_string()))?;
         let name = name.trim();
         let (acct, secrets) = {
@@ -524,9 +596,117 @@ impl Auth {
         }
         self.fails.lock().unwrap().remove(&ip);
         let mut s = self.stored.lock().unwrap();
-        let token = new_session(&mut s, acct.map(str::to_string), ip);
+        let user = acct.map(str::to_string);
+        let token = new_session(&mut s, user.clone(), ip);
+        if let Some((origin, agent)) = remote {
+            if let Some(last) = s.sessions.last_mut() {
+                last.origin = Some(origin.to_string());
+                last.agent = agent.chars().take(32).collect();
+            }
+            // A page signing in again and again (a loop, a script) can't
+            // pile up sessions: the oldest for this account and page go.
+            let mine: Vec<String> = s.sessions.iter().filter(|x| x.user == user && x.origin.as_deref() == Some(origin)).map(|x| x.hash.clone()).collect();
+            if mine.len() > MAX_REMOTE_PER_ACCOUNT {
+                let drop: Vec<String> = mine[..mine.len() - MAX_REMOTE_PER_ACCOUNT].to_vec();
+                s.sessions.retain(|x| !drop.contains(&x.hash));
+            }
+        }
         self.save(&s);
         Ok(token)
+    }
+
+    /// Sessions, newest use first: every one (`all`), or only `acct`'s.
+    pub fn sessions(&self, all: bool, acct: Account) -> Vec<SessionInfo> {
+        let t = now();
+        let s = self.stored.lock().unwrap();
+        let mut out: Vec<SessionInfo> = s
+            .sessions
+            .iter()
+            .filter(|x| t.saturating_sub(x.last_seen) < x.idle_limit())
+            .filter(|x| all || x.user.as_deref() == acct)
+            .map(|x| SessionInfo {
+                id: x.id().to_string(),
+                user: x.user.clone(),
+                kind: if x.origin.is_some() { "browser" } else { "cookie" },
+                origin: x.origin.clone(),
+                agent: x.agent.clone(),
+                created: x.created,
+                last_seen: x.last_seen,
+                ip: x.ip.clone(),
+                expires: x.last_seen + x.idle_limit(),
+            })
+            .collect();
+        out.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        out
+    }
+
+    /// The session list id of `token`'s session, to mark "this one".
+    pub fn session_id(token: &str) -> String {
+        hash_token(token)[..16].to_string()
+    }
+
+    /// Ends the session with list id `id`. Returns whose it was (the user
+    /// id, `None` for the owner) when it existed.
+    pub fn session_revoke(&self, id: &str) -> Option<Option<String>> {
+        if id.len() != 16 {
+            return None;
+        }
+        let mut s = self.stored.lock().unwrap();
+        let i = s.sessions.iter().position(|x| x.id() == id)?;
+        let gone = s.sessions.remove(i);
+        self.save(&s);
+        Some(gone.user)
+    }
+
+    /// Whose session `id` is, without ending it.
+    pub fn session_owner(&self, id: &str) -> Option<Option<String>> {
+        self.stored.lock().unwrap().sessions.iter().find(|x| x.id() == id).map(|x| x.user.clone())
+    }
+
+    /// Ends every session made for a page whose origin is no longer on the
+    /// list, so taking a page off the list also signs it out.
+    pub fn end_remote_sessions_except(&self, origins: &[String]) -> usize {
+        let mut s = self.stored.lock().unwrap();
+        let before = s.sessions.len();
+        s.sessions.retain(|x| x.origin.as_ref().is_none_or(|o| origins.contains(o)));
+        let ended = before - s.sessions.len();
+        if ended > 0 {
+            self.save(&s);
+        }
+        ended
+    }
+
+    /// Ends `acct`'s sessions made for pages on other origins, except the
+    /// one signed in with `keep`: after a password change a token a page
+    /// held (and a script could have copied) stops working.
+    pub fn end_browser_sessions(&self, acct: Account, keep: &str) -> usize {
+        let keep = hash_token(keep);
+        let mut s = self.stored.lock().unwrap();
+        let before = s.sessions.len();
+        s.sessions.retain(|x| x.origin.is_none() || x.user.as_deref() != acct || x.hash == keep);
+        let ended = before - s.sessions.len();
+        if ended > 0 {
+            self.save(&s);
+        }
+        ended
+    }
+
+    /// The origin `token`'s session was made for, when it is a session for
+    /// a page on another origin.
+    pub fn remote_origin(&self, token: &str) -> Option<String> {
+        if token.is_empty() {
+            return None;
+        }
+        let h = hash_token(token);
+        self.stored.lock().unwrap().sessions.iter().find(|x| x.hash == h).and_then(|x| x.origin.clone())
+    }
+
+    /// Tests: makes every session look `secs` older.
+    #[cfg(test)]
+    pub(crate) fn age_sessions(&self, secs: u64) {
+        for x in self.stored.lock().unwrap().sessions.iter_mut() {
+            x.last_seen = x.last_seen.saturating_sub(secs);
+        }
     }
 
     pub fn logout(&self, token: &str) {
@@ -556,16 +736,33 @@ impl Auth {
         e.1 = Instant::now();
     }
 
-    /// Who a session cookie or bearer token belongs to.
+    /// Who a session cookie or bearer token belongs to. A session made for
+    /// a page on another origin is not accepted here (see [`Self::check_from`]).
     pub fn check(&self, token: &str) -> Option<Who> {
+        self.check_from(token, None)
+    }
+
+    /// Like [`Self::check`], for a request that sent `origin` (its `Origin`
+    /// header). A session made for a page on another origin counts only
+    /// when the request comes from exactly that origin: from anywhere else,
+    /// or with no `Origin` at all, the token is refused.
+    pub fn check_from(&self, token: &str, origin: Option<&str>) -> Option<Who> {
         if token.is_empty() {
             return None;
         }
-        let h = hash_token(token);
+        self.check_hash(&hash_token(token), origin)
+    }
+
+    /// [`Self::check_from`] for a token known only by its hash (a one-use
+    /// ticket remembers the hash of the session that asked for it).
+    pub fn check_hash(&self, h: &str, origin: Option<&str>) -> Option<Who> {
         let t = now();
         let mut s = self.stored.lock().unwrap();
-        s.sessions.retain(|x| t.saturating_sub(x.last_seen) < SESSION_IDLE);
+        s.sessions.retain(|x| t.saturating_sub(x.last_seen) < x.idle_limit());
         if let Some(sess) = s.sessions.iter_mut().find(|x| x.hash == h) {
+            if sess.origin.is_some() && sess.origin.as_deref() != origin {
+                return None;
+            }
             // Saved lazily: a minute's precision is plenty.
             let stale = t.saturating_sub(sess.last_seen) > 60;
             sess.last_seen = t;
@@ -1028,7 +1225,7 @@ fn random_bytes16() -> [u8; 16] {
 
 fn new_session(s: &mut Stored, user: Option<String>, ip: IpAddr) -> String {
     let token = random_hex(32);
-    s.sessions.push(Session { hash: hash_token(&token), user, created: now(), last_seen: now(), ip: ip.to_string() });
+    s.sessions.push(Session { hash: hash_token(&token), user, created: now(), last_seen: now(), ip: ip.to_string(), origin: None, agent: String::new() });
     token
 }
 

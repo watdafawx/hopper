@@ -8,6 +8,7 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -24,13 +25,134 @@ static CACHE: Mutex<Option<HashMap<String, Entry>>> = Mutex::new(None);
 static PAUSED_UNTIL: Mutex<u64> = Mutex::new(0);
 /// The GitHub token, read once from the credential store.
 static TOKEN: Mutex<Option<Option<String>>> = Mutex::new(None);
+/// GitHub API requests that went out (not the ones the cache answered).
+static API_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Tests point GitHub at a local fake server instead.
+static TEST_BASE: Mutex<Option<String>> = Mutex::new(None);
+
+const API: &str = "https://api.github.com";
+const WEB: &str = "https://github.com";
+
+/// How long a releases list is used as it is before GitHub is asked again
+/// (and even then an unchanged list costs nothing).
+pub const LIST_FRESH: u64 = 10 * 60;
+/// One release by its tag rarely changes once out.
+pub const TAG_FRESH: u64 = 24 * 3600;
+
+/// GitHub said its limit for this PC is used up: no GitHub calls before
+/// `until` (unix seconds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RateLimited {
+    pub until: u64,
+}
+
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GitHub is limiting downloads for now. Hopper tries again at {}.", hhmm(self.until))
+    }
+}
+
+impl std::error::Error for RateLimited {}
+
+impl RateLimited {
+    /// When it ends, "14:32" (this PC's time).
+    pub fn at(&self) -> String {
+        hhmm(self.until)
+    }
+
+    /// How long until it ends (a second at least).
+    pub fn wait(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.until.saturating_sub(now()).max(1))
+    }
+}
+
+/// The rate limit behind `e`, if that's why it failed.
+pub fn rate_limited(e: &anyhow::Error) -> Option<RateLimited> {
+    e.chain().find_map(|c| c.downcast_ref::<RateLimited>()).copied()
+}
+
+/// "14:32", this PC's time.
+fn hhmm(unix: u64) -> String {
+    let c = crate::time::clock(unix as i64);
+    c.get(..5).unwrap_or(&c).to_string()
+}
 
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 fn cache_file() -> Option<std::path::PathBuf> {
+    // Tests never read or write the player's cache.
+    if cfg!(test) {
+        return None;
+    }
     crate::paths::dirs().map(|d| d.cache_dir().join("source-cache.json"))
+}
+
+/// The local fake GitHub tests run against: `HOPPER_TEST_GITHUB`, and only
+/// on this PC (a loopback address), so nobody can be pointed elsewhere.
+fn test_base() -> Option<String> {
+    if let Some(b) = TEST_BASE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Some(b);
+    }
+    std::env::var("HOPPER_TEST_GITHUB")
+        .ok()
+        .map(|b| b.trim_end_matches('/').to_string())
+        .filter(|b| b.starts_with("http://127.0.0.1:"))
+}
+
+/// Points GitHub at `base` (a fake server; `None` for the real one).
+#[doc(hidden)]
+pub fn set_test_base(base: Option<&str>) {
+    *TEST_BASE.lock().unwrap_or_else(|e| e.into_inner()) = base.map(str::to_string);
+}
+
+/// Where a request for `url` really goes: the fake server under a test.
+fn routed(url: &str) -> String {
+    match test_base() {
+        Some(b) if url.starts_with(API) => format!("{b}/api{}", &url[API.len()..]),
+        Some(b) if url.starts_with(WEB) => format!("{b}/web{}", &url[WEB.len()..]),
+        _ => url.to_string(),
+    }
+}
+
+/// GitHub API requests made this run (cache answers don't count).
+pub fn github_calls() -> u64 {
+    API_CALLS.load(Ordering::Relaxed)
+}
+
+/// The website link of a release's file. Downloads from it don't count
+/// against the API limit.
+pub fn release_download_url(repo: &str, tag: &str, file: &str) -> String {
+    routed(&format!("{WEB}/{repo}/releases/download/{}/{}", super::enc(tag), super::enc(file)))
+}
+
+/// When GitHub's answer says the limit is used up: the time calls may
+/// start again (unix seconds). `remaining`, `reset` and `retry_after` are
+/// the `x-ratelimit-remaining`, `x-ratelimit-reset` and `retry-after`
+/// headers. A 403 for anything else (a private repo) is not a limit.
+pub fn limit_reset(status: u16, remaining: Option<&str>, reset: Option<&str>, retry_after: Option<&str>, now: u64) -> Option<u64> {
+    let used_up = remaining.map(str::trim) == Some("0");
+    let reset = reset.and_then(|r| r.trim().parse::<u64>().ok()).filter(|r| *r > now);
+    let after = retry_after.and_then(|r| r.trim().parse::<u64>().ok()).map(|s| now + s.max(1));
+    if !(status == 429 || (status == 403 && (used_up || after.is_some()))) {
+        return None;
+    }
+    let at = if used_up { reset.or(after) } else { after.or(reset) };
+    // A missing or odd header: wait a while, never longer than GitHub's
+    // own hour-long window.
+    Some(at.unwrap_or(now + if used_up { 15 * 60 } else { 60 }).min(now + 3600))
+}
+
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Forgets the cache, the pause and the count (tests only).
+#[cfg(test)]
+pub(crate) fn reset_for_test() {
+    with_cache(|m| m.clear());
+    *PAUSED_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+    API_CALLS.store(0, Ordering::Relaxed);
 }
 
 fn with_cache<T>(f: impl FnOnce(&mut HashMap<String, Entry>) -> T) -> T {
@@ -97,21 +219,35 @@ pub fn paused_until() -> Option<u64> {
 /// GETs `url` as text. `github`: an API call (token, rate limit, cache).
 /// Other hosts are cached too, with their ETag when they send one.
 pub fn get_text(url: &str, github: bool) -> anyhow::Result<String> {
+    get_text_fresh(url, github, 0)
+}
+
+/// [`get_text`], taking a cached answer younger than `fresh` seconds as
+/// it is, without asking.
+pub fn get_text_fresh(url: &str, github: bool, fresh: u64) -> anyhow::Result<String> {
     let cached = with_cache(|m| m.get(url).cloned());
+    if let Some(c) = cached.as_ref().filter(|c| fresh > 0 && c.at + fresh > now()) {
+        return Ok(c.body.clone());
+    }
     if github && let Some(until) = paused_until() {
         if let Some(c) = cached {
             return Ok(c.body);
         }
-        bail!("GitHub's limit for checks is used up; Hopper tries again {}", clock(until));
+        return Err(RateLimited { until }.into());
     }
+    let target = routed(url);
     let mut req = crate::cf::agent()
-        .get(url)
+        .get(&target)
         .config()
         .http_status_as_error(false)
         .build();
     if github {
+        API_CALLS.fetch_add(1, Ordering::Relaxed);
         req = req.header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28");
-        if let Some(t) = github_token() {
+        // The token goes to GitHub's API and nowhere else.
+        if target.starts_with(API)
+            && let Some(t) = github_token()
+        {
             req = req.header("Authorization", &format!("Bearer {t}"));
         }
     }
@@ -140,19 +276,24 @@ pub fn get_text(url: &str, github: bool) -> anyhow::Result<String> {
         });
         return Ok(c.body);
     }
-    if github && (status == 429 || (status == 403 && header("x-ratelimit-remaining").as_deref() == Some("0"))) {
-        let reset = header("x-ratelimit-reset")
-            .and_then(|r| r.parse::<u64>().ok())
-            .or_else(|| header("retry-after").and_then(|r| r.parse::<u64>().ok()).map(|s| now() + s))
-            .unwrap_or(now() + 15 * 60);
-        *PAUSED_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) = reset;
+    if github
+        && let Some(until) = limit_reset(
+            status,
+            header("x-ratelimit-remaining").as_deref(),
+            header("x-ratelimit-reset").as_deref(),
+            header("retry-after").as_deref(),
+            now(),
+        )
+    {
+        log::warn!("GitHub's rate limit is used up; no GitHub calls until {}", hhmm(until));
+        {
+            let mut p = PAUSED_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+            *p = (*p).max(until);
+        }
         if let Some(c) = cached {
             return Ok(c.body);
         }
-        bail!(
-            "GitHub's limit for checks is used up; Hopper tries again {}. A GitHub token in Settings raises the limit.",
-            clock(reset)
-        );
+        return Err(RateLimited { until }.into());
     }
     if status == 404 {
         bail!("Not found (404). Check the link; a private repo can't be read.");
@@ -202,7 +343,6 @@ pub fn filename_in(d: &str) -> Option<String> {
     (!v.is_empty()).then(|| v.to_string())
 }
 
-fn clock(unix: u64) -> String {
-    let mins = unix.saturating_sub(now()).div_ceil(60).max(1);
-    if mins == 1 { "in a minute".into() } else { format!("in about {mins} minutes") }
-}
+#[cfg(test)]
+#[path = "http_tests.rs"]
+mod tests;

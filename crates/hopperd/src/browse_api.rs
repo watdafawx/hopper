@@ -436,6 +436,8 @@ async fn pack(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Q
         c["all_versions"] = json!(m.game_versions());
         let links: Vec<Value> = m.links.extra().into_iter().map(|(l, u)| json!({ "label": l, "url": u })).collect();
         c["links"] = json!(links);
+        // The GitHub repo its Issues tab lists (`/browse/issues`), if any.
+        c["issues_repo"] = json!(hopper_core::ghissues::repo_of_mod(&m));
         c["license"] = json!(m.license_type);
         c["gallery"] = json!(m
             .screenshots

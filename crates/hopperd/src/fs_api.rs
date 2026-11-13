@@ -29,6 +29,8 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/fs/{id}/list", get(list).layer(CompressionLayer::new()))
         .route("/api/v1/fs/{id}/file", get(download))
         .route("/api/v1/fs/{id}/zip", get(zip))
+        // A link keeps its paths in memory for a minute: its request stays small.
+        .route("/api/v1/fs/{id}/link", post(link).layer(DefaultBodyLimit::max(LINK_MAX_BODY)))
         .route("/api/v1/fs/{id}/text", get(read_text).put(write_text).layer(CompressionLayer::new()))
         .route("/api/v1/fs/{id}/ops", post(ops))
         .route("/api/v1/fs/{id}/walk", get(walk).layer(CompressionLayer::new()))
@@ -117,15 +119,19 @@ async fn download(
     Query(q): Query<HashMap<String, String>>,
 ) -> ApiResult<Response> {
     let e = server(&app, &headers, &method, &id)?;
-    let rel = path_q(&q);
-    let p = files::resolve(&e.root, &rel).map_err(bad)?;
+    send_file(&e, &path_q(&q), &headers, q.contains_key("inline")).await
+}
+
+/// The file download itself, for [`download`] and one-use links. The path
+/// goes through `files::resolve` (the server-folder check) here.
+async fn send_file(e: &Entry, rel: &str, headers: &HeaderMap, inline: bool) -> ApiResult<Response> {
+    let p = files::resolve(&e.root, rel).map_err(bad)?;
     let meta = tokio::fs::metadata(&p).await.map_err(|_| not_found("file"))?;
     if meta.is_dir() {
         return Err(bad("That's a folder; download it as a zip."));
     }
     let len = meta.len();
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let inline = q.contains_key("inline");
     let range = headers
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok())
@@ -210,8 +216,15 @@ async fn zip(
 ) -> ApiResult<Response> {
     let e = server(&app, &headers, &method, &id)?;
     let paths: Vec<String> = q.iter().filter(|(k, _)| k == "path").map(|(_, v)| v.clone()).collect();
+    let name = q.iter().find(|(k, _)| k == "name").map(|(_, v)| v.clone());
+    send_zip(&e, &paths, name)
+}
+
+/// The zip download itself, for [`zip`] and one-use links. Every path goes
+/// through `files::resolve` (the server-folder check) here.
+fn send_zip(e: &Entry, paths: &[String], name: Option<String>) -> ApiResult<Response> {
     let mut items = Vec::new();
-    for p in &paths {
+    for p in paths {
         items.push(files::resolve(&e.root, p).map_err(bad)?);
     }
     if items.is_empty() {
@@ -220,10 +233,7 @@ async fn zip(
     // Entries are named relative to the folder the items are in.
     let base = items[0].parent().map(|p| p.to_path_buf()).unwrap_or_else(|| e.root.clone());
     let base = if items.len() == 1 && items[0] == e.root { e.root.clone() } else { base };
-    let name = q
-        .iter()
-        .find(|(k, _)| k == "name")
-        .map(|(_, v)| v.clone())
+    let name = name
         .unwrap_or_else(|| match (items.len(), items[0].file_name()) {
             (1, Some(n)) if items[0] != e.root => format!("{}.zip", n.to_string_lossy()),
             _ => format!("{}.zip", e.name),
@@ -253,6 +263,89 @@ async fn zip(
         .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)))
         .map_err(bad)
+}
+
+// ---- one-use file links (design/multi-panel.md, B1) ------------------------------
+
+/// Most paths one zip link may name.
+const LINK_MAX_PATHS: usize = 1000;
+/// Largest link request: 1000 ordinary paths fit easily.
+const LINK_MAX_BODY: usize = 256 * 1024;
+
+#[derive(Deserialize)]
+struct LinkBody {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    zip: bool,
+    #[serde(default)]
+    inline: bool,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// A one-use link (60 s) to download or preview files of this server, for
+/// a page that signs in with a bearer token and so can't use a plain
+/// `<a href>` (design/multi-panel.md, B1). Bound to the asking session,
+/// this server and these exact paths; the paths are checked now and again
+/// when the link is used.
+async fn link(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<LinkBody>,
+) -> ApiResult<Json<Value>> {
+    let e = server(&app, &headers, &method, &id)?;
+    let mut paths = b.paths;
+    if let Some(p) = b.path {
+        paths.insert(0, p);
+    }
+    if paths.len() > LINK_MAX_PATHS {
+        return Err(bad(format!("At most {LINK_MAX_PATHS} files in one download.")));
+    }
+    if !b.zip && paths.len() != 1 {
+        return Err(bad("Name one file, or ask for a zip."));
+    }
+    // Kept as the tidy path inside the folder, so padding like `./././`
+    // that the folder check skips doesn't sit in memory with the link.
+    for p in paths.iter_mut() {
+        let full = files::resolve(&e.root, p).map_err(bad)?;
+        if !full.exists() {
+            return Err(not_found("file"));
+        }
+        if !b.zip && full.is_dir() {
+            return Err(bad("That's a folder; download it as a zip."));
+        }
+        *p = files::rel_of(&e.root, &full);
+    }
+    let name = b.name.map(|n| n.chars().filter(|c| !c.is_control() && !matches!(c, '/' | '\\')).take(200).collect::<String>()).filter(|n| !n.is_empty());
+    let cred = crate::auth::hash_token(&crate::api::token(&headers).0);
+    let purpose = crate::grants::Purpose::File { server: id, paths, zip: b.zip, inline: b.inline && !b.zip, name };
+    let k = app.grants.issue(purpose, &cred, crate::api::origin_of(&headers)).map_err(|m| ApiError(StatusCode::TOO_MANY_REQUESTS, m.into()))?;
+    // The secret goes in the query: the panel's logs record paths only.
+    Ok(Json(json!({ "url": format!("/api/v1/link?k={k}"), "expires_in": crate::grants::LINK_TTL.as_secs() })))
+}
+
+/// Uses a one-use file link. It's gone after the first try. The session
+/// that asked must still be signed in, and its role and server access are
+/// checked again as a read of that server's files.
+pub(crate) async fn redeem_link(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> ApiResult<Response> {
+    let expired = || ApiError(StatusCode::UNAUTHORIZED, "This link has expired or was already used. Ask for the file again.".into());
+    let g = app.grants.take(q.get("k").map_or("", String::as_str)).ok_or_else(expired)?;
+    let crate::grants::Purpose::File { server: id, paths, zip, inline, name } = g.purpose else { return Err(expired()) };
+    let who = app.auth.check_hash(&g.cred, g.origin.as_deref()).ok_or_else(expired)?;
+    if let Some(msg) = crate::security::refusal(&who, &Method::GET, &format!("/api/v1/fs/{id}/file")) {
+        return Err(ApiError(StatusCode::FORBIDDEN, msg.into()));
+    }
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    if zip {
+        send_zip(&e, &paths, name)
+    } else {
+        send_file(&e, &paths[0], &headers, inline).await
+    }
 }
 
 /// Every file under a folder, as (path inside it, size, modified time),

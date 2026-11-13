@@ -162,6 +162,42 @@ struct Comments {
     failed: bool,
 }
 
+/// The GitHub repo whose issues the Issues tab lists: the project's issue
+/// tracker link when it's on GitHub, else a mod from GitHub's own repo.
+fn issues_repo(m: &cf::Mod) -> Option<String> {
+    hopper::ghissues::repo_of_mod(m)
+}
+
+/// The Issues tab's place: after Comments where that shows.
+fn issues_tab(m: &cf::Mod) -> usize {
+    COMMENTS_TAB + usize::from(has_comments(m))
+}
+
+/// One list of a repo's issues (a filter and a search) as far as it's
+/// loaded (`hopper::ghissues`).
+#[derive(Default)]
+struct Issues {
+    pages: Vec<std::sync::Arc<hopper::ghissues::Page>>,
+    busy: bool,
+    error: Option<hopper::ghissues::Error>,
+}
+
+/// Which list: repo, filter, search words.
+type IssuesKey = (String, hopper::ghissues::Filter, String);
+
+/// What picking a project panel tab may need to ask for: its comments, or
+/// (at the Issues tab's place) its repo's issues.
+#[derive(Clone)]
+struct TabWants {
+    id: u64,
+    comments: bool,
+    issues: Option<(usize, String)>,
+}
+
+fn tab_wants(m: &cf::Mod) -> TabWants {
+    TabWants { id: m.id, comments: has_comments(m), issues: issues_repo(m).map(|r| (issues_tab(m), r)) }
+}
+
 /// The list a history place showed when it was left: stepping back brings
 /// it (every page loaded, same scroll spot) instead of asking again.
 #[derive(Clone)]
@@ -425,10 +461,23 @@ pub struct BrowseView {
     pending_query: Option<String>,
     /// The file a curseforge.com Install link asked for.
     link_file: Option<cf::File>,
-    /// Description, Files, Dependencies or Comments in the project panel.
+    /// Description, Files, Dependencies, Comments or Issues in the project
+    /// panel.
     detail_tab: usize,
     /// CurseForge projects' comments, asked for when their tab opens.
     comments: HashMap<u64, Comments>,
+    /// GitHub issues, asked for when the Issues tab opens or its search
+    /// or filter changes.
+    issues: HashMap<IssuesKey, Issues>,
+    /// The Issues tab's filter and search box, and the words searched for
+    /// (the box's text once typing pauses, or Enter).
+    issues_filter: hopper::ghissues::Filter,
+    issues_search: Entity<InputState>,
+    issues_query: String,
+    /// Another project was opened: its box starts empty (cleared as it
+    /// draws, which has the window).
+    issues_reset: bool,
+    _issues_debounce: Option<Task<()>>,
     /// The open project's description, a view of its own so its GIFs
     /// redraw it alone.
     desc: Entity<widgets::DescView>,
@@ -491,6 +540,7 @@ impl BrowseView {
     fn build(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let modrinth = store.read(cx).settings().browse_modrinth;
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder(modrinth)));
+        let issues_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search issues"));
         let desc = cx.new(|cx| widgets::DescView::new(store.clone(), window, cx));
         // A description's link to another project opens it here.
         let me = cx.entity().downgrade();
@@ -517,6 +567,23 @@ impl BrowseView {
                     }
                 }
                 InputEvent::PressEnter { .. } => this.run_search(false, cx),
+                _ => {}
+            }),
+            // GitHub answers few searches a minute: one once typing pauses,
+            // or right away on Enter.
+            cx.subscribe_in(&issues_search, window, |this, state, event, _, cx| match event {
+                InputEvent::Change => {
+                    let text = state.read(cx).value().trim().to_string();
+                    this._issues_debounce = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(Duration::from_millis(500)).await;
+                        this.update(cx, |this, cx| this.search_issues(text, cx)).ok();
+                    }));
+                }
+                InputEvent::PressEnter { .. } => {
+                    this._issues_debounce = None;
+                    let text = state.read(cx).value().trim().to_string();
+                    this.search_issues(text, cx);
+                }
                 _ => {}
             }),
         ];
@@ -599,6 +666,12 @@ impl BrowseView {
             server_files: HashMap::new(),
             detail_tab: 0,
             comments: HashMap::new(),
+            issues: HashMap::new(),
+            issues_filter: Default::default(),
+            issues_search,
+            issues_query: String::new(),
+            issues_reset: false,
+            _issues_debounce: None,
             desc,
             parts: None,
             logos: Default::default(),
@@ -1758,9 +1831,12 @@ impl BrowseView {
             self.peek_scroll_after = back.map(|b| b.scroll);
             self.peek_scroll_set = (Point::default(), 0);
             self.detail_tab = spot.tab;
-            if self.detail_tab == COMMENTS_TAB {
-                self.want_comments(id, false, cx);
-            }
+            // Its issues start unsearched, open ones first.
+            self.issues_query.clear();
+            self.issues_filter = Default::default();
+            self.issues_reset = true;
+            self._issues_debounce = None;
+            self.tab_opened(&m, self.detail_tab, cx);
         }
         // Files for the current Minecraft and loader filters (they follow the
         // target instance); the newest 50 overall are mostly other loaders.
@@ -3809,6 +3885,9 @@ impl BrowseView {
         let banner = self.link_banner(m, target, cx);
         // Built only while its tab is open.
         let mut comments = (self.detail_tab == COMMENTS_TAB && has_comments(m)).then(|| self.comments_tab(m, cx));
+        let mut issues = issues_repo(m)
+            .filter(|_| self.detail_tab == issues_tab(m))
+            .map(|repo| self.issues_view(&repo, cx));
         let store = self.store.read(cx);
         let theme = cx.theme();
         let icon = m.icon().and_then(|u| store.image(u)).map(Path::to_path_buf);
@@ -4197,7 +4276,7 @@ impl BrowseView {
                     ),
                 };
                 let tab = self.detail_tab;
-                let id = m.id;
+                let wants = tab_wants(m);
                 v_flex()
                     .gap_4()
                     .child(
@@ -4210,12 +4289,11 @@ impl BrowseView {
                                     .child(Tab::new().label("Description"))
                                     .child(Tab::new().label(files_label.clone()))
                                     .child(Tab::new().label(format!("Dependencies {n_deps}")))
-                                    .when(has_comments(m), |t| t.child(Tab::new().label(self.comments_label(id))))
+                                    .when(has_comments(m), |t| t.child(Tab::new().label(self.comments_label(m.id))))
+                                    .when(wants.issues.is_some(), |t| t.child(Tab::new().label("Issues")))
                                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                                         this.detail_tab = *ix;
-                                        if *ix == COMMENTS_TAB {
-                                            this.want_comments(id, false, cx);
-                                        }
+                                        this.tab_picked(&wants, *ix, cx);
                                         cx.notify();
                                     })),
                             )
@@ -4223,6 +4301,7 @@ impl BrowseView {
                     )
                     .map(|c| match (tab, files_state) {
                         (COMMENTS_TAB, _) if comments.is_some() => c.children(comments.take()),
+                        (_, _) if issues.is_some() => c.children(issues.take()),
                         (1 | 2, Some(wait)) => c.child(wait),
                         (1, _) => c.child(files),
                         (2, _) if n_deps == 0 => c.child(widgets::caption("No dependencies.", cx)),
@@ -4334,6 +4413,289 @@ impl BrowseView {
             Some(p) => format!("Comments {}", p.total),
             None => "Comments".to_string(),
         }
+    }
+
+    /// A tab of project `m`'s panel is showing: ask for what it lists.
+    fn tab_opened(&mut self, m: &cf::Mod, ix: usize, cx: &mut Context<Self>) {
+        self.tab_picked(&tab_wants(m), ix, cx);
+    }
+
+    fn tab_picked(&mut self, wants: &TabWants, ix: usize, cx: &mut Context<Self>) {
+        if wants.comments && ix == COMMENTS_TAB {
+            self.want_comments(wants.id, false, cx);
+        }
+        if let Some((at, repo)) = &wants.issues
+            && *at == ix
+        {
+            self.want_issues(repo.clone(), false, cx);
+        }
+    }
+
+    /// The repo the open project's Issues tab lists, while that tab shows.
+    fn shown_issues_repo(&self) -> Option<String> {
+        let m = self.selected.as_ref()?;
+        issues_repo(m).filter(|_| self.detail_tab == issues_tab(m))
+    }
+
+    /// The search box's words, once typing pauses (or on Enter).
+    fn search_issues(&mut self, text: String, cx: &mut Context<Self>) {
+        if text == self.issues_query {
+            return;
+        }
+        self.issues_query = text;
+        if let Some(repo) = self.shown_issues_repo() {
+            self.want_issues(repo, false, cx);
+        }
+        cx.notify();
+    }
+
+    fn set_issues_filter(&mut self, f: hopper::ghissues::Filter, cx: &mut Context<Self>) {
+        self.issues_filter = f;
+        if let Some(repo) = self.shown_issues_repo() {
+            self.want_issues(repo, false, cx);
+        }
+        cx.notify();
+    }
+
+    /// Asks for the first page of `repo`'s issues for the current filter
+    /// and search (again, after a failure), or with `more` the next page.
+    /// One request per list at a time; pages already had come from
+    /// `ghissues`' session cache without asking GitHub.
+    fn want_issues(&mut self, repo: String, more: bool, cx: &mut Context<Self>) {
+        let (filter, query) = (self.issues_filter, self.issues_query.clone());
+        let key: IssuesKey = (repo.clone(), filter, query.clone());
+        let l = self.issues.entry(key.clone()).or_default();
+        if l.busy {
+            return;
+        }
+        let page = l.pages.len() as u32 + 1;
+        let go = if more { l.pages.last().is_some_and(|p| p.more) } else { l.pages.is_empty() };
+        if !go {
+            return;
+        }
+        l.busy = true;
+        l.error = None;
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move { hopper::ghissues::page(&repo, filter, &query, page) })
+                .await;
+            this.update(cx, |this, cx| {
+                let l = this.issues.entry(key.clone()).or_default();
+                l.busy = false;
+                match r {
+                    Ok(p) => {
+                        if l.pages.len() as u32 + 1 == page {
+                            l.pages.push(p);
+                        }
+                    }
+                    Err(e) => l.error = Some(e),
+                }
+                // A page of only pull requests shows nothing: look a little
+                // further before saying there are no issues.
+                let empty = l.pages.iter().all(|p| p.issues.is_empty());
+                if empty && l.error.is_none() && l.pages.len() < 3 && l.pages.last().is_some_and(|p| p.more) {
+                    this.want_issues(key.0, true, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The Issues tab: `repo`'s GitHub issues with a search box and the
+    /// Open / Closed / All filter, 20 at a time, each opening on GitHub.
+    fn issues_view(&self, repo: &str, cx: &mut Context<Self>) -> AnyElement {
+        use hopper::ghissues::{Error, Filter, Issue};
+        let filter = self.issues_filter;
+        let query = self.issues_query.clone();
+        let l = self.issues.get(&(repo.to_string(), filter, query.clone()));
+        let mut seen = HashSet::new();
+        // A later page can repeat the end of the one before when issues
+        // came in meanwhile.
+        let list: Vec<&Issue> = l
+            .into_iter()
+            .flat_map(|l| &l.pages)
+            .flat_map(|p| &p.issues)
+            .filter(|i| seen.insert(i.number))
+            .collect();
+        let busy = l.is_none_or(|l| l.busy);
+        let error = l.and_then(|l| l.error);
+        let more = l.and_then(|l| l.pages.last()).is_some_and(|p| p.more);
+        let total = l.and_then(|l| l.pages.first()).and_then(|p| p.total);
+        let site = hopper::ghissues::site_url(repo, filter, &query);
+        let theme = cx.theme();
+        let dark = theme.mode.is_dark();
+        let (muted, border) = (theme.muted_foreground, theme.border);
+        // GitHub's own colours for the two states, from the theme: green
+        // for open, purple for closed (lifted on dark themes to read).
+        let open_c = theme.success;
+        let closed_c = if dark { hsla(theme.magenta.h, theme.magenta.s, theme.magenta.l.max(0.7), 1.) } else { crate::theme::ink(theme.magenta) };
+        let label_c = |hex: &str| -> Hsla {
+            match u32::from_str_radix(hex, 16) {
+                Ok(n) if hex.len() == 6 => {
+                    let c: Hsla = rgb(n).into();
+                    // A label's own colour, light enough to read on a dark
+                    // page (light themes darken it in `chip`).
+                    if dark { hsla(c.h, c.s, c.l.max(0.68), 1.) } else { c }
+                }
+                _ => muted,
+            }
+        };
+        let lower = |s: String| -> String {
+            let mut c = s.chars();
+            c.next().map(|f| f.to_lowercase().chain(c).collect()).unwrap_or_default()
+        };
+        let row = |i: &Issue, first: bool| -> AnyElement {
+            let url = i.url.clone();
+            // "by" is who opened it, so a closed one names them before
+            // when it closed: "#12 by alex · closed 2 weeks ago".
+            let by = if i.author.is_empty() { String::new() } else { format!(" by {}", i.author) };
+            let meta = if i.open || i.closed == 0 {
+                format!("#{} · opened {}{by}", i.number, lower(hopper::time::relative_secs(i.created)))
+            } else {
+                format!("#{}{by} · closed {}", i.number, lower(hopper::time::relative_secs(i.closed)))
+            };
+            h_flex()
+                .id(ElementId::Name(format!("issue:{}", i.number).into()))
+                .gap_2p5()
+                .items_start()
+                .px_2()
+                .py_2p5()
+                .rounded(cx.theme().radius)
+                .when(!first, |r| r.border_t_1().border_color(border))
+                .hover(|s| widgets::row_hover(s, cx))
+                .clickable(cx)
+                .tooltip({
+                    let url = url.clone();
+                    move |w, cx| gpui_kit::component::tooltip::Tooltip::new(url.clone()).build(w, cx)
+                })
+                .on_click(move |_, _, cx| cx.open_url(&url))
+                .child(
+                    // As tall as one line of the title (an empty character
+                    // sets it), so the icon sits on the first line at any zoom.
+                    h_flex()
+                        .flex_none()
+                        .text_sm()
+                        .items_center()
+                        .child(
+                            Icon::new(if i.open { IconName::CircleDot } else { IconName::CircleCheck })
+                                .small()
+                                .text_color(if i.open { open_c } else { closed_c }),
+                        )
+                        .child(div().w_0().overflow_hidden().child("\u{200b}")),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().text_sm().font_semibold().child(i.title.clone()))
+                        .when(!i.labels.is_empty(), |c| {
+                            c.child(h_flex().flex_wrap().gap_1().children(
+                                i.labels.iter().map(|lb| widgets::chip(label_c(&lb.color)).child(lb.name.clone())),
+                            ))
+                        })
+                        .child(
+                            h_flex()
+                                .gap_3()
+                                .min_w_0()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(div().min_w_0().truncate().child(meta))
+                                .when(i.comments > 0, |r| {
+                                    r.child(
+                                        h_flex()
+                                            .flex_none()
+                                            .gap_1()
+                                            .child(Icon::new(IconName::MessageSquare).xsmall())
+                                            .child(i.comments.to_string()),
+                                    )
+                                }),
+                        ),
+                )
+                .into_any_element()
+        };
+        let body: AnyElement = if !list.is_empty() {
+            v_flex().children(list.iter().enumerate().map(|(n, i)| row(i, n == 0))).into_any_element()
+        } else if busy {
+            widgets::skeleton_rows(5, rems(2.5), cx).into_any_element()
+        } else if error == Some(Error::Busy) {
+            widgets::empty_state(
+                IconName::Clock,
+                hopper::ghissues::BUSY,
+                Some("GitHub only answers a few searches a minute. They're still on its page.".into()),
+                cx,
+            )
+            .into_any_element()
+        } else if error.is_some() {
+            widgets::empty_state(
+                IconName::TriangleAlert,
+                hopper::ghissues::LOAD_FAILED,
+                Some("GitHub didn't answer. They're still on its page.".into()),
+                cx,
+            )
+            .into_any_element()
+        } else {
+            widgets::empty_state(
+                IconName::SearchX,
+                "No issues match",
+                Some(if query.is_empty() { "Nothing here for this filter.".into() } else { "Try other words, or All.".into() }),
+                cx,
+            )
+            .into_any_element()
+        };
+        let danger = cx.theme().danger;
+        v_flex()
+            .gap_3()
+            .child(widgets::search_input(&self.issues_search).cleanable(true))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        widgets::Segmented::new("issues-filter")
+                            .xsmall()
+                            .selected_index(Filter::ALL.iter().position(|f| *f == filter).unwrap_or(0))
+                            .children(Filter::ALL.map(|f| widgets::SegItem::new().label(f.label())))
+                            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                this.set_issues_filter(Filter::ALL[*ix % 3], cx);
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .children(total.filter(|_| !list.is_empty()).map(|t| {
+                        widgets::caption(if t == 1 { "1 found".to_string() } else { format!("{} found", human_count(t as f64)) }, cx)
+                    })),
+            )
+            .child(body)
+            .when(!list.is_empty() && error.is_some(), |c| {
+                c.child(div().text_sm().text_color(danger).child(error.map(|e| e.to_string()).unwrap_or_default()))
+            })
+            .child(
+                h_flex()
+                    .gap_2()
+                    .when(more && !list.is_empty(), |r| {
+                        let repo = repo.to_string();
+                        r.child(
+                            Button::new("issues-more")
+                                .small()
+                                .outline()
+                                .label(if busy { "Loading…" } else { "Show more" })
+                                .disabled(busy)
+                                .on_click(cx.listener(move |this, _, _, cx| this.want_issues(repo.clone(), true, cx))),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("issues-site")
+                            .small()
+                            .ghost()
+                            .icon(IconName::ExternalLink)
+                            .label("Open issues on GitHub")
+                            .tooltip(site.clone())
+                            .on_click(move |_, _, cx| cx.open_url(&site)),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// Asks for project `id`'s first page of comments (again, after a
@@ -4771,7 +5133,7 @@ impl BrowseView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let action = self.sticky_action(m, target, cx);
-        let id = m.id;
+        let wants = tab_wants(m);
         let icon = m.icon().and_then(|u| self.store.read(cx).image(u)).map(Path::to_path_buf);
         let theme = cx.theme();
         let author = m.authors.first().map(|a| format!("by {}", a.name));
@@ -4825,12 +5187,11 @@ impl BrowseView {
                     .child(Tab::new().label("Description"))
                     .child(Tab::new().label(files_label))
                     .child(Tab::new().label(format!("Dependencies {n_deps}")))
-                    .when(has_comments(m), |t| t.child(Tab::new().label(self.comments_label(id))))
+                    .when(has_comments(m), |t| t.child(Tab::new().label(self.comments_label(m.id))))
+                    .when(wants.issues.is_some(), |t| t.child(Tab::new().label("Issues")))
                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                         this.detail_tab = *ix;
-                        if *ix == COMMENTS_TAB {
-                            this.want_comments(id, false, cx);
-                        }
+                        this.tab_picked(&wants, *ix, cx);
                         // Past the page's own tabs, tuck them under the
                         // bar so the new tab reads from its start.
                         if let Some(tabs) = this.sticky.down_page(&this.sticky.tabs) {
@@ -5606,6 +5967,9 @@ impl Render for BrowseView {
             self.drop_peek_images(cx);
         }
         self.restore_peek_scroll(window);
+        if std::mem::take(&mut self.issues_reset) {
+            self.issues_search.update(cx, |s, cx| s.set_value("", window, cx));
+        }
         if self.peek {
             // Its logos are marked again as it lays out (played by the
             // page it's docked in, if that page has a logo layer).

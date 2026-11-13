@@ -14,6 +14,7 @@ pub mod browser;
 pub mod cf;
 pub mod cf_instance;
 pub mod cfcomments;
+pub mod ghissues;
 pub mod changelog;
 pub mod changelog_files;
 pub mod changelog_trim;

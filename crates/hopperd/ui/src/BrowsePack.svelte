@@ -18,6 +18,7 @@
   import Changelog from './lib/Changelog.svelte';
   import Comments from './lib/Comments.svelte';
   import { commentsLabel, prefetchComments } from './lib/comments.svelte.js';
+  import Issues from './lib/Issues.svelte';
   import VersionCard from './lib/VersionCard.svelte';
   import BrowseMenu from './BrowseMenu.svelte';
   import { packQuery, packPage, preloadNow, warm, cancelWarm } from './lib/prefetch.js';
@@ -112,6 +113,8 @@
   $effect(() => {
     if (hasComments) prefetchComments(p.num);
   });
+  // Its GitHub issues (desktop's Issues tab), when its tracker is on GitHub.
+  const issuesRepo = $derived(p?.num ? p?.issues_repo || '' : '');
   const otherSite = $derived(cur.source === 'modrinth' ? 'CurseForge' : 'Modrinth');
   // Desktop's facts: Minecraft (first five, the rest in a tooltip), loaders, where it runs.
   const mcs = $derived(p?.all_versions?.length ? p.all_versions : p?.mc_versions || []);
@@ -363,6 +366,7 @@
             {#if !packs}<button class:tab-sel={tab === 'deps'} onclick={() => pickTab('deps')}>Dependencies{Array.isArray(deps) ? ` ${deps.length}` : ''}</button>{/if}
             {#if p.gallery.length}<button class:tab-sel={tab === 'gallery'} onclick={() => pickTab('gallery')}>Gallery {p.gallery.length}</button>{/if}
             {#if hasComments}<button class:tab-sel={tab === 'comments'} onclick={() => pickTab('comments')}>{commentsLabel(p.num)}</button>{/if}
+            {#if issuesRepo}<button class:tab-sel={tab === 'issues'} onclick={() => pickTab('issues')}>Issues</button>{/if}
           </div>
         </div>
       </div>
@@ -503,6 +507,7 @@
         {#if !packs}<button class:tab-sel={tab === 'deps'} onclick={() => (tab = 'deps')}>Dependencies{Array.isArray(deps) ? ` ${deps.length}` : ''}</button>{/if}
         {#if p.gallery.length}<button class:tab-sel={tab === 'gallery'} onclick={() => (tab = 'gallery')}>Gallery {p.gallery.length}</button>{/if}
         {#if hasComments}<button class:tab-sel={tab === 'comments'} onclick={() => (tab = 'comments')}>{commentsLabel(p.num)}</button>{/if}
+        {#if issuesRepo}<button class:tab-sel={tab === 'issues'} onclick={() => (tab = 'issues')}>Issues</button>{/if}
       </div>
 
       {#if tab === 'description'}
@@ -547,6 +552,8 @@
             {/each}
           {/if}
         </div>
+      {:else if tab === 'issues' && issuesRepo}
+        <Issues project={p.num} repo={issuesRepo} />
       {:else if tab === 'comments' && hasComments}
         <Comments project={p.num} url={p.url} />
       {:else if tab === 'deps'}
