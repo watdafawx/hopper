@@ -832,7 +832,7 @@ New open questions from this section: 11 and 12 below.
 11. **Join command (A).** Offer the generated one-line join command with a
     single-use 30-minute join key next to the code, or code only? I
     recommend both: the code for people at the VM's console, the command for
-    scripts and fresh VMs.
+    scripts and fresh VMs. **Decided 2026-11-13: both.**
 12. **Moved server's old copy (A).** Keep the source stopped and marked until
     the user deletes it (my pick), or delete it automatically after a
     successful move? **Decided 2026-11-13: keep it stopped and marked until the
