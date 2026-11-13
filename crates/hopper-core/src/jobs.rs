@@ -36,6 +36,22 @@ pub struct JobState {
     /// Stopped because the user cancelled it: `error` is just "Cancelled",
     /// and lists show it as a quiet grey line, not a failure.
     pub cancelled: bool,
+    /// What a running job is on right now, shown on a line of its own
+    /// under the detail: a mod by name (with its icon) and how far it is.
+    pub item: Option<JobItem>,
+}
+
+/// The thing a running job is busy with (see [`Job::item`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct JobItem {
+    /// The mod's name, or the file's when the mod isn't known.
+    pub name: String,
+    /// The mod's icon (a URL the image cache keys by), or empty.
+    pub icon: String,
+    /// Its CurseForge / Modrinth project, or 0.
+    pub project: u64,
+    /// After the name: "18 MB of 42 MB · 2 MB/s · about 10 s left", or the file.
+    pub info: String,
 }
 
 #[derive(Clone, Default)]
@@ -104,6 +120,7 @@ impl Jobs {
             held: false,
             presence: None,
             cancelled: false,
+            item: None,
         });
         drop(g);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -283,6 +300,11 @@ impl Job {
         self.jobs.tick(self.id, |j| j.progress = p);
     }
 
+    /// What it's on now, under its detail; `None` drops the line.
+    pub fn item(&self, item: Option<JobItem>) {
+        self.jobs.tick(self.id, |j| j.item = item);
+    }
+
     /// Marks the job as installing (or updating) the named modpack, which
     /// Discord shows while it runs.
     pub fn presence(&self, pack: impl Into<String>, update: bool) {
@@ -350,6 +372,7 @@ impl Job {
                 return;
             }
             j.waits.clear();
+            j.item = None;
             j.done = true;
             j.progress = Some(1.0);
             j.error = err;
@@ -421,6 +444,16 @@ mod tests {
         let s = jobs.snapshot().into_iter().find(|j| j.title == "bad").unwrap();
         assert!(!s.cancelled);
         assert_eq!(s.error.as_deref(), Some("disk full"));
+    }
+
+    #[test]
+    fn the_file_a_job_is_on_goes_when_it_ends() {
+        let jobs = Jobs::default();
+        let job = jobs.start("Updating dg");
+        job.item(Some(JobItem { name: "Create".into(), info: "3 MB of 8 MB".into(), ..Default::default() }));
+        assert_eq!(jobs.snapshot()[0].item.as_ref().map(|i| i.name.as_str()), Some("Create"));
+        job.finish(&anyhow::Ok(()));
+        assert!(jobs.snapshot()[0].item.is_none());
     }
 
     #[test]

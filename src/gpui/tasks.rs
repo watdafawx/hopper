@@ -33,6 +33,8 @@ pub struct TasksButton {
     started: bool,
     /// Files in the air: (job id, where they took off).
     flights: Vec<(u64, Point<Pixels>)>,
+    /// Mod icons already asked for, for the jobs' item lines.
+    asked: HashSet<String>,
     _subs: [Subscription; 2],
 }
 
@@ -41,7 +43,10 @@ impl TasksButton {
         let ticks = store.read(cx).job_ticks().clone();
         let subs = [
             cx.observe(&store, |_, _, cx| cx.notify()),
-            cx.observe(&ticks, |_, _, cx| cx.notify()),
+            cx.observe(&ticks, |this, _, cx| {
+                this.want_icons(cx);
+                cx.notify()
+            }),
         ];
         Self {
             store,
@@ -51,8 +56,31 @@ impl TasksButton {
             seen: HashSet::new(),
             started: false,
             flights: Vec::new(),
+            asked: HashSet::new(),
             _subs: subs,
         }
+    }
+
+    /// Fetches the icon of each mod a running job is on, once.
+    fn want_icons(&mut self, cx: &mut Context<Self>) {
+        let icons: Vec<String> = self
+            .store
+            .read(cx)
+            .jobs()
+            .snapshot()
+            .into_iter()
+            .filter_map(|j| j.item.map(|i| i.icon))
+            .filter(|i| !i.is_empty() && !self.asked.contains(i))
+            .collect();
+        if icons.is_empty() {
+            return;
+        }
+        self.store.update(cx, |s, _| {
+            for i in &icons {
+                s.want_image(i);
+            }
+        });
+        self.asked.extend(icons);
     }
 
     fn toggle(&mut self, cx: &mut Context<Self>) {
@@ -176,10 +204,12 @@ impl TasksButton {
                                 .flex_1()
                                 .min_w_0()
                                 .child(div().text_sm().font_medium().truncate().child(j.title.clone()))
+                                // One line while it runs; a finished task's
+                                // summary (what it changed, why it failed) wraps.
                                 .child(
                                     div()
                                         .text_xs()
-                                        .truncate()
+                                        .when(!j.done, |d| d.truncate())
                                         .text_color(if j.error.is_some() && !j.cancelled { theme.danger } else { theme.muted_foreground })
                                         .child(j.error.clone().unwrap_or(j.detail.clone())),
                                 ),
@@ -269,6 +299,28 @@ impl TasksButton {
                                 )
                         }),
                 )
+                // What it's on now: the mod (with its icon) and how far.
+                .when_some(j.item.clone().filter(|_| !j.done), |c, it| {
+                    let icon = store.read(cx).image(&it.icon).map(|p| p.to_path_buf());
+                    // The numbers stay whole; a long mod name gives way.
+                    c.child(
+                        h_flex()
+                            .id(ElementId::Name(format!("task-item-{id}").into()))
+                            .pl(rems(2.0))
+                            .gap_1p5()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(
+                                widgets::mod_name(ElementId::Name(format!("task-mod-{id}").into()), it.name.clone(), icon.as_deref(), cx)
+                                    .flex_shrink(1.)
+                                    .text_color(theme.foreground),
+                            )
+                            .when(!it.info.is_empty(), |r| {
+                                r.child(div().flex_none().child("·")).child(div().flex_none().child(it.info.clone()))
+                            }),
+                    )
+                })
                 .when(!j.done, |c| {
                     c.child(
                         div().pl(rems(2.0)).child(

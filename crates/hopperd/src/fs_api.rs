@@ -41,6 +41,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/fs/{id}/trash/restore", post(trash_restore))
         .route("/api/v1/fs/{id}/trash/purge", post(trash_purge))
         .route("/api/v1/fs/{id}/uploads", post(upload_start))
+        .route("/api/v1/fs/{id}/fetch", post(fetch))
         .route(
             "/api/v1/fs/{id}/uploads/{up}",
             get(upload_status).put(upload_chunk).delete(upload_cancel),
@@ -515,6 +516,35 @@ async fn upload_start(
         }
         Err(err) => Err(err),
     }
+}
+
+#[derive(Deserialize)]
+struct FetchBody {
+    path: String,
+    url: String,
+    size: u64,
+    sha1: String,
+}
+
+/// Puts a file at `path` by downloading it here from a mod host, instead
+/// of Hopper uploading it (see `files::fetch_into`: the hosts, the sha1
+/// check, the replaced file going to the trash). The same access as an
+/// upload.
+async fn fetch(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<FetchBody>,
+) -> ApiResult<Json<Value>> {
+    let e = server(&app, &headers, &method, &id)?;
+    let path = b.path.clone();
+    let r = blocking(move || files::fetch_into(&e.root, &b.path, &b.url, b.size, &b.sha1)).await;
+    if let Err(err) = &r {
+        log::warn!("fetch {path} for server {id}: {}", err.1);
+    }
+    r?;
+    Ok(Json(json!({ "path": path })))
 }
 
 async fn upload_status(

@@ -186,9 +186,51 @@ pub struct Report {
     pub turned_off: usize,
     /// Mods turned on on the server (they're on in the pack).
     pub turned_on: usize,
+    /// Each file that failed: which mod, which file, and why.
     pub failed: Vec<String>,
     /// What happened to the panel's own launch command, if anything.
     pub panel: Option<String>,
+    /// The mods it changed, by name, for the summary.
+    pub changes: Changes,
+    /// Jars a Hopper Server downloaded itself, and ones Hopper uploaded
+    /// to it (with their bytes).
+    pub fetched: usize,
+    pub uploaded: usize,
+    pub uploaded_bytes: u64,
+}
+
+/// The mods a server sync changed, by name.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Changes {
+    pub added: Vec<String>,
+    pub updated: Vec<String>,
+    pub removed: Vec<String>,
+    pub turned_off: Vec<String>,
+    pub turned_on: Vec<String>,
+}
+
+impl Changes {
+    /// "Added Create, Jade; updated JEI; removed Old Mod", or "" when
+    /// nothing changed. Long lists name a few and count the rest.
+    pub fn line(&self) -> String {
+        let parts: Vec<String> = [
+            ("added", &self.added),
+            ("updated", &self.updated),
+            ("removed", &self.removed),
+            ("turned off", &self.turned_off),
+            ("turned on", &self.turned_on),
+        ]
+        .into_iter()
+        .filter(|(_, l)| !l.is_empty())
+        .map(|(verb, l)| format!("{verb} {}", crate::words::names(l, 3)))
+        .collect();
+        let line = parts.join("; ");
+        let mut c = line.chars();
+        match c.next() {
+            Some(f) => f.to_uppercase().chain(c).collect(),
+            None => line,
+        }
+    }
 }
 
 impl Report {
@@ -197,22 +239,178 @@ impl Report {
         if let Some((from, to)) = &self.loader {
             parts.push(format!("NeoForge {from} » {to}"));
         }
-        let mut mods = vec![format!("{} copied", crate::words::count(self.copied, "mod")), format!("{} removed", self.removed)];
-        if self.turned_on > 0 {
-            mods.push(format!("{} turned on", self.turned_on));
+        let line = self.changes.line();
+        if !line.is_empty() {
+            parts.push(line);
+        } else if self.failed.is_empty() {
+            parts.push("Mods already match the pack".to_string());
         }
-        if self.turned_off > 0 {
-            mods.push(format!("{} turned off", self.turned_off));
+        if self.fetched > 0 {
+            let mut t = format!("Hopper Server downloaded {} itself", crate::words::count(self.fetched, "file"));
+            if self.uploaded > 0 {
+                t.push_str(&format!(", {} uploaded ({})", self.uploaded, crate::instance_ops::human_bytes(self.uploaded_bytes)));
+            }
+            parts.push(t);
         }
-        parts.push(mods.join(", "));
         if !self.failed.is_empty() {
-            parts.push(format!("{} failed", self.failed.len()));
+            parts.push(format!("{} failed", crate::words::count(self.failed.len(), "file")));
         }
         if let Some(p) = &self.panel {
             parts.push(p.clone());
         }
         parts.join(" · ")
     }
+}
+
+/// A file's key in [`owners`]: its name in lower case, without ".disabled".
+fn file_key(p: &Path) -> String {
+    let n = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+    n.strip_suffix(".disabled").map(str::to_string).unwrap_or(n)
+}
+
+/// The comparison row each file of a sync belongs to, by [`file_key`]: the
+/// pack's jar and the server's old one both point at their mod.
+fn owners(diff: &[crate::model::DiffEntry]) -> std::collections::HashMap<String, usize> {
+    let mut m = std::collections::HashMap::new();
+    for (i, d) in diff.iter().enumerate() {
+        for f in [&d.client, &d.server].into_iter().flatten() {
+            m.insert(file_key(Path::new(&f.file_name)), i);
+        }
+    }
+    m
+}
+
+fn op_path(op: &crate::model::SyncOp) -> &Path {
+    use crate::model::SyncOp;
+    match op {
+        SyncOp::Copy { dst, .. } => dst,
+        SyncOp::Delete { path } | SyncOp::Disable { path } | SyncOp::Enable { path } => path,
+    }
+}
+
+/// What a running server sync is doing, in a player's words:
+/// "Uploading mods to the server · 3 of 7 files". `from`: a Hopper Server
+/// is downloading the file itself.
+pub fn step_line(op: &crate::model::SyncOp, remote: bool, from: Option<&str>, index: usize, count: usize) -> String {
+    use crate::model::SyncOp;
+    let what = match op {
+        SyncOp::Copy { .. } if from.is_some() => "Hopper Server is downloading mods",
+        SyncOp::Copy { .. } if remote => "Uploading mods to the server",
+        SyncOp::Copy { .. } => "Copying mods to the server",
+        SyncOp::Delete { .. } => "Removing old mods",
+        SyncOp::Disable { .. } => "Turning mods off",
+        SyncOp::Enable { .. } => "Turning mods on",
+    };
+    format!("{what} · {} of {}", index + 1, crate::words::count(count, "file"))
+}
+
+/// A server sync's copies as they go, for the line under its step: which
+/// the server downloads itself, and the bytes and speed of the uploads.
+#[derive(Default)]
+struct Watch {
+    /// By operation: the host the server downloads it from, or `None` for an upload.
+    from: std::collections::HashMap<usize, Option<&'static str>>,
+    /// Bytes sent of each upload.
+    sent: std::collections::HashMap<usize, u64>,
+    /// Seconds spent on uploads before the current one.
+    secs: f64,
+    /// The upload under way: its operation, when it began, where the run stood.
+    now: Option<(usize, std::time::Instant, u64)>,
+}
+
+impl Watch {
+    /// "From Modrinth", or "3 MB of 8 MB · 210 KB/s · about 24 s left": the
+    /// speed is the average over this run's uploads, steady enough for a
+    /// rough time left.
+    fn step(&mut self, s: &crate::sync::Step, op: &crate::model::SyncOp) -> String {
+        self.from.insert(s.index, s.from);
+        if self.now.is_some_and(|n| n.0 != s.index || s.from.is_some()) {
+            let (_, t, _) = self.now.take().unwrap_or((0, std::time::Instant::now(), 0));
+            self.secs += t.elapsed().as_secs_f64();
+        }
+        if let Some(from) = s.from {
+            return format!("Hopper Server is downloading it from {from}");
+        }
+        let (_, t, at) = *self.now.get_or_insert((s.index, std::time::Instant::now(), s.done));
+        let sent = s.done.saturating_sub(at);
+        self.sent.insert(s.index, sent);
+        let secs = self.secs + t.elapsed().as_secs_f64();
+        let bytes: u64 = self.sent.values().sum();
+        let speed = if secs >= 1.0 { bytes as f64 / secs } else { 0.0 };
+        crate::words::transfer(sent, crate::sync::op_weight(op), speed)
+    }
+}
+
+/// The mod (name, icon, project) a sync's file belongs to, else the file's name.
+fn mod_of(diff: &[crate::model::DiffEntry], owners: &std::collections::HashMap<String, usize>, p: &Path) -> (String, String, u64) {
+    let file = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let Some(d) = owners.get(&file_key(p)).and_then(|&i| diff.get(i)) else {
+        return (file, String::new(), 0);
+    };
+    let info = d.client.as_ref().or(d.server.as_ref());
+    let name = if d.mod_name.is_empty() { file } else { d.mod_name.clone() };
+    (name, info.map(|m| m.icon.clone()).unwrap_or_default(), info.map_or(0, |m| m.project_id))
+}
+
+/// Sorts a sync's results into the mods it added, updated, removed and
+/// turned off or on (one mod's old jar going and new jar coming is one
+/// update), and a line for each file that failed.
+fn tally(diff: &[crate::model::DiffEntry], results: &[crate::model::SyncResult], remote: bool) -> (Changes, Vec<String>) {
+    use crate::model::SyncOp;
+    let owners = owners(diff);
+    // Per comparison row: copied, removed, turned off, turned on.
+    let mut did = vec![[false; 4]; diff.len()];
+    let mut loose = Changes::default();
+    let mut failed = Vec::new();
+    for r in results {
+        let p = op_path(&r.op);
+        let (name, _, _) = mod_of(diff, &owners, p);
+        let slot = match &r.op {
+            SyncOp::Copy { .. } => 0,
+            SyncOp::Delete { .. } => 1,
+            SyncOp::Disable { .. } => 2,
+            SyncOp::Enable { .. } => 3,
+        };
+        if !r.ok {
+            let verb = match &r.op {
+                SyncOp::Copy { .. } if remote => "upload",
+                SyncOp::Copy { .. } => "copy",
+                SyncOp::Delete { .. } => "remove",
+                SyncOp::Disable { .. } => "turn off",
+                SyncOp::Enable { .. } => "turn on",
+            };
+            let file = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let what = if name == file { name.clone() } else { format!("{name} ({file})") };
+            failed.push(format!("Couldn't {verb} {what}: {}", r.error.as_deref().unwrap_or("no reason given")));
+            continue;
+        }
+        match owners.get(&file_key(p)) {
+            Some(&i) => did[i][slot] = true,
+            // A file the comparison doesn't list: named by its file.
+            None => [&mut loose.added, &mut loose.removed, &mut loose.turned_off, &mut loose.turned_on][slot].push(name),
+        }
+    }
+    let mut c = Changes::default();
+    for (d, [copied, removed, off, on]) in diff.iter().zip(did) {
+        let name = match d.client.as_ref().or(d.server.as_ref()) {
+            Some(m) if d.mod_name.is_empty() => m.file_name.clone(),
+            _ => d.mod_name.clone(),
+        };
+        if copied {
+            if d.server.is_some() { c.updated.push(name) } else { c.added.push(name) }
+        } else if removed {
+            c.removed.push(name);
+        } else if off {
+            c.turned_off.push(name);
+        } else if on {
+            c.turned_on.push(name);
+        }
+    }
+    c.added.append(&mut loose.added);
+    c.removed.append(&mut loose.removed);
+    c.turned_off.append(&mut loose.turned_off);
+    c.turned_on.append(&mut loose.turned_on);
+    (c, failed)
 }
 
 /// Points the panel's own launch command for `server` (Crafty's Server
@@ -355,7 +553,7 @@ pub fn update_server(
     }
 
     // Mods.
-    job.detail("Comparing mods");
+    job.detail("Comparing the pack's mods with the server's");
     // The same comparison the banner and the Sync tab show.
     let (client, _) = crate::rigsync::client_mods(inst, sync_anyway)?;
     // Read by the panel when the server is on a Hopper Server. The ones
@@ -377,20 +575,68 @@ pub fn update_server(
     if let Some(r) = &server.remote {
         crate::hopperd::register(&server.root, r);
     }
-    let results = crate::sync::execute_with(ops, &server.root, &|done, total| job.progress(done as usize, total as usize));
+    // Over the network (a Hopper Server, SFTP / FTP) a copy is an upload.
+    let remote = server.remote.is_some() || crate::remotefs::mirror_of(&server.root).is_some();
+    // A Hopper Server downloads the jars that have a public link itself:
+    // its connection is usually far faster than this PC's upload.
+    let links = if server.remote.is_some() {
+        let jars: Vec<PathBuf> = ops
+            .iter()
+            .filter_map(|op| match op {
+                crate::model::SyncOp::Copy { src, .. } => Some(src.clone()),
+                _ => None,
+            })
+            .collect();
+        if jars.is_empty() {
+            Default::default()
+        } else {
+            job.detail("Looking up where the server can download the mods");
+            crate::modfetch::links(inst, &jars)
+        }
+    } else {
+        Default::default()
+    };
+    let who = owners(&diff);
+    let watch = std::sync::Mutex::new(Watch::default());
+    let results = crate::sync::execute_links(ops, &server.root, &links, &|s| {
+        job.progress(s.done as usize, s.total as usize);
+        let Some(op) = s.op else {
+            job.item(None);
+            return;
+        };
+        job.detail(step_line(op, remote, s.from, s.index, s.count));
+        let (name, icon, project) = mod_of(&diff, &who, op_path(op));
+        let info = match op {
+            crate::model::SyncOp::Copy { .. } => watch.lock().unwrap_or_else(|e| e.into_inner()).step(&s, op),
+            _ => op_path(op).file_name().unwrap_or_default().to_string_lossy().into_owned(),
+        };
+        job.item(Some(crate::jobs::JobItem { name, icon, project, info }));
+    });
+    let w = watch.into_inner().unwrap_or_else(|e| e.into_inner());
+    for (i, _) in results.iter().enumerate().filter(|(_, r)| r.ok && matches!(r.op, crate::model::SyncOp::Copy { .. })) {
+        match w.from.get(&i) {
+            Some(Some(_)) => report.fetched += 1,
+            Some(None) if server.remote.is_some() => {
+                report.uploaded += 1;
+                report.uploaded_bytes += w.sent.get(&i).copied().unwrap_or(0);
+            }
+            _ => {}
+        }
+    }
+    job.detail("Saving the changes to History");
     crate::history::record(&server.root, "server", &server.root, &results);
     // The jars' CurseForge / Modrinth records go along, as with Sync to
     // server, so the server lists them as those mods.
     crate::sources::carry::carry_ids(&inst.root, &server.root, &crate::sources::carry::copied_jars(&results, &server.root));
-    for r in results {
-        match (&r.op, r.ok) {
-            (crate::model::SyncOp::Copy { .. }, true) => report.copied += 1,
-            (crate::model::SyncOp::Delete { .. }, true) => report.removed += 1,
-            (crate::model::SyncOp::Disable { .. }, true) => report.turned_off += 1,
-            (crate::model::SyncOp::Enable { .. }, true) => report.turned_on += 1,
-            (op, false) => report
-                .failed
-                .push(format!("{op:?}: {}", r.error.unwrap_or_default())),
+    let (changes, failed) = tally(&diff, &results, remote);
+    report.changes = changes;
+    report.failed = failed;
+    for r in results.iter().filter(|r| r.ok) {
+        match &r.op {
+            crate::model::SyncOp::Copy { .. } => report.copied += 1,
+            crate::model::SyncOp::Delete { .. } => report.removed += 1,
+            crate::model::SyncOp::Disable { .. } => report.turned_off += 1,
+            crate::model::SyncOp::Enable { .. } => report.turned_on += 1,
         }
     }
     Ok(report)
@@ -428,6 +674,88 @@ mod tests {
         assert!(out.contains("\"G:\\graalvm\\bin\\java.exe\""));
         assert!(out.contains("nogui%*"));
         assert!(rewrite_version(BAT, "9.9.9", "1").is_none());
+    }
+
+    fn jar(file: &str) -> crate::model::ModInfo {
+        crate::model::ModInfo { file_name: file.into(), icon: format!("https://icons/{file}"), ..Default::default() }
+    }
+
+    fn row(name: &str, client: Option<&str>, server: Option<&str>) -> crate::model::DiffEntry {
+        crate::model::DiffEntry {
+            mod_name: name.into(),
+            client: client.map(jar),
+            server: server.map(jar),
+            status: crate::model::DiffStatus::ClientNewer,
+            action: crate::model::DiffAction::CopyToServer,
+            skip_reason: None,
+        }
+    }
+
+    fn done(op: crate::model::SyncOp, error: Option<&str>) -> crate::model::SyncResult {
+        crate::model::SyncResult { op, ok: error.is_none(), error: error.map(str::to_string), backup: None }
+    }
+
+    #[test]
+    fn a_sync_names_what_it_added_updated_removed_and_what_failed() {
+        use crate::model::SyncOp;
+        let m = |f: &str| PathBuf::from("mods").join(f);
+        let diff = vec![
+            row("Create", Some("create-6.jar"), Some("create-5.jar")),
+            row("Jade", Some("jade-2.jar"), None),
+            row("Old Mod", None, Some("old.jar")),
+            row("JEI", Some("jei-9.jar"), None),
+            row("Sodium", Some("sodium.jar"), Some("sodium.jar.disabled")),
+        ];
+        let results = vec![
+            done(SyncOp::Delete { path: m("create-5.jar") }, None),
+            done(SyncOp::Copy { src: m("create-6.jar"), dst: m("create-6.jar") }, None),
+            done(SyncOp::Copy { src: m("jade-2.jar"), dst: m("jade-2.jar") }, None),
+            done(SyncOp::Delete { path: m("old.jar") }, None),
+            done(SyncOp::Copy { src: m("jei-9.jar"), dst: m("jei-9.jar") }, Some("disk full")),
+            done(SyncOp::Enable { path: m("sodium.jar") }, None),
+            done(SyncOp::Copy { src: m("custom.jar"), dst: m("custom.jar") }, None),
+        ];
+        let (c, failed) = tally(&diff, &results, true);
+        assert_eq!(c.added, ["Jade", "custom.jar"]);
+        assert_eq!(c.updated, ["Create"]);
+        assert_eq!(c.removed, ["Old Mod"]);
+        assert_eq!(c.turned_on, ["Sodium"]);
+        assert_eq!(failed, ["Couldn't upload JEI (jei-9.jar): disk full"]);
+        assert_eq!(c.line(), "Added Jade, custom.jar; updated Create; removed Old Mod; turned on Sodium");
+    }
+
+    #[test]
+    fn the_summary_says_what_the_server_downloaded_and_what_failed() {
+        let mut r = Report {
+            loader: None,
+            copied: 0,
+            removed: 0,
+            turned_off: 0,
+            turned_on: 0,
+            failed: vec![],
+            panel: None,
+            changes: Changes::default(),
+            fetched: 0,
+            uploaded: 0,
+            uploaded_bytes: 0,
+        };
+        assert_eq!(r.summary(), "Mods already match the pack");
+        r.changes.added = vec!["Jade".into()];
+        r.fetched = 5;
+        r.uploaded = 2;
+        r.uploaded_bytes = 3 * 1024 * 1024;
+        r.failed = vec!["Couldn't upload JEI (jei-9.jar): disk full".into()];
+        assert_eq!(r.summary(), "Added Jade · Hopper Server downloaded 5 files itself, 2 uploaded (3 MB) · 1 file failed");
+    }
+
+    #[test]
+    fn step_lines_say_what_and_how_far() {
+        use crate::model::SyncOp;
+        let copy = SyncOp::Copy { src: "a.jar".into(), dst: "a.jar".into() };
+        assert_eq!(step_line(&copy, true, None, 2, 7), "Uploading mods to the server · 3 of 7 files");
+        assert_eq!(step_line(&copy, true, Some("Modrinth"), 0, 7), "Hopper Server is downloading mods · 1 of 7 files");
+        assert_eq!(step_line(&copy, false, None, 0, 1), "Copying mods to the server · 1 of 1 file");
+        assert_eq!(step_line(&SyncOp::Delete { path: "a.jar".into() }, true, None, 4, 7), "Removing old mods · 5 of 7 files");
     }
 
     #[test]

@@ -574,22 +574,7 @@ pub(crate) fn fetch_pack_zip(pack_file: &cf::File, job: &Job) -> anyhow::Result<
 
 /// "Downloading x.zip: 512 MB of 1.4 GB · 24 MB/s · about 40 s left".
 fn download_detail(name: &str, done: u64, total: u64, speed: f64) -> String {
-    use crate::instance_ops::human_bytes;
-    let mut s = format!("Downloading {name}: {}", human_bytes(done));
-    if total > 0 {
-        s.push_str(&format!(" of {}", human_bytes(total)));
-    }
-    if speed >= 1.0 {
-        s.push_str(&format!(" · {}/s", human_bytes(speed as u64)));
-        if total > done {
-            let left = ((total - done) as f64 / speed).round() as u64;
-            s.push_str(&match left {
-                0..60 => format!(" · about {left} s left"),
-                _ => format!(" · about {} min left", left.div_ceil(60)),
-            });
-        }
-    }
-    s
+    format!("Downloading {name}: {}", crate::words::transfer(done, total, speed))
 }
 
 pub(crate) fn read_manifest(zip_path: &Path) -> anyhow::Result<PackManifest> {
