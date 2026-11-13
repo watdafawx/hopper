@@ -6,6 +6,7 @@
   import { browseHash } from './lib/browse.js';
   import ModVersions from './ModVersions.svelte';
   import Comments from './lib/Comments.svelte';
+  import { commentsLabel, prefetchComments } from './lib/comments.svelte.js';
   import SourceAbout from './SourceAbout.svelte';
   import { resetConfig, setLocked, removeMods, switchSource, versionLocked, problems } from './lib/modops.js';
 
@@ -22,9 +23,12 @@
   // Its page in Browse (description, gallery, every file).
   const browse = $derived(mod.source && !linked ? `#${browseHash('mods', server.id)}/${mod.source}/${encodeURIComponent(mod.source === 'modrinth' ? mod.mr_project || '' : mod.project_id)}` : '');
   const vl = $derived(versionLocked(mod));
-  // CurseForge's comments (desktop's Comments tab), asked for only when
-  // that tab is picked.
+  // CurseForge's comments (desktop's Comments tab): the first page is asked
+  // for in the background, so the tab is ready (and shows its count).
   const hasComments = $derived(mod.source === 'curseforge' && !!mod.project_id);
+  $effect(() => {
+    if (hasComments) prefetchComments(mod.project_id);
+  });
   let tab = $state('versions');
 </script>
 
@@ -55,7 +59,7 @@
   {#if hasComments}
     <div class="utabs" role="tablist">
       <button role="tab" aria-selected={tab === 'versions'} class:tab-sel={tab === 'versions'} onclick={() => (tab = 'versions')}>Versions</button>
-      <button role="tab" aria-selected={tab === 'comments'} class:tab-sel={tab === 'comments'} onclick={() => (tab = 'comments')}>Comments</button>
+      <button role="tab" aria-selected={tab === 'comments'} class:tab-sel={tab === 'comments'} onclick={() => (tab = 'comments')}>{commentsLabel(mod.project_id)}</button>
     </div>
   {/if}
   {#if hasComments && tab === 'comments'}

@@ -130,17 +130,19 @@ async fn author(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
     Ok(Json(v))
 }
 
-fn comment_json(c: &hopper_core::cfcomments::Comment) -> Value {
+fn comment_json(c: &hopper_core::cfcomments::Comment, makers: &[cf::Author]) -> Value {
     json!({
         "id": c.id.to_string(),
         "author": c.author,
+        // Written by one of the project's own authors (replies too).
+        "by_author": c.is_by(makers),
         "avatar": c.avatar,
         // Seconds, as the browse routes' other dates.
         "date": c.posted,
         "text": c.text,
         "pinned": c.pinned,
         "removed": c.removed,
-        "replies": c.replies.iter().map(comment_json).collect::<Vec<_>>(),
+        "replies": c.replies.iter().map(|r| comment_json(r, makers)).collect::<Vec<_>>(),
     })
 }
 
@@ -156,8 +158,9 @@ async fn comments(State(app): State<Arc<App>>, headers: HeaderMap, method: Metho
     let page: u32 = arg(&q, "page").parse().unwrap_or(0).min(10_000);
     let v = blocking(move || {
         let p = hopper_core::cfcomments::page(project, page)?;
+        let makers = hopper_core::cfcomments::authors(project);
         Ok(json!({
-            "comments": p.comments.iter().map(comment_json).collect::<Vec<_>>(),
+            "comments": p.comments.iter().map(|c| comment_json(c, &makers)).collect::<Vec<_>>(),
             "page": p.index,
             "total": p.total,
             "more": p.more(),
