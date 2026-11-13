@@ -34,6 +34,7 @@ mod discovery;
 mod files;
 mod fs_api;
 mod fs_zip;
+mod grants;
 mod home;
 mod host;
 #[cfg(windows)]
@@ -75,6 +76,8 @@ mod tls;
 mod tray;
 mod ui;
 mod web_access;
+#[cfg(test)]
+mod cross_origin_tests;
 mod webhooks;
 mod worlds_api;
 mod zipstream;
@@ -137,6 +140,8 @@ pub struct App {
     pub results: std::sync::Mutex<std::collections::HashMap<u64, serde_json::Value>>,
     /// What changed, for every open client (see [`changes`]).
     pub changes: changes::Changes,
+    /// One-use WebSocket tickets and file links for pages on other origins.
+    pub grants: grants::Grants,
 }
 
 impl App {
@@ -326,6 +331,8 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     hopper_core::sources::http::set_session_github_token(&cfg.github_token);
     hopper_core::sources::set_enabled(cfg.allow_sources);
     let auth = auth::Auth::load(&data_dir)?;
+    // Sessions of pages taken off the list (hopperd.toml edited by hand) end.
+    auth.end_remote_sessions_except(&cfg.web_origins);
     if let Some(code) = auth.setup_code() {
         let _ = std::fs::write(data_dir.join(SETUP_FILE), &code);
         let file = data_dir.join(SETUP_FILE);
@@ -362,6 +369,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         jobs: Default::default(),
         results: Default::default(),
         changes: Default::default(),
+        grants: Default::default(),
         router: Default::default(),
         scheduler: Default::default(),
         limiter: Default::default(),

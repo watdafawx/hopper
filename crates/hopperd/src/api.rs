@@ -27,7 +27,7 @@ pub const API_VERSION: u32 = 1;
 
 /// Features this panel has, so clients light up only what both sides know.
 pub const CAPABILITIES: &[&str] =
-    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "jvm.preview", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "rules", "users", "mcp", "sftp", "mods.profiles", "browse.install", "pack.check", "configs.batch", "configs.sync", "mods.records", "web.origins", "mods.staged", "files.fetch"];
+    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "jvm.preview", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "rules", "users", "mcp", "sftp", "mods.profiles", "browse.install", "pack.check", "configs.batch", "configs.sync", "mods.records", "web.origins", "mods.staged", "files.fetch", "web.remote"];
 
 pub struct ApiError(pub StatusCode, pub String);
 
@@ -72,12 +72,17 @@ pub(crate) fn require(app: &App, headers: &HeaderMap, method: &Method) -> ApiRes
     let (tok, from_cookie) = token(headers);
     let who = app
         .auth
-        .check(&tok)
+        .check_from(&tok, origin_of(headers))
         .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "Sign in first.".into()))?;
     if from_cookie && method != Method::GET && headers.get("x-hopperd").is_none() {
         return Err(ApiError(StatusCode::FORBIDDEN, "Missing X-Hopperd header.".into()));
     }
     Ok(who)
+}
+
+/// The request's `Origin`, when it sent one.
+pub(crate) fn origin_of(headers: &HeaderMap) -> Option<&str> {
+    headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).filter(|o| !o.is_empty())
 }
 
 /// The owner or a manager: panel-wide settings, users, devices and the
@@ -125,6 +130,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/me", get(me))
+        .route("/api/v1/auth/sessions", get(sessions))
+        .route("/api/v1/auth/sessions/{id}", axum::routing::delete(session_revoke))
+        .route("/api/v1/ws/ticket", post(ws_ticket))
+        .route("/api/v1/link", get(crate::fs_api::redeem_link))
         .route("/api/v1/auth/2fa", get(two_factor_status))
         .route("/api/v1/auth/2fa/begin", post(two_factor_begin))
         .route("/api/v1/auth/2fa/enable", post(two_factor_enable))
@@ -259,20 +268,45 @@ struct LoginBody {
     password: String,
     #[serde(default)]
     code: Option<String>,
+    /// A page on another origin signing in (B1): the token comes back in
+    /// the body instead of a cookie, for that page only.
+    #[serde(default)]
+    bearer: bool,
 }
 
 async fn login(
     State(app): State<Arc<App>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     t: Option<axum::Extension<crate::net::Transport>>,
+    headers: HeaderMap,
     Json(b): Json<LoginBody>,
 ) -> Response {
     use crate::auth::LoginError;
     let private = crate::net::Net::of(addr.ip()).private();
-    match app.auth.login_as(&b.name, &b.password, b.code.as_deref(), addr.ip(), private) {
+    // A bearer session only for a page the owner listed, never for the
+    // panel's own page (it has its cookie) or a client without `Origin`
+    // (scripts use API tokens). Checked before the password, so a refused
+    // page learns nothing about it and uses up no try.
+    let remote = if b.bearer {
+        let list = app.cfg.read().unwrap().web_origins.clone();
+        match crate::web_access::listed_other(&headers, &list) {
+            Some(o) => Some((o.to_string(), crate::auth::agent_label(headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("")))),
+            None => {
+                return ApiError(StatusCode::FORBIDDEN, "This page can't sign in to this panel. Its owner can add it in Settings › Access & devices.".into()).into_response();
+            }
+        }
+    } else {
+        None
+    };
+    let page = remote.as_ref().map(|(o, _)| o.as_str());
+    let mut r = match app.auth.login_with(&b.name, &b.password, b.code.as_deref(), addr.ip(), private, remote.as_ref().map(|(o, a)| (o.as_str(), a.as_str()))) {
         Ok(token) => {
-            let (who, role) = app.auth.check(&token).map_or_else(|| ("owner".into(), "owner"), |w| (w.name(), w.role_name()));
-            let mut r = ([(header::SET_COOKIE, session_cookie(&token, secure(&t)))], Json(json!({ "ok": true }))).into_response();
+            let (who, role) = app.auth.check_from(&token, page).map_or_else(|| ("owner".into(), "owner"), |w| (w.name(), w.role_name()));
+            let mut r = if remote.is_some() {
+                Json(json!({ "ok": true, "token": token, "expires_in": crate::auth::REMOTE_IDLE })).into_response()
+            } else {
+                ([(header::SET_COOKIE, session_cookie(&token, secure(&t)))], Json(json!({ "ok": true }))).into_response()
+            };
             r.extensions_mut().insert(crate::security::SignedIn(who, role.into()));
             r
         }
@@ -281,7 +315,53 @@ async fn login(
             Json(json!({ "error": e.to_string(), "need_code": e == LoginError::NeedCode, "need_two_factor": e == LoginError::NeedTwoFactor })),
         )
             .into_response(),
+    };
+    // The audit log names the page a sign-in came from, right or wrong.
+    if let Some(o) = page {
+        r.extensions_mut().insert(crate::security::AuditNote(format!("from {o}")));
     }
+    r
+}
+
+// ---- sessions (your own; every one for the owner and managers) ------------------------
+
+async fn sessions(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    let who = account(&app, &headers, &method)?;
+    let current = crate::auth::Auth::session_id(&token(&headers).0);
+    let names: HashMap<String, String> = app.auth.users().into_iter().map(|u| (u.id, u.name)).collect();
+    let list: Vec<Value> = app
+        .auth
+        .sessions(who.owner_level(), who.account().flatten())
+        .into_iter()
+        .map(|s| {
+            let mut v = serde_json::to_value(&s).unwrap_or_default();
+            v["current"] = json!(s.id == current);
+            v["name"] = json!(s.user.as_ref().map_or_else(|| "owner".to_string(), |u| names.get(u).cloned().unwrap_or_default()));
+            v
+        })
+        .collect();
+    Ok(Json(json!(list)))
+}
+
+/// Ends a session: your own, or (owner and managers) someone else's. A
+/// manager can't end the owner's or another manager's sessions.
+async fn session_revoke(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let who = account(&app, &headers, &method)?;
+    let whose = app.auth.session_owner(&id).ok_or_else(|| not_found("session"))?;
+    let mine = who.account().flatten().map(str::to_string) == whose;
+    let allowed = mine
+        || match &whose {
+            None => who.is_owner(),
+            Some(uid) => {
+                let role = app.auth.users().into_iter().find(|u| &u.id == uid).map(|u| u.role);
+                who.owner_level() && who.may_manage_user(role, role)
+            }
+        };
+    if !allowed {
+        return Err(only_owner("Only the owner can end this session."));
+    }
+    app.auth.session_revoke(&id).ok_or_else(|| not_found("session"))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ---- two-factor sign-in and passwords (your own), tokens, audit (owner) -----------
@@ -1007,10 +1087,14 @@ async fn console(
 // ---- live updates ----------------------------------------------------------
 
 /// Browsers: the cookie, from a page on this panel (Origin matches Host).
-/// Devices: a bearer token.
-fn ws_allowed(app: &App, headers: &HeaderMap) -> Option<Who> {
+/// Devices: a bearer token. A page on another origin the owner listed: a
+/// one-use ticket in `Sec-WebSocket-Protocol` (see [`ws_ticket`]).
+pub(crate) fn ws_allowed(app: &App, headers: &HeaderMap) -> Option<Who> {
+    if let Some(ticket) = crate::grants::ticket_in(headers) {
+        return ws_ticket_who(app, headers, &ticket);
+    }
     let (tok, from_cookie) = token(headers);
-    let who = app.auth.check(&tok)?;
+    let who = app.auth.check_from(&tok, origin_of(headers))?;
     if !from_cookie {
         return Some(who);
     }
@@ -1020,10 +1104,43 @@ fn ws_allowed(app: &App, headers: &HeaderMap) -> Option<Who> {
     (!host.is_empty() && origin_host == host).then_some(who)
 }
 
+/// A ticket opens the socket only from a listed page, the same page that
+/// asked for it, while the session that asked is still signed in. The
+/// first try uses it up, right or wrong.
+fn ws_ticket_who(app: &App, headers: &HeaderMap, ticket: &str) -> Option<Who> {
+    let g = app.grants.take(ticket)?;
+    let list = app.cfg.read().unwrap().web_origins.clone();
+    let page = crate::web_access::listed_other(headers, &list)?;
+    if g.purpose != crate::grants::Purpose::Live || g.origin.as_deref() != Some(page) {
+        return None;
+    }
+    app.auth.check_hash(&g.cred, Some(page))
+}
+
+/// A one-use ticket for the live WebSocket, for a page on another origin
+/// the owner listed (browsers can't send `Authorization` on a WebSocket).
+async fn ws_ticket(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let list = app.cfg.read().unwrap().web_origins.clone();
+    let Some(page) = crate::web_access::listed_other(&headers, &list) else {
+        return Err(ApiError(StatusCode::FORBIDDEN, "Tickets are only for pages on another address that this panel lists.".into()));
+    };
+    let cred = crate::auth::hash_token(&token(&headers).0);
+    let ticket = app.grants.issue(crate::grants::Purpose::Live, &cred, Some(page)).map_err(|m| ApiError(StatusCode::TOO_MANY_REQUESTS, m.into()))?;
+    Ok(Json(json!({
+        "ticket": ticket,
+        "expires_in": crate::grants::TICKET_TTL.as_secs(),
+        "protocols": [crate::grants::WS_PROTOCOL, format!("{}{ticket}", crate::grants::WS_TICKET_PREFIX)],
+    })))
+}
+
 async fn ws(State(app): State<Arc<App>>, headers: HeaderMap, upgrade: WebSocketUpgrade) -> Response {
     let Some(who) = ws_allowed(&app, &headers) else {
         return ApiError(StatusCode::UNAUTHORIZED, "Sign in first.".into()).into_response();
     };
+    // A browser that offered subprotocols drops the socket unless the
+    // panel picks one; the ticket's own entry is never echoed back.
+    let upgrade = if crate::grants::ticket_in(&headers).is_some() { upgrade.protocols([crate::grants::WS_PROTOCOL]) } else { upgrade };
     upgrade.on_upgrade(move |socket| live(app, who, socket))
 }
 

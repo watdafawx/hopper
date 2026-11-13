@@ -146,6 +146,7 @@ fn manages_access(path: &str) -> bool {
         || under("/api/v1/auth/2fa")
         || path == "/api/v1/auth/password"
         || path == "/api/v1/settings/certificate"
+        || under("/api/v1/auth/sessions")
         || path == SETTINGS_PATH
 }
 
@@ -154,14 +155,19 @@ fn manages_access(path: &str) -> bool {
 /// - This list and its switch: only from the panel's own page, always.
 /// - The rest: refused from a listed other page unless the owner turned on
 ///   "Let other web pages manage who can get in".
-pub fn access_refusal(headers: &HeaderMap, list: &[String], manage_from_others: bool, method: &Method, path: &str) -> Option<&'static str> {
+///
+/// `remote`: the request signed in with a session made for another page
+/// (B1). It counts as that page whatever `Origin` and `Host` say, so a
+/// copied token sent from a script with made-up headers is held to the
+/// same rule.
+pub fn access_refusal(headers: &HeaderMap, list: &[String], manage_from_others: bool, remote: bool, method: &Method, path: &str) -> Option<&'static str> {
     if method == Method::GET || method == Method::HEAD || method == Method::OPTIONS || !manages_access(path) {
         return None;
     }
     if path == SETTINGS_PATH {
-        return (origin(headers).is_some() && !is_own(headers)).then_some("Change this on the panel's own page.");
+        return (remote || (origin(headers).is_some() && !is_own(headers))).then_some("Change this on the panel's own page.");
     }
-    (!manage_from_others && listed_other(headers, list).is_some())
+    (!manage_from_others && (remote || listed_other(headers, list).is_some()))
         .then_some("Users, devices, tokens, two-factor and the certificate can only be changed on this panel's own page.")
 }
 
@@ -284,6 +290,11 @@ async fn put_settings(State(app): State<Arc<App>>, headers: HeaderMap, method: M
         cfg.web_origins = origins;
         cfg.web_manage_access = b.manage;
         cfg.save(&app.data_dir).map_err(|e| bad(format!("{e:#}")))?;
+        // A page taken off the list is signed out there too.
+        let ended = app.auth.end_remote_sessions_except(&cfg.web_origins);
+        if ended > 0 {
+            parts.push(format!("signed out {ended} session(s) of removed pages"));
+        }
         if parts.is_empty() { "no change".to_string() } else { parts.join("; ") }
     };
     log::info!("web pages allowed to use this panel: {note}");
@@ -490,30 +501,54 @@ mod tests {
         ];
         for (p, m) in &guarded {
             // Switch off: refused from a listed other page.
-            assert!(access_refusal(&other, &list(), false, m, p).is_some(), "{m} {p} off");
+            assert!(access_refusal(&other, &list(), false, false, m, p).is_some(), "{m} {p} off");
             // Switch on: allowed through (the route's own checks still run).
-            assert!(access_refusal(&other, &list(), true, m, p).is_none(), "{m} {p} on");
+            assert!(access_refusal(&other, &list(), true, false, m, p).is_none(), "{m} {p} on");
             // The panel's own page and clients without Origin: as before.
-            assert!(access_refusal(&own, &list(), false, m, p).is_none(), "{m} {p} own");
-            assert!(access_refusal(&none, &list(), false, m, p).is_none(), "{m} {p} no origin");
+            assert!(access_refusal(&own, &list(), false, false, m, p).is_none(), "{m} {p} own");
+            assert!(access_refusal(&none, &list(), false, false, m, p).is_none(), "{m} {p} no origin");
             // Empty list: today's behaviour.
-            assert!(access_refusal(&other, &[], false, m, p).is_none(), "{m} {p} empty list");
+            assert!(access_refusal(&other, &[], false, false, m, p).is_none(), "{m} {p} empty list");
             // An unlisted page gets no CORS answer; the guard leaves it to that.
-            assert!(access_refusal(&unlisted, &list(), false, m, p).is_none(), "{m} {p} unlisted");
+            assert!(access_refusal(&unlisted, &list(), false, false, m, p).is_none(), "{m} {p} unlisted");
         }
         // Reads and day-to-day work stay open from a listed page.
-        assert!(access_refusal(&other, &list(), false, &Method::GET, "/api/v1/users").is_none());
-        assert!(access_refusal(&other, &list(), false, &Method::GET, "/api/v1/tokens").is_none());
+        assert!(access_refusal(&other, &list(), false, false, &Method::GET, "/api/v1/users").is_none());
+        assert!(access_refusal(&other, &list(), false, false, &Method::GET, "/api/v1/tokens").is_none());
         for p in ["/api/v1/servers/tnp/power", "/api/v1/auth/logout", "/api/v1/auth/login", "/api/v1/userslist", "/api/v1/settings/curseforge", "/api/v1/devices-x"] {
-            assert!(access_refusal(&other, &list(), false, &post, p).is_none(), "{p}");
+            assert!(access_refusal(&other, &list(), false, false, &post, p).is_none(), "{p}");
         }
         // The list itself: only from the panel's own page, whatever the switch.
         for on in [false, true] {
-            assert!(access_refusal(&other, &list(), on, &Method::PUT, SETTINGS_PATH).is_some());
-            assert!(access_refusal(&unlisted, &list(), on, &Method::PUT, SETTINGS_PATH).is_some());
-            assert!(access_refusal(&own, &list(), on, &Method::PUT, SETTINGS_PATH).is_none());
+            assert!(access_refusal(&other, &list(), on, false, &Method::PUT, SETTINGS_PATH).is_some());
+            assert!(access_refusal(&unlisted, &list(), on, false, &Method::PUT, SETTINGS_PATH).is_some());
+            assert!(access_refusal(&own, &list(), on, false, &Method::PUT, SETTINGS_PATH).is_none());
         }
-        assert!(access_refusal(&other, &list(), false, &Method::GET, SETTINGS_PATH).is_none());
+        assert!(access_refusal(&other, &list(), false, false, &Method::GET, SETTINGS_PATH).is_none());
+    }
+
+    /// B1: a session made for another page is held to that page's rule
+    /// whatever headers come with it (a copied token sent by a script
+    /// without `Origin`, or with `Origin` made equal to `Host`).
+    #[test]
+    fn remote_sessions_count_as_the_other_page() {
+        let own = hdrs(&[("host", "rig:8791"), ("origin", "http://rig:8791")]);
+        let none = hdrs(&[("host", "rig:8791")]);
+        let faked = hdrs(&[("host", "fox:8790"), ("origin", "http://fox:8790")]);
+        for h in [&own, &none, &faked] {
+            for (p, m) in [("/api/v1/users", Method::POST), ("/api/v1/tokens", Method::POST), ("/api/v1/auth/sessions/0123456789abcdef", Method::DELETE), ("/api/v1/auth/2fa/disable", Method::POST)] {
+                assert!(access_refusal(h, &list(), false, true, &m, p).is_some(), "{m} {p}");
+                assert!(access_refusal(h, &list(), true, true, &m, p).is_none(), "{m} {p} with the switch on");
+            }
+            for on in [false, true] {
+                assert!(access_refusal(h, &list(), on, true, &Method::PUT, SETTINGS_PATH).is_some(), "the list never from another page");
+            }
+            assert!(access_refusal(h, &list(), false, true, &Method::POST, "/api/v1/servers/a/power").is_none(), "day-to-day work");
+        }
+        // Without a remote session the session list is guarded like the rest.
+        let other = hdrs(&[("host", "rig:8791"), ("origin", "http://fox:8790")]);
+        assert!(access_refusal(&other, &list(), false, false, &Method::DELETE, "/api/v1/auth/sessions/0123456789abcdef").is_some());
+        assert!(access_refusal(&own, &list(), false, false, &Method::DELETE, "/api/v1/auth/sessions/0123456789abcdef").is_none());
     }
 
     /// End to end through a router: the same two calls `security::guard` makes.
