@@ -140,7 +140,7 @@
   .steps li.bad .ck { background: var(--red-dim); color: var(--red); }
   .fix { display: flex; flex-direction: column; gap: 8px; font-size: 13px; border-radius: var(--radius-lg); background: var(--raise); padding: 10px 12px; }
   .fix ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
-  .fix a { color: var(--acc); display: inline-flex; align-items: center; gap: 3px; }
+  .fix a { color: color-mix(in srgb, var(--acc) 60%, var(--text)); display: inline-flex; align-items: center; gap: 3px; }
   .orig { display: flex; align-items: center; gap: 4px; margin-top: 4px; padding: 2px 4px 2px 8px; border-radius: var(--radius); background: var(--base); border: 1px solid var(--line); width: fit-content; max-width: 100%; }
   .orig .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
   .end { justify-content: flex-end; }

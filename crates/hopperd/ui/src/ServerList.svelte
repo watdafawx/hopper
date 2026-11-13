@@ -242,15 +242,15 @@
   </a>
 {/snippet}
 
-{#snippet head(id, name, count, role, lightKey, p)}
+{#snippet head(id, name, role, lightKey, p)}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div class="gh" role="group" aria-label={name} oncontextmenu={p ? (e) => openMenu(e, null, null, p) : undefined}>
-    <button class="gfold" aria-expanded={!fold[id]} title={fold[id] ? 'Show its servers' : 'Hide its servers'} onclick={() => flip(id)}>
+    <button class="gfold" aria-expanded={!fold[id]} title="{name}: {fold[id] ? 'show its servers' : 'hide its servers'}" onclick={() => flip(id)}>
       {#if fold[id]}<ChevronRight size={14} />{:else}<ChevronDown size={14} />{/if}
       <span class="dot {lightKey}"></span>
       <span class="gnm">{name}</span>
     </button>
-    <span class="gcount">Hopper Server · {count}</span>
+    <span class="gfill"></span>
     {#if role}<span class="chip">{roleLabel(role)}</span>{/if}
     {#if p}<button class="btn ghost icon sm gmore" title="More" aria-label="More for {name}" onclick={(e) => openMenu(e, null, null, p)}><Ellipsis size={14} /></button>{/if}
   </div>
@@ -283,8 +283,8 @@
       <button class="btn ghost icon" title="Hide server list" onclick={toggle}><PanelLeftClose size={15} /></button>
     </div>
     {#if grouped}
-      {@render head('home', homeName || 'This panel', live.servers.length, homeRole, live.connected ? 'running' : 'starting', null)}
-      <div class="health">This panel{homeVersion ? ` · ${homeVersion}` : ''}</div>
+      {@render head('home', homeName || 'This panel', homeRole, live.connected ? 'running' : 'starting', null)}
+      <div class="health">Hopper Server · {live.servers.length} · this panel{homeVersion ? ` · ${homeVersion}` : ''}</div>
     {/if}
     {#if !grouped || !fold.home}
       {#if loading}
@@ -327,9 +327,9 @@
 
     {#each panels.list as p (p.id)}
       <div class="gsep"></div>
-      {@render head(p.id, p.name, p.servers.length, p.me ? p.role : '', light(p), p)}
+      {@render head(p.id, p.name, p.me && p.state !== 'signin' ? p.role : '', light(p), p)}
       {#if p.state === 'ok'}
-        <div class="health">{p.version || 'Hopper Server'}{p.ping != null ? ` · ${p.ping} ms` : ''}</div>
+        <div class="health">Hopper Server · {p.servers.length}{p.version ? ` · ${p.version}` : ''}{p.ping != null ? ` · ${p.ping} ms` : ''}</div>
       {:else if p.state === 'loading'}
         <div class="health">Connecting…</div>
       {:else if p.state === 'reconnecting' || p.state === 'offline'}
@@ -421,11 +421,12 @@
   .gfold:hover { background: var(--hover, #ededef10); }
   .gfold :global(svg) { color: var(--muted); flex: none; }
   .gnm { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .gcount { font-size: 11.5px; color: var(--muted); white-space: nowrap; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .gfill { flex: 1; }
   .gmore { flex: none; }
   .health { padding: 0 10px 4px 32px; font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
   .health.trouble { color: var(--subtle); }
-  .link { background: none; border: 0; padding: 0; font: inherit; color: var(--acc); cursor: pointer; text-decoration: none; }
+  /* Accent mixed toward the text colour: readable on light themes too (plain --acc is 3.4:1 there). */
+  .link { background: none; border: 0; padding: 0; font: inherit; color: color-mix(in srgb, var(--acc) 60%, var(--text)); cursor: pointer; text-decoration: none; }
   .link:hover { text-decoration: underline; }
   .gsep { height: 1px; background: var(--line); margin: 8px 4px 4px; flex: none; }
   .srv.dim, .tile.dim { opacity: .55; }

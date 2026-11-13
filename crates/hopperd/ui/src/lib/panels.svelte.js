@@ -134,8 +134,10 @@ async function refresh(p) {
   let h;
   try {
     h = await hello(p.url);
-  } catch {
-    if (await reachable(p.url)) {
+  } catch (e) {
+    // No answer in time: it's down, no need for a second 5 s wait to say so.
+    if (e?.name === 'TimeoutError') down(p);
+    else if (await reachable(p.url)) {
       p.state = 'refused';
       p.error = '';
     } else down(p);
@@ -462,10 +464,12 @@ export async function check(input) {
       continue;
     }
     let h = null;
+    let slow = false;
     try {
       h = await hello(url);
-    } catch {
+    } catch (e) {
       // Unreadable: up but not listing this page, or not reachable at all.
+      slow = e?.name === 'TimeoutError';
     }
     if (h) {
       const tls = url.startsWith('https:') ? 'Your browser trusts its certificate' : 'Plain HTTP: fine on your own network or Tailscale';
@@ -478,7 +482,7 @@ export async function check(input) {
       if (h.setup_needed) return { ok: false, problem: 'setup', url, name: h.name, version: h.version, steps: s };
       return { ok: true, url, name: h.name || panelId(url), version: h.version, steps: s };
     }
-    if (await reachable(url)) {
+    if (!slow && (await reachable(url))) {
       return {
         ok: false, problem: 'notlisted', url,
         steps: [
