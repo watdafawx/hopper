@@ -607,6 +607,16 @@ pub fn start(app: Arc<App>) {
         .ok();
 }
 
+/// A TPS reading and a low-TPS alert for server `id`, as the TPS look and
+/// [`check`] would make them (relay tests).
+#[cfg(test)]
+pub(crate) fn low_tps_for_test(id: &str, name: &str, tps: f32, mspt: f32) {
+    let mut st = state().lock().unwrap();
+    st.tps.insert(id.into(), Tps { tps, mspt: Some(mspt), at: now(), source: "rcon" });
+    let text = format!("**{name}** is running slowly: {tps:.1} TPS for 2 min");
+    st.active.insert((id.into(), "tps"), Alert { server_id: id.into(), server: name.into(), kind: "tps", text, since: now(), dismissed: false });
+}
+
 /// The server's last TPS reading, while it's fresh (for automations).
 pub fn tps_now(id: &str) -> Option<f32> {
     state().lock().unwrap().tps.get(id).map(|t| t.tps)
@@ -627,16 +637,188 @@ async fn list(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -
     let owner = require_owner(&app, &headers, &method).is_ok();
     // A console report shows the moment it's printed, not at the next poll.
     let fresh: Vec<(String, Tps)> = app.servers.list().iter().filter(|e| who.sees(&e.id)).filter_map(|e| Some((e.id.clone(), console_reading(e)?))).collect();
-    let st = state().lock().unwrap();
-    let mut active: Vec<&Alert> = st.active.values().filter(|a| a.server_id.is_empty() || who.sees(&a.server_id)).collect();
-    active.sort_by_key(|a| a.since);
-    let mut tps: HashMap<String, Tps> = st.tps.iter().filter(|(id, _)| who.sees(id)).map(|(k, v)| (k.clone(), *v)).collect();
-    let mut no_tps: HashMap<String, &str> = st.no_tps.iter().filter(|(id, _)| who.sees(id)).map(|(k, v)| (k.clone(), *v)).collect();
-    for (id, t) in fresh {
-        no_tps.remove(&id);
-        tps.insert(id, t);
+    let mut out = {
+        let st = state().lock().unwrap();
+        let active: Vec<&Alert> = st.active.values().filter(|a| a.server_id.is_empty() || who.sees(&a.server_id)).collect();
+        let mut tps: HashMap<String, Tps> = st.tps.iter().filter(|(id, _)| who.sees(id)).map(|(k, v)| (k.clone(), *v)).collect();
+        let mut no_tps: HashMap<String, &str> = st.no_tps.iter().filter(|(id, _)| who.sees(id)).map(|(k, v)| (k.clone(), *v)).collect();
+        for (id, t) in fresh {
+            no_tps.remove(&id);
+            tps.insert(id, t);
+        }
+        json!({ "active": active, "tps": tps, "no_tps": no_tps, "settings": owner.then(|| settings(&app)) })
+    };
+    // A node's servers show their TPS and alerts here like this panel's own.
+    for (node, name, v) in from_nodes(&app, &who).await {
+        merge_node(&mut out, &node, &name, &v, &who);
     }
-    Ok(Json(json!({ "active": active, "tps": tps, "no_tps": no_tps, "settings": owner.then(|| settings(&app)) })))
+    if let Some(a) = out["active"].as_array_mut() {
+        a.sort_by_key(|a| a["since"].as_u64().unwrap_or(0));
+    }
+    Ok(Json(out))
+}
+
+// ---- a node's alerts on its main (design/multi-panel.md, A2) ----------------
+
+/// How long a node's answer counts as fresh (the web UI asks every 15 s).
+const NODE_FRESH: Duration = Duration::from_secs(10);
+/// A node's last answer is shown this long after it, then dropped (an
+/// offline node's TPS would be old news).
+const NODE_KEEP: Duration = Duration::from_secs(60);
+/// How long `/alerts` waits for nodes it's asking right now. A slow or
+/// gone node is shown from its last answer, or not at all.
+const NODE_WAIT: Duration = Duration::from_millis(1500);
+/// How long one ask may take in the background.
+const NODE_ASK: Duration = Duration::from_secs(10);
+
+#[derive(Default)]
+struct NodeAnswer {
+    asked: Option<Instant>,
+    busy: bool,
+    got: Option<(Instant, Value)>,
+}
+
+/// Each node's last answer, shared by everyone on this main: it's asked as
+/// Look, and filtered per person when merged.
+fn node_answers() -> &'static Mutex<HashMap<String, NodeAnswer>> {
+    static S: OnceLock<Mutex<HashMap<String, NodeAnswer>>> = OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// A node's alerts dismissed on this main: (node, the node's server id or
+/// "" for the node itself, kind) → the `since` of the alert dismissed, so it
+/// comes back when the node raises it again. Dismissing isn't sent to the
+/// node: there it would hide the alert for the node's own people too, and
+/// the main asks only with Look.
+fn node_hidden() -> &'static Mutex<HashMap<(String, String, String), u64>> {
+    static S: OnceLock<Mutex<HashMap<(String, String, String), u64>>> = OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// The nodes this person sees, with each one's last answer, asking the
+/// connected ones whose answer is older than [`NODE_FRESH`] (waiting at
+/// most [`NODE_WAIT`] for them).
+async fn from_nodes(app: &Arc<App>, who: &crate::auth::Who) -> Vec<(String, String, Value)> {
+    let (_, heads) = app.nodes.live_view(who);
+    let nodes: Vec<(String, String)> = heads.iter().filter_map(|h| Some((h["id"].as_str()?.to_string(), h["name"].as_str().unwrap_or("").to_string()))).collect();
+    let mut asks = Vec::new();
+    for (id, _) in &nodes {
+        let Some(handle) = app.nodes.relay_info(id).and_then(|i| i.handle) else { continue };
+        {
+            let mut c = node_answers().lock().unwrap();
+            let e = c.entry(id.clone()).or_default();
+            if e.busy || e.asked.is_some_and(|t| t.elapsed() < NODE_FRESH) {
+                continue;
+            }
+            e.busy = true;
+            e.asked = Some(Instant::now());
+        }
+        let id = id.clone();
+        // Its own task: it finishes and is kept even when this answer
+        // stops waiting for it.
+        asks.push(tokio::spawn(async move {
+            let v = tokio::time::timeout(NODE_ASK, crate::relay::ask_alerts(&handle)).await.ok().flatten();
+            let mut c = node_answers().lock().unwrap();
+            let e = c.entry(id).or_default();
+            e.busy = false;
+            if let Some(v) = v {
+                e.got = Some((Instant::now(), v));
+            }
+        }));
+    }
+    if !asks.is_empty() {
+        let _ = tokio::time::timeout(NODE_WAIT, async {
+            for a in asks {
+                let _ = a.await;
+            }
+        }).await;
+    }
+    let c = node_answers().lock().unwrap();
+    nodes
+        .into_iter()
+        .filter_map(|(id, name)| {
+            let (at, v) = c.get(&id)?.got.as_ref()?;
+            (at.elapsed() < NODE_KEEP).then(|| (id, name, v.clone()))
+        })
+        .collect()
+}
+
+/// Kinds a node's alert may have on its main: about one of its servers, or
+/// about the node's machine. Not "node" (a node's own nodes).
+const NODE_KINDS: &[&str] = &["crash", "tps", "join", "disk", "ram"];
+/// Why a node's server has no TPS, as the web UI explains it.
+const NO_TPS: &[&str] = &["rcon_off", "restart", "unsupported", "slow", "spark_console"];
+
+#[cfg(test)]
+pub(crate) fn merge_node_for_test(out: &mut Value, node: &str, name: &str, v: &Value, who: &crate::auth::Who) {
+    merge_node(out, node, name, v, who)
+}
+
+/// Puts one node's answer into this main's `/alerts` answer, its server ids
+/// namespaced the way the server list does (`relay::join`), and only what
+/// this person may see. The node's answer is read as untrusted: ids must be
+/// plain names, kinds and reasons known ones, numbers numbers, text short.
+fn merge_node(out: &mut Value, node: &str, name: &str, v: &Value, who: &crate::auth::Who) {
+    use crate::relay::{join, plain_id};
+    let sees = |local: &str| plain_id(local) && who.sees(&join(node, local));
+    if let Some(tps) = v["tps"].as_object() {
+        for (local, t) in tps.iter().filter(|(k, _)| sees(k)) {
+            let Some(r) = t["tps"].as_f64().filter(|r| r.is_finite() && (0.0..=1000.0).contains(r)) else { continue };
+            let source = if t["source"] == "console" { "console" } else { "rcon" };
+            let mspt = t["mspt"].as_f64().filter(|m| m.is_finite() && *m >= 0.0);
+            out["tps"][join(node, local)] = json!({ "tps": r, "mspt": mspt, "at": t["at"].as_u64().unwrap_or(0), "source": source });
+            if let Some(n) = out["no_tps"].as_object_mut() {
+                n.remove(&join(node, local));
+            }
+        }
+    }
+    if let Some(no) = v["no_tps"].as_object() {
+        for (local, why) in no.iter().filter(|(k, _)| sees(k)) {
+            let ns = join(node, local);
+            if let Some(why) = why.as_str().and_then(|w| NO_TPS.iter().find(|k| **k == w)) && out["tps"].get(&ns).is_none() {
+                out["no_tps"][ns] = json!(why);
+            }
+        }
+    }
+    let Some(active) = v["active"].as_array() else { return };
+    let mut hidden = node_hidden().lock().unwrap();
+    let mut still = Vec::new();
+    for a in active {
+        let Some(kind) = a["kind"].as_str().and_then(|k| NODE_KINDS.iter().find(|x| **x == k)) else { continue };
+        let local = a["server_id"].as_str().unwrap_or("");
+        // About the node itself (a drive, its memory): no server id, the
+        // node named; about a server: its namespaced id.
+        let machine = local.is_empty();
+        if machine != matches!(*kind, "disk" | "ram") || (!machine && !sees(local)) {
+            continue;
+        }
+        let since = a["since"].as_u64().unwrap_or(0);
+        let key = (node.to_string(), local.to_string(), kind.to_string());
+        let gone = hidden.get(&key) == Some(&since);
+        if gone {
+            still.push(key);
+        }
+        let text: String = crate::relay::clean_text(a["text"].as_str().unwrap_or(""));
+        let (server_id, server, text) = if machine {
+            (String::new(), name.to_string(), format!("**{name}**: {text}"))
+        } else {
+            (join(node, local), crate::relay::clean(a["server"].as_str().unwrap_or(local)), text)
+        };
+        let row = json!({
+            "server_id": server_id,
+            "server": server,
+            "kind": kind,
+            "text": text,
+            "since": since,
+            "dismissed": gone || a["dismissed"] == true,
+            "node": node,
+        });
+        if let Some(list) = out["active"].as_array_mut() {
+            list.push(row);
+        }
+    }
+    // Hidden alerts that cleared on the node are forgotten.
+    hidden.retain(|k, _| k.0 != node || still.contains(k));
 }
 
 async fn save(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(s): Json<Settings>) -> ApiResult<Json<Value>> {
@@ -664,10 +846,34 @@ async fn save(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, J
 struct DismissBody {
     server_id: String,
     kind: String,
+    /// A node's alert (the `node` its row carries): hidden on this main.
+    #[serde(default)]
+    node: String,
 }
 
 async fn dismiss(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<DismissBody>) -> ApiResult<Json<Value>> {
-    require(&app, &headers, &method)?;
+    let who = require(&app, &headers, &method)?;
+    let node = match crate::relay::split(&b.server_id) {
+        Some((n, local)) => Some((n.to_string(), local.to_string())),
+        None if !b.node.is_empty() && b.server_id.is_empty() => Some((b.node.clone(), String::new())),
+        None => None,
+    };
+    if let Some((node, local)) = node {
+        if !local.is_empty() && !who.sees(&b.server_id) {
+            return Err(not_found("server"));
+        }
+        // The alert as this main last heard it from the node, so a newer
+        // one (raised again after it cleared) shows.
+        let c = node_answers().lock().unwrap();
+        let since = c.get(&node).and_then(|e| e.got.as_ref()).and_then(|(_, v)| {
+            v["active"].as_array()?.iter().find(|a| a["server_id"] == local.as_str() && a["kind"] == b.kind.as_str()).and_then(|a| a["since"].as_u64())
+        });
+        drop(c);
+        if let Some(since) = since {
+            node_hidden().lock().unwrap().insert((node, local, b.kind.clone()), since);
+        }
+        return Ok(Json(json!({ "ok": true })));
+    }
     let mut st = state().lock().unwrap();
     for a in st.active.values_mut().filter(|a| a.server_id == b.server_id && a.kind == b.kind) {
         a.dismissed = true;

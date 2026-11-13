@@ -1579,6 +1579,26 @@ segmented control).
 - MCP over nodes, node-scoped access for users ("everything on vm-a2"),
   bulk actions per node: A4.
 
+### TPS and alerts of a node's servers (2026-11-13)
+
+- The main's `GET /alerts` asks each connected node for its own
+  `GET /alerts` over the tunnel (`relay::ask_alerts`, on the allowlist as
+  GET only) as Look, the lowest role, whatever the person's. One answer per
+  node is kept for everyone: asked again after 10 s, shown up to 60 s, and
+  the main waits at most 1.5 s for nodes it is asking, so a slow or offline
+  node never holds the page up (its last answer, or nothing, shows).
+- The answer is merged like the server list (`alerts::merge_node`): server
+  ids namespaced, only plain ids, only the person's servers, known kinds
+  and no-TPS reasons, numbers checked, text one line of at most 500
+  characters. A node's drive and memory alerts carry `node` and read
+  "**oracle**: Drive C: is nearly full"; they show on the Overview and on
+  that node's server pages, not on the main's own (`alertShows` in
+  `ui/src/lib/nodes.js`). A node's "node" alerts are dropped.
+- Dismissing a node's alert on the main hides it on the main only, until
+  the node raises it again (a new `since`). Not sent to the node: there it
+  would hide the alert for the node's own people too, and the main only
+  reads from the node for alerts.
+
 ### A2 security review (2026-11-13)
 
 Read against the A threat list for the relay: identity in the OPEN head,

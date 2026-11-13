@@ -11,7 +11,8 @@
   import { say } from './lib/toast.svelte.js';
 
   let { server, part = 'chip' } = $props();
-  // Alerts are this panel's own; another panel's server shows none here (yet).
+  // Alerts are this panel's own and its nodes' (merged by the panel under
+  // the namespaced ids); another panel's server shows none here (yet).
   const remote = !!target.panel;
   const id = $derived(server.id);
   const tps = $derived(alerts.tps[id]);

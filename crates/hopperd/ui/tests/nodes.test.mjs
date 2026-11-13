@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { nodeLine, span, codeGroups, defaultAddress, STATES, ceilingLabel, onNode, canShareLog } from '../src/lib/nodes.js';
+import { nodeLine, span, codeGroups, defaultAddress, STATES, ceilingLabel, onNode, canShareLog, nodeOf, alertShows } from '../src/lib/nodes.js';
 
 const now = 1_800_000_000;
 
@@ -41,4 +41,21 @@ test("sharing a log on mclo.gs shows only for a panel's own servers", () => {
   assert.equal(canShareLog({ id: 'tnp', node: 'ab12cd34ef56' }), false);
   assert.equal(onNode(null), false);
   assert.equal(onNode({}), false);
+});
+
+test('a node machine alert shows on that node servers and the Overview only', () => {
+  assert.equal(nodeOf('ab12:dg'), 'ab12');
+  assert.equal(nodeOf('dg'), '');
+  const nodeDisk = { server_id: '', kind: 'disk', node: 'ab12' };
+  const ownDisk = { server_id: '', kind: 'disk' };
+  const dgTps = { server_id: 'ab12:dg', kind: 'tps', node: 'ab12' };
+  assert.ok(alertShows(nodeDisk, 'ab12:dg'));
+  assert.ok(!alertShows(nodeDisk, 'local'));
+  assert.ok(!alertShows(nodeDisk, 'cd34:other'));
+  assert.ok(alertShows(nodeDisk, ''), 'the Overview shows every machine');
+  assert.ok(alertShows(ownDisk, 'local'));
+  assert.ok(!alertShows(ownDisk, 'ab12:dg'), "this panel's drive isn't the node's");
+  assert.ok(alertShows(dgTps, 'ab12:dg'));
+  assert.ok(!alertShows(dgTps, 'dg'));
+  assert.ok(!alertShows(dgTps, ''), 'a server alert stays on its page');
 });

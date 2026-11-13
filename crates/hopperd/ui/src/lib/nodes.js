@@ -27,6 +27,15 @@ export const ceilingLabel = (id) => CEILINGS.find((c) => c.id === id)?.label ?? 
  * merged list also marks it with `node`. */
 export const onNode = (s) => !!s && (!!s.node || String(s.id ?? '').includes(':'));
 
+/** The node a server id lives on ('' for this panel's own). */
+export const nodeOf = (id) => (String(id ?? '').includes(':') ? String(id).split(':')[0] : '');
+
+/** Whether alert `a` shows on the page of server `id` ('' is the Overview):
+ * the server's own alerts, plus alerts about the machine it runs on (a
+ * drive, memory). The Overview shows every machine's: this panel's and
+ * each node's, which name their node. */
+export const alertShows = (a, id) => a.server_id === id || (!a.server_id && (!id || (a.node || '') === nodeOf(id)));
+
 /** Whether "Share on mclo.gs" works for server `s`. Sharing isn't relayed
  * to a node (the panel itself posts the log), so it shows only for a
  * panel's own servers. */

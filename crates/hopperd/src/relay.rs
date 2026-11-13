@@ -162,6 +162,10 @@ pub fn allowed(method: &Method, route: &str) -> bool {
         },
         ("jobs", [_]) => *method == Method::GET,
         ("jobs", [_, "cancel" | "dismiss"]) => *method == Method::POST,
+        // The node's TPS readings and alerts, which the main asks for itself
+        // ([`ask_alerts`]) to show them on its own pages. Reading only:
+        // dismissing stays on the node (the main hides them for itself).
+        ("alerts", []) => *method == Method::GET,
         _ => false,
     }
 }
@@ -301,6 +305,12 @@ pub fn ceiling_text(c: Role) -> &'static str {
 /// A name from the other side, as shown and logged: one line, short.
 pub fn clean(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).take(60).collect::<String>().trim().to_string()
+}
+
+/// A sentence from the other side (an alert's text): one line, at most 500
+/// characters.
+pub fn clean_text(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(500).collect::<String>().trim().to_string()
 }
 
 // ---- the stream head -------------------------------------------------------
@@ -459,6 +469,35 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
         }
     });
     b.body(Body::from_stream(stream)).unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+/// A node's TPS readings and alerts (its `GET /api/v1/alerts`), asked for by
+/// the main itself, not for a person: so with the lowest role there is, Look,
+/// which every ceiling allows. The main filters the answer per person by
+/// the namespaced ids (`crate::alerts`). `None` when the node refuses,
+/// stops or sends something that isn't a small JSON object.
+pub async fn ask_alerts(handle: &crate::tunnel::mux::Handle) -> Option<Value> {
+    const PATH: &str = "/api/v1/alerts";
+    /// Plenty for a node's alerts and a reading per server.
+    const MAX: usize = 1024 * 1024;
+    if !allowed(&Method::GET, PATH) {
+        return None;
+    }
+    let head = Head { k: "req".into(), m: "GET".into(), p: PATH.into(), user: "alerts".into(), role: Role::Viewer.id().into(), ..Default::default() };
+    let mut s = handle.open(serde_json::to_vec(&head).ok()?).await.ok()?;
+    s.tx.finish().await.ok()?;
+    let (answer, mut all) = read_answer(&mut s.rx).await.ok()?;
+    if answer.s != 200 {
+        return None;
+    }
+    loop {
+        match s.rx.recv().await {
+            Ok(Some(d)) if all.len() + d.len() <= MAX => all.extend_from_slice(&d),
+            Ok(None) => break,
+            _ => return None,
+        }
+    }
+    serde_json::from_slice::<Value>(&all).ok().filter(Value::is_object)
 }
 
 /// Whether a relayed request can start a server (refused while the node is
@@ -903,6 +942,7 @@ mod tests {
             (&p, "/api/v1/servers/create"),
             (&g, "/api/v1/jobs/7"),
             (&p, "/api/v1/jobs/7/cancel"),
+            (&g, "/api/v1/alerts"),
         ] {
             assert!(allowed(m, r), "{m} {r}");
         }
@@ -930,6 +970,11 @@ mod tests {
             (&g, "/api/v1/ws"),
             (&p, "/api/v1/mcp"),
             (&g, "/api/v1/jobs"),
+            // Alerts: reading only; settings and dismissing stay on the node.
+            (&p, "/api/v1/alerts"),
+            (&p, "/api/v1/alerts/dismiss"),
+            (&put, "/api/v1/alerts/settings"),
+            (&g, "/api/v1/alerts/settings"),
             // Encoded separators and climbs in a path part (the node's router
             // decodes them into a handler's name).
             (&d, "/api/v1/servers/tnp/backups/..%2F..%2Fx"),

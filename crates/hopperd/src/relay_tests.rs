@@ -344,6 +344,8 @@ async fn fake_node(live: Vec<Value>, answer: Script) -> Fake {
                         }
                         std::future::pending::<()>().await;
                     }
+                    // Status 0: a node that never answers.
+                    Some("req") if answer.0 == 0 => std::future::pending::<()>().await,
                     Some("req") => {
                         while let Ok(Some(_)) = s.rx.recv().await {}
                         let h = serde_json::to_vec(&json!({ "s": answer.0, "h": answer.1 })).unwrap();
@@ -433,4 +435,109 @@ async fn a_node_lists_a_bounded_number_of_servers() {
     let f = fake_node(vec![json!({ "t": "snap", "servers": servers, "host": {} })], (200, vec![], Vec::new())).await;
     let n = f.listed().await.len();
     assert!(n > 0 && n <= crate::nodes::MAX_NODE_SERVERS, "{n}");
+}
+
+// ---- a node's TPS and alerts on the main ----
+
+/// A node server's TPS reading and its low-TPS alert show in the main's
+/// `/alerts` under the namespaced id, like a local server's; Look is
+/// enough for the main to read them.
+#[tokio::test]
+async fn a_nodes_tps_and_alerts_show_on_the_main() {
+    for (main_copy, node_has) in [(Ceiling::Manage, Role::Admin), (Ceiling::Look, Role::Viewer)] {
+        let p = pair(main_copy, Some(node_has)).await;
+        let ns = p.ns();
+        crate::alerts::low_tps_for_test(&p.node.server, "dg", 14.56, 68.7);
+        let (s, b) = send(&p.main, &p.main_cookie, "GET", "/api/v1/alerts", None).await;
+        assert_eq!(s, StatusCode::OK);
+        let t = &b["tps"][&ns];
+        assert!((t["tps"].as_f64().unwrap_or(0.0) - 14.56).abs() < 0.01, "{b}");
+        assert_eq!(t["source"], "rcon");
+        let a = b["active"].as_array().unwrap().iter().find(|a| a["server_id"] == ns.as_str()).unwrap_or_else(|| panic!("{b}"));
+        assert_eq!((a["kind"].as_str(), a["node"].as_str(), a["dismissed"].as_bool()), (Some("tps"), Some(p.id.as_str()), Some(false)));
+        assert!(b["settings"].is_object(), "the main's own settings stay");
+    }
+}
+
+/// Dismissing a node server's alert on the main hides it there only: the
+/// node's own alert stays up for the node's people.
+#[tokio::test]
+async fn dismissing_a_node_alert_hides_it_on_the_main_only() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let ns = p.ns();
+    crate::alerts::low_tps_for_test(&p.node.server, "dg", 9.0, 110.0);
+    let (_, b) = send(&p.main, &p.main_cookie, "GET", "/api/v1/alerts", None).await;
+    assert!(b["active"].as_array().unwrap().iter().any(|a| a["server_id"] == ns.as_str()), "{b}");
+    let (s, _) = send(&p.main, &p.main_cookie, "POST", "/api/v1/alerts/dismiss", Some(json!({ "server_id": ns, "kind": "tps", "node": p.id }))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, b) = send(&p.main, &p.main_cookie, "GET", "/api/v1/alerts", None).await;
+    let a = b["active"].as_array().unwrap().iter().find(|a| a["server_id"] == ns.as_str()).unwrap();
+    assert_eq!(a["dismissed"], true, "{b}");
+    let (_, b) = send(&p.node, &p.node_cookie, "GET", "/api/v1/alerts", None).await;
+    let a = b["active"].as_array().unwrap().iter().find(|a| a["server_id"] == p.node.server.as_str()).unwrap();
+    assert_eq!(a["dismissed"], false, "the node's own alert stays: {b}");
+}
+
+/// A node's alerts are read as untrusted: ids must be plain, kinds and
+/// reasons known ones, numbers numbers. Its machine's alerts (a drive) show
+/// as about that node, never as the main's own.
+#[tokio::test]
+async fn a_nodes_alerts_are_checked() {
+    let answer = json!({
+        "tps": { "ok": { "tps": 12.5, "mspt": 80.0, "at": 1, "source": "console" }, "x/../y": { "tps": 1.0 }, "a:b": { "tps": 1.0 }, "nan": { "tps": "fast" } },
+        "no_tps": { "quiet": "rcon_off", "odd": "<script>" },
+        "active": [
+            { "server_id": "ok", "server": "OK", "kind": "crash", "text": "**OK** crashed", "since": 5 },
+            { "server_id": "../users", "server": "x", "kind": "tps", "text": "x", "since": 5 },
+            { "server_id": "ok", "server": "OK", "kind": "node", "text": "x", "since": 5 },
+            { "server_id": "ok", "server": "OK", "kind": "disk", "text": "x", "since": 5 },
+            { "server_id": "", "server": "", "kind": "disk", "text": "Drive / is nearly full: 3.0 GB free", "since": 6 },
+            { "server_id": "", "server": "", "kind": "tps", "text": "x", "since": 6 },
+        ],
+    });
+    let f = fake_node(Vec::new(), (200, vec![("content-type", "application/json".into())], answer.to_string().into_bytes())).await;
+    let (s, b) = send(&f.main, &f.cookie, "GET", "/api/v1/alerts", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let prefix = format!("{}:", f.id);
+    let mine = |m: &Value| m.as_object().unwrap().keys().filter(|k| k.starts_with(&prefix)).cloned().collect::<Vec<_>>();
+    assert_eq!(mine(&b["tps"]), vec![f.ns("ok")], "{b}");
+    assert_eq!(b["tps"][f.ns("ok")]["source"], "console");
+    assert_eq!(mine(&b["no_tps"]), vec![f.ns("quiet")], "{b}");
+    let rows: Vec<&Value> = b["active"].as_array().unwrap().iter().filter(|a| a["node"] == f.id.as_str()).collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!((rows[0]["server_id"].as_str(), rows[0]["kind"].as_str()), (Some(f.ns("ok").as_str()), Some("crash")));
+    assert_eq!((rows[1]["server_id"].as_str(), rows[1]["kind"].as_str()), (Some(""), Some("disk")));
+    assert_eq!(rows[1]["text"], "**vm**: Drive / is nearly full: 3.0 GB free");
+}
+
+/// A node that doesn't answer doesn't hold up the main's `/alerts`.
+#[tokio::test]
+async fn a_slow_node_does_not_hold_up_alerts() {
+    let f = fake_node(Vec::new(), (0, vec![], Vec::new())).await;
+    let t = std::time::Instant::now();
+    let (s, b) = send(&f.main, &f.cookie, "GET", "/api/v1/alerts", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(t.elapsed() < std::time::Duration::from_secs(3), "{:?}", t.elapsed());
+    assert!(b["tps"].as_object().unwrap().keys().all(|k| !k.starts_with(&f.id)), "{b}");
+    // Asked again while that ask still runs: an answer at once.
+    let t = std::time::Instant::now();
+    let _ = send(&f.main, &f.cookie, "GET", "/api/v1/alerts", None).await;
+    assert!(t.elapsed() < std::time::Duration::from_millis(500), "{:?}", t.elapsed());
+}
+
+/// Someone limited to some servers gets none of a node's alerts for
+/// servers they can't see.
+#[tokio::test]
+async fn limited_people_get_only_their_node_alerts() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let other = Who::User { id: "u".into(), name: "u".into(), role: Role::Operator, servers: vec![p.main.server.clone()] };
+    let mut tps = serde_json::Map::new();
+    tps.insert(p.node.server.clone(), json!({ "tps": 9.0 }));
+    let v = json!({ "tps": tps, "no_tps": {}, "active": [{ "server_id": p.node.server, "kind": "tps", "text": "x", "since": 1 }] });
+    let mut out = json!({ "active": [], "tps": {}, "no_tps": {} });
+    crate::alerts::merge_node_for_test(&mut out, &p.id, "vm", &v, &other);
+    assert_eq!(out, json!({ "active": [], "tps": {}, "no_tps": {} }));
+    let mine = Who::User { id: "u".into(), name: "u".into(), role: Role::Operator, servers: vec![p.ns()] };
+    crate::alerts::merge_node_for_test(&mut out, &p.id, "vm", &v, &mine);
+    assert!(out["tps"].get(p.ns()).is_some() && out["active"].as_array().unwrap().len() == 1, "{out}");
 }
