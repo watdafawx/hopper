@@ -8,6 +8,8 @@
   import { api } from './lib/api.js';
   import { bytes } from './lib/format.js';
   import { download } from './lib/transfers.svelte.js';
+  import { panelImg, fetchFrom, openTab } from './lib/panelfiles.svelte.js';
+  import { say } from './lib/toast.svelte.js';
   import { IMAGE, TEXT } from './lib/files.svelte.js';
   import { dialog } from './lib/dialog.svelte.js';
 
@@ -91,7 +93,7 @@
       peek = { name: e.name, img: entryUrl(e.name, true) };
     } else if (TEXT.test(e.name) || /\.(mcmeta|json|toml|txt|cfg|md|properties|mf|accesswidener)$/i.test(e.name)) {
       const seq = ++peekSeq;
-      const t = await fetch(entryUrl(e.name, true), { credentials: 'same-origin' })
+      const t = await fetchFrom(entryUrl(e.name, true))
         .then((r) => (r.ok ? r.text() : r.json().then((j) => `Couldn't read it: ${j.error || r.status}`, () => `Couldn't read it (HTTP ${r.status}).`)))
         .catch(() => "Couldn't read it: the connection dropped.");
       // Another entry clicked meanwhile wins.
@@ -125,12 +127,12 @@
   {#if mode === 'image'}
     <div class="img col">
       <div class="row top"><b class="ell">{cur.split('/').pop()}</b><span class="tiny muted">{images.length > 1 ? `${at + 1} of ${images.length} · ← → or scroll to move` : ''}</span><span class="sp"></span>
-        <a class="btn sm ghost icon" title="Open in a new tab" href={src(cur)} target="_blank" rel="noopener"><ExternalLink size={13} /></a>
+        <button class="btn sm ghost icon" title="Open in a new tab" aria-label="Open in a new tab" onclick={() => openTab(src(cur), undefined, (e) => say(e.message, true))}><ExternalLink size={13} /></button>
         <button class="btn sm" onclick={() => download(`/api/v1${base}/file?path=${encodeURIComponent(cur)}`)}><Download size={13} />Download</button>
         <button class="btn sm ghost icon" title="Close (Esc)" onclick={onClose}><X size={14} /></button></div>
       <div class="stage" use:wheelable bind:clientWidth={room.w} bind:clientHeight={room.h}>
         {#if images.length > 1}<button class="nav l" title="Previous (←)" onclick={() => step(-1)}><ChevronLeft size={22} /></button>{/if}
-        <img src={src(cur)} alt="" style={fit} onload={(e) => (nat = { w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })} />
+        <img use:panelImg={src(cur)} alt="" style={fit} onload={(e) => (nat = { w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })} />
         {#if images.length > 1}<button class="nav r" title="Next (→)" onclick={() => step(1)}><ChevronRight size={22} /></button>{/if}
       </div>
     </div>
@@ -161,7 +163,7 @@
         {#if peek}
           <div class="zp">
             <div class="row small"><b class="ell">{peek.name}</b><span class="sp"></span><button class="btn sm ghost" onclick={() => download(entryUrl(peek.name))}><Download size={12} />Download</button></div>
-            {#if peek.img}<img src={peek.img} alt="" class="pimg" />{:else}<pre class="mono">{peek.text}</pre>{/if}
+            {#if peek.img}<img use:panelImg={peek.img} alt="" class="pimg" />{:else}<pre class="mono">{peek.text}</pre>{/if}
           </div>
         {/if}
       </div>

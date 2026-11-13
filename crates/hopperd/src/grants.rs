@@ -44,8 +44,11 @@ pub const WS_TICKET_PREFIX: &str = "hopperd-ticket.";
 pub enum Purpose {
     /// The live WebSocket.
     Live,
-    /// Files of one server: one file, or a zip of several paths.
-    File { server: String, paths: Vec<String>, zip: bool, inline: bool, name: Option<String> },
+    /// Files of one server: one file, or a zip of several paths, or (with
+    /// `entry`) one entry inside the zip or jar at `paths[0]`.
+    File { server: String, paths: Vec<String>, zip: bool, inline: bool, name: Option<String>, entry: Option<String> },
+    /// One of a server's backups, as a zip.
+    Backup { server: String, name: String },
 }
 
 impl Purpose {
@@ -53,7 +56,10 @@ impl Purpose {
     fn size(&self) -> usize {
         match self {
             Purpose::Live => 0,
-            Purpose::File { server, paths, name, .. } => server.len() + paths.iter().map(|p| p.len() + 24).sum::<usize>() + name.as_ref().map_or(0, String::len),
+            Purpose::File { server, paths, name, entry, .. } => {
+                server.len() + paths.iter().map(|p| p.len() + 24).sum::<usize>() + name.as_ref().map_or(0, String::len) + entry.as_ref().map_or(0, String::len)
+            }
+            Purpose::Backup { server, name } => server.len() + name.len(),
         }
     }
 }
@@ -102,7 +108,7 @@ impl Grants {
     pub fn issue(&self, purpose: Purpose, cred: &str, acct: &str, origin: Option<&str>) -> Result<String, &'static str> {
         let ttl = match purpose {
             Purpose::Live => TICKET_TTL,
-            Purpose::File { .. } => LINK_TTL,
+            Purpose::File { .. } | Purpose::Backup { .. } => LINK_TTL,
         };
         let now = Instant::now();
         let mut m = self.waiting.lock().unwrap();
@@ -179,7 +185,7 @@ mod tests {
         g.age(&t, TICKET_TTL);
         assert!(g.take(&t).is_none());
         // A file link lives longer than a ticket, but not forever.
-        let f = Purpose::File { server: "s".into(), paths: vec!["a".into()], zip: false, inline: false, name: None };
+        let f = Purpose::File { server: "s".into(), paths: vec!["a".into()], zip: false, inline: false, name: None, entry: None };
         let l = g.issue(f.clone(), "h1", "acct", None).unwrap();
         g.age(&l, TICKET_TTL);
         assert_eq!(g.take(&l).unwrap().purpose, f);
@@ -212,7 +218,7 @@ mod tests {
     #[test]
     fn waiting_links_hold_little_memory() {
         let g = Grants::default();
-        let big = Purpose::File { server: "s".into(), paths: vec!["a".repeat(1024 * 1024)], zip: true, inline: false, name: None };
+        let big = Purpose::File { server: "s".into(), paths: vec!["a".repeat(1024 * 1024)], zip: true, inline: false, name: None, entry: None };
         for i in 0..64 {
             // Each from its own account, so only the pool-wide limit is at work.
             g.issue(big.clone(), &format!("session-{i}"), &format!("acct-{i}"), None).unwrap();
@@ -237,14 +243,14 @@ mod tests {
         assert!(g.waiting.lock().unwrap().values().filter(|x| x.acct == "owner").count() <= PER_ACCOUNT);
         // Everyone else still gets through.
         assert!(g.issue(Purpose::Live, "v1", "vic", None).is_ok());
-        let f = Purpose::File { server: "s".into(), paths: vec!["a".into()], zip: false, inline: false, name: None };
+        let f = Purpose::File { server: "s".into(), paths: vec!["a".into()], zip: false, inline: false, name: None, entry: None };
         assert!(g.issue(f, "v1", "vic", None).is_ok());
     }
 
     #[test]
     fn one_account_cannot_hold_much_memory() {
         let g = Grants::default();
-        let mb = Purpose::File { server: "s".into(), paths: vec!["a".repeat(1024 * 1024)], zip: true, inline: false, name: None };
+        let mb = Purpose::File { server: "s".into(), paths: vec!["a".repeat(1024 * 1024)], zip: true, inline: false, name: None, entry: None };
         let a = g.issue(mb.clone(), "s1", "owner", None).unwrap();
         g.issue(mb.clone(), "s2", "owner", None).unwrap();
         let c = g.issue(mb, "s3", "owner", None).unwrap();
@@ -253,7 +259,7 @@ mod tests {
         let held: usize = g.waiting.lock().unwrap().values().map(|x| x.purpose.size()).sum();
         assert!(held <= MAX_BYTES_PER_ACCOUNT, "{held} bytes");
         // Ten accounts at their share: the pool isn't exhausted for an eleventh.
-        let mb = Purpose::File { server: "s".into(), paths: vec!["a".repeat(1024 * 1024)], zip: true, inline: false, name: None };
+        let mb = Purpose::File { server: "s".into(), paths: vec!["a".repeat(1024 * 1024)], zip: true, inline: false, name: None, entry: None };
         for i in 0..10 {
             g.issue(mb.clone(), &format!("x{i}"), &format!("user{i}"), None).unwrap();
         }

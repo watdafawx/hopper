@@ -230,6 +230,39 @@ the address the player typed and passes them to that server's own port.
 - Mods › Backups shows `.hopper-backups` (from Hopper desktop or the panel): restore a jar (the current one of the same mod is set aside first) or delete old backups.
 - Settings has sections (General, Players, World, Network, Address, Memory & Java, Other keys) with a list to jump between them.
 
+## Several panels on one page
+
+Run Hopper Server on more than one PC and see all their servers in one
+list. One panel's page (say `http://rig:8790`) shows its own servers and
+those of every panel you add to it.
+
+1. **On the other panel**, open its own page, sign in as its owner, and in
+   Settings › Access & devices › Other web pages add the address of the
+   page you'll use (`http://rig:8790`). Only listed pages can use it.
+2. **On your page**, press "Add a Hopper Server" under the server list and
+   type the other panel's address (`gamebox:8790`). It checks that it
+   answers, that the browser trusts its certificate and that it lists your
+   page, and says how to fix whatever doesn't.
+3. **Sign in** to it in its group in the list, once per browser. Your page
+   keeps only its address; the sign-in stays in your browser.
+
+Certificates: over https, the browser has to trust the other panel's own
+certificate. Either open its page once and accept the warning (this
+browser, until it forgets), or download its certificate from "Add a Hopper
+Server" (`/api/v1/ca.crt`) and install it as a trusted root on this PC (it
+lists the steps for Windows, Mac and Firefox). Only do that for a panel you
+run: the PC then trusts every certificate it makes. Plain http works on
+your own network and Tailscale without any of this.
+
+What works from your page on another panel's servers: the console, start
+and stop, settings, mods, configs, players, backups, worlds and files,
+including uploads (any size: they go in chunks), downloads, zips and
+previews. Downloads use a one-use link from that panel, so the file comes
+straight from it. Each panel still checks its own roles and keeps its own
+audit log. Things about a panel itself (making a new server, its users,
+addresses and certificate) are on its own page: "Open in browser" in its
+group's menu.
+
 ## Servers other panels know (0.4.0)
 
 Any server folder runs here in place, also ones Crafty or MCSS know: their

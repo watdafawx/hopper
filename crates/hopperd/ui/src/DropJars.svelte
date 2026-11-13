@@ -5,6 +5,7 @@
   import { FileUp, Check, X, TriangleAlert } from '@lucide/svelte';
   import { choose } from './lib/dialog.svelte.js';
   import { say } from './lib/toast.svelte.js';
+  import { target, apiBase, headersFor } from './lib/api.js';
 
   let { server, onAdded } = $props();
 
@@ -63,16 +64,18 @@
     for (const f of jars) {
       const row = { id: next++, name: f.name, state: 'wait', pct: 0, note: '' };
       rows.push(row);
-      queue.push({ f, row: rows[rows.length - 1], sid: server.id });
+      // The panel whose page it was dropped on (another panel: its address and token).
+      queue.push({ f, row: rows[rows.length - 1], sid: server.id, panel: target.panel });
     }
     if (!working) run();
   }
 
-  function send(sid, f, conflict, row) {
+  function send(sid, f, conflict, row, panel) {
     return new Promise((resolve) => {
       const x = new XMLHttpRequest();
-      x.open('POST', `/api/v1/servers/${encodeURIComponent(sid)}/mods/upload?name=${encodeURIComponent(f.name)}&conflict=${conflict}`);
-      x.setRequestHeader('X-Hopperd', '1');
+      x.open('POST', `${apiBase(panel)}/servers/${encodeURIComponent(sid)}/mods/upload?name=${encodeURIComponent(f.name)}&conflict=${conflict}`);
+      if (panel) for (const [k, v] of Object.entries(headersFor(panel))) x.setRequestHeader(k, v);
+      else x.setRequestHeader('X-Hopperd', '1');
       x.setRequestHeader('Content-Type', 'application/octet-stream');
       x.upload.onprogress = (e) => (row.pct = e.lengthComputable ? Math.round((e.loaded / e.total) * 100) : 0);
       x.onload = () => {
@@ -90,9 +93,9 @@
     let added = 0;
     let replacedAny = false;
     while (queue.length) {
-      const { f, row, sid } = queue.shift();
+      const { f, row, sid, panel } = queue.shift();
       row.state = 'up';
-      let r = await send(sid, f, 'ask', row);
+      let r = await send(sid, f, 'ask', row, panel);
       if (r.status === 409 && r.body?.conflict) {
         // The same mod is on the server already (matched by the id inside
         // the jar, so a new version with another file name counts).
@@ -109,7 +112,7 @@
           row.note = 'Skipped';
           continue;
         }
-        r = await send(sid, f, a === 'ok' ? 'replace' : 'both', row);
+        r = await send(sid, f, a === 'ok' ? 'replace' : 'both', row, panel);
       }
       if (r.status === 200) {
         row.state = 'done';

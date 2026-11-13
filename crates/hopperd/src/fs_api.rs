@@ -284,7 +284,16 @@ struct LinkBody {
     inline: bool,
     #[serde(default)]
     name: Option<String>,
+    /// One entry inside the zip or jar at `path` (the Files tab's zip view).
+    #[serde(default)]
+    entry: Option<String>,
+    /// One of the server's backups, by its name in the Backups tab.
+    #[serde(default)]
+    backup: Option<String>,
 }
+
+/// Longest name of an entry inside a zip a link may hold.
+const LINK_MAX_ENTRY: usize = 4096;
 
 /// A one-use link (60 s) to download or preview files of this server, for
 /// a page that signs in with a bearer token and so can't use a plain
@@ -299,6 +308,26 @@ async fn link(
     Json(b): Json<LinkBody>,
 ) -> ApiResult<Json<Value>> {
     let e = server(&app, &headers, &method, &id)?;
+    let cred = crate::auth::hash_token(&crate::api::token(&headers).0);
+    let acct = app.auth.account_key(&cred).unwrap_or_else(|| cred.clone());
+    let issue = |purpose| -> ApiResult<Json<Value>> {
+        let k = app.grants.issue(purpose, &cred, &acct, crate::api::origin_of(&headers)).map_err(|m| ApiError(StatusCode::TOO_MANY_REQUESTS, m.into()))?;
+        // The secret goes in the query: the panel's logs record paths only.
+        Ok(Json(json!({ "url": format!("/api/v1/link?k={k}"), "expires_in": crate::grants::LINK_TTL.as_secs() })))
+    };
+    // A backup is named, not a path: the same check as its download.
+    if let Some(name) = b.backup {
+        if b.path.is_some() || !b.paths.is_empty() || b.zip || b.inline || b.entry.is_some() {
+            return Err(bad("Ask for a backup on its own."));
+        }
+        crate::backups_api::backup_exists(&e, &name)?;
+        return issue(crate::grants::Purpose::Backup { server: id, name });
+    }
+    if let Some(en) = &b.entry
+        && (b.zip || en.is_empty() || en.len() > LINK_MAX_ENTRY)
+    {
+        return Err(bad("Name one entry of one zip."));
+    }
     let mut paths = b.paths;
     if let Some(p) = b.path {
         paths.insert(0, p);
@@ -322,12 +351,7 @@ async fn link(
         *p = files::rel_of(&e.root, &full);
     }
     let name = b.name.map(|n| n.chars().filter(|c| !c.is_control() && !matches!(c, '/' | '\\')).take(200).collect::<String>()).filter(|n| !n.is_empty());
-    let cred = crate::auth::hash_token(&crate::api::token(&headers).0);
-    let purpose = crate::grants::Purpose::File { server: id, paths, zip: b.zip, inline: b.inline && !b.zip, name };
-    let acct = app.auth.account_key(&cred).unwrap_or_else(|| cred.clone());
-    let k = app.grants.issue(purpose, &cred, &acct, crate::api::origin_of(&headers)).map_err(|m| ApiError(StatusCode::TOO_MANY_REQUESTS, m.into()))?;
-    // The secret goes in the query: the panel's logs record paths only.
-    Ok(Json(json!({ "url": format!("/api/v1/link?k={k}"), "expires_in": crate::grants::LINK_TTL.as_secs() })))
+    issue(crate::grants::Purpose::File { server: id, paths, zip: b.zip, inline: b.inline && !b.zip, name, entry: b.entry })
 }
 
 /// Uses a one-use file link. It's gone after the first try. The session
@@ -336,16 +360,24 @@ async fn link(
 pub(crate) async fn redeem_link(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> ApiResult<Response> {
     let expired = || ApiError(StatusCode::UNAUTHORIZED, "This link has expired or was already used. Ask for the file again.".into());
     let g = app.grants.take(q.get("k").map_or("", String::as_str)).ok_or_else(expired)?;
-    let crate::grants::Purpose::File { server: id, paths, zip, inline, name } = g.purpose else { return Err(expired()) };
     let who = app.auth.check_hash(&g.cred, g.origin.as_deref()).ok_or_else(expired)?;
-    if let Some(msg) = crate::security::refusal(&who, &Method::GET, &format!("/api/v1/fs/{id}/file")) {
+    // Checked as the same read on the panel's own page would be.
+    let (id, route) = match &g.purpose {
+        crate::grants::Purpose::File { server, entry: Some(_), .. } => (server.clone(), format!("/api/v1/fs/{server}/zip-entry")),
+        crate::grants::Purpose::File { server, .. } => (server.clone(), format!("/api/v1/fs/{server}/file")),
+        crate::grants::Purpose::Backup { server, name } => (server.clone(), format!("/api/v1/servers/{server}/backups/{name}/download")),
+        crate::grants::Purpose::Live => return Err(expired()),
+    };
+    if let Some(msg) = crate::security::refusal(&who, &Method::GET, &route) {
         return Err(ApiError(StatusCode::FORBIDDEN, msg.into()));
     }
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
-    if zip {
-        send_zip(&e, &paths, name)
-    } else {
-        send_file(&e, &paths[0], &headers, inline).await
+    match g.purpose {
+        crate::grants::Purpose::Backup { name, .. } => crate::backups_api::send_backup(&e, name).await,
+        crate::grants::Purpose::File { paths, entry: Some(entry), inline, .. } => crate::fs_zip::send_entry(&e, &paths[0], entry, inline).await,
+        crate::grants::Purpose::File { paths, zip: true, name, .. } => send_zip(&e, &paths, name),
+        crate::grants::Purpose::File { paths, inline, .. } => send_file(&e, &paths[0], &headers, inline).await,
+        crate::grants::Purpose::Live => Err(expired()),
     }
 }
 
