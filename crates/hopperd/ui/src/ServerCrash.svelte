@@ -9,8 +9,9 @@
   // lingered}) it shows that one instead, read-only: no fixes from an old
   // report.
   import { issueUrl } from './lib/report.js';
-  import { AlertTriangle, FileText, Share2, RefreshCw, Undo2, PowerOff, Trash2, Check, ChevronDown, ChevronRight, Info } from '@lucide/svelte';
+  import { AlertTriangle, FileText, Share2, RefreshCw, Undo2, PowerOff, Trash2, Check, ChevronDown, ChevronRight, Info, Download } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
+  import { followJob } from './lib/jobs.js';
   import { removeMods, setOn } from './lib/modops.js';
   import { relative } from './lib/worlds.js';
   import { say } from './lib/toast.svelte.js';
@@ -42,6 +43,11 @@
   let report = $state(null);
   let lingered = $state(null);
   let mods = $state([]);
+  // Where each mod id the crash says is missing stands now: installed
+  // since, the game or its loader, or still missing (the panel's read).
+  let needsNow = $state({});
+  // Mod ids being added from this card (id -> what the job says).
+  let adding = $state({});
   let checking = $state(false);
   // Mods (jars) whose "Why?" list is open (what Hopper weighed for each).
   let whyOpen = $state({})
@@ -68,6 +74,7 @@
       report = r.report;
       lingered = r.lingered || null;
       changes = r.changes || [];
+      needsNow = r.needs || {};
       mods = m;
     } catch {
       if (n === seq) crash = null;
@@ -82,6 +89,7 @@
     crash = g.crash;
     report = g.report;
     lingered = g.lingered || null;
+    needsNow = g.needs || {};
     back = null;
     picking = false;
     try {
@@ -102,6 +110,37 @@
       checking = false;
     }
   });
+
+  const needState = (id) => needsNow[id] || 'missing';
+  // Once everything a mod needs is installed, "Add what it needs" is done:
+  // the step says to start again, and the "Or …" step after it stays.
+  const stepsOf = (s) =>
+    s.needs?.length && s.needs.every(([id]) => needState(id) === 'installed')
+      ? (s.steps || []).map((t) => (/^add what /i.test(t) ? 'It has what it needs now. Start the server to try again.' : t))
+      : s.steps || [];
+
+  // The card's Install for a mod the crash says is missing: found by its id
+  // on Modrinth or CurseForge and added with what it needs (the desktop's
+  // button). The server starts again by hand.
+  async function installNeed(id) {
+    adding = { ...adding, [id]: 'Adding…' };
+    try {
+      const { job } = await post(`${base}/mods/install-needed`, { mod_id: id });
+      const r = await followJob(job, (st) => (adding = { ...adding, [id]: st.detail || 'Adding…' }));
+      needsNow = { ...needsNow, [id]: 'installed' };
+      say(`Added ${(r?.added || [id]).join(', ')}. Start the server to try again.`);
+      try {
+        mods = (await api(`${base}/mods/list`)).mods || mods;
+      } catch {
+        // the card keeps the mods it had
+      }
+    } catch (e) {
+      say(e.message, true);
+    } finally {
+      const { [id]: _done, ...rest } = adding;
+      adding = rest;
+    }
+  }
 
   const bare = (f) => (f || '').toLowerCase().replace(/\.disabled$/, '');
   const modOf = (file) => mods.find((m) => bare(m.file) === bare(file));
@@ -257,10 +296,10 @@
   {#if s.partner}
     <div class="line tiny partner"><span class="muted">Doesn't match</span>{@render mod(s.partner.file_name, s.partner.name)}{#if s.partner.version}<span class="muted">{s.partner.version} (installed)</span>{/if}</div>
   {/if}
-  {#if s.steps?.length}
+  {#if stepsOf(s).length}
     <div class="todo">
       <span class="tiny muted b">What to do</span>
-      <ol>{#each s.steps as t, k (k)}<li class="tiny"><span class="muted">{k + 1}.</span><span>{named(t)}</span></li>{/each}</ol>
+      <ol>{#each stepsOf(s) as t, k (k)}<li class="tiny"><span class="muted">{k + 1}.</span><span>{named(t)}</span></li>{/each}</ol>
     </div>
   {/if}
 {/snippet}
@@ -271,7 +310,19 @@
     <div class="grade">{@render sTag(s)}</div>
     <div class="why">
       <div class="tiny muted">{named(s.why)}</div>
-      {#each s.needs || [] as [id, ver] (id)}<div class="tiny need">Needs {id}{ver ? ` ${ver}` : ''}</div>{/each}
+      {#each s.needs || [] as [id, ver] (id)}
+        {@const ns = needState(id)}
+        <div class="tiny need">
+          <span>Needs {id}{ver ? ` ${ver}` : ''}</span>
+          {#if ns === 'installed'}
+            <span class="done"><Check size={12} />Installed</span>
+          {:else if ns === 'loader'}
+            <span class="muted">Change it in the loader versions (the loader in the page header)</span>
+          {:else}
+            <button class="btn sm pri" disabled={!!adding[id]} title="From Modrinth or CurseForge, with what it needs" onclick={() => installNeed(id)}>{#if adding[id]}<span class="spinner"></span>{adding[id]}{:else}<Download size={12} />Install{/if}</button>
+          {/if}
+        </div>
+      {/each}
       {@render help(s)}
       {#if (s.facts || []).length > 1 && moreFacts(s).length}
         <button class="btn ghost sm whybtn" aria-expanded={!!whyOpen[s.file_name]} onclick={() => (whyOpen[s.file_name] = !whyOpen[s.file_name])}>
@@ -497,7 +548,9 @@
   .grade { flex: none; width: 5rem; }
   .why { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
   .why .tiny, .quote, .steps .tiny { white-space: normal; overflow-wrap: anywhere; }
-  .need { color: var(--gold); font-family: var(--mono, monospace); }
+  .need { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--gold); font-family: var(--mono, monospace); }
+  .need .done { font-family: inherit; }
+  .need .muted { font-family: inherit; color: var(--muted); }
   .morebtn { align-self: flex-start; gap: 4px; padding: 0 6px; }
   .whybtn { align-self: flex-start; gap: 4px; padding: 0 4px; margin-left: -4px; }
   .facts { list-style: none; margin: 2px 0 0; padding: 6px 8px; display: flex; flex-direction: column; gap: 2px; border-radius: var(--radius); background: var(--raise); }

@@ -190,7 +190,8 @@ async fn crashes(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
 
 /// One crash report, read like the crash card reads the last one: the
 /// mods with how sure, why, and what to do. `names` gives each named jar's
-/// name for people.
+/// name for people; `needs` says for each mod id a suspect needs whether it
+/// is "installed" now, "loader" (the game, its loader, Java) or "missing".
 async fn crash_read(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Query(q): Query<PathQ>) -> ApiResult<Json<Value>> {
     require(&app, &headers, &method)?;
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
@@ -210,7 +211,9 @@ async fn crash_read(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
         }
         let lingered = c.as_ref().and_then(|c| c.lingered_note());
         let follow_note = c.as_ref().and_then(hopper_core::crashdetect::follow_up_note);
-        Ok(json!({ "crash": c, "report": rel, "names": names, "lingered": lingered, "follow_note": follow_note }))
+        // What each mod the crash says is missing is now: installed since, the game or its loader, or still missing.
+        let needs = c.as_ref().map(|c| hopper_core::crashdetect::need_statuses(&mods, c)).unwrap_or_default();
+        Ok(json!({ "crash": c, "report": rel, "names": names, "needs": needs, "lingered": lingered, "follow_note": follow_note }))
     })
     .await
     .map_err(bad)?

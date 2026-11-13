@@ -60,6 +60,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/mods/remove", post(remove))
         .route("/api/v1/servers/{id}/mods/search", get(search))
         .route("/api/v1/servers/{id}/mods/install", post(install_mod))
+        .route("/api/v1/servers/{id}/mods/install-needed", post(install_needed))
         .route("/api/v1/servers/{id}/mods/updates", get(updates))
         .route("/api/v1/servers/{id}/mods/update", post(update))
         .route("/api/v1/settings/curseforge", get(cf_key_status).put(set_cf_key))
@@ -673,6 +674,48 @@ async fn install_mod(
     Ok(Json(json!({ "job": job })))
 }
 
+/// A mod id as jars write it: letters, digits, `_`, `-` and `.`, not long.
+fn is_mod_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+#[derive(Deserialize)]
+struct NeededBody {
+    /// The mod id a crash report says is missing ("watermedia").
+    mod_id: String,
+}
+
+/// The crash card's Install: the mod a crash says is missing, found by its
+/// mod id on Modrinth or CurseForge and added with what it needs, as the
+/// desktop's crash card does.
+async fn install_needed(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<NeededBody>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let wanted = b.mod_id.trim().to_string();
+    if !is_mod_id(&wanted) {
+        return Err(bad("That isn't a mod id."));
+    }
+    if hopper_core::crashdetect::is_loader_id(&wanted) {
+        return Err(bad("That is the game or its loader, not a mod. Change it in the server's settings."));
+    }
+    forget_updates(&id);
+    let by = changer(&app, &headers, &method);
+    let job = crate::pack_api::spawn(&app, format!("Adding {wanted} to {}", e.name), move |job| {
+        let _by = hopper_core::actor::batch(&e.root, by);
+        let mut inst = instance(&e)?;
+        known_version(&inst)?;
+        let added = install::install_mod_id(&mut inst, &wanted, job)?;
+        log::info!("{}: added {}", e.name, added.join(", "));
+        Ok(json!({ "added": added }))
+    });
+    Ok(Json(json!({ "job": job })))
+}
+
 /// A mod the paired pack ships: the pack sets its version (updating it
 /// alone would leave the server out of step with players' copies), so it
 /// gets no update of its own; a pack update brings it. Without the pack's
@@ -873,6 +916,17 @@ async fn set_cf_key(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
 #[cfg(test)]
 mod tests {
     use hopper_core::server_mods::mc_for_neoforge;
+    use super::is_mod_id;
+
+    #[test]
+    fn only_mod_ids_are_looked_up() {
+        for ok in ["watermedia", "cloth-config", "ae2_wtlib", "mod.id"] {
+            assert!(is_mod_id(ok), "{ok}");
+        }
+        for bad in ["", " ", "a b", "../x", "x/y", "a;b", &"a".repeat(65)] {
+            assert!(!is_mod_id(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn neoforge_to_minecraft() {

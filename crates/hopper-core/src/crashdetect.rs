@@ -313,6 +313,51 @@ fn after_loading_event(line: &str) -> bool {
 /// Mod ids that are the game or the loader, not a mod someone installed.
 pub(crate) const NOT_MODS: [&str; 7] = ["minecraft", "neoforge", "forge", "fml", "fml_loader", "fabricloader", "java"];
 
+/// Whether an id a crash says is missing is the game, its loader or Java:
+/// that is set in the loader settings, not installed from a mod site.
+pub fn is_loader_id(id: &str) -> bool {
+    NOT_MODS.contains(&id) || id == "quilt_loader"
+}
+
+/// Where a mod id a crash says is missing stands now, in the mods folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NeedStatus {
+    /// An enabled jar provides it: it was installed since the crash.
+    Installed,
+    /// The game, the loader or Java.
+    Loader,
+    /// Nothing provides it yet: it can be installed.
+    Missing,
+}
+
+/// [`NeedStatus`] of mod id `id` in `mods`. Only jars named like the id are
+/// opened (a pack has hundreds), then asked what they provide, so a mod
+/// whose jar is named otherwise still counts as missing here, as on desktop.
+pub fn need_status(mods: &Path, id: &str) -> NeedStatus {
+    if is_loader_id(id) {
+        return NeedStatus::Loader;
+    }
+    let loose = |s: &str| s.to_lowercase().replace(['_', '-'], "");
+    let want = loose(id);
+    let have = fs::read_dir(mods).into_iter().flatten().flatten().any(|e| {
+        let n = e.file_name().to_string_lossy().into_owned();
+        n.ends_with(".jar") && loose(&n).contains(&want) && crate::deps::provides(&e.path()).iter().any(|p| p == id)
+    });
+    if have { NeedStatus::Installed } else { NeedStatus::Missing }
+}
+
+/// [`need_status`] for every mod id the crash's suspects say is missing.
+pub fn need_statuses(mods: &Path, c: &Crash) -> std::collections::BTreeMap<String, NeedStatus> {
+    let mut out = std::collections::BTreeMap::new();
+    for (id, _) in c.suspects.iter().flat_map(|s| s.needs.iter()) {
+        if !out.contains_key(id) {
+            out.insert(id.clone(), need_status(mods, id));
+        }
+    }
+    out
+}
+
 /// One finding in a crash text, before it's matched to the instance.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Raw {
@@ -3963,6 +4008,61 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         blame_inside(&mut raws, TAB_REPORT, "nothing here", &|| Some(TAB_LOG.to_string()));
         raws.sort_by_key(|r| r.certainty);
         assert_eq!(raws[0].mod_id, "litematicatool");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// NeoForge's "requires X, currently X is not installed": the crash names
+    /// the mod that failed with what it needs (lines kept from a real report
+    /// of WaterFrames before WaterMedia was added); the card then says whether
+    /// that was installed since.
+    #[test]
+    fn a_missing_dependency_is_offered_and_its_state_follows_the_folder() {
+        let report = "---- Minecraft Crash Report ----
+// Don't do that.
+
+Time: 2026-11-13 02:58:44
+Description: Mod loading failures have occurred; consult the issue messages for more details
+
+net.neoforged.neoforge.logging.CrashReportExtender$ModLoadingCrashException: Mod loading has failed
+
+-- Mod loading issue for: waterframes --
+Details:
+	Mod file: /G:/Minecraft/packs/Pack/mods/waterframes-NEOFORGE-mc1.21.1-v3.0.0-alpha.1.jar
+	Failure message: Mod waterframes requires watermedia 3.0.0, 3.0.1 or above, and below 3.1
+		Currently, watermedia is not installed
+		
+	Mod version: 3.0.0-alpha.1
+	Exception message: <No associated exception found>
+
+-- System Details --
+Details:
+	Minecraft Version: 1.21.1
+";
+        let root = std::env::temp_dir().join(format!("hopper-crash-needs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["crash-reports", "logs", "mods"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let mods = root.join("mods");
+        jar_with_classes(&mods.join("waterframes-NEOFORGE-mc1.21.1-v3.0.0-alpha.1.jar"), "waterframes", "WaterFrames", &[]);
+        let rep = root.join("crash-reports").join("crash-2026-11-13_02.58.44-fml.txt");
+        fs::write(&rep, report).unwrap();
+        let c = server_report(&root, &rep).expect("a reading");
+        assert_eq!(c.suspects.len(), 1, "{:?}", c.suspects);
+        let s = &c.suspects[0];
+        assert_eq!((s.mod_id.as_str(), s.certainty), ("waterframes", Certainty::Certain));
+        assert_eq!(s.needs, [("watermedia".to_string(), "3.0.0, 3.0.1 or above, and below 3.1".to_string())]);
+        assert_eq!(verdict(&c, &|st| jar_name(&mods, &st.file_name)), "WaterFrames failed to load");
+        // Nothing provides it yet; then a jar does; the game and loader are never offered.
+        assert_eq!(need_status(&mods, "watermedia"), NeedStatus::Missing);
+        jar_with_classes(&mods.join("watermedia-3.0.1.jar"), "watermedia", "WaterMedia", &[]);
+        assert_eq!(need_status(&mods, "watermedia"), NeedStatus::Installed);
+        // A jar named like it that doesn't provide it doesn't count.
+        jar_with_classes(&mods.join("watermedia_extras-1.0.jar"), "extras", "Extras", &[]);
+        assert_eq!(need_status(&mods, "watermedia_extras"), NeedStatus::Missing);
+        for id in ["minecraft", "neoforge", "forge", "fabricloader", "quilt_loader", "java"] {
+            assert_eq!(need_status(&mods, id), NeedStatus::Loader, "{id}");
+        }
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -748,7 +748,9 @@ async fn crash(
     // What Hopper changed for each setting turned off since: the card's diff.
     let changes: Vec<Vec<(bool, String)>> =
         c.as_ref().map(|c| c.switched_off.iter().map(|s| hopper_core::configswitch::applied_diff(&e.root, s)).collect()).unwrap_or_default();
-    Ok(Json(json!({ "crash": c, "report": report, "lingered": lingered, "changes": changes })))
+    // What each mod the crash says is missing is now (installed since, the game or its loader, still missing).
+    let needs = c.as_ref().map(|c| hopper_core::crashdetect::need_statuses(&e.root.join("mods"), c)).unwrap_or_default();
+    Ok(Json(json!({ "crash": c, "report": report, "lingered": lingered, "changes": changes, "needs": needs })))
 }
 
 #[derive(serde::Deserialize)]
