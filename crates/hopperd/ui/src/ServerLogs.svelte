@@ -6,7 +6,6 @@
   // crash card (ServerCrash with `given`, with its fixes for the newest); then latest.log and debug.log,
   // followed while the server runs (LogText).
   import { FileWarning, RefreshCw, FileText, Share2, ChevronRight, Trash2 } from '@lucide/svelte';
-  import { untrack } from 'svelte';
   import { api, post } from './lib/api.js';
   import { exactLabel, fullDate, plural } from './lib/worlds.js';
   import { bytes } from './lib/format.js';
@@ -74,25 +73,14 @@
     if (!p) return;
     try {
       const r = await api(`${base}/crashes/read?path=${encodeURIComponent(p)}`);
-      if (n === seq) read = r;
+      // An empty reply still ends the wait: the "couldn't read" card shows.
+      if (n === seq) read = r || { crash: null, report: p };
     } catch (e) {
-      if (n === seq) readErr = e.message;
+      if (n === seq) readErr = e?.message || "Hopper couldn't read this report.";
     }
   }
 
   $effect(() => () => clearTimeout(more));
-
-  // Coming back to Crash reports (from latest.log, say) shows the newest
-  // report, not the one an earlier visit left picked. The list is read right
-  // after (the effect below), which picks it.
-  $effect(() => {
-    if (view !== 'crashes') return;
-    untrack(() => {
-      if (!list) return;
-      picked = '';
-      sel.clear();
-    });
-  });
 
   // Looked at again when the server stops or crashes (a new report).
   const settled = $derived(server.state === 'crashed' || server.state === 'stopped');
@@ -252,11 +240,31 @@
       </div>
       <div class="read">
         {#if readErr}
-          <div class="small err">{readErr}</div>
+          <div class="card col">
+            <b class="small">Hopper couldn't read this report</b>
+            <p class="tiny err">{readErr}</p>
+            <div class="row acts">
+              <button class="btn sm" onclick={() => loadRead(picked)}><RefreshCw size={13} />Try again</button>
+              {#if picked}<button class="btn sm" onclick={() => openFile(picked)}><FileText size={13} />Open report</button>{/if}
+            </div>
+          </div>
         {:else if picked && !read}
           <div class="muted small row"><span class="spinner"></span>Reading the report…</div>
         {:else if read?.crash}
-          <ServerCrash {server} given={read} times={timesOf(pickedRow)} fixes={picked === list?.[0]?.path && settled} onPeek={(m) => (peek = m)} {onShare} {openFile} />
+          <!-- A report the card can't draw still gets a card, never an empty side. -->
+          <svelte:boundary onerror={(e) => console.error('crash card', e)}>
+            <ServerCrash {server} given={read} times={timesOf(pickedRow)} fixes={picked === list?.[0]?.path && settled} onPeek={(m) => (peek = m)} {onShare} {openFile} />
+            {#snippet failed(error)}
+              <div class="card col">
+                <b class="small">Hopper couldn't show this report</b>
+                <p class="tiny muted">Drawing what it found went wrong ({error?.message || 'unknown error'}). Open the report to see what it says.</p>
+                <div class="row acts">
+                  <button class="btn sm" onclick={() => openFile(read.report)}><FileText size={13} />Open report</button>
+                  <button class="btn sm" onclick={() => onShare(read.report)}><Share2 size={13} />Share on mclo.gs</button>
+                </div>
+              </div>
+            {/snippet}
+          </svelte:boundary>
         {:else if read}
           <div class="card col">
             <b class="small">Hopper couldn't read this report</b>
@@ -266,6 +274,8 @@
               <button class="btn sm" onclick={() => onShare(read.report)}><Share2 size={13} />Share on mclo.gs</button>
             </div>
           </div>
+        {:else if list?.length}
+          <div class="muted small">Pick a crash report to see what Hopper makes of it.</div>
         {/if}
       </div>
       {#if peek}<ModPeek {server} mod={peek} onClose={() => (peek = null)} onChanged={() => {}} onUpdate={() => { peek = null; openMods(); }} />{/if}
