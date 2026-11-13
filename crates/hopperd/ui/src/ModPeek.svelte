@@ -6,6 +6,8 @@
   import { browseHash } from './lib/browse.js';
   import ModVersions from './ModVersions.svelte';
   import Comments from './lib/Comments.svelte';
+  import Issues from './lib/Issues.svelte';
+  import { api } from './lib/api.js';
   import SourceAbout from './SourceAbout.svelte';
   import { resetConfig, setLocked, removeMods, switchSource, versionLocked, problems } from './lib/modops.js';
 
@@ -26,6 +28,17 @@
   // that tab is picked.
   const hasComments = $derived(mod.source === 'curseforge' && !!mod.project_id);
   let tab = $state('versions');
+  // Its GitHub issues (desktop's Issues tab): the panel says which repo its
+  // tracker is, if it's on GitHub.
+  let issuesRepo = $state('');
+  $effect(() => {
+    const pid = mod.project_id;
+    issuesRepo = '';
+    if (!pid || !mod.source) return;
+    api(`/browse/issues/repo?project=${encodeURIComponent(pid)}`)
+      .then((r) => { if (pid === mod.project_id) issuesRepo = r.repo || ''; })
+      .catch(() => {});
+  });
 </script>
 
 <aside class="peek card col">
@@ -52,13 +65,16 @@
   {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
   <div class="tiny muted mono ell" title={mod.file}>{mod.file}</div>
   {#if linked}<SourceAbout {server} {mod} />{/if}
-  {#if hasComments}
+  {#if hasComments || issuesRepo}
     <div class="utabs" role="tablist">
       <button role="tab" aria-selected={tab === 'versions'} class:tab-sel={tab === 'versions'} onclick={() => (tab = 'versions')}>Versions</button>
-      <button role="tab" aria-selected={tab === 'comments'} class:tab-sel={tab === 'comments'} onclick={() => (tab = 'comments')}>Comments</button>
+      {#if hasComments}<button role="tab" aria-selected={tab === 'comments'} class:tab-sel={tab === 'comments'} onclick={() => (tab = 'comments')}>Comments</button>{/if}
+      {#if issuesRepo}<button role="tab" aria-selected={tab === 'issues'} class:tab-sel={tab === 'issues'} onclick={() => (tab = 'issues')}>Issues</button>{/if}
     </div>
   {/if}
-  {#if hasComments && tab === 'comments'}
+  {#if issuesRepo && tab === 'issues'}
+    <Issues project={mod.project_id} repo={issuesRepo} />
+  {:else if hasComments && tab === 'comments'}
     <Comments project={mod.project_id} url={mod.page} />
   {:else}
     <ModVersions {server} {mod} onChanged={onChanged} />
