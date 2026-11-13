@@ -1952,6 +1952,9 @@ pub struct Pairing {
     /// panel is checked with the web roots instead of a pin.
     pub ca: String,
     pub fingerprint: String,
+    /// The nonce this PC committed to by hash in the request and revealed
+    /// on its first status ask (see [`committed_pair_code`]).
+    nonce: String,
     /// One agent for the whole wait, so the polls reuse one connection
     /// instead of opening a new one through the proxy every second.
     agent: ureq::Agent,
@@ -1974,12 +1977,15 @@ fn cert_rejected(e: &anyhow::Error) -> bool {
 /// accept it either, pairing stops.
 pub fn pair_request(url: &str, device: &str) -> anyhow::Result<Pairing> {
     let (base, h) = find(url)?;
+    pairable(&h)?;
     let tls = h.tls.context("This Hopper Server is too old for encrypted pairing; update it.")?;
     let fingerprint = fingerprint_of(&tls.ca).context("The panel sent a broken certificate.")?;
+    let nonce = pair_nonce();
+    let commit = pair_commit(&nonce);
     let ask = |trust: &Trust| {
         let agent = agent_with(&base, trust);
         let v = reply(send(&base, true, || {
-            agent.post(&format!("{base}/api/v1/pair/request")).send_json(json!({ "device": device }))
+            agent.post(&format!("{base}/api/v1/pair/request")).send_json(json!({ "device": device, "commit": commit }))
         }));
         v.map(|v| (v, agent))
     };
@@ -1997,7 +2003,15 @@ pub fn pair_request(url: &str, device: &str) -> anyhow::Result<Pairing> {
     if id.is_empty() || secret.is_empty() {
         bail!("{base} didn't take the pairing request.");
     }
-    Ok(Pairing { code: pair_code(&fingerprint, &id, &secret), base, id, secret, ca, fingerprint, agent })
+    let code = committed_pair_code(&fingerprint, &id, &secret, &nonce);
+    let p = Pairing { code, base, id, secret, ca, fingerprint, nonce, agent };
+    // The reveal, now that the panel has picked the id and secret: only
+    // after it does the panel show the request and its code.
+    match pair_status(&p) {
+        Ok(PairState::Waiting) => Ok(p),
+        Ok(_) => bail!("{} didn't take the pairing request. Pair again.", p.base),
+        Err(e) => Err(e.context("Couldn't send the pairing request")),
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -2012,7 +2026,7 @@ pub enum PairState {
 /// Where a pairing request stands.
 pub fn pair_status(p: &Pairing) -> anyhow::Result<PairState> {
     let v = reply(send(&p.base, true, || {
-        p.agent.post(&format!("{}/api/v1/pair/status", p.base)).send_json(json!({ "id": p.id, "secret": p.secret }))
+        p.agent.post(&format!("{}/api/v1/pair/status", p.base)).send_json(json!({ "id": p.id, "secret": p.secret, "nonce": p.nonce }))
     }))?;
     Ok(match v["status"].as_str() {
         Some("waiting") => PairState::Waiting,
@@ -2070,10 +2084,66 @@ fn wait_with(
     }
 }
 
-/// The 6-digit pairing code: from the panel's certificate fingerprint and
-/// the request, so both sides only show the same code when the desktop
-/// talks to the real panel (a machine in the middle has another
-/// certificate, so the codes differ).
+/// Whether the panel pairs with commit and reveal. The old flow lets a
+/// machine in the middle choose the code, so it is never used: an older
+/// panel is told to update instead. (The hello is unchecked, so a middle can
+/// claim either; claiming the old flow only stops pairing.)
+fn pairable(h: &Hello) -> anyhow::Result<()> {
+    if !h.capabilities.iter().any(|c| c == PAIR_COMMIT) {
+        bail!("{OLD_PANEL}");
+    }
+    Ok(())
+}
+
+/// What a desktop says when the panel is too old for safe pairing.
+pub const OLD_PANEL: &str = "This Hopper Server is too old to pair with this version of Hopper. Update Hopper Server, then pair again.";
+/// What a panel says to a desktop too old for safe pairing.
+pub const OLD_HOPPER: &str = "This version of Hopper is too old to pair with this Hopper Server. Update Hopper, then pair again.";
+/// The panel capability (in its hello) for commit-and-reveal pairing.
+pub const PAIR_COMMIT: &str = "pair.commit";
+
+/// The random nonce a joining side (a desktop, a node) picks before it
+/// learns the request's id and secret.
+pub fn pair_nonce() -> String {
+    crate::peer::random_hex(32)
+}
+
+/// What the joining side sends instead of the nonce: its SHA-256 (hex).
+pub fn pair_commit(nonce: &str) -> String {
+    crate::javadl::sha256_hex(nonce.as_bytes())
+}
+
+/// Whether a revealed `nonce` is the one committed to by `commit` (hex).
+/// Compared in constant time; a nonce of the wrong size never matches.
+pub fn pair_reveal_matches(commit: &str, nonce: &str) -> bool {
+    if !(32..=128).contains(&nonce.len()) || commit.len() != 64 {
+        return false;
+    }
+    let got = pair_commit(nonce);
+    got.bytes().zip(commit.to_ascii_lowercase().bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Whether `commit` looks like a commitment (64 hex digits).
+pub fn is_pair_commit(commit: &str) -> bool {
+    commit.len() == 64 && commit.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The 6-digit code both sides show when pairing.
+///
+/// A machine in the middle shows the joining side its own certificate, so
+/// the codes can only differ if neither side's inputs can be chosen after
+/// seeing the other's. The joining side picks `nonce` and sends only its
+/// hash with the request; the panel then picks `id` and `secret`; only then
+/// is the nonce revealed. A middle has to commit to what it tells each side
+/// before it learns the random part the other side adds, so it matches by
+/// luck only (one in a million per try, and tries are rate limited).
+pub fn committed_pair_code(fingerprint: &str, id: &str, secret: &str, nonce: &str) -> String {
+    pair_code(fingerprint, id, &format!("{secret}|{nonce}"))
+}
+
+/// The 6-digit code over the panel's certificate fingerprint and the
+/// request. On its own a machine in the middle can choose `secret` until the
+/// codes match; pairing uses [`committed_pair_code`].
 pub fn pair_code(fingerprint: &str, id: &str, secret: &str) -> String {
     let h = crate::javadl::sha256_hex(format!("{}|{id}|{secret}", fingerprint.to_uppercase()).as_bytes());
     let n = u32::from_str_radix(&h[..8], 16).unwrap_or(0);
@@ -2138,7 +2208,37 @@ mod tests {
         assert_eq!(pair_code("aa:bb", "1", "2"), pair_code("AA:BB", "1", "2"));
         assert_ne!(pair_code("AA:BB", "1", "2"), pair_code("AA:BC", "1", "2"));
         assert_eq!(pair_code("AA", "1", "2").len(), 6);
+        assert_eq!(committed_pair_code("AA", "1", "2", "n"), pair_code("AA", "1", "2|n"), "the node's formula, shared");
         assert_eq!(enc("config/a b.toml"), "config%2Fa%20b.toml");
+    }
+
+    /// Commit and reveal (security review H4): a nonce matches only its own
+    /// commitment, and every bit of it changes the code.
+    #[test]
+    fn pairing_commit_and_reveal() {
+        let n = pair_nonce();
+        assert_eq!(n.len(), 64);
+        assert_ne!(n, pair_nonce());
+        let c = pair_commit(&n);
+        assert!(is_pair_commit(&c) && !is_pair_commit("") && !is_pair_commit(&"g".repeat(64)));
+        assert!(pair_reveal_matches(&c, &n));
+        assert!(pair_reveal_matches(&c.to_uppercase(), &n));
+        assert!(!pair_reveal_matches(&c, &pair_nonce()));
+        assert!(!pair_reveal_matches(&c, ""), "a missing reveal");
+        assert!(!pair_reveal_matches(&pair_commit("short"), "short"), "too short to be a nonce");
+        assert_ne!(committed_pair_code("AA", "1", "2", &n), committed_pair_code("AA", "1", "2", &pair_nonce()));
+    }
+
+    /// A panel from before commit and reveal is never paired the old way:
+    /// the PC says to update Hopper Server.
+    #[test]
+    fn an_older_panel_is_told_to_update() {
+        let old: Hello = serde_json::from_value(json!({ "name": "rig", "version": "0.61.0", "capabilities": ["servers", "pairing", "tls"] })).unwrap();
+        assert_eq!(pairable(&old).unwrap_err().to_string(), OLD_PANEL);
+        let older: Hello = serde_json::from_value(json!({ "name": "rig", "version": "0.12.0" })).unwrap();
+        assert_eq!(pairable(&older).unwrap_err().to_string(), OLD_PANEL);
+        let new: Hello = serde_json::from_value(json!({ "name": "rig", "version": "0.62.0", "capabilities": ["pairing", PAIR_COMMIT] })).unwrap();
+        assert!(pairable(&new).is_ok());
     }
 
     #[test]

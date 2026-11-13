@@ -373,10 +373,18 @@ impl std::fmt::Display for LoginError {
 pub struct PairRequest {
     pub id: String,
     pub device: String,
+    /// Empty until the device reveals the nonce it committed to; only then
+    /// is the request shown or allowed.
     pub code: String,
     pub ip: String,
     #[serde(skip)]
     secret: String,
+    /// SHA-256 (hex) of the device's nonce, sent with the request.
+    #[serde(skip)]
+    commit: String,
+    /// This panel's fingerprint when it was asked.
+    #[serde(skip)]
+    fingerprint: String,
     #[serde(skip)]
     at: Instant,
     #[serde(skip)]
@@ -1104,9 +1112,16 @@ impl Auth {
 
     // ---- pairing ---------------------------------------------------------
 
-    /// A device asks to pair. Returns (request id, secret to poll with,
-    /// code both sides show).
-    pub fn pair_request(&self, device: &str, ip: IpAddr, fingerprint: &str) -> anyhow::Result<(String, String, String)> {
+    /// A device asks to pair; `commit` is the SHA-256 (hex) of a nonce it
+    /// reveals on its first status ask, and the code exists only after that
+    /// (`hopper_core::hopperd::committed_pair_code`). Returns (request id,
+    /// secret to poll with). A request without a commitment comes from a
+    /// Hopper too old for safe pairing and is refused.
+    pub fn pair_request(&self, device: &str, ip: IpAddr, fingerprint: &str, commit: &str) -> anyhow::Result<(String, String)> {
+        let commit = commit.trim();
+        if !hopper_core::hopperd::is_pair_commit(commit) {
+            bail!("{}", hopper_core::hopperd::OLD_HOPPER);
+        }
         let device = device.trim();
         if device.is_empty() || device.len() > 64 {
             bail!("Give the device a name (up to 64 characters).");
@@ -1118,24 +1133,27 @@ impl Auth {
         }
         let (id, secret) = (random_hex(8), random_hex(32));
         let req = PairRequest {
-            code: hopper_core::hopperd::pair_code(fingerprint, &id, &secret),
+            code: String::new(),
             id,
             device: device.to_string(),
             ip: ip.to_string(),
             secret,
+            commit: commit.to_ascii_lowercase(),
+            fingerprint: fingerprint.to_string(),
             at: Instant::now(),
             answer: None,
         };
-        let out = (req.id.clone(), req.secret.clone(), req.code.clone());
+        let out = (req.id.clone(), req.secret.clone());
         p.push(req);
         Ok(out)
     }
 
-    /// Requests the owner hasn't answered yet.
+    /// Requests the owner hasn't answered yet, once their device revealed
+    /// its nonce (before that there is no code to compare).
     pub fn pending(&self) -> Vec<PairRequest> {
         let mut p = self.pairs.lock().unwrap();
         p.retain(|r| r.at.elapsed() < PAIR_TTL);
-        p.iter().filter(|r| r.answer.is_none()).cloned().collect()
+        p.iter().filter(|r| r.answer.is_none() && !r.code.is_empty()).cloned().collect()
     }
 
     /// The owner (`by` = `None`) or a manager allows or refuses a request.
@@ -1143,7 +1161,8 @@ impl Auth {
     /// that only the true owner asked for it.
     pub fn answer(&self, id: &str, allow: bool, by: Option<&str>, manage: bool) -> anyhow::Result<()> {
         let mut p = self.pairs.lock().unwrap();
-        let Some(r) = p.iter_mut().find(|r| r.id == id && r.answer.is_none() && r.at.elapsed() < PAIR_TTL) else {
+        // Only a request whose code the owner could compare.
+        let Some(r) = p.iter_mut().find(|r| r.id == id && !r.code.is_empty() && r.answer.is_none() && r.at.elapsed() < PAIR_TTL) else {
             bail!("That pairing request has expired.");
         };
         if !allow {
@@ -1171,8 +1190,10 @@ impl Auth {
     /// What the device that made request `id` gets when it asks again. The
     /// answer stays until the request expires, so a device whose reply got
     /// lost on the way (a slow link, a proxy) can ask again instead of being
-    /// left half paired; only the device holding the secret can ask.
-    pub fn pair_status(&self, id: &str, secret: &str) -> PairStatus {
+    /// left half paired; only the device holding the secret can ask. Its
+    /// first ask reveals the nonce it committed to; one that doesn't match
+    /// ends the request.
+    pub fn pair_status(&self, id: &str, secret: &str, nonce: &str) -> PairStatus {
         let mut p = self.pairs.lock().unwrap();
         let Some(i) = p.iter().position(|r| r.id == id && r.secret == secret) else {
             return PairStatus::Unknown;
@@ -1180,6 +1201,14 @@ impl Auth {
         if p[i].at.elapsed() >= PAIR_TTL {
             p.remove(i);
             return PairStatus::Unknown;
+        }
+        if p[i].code.is_empty() {
+            let r = &mut p[i];
+            if !hopper_core::hopperd::pair_reveal_matches(&r.commit, nonce) {
+                p.remove(i);
+                return PairStatus::Unknown;
+            }
+            r.code = hopper_core::hopperd::committed_pair_code(&r.fingerprint, &r.id, &r.secret, nonce);
         }
         match p[i].answer.clone() {
             None => PairStatus::Waiting,
@@ -1273,6 +1302,16 @@ mod tests {
     }
 
     const IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 50, 21));
+
+    impl Auth {
+        /// A pairing request with its nonce revealed: (id, secret, nonce).
+        pub(crate) fn pair_revealed(&self, device: &str, ip: IpAddr, fingerprint: &str) -> (String, String, String) {
+            let nonce = hopper_core::hopperd::pair_nonce();
+            let (id, secret) = self.pair_request(device, ip, fingerprint, &hopper_core::hopperd::pair_commit(&nonce)).unwrap();
+            assert_eq!(self.pair_status(&id, &secret, &nonce), PairStatus::Waiting);
+            (id, secret, nonce)
+        }
+    }
 
     #[test]
     fn same_pc_setup() {
@@ -1414,9 +1453,9 @@ mod tests {
         let dir = temp();
         let a = Auth::load(&dir).unwrap();
         let pair = |manage| {
-            let (id, secret, _) = a.pair_request("Hopper on FOX", IP, "AA:BB").unwrap();
+            let (id, secret, nonce) = a.pair_revealed("Hopper on FOX", IP, "AA:BB");
             a.answer(&id, true, None, manage).unwrap();
-            let PairStatus::Approved { token, device_id } = a.pair_status(&id, &secret) else { panic!() };
+            let PairStatus::Approved { token, device_id } = a.pair_status(&id, &secret, &nonce) else { panic!() };
             (token, device_id)
         };
         // Off by default: a plain device is not owner-level and manages no users.
@@ -1536,27 +1575,85 @@ mod tests {
     fn pairing_flow() {
         let dir = temp();
         let a = Auth::load(&dir).unwrap();
-        let (id, secret, code) = a.pair_request("Hopper on FOX", IP, "AA:BB").unwrap();
-        assert_eq!(code.len(), 6);
-        assert_eq!(a.pair_status(&id, &secret), PairStatus::Waiting);
-        assert_eq!(a.pair_status(&id, "wrong"), PairStatus::Unknown);
+        let (id, secret, nonce) = a.pair_revealed("Hopper on FOX", IP, "AA:BB");
+        assert_eq!(a.pending()[0].code.len(), 6);
+        assert_eq!(a.pair_status(&id, &secret, &nonce), PairStatus::Waiting);
+        assert_eq!(a.pair_status(&id, "wrong", &nonce), PairStatus::Unknown);
         assert_eq!(a.pending().len(), 1);
         a.answer(&id, true, None, false).unwrap();
-        let PairStatus::Approved { token, device_id } = a.pair_status(&id, &secret) else { panic!() };
+        let PairStatus::Approved { token, device_id } = a.pair_status(&id, &secret, &nonce) else { panic!() };
         assert_eq!(a.check(&token), Some(Who::Device { id: device_id.clone(), name: "Hopper on FOX".into(), manage: false }));
         // Asking again (the first reply lost on the way) gets the same
         // token; the wrong secret still gets nothing.
-        assert_eq!(a.pair_status(&id, &secret), PairStatus::Approved { token: token.clone(), device_id: device_id.clone() });
-        assert_eq!(a.pair_status(&id, "wrong"), PairStatus::Unknown);
+        assert_eq!(a.pair_status(&id, &secret, &nonce), PairStatus::Approved { token: token.clone(), device_id: device_id.clone() });
+        assert_eq!(a.pair_status(&id, "wrong", &nonce), PairStatus::Unknown);
         assert!(a.pending().is_empty());
         assert!(a.answer(&id, true, None, false).is_err(), "answered once");
         assert!(a.forget_device(&device_id));
         assert_eq!(a.check(&token), None);
-        let (id2, s2, _) = a.pair_request("Phone", IP, "AA:BB").unwrap();
+        let (id2, s2, n2) = a.pair_revealed("Phone", IP, "AA:BB");
         a.answer(&id2, false, None, false).unwrap();
-        assert_eq!(a.pair_status(&id2, &s2), PairStatus::Denied);
-        assert_eq!(a.pair_status(&id2, &s2), PairStatus::Denied);
-        assert!(a.pair_request("", IP, "AA:BB").is_err());
+        assert_eq!(a.pair_status(&id2, &s2, &n2), PairStatus::Denied);
+        assert_eq!(a.pair_status(&id2, &s2, ""), PairStatus::Denied);
+        assert!(a.pair_request("", IP, "AA:BB", &hopper_core::hopperd::pair_commit(&n2)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Security review H4 (design/multi-panel.md): a machine in the middle
+    /// could choose the code. The panel handed out the id and secret the
+    /// code came from, so a middle that showed the PC its own certificate
+    /// asked the real panel itself, worked out the panel's code (its
+    /// fingerprint is public) and tried secrets for the PC until the PC's
+    /// code matched: a million SHA-256s, well under a second. Now the PC
+    /// commits to a nonce before the panel picks anything, the code covers
+    /// that nonce, and the panel shows (and allows) a request only after a
+    /// matching reveal.
+    #[test]
+    fn a_machine_in_the_middle_cannot_choose_the_code() {
+        use hopper_core::hopperd::{committed_pair_code, pair_commit, pair_nonce};
+        let dir = temp();
+        let a = Auth::load(&dir).unwrap();
+        let (panel_fp, middle_fp) = ("AA:BB", "EE:FF");
+        // The real PC picks its nonce and sends only the hash; the middle
+        // passes the hash on and learns the panel's id and secret.
+        let nonce = pair_nonce();
+        let commit = pair_commit(&nonce);
+        let (id, secret) = a.pair_request("Hopper on FOX", IP, panel_fp, &commit).unwrap();
+        assert!(a.pending().is_empty(), "nothing to compare before the reveal");
+        assert!(a.answer(&id, true, None, false).is_err(), "nor to allow");
+        // The middle's best: brute-force a secret for the PC so that the
+        // code the PC computes from the middle's certificate is the panel's,
+        // the way it could before. Without the nonce its pick is a guess.
+        assert_eq!(a.pair_status(&id, &secret, &nonce), PairStatus::Waiting);
+        let panel_code = a.pending()[0].code.clone();
+        // `pair_code` again, with this crate's optimised SHA-256 so the
+        // search takes a second, not a minute.
+        let code_of = |fp: &str, s: &str| {
+            let h = Sha256::digest(format!("{fp}|{id}|{s}").as_bytes());
+            format!("{:06}", u32::from_be_bytes([h[0], h[1], h[2], h[3]]) % 1_000_000)
+        };
+        assert_eq!(code_of(middle_fp, "x"), hopper_core::hopperd::pair_code(middle_fp, &id, "x"));
+        // A match takes about a million tries; 50 million miss with odds of e^-50.
+        let forged = (0u64..50_000_000).map(|i| format!("{i:064x}")).find(|s| code_of(middle_fp, s) == panel_code).expect("brute-forced");
+        assert_ne!(committed_pair_code(middle_fp, &id, &forged, &nonce), panel_code, "the PC's code no longer matches");
+        // Revealing a nonce it chose later (to fit a code) ends the request.
+        let (id2, s2) = a.pair_request("Hopper on FOX", IP, panel_fp, &commit).unwrap();
+        assert_eq!(a.pair_status(&id2, &s2, &pair_nonce()), PairStatus::Unknown);
+        assert_eq!(a.pair_status(&id2, &s2, &nonce), PairStatus::Unknown, "gone");
+        assert_eq!(a.pending().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An older Hopper sends no commitment: refused, saying to update Hopper.
+    #[test]
+    fn an_old_hopper_is_told_to_update() {
+        let dir = temp();
+        let a = Auth::load(&dir).unwrap();
+        for commit in ["", "abc", &"z".repeat(64)] {
+            let e = a.pair_request("Hopper on FOX", IP, "AA:BB", commit).unwrap_err().to_string();
+            assert_eq!(e, hopper_core::hopperd::OLD_HOPPER);
+        }
+        assert!(a.pending().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
