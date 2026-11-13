@@ -6,6 +6,7 @@
   // crash card (ServerCrash with `given`, with its fixes for the newest); then latest.log and debug.log,
   // followed while the server runs (LogText).
   import { FileWarning, RefreshCw, FileText, Share2, ChevronRight, Trash2 } from '@lucide/svelte';
+  import { untrack } from 'svelte';
   import { api, post } from './lib/api.js';
   import { exactLabel, fullDate, plural } from './lib/worlds.js';
   import { bytes } from './lib/format.js';
@@ -40,13 +41,21 @@
 
   // The panel works out a few verdicts per ask; ask again until done.
   let more = 0;
+  // The reports of the last list (null before the first), to tell a report that just came.
+  let known = null;
   async function loadList() {
     listErr = '';
     clearTimeout(more);
     try {
       const r = await api(`${base}/crashes`);
       list = r.crashes || [];
-      if (!list.some((c) => c.path === picked)) picked = (list.some((c) => c.path === want) ? want : '') || list.find((c) => !c.lead)?.path || '';
+      // The newest row shows: when nothing is picked, the pick went, or a report
+      // that wasn't in the last list is now on top (a crash just came). Otherwise
+      // the player's own pick stays (it is kept by file, not by position).
+      const top = list.find((c) => !c.lead)?.path || '';
+      const arrived = known && top && !known.has(top);
+      if (arrived || !list.some((c) => c.path === picked)) picked = (list.some((c) => c.path === want) ? want : '') || top;
+      known = new Set(list.map((c) => c.path));
       sel.retain(list.map((c) => c.path));
       if (picked && !sel.has(picked) && !sel.many) sel.setOne(picked);
       if (r.pending && view === 'crashes') more = setTimeout(loadList, 200);
@@ -72,6 +81,18 @@
   }
 
   $effect(() => () => clearTimeout(more));
+
+  // Coming back to Crash reports (from latest.log, say) shows the newest
+  // report, not the one an earlier visit left picked. The list is read right
+  // after (the effect below), which picks it.
+  $effect(() => {
+    if (view !== 'crashes') return;
+    untrack(() => {
+      if (!list) return;
+      picked = '';
+      sel.clear();
+    });
+  });
 
   // Looked at again when the server stops or crashes (a new report).
   const settled = $derived(server.state === 'crashed' || server.state === 'stopped');

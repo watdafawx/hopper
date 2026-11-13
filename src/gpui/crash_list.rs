@@ -248,8 +248,9 @@ pub fn watch<V: Host>(this: &mut V, cx: &mut Context<V>) {
                 if list.is_err() && matches!(l.reports, Some(Ok(_))) {
                     return true;
                 }
-                let pick = match &list {
-                    Ok(v) if !l.picked.as_ref().is_some_and(|p| v.iter().any(|r| &r.rel == p)) => first_shown(v),
+                let pick = match (&list, &l.reports) {
+                    (Ok(v), Some(Ok(old))) => pick_after_poll(Some(old), v, l.picked.as_deref()),
+                    (Ok(v), _) => pick_after_poll(None, v, l.picked.as_deref()),
                     _ => None,
                 };
                 l.reports = Some(list);
@@ -274,6 +275,37 @@ pub fn watch<V: Host>(this: &mut V, cx: &mut Context<V>) {
         }
     });
     this.list_mut()._list = Some(task);
+}
+
+/// Opening the crash reports (the tab, or its sub-tab): forget what an
+/// earlier visit left picked and show the newest row, so a player never
+/// lands on an older crash than the one at the top. Before the first list
+/// is in, nothing is picked and the first poll picks the newest.
+pub fn open_newest<V: Host>(this: &mut V, cx: &mut Context<V>) {
+    let l = this.list_mut();
+    l.picked = None;
+    l.sel.clear();
+    let pick = match &l.reports {
+        Some(Ok(v)) => first_shown(v),
+        _ => None,
+    };
+    if let Some(p) = pick {
+        this.pick(p, cx);
+    }
+}
+
+/// What a new list picks. The report shown stays while it is still there
+/// (the player's own choice sticks), unless a report that wasn't in the
+/// last list is now the newest row: then the crash that just came shows.
+/// Picks by file, not by position, so a new row above can't shift it.
+fn pick_after_poll(old: Option<&[Report]>, new: &[Report], picked: Option<&str>) -> Option<String> {
+    let top = first_shown(new)?;
+    if !picked.is_some_and(|p| new.iter().any(|r| r.rel == p)) {
+        return Some(top);
+    }
+    // The first list isn't "new": nothing was there to compare with.
+    let arrived = old.is_some_and(|o| !o.iter().any(|r| r.rel == top));
+    (arrived && picked != Some(top.as_str())).then_some(top)
 }
 
 /// The report a list opens on: the newest row (a folded report's row is
@@ -1007,4 +1039,48 @@ pub fn follow_up_note(c: &hopper::crashdetect::Crash, cx: &App) -> Option<AnyEle
             .child(div().flex_1().min_w_0().text_xs().text_color(theme.muted_foreground).whitespace_normal().child(n))
             .into_any_element(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    // Named, not `*`: the glob would bring in gpui's own `test` macro.
+    use super::{Report, pick_after_poll};
+
+    fn rep(rel: &str, modified: i64) -> Report {
+        Report { rel: rel.into(), modified, verdict: None, follow_up: false }
+    }
+
+    #[test]
+    fn nothing_shown_yet_shows_the_newest() {
+        let new = [rep("crash-reports/b.txt", 20), rep("crash-reports/a.txt", 10)];
+        assert_eq!(pick_after_poll(None, &new, None).as_deref(), Some("crash-reports/b.txt"));
+    }
+
+    #[test]
+    fn the_players_choice_sticks_while_the_list_is_the_same() {
+        let list = [rep("crash-reports/b.txt", 20), rep("crash-reports/a.txt", 10)];
+        assert_eq!(pick_after_poll(Some(&list), &list, Some("crash-reports/a.txt")), None);
+    }
+
+    #[test]
+    fn a_crash_that_just_came_shows_even_over_an_older_pick() {
+        // The report: the list led with the 02:35 one, the 02:33 one stayed shown.
+        let old = [rep("crash-reports/a.txt", 10)];
+        let new = [rep("crash-reports/b.txt", 20), rep("crash-reports/a.txt", 10)];
+        assert_eq!(pick_after_poll(Some(&old), &new, Some("crash-reports/a.txt")).as_deref(), Some("crash-reports/b.txt"));
+    }
+
+    #[test]
+    fn a_deleted_pick_falls_back_to_the_newest() {
+        let old = [rep("crash-reports/b.txt", 20), rep("crash-reports/a.txt", 10)];
+        let new = [rep("crash-reports/b.txt", 20)];
+        assert_eq!(pick_after_poll(Some(&old), &new, Some("crash-reports/a.txt")).as_deref(), Some("crash-reports/b.txt"));
+    }
+
+    #[test]
+    fn a_pick_is_kept_by_file_when_a_row_is_deleted_above_it() {
+        let old = [rep("crash-reports/c.txt", 30), rep("crash-reports/b.txt", 20), rep("crash-reports/a.txt", 10)];
+        let new = [rep("crash-reports/b.txt", 20), rep("crash-reports/a.txt", 10)];
+        assert_eq!(pick_after_poll(Some(&old), &new, Some("crash-reports/a.txt")), None);
+    }
 }

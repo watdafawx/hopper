@@ -257,6 +257,9 @@ impl LogsView {
             // Opens on the game's log; after a crash, render switches to
             // the crash reports.
             self.select(Pane::Latest, cx);
+        } else if self.pane == Pane::Crashes {
+            // The tab opened again on the same instance.
+            crash_list::open_newest(self, cx);
         }
         crash_list::watch(self, cx);
         self.help.update(cx, |h, cx| h.show(root, cx));
@@ -392,7 +395,12 @@ impl LogsView {
 
     /// Shows pane `pane`, opening its log.
     fn select(&mut self, pane: Pane, cx: &mut Context<Self>) {
-        self.pane = pane;
+        let was = std::mem::replace(&mut self.pane, pane);
+        // Coming to the crash reports shows the newest one, not whichever an
+        // earlier visit left picked.
+        if pane == Pane::Crashes && was != Pane::Crashes {
+            crash_list::open_newest(self, cx);
+        }
         let Some(root) = self.root.clone() else { return };
         if pane == Pane::Older {
             crash_list::load_old(self, cx);

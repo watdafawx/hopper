@@ -202,6 +202,10 @@ impl ServerLogsView {
         let pane = self.pane;
         self.log = None;
         self.select(pane, cx);
+        // The tab came back on the same server: the newest report again.
+        if pane == Pane::Crashes && !new_root {
+            crash_list::open_newest(self, cx);
+        }
     }
 
     /// Opens the crash reports on `rel` (the newest when none): where the
@@ -303,7 +307,12 @@ impl ServerLogsView {
 
     /// Shows pane `pane`, opening its log.
     fn select(&mut self, pane: Pane, cx: &mut Context<Self>) {
-        self.pane = pane;
+        let was = std::mem::replace(&mut self.pane, pane);
+        // Coming to the crash reports shows the newest one, not whichever an
+        // earlier visit left picked.
+        if pane == Pane::Crashes && was != Pane::Crashes {
+            crash_list::open_newest(self, cx);
+        }
         if pane == Pane::Older {
             crash_list::load_old(self, cx);
         }
