@@ -22,8 +22,8 @@ pub fn routes() -> Router<Arc<App>> {
 }
 
 fn open(app: &App, headers: &HeaderMap, method: &Method, id: &str, rel: &str) -> ApiResult<zip::ZipArchive<std::fs::File>> {
-    require(app, headers, method)?;
-    let e = app.servers.get(id).ok_or_else(|| not_found("server"))?;
+    let who = require(app, headers, method)?;
+    let e = app.servers.get(id).filter(|_| who.sees(id)).ok_or_else(|| not_found("server"))?;
     let p = crate::files::resolve(&e.root, rel).map_err(bad)?;
     let f = std::fs::File::open(&p).map_err(|_| not_found("file"))?;
     zip::ZipArchive::new(f).map_err(|_| bad("That isn't a zip file Hopper can read."))
@@ -92,8 +92,8 @@ async fn zip_entry(
 ) -> ApiResult<Response> {
     let rel = q.get("path").cloned().unwrap_or_default();
     let entry = q.get("entry").cloned().unwrap_or_default();
-    require(&app, &headers, &method)?;
-    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    let who = require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).filter(|_| who.sees(&id)).ok_or_else(|| not_found("server"))?;
     send_entry(&e, &rel, entry, q.contains_key("inline")).await
 }
 

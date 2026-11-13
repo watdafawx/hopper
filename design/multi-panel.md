@@ -1661,6 +1661,16 @@ the node's handler uses; the main's audit log records every relayed change
 and early refusal with the real person, and the node's records each
 relayed change and refusal as "person via main (role)".
 
+### Server secrets security review (2026-11-13)
+
+`/servers/infos` with node servers (and every properties or file read
+relayed to a node) carried `rcon.password` and the management secret at
+any ceiling. Now a node sends secrets only to a request at Admin (Manage),
+infos never carry them, and the main drops them from an older node's
+answer too. The rule, who sees what and the review are in
+[server-secrets.md](server-secrets.md); the relay test is
+`relay_tests::a_look_node_sends_no_secret`.
+
 ## Open questions for the maintainer
 
 1. **Remote-session limits (B).** *Answered (maintainer, 2026-11-11): a

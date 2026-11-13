@@ -53,8 +53,15 @@ pub fn routes() -> Router<Arc<App>> {
 
 /// Checks auth and finds the server.
 fn server(app: &App, headers: &HeaderMap, method: &Method, id: &str) -> ApiResult<Arc<Entry>> {
-    require(app, headers, method)?;
-    app.servers.get(id).ok_or_else(|| not_found("server"))
+    server_who(app, headers, method, id).map(|(e, _)| e)
+}
+
+/// The server and who asked. The guard already refuses servers someone
+/// doesn't have; checked here again so a route can't lose it.
+fn server_who(app: &App, headers: &HeaderMap, method: &Method, id: &str) -> ApiResult<(Arc<Entry>, crate::auth::Who)> {
+    let who = require(app, headers, method)?;
+    let e = app.servers.get(id).filter(|_| who.sees(id)).ok_or_else(|| not_found("server"))?;
+    Ok((e, who))
 }
 
 /// Runs blocking file work off the async threads; errors become 400s.
@@ -214,15 +221,16 @@ async fn zip(
     Path(id): Path<String>,
     Query(q): Query<Vec<(String, String)>>,
 ) -> ApiResult<Response> {
-    let e = server(&app, &headers, &method, &id)?;
+    let (e, who) = server_who(&app, &headers, &method, &id)?;
     let paths: Vec<String> = q.iter().filter(|(k, _)| k == "path").map(|(_, v)| v.clone()).collect();
     let name = q.iter().find(|(k, _)| k == "name").map(|(_, v)| v.clone());
-    send_zip(&e, &paths, name)
+    send_zip(&e, &paths, name, !who.sees_secrets())
 }
 
 /// The zip download itself, for [`zip`] and one-use links. Every path goes
-/// through `files::resolve` (the server-folder check) here.
-fn send_zip(e: &Entry, paths: &[String], name: Option<String>) -> ApiResult<Response> {
+/// through `files::resolve` (the server-folder check) here. `hide` leaves
+/// out server.properties and Hopper's own folders (`crate::secrets`).
+fn send_zip(e: &Entry, paths: &[String], name: Option<String>, hide: bool) -> ApiResult<Response> {
     let mut items = Vec::new();
     for p in paths {
         items.push(files::resolve(&e.root, p).map_err(bad)?);
@@ -243,7 +251,7 @@ fn send_zip(e: &Entry, paths: &[String], name: Option<String>) -> ApiResult<Resp
     let at_root = base == root;
     tokio::task::spawn_blocking(move || {
         let w = ChanWriter { tx: tx.clone(), buf: Vec::with_capacity(256 * 1024) };
-        let skip = move |n: &str| at_root && files::is_internal(n);
+        let skip = move |n: &str| ((at_root || hide) && files::is_internal(n)) || (hide && crate::secrets::is_secret_file(n));
         let res = if items.len() == 1 && items[0] == root {
             let kids: Vec<_> = std::fs::read_dir(&root).map(|rd| rd.flatten().map(|d| d.path()).collect()).unwrap_or_default();
             crate::zipstream::zip_paths(w, &root, &kids, &skip)
@@ -372,10 +380,18 @@ pub(crate) async fn redeem_link(State(app): State<Arc<App>>, headers: HeaderMap,
         return Err(ApiError(StatusCode::FORBIDDEN, msg.into()));
     }
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    let hide = !who.sees_secrets();
+    let secret = match &g.purpose {
+        crate::grants::Purpose::File { paths, entry, .. } => crate::secrets::link_refusal(&who, &e.root, paths, entry.as_deref(), false),
+        _ => crate::secrets::link_refusal(&who, &e.root, &[], None, true),
+    };
+    if let Some(msg) = secret {
+        return Err(ApiError(StatusCode::FORBIDDEN, msg.into()));
+    }
     match g.purpose {
         crate::grants::Purpose::Backup { name, .. } => crate::backups_api::send_backup(&e, name).await,
         crate::grants::Purpose::File { paths, entry: Some(entry), inline, .. } => crate::fs_zip::send_entry(&e, &paths[0], entry, inline).await,
-        crate::grants::Purpose::File { paths, zip: true, name, .. } => send_zip(&e, &paths, name),
+        crate::grants::Purpose::File { paths, zip: true, name, .. } => send_zip(&e, &paths, name, hide),
         crate::grants::Purpose::File { paths, inline, .. } => send_file(&e, &paths[0], &headers, inline).await,
         crate::grants::Purpose::Live => Err(expired()),
     }
@@ -570,14 +586,16 @@ async fn search(
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
-    let e = server(&app, &headers, &method, &id)?;
+    let (e, who) = server_who(&app, &headers, &method, &id)?;
     let rel = path_q(&q);
     let query = q.get("q").cloned().unwrap_or_default();
     if query.trim().len() < 2 {
         return Err(bad("Search for at least 2 characters."));
     }
     let regex = q.get("regex").is_some_and(|v| v == "1" || v == "true");
-    let (hits, more) = blocking(move || files::search(&e.root, &rel, &query, regex, 500)).await?;
+    let (mut hits, more) = blocking(move || files::search(&e.root, &rel, &query, regex, 500)).await?;
+    // A search reads inside files: not server.properties for those who may not open it.
+    hits.retain(|h| crate::secrets::shows(&who, &h.path));
     Ok(Json(json!({ "hits": hits, "more": more })))
 }
 

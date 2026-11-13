@@ -264,7 +264,13 @@ async fn call(app: &Arc<App>, who: &Who, name: &str, args: &Value) -> Value {
                 text(if lines.is_empty() { "Sent. (No console output yet.)".to_string() } else { format!("Sent. Console:\n{}", lines.join("\n")) })
             }
             "list_files" => as_text(&files::list(&entry.unwrap().root, arg(&args, "path"))?),
-            "read_file" => text(files::read_text(&entry.unwrap().root, arg(&args, "path"))?.content),
+            "read_file" => {
+                let (root, rel) = (&entry.unwrap().root, arg(&args, "path"));
+                if let Some(msg) = crate::secrets::link_refusal(&who, root, &[rel.to_string()], None, false) {
+                    return Ok(tool_error(msg));
+                }
+                text(files::read_text(root, rel)?.content)
+            }
             "write_file" => {
                 let r = files::write_text(&entry.unwrap().root, arg(&args, "path"), arg(&args, "content"), None, false)?;
                 as_text(&r)
@@ -275,7 +281,8 @@ async fn call(app: &Arc<App>, who: &Who, name: &str, args: &Value) -> Value {
                     return Ok(tool_error("Search for at least 2 characters."));
                 }
                 let regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
-                let (hits, more) = files::search(&entry.unwrap().root, arg(&args, "path"), q, regex, 300)?;
+                let (mut hits, more) = files::search(&entry.unwrap().root, arg(&args, "path"), q, regex, 300)?;
+                hits.retain(|h| crate::secrets::shows(&who, &h.path));
                 as_text(&json!({ "hits": hits, "more": more }))
             }
             "list_mods" => {

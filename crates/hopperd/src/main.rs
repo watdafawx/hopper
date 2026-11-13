@@ -48,6 +48,7 @@ mod mods_more;
 mod mods_upload;
 mod mods_table;
 mod motd_live;
+mod secrets;
 mod security;
 mod relay;
 #[cfg(test)]
@@ -88,6 +89,8 @@ mod web_access;
 mod web_panels;
 #[cfg(test)]
 mod cross_origin_tests;
+#[cfg(test)]
+mod secrets_tests;
 mod webhooks;
 mod worlds_api;
 mod zipstream;

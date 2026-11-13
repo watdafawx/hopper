@@ -505,7 +505,8 @@ pub fn node_info(s: &Value, node_name: &str, props: Option<&Value>) -> Value {
         .and_then(Value::as_object)
         .into_iter()
         .flatten()
-        .filter(|(k, v)| !k.is_empty() && k.chars().count() <= 64 && v.is_string())
+        // A node of an older version may still send its passwords.
+        .filter(|(k, v)| !k.is_empty() && k.chars().count() <= 64 && v.is_string() && !crate::secrets::is_secret_key(k))
         .take(200)
         .map(|(k, v)| (k.clone(), Value::String(v.as_str().unwrap_or("").chars().take(500).collect())))
         .collect();
@@ -1121,12 +1122,14 @@ mod tests {
         props.insert("max-players".into(), json!(12));
         props.insert("x".repeat(65), json!("long key"));
         props.insert("level-name".into(), json!("w".repeat(600)));
+        props.insert("rcon.password".into(), json!("hunter22"));
+        props.insert("management-server-secret".into(), json!("s3cret"));
         let v = node_info(&s, "vm-a", Some(&Value::Object(props)));
         assert_eq!(v["id"], "ab12:smp");
         assert_eq!((v["node"].as_str(), v["node_name"].as_str(), v["stale"].as_bool()), (Some("ab12"), Some("vm-a"), Some(true)));
         assert_eq!((v["loader"].as_str(), v["max_memory"].as_str()), (Some("fabric"), Some("4G")));
         let p = v["properties"].as_object().unwrap();
-        // Strings only, short keys, values cut to 500 characters.
+        // Strings only, short keys, values cut to 500 characters, no secrets.
         assert_eq!(p.get("motd").and_then(Value::as_str), Some("Hi"));
         assert!(p.get("max-players").is_none() && p.len() == 2);
         assert_eq!(p["level-name"].as_str().unwrap().chars().count(), 500);

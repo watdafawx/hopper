@@ -283,6 +283,13 @@ pub(crate) fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Op
     }
 }
 
+/// `crate::secrets::refusal` for a request about one of this panel's own
+/// servers (a node's are checked on the node, which has the files).
+pub(crate) fn secret_refusal(app: &App, who: &crate::auth::Who, method: &Method, path: &str, query: Option<&str>) -> Option<&'static str> {
+    let root = server_of(path).and_then(|id| app.servers.get(&id)).map(|e| e.root.clone());
+    crate::secrets::refusal(who, method, path, query, root.as_deref())
+}
+
 fn deny(status: StatusCode, msg: &str) -> Response {
     (status, axum::Json(serde_json::json!({ "error": msg }))).into_response()
 }
@@ -363,7 +370,7 @@ async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String],
         return deny(StatusCode::FORBIDDEN, msg);
     }
     if let Some(w) = &who {
-        if let Some(msg) = refusal(w, &method, &path) {
+        if let Some(msg) = refusal(w, &method, &path).or_else(|| secret_refusal(&app, w, &method, &path, req.uri().query())) {
             app.audit.record(&Event { at: now(), who: w.name(), role: w.role_name().into(), ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status: 403 });
             return deny(StatusCode::FORBIDDEN, msg);
         }
@@ -426,7 +433,7 @@ async fn relayed_checks(app: Arc<App>, who: crate::auth::Who, req: Request, next
         path,
         status,
     };
-    if let Some(msg) = refusal(&who, &method, &path) {
+    if let Some(msg) = refusal(&who, &method, &path).or_else(|| secret_refusal(&app, &who, &method, &path, req.uri().query())) {
         app.audit.record(&log(403, path));
         return deny(StatusCode::FORBIDDEN, msg);
     }

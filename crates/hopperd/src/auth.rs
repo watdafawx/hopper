@@ -435,6 +435,18 @@ impl Who {
         }
     }
 
+    /// Whether this one may see passwords in a server's files (RCON's, in
+    /// server.properties; `crate::secrets`): only those who may change the
+    /// server's files, who could set a new one anyway. A request the main
+    /// relayed counts at its role here, already capped by the ceiling.
+    pub fn sees_secrets(&self) -> bool {
+        match self {
+            Who::Owner | Who::Device { .. } => true,
+            Who::Token { read_only, .. } => !read_only,
+            Who::User { role, .. } | Who::Main { role, .. } => matches!(role, Role::Manager | Role::Admin),
+        }
+    }
+
     /// The owner or a manager: what owner-only routes (`require_owner`) allow.
     pub fn owner_level(&self) -> bool {
         matches!(self, Who::Owner | Who::User { role: Role::Manager, .. } | Who::Device { manage: true, .. } | Who::Main { lead: true, .. })

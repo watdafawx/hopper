@@ -351,6 +351,10 @@ impl russh_sftp::server::Handler for Sftp {
         if rel.is_empty() {
             return Err(StatusCode::PermissionDenied);
         }
+        // server.properties holds the RCON password (`crate::secrets`).
+        if crate::secrets::link_refusal(&self.who, &e.root, std::slice::from_ref(&rel), None, false).is_some() {
+            return Err(StatusCode::PermissionDenied);
+        }
         let exists = p.is_file();
         if writing && exists && pflags.contains(OpenFlags::EXCLUDE) {
             return Err(StatusCode::Failure);

@@ -33,8 +33,15 @@ pub fn routes() -> Router<Arc<App>> {
 }
 
 fn entry(app: &App, headers: &HeaderMap, method: &Method, id: &str) -> ApiResult<Arc<Entry>> {
-    require(app, headers, method)?;
-    app.servers.get(id).ok_or_else(|| not_found("server"))
+    entry_who(app, headers, method, id).map(|(e, _)| e)
+}
+
+/// The server and who asked. The guard already refuses servers someone
+/// doesn't have; checked here again so a route can't lose it.
+fn entry_who(app: &App, headers: &HeaderMap, method: &Method, id: &str) -> ApiResult<(Arc<Entry>, crate::auth::Who)> {
+    let who = require(app, headers, method)?;
+    let e = app.servers.get(id).filter(|_| who.sees(id)).ok_or_else(|| not_found("server"))?;
+    Ok((e, who))
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {
@@ -64,7 +71,7 @@ async fn get_props(
     method: Method,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let e = entry(&app, &headers, &method, &id)?;
+    let (e, who) = entry_who(&app, &headers, &method, &id)?;
     // The message as a template ({pack_version}…), with the values its
     // variables have now for the preview.
     let (p, motd, vars) = blocking(move || {
@@ -72,6 +79,11 @@ async fn get_props(
     })
     .await?;
     let mut values: BTreeMap<&str, &str> = p.entries().collect();
+    // Passwords only for those who may change the server's files; the rest
+    // get the settings without them (and can't save, so nothing is lost).
+    if !who.sees_secrets() {
+        values.retain(|k, _| !crate::secrets::is_secret_key(k));
+    }
     if values.contains_key("motd") || !motd.is_empty() {
         values.insert("motd", &motd);
     }
@@ -88,7 +100,8 @@ struct PropsBody {
 }
 
 /// Changes keys (others stay as they are, comments too). Known keys are
-/// checked first; nothing is written when one is wrong.
+/// checked first; nothing is written when one is wrong. A key left out
+/// keeps its value, so a page that wasn't shown a password never wipes it.
 async fn put_props(
     State(app): State<Arc<App>>,
     headers: HeaderMap,

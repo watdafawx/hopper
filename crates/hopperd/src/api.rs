@@ -803,7 +803,10 @@ async fn infos(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) 
             .iter()
             .filter(|e| who.sees(&e.id))
             .map(|e| {
-                let i = hopper_core::server::load(&e.root);
+                let mut i = hopper_core::server::load(&e.root);
+                // Hopper desktop reads players, the world and the message
+                // here; passwords stay on the Settings page (`crate::secrets`).
+                i.properties.retain(|k, _| !crate::secrets::is_secret_key(k));
                 json!({
                     "id": e.id, "name": e.name, "path": e.root.to_string_lossy(), "managed_by": e.managed_by,
                     "loader": i.loader, "java": i.java, "max_memory": i.max_memory, "properties": i.properties,

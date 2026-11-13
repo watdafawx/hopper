@@ -40,8 +40,8 @@ async fn version_text(
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
-    require(&app, &headers, &method)?;
-    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    let who = require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).filter(|_| who.sees(&id)).ok_or_else(|| not_found("server"))?;
     let version = q.get("version").cloned().unwrap_or_default();
     let text = tokio::task::spawn_blocking(move || crate::files::trash_text(&e.root, &version))
         .await

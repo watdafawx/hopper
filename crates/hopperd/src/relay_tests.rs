@@ -541,3 +541,36 @@ async fn limited_people_get_only_their_node_alerts() {
     crate::alerts::merge_node_for_test(&mut out, &p.id, "vm", &v, &mine);
     assert!(out["tps"].get(p.ns()).is_some() && out["active"].as_array().unwrap().len() == 1, "{out}");
 }
+
+/// A node at the Look ceiling never sends its passwords: not in
+/// `/servers/infos`, the properties page or as a file. At Manage the
+/// main's owner is an Admin there and sees them (design/server-secrets.md).
+#[tokio::test]
+async fn a_look_node_sends_no_secret() {
+    let props = "motd=on a node\nrcon.password=hunter22\nmanagement-server-secret=s3cretkey\n";
+    let p = pair(Ceiling::Look, Some(Role::Viewer)).await;
+    std::fs::write(p.node.dir.join("servers").join("Test Server").join("server.properties"), props).unwrap();
+    let ns = p.ns();
+    let (s, v) = send(&p.main, &p.main_cookie, "GET", "/api/v1/servers/infos", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let row = v.as_array().unwrap().iter().find(|s| s["id"] == ns.as_str()).expect("the node's server").clone();
+    assert_eq!(row["properties"]["motd"], "on a node", "{row}");
+    assert!(!v.to_string().contains("hunter22") && !v.to_string().contains("s3cretkey"), "{row}");
+    let (s, v) = send(&p.main, &p.main_cookie, "GET", &format!("/api/v1/servers/{ns}/properties"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(v["values"].get("rcon.password").is_none() && v["values"].get("management-server-secret").is_none(), "{v}");
+    for r in ["text?path=server.properties", "file?path=server.properties"] {
+        let (s, v) = send(&p.main, &p.main_cookie, "GET", &format!("/api/v1/fs/{ns}/{r}"), None).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{r}");
+        assert!(!v.to_string().contains("hunter22"), "{r}");
+    }
+
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    std::fs::write(p.node.dir.join("servers").join("Test Server").join("server.properties"), props).unwrap();
+    let ns = p.ns();
+    let (_, v) = send(&p.main, &p.main_cookie, "GET", &format!("/api/v1/servers/{ns}/properties"), None).await;
+    assert_eq!(v["values"]["rcon.password"], "hunter22");
+    // Infos never carry them, at any ceiling.
+    let (_, v) = send(&p.main, &p.main_cookie, "GET", "/api/v1/servers/infos", None).await;
+    assert!(!v.to_string().contains("hunter22"));
+}
