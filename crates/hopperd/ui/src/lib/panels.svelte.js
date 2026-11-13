@@ -12,6 +12,7 @@
 import { api, hooks, ApiError, apiBase, headersFor, target } from './api.js';
 import { tokenFor, setToken, forgetToken } from './panelTokens.js';
 import { session, ownerLike } from './me.svelte.js';
+import { savedList, stuck } from './panelOff.js';
 
 /** Lists and sign-in checks give up after this (a dead panel mustn't hold the page). */
 export const LIST_TIMEOUT = 5000;
@@ -42,11 +43,13 @@ export function panelId(url) {
 
 export const byId = (id) => panels.list.find((p) => p.id === id) || null;
 
-function make({ url, name }) {
+function make({ url, name, off = false }) {
   return {
     id: panelId(url), url, name: name || panelId(url),
-    /** loading | ok | reconnecting | offline | signin | refused | old | setup */
-    state: 'loading',
+    /** Turned off on this page: nothing asks it anything (lib/panelOff.js). */
+    off: !!off,
+    /** loading | ok | reconnecting | offline | signin | refused | old | setup | off */
+    state: off ? 'off' : 'loading',
     /** Why it needs a sign-in: new (never signed in here) | expired | out. */
     reason: '',
     error: '', version: '', ping: null, me: null, role: '',
@@ -68,12 +71,12 @@ export async function loadPanels() {
   rt.clear();
   panels.list = (list || []).map(make);
   panels.loaded = true;
-  for (const p of panels.list) start(byId(p.id));
+  for (const p of panels.list) if (!p.off) start(byId(p.id));
 }
 
 async function saveList() {
   try {
-    await api('/auth/me/panels', { home: true, method: 'PUT', body: { panels: panels.list.map((p) => ({ url: p.url, name: p.name })) } });
+    await api('/auth/me/panels', { home: true, method: 'PUT', body: { panels: savedList(panels.list) } });
   } catch {
     // Kept for this page; the next change tries again.
   }
@@ -86,6 +89,30 @@ export async function addPanel(url, name) {
   const p = byId(panelId(url));
   start(p);
   return p;
+}
+
+/** Turns a panel on or off on this page. Off stops everything that asks
+ * it (socket, pings, retries) and drops its servers; on starts it again at
+ * once with the sign-in it had. */
+export async function setOff(p, off) {
+  const r = rt.get(p.id);
+  if (r) stopRuntime(r);
+  rt.delete(p.id);
+  p.off = off;
+  p.connected = false;
+  p.downSince = 0;
+  if (off) {
+    Object.assign(p, { state: 'off', servers: [], host: null, consoles: {}, history: {}, ping: null, error: '' });
+  } else {
+    p.state = 'loading';
+    start(p);
+  }
+  await saveList();
+}
+
+/** The list's refresh: every panel that's on and not answering, asked again now. */
+export function retryStuck() {
+  for (const p of stuck(panels.list)) retry(p);
 }
 
 export async function removePanel(p) {
@@ -135,6 +162,8 @@ async function refresh(p) {
   try {
     h = await hello(p.url);
   } catch (e) {
+    // Turned off while it was asked: the answer is dropped.
+    if (p.off) return;
     // No answer in time: it's down, no need for a second 5 s wait to say so.
     if (e?.name === 'TimeoutError') down(p);
     else if (await reachable(p.url)) {
@@ -143,6 +172,7 @@ async function refresh(p) {
     } else down(p);
     return;
   }
+  if (p.off) return;
   p.ping = Math.round(performance.now() - t);
   p.version = h.version || '';
   p.caps = h.capabilities || [];
@@ -165,6 +195,7 @@ async function refresh(p) {
   }
   try {
     p.me = await api('/auth/me', { panel: p, timeout: LIST_TIMEOUT });
+    if (p.off) return;
     p.role = p.me?.role || '';
     p.reason = '';
     if (p.state !== 'ok' || !r.socket) p.state = p.connected ? 'ok' : 'loading';
@@ -179,6 +210,7 @@ async function refresh(p) {
 
 /** The panel went away: "Reconnecting" now, "Offline" after the grace period. */
 function down(p) {
+  if (p.off) return;
   const r = runtime(p);
   p.connected = false;
   if (!p.downSince) p.downSince = Date.now();
@@ -202,6 +234,7 @@ function stopRuntime(r) {
 }
 
 async function start(p) {
+  if (p.off) return;
   const r = runtime(p);
   r.stopped = false;
   await refresh(p);
@@ -241,6 +274,7 @@ function later(p) {
 
 /** Try again now (the group's "Try again"). */
 export function retry(p) {
+  if (p.off) return;
   const r = runtime(p);
   r.retry = 0;
   clearTimeout(r.timer);
@@ -255,6 +289,7 @@ function sample(p, key, v) {
 }
 
 async function openSocket(p) {
+  if (p.off) return;
   const r = runtime(p);
   if (r.socket || r.stopped) return;
   let t;
@@ -271,7 +306,7 @@ async function openSocket(p) {
     later(p);
     return;
   }
-  if (r.socket || r.stopped) return;
+  if (r.socket || r.stopped || p.off) return;
   const ws = new WebSocket(`${p.url.replace(/^http/, 'ws')}/api/v1/ws`, t.protocols);
   r.socket = ws;
   ws.onopen = () => {

@@ -449,6 +449,7 @@ mod tests {
             name: "rig".into(),
             url: String::new(),
             ca: String::new(),
+            off: false,
         }];
         assert_eq!(s.place(&panels), "TNP-LL8 on rig");
         assert_eq!(s.place(&[]), "TNP-LL8 on 192.168.50.3");

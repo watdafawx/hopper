@@ -663,7 +663,7 @@ impl UpdatePreview {
     /// Server mode: looks up the pack versions (first time), then compares
     /// the picked one's server pack with the server.
     fn plan_server(&mut self, cx: &mut Context<Self>) {
-        let panels = self.store.read(cx).settings().hopper_panels.clone();
+        let panels: Vec<_> = self.store.read(cx).settings().hopper_panels_on().cloned().collect();
         let compare = self.compare;
         let Some(t) = self.server.as_mut() else { return };
         t.splan = None;

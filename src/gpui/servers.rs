@@ -518,6 +518,18 @@ fn server_list(
                     h_flex()
                         .child(div().flex_1().min_w_0().truncate().text_lg().font_semibold().child("Servers"))
                         .child({
+                            let store = store.clone();
+                            Button::new("servers-refresh")
+                                .ghost()
+                                .small()
+                                .icon(IconName::RefreshCw)
+                                .tooltip("Check every server and panel again now")
+                                .on_click(move |_, _, cx| store.update(cx, |s, cx| {
+                                    s.rediscover_servers();
+                                    cx.notify();
+                                }))
+                        })
+                        .child({
                             let on_browse = on_browse.clone();
                             Button::new("browse-packs")
                                 .ghost()
@@ -543,6 +555,10 @@ fn server_list(
             r.child(no_servers(on_host, on_browse.clone(), cx))
         })
 }
+
+/// After this many seconds without an answer a panel's group says it is
+/// waiting, and offers Try again.
+const SLOW_SECS: u64 = 4;
 
 /// Where a group of servers in the list comes from.
 enum GroupKind {
@@ -585,7 +601,7 @@ impl Group {
 fn groups(s: &Store) -> Vec<Group> {
     let st = s.settings();
     let mut out: Vec<Group> = Vec::new();
-    for p in &st.hopper_panels {
+    for p in st.hopper_panels_on() {
         out.push(Group { kind: GroupKind::Panel(p.id.clone()), key: format!("panel:{}", p.id), name: p.name.clone(), what: "Hopper Server".into() });
         let mut nodes: Vec<String> = s
             .servers()
@@ -637,8 +653,14 @@ fn group_head(
 ) -> AnyElement {
     let theme = cx.theme();
     let s = store.read(cx);
+    // A panel that hasn't answered in a while says so, with Try again.
+    let slow = match &g.kind {
+        GroupKind::Panel(id) => s.panel_waiting(id).filter(|w| w.as_secs() >= SLOW_SECS),
+        _ => None,
+    };
     let (light, error) = match &g.kind {
         GroupKind::Panel(id) | GroupKind::Node(id, _) => match s.panel_error(id) {
+            _ if slow.is_some() => (Some(theme.warning), slow.map(|w| format!("Waiting for {}… ({} s)", g.name, w.as_secs()))),
             Some(e) => (Some(theme.danger), Some(e.to_string())),
             None if s.panel_listed(id) => (Some(theme.success), None),
             None => (Some(theme.warning), None),
@@ -717,6 +739,24 @@ fn group_head(
         }),
         GroupKind::Node(..) | GroupKind::Folder | GroupKind::Site(_) => None,
     };
+    let retry: Option<AnyElement> = match &g.kind {
+        GroupKind::Panel(id) if slow.is_some() || s.panel_error(id).is_some() => {
+            let (store, id) = (store.clone(), id.clone());
+            Some(
+                Button::new(ElementId::Name(format!("group-retry:{}", g.key).into()))
+                    .outline()
+                    .xsmall()
+                    .label("Try again")
+                    .tooltip(format!("Ask {} for its servers again", g.name))
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        store.update(cx, |s, cx| s.refresh_panel(&id, cx));
+                    })
+                    .into_any_element(),
+            )
+        }
+        _ => None,
+    };
     let web = match &g.kind {
         GroupKind::Panel(id) | GroupKind::Node(id, _) => s.settings().hopper_panels.iter().find(|p| &p.id == id).map(|p| p.url.clone()),
         _ => None,
@@ -757,11 +797,12 @@ fn group_head(
                         .child(g.name.clone()),
                 )
                 .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(what))
+                .children(retry)
                 .children(browse)
                 .children(add),
         )
         .when_some(error.filter(|_| !folded), |c, e| {
-            c.child(div().px_3().pb_1().text_xs().text_color(theme.danger).child(e))
+            c.child(div().px_3().pb_1().text_xs().text_color(if slow.is_some() { theme.muted_foreground } else { theme.danger }).child(e))
         })
         .into_any_element()
 }

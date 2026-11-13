@@ -160,7 +160,8 @@
   // across panels; this panel's keep #/server/<id> so old links work).
   const remoteRoute = $derived(route.match(/^\/p\/([^/]+)(\/server\/.*)$/));
   const panelKey = $derived(remoteRoute ? decodeURIComponent(remoteRoute[1]) : null);
-  const panelHere = $derived(panelKey ? byId(panelKey) : null);
+  // A panel turned off opens nothing (its page would ask it).
+  const panelHere = $derived(panelKey ? (byId(panelKey)?.off ? null : byId(panelKey)) : null);
   const local = $derived(remoteRoute ? remoteRoute[2] : route);
   const page = $derived(local.startsWith('/server/') ? 'server' : local === '/browse' || local.startsWith('/browse/') ? 'browse' : settingsCat != null ? 'settings' : 'overview');
   // #/server/<id>/<tab>/<path...>
@@ -432,7 +433,7 @@
       {#if page === 'browse'}
         <Browse segs={segs} />
       {:else if page === 'server' && panelKey && !panelHere}
-        <div class="pad muted">{panels.loaded ? 'That panel isn’t on this page any more.' : 'Loading…'}</div>
+        <div class="pad muted">{!panels.loaded ? 'Loading…' : byId(panelKey)?.off ? 'That panel is turned off. Turn it on at the end of the server list.' : 'That panel isn’t on this page any more.'}</div>
       {:else if page === 'server'}
         {#key `${panelKey}|${serverId}`}<ServerPage id={serverId} {tab} path={subpath} panel={panelHere} />{/key}
       {:else if page === 'settings'}

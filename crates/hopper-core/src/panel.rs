@@ -381,10 +381,47 @@ pub fn address_hint(kind: &str) -> &'static str {
     }
 }
 
-/// The Crafty / MCSS / Pterodactyl panels set up in Settings, in order,
-/// with an address. `HOPPER_PANEL_URL` (and `HOPPER_PANEL_TOKEN`) in .env
-/// replace the first one's, or make one, for tests.
+/// Panels turned off in Settings, as "hopperd:<id>" and "other:<id>" (the
+/// two kinds' ids may both be "", for the panel of an older build). Kept
+/// here as well as in the settings so every way of reaching a panel, even
+/// from a server remembered without the settings at hand, can refuse.
+static OFF: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Notes which panels `s` turns off. Call whenever the settings change.
+pub fn set_off(s: &crate::settings::Settings) {
+    let ids = s
+        .hopper_panels
+        .iter()
+        .filter(|p| p.off)
+        .map(|p| format!("hopperd:{}", p.id))
+        .chain(s.panels.iter().filter(|p| p.off).map(|p| format!("other:{}", p.id)))
+        .collect();
+    *OFF.write().unwrap_or_else(|e| e.into_inner()) = ids;
+}
+
+/// Whether the Hopper Server with this id is turned off.
+pub fn hopperd_off(id: &str) -> bool {
+    OFF.read().unwrap_or_else(|e| e.into_inner()).iter().any(|k| k.strip_prefix("hopperd:") == Some(id))
+}
+
+/// Whether the Crafty / MCSS / Pterodactyl panel with this id is turned off.
+pub fn other_off(id: &str) -> bool {
+    OFF.read().unwrap_or_else(|e| e.into_inner()).iter().any(|k| k.strip_prefix("other:") == Some(id))
+}
+
+/// The Crafty / MCSS / Pterodactyl panels set up in Settings and turned
+/// on, in order, with an address. Settings lists them all
+/// ([`panels_all`]); everything else asks only these.
 pub fn panels(s: &crate::settings::Settings) -> Vec<crate::settings::OtherPanel> {
+    let mut out = panels_all(s);
+    out.retain(|p| !p.off);
+    out
+}
+
+/// Every Crafty / MCSS / Pterodactyl panel set up in Settings, off ones
+/// too, with an address. `HOPPER_PANEL_URL` (and `HOPPER_PANEL_TOKEN`) in
+/// .env replace the first one's, or make one, for tests.
+pub fn panels_all(s: &crate::settings::Settings) -> Vec<crate::settings::OtherPanel> {
     let mut out = s.panels.clone();
     if let Some(url) = env("HOPPER_PANEL_URL") {
         match out.iter_mut().find(|p| p.id.is_empty()) {
@@ -406,6 +443,9 @@ pub fn panels(s: &crate::settings::Settings) -> Vec<crate::settings::OtherPanel>
 
 /// A client for panel `p`, when its API key is saved.
 pub fn open(p: &crate::settings::OtherPanel) -> Option<Box<dyn ServerPanel>> {
+    if p.off || other_off(&p.id) {
+        return None;
+    }
     let token = token_for(&p.id)?;
     let (url, ss) = (p.url.trim(), p.self_signed);
     if url.is_empty() {
@@ -1225,5 +1265,74 @@ mod tests {
         assert_eq!(crafty_action(PanelAction::Kill), "kill_server");
         assert_eq!(crafty_action(PanelAction::Start), "start_server");
     }
-}
 
+    /// A fake panel that counts the connections it gets and drops each.
+    fn counting_panel() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                h.fetch_add(1, Ordering::SeqCst);
+                drop(c);
+            }
+        });
+        (url, hits)
+    }
+
+    #[test]
+    fn a_panel_turned_off_gets_no_calls() {
+        use crate::settings::{HopperPanel, OtherPanel, Settings};
+        use std::sync::atomic::Ordering;
+        let (url, hits) = counting_panel();
+        // The counter works: a client made by hand reaches it.
+        let _ = crate::hopperd::Client::new(&url, "t", "").server_infos();
+        assert!(hits.load(Ordering::SeqCst) >= 1);
+        hits.store(0, Ordering::SeqCst);
+
+        let hp = HopperPanel { id: "test-off-hd".into(), name: "vm".into(), url: url.clone(), off: true, ..Default::default() };
+        let op = OtherPanel { id: "test-off-cr".into(), url: url.clone(), off: true, ..Default::default() };
+        let mut s = Settings::default();
+        s.hopper_panels = vec![hp.clone()];
+        s.panels = vec![op.clone()];
+        set_off(&s);
+
+        assert!(crate::hopperd::Client::for_panel(&hp).is_none());
+        assert!(crate::hopperd::Client::from_settings(&s).is_none());
+        assert_eq!(s.hopper_panels_on().count(), 0);
+        let remote = crate::hopperd::Remote { base: url.clone(), id: "a".into(), ca: String::new(), panel: hp.id.clone() };
+        let e = crate::hopperd::Client::for_remote(&remote).err().unwrap();
+        assert!(e.to_string().contains("turned off"), "{e}");
+        assert!(open(&op).is_none());
+        assert!(panels(&s).is_empty());
+        assert_eq!(panels_all(&s).len(), 1, "Settings still lists it");
+        assert!(from_settings(&s).is_none());
+        // A copy that still says on (a server remembered before the switch)
+        // is refused by the id alone.
+        assert!(crate::hopperd::Client::for_panel(&HopperPanel { off: false, ..hp.clone() }).is_none());
+        assert!(open(&OtherPanel { off: false, ..op.clone() }).is_none());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // On again: nothing else to do before it can be asked.
+        s.hopper_panels[0].off = false;
+        s.panels[0].off = false;
+        set_off(&s);
+        assert!(!hopperd_off(&hp.id) && !other_off(&op.id));
+        assert_eq!(s.hopper_panels_on().count(), 1);
+        assert_eq!(panels(&s).len(), 1);
+    }
+
+    #[test]
+    fn off_is_saved_only_when_set() {
+        let on = serde_json::to_value(crate::settings::HopperPanel::default()).unwrap();
+        assert!(on.get("off").is_none());
+        let off = crate::settings::HopperPanel { off: true, ..Default::default() };
+        let back: crate::settings::HopperPanel = serde_json::from_value(serde_json::to_value(&off).unwrap()).unwrap();
+        assert!(back.off);
+        let old: crate::settings::OtherPanel = serde_json::from_str(r#"{"id":"a","kind":"mcss","url":"https://rig"}"#).unwrap();
+        assert!(!old.off);
+    }
+}

@@ -19,10 +19,11 @@
   // (BulkAction.svelte). Filters above the rows narrow to one panel or one
   // state.
   import { tick } from 'svelte';
-  import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy, Compass, ChevronRight, ChevronDown, Ellipsis, ExternalLink, LogOut, Trash2, ListChecks, Terminal, Pause } from '@lucide/svelte';
+  import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy, Compass, ChevronRight, ChevronDown, Ellipsis, ExternalLink, LogOut, Trash2, ListChecks, Terminal, Pause, Power } from '@lucide/svelte';
   import { put } from './lib/api.js';
   import { bytes } from './lib/format.js';
-  import { panels, retry, signOut, removePanel } from './lib/panels.svelte.js';
+  import { panels, retry, signOut, removePanel, setOff, retryStuck } from './lib/panels.svelte.js';
+  import { onOnly, offOnly, SWITCH_TIP } from './lib/panelOff.js';
   import { tokenFor } from './lib/panelTokens.js';
   import { roleLabel } from './lib/me.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
@@ -63,7 +64,10 @@
   }
   // This panel's nodes: a group each, right under this panel's own servers.
   const nodes = $derived(live.nodes || []);
-  const grouped = $derived(panels.list.length > 0 || nodes.length > 0);
+  // Panels turned off are left out of everything but their "Turned off" line.
+  const livePanels = $derived(onOnly(panels.list));
+  const offPanels = $derived(offOnly(panels.list));
+  const grouped = $derived(livePanels.length > 0 || nodes.length > 0);
   const nodeKey = (n) => `node:${n.id}`;
   /** A node's light: green connected, amber reconnecting, new or under maintenance, red offline. */
   const nodeLight = (n) => (n.state === 'offline' ? 'crashed' : n.state === 'connected' && !n.maintenance ? 'running' : 'starting');
@@ -159,7 +163,7 @@
   }
   const STATES = [['all', 'All'], ['running', 'Running'], ['stopped', 'Stopped'], ['crashed', 'Crashed']];
   // A saved filter for a panel that's no longer on the page shows them all.
-  const panelFilter = $derived(!grouped ? 'all' : filter.panel === 'home' || panels.list.some((p) => p.id === filter.panel) || nodes.some((n) => nodeKey(n) === filter.panel) ? filter.panel : 'all');
+  const panelFilter = $derived(!grouped ? 'all' : filter.panel === 'home' || livePanels.some((p) => p.id === filter.panel) || nodes.some((n) => nodeKey(n) === filter.panel) ? filter.panel : 'all');
   const showGroup = (id) => panelFilter === 'all' || panelFilter === id;
   const homeAll = $derived(shown.filter((s) => !s.node));
   const homeRows = $derived(homeAll.filter((s) => passes(s, filter.state)));
@@ -167,7 +171,7 @@
   const nodeOf = (s) => (s.node ? nodes.find((n) => n.id === s.node) : null);
   const rowsOf = (p) => sorted(p.servers).filter((s) => passes(s, filter.state));
   const noneText = $derived(`No ${filter.state} servers here.`);
-  const anyServers = $derived(live.servers.length > 0 || panels.list.some((p) => p.servers.length));
+  const anyServers = $derived(live.servers.length > 0 || livePanels.some((p) => p.servers.length));
 
   // ---- picking servers for a bulk action ----
   let selecting = $state(false);
@@ -182,7 +186,7 @@
       if (!showGroup(nodeKey(n)) || fold[nodeKey(n)]) continue;
       for (const s of nodeRows(n)) out.push({ key: keyOf(null, s), p: null, s });
     }
-    for (const p of panels.list) {
+    for (const p of livePanels) {
       if (!showGroup(p.id) || p.state === 'signin' || fold[p.id]) continue;
       for (const s of rowsOf(p)) out.push({ key: keyOf(p, s), p, s });
     }
@@ -231,7 +235,7 @@
   function openBulk(action) {
     const groups = [
       { key: 'home', name: homeName || 'This panel', panel: null, role: canPower ? homeRole || 'owner' : 'viewer', state: 'ok', servers: [] },
-      ...panels.list.map((p) => ({ key: p.id, name: p.name, panel: p, role: p.role, state: p.state, servers: [] })),
+      ...livePanels.map((p) => ({ key: p.id, name: p.name, panel: p, role: p.role, state: p.state, servers: [] })),
     ];
     const at = new Map(groups.map((g) => [g.key, g]));
     for (const r of pickedRows) at.get(r.p ? r.p.id : 'home')?.servers.push($state.snapshot(r.s));
@@ -416,7 +420,7 @@
         <span class="dot {stateKey(s)} tdot"></span>
       </a>
     {/each}
-    {#each panels.list as p (p.id)}
+    {#each livePanels as p (p.id)}
       {#if p.servers.length}<div class="rsep" title={p.name}></div>{/if}
       {#each sorted(p.servers) as s (s.id)}
         <a class="tile" class:dim={dim(p)} class:row-sel={isSel(p, s)} class:row-hover={!isSel(p, s)} href={serverHref(p, s)} title="{s.name} · {p.name}" oncontextmenu={(e) => openMenu(e, s, p)}>
@@ -428,7 +432,7 @@
   {:else}
     <div class="hd">
       <span class="title">Servers</span>
-      {#if owner}<button class="btn ghost icon" title="Look for new server folders" onclick={onRescan}><RefreshCw size={14} /></button>{/if}
+      {#if owner || livePanels.length}<button class="btn ghost icon" title={owner ? 'Look for new server folders and check every panel again' : 'Check every panel again now'} onclick={() => { if (owner) onRescan(); retryStuck(); }}><RefreshCw size={14} /></button>{/if}
       <a class="btn ghost icon" title="Browse modpacks to make a server from" href="#/browse"><Compass size={15} /></a>
       <button class="btn ghost icon" title="New server" onclick={onNew}><Plus size={15} /></button>
       {#if anyServers}<button class="btn ghost icon" class:on={selecting} aria-pressed={selecting} title={selecting ? 'Stop selecting (Esc)' : 'Select servers to start, stop or restart together'} onclick={() => (selecting ? stopSelecting() : (selecting = true))}><ListChecks size={15} /></button>{/if}
@@ -441,7 +445,7 @@
             <option value="all">All panels</option>
             <option value="home">{homeName || 'This panel'}</option>
             {#each nodes as n (n.id)}<option value={nodeKey(n)}>{n.name}</option>{/each}
-            {#each panels.list as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+            {#each livePanels as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
           </select>
         {/if}
         <div class="seg" role="group" aria-label="Show servers that are">
@@ -521,7 +525,7 @@
       {/if}
     {/each}
 
-    {#each panels.list.filter((q) => showGroup(q.id)) as p, i (p.id)}
+    {#each livePanels.filter((q) => showGroup(q.id)) as p, i (p.id)}
       {#if showGroup('home') || nodes.some((n) => showGroup(nodeKey(n))) || i > 0}<div class="gsep"></div>{/if}
       {@render head(p.id, p.name, p.me && p.state !== 'signin' ? roleLabel(p.role) : '', light(p), p)}
       {#if p.state === 'ok'}
@@ -548,6 +552,17 @@
         {/each}
       {/if}
     {/each}
+
+    {#if offPanels.length}
+      <div class="gsep"></div>
+      <div class="offh">Turned off</div>
+      {#each offPanels as p (p.id)}
+        <div class="offrow">
+          <span class="offnm" title={p.url}>{p.name}</span>
+          <label class="switch" title={SWITCH_TIP}><input type="checkbox" aria-label="{p.name}: on" checked={false} onchange={() => setOff(p, false)} /><span></span></label>
+        </div>
+      {/each}
+    {/if}
 
     {#if canAdd}
       <button class="btn sm ghost addp" onclick={() => (adding = true)}><Plus size={13} />Add a Hopper Server</button>
@@ -586,6 +601,7 @@
     <button class="menu-item" role="menuitem" onclick={() => pick((v) => window.open(v.url, '_blank', 'noopener'))}><ExternalLink size={14} />Open in browser</button>
     {#if g.state !== 'ok' && g.state !== 'signin'}<button class="menu-item" role="menuitem" onclick={() => pick((v) => retry(v))}><RotateCw size={14} />Try again</button>{/if}
     {#if tokenFor(g.url) && g.state !== 'signin'}<button class="menu-item" role="menuitem" onclick={() => pick((v) => signOut(v))}><LogOut size={14} />Sign out of it</button>{/if}
+    <button class="menu-item" role="menuitem" title={SWITCH_TIP} onclick={() => pick((v) => setOff(v, true))}><Power size={14} />Turn off</button>
     <div class="menu-sep"></div>
     <button class="menu-item" role="menuitem" onclick={() => pick(drop)}><Trash2 size={14} />Remove from this page</button>
   </div>
@@ -651,6 +667,10 @@
   .link { background: none; border: 0; padding: 0; font: inherit; color: color-mix(in srgb, var(--acc) 60%, var(--text)); cursor: pointer; text-decoration: none; }
   .link:hover { text-decoration: underline; }
   .gsep { height: 1px; background: var(--line); margin: 8px 4px 4px; flex: none; }
+  /* Panels turned off: a quiet heading, then a name and its switch each. */
+  .offh { padding: 4px 10px 2px; font-size: 11.5px; color: var(--muted); }
+  .offrow { display: flex; align-items: center; gap: 8px; padding: 3px 10px; min-height: 26px; }
+  .offnm { flex: 1; min-width: 0; font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .srv.dim, .tile.dim { opacity: .55; }
   .cap.none { padding: 2px 10px 6px 32px; }
   .cap.none.flat { padding-left: 10px; }

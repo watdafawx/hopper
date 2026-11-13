@@ -790,7 +790,7 @@ impl SettingsPage {
         // rows (Edit) show where.
         if matches!(id, "panel-kind" | "panel-url" | "panel-key" | "panel-cert" | "panel-test")
             && !self.panel_form
-            && hopper::panel::panels(self.store.read(cx).settings()).is_empty()
+            && hopper::panel::panels_all(self.store.read(cx).settings()).is_empty()
         {
             self.panel_form = true;
             self.panel_editing = None;
@@ -983,7 +983,7 @@ impl SettingsPage {
                         p.url = url;
                         p.self_signed = ss;
                     }
-                    None => st.panels.push(hopper::settings::OtherPanel { id: id2, kind, name: String::new(), url, self_signed: ss }),
+                    None => st.panels.push(hopper::settings::OtherPanel { id: id2, kind, name: String::new(), url, self_signed: ss, off: false }),
                 },
                 cx,
             );
@@ -1620,7 +1620,7 @@ impl SettingsPage {
             ),
             Block::card(Some("Hopper Servers"), self.hopperd_rows(s, cx)),
             Block::card(Some("Other server panels"), {
-                let listed: Vec<AnyElement> = hopper::panel::panels(s)
+                let listed: Vec<AnyElement> = hopper::panel::panels_all(s)
                     .iter()
                     .enumerate()
                     .filter(|(_, p)| !(self.panel_form && self.panel_editing.as_deref() == Some(p.id.as_str())))
@@ -1712,6 +1712,7 @@ impl SettingsPage {
         let test = self.panel_tests.get(&p.id);
         let found = self.store.read(cx).panel_server_count(&p.id);
         let state = match test {
+            _ if p.off => widgets::pill("Off", theme.muted_foreground, false),
             _ if testing => widgets::pill("Connecting", theme.muted_foreground, false),
             Some(Ok(_)) => widgets::pill("Connected", theme.success, false),
             Some(Err(_)) => widgets::pill("Can't connect", theme.danger, false),
@@ -1724,8 +1725,9 @@ impl SettingsPage {
             _ => None,
         };
         let asking = self.panel_removing.as_deref() == Some(p.id.as_str());
-        let (open, id, id2, id3) = (url.clone(), p.id.clone(), p.id.clone(), p.id.clone());
+        let (open, id, id2, id3, id4) = (url.clone(), p.id.clone(), p.id.clone(), p.id.clone(), p.id.clone());
         let sub = match found {
+            _ if p.off => format!("{url} · Turned off: not checked"),
             0 => url.clone(),
             1 => format!("{url} · 1 server here"),
             n => format!("{url} · {n} servers here"),
@@ -1741,6 +1743,7 @@ impl SettingsPage {
                         v_flex()
                             .flex_1()
                             .min_w_0()
+                            .when(p.off, |d| d.opacity(0.6))
                             .child(div().text_sm().font_medium().truncate().child(format!("{} · {}", p.label(), kind_name(&p.kind))))
                             .child(widgets::caption(sub, cx).text_xs().truncate()),
                     )
@@ -1759,7 +1762,7 @@ impl SettingsPage {
                             .small()
                             .label("Test")
                             .loading(testing)
-                            .disabled(testing || !has_key)
+                            .disabled(testing || !has_key || p.off)
                             .when(!has_key, |b| b.tooltip("Add its API key first (Edit)"))
                             .on_click(cx.listener(move |this, _, _, cx| this.test_panel(id.clone(), false, cx))),
                     )
@@ -1778,10 +1781,42 @@ impl SettingsPage {
                             .label(if asking { "Remove?" } else { "Remove" })
                             .tooltip("Forget this panel and delete its API key here. Its servers keep running.")
                             .on_click(cx.listener(move |this, _, window, cx| this.remove_other_panel(id3.clone(), window, cx))),
+                    )
+                    .child(
+                        Switch::new(("other-panel-on", i))
+                            .checked(!p.off)
+                            .tooltip(PANEL_SWITCH_TIP)
+                            .on_click(cx.listener(move |this, on: &bool, _, cx| this.turn_panel(id4.clone(), false, *on, cx))),
                     ),
             )
             .children(detail)
             .into_any_element()
+    }
+
+    /// Turns a panel on or off (`hopperd`: a paired Hopper Server, else a
+    /// Crafty / MCSS / Pterodactyl panel). Off asks it nothing and drops
+    /// its servers from the lists; on lists them again at once. Its
+    /// pairing or API key stays either way.
+    fn turn_panel(&mut self, id: String, hopperd: bool, on: bool, cx: &mut Context<Self>) {
+        if !on {
+            self.panel_tests.remove(&id);
+        }
+        self.store.update(cx, |s, cx| {
+            s.update_settings(
+                |st| {
+                    if hopperd {
+                        if let Some(p) = st.hopper_panels.iter_mut().find(|p| p.id == id) {
+                            p.off = !on;
+                        }
+                    } else if let Some(p) = st.panels.iter_mut().find(|p| p.id == id) {
+                        p.off = !on;
+                    }
+                },
+                cx,
+            );
+            s.rediscover_servers();
+        });
+        cx.notify();
     }
 
     /// Closes the add / edit form. A key is only saved by Save and test.
@@ -1830,19 +1865,20 @@ impl SettingsPage {
                     let store = self.store.read(cx);
                     let offline = store.panel_error(&p.id).is_some();
                     let state = match store.panel_error(&p.id) {
+                        _ if p.off => widgets::pill("Off", theme.muted_foreground, false),
                         Some(e) => widgets::pill(e.to_string(), theme.danger, false),
                         None if !has_token => widgets::pill("Not paired", theme.warning, false),
                         None if store.panel_listed(&p.id) => widgets::pill(
-                            format!(
-                                "{} servers",
-                                store.servers().iter().filter(|x| x.remote.as_ref().is_some_and(|r| r.panel == p.id)).count()
+                            servers_text(
+                                store.servers().iter().filter(|x| x.remote.as_ref().is_some_and(|r| r.panel == p.id)).count(),
                             ),
                             theme.success,
                             false,
                         ),
                         None => widgets::pill("Connecting", theme.muted_foreground, false),
                     };
-                    let (id, id2, url) = (p.id.clone(), p.id.clone(), p.url.clone());
+                    let sub = if p.off { format!("{} · Turned off: not checked, servers hidden", p.url) } else { p.url.clone() };
+                    let (id, id2, id3, url) = (p.id.clone(), p.id.clone(), p.id.clone(), p.url.clone());
                     let asking = self.removing.as_deref() == Some(p.id.as_str());
                     h_flex()
                         .gap_2()
@@ -1852,8 +1888,9 @@ impl SettingsPage {
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
+                                .when(p.off, |d| d.opacity(0.6))
                                 .child(div().text_sm().font_medium().truncate().child(p.name.clone()))
-                                .child(widgets::caption(p.url.clone(), cx).text_xs().truncate()),
+                                .child(widgets::caption(sub, cx).text_xs().truncate()),
                         )
                         .child(state)
                         .child(
@@ -1887,6 +1924,12 @@ impl SettingsPage {
                                     "Unpair this PC in the panel and forget it here. Its servers keep running."
                                 })
                                 .on_click(cx.listener(move |this, _, window, cx| this.remove_panel(id2.clone(), window, cx))),
+                        )
+                        .child(
+                            Switch::new(("panel-on", i))
+                                .checked(!p.off)
+                                .tooltip(PANEL_SWITCH_TIP)
+                                .on_click(cx.listener(move |this, on: &bool, _, cx| this.turn_panel(id3.clone(), true, *on, cx))),
                         )
                         .into_any_element()
                 }))
@@ -2131,7 +2174,7 @@ impl SettingsPage {
                                         } else {
                                             name
                                         };
-                                        st.hopper_panels.push(hopper::settings::HopperPanel { id: id.clone(), name, url: base, ca })
+                                        st.hopper_panels.push(hopper::settings::HopperPanel { id: id.clone(), name, url: base, ca, off: false })
                                     }
                                 },
                                 cx,
@@ -2949,7 +2992,7 @@ impl SettingsPage {
             Category::Servers => {
                 let s = self.store.read(cx).settings();
                 let others = hopper::panel::panels(s);
-                let n = others.len() + s.hopper_panels.len();
+                let n = others.len() + s.hopper_panels_on().count();
                 Some(match (n, others.first()) {
                     (0, _) => widgets::pill("No panel", theme.muted_foreground, false),
                     (1, Some(p)) => widgets::pill(kind_name(&p.kind), theme.primary, true),
@@ -3369,6 +3412,14 @@ fn warning(text: &'static str, cx: &App) -> impl IntoElement {
 }
 
 /// A colored line with an icon: a test result.
+/// The panel rows' On switch (the web UI's says the same).
+const PANEL_SWITCH_TIP: &str = "On: this panel is checked and its servers are listed. Off: nothing asks it anything and its servers are hidden. It stays set up, so turning it on again needs nothing else.";
+
+/// "1 server", "8 servers".
+fn servers_text(n: usize) -> String {
+    if n == 1 { "1 server".into() } else { format!("{n} servers") }
+}
+
 fn status_line(icon: IconName, text: String, color: Hsla) -> AnyElement {
     h_flex()
         .gap_1()

@@ -39,12 +39,11 @@ impl Store {
         let mut on = FOLLOWING.lock().unwrap_or_else(|e| e.into_inner());
         let wanted: Vec<(String, String)> = self
             .settings
-            .hopper_panels
-            .iter()
+            .hopper_panels_on()
             .map(|p| (p.id.clone(), format!("{}|{}", p.url, hopper::panel::hopperd_token_for(&p.id).unwrap_or_default())))
             .collect();
         on.retain(|id, _| wanted.iter().any(|(w, _)| w == id));
-        for p in self.settings.hopper_panels.clone() {
+        for p in self.settings.hopper_panels_on().cloned().collect::<Vec<_>>() {
             let key = wanted.iter().find(|(id, _)| *id == p.id).map(|w| w.1.clone()).unwrap_or_default();
             // Same address and token: the running thread carries on.
             let generation = {
@@ -69,7 +68,7 @@ impl Store {
     /// a server's settings changed, and tell the open views.
     pub(super) fn panel_changed(&mut self, panel: String, changes: Vec<PanelChange>, cx: &mut Context<Self>) {
         let relist = changes.iter().any(|c| c.touches("list") || c.touches("server"));
-        if relist && let Some(p) = self.settings.hopper_panels.iter().find(|p| p.id == panel).cloned() {
+        if relist && let Some(p) = self.settings.hopper_panels_on().find(|p| p.id == panel).cloned() {
             if let Some(client) = Client::for_panel(&p) {
                 let id = p.id.clone();
                 self.spawn(move || Msg::PanelServers(id, client.server_infos().map_err(|e| format!("{e:#}"))));

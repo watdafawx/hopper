@@ -24,6 +24,10 @@ pub struct Panel {
     pub url: String,
     #[serde(default)]
     pub name: String,
+    /// Turned off on this page: the browser asks it nothing and hides its
+    /// servers; the entry stays so turning it on again needs no new sign-in.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub off: bool,
 }
 
 static LOCK: Mutex<()> = Mutex::new(());
@@ -53,7 +57,7 @@ pub fn tidy(list: &[Panel]) -> Result<Vec<Panel>, String> {
             continue;
         }
         let name: String = p.name.chars().filter(|c| !c.is_control()).take(MAX_NAME).collect::<String>().trim().to_string();
-        out.push(Panel { url, name });
+        out.push(Panel { url, name, off: p.off });
     }
     if out.len() > MAX_PANELS {
         return Err(format!("At most {MAX_PANELS} panels."));
@@ -107,7 +111,17 @@ mod tests {
     use super::*;
 
     fn p(url: &str, name: &str) -> Panel {
-        Panel { url: url.into(), name: name.into() }
+        Panel { url: url.into(), name: name.into(), off: false }
+    }
+
+    #[test]
+    fn tidy_keeps_off_and_old_lists_read_as_on() {
+        let off = Panel { off: true, ..p("http://vm:8790", "vm") };
+        assert_eq!(tidy(std::slice::from_ref(&off)).unwrap(), vec![off.clone()]);
+        let old: Vec<Panel> = serde_json::from_str(r#"[{"url":"http://rig:8790","name":"rig"}]"#).unwrap();
+        assert!(!old[0].off);
+        assert!(!serde_json::to_string(&old[0]).unwrap().contains("off"));
+        assert!(serde_json::to_string(&off).unwrap().contains(r#""off":true"#));
     }
 
     #[test]

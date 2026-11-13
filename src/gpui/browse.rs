@@ -5694,7 +5694,7 @@ fn host_places(
 }
 
 fn paired_panels(store: &Entity<Store>, cx: &App) -> Vec<(String, String)> {
-    store.read(cx).settings().hopper_panels.iter().map(|p| (p.id.clone(), p.name.clone())).collect()
+    store.read(cx).settings().hopper_panels_on().map(|p| (p.id.clone(), p.name.clone())).collect()
 }
 
 /// Downloads, last update and categories; `full` adds when it came out

@@ -599,6 +599,10 @@ impl Client {
 
     /// A paired panel, when its token is saved.
     pub fn for_panel(p: &crate::settings::HopperPanel) -> Option<Client> {
+        // Turned off: no client, so nothing can ask it anything.
+        if p.off || crate::panel::hopperd_off(&p.id) {
+            return None;
+        }
         let url = if p.id.is_empty() {
             std::env::var("HOPPER_PANEL_URL").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| p.url.clone())
         } else {
@@ -623,11 +627,14 @@ impl Client {
 
     /// The first paired panel.
     pub fn from_settings(s: &crate::settings::Settings) -> Option<Client> {
-        s.hopper_panels.first().and_then(Client::for_panel)
+        s.hopper_panels_on().next().and_then(Client::for_panel)
     }
 
     /// For a server on this panel.
     pub fn for_remote(r: &Remote) -> anyhow::Result<Client> {
+        if crate::panel::hopperd_off(&r.panel) {
+            bail!("This Hopper Server is turned off in Settings › Servers.");
+        }
         let token =
             crate::panel::hopperd_token_for(&r.panel).context("Pair with the Hopper Server first (Settings → Servers).")?;
         let mut c = Client::new(&r.base, &token, &r.ca);

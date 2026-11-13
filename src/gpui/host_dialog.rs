@@ -1738,8 +1738,7 @@ impl Render for HostForm {
             .store
             .read(cx)
             .settings()
-            .hopper_panels
-            .iter()
+            .hopper_panels_on()
             .map(|p| (p.id.clone(), p.name.clone()))
             .collect();
         let place_field = (!panels.is_empty()).then(|| {

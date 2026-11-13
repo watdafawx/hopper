@@ -486,6 +486,8 @@ pub struct Store {
     folder_servers: Vec<ServerInfo>,
     /// Each Hopper Server's servers (by panel id), or why it couldn't list them.
     panel_servers: HashMap<String, Result<Vec<ServerInfo>, String>>,
+    /// Paired panels asked for their list and not answered yet, since when.
+    panel_asked: HashMap<String, std::time::Instant>,
     /// Each SFTP / FTP site's servers (by site id), or why it couldn't list them.
     site_servers: HashMap<String, Result<Vec<ServerInfo>, String>>,
     /// Pack files that couldn't be downloaded automatically, per instance.
@@ -736,6 +738,7 @@ impl Store {
             panel_stats: HashMap::new(),
             folder_servers: Vec::new(),
             panel_servers: HashMap::new(),
+            panel_asked: HashMap::new(),
             site_servers: HashMap::new(),
             started_with: HashMap::new(),
             live_syncs: HashMap::new(),
@@ -807,6 +810,8 @@ impl Store {
             wake,
             _poll: Self::poll(rx, dirty, ticked, cx),
         };
+        // Panels turned off are refused before anything asks them.
+        hopper::panel::set_off(&store.settings);
         store.refresh();
         // Note which instances have old backups to clean up (nothing goes
         // by itself at start).
@@ -1510,7 +1515,11 @@ impl Store {
                 if let Err(e) = &list {
                     log::warn!("Hopper Server {panel:?}: {e}");
                 }
-                self.panel_servers.insert(panel, list);
+                self.panel_asked.remove(&panel);
+                // A panel turned off while it was asked: its answer is dropped.
+                if self.settings.hopper_panels_on().any(|p| p.id == panel) {
+                    self.panel_servers.insert(panel, list);
+                }
                 self.merge_servers(cx);
             }
             Msg::SiteServers(id, r) => {
@@ -1738,6 +1747,7 @@ impl Store {
         edit(&mut self.settings);
         hopper::retention::set_policy(self.settings.backup_retention);
         hopper::sources::set_enabled(self.settings.allow_sources);
+        hopper::panel::set_off(&self.settings);
         crate::hero_drift::set_still(self.settings.still_header);
         crate::smooth_scroll::set_enabled(self.settings.smooth_scroll);
         crate::clip_watch::set_enabled(self.settings.clip_links);
@@ -3741,14 +3751,21 @@ impl Store {
         // Each Hopper Server lists its servers itself; no shared drive needed.
         // ...and says when they change.
         self.follow_panels();
-        let ids: Vec<String> = self.settings.hopper_panels.iter().map(|p| p.id.clone()).collect();
+        // Panels turned off drop out here: their servers leave the list now.
+        let ids: Vec<String> = self.settings.hopper_panels_on().map(|p| p.id.clone()).collect();
+        let before = self.panel_servers.len();
         self.panel_servers.retain(|k, _| ids.contains(k));
-        for p in self.settings.hopper_panels.clone() {
+        self.panel_asked.retain(|k, _| ids.contains(k));
+        if self.panel_servers.len() != before {
+            self.merge_servers_quiet();
+        }
+        for p in self.settings.hopper_panels_on().cloned().collect::<Vec<_>>() {
             let id = p.id.clone();
             match hopper::hopperd::Client::for_panel(&p) {
-                Some(client) => self.spawn(move || {
-                    Msg::PanelServers(id, client.server_infos().map_err(|e| format!("{e:#}")))
-                }),
+                Some(client) => {
+                    self.panel_asked.insert(id.clone(), std::time::Instant::now());
+                    self.spawn(move || Msg::PanelServers(id, client.server_infos().map_err(|e| format!("{e:#}"))))
+                }
                 None => {
                     self.panel_servers.insert(id, Err("Not paired. Pair it again in Settings â€º Servers.".into()));
                 }
@@ -3788,7 +3805,7 @@ impl Store {
             .filter(|s| !hosted_root.is_empty() && s.root.starts_with(&hosted_root))
             .collect();
         let mut out: Vec<ServerInfo> = Vec::new();
-        for p in &self.settings.hopper_panels {
+        for p in self.settings.hopper_panels_on() {
             if let Some(Ok(list)) = self.panel_servers.get(&p.id) {
                 out.extend(list.iter().cloned());
             }
@@ -3840,6 +3857,27 @@ impl Store {
     /// Whether a paired panel's list has come back (either way).
     pub fn panel_listed(&self, panel: &str) -> bool {
         self.panel_servers.contains_key(panel)
+    }
+
+    /// How long a paired panel has been asked for its list without an
+    /// answer yet, while it is being asked.
+    pub fn panel_waiting(&self, panel: &str) -> Option<std::time::Duration> {
+        self.panel_asked.get(panel).map(|t| t.elapsed())
+    }
+
+    /// Asks one paired panel (turned on) for its servers again now: the
+    /// list's Try again.
+    pub fn refresh_panel(&mut self, panel: &str, cx: &mut Context<Self>) {
+        let Some(p) = self.settings.hopper_panels_on().find(|p| p.id == panel).cloned() else { return };
+        let Some(client) = hopper::hopperd::Client::for_panel(&p) else { return };
+        // Asked a moment ago: that answer is still coming.
+        if self.panel_asked.get(panel).is_some_and(|t| t.elapsed().as_secs() < 2) {
+            return;
+        }
+        self.panel_asked.insert(p.id.clone(), std::time::Instant::now());
+        let id = p.id.clone();
+        self.spawn(move || Msg::PanelServers(id, client.server_infos().map_err(|e| format!("{e:#}"))));
+        cx.notify();
     }
 
     /// Why an SFTP / FTP site couldn't list its servers, if it couldn't.
@@ -3945,7 +3983,7 @@ impl Store {
                 Box::new(move || local.add(&root).start())
             }
             Some(panel) => {
-                let client = self.settings.hopper_panels.iter().find(|p| &p.id == panel).and_then(hopper::hopperd::Client::for_panel);
+                let client = self.settings.hopper_panels_on().find(|p| &p.id == panel).and_then(hopper::hopperd::Client::for_panel);
                 let id = m.panel_id.clone();
                 Box::new(move || {
                     let (Some(c), Some(id)) = (client, id) else { anyhow::bail!("The panel isn't connected.") };

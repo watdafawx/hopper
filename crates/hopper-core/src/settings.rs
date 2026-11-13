@@ -412,6 +412,14 @@ fn yes() -> bool {
     true
 }
 
+impl Settings {
+    /// The paired Hopper Servers that are turned on: the ones to list, ask
+    /// and offer anywhere outside Settings.
+    pub fn hopper_panels_on(&self) -> impl Iterator<Item = &HopperPanel> {
+        self.hopper_panels.iter().filter(|p| !p.off)
+    }
+}
+
 /// A paired Hopper Server.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -424,6 +432,10 @@ pub struct HopperPanel {
     pub url: String,
     /// Its certificate authority (PEM), pinned when pairing.
     pub ca: String,
+    /// Turned off in Settings: nothing asks it anything and its servers
+    /// leave every list. Its pairing and token stay, to turn it on again.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub off: bool,
 }
 
 /// A Crafty, MCSS or Pterodactyl panel Hopper drives with an API key.
@@ -440,11 +452,14 @@ pub struct OtherPanel {
     pub url: String,
     /// Accept the panel's self-signed certificate (Crafty makes its own).
     pub self_signed: bool,
+    /// Turned off in Settings: nothing asks it anything. Its API key stays.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub off: bool,
 }
 
 impl Default for OtherPanel {
     fn default() -> Self {
-        OtherPanel { id: String::new(), kind: "crafty".into(), name: String::new(), url: String::new(), self_signed: true }
+        OtherPanel { id: String::new(), kind: "crafty".into(), name: String::new(), url: String::new(), self_signed: true, off: false }
     }
 }
 
@@ -1149,6 +1164,7 @@ impl Settings {
                         name: String::new(),
                         url: self.panel_url.trim().to_string(),
                         self_signed: self.panel_self_signed,
+                        off: false,
                     },
                 );
                 self.panel_url.clear();
@@ -1159,7 +1175,7 @@ impl Settings {
             let base = crate::hopperd::base_url(&self.panel_url);
             self.hopper_panels.insert(
                 0,
-                HopperPanel { id: String::new(), name: crate::hopperd::host_name(&base), url: base, ca: self.panel_ca.clone() },
+                HopperPanel { id: String::new(), name: crate::hopperd::host_name(&base), url: base, ca: self.panel_ca.clone(), off: false },
             );
         }
         self.panel_kind = "crafty".into();
