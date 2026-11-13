@@ -135,13 +135,7 @@ pub fn pinned_tls(ca: &rustls::pki_types::CertificateDer<'static>) -> anyhow::Re
 /// or subprotocol: the key never lands in an access log).
 pub async fn connect(url: &str, tls: Arc<rustls::ClientConfig>, token: &str) -> Result<(ClientTx, ClientRx), ConnectError> {
     let rest = url.strip_prefix("wss://").ok_or_else(|| ConnectError::BadAddress("must start with wss://".into()))?;
-    let authority = rest.split('/').next().unwrap_or_default();
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) if !h.ends_with(']') || h.starts_with('[') => {
-            (h.trim_start_matches('[').trim_end_matches(']').to_string(), p.parse::<u16>().map_err(|_| ConnectError::BadAddress("bad port".into()))?)
-        }
-        _ => (authority.to_string(), 443),
-    };
+    let (host, port) = host_port(rest.split('/').next().unwrap_or_default())?;
     let addrs: Vec<_> = match tokio::net::lookup_host((host.as_str(), port)).await {
         Ok(a) => a.collect(),
         Err(e) => return Err(ConnectError::Dns(e.to_string())),
@@ -168,12 +162,58 @@ pub async fn connect(url: &str, tls: Arc<rustls::ClientConfig>, token: &str) -> 
     let mut req = url.into_client_request().map_err(|e| ConnectError::BadAddress(e.to_string()))?;
     let auth = format!("Bearer {token}").parse().map_err(|_| ConnectError::Other("bad token".into()))?;
     req.headers_mut().insert("authorization", auth);
-    match tokio_tungstenite::client_async_with_config(req, stream, Some(ws_config())).await {
-        Ok((ws, _)) => {
+    // Bounded like the steps before it: a main that finishes TLS and then
+    // never answers the upgrade would otherwise hold the node here for ever,
+    // never reaching its reconnect loop.
+    let upgrade = tokio_tungstenite::client_async_with_config(req, stream, Some(ws_config()));
+    match tokio::time::timeout(Duration::from_secs(15), upgrade).await {
+        Err(_) => Err(ConnectError::Other("the main didn't answer the connection request".into())),
+        Ok(Ok((ws, _))) => {
             let (tx, rx) = ws.split();
             Ok((ClientTx(tx), ClientRx(rx)))
         }
-        Err(tungstenite::Error::Http(resp)) if matches!(resp.status().as_u16(), 401 | 403) => Err(ConnectError::Refused(resp.status().as_u16())),
-        Err(e) => Err(ConnectError::Other(e.to_string())),
+        Ok(Err(tungstenite::Error::Http(resp))) if matches!(resp.status().as_u16(), 401 | 403) => Err(ConnectError::Refused(resp.status().as_u16())),
+        Ok(Err(e)) => Err(ConnectError::Other(e.to_string())),
+    }
+}
+
+/// `host`, `host:port`, `[v6]` or `[v6]:port`; 443 when no port is given.
+fn host_port(authority: &str) -> Result<(String, u16), ConnectError> {
+    let bad = |m: &str| ConnectError::BadAddress(m.into());
+    let port = |p: &str| p.parse::<u16>().map_err(|_| bad("bad port"));
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let (h, after) = rest.split_once(']').ok_or_else(|| bad("missing ]"))?;
+        match after {
+            "" => (h, 443),
+            p => (h, port(p.strip_prefix(':').ok_or_else(|| bad("bad port"))?)?),
+        }
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, p)) => (h, port(p)?),
+            None => (authority, 443),
+        }
+    };
+    if host.is_empty() {
+        return Err(bad("no host"));
+    }
+    Ok((host.to_string(), port))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_port;
+
+    #[test]
+    fn addresses_with_and_without_ports() {
+        let ok = |a: &str| host_port(a).map_err(|e| e.to_string()).unwrap();
+        assert_eq!(ok("main.example"), ("main.example".into(), 443));
+        assert_eq!(ok("main.example:8790"), ("main.example".into(), 8790));
+        assert_eq!(ok("127.0.0.1:18790"), ("127.0.0.1".into(), 18790));
+        assert_eq!(ok("[::1]:8790"), ("::1".into(), 8790));
+        // Used to be read as host "[:" and port "1]".
+        assert_eq!(ok("[::1]"), ("::1".into(), 443));
+        for bad in ["", ":8790", "h:", "h:99999", "[::1", "[::1]x", "[::1]:"] {
+            assert!(host_port(bad).is_err(), "{bad}");
+        }
     }
 }

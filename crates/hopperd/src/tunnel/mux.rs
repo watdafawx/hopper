@@ -11,7 +11,7 @@
 //! the sender does; sending past it is a protocol error that closes the
 //! connection.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -118,17 +118,67 @@ pub enum StreamError {
     Closed,
 }
 
-enum Inbound {
-    Data(Vec<u8>),
-    Fin,
-    Reset(u16),
+/// What a stream has received and its reader hasn't taken yet. The window
+/// bounds the bytes; merging small DATA frames into the last waiting chunk
+/// bounds the allocations too (an unbounded queue of one entry per frame let
+/// a peer turn one window of one-byte frames into half a million of them).
+#[derive(Default)]
+struct Inbox {
+    q: Mutex<Inboxed>,
+    notify: Notify,
+}
+
+#[derive(Default)]
+struct Inboxed {
+    chunks: VecDeque<Vec<u8>>,
+    fin: bool,
+    reset: Option<u16>,
+    /// The stream left the map (or the connection died): nothing more comes.
+    gone: bool,
+}
+
+impl Inbox {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inboxed> {
+        self.q.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// The connection's end of a stream's inbox. Dropped when the stream leaves
+/// the map, which tells a waiting reader the stream is gone.
+struct InboxTx(Arc<Inbox>);
+
+impl InboxTx {
+    fn data(&self, d: Vec<u8>) {
+        let mut q = self.0.lock();
+        match q.chunks.back_mut() {
+            Some(last) if last.len() + d.len() <= MAX_DATA => last.extend_from_slice(&d),
+            _ => q.chunks.push_back(d),
+        }
+        drop(q);
+        self.0.notify.notify_one();
+    }
+    fn fin(&self) {
+        self.0.lock().fin = true;
+        self.0.notify.notify_one();
+    }
+    fn reset(&self, code: u16) {
+        self.0.lock().reset = Some(code);
+        self.0.notify.notify_one();
+    }
+}
+
+impl Drop for InboxTx {
+    fn drop(&mut self) {
+        self.0.lock().gone = true;
+        self.0.notify.notify_one();
+    }
 }
 
 struct Entry {
     /// Bytes this side may still send.
     credit: u32,
     notify: Arc<Notify>,
-    inbound: mpsc::UnboundedSender<Inbound>,
+    inbound: InboxTx,
     /// Bytes the peer may still send before it needs more credit.
     window_left: u32,
     local_fin: bool,
@@ -148,6 +198,8 @@ struct Shared {
     side: Side,
     my_window: u32,
     peer_window: u32,
+    /// Open streams, both directions together.
+    max_streams: usize,
     state: Mutex<State>,
     /// OPEN, DATA and CLOSE, in order. Bounded: a busy stream waits here
     /// when the socket is slow.
@@ -166,20 +218,20 @@ impl Shared {
     fn known(&self, st: &State, id: u32) -> bool {
         if self.side.owns(id) { id < st.next_id } else { id <= st.last_peer_id }
     }
-    fn new_entry(&self) -> (Entry, Arc<Notify>, mpsc::UnboundedReceiver<Inbound>) {
-        let (tx, rx) = mpsc::unbounded_channel();
+    fn new_entry(&self) -> (Entry, Arc<Notify>, Arc<Inbox>) {
+        let rx = Arc::new(Inbox::default());
         let notify = Arc::new(Notify::new());
         let e = Entry {
             credit: self.peer_window,
             notify: notify.clone(),
-            inbound: tx,
+            inbound: InboxTx(rx.clone()),
             window_left: self.my_window,
             local_fin: false,
             remote_fin: false,
         };
         (e, notify, rx)
     }
-    fn stream(self: &Arc<Self>, id: u32, head: Vec<u8>, notify: Arc<Notify>, rx: mpsc::UnboundedReceiver<Inbound>) -> Stream {
+    fn stream(self: &Arc<Self>, id: u32, head: Vec<u8>, notify: Arc<Notify>, rx: Arc<Inbox>) -> Stream {
         let guard = Arc::new(Guard { id, shared: self.clone() });
         Stream {
             id,
@@ -210,23 +262,30 @@ impl Handle {
         if head.len() > MAX_HEAD {
             return Err(StreamError::Reset(code::REFUSED));
         }
+        // Queue room first, then take the id and queue the OPEN under one
+        // lock: OPENs then reach the wire in id order. (Taking the id and
+        // queueing separately let two tasks swap places, and the peer drops
+        // the connection when an id goes down.)
+        let permit = self.0.data_tx.reserve().await.map_err(|_| StreamError::Closed)?;
         let (id, notify, rx) = {
             let mut st = self.0.lock();
             if st.dead {
                 return Err(StreamError::Closed);
             }
-            if st.streams.len() >= MAX_LOCAL_STREAMS || st.next_id > u32::MAX - 2 {
+            // Our streams count toward the same limit as the peer's, so a
+            // peer that accepts everything still can't make us hold more
+            // than `max_streams` windows.
+            if st.streams.len() >= self.0.max_streams || st.next_id > u32::MAX - 2 {
                 return Err(StreamError::Reset(code::REFUSED));
             }
             let id = st.next_id;
             st.next_id += 2;
             let (e, notify, rx) = self.0.new_entry();
             st.streams.insert(id, e);
+            permit.send(Frame::Open { id, head });
             (id, notify, rx)
         };
-        let stream = self.0.stream(id, Vec::new(), notify, rx);
-        self.0.data_tx.send(Frame::Open { id, head }).await.map_err(|_| StreamError::Closed)?;
-        Ok(stream)
+        Ok(self.0.stream(id, Vec::new(), notify, rx))
     }
 
     /// The last measured ping round trip.
@@ -247,10 +306,6 @@ impl Handle {
         let _ = self.0.ctl_tx.send(Frame::GoAway { code: code::BYE, reason: reason.into() }).await;
     }
 }
-
-/// Our own streams are limited only so a runaway caller can't grow the map
-/// without end; the peer's limit (`max_streams`) refuses them first.
-const MAX_LOCAL_STREAMS: usize = 4096;
 
 pub struct Stream {
     pub id: u32,
@@ -352,7 +407,7 @@ impl SendHalf {
 pub struct RecvHalf {
     id: u32,
     shared: Arc<Shared>,
-    inbound: mpsc::UnboundedReceiver<Inbound>,
+    inbound: Arc<Inbox>,
     consumed: u32,
     done: bool,
     _guard: Arc<Guard>,
@@ -364,8 +419,27 @@ impl RecvHalf {
         if self.done {
             return Ok(None);
         }
-        match self.inbound.recv().await {
-            Some(Inbound::Data(d)) => {
+        let next = loop {
+            {
+                let mut q = self.inbound.lock();
+                if let Some(d) = q.chunks.pop_front() {
+                    break Some(Ok(d));
+                }
+                if q.fin {
+                    break None;
+                }
+                if let Some(c) = q.reset {
+                    break Some(Err(StreamError::Reset(c)));
+                }
+                if q.gone {
+                    return Err(StreamError::Closed);
+                }
+            }
+            // A push between the check and here leaves a permit.
+            self.inbound.notify.notified().await;
+        };
+        match next {
+            Some(Ok(d)) => {
                 self.consumed += d.len() as u32;
                 if self.consumed >= self.shared.my_window / 2 {
                     let n = std::mem::take(&mut self.consumed);
@@ -384,16 +458,21 @@ impl RecvHalf {
                 }
                 Ok(Some(d))
             }
-            Some(Inbound::Fin) => {
+            None => {
                 self.done = true;
                 Ok(None)
             }
-            Some(Inbound::Reset(c)) => {
+            Some(Err(e)) => {
                 self.done = true;
-                Err(StreamError::Reset(c))
+                Err(e)
             }
-            None => Err(StreamError::Closed),
         }
+    }
+
+    /// Chunks waiting to be read (tests).
+    #[cfg(test)]
+    pub fn queued(&self) -> usize {
+        self.inbound.lock().chunks.len()
     }
 
     /// Reads everything to the end.
@@ -411,7 +490,7 @@ impl RecvHalf {
 pub async fn start<T: FrameTx, R: FrameRx>(side: Side, cfg: Config, mut tx: T, mut rx: R) -> Result<Tunnel, MuxError> {
     let hello = Hello { tunnel: TUNNEL_VERSION, version: cfg.version.clone(), capabilities: cfg.capabilities.clone(), window: cfg.window };
     let body = serde_json::to_vec(&hello).expect("hello");
-    tx.send(Frame::Hello(body).encode()).await.map_err(MuxError::Io)?;
+    write_frame(&mut tx, &Frame::Hello(body), cfg.hello_timeout).await?;
     let first = match tokio::time::timeout(cfg.hello_timeout, rx.recv()).await {
         Err(_) => return Err(MuxError::Timeout),
         Ok(None) => return Err(MuxError::Closed),
@@ -426,7 +505,7 @@ pub async fn start<T: FrameTx, R: FrameRx>(side: Side, cfg: Config, mut tx: T, m
     };
     if peer.tunnel.abs_diff(TUNNEL_VERSION) > 1 {
         let reason = format!("tunnel {TUNNEL_VERSION} can't talk to tunnel {}", peer.tunnel);
-        let _ = tx.send(Frame::GoAway { code: code::VERSION, reason }.encode()).await;
+        let _ = write_frame(&mut tx, &Frame::GoAway { code: code::VERSION, reason }, cfg.hello_timeout).await;
         return Err(MuxError::Version { ours: TUNNEL_VERSION, theirs: peer.tunnel });
     }
     if !(4096..=16 * 1024 * 1024).contains(&peer.window) {
@@ -443,6 +522,7 @@ pub async fn start<T: FrameTx, R: FrameRx>(side: Side, cfg: Config, mut tx: T, m
         side,
         my_window: cfg.window,
         peer_window: peer.window,
+        max_streams: cfg.max_streams,
         state: Mutex::new(State {
             streams: HashMap::new(),
             next_id: side.first_id(),
@@ -456,10 +536,11 @@ pub async fn start<T: FrameTx, R: FrameRx>(side: Side, cfg: Config, mut tx: T, m
     });
     let (incoming_tx, incoming) = mpsc::channel(cfg.max_streams.max(1));
     let s = shared.clone();
+    let write_limit = cfg.dead_after;
     let done = tokio::spawn(async move {
         let err = tokio::select! {
             e = read_loop(&s, &cfg, rx, incoming_tx) => e,
-            e = write_loop(tx, ctl_rx, data_rx) => e,
+            e = write_loop(side, write_limit, tx, ctl_rx, data_rx) => e,
         };
         // Everyone waiting on a stream learns the connection is gone.
         let streams = {
@@ -476,7 +557,25 @@ pub async fn start<T: FrameTx, R: FrameRx>(side: Side, cfg: Config, mut tx: T, m
     Ok(Tunnel { handle: Handle(shared), incoming, peer, done })
 }
 
-async fn write_loop<T: FrameTx>(mut tx: T, mut ctl: mpsc::Receiver<Frame>, mut data: mpsc::Receiver<Frame>) -> MuxError {
+/// One frame to the socket. A peer that keeps sending but never reads
+/// would otherwise stall this (and every stream queued behind it) for as
+/// long as it likes, since the read side only checks that frames arrive.
+async fn write_frame<T: FrameTx>(tx: &mut T, f: &Frame, limit: Duration) -> Result<(), MuxError> {
+    match tokio::time::timeout(limit, tx.send(f.encode())).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(MuxError::Io(e)),
+        Err(_) => Err(MuxError::Timeout),
+    }
+}
+
+async fn write_loop<T: FrameTx>(side: Side, limit: Duration, mut tx: T, mut ctl: mpsc::Receiver<Frame>, mut data: mpsc::Receiver<Frame>) -> MuxError {
+    // RESETs jump the data queue, but one must never pass its own stream's
+    // OPEN: the peer would ignore the RESET, then open the stream and keep
+    // it (and its slot) for ever. OPENs go out in id order, so "on the
+    // wire" is just "at most the last OPEN id written". At most one RESET
+    // per queued OPEN waits here (the data queue holds 8).
+    let mut opened = 0u32;
+    let mut held: Vec<Frame> = Vec::new();
     loop {
         let f = tokio::select! {
             biased;
@@ -484,15 +583,33 @@ async fn write_loop<T: FrameTx>(mut tx: T, mut ctl: mpsc::Receiver<Frame>, mut d
             Some(f) = data.recv() => f,
             else => return MuxError::Closed,
         };
+        let open_id = match &f {
+            Frame::Reset { id, .. } if side.owns(*id) && *id > opened => {
+                held.push(f);
+                continue;
+            }
+            Frame::Open { id, .. } => Some(*id),
+            _ => None,
+        };
         let bye = match &f {
             Frame::GoAway { code, reason } => Some(MuxError::GoAway(*code, reason.clone())),
             _ => None,
         };
-        if let Err(e) = tx.send(f.encode()).await {
-            return MuxError::Io(e);
+        if let Err(e) = write_frame(&mut tx, &f, limit).await {
+            return e;
         }
         if let Some(b) = bye {
             return b;
+        }
+        if let Some(id) = open_id {
+            opened = id;
+            let (ready, wait): (Vec<_>, Vec<_>) = held.drain(..).partition(|r| matches!(r, Frame::Reset { id, .. } if *id <= opened));
+            held = wait;
+            for r in ready {
+                if let Err(e) = write_frame(&mut tx, &r, limit).await {
+                    return e;
+                }
+            }
         }
     }
 }
@@ -584,6 +701,11 @@ fn on_frame(shared: &Arc<Shared>, cfg: &Config, frame: Frame, incoming: &mpsc::S
             }
         }
         Frame::Data { id, data } => {
+            // Costs no window, so nothing would bound a flood of them; our
+            // sender never makes one.
+            if data.is_empty() {
+                return Err(protocol(shared, format!("empty data on stream {id}")));
+            }
             let mut st = shared.lock();
             let known = shared.known(&st, id);
             let Some(e) = st.streams.get_mut(&id) else {
@@ -599,7 +721,7 @@ fn on_frame(shared: &Arc<Shared>, cfg: &Config, frame: Frame, incoming: &mpsc::S
                 return Err(protocol(shared, format!("stream {id} sent past its window")));
             }
             e.window_left -= data.len() as u32;
-            let _ = e.inbound.send(Inbound::Data(data));
+            e.inbound.data(data);
         }
         Frame::Credit { id, n } => {
             let mut st = shared.lock();
@@ -626,8 +748,12 @@ fn on_frame(shared: &Arc<Shared>, cfg: &Config, frame: Frame, incoming: &mpsc::S
                 drop(st);
                 return if known { Ok(()) } else { Err(protocol(shared, format!("close on unknown stream {id}"))) };
             };
+            if e.remote_fin {
+                drop(st);
+                return Err(protocol(shared, format!("stream {id} closed twice")));
+            }
             e.remote_fin = true;
-            let _ = e.inbound.send(Inbound::Fin);
+            e.inbound.fin();
             if e.local_fin {
                 st.streams.remove(&id);
             }
@@ -635,7 +761,7 @@ fn on_frame(shared: &Arc<Shared>, cfg: &Config, frame: Frame, incoming: &mpsc::S
         Frame::Reset { id, code, .. } => {
             let removed = shared.lock().streams.remove(&id);
             if let Some(e) = removed {
-                let _ = e.inbound.send(Inbound::Reset(code));
+                e.inbound.reset(code);
                 e.notify.notify_one();
             }
         }
@@ -879,5 +1005,150 @@ mod tests {
         main.handle.close("maintenance").await;
         let e = node.done.await.unwrap();
         assert!(matches!(e, MuxError::GoAway(code::BYE, ref r) if r == "maintenance"), "{e}");
+    }
+
+    // ---- security review (design/multi-panel.md, "A0 review") ----
+
+    /// Waits until the tunnel under test has handled everything sent before:
+    /// a PING is answered only after the frames ahead of it.
+    async fn sync(pt: &mut Tx, pr: &mut Rx, n: u64) {
+        pt.send(Frame::Ping(n).encode()).await.unwrap();
+        while let Some(b) = pr.0.recv().await {
+            if Frame::decode(&b) == Ok(Frame::Pong(n)) {
+                return;
+            }
+        }
+        panic!("tunnel gone before the pong");
+    }
+
+    /// Thousands of tiny DATA frames inside one window must not become
+    /// thousands of queued allocations (each costs far more than its byte).
+    #[tokio::test]
+    async fn tiny_data_frames_are_merged_while_waiting() {
+        let (t, mut pt, mut pr) = raw_peer(cfg(8192), 8192, TUNNEL_VERSION).await;
+        let mut t = t.unwrap();
+        pt.send(Frame::Open { id: 1, head: b"{}".to_vec() }.encode()).await.unwrap();
+        for _ in 0..8192 {
+            pt.send(Frame::Data { id: 1, data: vec![7] }.encode()).await.unwrap();
+        }
+        sync(&mut pt, &mut pr, 1).await;
+        let mut s = t.incoming.recv().await.unwrap();
+        assert!(s.rx.queued() <= 2, "{} chunks queued for 8 KiB", s.rx.queued());
+        let mut got = 0;
+        while got < 8192 {
+            got += s.rx.recv().await.unwrap().unwrap().len();
+        }
+        assert_eq!(got, 8192);
+    }
+
+    /// Empty DATA and repeated CLOSE cost no window, so they would queue
+    /// without limit: both are protocol errors.
+    #[tokio::test]
+    async fn empty_data_and_double_close_are_refused() {
+        let (t, mut pt, _pr) = raw_peer(cfg(8192), 8192, TUNNEL_VERSION).await;
+        pt.send(Frame::Open { id: 1, head: b"{}".to_vec() }.encode()).await.unwrap();
+        pt.send(Frame::Data { id: 1, data: vec![] }.encode()).await.unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(2), t.unwrap().done).await.expect("must close").unwrap();
+        assert!(matches!(err, MuxError::Protocol(_)), "{err}");
+
+        let (t, mut pt, _pr) = raw_peer(cfg(8192), 8192, TUNNEL_VERSION).await;
+        let t = t.unwrap();
+        pt.send(Frame::Open { id: 1, head: b"{}".to_vec() }.encode()).await.unwrap();
+        pt.send(Frame::Close { id: 1 }.encode()).await.unwrap();
+        pt.send(Frame::Close { id: 1 }.encode()).await.unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(2), t.done).await.expect("must close").unwrap();
+        assert!(matches!(err, MuxError::Protocol(_)), "{err}");
+    }
+
+    /// Our own streams count toward the same limit as the peer's: a peer
+    /// that accepts everything can't make us hold thousands of windows.
+    #[tokio::test]
+    async fn our_own_opens_are_capped_at_max_streams() {
+        let main_cfg = Config { max_streams: 4, ..cfg(64 * 1024) };
+        let (main, _node) = connect(main_cfg, cfg(64 * 1024), None).await;
+        let mut keep = Vec::new();
+        for _ in 0..4 {
+            keep.push(main.handle.open(b"{}".to_vec()).await.unwrap());
+        }
+        assert!(matches!(main.handle.open(b"{}".to_vec()).await, Err(StreamError::Reset(code::REFUSED))));
+        drop(keep);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(main.handle.open(b"{}".to_vec()).await.is_ok(), "slots come back after a drop");
+    }
+
+    /// A transport that writes only when the test allows it.
+    struct Gated(Tx, Arc<tokio::sync::Semaphore>);
+    impl FrameTx for Gated {
+        async fn send(&mut self, frame: Vec<u8>) -> io::Result<()> {
+            self.1.acquire().await.unwrap().forget();
+            self.0.send(frame).await
+        }
+    }
+
+    /// Dropping a stream whose OPEN is still queued must not send its RESET
+    /// first: the peer would open it afterwards and keep it forever.
+    #[tokio::test]
+    async fn a_reset_never_overtakes_its_open() {
+        let ((mt, mr), (nt, nr)) = pair(None);
+        let gate = Arc::new(tokio::sync::Semaphore::new(1)); // the hello
+        let (m, n) = tokio::join!(start(Side::Main, cfg(8192), Gated(mt, gate.clone()), mr), start(Side::Node, cfg(8192), nt, nr));
+        let (main, mut node) = (m.unwrap(), n.unwrap());
+        let mut s0 = main.handle.open(b"{}".to_vec()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await; // the writer is stuck on OPEN 2
+        s0.tx.send(b"x").await.unwrap();
+        let s1 = main.handle.open(b"{}".to_vec()).await.unwrap();
+        drop(s1);
+        gate.add_permits(1000);
+        let _a = node.incoming.recv().await.unwrap();
+        let mut b = node.incoming.recv().await.unwrap();
+        let r = tokio::time::timeout(Duration::from_secs(1), b.rx.recv()).await.expect("the dropped stream must be reset on the peer");
+        assert_eq!(r, Err(StreamError::Reset(code::CANCEL)));
+    }
+
+    /// A peer that keeps talking but never reads must not stall our writer
+    /// (and every stream behind it) for ever.
+    #[tokio::test]
+    async fn a_peer_that_never_reads_times_out() {
+        let ((mt, mr), (mut pt, _pr)) = pair(None);
+        let hello = Hello { tunnel: TUNNEL_VERSION, version: "x".into(), capabilities: vec![], window: 8192 };
+        pt.send(Frame::Hello(serde_json::to_vec(&hello).unwrap()).encode()).await.unwrap();
+        let gate = Arc::new(tokio::sync::Semaphore::new(1)); // our hello, then nothing
+        let c = Config { ping_every: Duration::from_millis(50), dead_after: Duration::from_millis(200), ..cfg(8192) };
+        let t = start(Side::Main, c, Gated(mt, gate), mr).await.unwrap();
+        let talker = tokio::spawn(async move {
+            for i in 0.. {
+                if pt.send(Frame::Ping(i).encode()).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        });
+        let err = tokio::time::timeout(Duration::from_millis(1500), t.done).await.expect("writer stall must end the connection").unwrap();
+        talker.abort();
+        assert!(matches!(err, MuxError::Timeout), "{err}");
+    }
+
+    /// Many tasks opening at once: OPENs must reach the wire in id order, or
+    /// the peer sees a lower id after a higher one and drops the connection.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_opens_keep_ids_in_order() {
+        let (main, node) = connect(cfg(64 * 1024), Config { max_streams: 4096, ..cfg(64 * 1024) }, None).await;
+        let Tunnel { mut incoming, done: node_done, handle: _node_handle, .. } = node;
+        tokio::spawn(async move { while let Some(s) = incoming.recv().await { drop(s) } });
+        let mut tasks = Vec::new();
+        for _ in 0..32 {
+            let h = main.handle.clone();
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..300 {
+                    if let Ok(s) = h.open(b"{}".to_vec()).await {
+                        drop(s);
+                    }
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert!(!main.handle.is_dead(), "connection dropped: node {:?}", node_done.await.unwrap());
     }
 }

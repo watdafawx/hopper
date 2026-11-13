@@ -1044,22 +1044,30 @@ under axum) for the node's client side, and futures-util's `sink` feature.
   own (`CLOSE`, like a TCP FIN), so a request body and its answer share one
   stream; `RESET` kills both directions; dropping both halves of a stream
   that hasn't finished both ways sends `RESET CANCEL`. At most 64 open
-  streams per connection; more get `RESET REFUSED`.
+  streams per connection, both directions together; a peer's extra `OPEN`
+  gets `RESET REFUSED`, our own extra `open` fails locally. OPENs reach the
+  wire in id order, and a `RESET` is never sent ahead of its own stream's
+  `OPEN`. Empty `DATA` and a second `CLOSE` on a stream are protocol errors.
 - **Credit**: each side announces its per-stream receive `window` in HELLO
   (default 512 KiB, accepted range 4 KiB to 16 MiB). A sender takes credit
   before each `DATA` and waits at zero. The receiver returns credit
   (`CREDIT n`) only after the *application has read* half a window, so each
   stream buffers at most one window on the receiving side; data past the
   window is a protocol error that closes the connection (`GOAWAY PROTOCOL`).
+  Small `DATA` frames waiting to be read are merged into 64 KiB chunks, so
+  a window of one-byte frames is a handful of allocations, not 500,000.
   `CREDIT`, `PING`, `PONG` and `RESET` go on a small priority queue ahead of
   data, so a full data queue never holds back the credit the peer is waiting
   for. The data queue to the socket is 8 frames (512 KiB). Worst case per
   connection: 64 × 512 KiB = 32 MiB buffered; A3 adds a per-connection cap
   for the main (many nodes) and for the node (30 MB budget).
 - **Keepalive**: both sides `PING` every 20 s; *any* frame received counts as
-  alive; nothing for 60 s = dead (`Timeout`). The node reconnects 1 s
-  doubling to 60 s plus up to 1 s jitter. RTT comes from `PONG` (for the
-  node header in A2).
+  alive; nothing for 60 s = dead (`Timeout`). A frame that can't be written
+  for 60 s (a peer that talks but never reads) is also `Timeout`. The node
+  reconnects 1 s doubling to 60 s plus up to 1 s jitter; the backoff starts
+  over only after a connection that lasted 60 s. Every connect step,
+  including the WebSocket upgrade, has a time limit. RTT comes from `PONG`
+  (for the node header in A2).
 - **Tickets / auth**: the node key goes in `Authorization: Bearer` on the
   upgrade request; the main compares SHA-256 hashes in constant time and
   answers 401 before upgrading. No ticket in the URL or a subprotocol (no
@@ -1090,6 +1098,45 @@ our id parity or reusing an id → protocol error; version one apart ok, two
 apart refused; silent peer → `Timeout` within 190 to 600 ms of a 200 ms
 limit; pings keep an idle link alive and give an RTT, and a dead peer fails
 waiting streams; `GOAWAY` ends both sides. Whole crate: 195 passed.
+After the review below: 23 tunnel tests (5 repeated runs clean), whole
+crate 202 passed.
+
+### A0 security review (2026-11-13)
+
+Read against the threat list for A ("the tunnel: frame parsing, stream
+limits, memory caps, reconnect storms"). Each fixed finding has a test that
+was written first and failed on the old code.
+
+| # | Rank | Finding (attack) | Status |
+|---|---|---|---|
+| 1 | High | **Per-frame cost not bounded.** The window counted bytes, but every `DATA` frame was its own entry in an unbounded queue: a peer could turn one 512 KiB window of 1-byte frames into ~500,000 allocations per stream (tens of MB × 64 streams), and empty `DATA` or repeated `CLOSE` frames cost no window at all, so they queued without any limit while the reader was busy. | Fixed: per-stream inbox merges small chunks; empty `DATA` and a second `CLOSE` are protocol errors. Tests `tiny_data_frames_are_merged_while_waiting`, `empty_data_and_double_close_are_refused`. |
+| 2 | Medium | **Our own streams were capped at 4096, not 64.** A compromised node that accepts every stream the main opens could make the main hold 4096 × 512 KiB = 2 GiB. | Fixed: one limit for both directions. Test `our_own_opens_are_capped_at_max_streams`. |
+| 3 | Medium | **Concurrent opens could reach the wire out of id order** (id taken under the lock, queued after it), and the peer then drops the whole connection ("stream id 24 not allowed", reproduced). Normal A2 load (many browser requests at once) would trigger it. | Fixed: queue room reserved first, id taken and OPEN queued under one lock. Test `concurrent_opens_keep_ids_in_order`. |
+| 4 | Medium | **A RESET could overtake its own OPEN** (RESET rides the priority queue): a stream dropped while its OPEN was queued got opened on the peer afterwards and kept for ever, until the peer's 64 slots ran out and it refused everything. | Fixed: the writer holds such a RESET until its OPEN is written. Test `a_reset_never_overtakes_its_open`. |
+| 5 | Medium | **A peer that talks but never reads** stalled our writer and every stream behind it: the read side saw frames, so no timeout, and only a full control queue (~85 min of pings) ended it. | Fixed: every write has the 60 s limit (`Timeout`). Test `a_peer_that_never_reads_times_out`. |
+| 6 | Low | The node's WebSocket upgrade had no time limit: a main that finished TLS and never answered held the node for ever, outside its reconnect loop. | Fixed (15 s). |
+| 7 | Low | `wss://[::1]/...` (IPv6 without a port) was read as host `[:` port `1]`. | Fixed, test `addresses_with_and_without_ports`. |
+| 8 | Low | The spike node's backoff started over after every successful hello, so a main that accepts and drops at once gets each node back every 1–2 s. | Fixed in the spike: starts over only after 60 s up. A1's real node loop must keep this rule. |
+| 9 | Low | A RESET from dropping a stream uses `try_send` and is lost when the control queue (256) is full, leaving the stream open on the peer. Only on a stalled socket, which #5 now ends within 60 s. | Listed. |
+| 10 | Low | PING and `CREDIT 0` floods cost CPU only (one small frame in, at most one out; a peer that doesn't read fills the control queue and is dropped). | Listed; per-connection frame rate limit in A3 if measured. |
+| 11 | Low | The spike main's 401 has no rate limit, and its key file uses default permissions. | Spike only; A1 adds the connect-failure limit and stores only the hash. |
+| 12 | Low | `HOPPERD_TUNNEL_SPIKE_NODE` in `serve`: whoever can set the panel's environment can already run code as it; the variable only makes it dial the URL in that folder, pinned to the CA there, and answer echo and stats (its own RSS and CPU). | Listed; delete with the spike when A1's node mode lands. |
+
+Checked and found sound: frame decode (short, oversized before
+buffering on both sides, unknown types, connection/stream id placement,
+exact fixed sizes, UTF-8 reasons); stream ids (parity, only growing, no
+u32 wrap: our side stops at `u32::MAX - 2`, a peer at `u32::MAX` only
+exhausts itself); credit math (`checked_add`, capped at 2^31, window
+increments can't exceed the window); DATA/CREDIT/CLOSE after a stream
+ended are ignored only for ids this connection used, otherwise protocol
+errors; HELLO size, timeout, version and window range; key compare
+(SHA-256 of both sides, constant-time fold, 401 before upgrading, the key
+never in a URL or log); 401/403 stops the node; CA pinned with no system
+roots; WebSocket text messages refused; no browser credential reaches the
+node. The spike is reachable only as `hopperd tunnel-spike ...` (parsed
+before the normal arguments, so not from the web UI) or with the variable
+above; a normal `serve` without it does nothing tunnel-related, and
+`tunnel-spike main` binds 127.0.0.1 only.
 
 ### Measured
 
