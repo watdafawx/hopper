@@ -1,0 +1,175 @@
+[
+ {
+  "html_url": "https://github.com/CaffeineMC/sodium/issues/3991",
+  "number": 3991,
+  "title": "Pitcher Plant Does Not Have Updated Shade Direction Override Value in Model Files",
+  "user": {
+   "login": "Hippopotamoss"
+  },
+  "labels": [
+   {
+    "name": "S-needs-triage",
+    "color": "272702"
+   }
+  ],
+  "state": "open",
+  "comments": 0,
+  "created_at": "2026-11-12T21:37:22Z",
+  "updated_at": "2026-11-12T21:37:59Z",
+  "closed_at": null,
+  "state_reason": null
+ },
+ {
+  "html_url": "https://github.com/CaffeineMC/sodium/issues/3990",
+  "number": 3990,
+  "title": "Black Screen launching with Prism",
+  "user": {
+   "login": "arthuranderson1208"
+  },
+  "labels": [
+   {
+    "name": "E-duplicate",
+    "color": "cfd3d7"
+   }
+  ],
+  "state": "closed",
+  "comments": 0,
+  "created_at": "2026-11-12T21:29:48Z",
+  "updated_at": "2026-11-12T21:30:52Z",
+  "closed_at": "2026-11-12T21:30:40Z",
+  "state_reason": "duplicate"
+ },
+ {
+  "html_url": "https://github.com/CaffeineMC/sodium/pull/3992",
+  "number": 3992,
+  "title": "Fix chunk fade-in on world load",
+  "user": {
+   "login": "a-contributor"
+  },
+  "labels": [],
+  "state": "open",
+  "comments": 2,
+  "created_at": "2026-11-12T20:00:00Z",
+  "updated_at": "2026-11-12T21:00:00Z",
+  "closed_at": null,
+  "state_reason": null,
+  "pull_request": {
+   "url": "https://api.github.com/repos/CaffeineMC/sodium/pulls/3992"
+  }
+ },
+ {
+  "html_url": "https://github.com/CaffeineMC/sodium/issues/3989",
+  "number": 3989,
+  "title": "Crashing with Iris Shaders",
+  "user": {
+   "login": "santiagokenneth33-blip"
+  },
+  "labels": [
+   {
+    "name": "S-needs-triage",
+    "color": "272702"
+   }
+  ],
+  "state": "open",
+  "comments": 1,
+  "created_at": "2026-11-12T21:07:50Z",
+  "updated_at": "2026-11-12T21:12:24Z",
+  "closed_at": null,
+  "state_reason": null
+ },
+ {
+  "html_url": "https://github.com/CaffeineMC/sodium/issues/3988",
+  "number": 3988,
+  "title": "pls",
+  "user": {
+   "login": "Matixowy06"
+  },
+  "labels": [],
+  "state": "closed",
+  "comments": 0,
+  "created_at": "2026-11-12T09:28:55Z",
+  "updated_at": "2026-11-12T10:47:07Z",
+  "closed_at": "2026-11-12T10:47:07Z",
+  "state_reason": "not_planned"
+ },
+ {
+  "html_url": "https://github.com/CaffeineMC/sodium/issues/3987",
+  "number": 3987,
+  "title": "Sodium wants Iris 1.11.8 - No such Iris version exists",
+  "user": {
+   "login": "tofemaster"
+  },
+  "labels": [
+   {
+    "name": "E-invalid",
+    "color": "f9d2bb"
+   }
+  ],
+  "state": "closed",
+  "comments": 1,
+  "created_at": "2026-11-10T15:41:30Z",
+  "updated_at": "2026-11-10T15:48:15Z",
+  "closed_at": "2026-11-10T15:48:00Z",
+  "state_reason": "not_planned"
+ },
+ {
+  "html_url": "https://github.com/CaffeineMC/sodium/issues/3986",
+  "number": 3986,
+  "title": "NeoForge Coremod Crash: ReplaceFieldWithGetterAccess Fails on BlockEntity During Bootstrap",
+  "user": {
+   "login": "Lolbit1987"
+  },
+  "labels": [
+   {
+    "name": "E-duplicate",
+    "color": "cfd3d7"
+   }
+  ],
+  "state": "closed",
+  "comments": 0,
+  "created_at": "2026-11-10T09:00:40Z",
+  "updated_at": "2026-11-10T09:10:16Z",
+  "closed_at": "2026-11-10T09:10:10Z",
+  "state_reason": "duplicate"
+ },
+ {
+  "html_url": "https://github.com/CaffeineMC/sodium/issues/3985",
+  "number": 3985,
+  "title": "Bug report",
+  "user": {
+   "login": "hgaotang-stack"
+  },
+  "labels": [
+   {
+    "name": "S-needs-triage",
+    "color": "272702"
+   }
+  ],
+  "state": "open",
+  "comments": 0,
+  "created_at": "2026-11-08T10:22:07Z",
+  "updated_at": "2026-11-08T10:22:07Z",
+  "closed_at": null,
+  "state_reason": null
+ },
+ {
+  "html_url": "https://github.com/CaffeineMC/sodium/issues/3984",
+  "number": 3984,
+  "title": "Weird Checkerboard issue with Iris",
+  "user": {
+   "login": "Slitacid"
+  },
+  "labels": [
+   {
+    "name": "E-external",
+    "color": "fcd8a6"
+   }
+  ],
+  "state": "closed",
+  "comments": 1,
+  "created_at": "2026-11-07T21:45:09Z",
+  "updated_at": "2026-11-08T00:02:49Z",
+  "closed_at": "2026-11-08T00:02:41Z",
+  "state_reason": "not_planned"
+ }
+]
