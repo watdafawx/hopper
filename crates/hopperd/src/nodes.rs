@@ -38,6 +38,8 @@ const KEY_KEEP: u64 = 24 * 3600;
 /// A code request waits this long for the owner (as desktop pairing).
 const REQUEST_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_PENDING: usize = 8;
+/// The most servers of one node the main keeps from its live feed.
+pub const MAX_NODE_SERVERS: usize = 1000;
 /// Wrong keys and node tokens from one address: this many per window, then
 /// it's refused until the window passes.
 const MAX_FAILS: u32 = 10;
@@ -643,7 +645,11 @@ impl Nodes {
     }
 
     /// A node's live feed said this.
+    /// Only servers with a plain id are kept (one with `/`, `..` or `?`
+    /// would point the browser elsewhere on this panel), and at most
+    /// [`MAX_NODE_SERVERS`] of them, so a node can't flood every list.
     fn took(&self, id: &str, servers: Vec<Value>, host: Value) {
+        let servers: Vec<Value> = servers.into_iter().filter(|s| s["id"].as_str().is_some_and(crate::relay::plain_id)).take(MAX_NODE_SERVERS).collect();
         self.lock().snaps.insert(id.into(), NodeSnap { servers, host });
     }
 
@@ -1124,7 +1130,11 @@ async fn take_feed(app: Arc<App>, id: String, handle: Handle) {
                     app.nodes.took(&id, servers, v["host"].clone());
                 }
                 Some("changed") => {
-                    let server = v["server"].as_str().map(|s| crate::relay::join(&id, s));
+                    let server = match v["server"].as_str() {
+                        Some(s) if crate::relay::plain_id(s) => Some(crate::relay::join(&id, s)),
+                        Some(_) => continue,
+                        None => None,
+                    };
                     let areas: Vec<String> = v["areas"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).take(16).map(|x| x.chars().take(32).collect()).collect()).unwrap_or_default();
                     let areas: Vec<&str> = areas.iter().map(String::as_str).collect();
                     let by = v["by"].as_str().map(|b| b.chars().take(96).collect());

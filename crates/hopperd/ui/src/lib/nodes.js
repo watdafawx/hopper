@@ -22,6 +22,16 @@ export const CEILINGS = [
 
 export const ceilingLabel = (id) => CEILINGS.find((c) => c.id === id)?.label ?? id;
 
+/** A server that lives on a node: its id is `<node>:<server>` (the
+ * backend's relay::SEP; a panel's own ids never hold a `:`), and the
+ * merged list also marks it with `node`. */
+export const onNode = (s) => !!s && (!!s.node || String(s.id ?? '').includes(':'));
+
+/** Whether "Share on mclo.gs" works for server `s`. Sharing isn't relayed
+ * to a node (the panel itself posts the log), so it shows only for a
+ * panel's own servers. */
+export const canShareLog = (s) => !onNode(s);
+
 /** "14:02" today, else "12 Nov 14:02". */
 export function clock(t, now = Date.now() / 1000) {
   if (!t) return '';

@@ -21,6 +21,7 @@
   import PushPlayers from './lib/PushPlayers.svelte';
 
   // times: {n, first} when the picked report's failure came more than once.
+  import { canShareLog } from './lib/nodes.js';
   let { server, onPeek, onShare, openFile, given = null, fixes = false, times = null } = $props();
   // Fixes (put back, turn off) are for the crash the server last had: a
   // picked report shows them only when it is that one (`fixes`).
@@ -509,7 +510,7 @@
     {#if given?.follow_note}<div class="tiny muted follow"><Info size={12} />{given.follow_note}</div>{/if}
     {#if report || crash.source}
       <div class="row acts share">
-        <button class="btn sm" onclick={() => onShare(report || crash.source)}><Share2 size={13} />Share on mclo.gs</button>
+        {#if canShareLog(server)}<button class="btn sm" onclick={() => onShare(report || crash.source)}><Share2 size={13} />Share on mclo.gs</button>{/if}
         <a class="report" href={issueUrl(`Crash: ${crash.headline || 'the server crashed'}`)} target="_blank" rel="noopener" title="Report it on GitHub if Hopper caused this crash or got its cause wrong">Report</a>
       </div>
     {/if}

@@ -141,7 +141,7 @@ const FS_PARTS: &[&str] = &[
 pub fn allowed(method: &Method, route: &str) -> bool {
     let parts: Vec<&str> = route.split('/').collect();
     // "", "api", "v1", family, id, rest...
-    if parts.len() < 4 || parts[0] != "" || parts[1] != "api" || parts[2] != "v1" || parts[1..].iter().any(|p| p.is_empty() || *p == "." || *p == "..") {
+    if parts.len() < 4 || parts[0] != "" || parts[1] != "api" || parts[2] != "v1" || !parts[1..].iter().all(|p| seg_ok(p)) {
         return false;
     }
     match (parts[3], &parts[4..]) {
@@ -164,6 +164,21 @@ pub fn allowed(method: &Method, route: &str) -> bool {
         ("jobs", [_, "cancel" | "dismiss"]) => *method == Method::POST,
         _ => false,
     }
+}
+
+/// One part of a relayed path, read the way the node's router decodes it
+/// into a handler's argument: a name, never a climb, a separator, a drive
+/// or a NUL (the handlers check names too; this is a second look).
+fn seg_ok(p: &str) -> bool {
+    let d = percent_decode(p);
+    !d.is_empty() && d != "." && d != ".." && !d.contains(['/', '\\', ':', '\0'])
+}
+
+/// A server or job id from a node, as the main lists and links it: a plain
+/// name. Anything else (a `/`, `..`, `?`, `#`, `:`) would make the browser
+/// call a different address on the main when it builds a URL from it.
+pub fn plain_id(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 96 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Query values a relayed request may not carry: a path above the server
@@ -373,8 +388,7 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
         Err(_) => return refuse(StatusCode::PAYLOAD_TOO_LARGE, "That's too big to send to a node in one go."),
     };
     if info.maintenance.is_some() {
-        let starting = making || (t.route.ends_with("/power") && serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["action"].as_str().map(str::to_string)).is_some_and(|a| a == "start" || a == "restart"));
-        if starting {
+        if starts_server(&method, &t.route, &body) {
             return refuse(StatusCode::CONFLICT, format!("{} is under maintenance, so nothing starts there. End maintenance first.", info.name));
         }
     }
@@ -408,24 +422,10 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
         Ok(Err(e)) => return refuse(StatusCode::BAD_GATEWAY, format!("{} sent an answer this panel can't read ({e}).", info.name)),
         Err(_) => return refuse(StatusCode::GATEWAY_TIMEOUT, format!("{} didn't answer in time.", info.name)),
     };
-    let status = StatusCode::from_u16(answer.s).unwrap_or(StatusCode::BAD_GATEWAY);
+    let (status, headers, json_answer) = answer_head(&answer);
     let mut b = Response::builder().status(status);
-    let mut json_answer = false;
-    for (k, v) in &answer.h {
-        let k = k.to_ascii_lowercase();
-        if !PASS_OUT.contains(&k.as_str()) {
-            continue;
-        }
-        if k == "content-type" && v.starts_with("application/json") {
-            json_answer = true;
-        }
-        // A JSON answer is rewritten (job ids), so its length is set below.
-        if k == "content-length" && answer.h.iter().any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v.starts_with("application/json")) {
-            continue;
-        }
-        if let Ok(v) = HeaderValue::from_str(v) {
-            b = b.header(k, v);
-        }
+    for (k, v) in headers {
+        b = b.header(k, v);
     }
     if json_answer {
         // Read whole, so job ids and made servers carry the node's id.
@@ -459,6 +459,78 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
         }
     });
     b.body(Body::from_stream(stream)).unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+/// Whether a relayed request can start a server (refused while the node is
+/// under maintenance): Start and Restart, a new server (it may start once
+/// made), and pre-generating a world (it starts a stopped server).
+fn starts_server(method: &Method, route: &str, body: &[u8]) -> bool {
+    if *method != Method::POST {
+        return false;
+    }
+    if route == "/api/v1/servers/create" || (route.starts_with("/api/v1/servers/") && route.ends_with("/worlds/pregen")) {
+        return true;
+    }
+    route.starts_with("/api/v1/servers/")
+        && route.ends_with("/power")
+        && serde_json::from_slice::<Value>(body).ok().and_then(|v| v["action"].as_str().map(str::to_string)).is_some_and(|a| a == "start" || a == "restart")
+}
+
+/// What the browser gets from a node's answer head: its status, the
+/// headers passed on, and whether the body is JSON (read whole and
+/// rewritten). A compromised node must not be able to run a page on the
+/// main's address, set cookies there or sign people out, so:
+/// - only the listed headers cross, each at most once;
+/// - the type is one the panel itself serves (JSON, plain text, a raster
+///   image, a zip, raw bytes), anything else becomes raw bytes;
+/// - every answer gets the panel's file sandbox and `nosniff`, whatever
+///   the node sent for those;
+/// - a status outside 200–599, or one that means "sign in" (401, 407),
+///   is a 502: only the main says who is signed in.
+fn answer_head(a: &Answer) -> (StatusCode, Vec<(&'static str, HeaderValue)>, bool) {
+    let status = match a.s {
+        401 | 407 => StatusCode::BAD_GATEWAY,
+        s @ 200..=599 => StatusCode::from_u16(s).unwrap_or(StatusCode::BAD_GATEWAY),
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    let first = |name: &str| a.h.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
+    let ctype = safe_type(first("content-type").unwrap_or("application/octet-stream"));
+    let json_answer = ctype.starts_with("application/json");
+    let mut out: Vec<(&'static str, HeaderValue)> = Vec::new();
+    if let Ok(v) = HeaderValue::from_str(&ctype) {
+        out.push(("content-type", v));
+    }
+    for k in PASS_OUT {
+        if matches!(*k, "content-type" | "content-security-policy" | "x-content-type-options") {
+            continue;
+        }
+        let Some(v) = first(k) else { continue };
+        // A JSON answer is rewritten (job ids), so its length is set later;
+        // another length must be a plain number.
+        if *k == "content-length" && (json_answer || v.trim().parse::<u64>().is_err()) {
+            continue;
+        }
+        if let Ok(v) = HeaderValue::from_str(v) {
+            out.push((k, v));
+        }
+    }
+    out.push(("content-security-policy", HeaderValue::from_static("sandbox; default-src 'none'; img-src 'self'")));
+    out.push(("x-content-type-options", HeaderValue::from_static("nosniff")));
+    (status, out, json_answer)
+}
+
+/// A content type the panel itself serves, with its parameters; anything
+/// else (HTML, SVG, XML, scripts) as raw bytes.
+fn safe_type(t: &str) -> String {
+    let base = t.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    match base.as_str() {
+        "application/json" | "text/plain" => {
+            let utf8 = t.to_ascii_lowercase().contains("charset=utf-8");
+            if utf8 { format!("{base}; charset=utf-8") } else { base }
+        }
+        "application/octet-stream" | "application/zip" | "application/gzip" | "application/java-archive" | "image/png" | "image/jpeg" | "image/gif" | "image/webp" => base,
+        _ => "application/octet-stream".into(),
+    }
 }
 
 /// "mikey (admin)" as the node's History and log show it.
@@ -505,17 +577,17 @@ fn namespace_answer(node: &str, route: &str, body: Vec<u8>) -> Vec<u8> {
             Value::String(s) if !s.is_empty() => Some(s.clone()),
             _ => None,
         };
-        if let Some(id) = id {
-            *j = Value::String(join(node, &id));
-            changed = true;
-        }
+        // An id the browser can't use safely in a URL is dropped.
+        *j = id.filter(|id| plain_id(id)).map_or(Value::Null, |id| Value::String(join(node, &id)));
+        changed = true;
     }
     if route.starts_with("/api/v1/jobs/")
         && let Some(r) = v.get_mut("result")
         && r.get("path").is_some()
-        && let Some(Value::String(id)) = r.get_mut("id")
+        && let Some(id) = r.get_mut("id")
+        && id.is_string()
     {
-        *id = join(node, id);
+        *id = id.as_str().filter(|s| plain_id(s)).map_or(Value::Null, |s| Value::String(join(node, s)));
         changed = true;
     }
     if changed { serde_json::to_vec(&v).unwrap_or(body) } else { body }
@@ -553,13 +625,18 @@ impl Lines {
 
 // ---- the node's side -------------------------------------------------------
 
-/// Serves the streams the main opens, until the connection ends. `ceiling`
-/// is what `node.json` says, read strictly: `None` refuses everything.
-pub async fn serve(app: Arc<App>, ceiling: Option<Role>, main: String, mut incoming: tokio::sync::mpsc::Receiver<Stream>) {
+/// What `node.json` says the main may do, read again for every stream so a
+/// ceiling lowered on the node applies at once, not at the next connect.
+/// `None` (unreadable, or this node left) refuses everything.
+pub type CeilingNow = Arc<dyn Fn() -> Option<Role> + Send + Sync>;
+
+/// Serves the streams the main opens, until the connection ends.
+pub async fn serve(app: Arc<App>, ceiling: CeilingNow, main: String, mut incoming: tokio::sync::mpsc::Receiver<Stream>) {
     let router = crate::api::router(app.clone());
     let main = clean(&main);
     while let Some(s) = incoming.recv().await {
         let (app, router, main) = (app.clone(), router.clone(), main.clone());
+        let ceiling = ceiling();
         tokio::spawn(async move { serve_stream(app, router, ceiling, main, s).await });
     }
 }
@@ -853,6 +930,14 @@ mod tests {
             (&g, "/api/v1/ws"),
             (&p, "/api/v1/mcp"),
             (&g, "/api/v1/jobs"),
+            // Encoded separators and climbs in a path part (the node's router
+            // decodes them into a handler's name).
+            (&d, "/api/v1/servers/tnp/backups/..%2F..%2Fx"),
+            (&d, "/api/v1/servers/tnp/backups/%2e%2e"),
+            (&g, "/api/v1/fs/tnp%2F..%2Fother/list"),
+            (&d, "/api/v1/servers/tnp/worlds/a%5Cb"),
+            (&g, "/api/v1/servers/C%3A"),
+            (&d, "/api/v1/servers/tnp/backups/a%00b"),
         ] {
             assert!(!allowed(m, r), "{m} {r}");
         }

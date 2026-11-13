@@ -12,6 +12,7 @@
   import { api } from './lib/api.js';
   import { rightClear } from './lib/rightclear.js';
 
+  import { canShareLog } from './lib/nodes.js';
   let { server, path, onShare, openFile } = $props();
 
   const KEEP = 200000;
@@ -194,7 +195,7 @@
     <span class="sp"></span>
     {#if alive && !path.endsWith('.gz')}<span class="tiny muted">Follows the server as it writes</span>{/if}
     <button class="btn sm ghost" title="Opens the file in the editor" onclick={() => openFile(path)}><FileText size={13} />Open file</button>
-    <button class="btn sm" title="Upload it and get a link for Discord or a bug report. The log becomes public." onclick={() => onShare(path)}><Share2 size={13} />Share on mclo.gs</button>
+    {#if canShareLog(server)}<button class="btn sm" title="Upload it and get a link for Discord or a bug report. The log becomes public." onclick={() => onShare(path)}><Share2 size={13} />Share on mclo.gs</button>{/if}
   </div>
   <span class="probe" bind:this={probe} aria-hidden="true">{'0'.repeat(100)}</span>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->

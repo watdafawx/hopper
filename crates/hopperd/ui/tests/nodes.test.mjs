@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { nodeLine, span, codeGroups, defaultAddress, STATES, ceilingLabel } from '../src/lib/nodes.js';
+import { nodeLine, span, codeGroups, defaultAddress, STATES, ceilingLabel, onNode, canShareLog } from '../src/lib/nodes.js';
 
 const now = 1_800_000_000;
 
@@ -32,4 +32,13 @@ test('the address nodes use defaults to this page over HTTPS', () => {
   const hello = { port: 8790, addresses: ['https://127.0.0.1:8790', 'https://192.168.50.3:8790'] };
   assert.equal(defaultAddress({ protocol: 'http:', origin: 'http://localhost:8790', hostname: 'localhost' }, hello), 'https://192.168.50.3:8790');
   assert.equal(defaultAddress({ protocol: 'http:', hostname: 'rig' }, { port: 9 }), 'https://rig:9');
+});
+
+test("sharing a log on mclo.gs shows only for a panel's own servers", () => {
+  // Not relayed to nodes: the node would answer 403.
+  assert.equal(canShareLog({ id: 'tnp' }), true);
+  assert.equal(canShareLog({ id: 'ab12cd34ef56:tnp' }), false);
+  assert.equal(canShareLog({ id: 'tnp', node: 'ab12cd34ef56' }), false);
+  assert.equal(onNode(null), false);
+  assert.equal(onNode({}), false);
 });

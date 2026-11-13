@@ -1572,11 +1572,62 @@ segmented control).
   home group until the job ends.
 - Browse/install from the mod browser onto a node's server, server infos,
   copying, templates, `fs/fetch` and off-site backup copies.
-- "Share on mclo.gs" still shows on a node's server (console, logs, crash,
-  editor) but `logs/share` isn't relayed, so it answers 403. Hide it for
-  node servers, or relay it (it only ever posts to mclo.gs).
+- ~~"Share on mclo.gs" shows on a node's server but answers 403.~~ Hidden
+  for node servers since the A2 review (one check, `canShareLog` in
+  `ui/src/lib/nodes.js`, used by the console, log, crash and editor
+  views). Relaying it instead stays open.
 - MCP over nodes, node-scoped access for users ("everything on vm-a2"),
   bulk actions per node: A4.
+
+### A2 security review (2026-11-13)
+
+Read against the A threat list for the relay: identity in the OPEN head,
+the ceiling, `lead`, the allowlist, node-side path checks, a compromised
+node attacking the main, id namespacing, maintenance and the audit log.
+Each fixed High and Medium has a test that was written first and failed
+on the old code (the ceiling one by reverting the fix to "read once").
+
+| # | Rank | Finding (attack) | Status |
+|---|---|---|---|
+| 1 | High | **A compromised node could run script on the main's address.** The main passed the node's `Content-Type` and `Content-Security-Policy` through. A node answering a file download (`fs/{id}/file`, opened from the main's Files view) with `text/html` and its own CSP had its page run on the main's origin with the viewer's session: making API tokens, users, anything the person may do there. | Fixed (`relay::answer_head`): the type is one the panel itself serves (JSON, plain text, raster image, zip, raw bytes), anything else is raw bytes; every relayed answer gets the panel's file sandbox CSP and `nosniff`, whatever the node sent; each passed header once; a non-number length is dropped. Test `a_node_cannot_put_a_page_on_the_mains_address`. |
+| 2 | Medium | **Server and job ids from a node weren't checked.** The web UI builds URLs from ids, several without encoding (`/servers/${id}/power`), so a node listing a server `x/../../../users/u1?` made the browser send the person's Stop click to a different route on the main. | Fixed: ids from a node must be plain names (`relay::plain_id`: letters, digits, `-`, `_`, at most 96); others are left out of the list, change lines and job answers. Test `ids_from_a_node_must_be_plain`. |
+| 3 | Medium | **Maintenance could be bypassed:** pre-generating a world (`worlds/pregen`) starts a stopped server and wasn't on the "starts something" list. | Fixed: one check, `relay::starts_server` (Start, Restart, new server, pre-generate). Test `maintenance_blocks_starts`. |
+| 4 | Medium | **Lowering the ceiling on the node didn't apply to the open connection.** It was read from `node.json` once per connection, so a node owner who lowered it (because they no longer trust the main) still gave the main Manage until the next reconnect, which may never come. | Fixed: read from `node.json` for every stream (`tunnel::node::ceiling_now`), strictly; another join or a missing file refuses. Tests `a_lowered_ceiling_applies_at_once`, `the_ceiling_is_read_from_node_json_each_time`. |
+| 5 | Low | A node answering 401 or 407 could make a browser think it was signed out of the main (or of a listed other panel); 1xx and out-of-range statuses went through. | Fixed: those are 502. Same test as #1. |
+| 6 | Low | A node could flood every server list with thousands of servers (one 8 MB line at a time). | Fixed: at most `nodes::MAX_NODE_SERVERS` (1000) per node. Test `a_node_lists_a_bounded_number_of_servers`. |
+| 7 | Low | Path parts were checked raw, so `..%2F..%2Fx` reached a handler as `../../x` (every handler checked its names; no escape found). | Fixed: parts are checked as the node's router decodes them (no `/`, `\`, `:`, NUL, `.`, `..`). Unit test `the_allowlist`. |
+| 8 | Low | The node doesn't know about maintenance: its own schedule (restarts) and automations still run there. | Listed: send maintenance to the node in A3 if wanted. |
+| 9 | Low | `/jobs/{node}:{n}` isn't limited to the person's servers (job numbers are small): someone limited to one server can read another job's result. The same holds for local jobs. | Listed (both apps, not only nodes). |
+| 10 | Low | A compromised node writes its own History and `changed` lines: it can blame any main user there, or make every browser refresh. The main's audit log, which records every relayed change with the real person, is the record to trust. | Listed (inherent). |
+| 11 | Low | Under Manage the main can add a mod source from any URL (`mods/source/*`), so the node fetches from its own network, like the unrelayed `fs/fetch`. Manage already means code on the node (see "Trust model"). | Listed. |
+| 12 | Low | The person's name crosses as plain text (control characters dropped, 60 characters), so a main user called "x via other (admin)" reads oddly in the node's log. | Listed. |
+
+Checked and found sound: the OPEN head comes only from the one tunnel the
+node dialled to its pinned main, and `relay::relayed()` is a task-local
+that only `serve_request` sets (no header or cookie reaches it; the node's
+handlers see no session headers); the role in the head is parsed strictly
+(unknown, missing or "manager" refuses) and capped by both ceilings; a
+main user below Admin stays there on the node (`security::refusal` runs on
+both sides with the same role rules); `lead` is set by the main only for
+owner-level people under its stored Manage, honoured by the node only under
+its own Manage and an Admin role, and only makes `owner_level()` true:
+`is_owner()` and `may_manage_user` stay false, and of the owner-only
+handlers only `servers/{id}/remove` (and the owner view of the backup list)
+is on the allowlist, so users, tokens, devices, settings, the nodes list,
+TLS, update and the panel folder stay unreachable; the allowlist is
+checked on the node against the path it routes (empty parts, double
+slashes and `..` refused; query values with `..`, `/`, drives refused
+after decoding; JSON path fields at any depth); file routes resolve on the
+node through `files::resolve`, which follows symlinks (tested with `..`,
+encoded `..`, absolute, drive and link paths); `Set-Cookie`, `Location`,
+`Transfer-Encoding` and `Content-Encoding` never cross; answer heads are
+capped at 16 KiB, JSON answers at 32 MB, request bodies at 8 MB, feed lines
+at 8 MB; ids can't collide (local ids are slugs without `:`, node ids are
+the main's own 12 hex characters, and a node's id with `:` is dropped);
+maintenance is checked after the body is read, with the same JSON parser
+the node's handler uses; the main's audit log records every relayed change
+and early refusal with the real person, and the node's records each
+relayed change and refusal as "person via main (role)".
 
 ## Open questions for the maintainer
 

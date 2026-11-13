@@ -18,6 +18,7 @@
   import { Selection } from './lib/selection.svelte.js';
 
   /** sub: 'crashes' | 'latest' | 'debug'; go(sub) changes it. */
+  import { canShareLog } from './lib/nodes.js';
   let { server, sub = 'crashes', go, onShare, openFile, openMods } = $props();
 
   const SUBS = [
@@ -260,7 +261,7 @@
                 <p class="tiny muted">Drawing what it found went wrong ({error?.message || 'unknown error'}). Open the report to see what it says.</p>
                 <div class="row acts">
                   <button class="btn sm" onclick={() => openFile(read.report)}><FileText size={13} />Open report</button>
-                  <button class="btn sm" onclick={() => onShare(read.report)}><Share2 size={13} />Share on mclo.gs</button>
+                  {#if canShareLog(server)}<button class="btn sm" onclick={() => onShare(read.report)}><Share2 size={13} />Share on mclo.gs</button>{/if}
                 </div>
               </div>
             {/snippet}
@@ -271,7 +272,7 @@
             <p class="tiny muted">It may not be a Minecraft crash report. Open it to see what it says.</p>
             <div class="row acts">
               <button class="btn sm" onclick={() => openFile(read.report)}><FileText size={13} />Open report</button>
-              <button class="btn sm" onclick={() => onShare(read.report)}><Share2 size={13} />Share on mclo.gs</button>
+              {#if canShareLog(server)}<button class="btn sm" onclick={() => onShare(read.report)}><Share2 size={13} />Share on mclo.gs</button>{/if}
             </div>
           </div>
         {:else if list?.length}

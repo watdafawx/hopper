@@ -19,6 +19,7 @@
   import { configOwners, ownerOf, siblingsOf } from './lib/files-config.js';
   import { rightClear } from './lib/rightclear.js';
 
+  import { canShareLog } from './lib/nodes.js';
   let { server, path, close } = $props();
   let sharing = $state(false);
 
@@ -350,7 +351,7 @@
       <label class="input find"><Search size={13} /><input use:rightClear placeholder="Search settings" bind:value={query} />{#if query}<button class="clr" title="Clear" onclick={() => (query = '')}><X size={12} /></button>{/if}</label>
     {/if}
     <button class="btn sm" class:on={versions} title="Earlier versions" onclick={history}><History size={14} />History</button>
-    {#if /^(logs\/[^/]+\.log(\.gz)?|crash-reports\/[^/]+\.txt)$/i.test(path)}<button class="btn sm" title="Share on mclo.gs" onclick={() => (sharing = true)}><Share2 size={14} />Share</button>{/if}
+    {#if canShareLog(server) && /^(logs\/[^/]+\.log(\.gz)?|crash-reports\/[^/]+\.txt)$/i.test(path)}<button class="btn sm" title="Share on mclo.gs" onclick={() => (sharing = true)}><Share2 size={14} />Share</button>{/if}
     <button class="btn sm icon ghost" title="Download" onclick={() => download(`/api/v1${base}/file?path=${encodeURIComponent(path)}`)}><Download size={14} /></button>
   </div>
   {#if toml && loaded && !versions}

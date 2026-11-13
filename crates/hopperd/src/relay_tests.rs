@@ -23,6 +23,8 @@ struct Pair {
     id: String,
     main_cookie: String,
     node_cookie: String,
+    /// What the node's node.json says, as the node reads it per stream.
+    ceiling: Arc<std::sync::Mutex<Option<Role>>>,
     _feed: Follow,
     _serve: Follow,
     _tunnels: (mux::Tunnel, mux::Handle),
@@ -46,7 +48,9 @@ async fn pair(main_copy: Ceiling, node_has: Option<Role>) -> Pair {
     let (m, d) = tokio::join!(mux::start(Side::Main, Config::default(), a.0, a.1), mux::start(Side::Node, Config::default(), b.0, b.1));
     let (m, mut d) = (m.unwrap(), d.unwrap());
     let incoming = std::mem::replace(&mut d.incoming, tokio::sync::mpsc::channel(1).1);
-    let _serve = Follow(tokio::spawn(crate::relay::serve(node.app.clone(), node_has, "rig".into(), incoming)));
+    let cell = Arc::new(std::sync::Mutex::new(node_has));
+    let c = cell.clone();
+    let _serve = Follow(tokio::spawn(crate::relay::serve(node.app.clone(), Arc::new(move || *c.lock().unwrap()), "rig".into(), incoming)));
     // The node's server list, as its once-a-second loop would make it.
     for t in [&main, &node] {
         let snap = t.app.take_snapshot();
@@ -57,7 +61,7 @@ async fn pair(main_copy: Ceiling, node_has: Option<Role>) -> Pair {
     let node_cookie = cookie_login(&node).await;
     let id = n.id.clone();
     let handle = d.handle.clone();
-    let p = Pair { main, node, id, main_cookie, node_cookie, _feed, _serve, _tunnels: (m, handle) };
+    let p = Pair { main, node, id, main_cookie, node_cookie, ceiling: cell, _feed, _serve, _tunnels: (m, handle) };
     // Wait for the live feed's first list.
     for _ in 0..100 {
         if !p.main.app.nodes.servers_for(&Who::Owner).is_empty() {
@@ -150,6 +154,23 @@ async fn a_look_ceiling_refuses_start() {
     assert!(b["error"].as_str().unwrap().contains("vm lets this panel"), "{b}");
 }
 
+/// Lowering the ceiling on the node applies to the connection that is
+/// already open (security review, medium).
+#[tokio::test]
+async fn a_lowered_ceiling_applies_at_once() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let path = format!("/api/v1/fs/{}/text", p.ns());
+    let (s, _) = send(&p.main, &p.main_cookie, "PUT", &path, Some(json!({ "path": "hello.txt", "content": "a", "force": true }))).await;
+    assert_eq!(s, StatusCode::OK);
+    *p.ceiling.lock().unwrap() = Some(Role::Viewer);
+    let (s, _) = send(&p.main, &p.main_cookie, "PUT", &path, Some(json!({ "path": "hello.txt", "content": "b", "force": true }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    *p.ceiling.lock().unwrap() = None;
+    let (s, _) = send(&p.main, &p.main_cookie, "GET", &format!("/api/v1/fs/{}/list?path=", p.ns()), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(std::fs::read_to_string(p.node.dir.join("servers").join("Test Server").join("hello.txt")).unwrap(), "a");
+}
+
 /// A node whose node.json ceiling can't be read refuses everything.
 #[tokio::test]
 async fn an_unknown_ceiling_refuses_everything() {
@@ -236,6 +257,9 @@ async fn maintenance_blocks_starts() {
     assert!(b["error"].as_str().unwrap().contains("under maintenance"), "{b}");
     let (s, _) = send(&p.main, &p.main_cookie, "POST", &format!("/api/v1/servers/create?node={}", p.id), Some(json!({ "name": "x" }))).await;
     assert_eq!(s, StatusCode::CONFLICT);
+    // Pre-generating starts a stopped server too.
+    let (s, b) = send(&p.main, &p.main_cookie, "POST", &format!("/api/v1/servers/{ns}/worlds/pregen"), Some(json!({ "radius": 100 }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{b}");
     // Reading and other work go on.
     let (s, _) = send(&p.main, &p.main_cookie, "GET", &format!("/api/v1/fs/{ns}/list?path="), None).await;
     assert_eq!(s, StatusCode::OK);
@@ -260,4 +284,153 @@ async fn limited_people_see_only_their_node_servers() {
     let (servers, heads) = p.main.app.nodes.live_view(&mine);
     assert_eq!((servers.len(), heads.len()), (1, 1));
     assert_eq!(servers[0]["id"], ns.as_str());
+}
+
+// ---- a node that isn't honest (A2 security review) ----
+
+/// What the fake node answers every request with: status, headers, body.
+type Script = (u16, Vec<(&'static str, String)>, Vec<u8>);
+
+struct Fake {
+    main: T,
+    id: String,
+    cookie: String,
+    _feed: Follow,
+    _node: Follow,
+    _tunnels: (mux::Tunnel, mux::Handle),
+}
+
+impl Fake {
+    fn ns(&self, local: &str) -> String {
+        crate::relay::join(&self.id, local)
+    }
+
+    /// Waits for the live feed's first list; the node's servers on the main.
+    async fn listed(&self) -> Vec<String> {
+        for _ in 0..100 {
+            let l = self.main.app.nodes.servers_for(&Who::Owner);
+            if !l.is_empty() {
+                return l.iter().filter_map(|s| s["id"].as_str().map(str::to_string)).collect();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        Vec::new()
+    }
+}
+
+/// A main joined by a node that sends `live` as its live feed and answers
+/// every request with `answer`, whatever it was asked: a compromised node.
+async fn fake_node(live: Vec<Value>, answer: Script) -> Fake {
+    let main = panel_with(TLS());
+    let (_, key, _) = main.app.nodes.make_key(Ceiling::Manage, "owner");
+    let (n, _) = main.app.nodes.use_key(&key, "vm", "10.0.0.9".parse().unwrap(), "").unwrap();
+    let (a, b) = mux::mem::pair(None);
+    let (m, d) = tokio::join!(mux::start(Side::Main, Config::default(), a.0, a.1), mux::start(Side::Node, Config::default(), b.0, b.1));
+    let (m, mut d) = (m.unwrap(), d.unwrap());
+    let mut incoming = std::mem::replace(&mut d.incoming, tokio::sync::mpsc::channel(1).1);
+    let _node = Follow(tokio::spawn(async move {
+        while let Some(mut s) = incoming.recv().await {
+            let head: Value = serde_json::from_slice(&s.head).unwrap_or_default();
+            let (live, answer) = (live.clone(), answer.clone());
+            tokio::spawn(async move {
+                match head["k"].as_str() {
+                    Some("live") => {
+                        for l in live {
+                            let mut b = l.to_string().into_bytes();
+                            b.push(b'\n');
+                            if s.tx.send(&b).await.is_err() {
+                                return;
+                            }
+                        }
+                        std::future::pending::<()>().await;
+                    }
+                    Some("req") => {
+                        while let Ok(Some(_)) = s.rx.recv().await {}
+                        let h = serde_json::to_vec(&json!({ "s": answer.0, "h": answer.1 })).unwrap();
+                        let mut out = (h.len() as u32).to_be_bytes().to_vec();
+                        out.extend_from_slice(&h);
+                        out.extend_from_slice(&answer.2);
+                        let _ = s.tx.send(&out).await;
+                        let _ = s.tx.finish().await;
+                    }
+                    _ => s.tx.reset(crate::tunnel::frame::code::REFUSED),
+                }
+            });
+        }
+    }));
+    let _feed = crate::nodes::attach_for_test(&main.app, &n, m.handle.clone());
+    let cookie = cookie_login(&main).await;
+    let handle = d.handle.clone();
+    Fake { main, id: n.id.clone(), cookie, _feed, _node, _tunnels: (m, handle) }
+}
+
+/// A node can't make the main serve its own page: whatever type and
+/// headers it sends, a relayed answer never runs as a page on the main's
+/// address, sets a cookie there, or carries two lengths.
+#[tokio::test]
+async fn a_node_cannot_put_a_page_on_the_mains_address() {
+    let page = b"<script>fetch('/api/v1/tokens',{method:'POST',headers:{'x-hopperd':'1'}})</script>".to_vec();
+    let headers = vec![
+        ("content-type", "text/html; charset=utf-8".to_string()),
+        ("content-security-policy", "script-src *".to_string()),
+        ("content-length", page.len().to_string()),
+        ("content-length", "1".to_string()),
+        ("set-cookie", "hopperd_session=planted; Path=/".to_string()),
+        ("content-disposition", "inline".to_string()),
+    ];
+    let f = fake_node(Vec::new(), (200, headers, page)).await;
+    let path = format!("/api/v1/fs/{}/file?path=page.html&inline=1", f.ns("srv"));
+    let (s, h, _) = call("GET", &path).origin(OWN).h("cookie", format!("hopperd_session={}", f.cookie)).send(&f.main).await;
+    assert_eq!(s, StatusCode::OK);
+    let all = |k: &str| h.get_all(k).iter().filter_map(|v| v.to_str().ok()).map(str::to_string).collect::<Vec<_>>();
+    let types = all("content-type");
+    assert_eq!(types.len(), 1, "{types:?}");
+    assert!(!types[0].contains("html"), "a node's page would run on the main's address: {types:?}");
+    let csp = all("content-security-policy");
+    assert_eq!(csp.len(), 1, "{csp:?}");
+    assert!(csp[0].starts_with("sandbox") && csp[0].contains("default-src 'none'"), "{csp:?}");
+    assert_eq!(all("x-content-type-options"), vec!["nosniff"]);
+    assert!(all("set-cookie").is_empty());
+    assert_eq!(all("content-length").len(), 1, "{:?}", all("content-length"));
+
+    // A node that answers "sign in again" or with no real status gets a
+    // 502: only the main itself says who is signed in.
+    for status in [401u16, 407, 101, 999] {
+        let f = fake_node(Vec::new(), (status, vec![("content-type", "application/json".into())], b"{}".to_vec())).await;
+        let (s, _) = send(&f.main, &f.cookie, "GET", &format!("/api/v1/servers/{}", f.ns("srv")), None).await;
+        assert_eq!(s, StatusCode::BAD_GATEWAY, "{status}");
+    }
+}
+
+/// Server and job ids from a node are plain names: one with a `/`, `..`,
+/// `?` or `:` in it would make the browser call a different address on the
+/// main when it builds a URL from it.
+#[tokio::test]
+async fn ids_from_a_node_must_be_plain() {
+    let ids = ["ok-1", "x/../../users", "a:b", "..", "a?b", "a#b", "", "A_b", "a%2F..", r"a\b"];
+    let servers: Vec<Value> = ids.iter().map(|id| json!({ "id": id, "name": id })).collect();
+    let f = fake_node(vec![json!({ "t": "snap", "servers": servers, "host": {} })], (200, vec![], Vec::new())).await;
+    let mut listed = f.listed().await;
+    listed.sort();
+    assert_eq!(listed, vec![f.ns("A_b"), f.ns("ok-1")]);
+
+    // A job id or a made server's id that isn't plain doesn't reach the browser.
+    let f = fake_node(Vec::new(), (200, vec![("content-type", "application/json".into())], br#"{"job":"../../users"}"#.to_vec())).await;
+    let (s, b) = send(&f.main, &f.cookie, "POST", &format!("/api/v1/servers/create?node={}", f.id), Some(json!({ "name": "x" }))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(b["job"].is_null(), "{b}");
+    let answer = br#"{"done":true,"result":{"id":"x/../../users","path":"/srv"}}"#.to_vec();
+    let f = fake_node(Vec::new(), (200, vec![("content-type", "application/json".into())], answer)).await;
+    let (_, b) = send(&f.main, &f.cookie, "GET", &format!("/api/v1/jobs/{}", f.ns("7")), None).await;
+    assert!(b["result"]["id"].is_null(), "{b}");
+}
+
+/// A node can't flood the main's list: it keeps at most so many of a
+/// node's servers.
+#[tokio::test]
+async fn a_node_lists_a_bounded_number_of_servers() {
+    let servers: Vec<Value> = (0..5000).map(|i| json!({ "id": format!("s{i}"), "name": "x" })).collect();
+    let f = fake_node(vec![json!({ "t": "snap", "servers": servers, "host": {} })], (200, vec![], Vec::new())).await;
+    let n = f.listed().await.len();
+    assert!(n > 0 && n <= crate::nodes::MAX_NODE_SERVERS, "{n}");
 }

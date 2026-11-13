@@ -152,6 +152,14 @@ fn still_joined(dir: &Path, j: &Joined) -> bool {
     load(dir).is_some_and(|n| n.token == j.token && n.main_url == j.main_url)
 }
 
+/// What the main may do here, as `node.json` says it now: read for every
+/// stream, so lowering the ceiling on the node applies to the open
+/// connection. Read strictly: unreadable, unknown, or another join refuses.
+pub(crate) fn ceiling_now(dir: &Path, j: &Joined) -> crate::relay::CeilingNow {
+    let (dir, token, url) = (dir.to_path_buf(), j.token.clone(), j.main_url.clone());
+    std::sync::Arc::new(move || load(&dir).filter(|n| n.token == token && n.main_url == url).and_then(|n| crate::relay::ceiling_role(&n.ceiling)))
+}
+
 fn rand_ms(max: u16) -> Duration {
     let mut b = [0u8; 2];
     let _ = getrandom::fill(&mut b);
@@ -323,10 +331,10 @@ enum Ended {
 async fn session(app: &Arc<App>, dir: &Path, j: &Joined, mut t: mux::Tunnel) -> Ended {
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     let mut n = 0u32;
-    // The main's requests (A2). The ceiling is read strictly from the
-    // stored join: anything but look/operate/manage refuses every stream.
+    // The main's requests (A2). The ceiling is read strictly from
+    // node.json for every stream: anything but look/operate/manage refuses.
     let incoming = std::mem::replace(&mut t.incoming, tokio::sync::mpsc::channel(1).1);
-    let _serving = crate::nodes::Follow(tokio::spawn(crate::relay::serve(app.clone(), crate::relay::ceiling_role(&j.ceiling), j.main_name.clone(), incoming)));
+    let _serving = crate::nodes::Follow(tokio::spawn(crate::relay::serve(app.clone(), ceiling_now(dir, j), j.main_name.clone(), incoming)));
     loop {
         tokio::select! {
             r = &mut t.done => return Ended::Mux(r.unwrap_or(MuxError::Closed)),
@@ -708,5 +716,31 @@ mod tests {
             bad[k] = json!(v);
             assert!(joined_from("https://rig:8790", &ca, &bad, "code").is_err(), "{k}={v:?}");
         }
+    }
+
+    /// Security review (medium): the ceiling is node.json's as it is now,
+    /// not as it was when the connection opened; another join, an unknown
+    /// ceiling or no file refuses.
+    #[test]
+    fn the_ceiling_is_read_from_node_json_each_time() {
+        let dir = std::env::temp_dir().join(format!("hopperd-ceiling-{}", crate::auth::random_hex(4)));
+        let ca = rustls::pki_types::CertificateDer::from(vec![1u8, 2, 3]);
+        let mut j = joined_from("https://rig:8790", &ca, &json!({ "node_id": "ab12", "token": "hnt_00ff", "ceiling": "manage" }), "key").unwrap();
+        save(&dir, &j).unwrap();
+        let now = ceiling_now(&dir, &j);
+        assert_eq!(now(), Some(crate::auth::Role::Admin));
+        let first = j.clone();
+        j.ceiling = "look".into();
+        save(&dir, &j).unwrap();
+        assert_eq!(now(), Some(crate::auth::Role::Viewer), "lowered on the node: applies at once");
+        j.ceiling = "everything".into();
+        save(&dir, &j).unwrap();
+        assert_eq!(now(), None);
+        j.ceiling = "manage".into();
+        j.token = "hnt_11ee".into();
+        save(&dir, &j).unwrap();
+        assert_eq!(ceiling_now(&dir, &first)(), None, "another join");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(now(), None, "left");
     }
 }

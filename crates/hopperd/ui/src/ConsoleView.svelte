@@ -13,6 +13,7 @@
   import { kind, shift } from './lib/consoleKit.js';
   import { rightClear } from './lib/rightclear.js';
 
+  import { canShareLog } from './lib/nodes.js';
   let { server, onShare } = $props();
 
   const id = $derived(server.id);
@@ -279,7 +280,7 @@
     </div>
     <span class="tiny muted src">{source === 'file' ? "This run's latest.log from the start, read every few seconds." : "The panel's latest lines, live."}</span>
     <span class="sp"></span>
-    <button class="btn sm" title="Upload a log or crash report and get a link for Discord or a bug report. The log becomes public." onclick={() => onShare('')}><Share2 size={13} />Share on mclo.gs</button>
+    {#if canShareLog(server)}<button class="btn sm" title="Upload a log or crash report and get a link for Discord or a bug report. The log becomes public." onclick={() => onShare('')}><Share2 size={13} />Share on mclo.gs</button>{/if}
   </div>
   <div class="tb">
     <button class="chip" class:on={filter === 'all'} onclick={() => (filter = 'all')}>All</button>
@@ -305,7 +306,7 @@
           <p>{source === 'file' && fileMissing ? 'It shows once the server has run.' : alive ? 'Lines show here as the server writes them.' : 'Its console shows here when it runs.'}</p></div>
       {/if}
     {:else if source === 'file' && fileCut}
-      <div class="muted note tiny">The start of the file isn't shown here (it's too long). Share on mclo.gs or open logs/latest.log in Files for all of it.</div>
+      <div class="muted note tiny">The start of the file isn't shown here (it's too long). {canShareLog(server) ? 'Share on mclo.gs or open' : 'Open'} logs/latest.log in Files for all of it.</div>
     {/if}
     <div class="inner" bind:this={inner} style="--gw: {Math.max(3, String(keyBase + lines.length).length) + 2}ch">
       {#each shown as l (l.key)}
