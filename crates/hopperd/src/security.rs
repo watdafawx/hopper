@@ -211,11 +211,22 @@ fn is_guessable(path: &str) -> bool {
     matches!(path, "/api/v1/auth/login" | "/api/v1/auth/setup" | "/api/v1/auth/2fa/enable" | "/api/v1/auth/2fa/disable" | "/api/v1/pair/request")
 }
 
+/// Asking for a one-use live ticket or a file link (design/multi-panel.md,
+/// B1). These POSTs change nothing, so roles treat them as reads and the
+/// audit log leaves them out like other reads.
+pub(crate) fn is_grant_request(method: &Method, path: &str) -> bool {
+    *method == Method::POST
+        && (path == "/api/v1/ws/ticket"
+            || path.strip_prefix("/api/v1/fs/").and_then(|r| r.split_once('/')).is_some_and(|(id, rest)| !id.is_empty() && rest == "link"))
+}
+
 /// Why a scoped token or a user may not make this request, if they may not.
 /// (Owner-only routes check that themselves.)
 pub(crate) fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Option<&'static str> {
     use crate::auth::{Role, Who};
-    let reading = method == Method::GET || method == Method::HEAD;
+    // A one-use ticket or file link only reads; using it is checked as a
+    // read of what it names (`grants`).
+    let reading = method == Method::GET || method == Method::HEAD || is_grant_request(method, path);
     match who {
         Who::Token { read_only, servers, .. } => {
             if *read_only && !reading && path != "/api/v1/mcp" {
@@ -234,8 +245,8 @@ pub(crate) fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Op
             if path == "/api/v1/mcp" {
                 return None;
             }
-            // Your own sign-in: sign out, password, two-factor.
-            if reading || path == "/api/v1/auth/logout" || path == "/api/v1/auth/password" || path.starts_with("/api/v1/auth/2fa/") {
+            // Your own sign-in: sign out, password, two-factor, your sessions.
+            if reading || path == "/api/v1/auth/logout" || path == "/api/v1/auth/password" || path.starts_with("/api/v1/auth/2fa/") || path.starts_with("/api/v1/auth/sessions/") {
                 return None;
             }
             match role {
@@ -323,12 +334,15 @@ async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String],
     // in between when there is one.
     let (log_ip, log_net, proxy) = (from.to_string(), Net::of(from), if from == ip { String::new() } else { ip.to_string() });
 
-    // Who's asking, for scopes and the log.
+    // Who's asking, for scopes and the log. A session made for another
+    // page only counts when that page sent the request (`Auth::check_from`).
     let token = crate::api::token(req.headers()).0;
-    let who = if token.is_empty() { None } else { app.auth.check(&token) };
+    let origin = req.headers().get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let who = if token.is_empty() { None } else { app.auth.check_from(&token, origin.as_deref()) };
+    let remote = who.is_some() && app.auth.remote_origin(&token).is_some();
     // Who can get in is managed on the panel's own page (unless the owner
     // lets listed pages do it too).
-    if api && let Some(msg) = crate::web_access::access_refusal(req.headers(), origins, manage_from_others, &method, &path) {
+    if api && let Some(msg) = crate::web_access::access_refusal(req.headers(), origins, manage_from_others, remote, &method, &path) {
         let (name, role) = who.as_ref().map_or_else(|| ("-".to_string(), String::new()), |w| (w.name(), w.role_name().to_string()));
         app.audit.record(&Event { at: now(), who: name, role, ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status: 403 });
         return deny(StatusCode::FORBIDDEN, msg);
@@ -357,7 +371,7 @@ async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String],
     // Changes, sign-ins and pairing go in the audit log.
     // Reads aren't logged (the UI checks who's signed in all the time).
     let changes = method != Method::GET && method != Method::HEAD;
-    if api && changes && path != "/api/v1/pair/status" {
+    if api && changes && path != "/api/v1/pair/status" && !is_grant_request(&method, &path) {
         let status = res.status().as_u16();
         // A sign-in names who it became; a failed one stays anonymous.
         let (who_name, role) = who.as_ref().map(|w| (w.name(), w.role_name().to_string())).unwrap_or_else(|| {

@@ -153,7 +153,7 @@ pub fn emit(app: &App, server: Option<&str>, areas: &[&str]) {
 /// Last path parts of POST routes that only read (plans, previews, checks).
 const READS: &[&str] = &[
     "parse", "preview", "plan", "check", "resolve", "related", "hashes", "share", "search", "diff", "walk", "zip-list",
-    "zip-info", "clone-info", "test", "orphans",
+    "zip-info", "clone-info", "test", "orphans", "link",
 ];
 
 /// What a successful change request changed: (server, areas). `None` for
