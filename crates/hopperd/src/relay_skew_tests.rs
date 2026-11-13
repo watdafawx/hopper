@@ -254,3 +254,42 @@ async fn the_node_takes_an_update_only_at_manage_from_a_lead() {
     assert!(v["error"].as_str().unwrap().contains("development build"), "{v}");
     assert_eq!(crate::autoupdate::status().state, "", "nothing started");
 }
+
+/// A paired PC's token for `main`; `manage` lets it manage the panel.
+fn device(main: &T, manage: bool) -> String {
+    let (id, secret, nonce) = main.app.auth.pair_revealed("Hopper on FOX", "192.168.50.2".parse().unwrap(), "AA");
+    main.app.auth.answer(&id, true, None, manage).unwrap();
+    match main.app.auth.pair_status(&id, &secret, &nonce) {
+        crate::auth::PairStatus::Approved { token, .. } => token,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// `GET /nodes/live` (Hopper desktop's node heads): anyone signed in sees
+/// each node's state and version; Update is offered only to someone who
+/// may update nodes, as `POST /nodes/{id}/update` checks; nobody else.
+#[tokio::test]
+async fn desktop_reads_node_heads() {
+    use crate::cross_origin_tests::{body, call};
+    let main = panel_with(TLS());
+    let n = up_node(&main, "vm", Ceiling::Manage, "0.1.0", all_caps(), vec![]).await;
+    let heads = |token: String| {
+        let main = &main;
+        async move {
+            let (s, _, b) = call("GET", "/api/v1/nodes/live").bearer(&token).send(main).await;
+            assert_eq!(s, StatusCode::OK);
+            body(&b)
+        }
+    };
+    let v = heads(device(&main, true)).await;
+    assert_eq!(v["version"], crate::nodes::main_version());
+    let h = &v["nodes"][0];
+    assert_eq!((h["id"].as_str(), h["name"].as_str(), h["state"].as_str()), (Some(n.node.id.as_str()), Some("vm"), Some("connected")), "{v}");
+    assert_eq!(h["version"], "0.1.0");
+    assert_eq!(h["outdated"], true);
+    assert_eq!(h["can_update"], true, "a PC that may manage");
+    let v = heads(device(&main, false)).await;
+    assert_eq!(v["nodes"][0]["state"], "connected");
+    assert_eq!(v["nodes"][0]["can_update"], false, "a plain paired PC");
+    assert_eq!(call("GET", "/api/v1/nodes/live").send(&main).await.0, StatusCode::UNAUTHORIZED);
+}

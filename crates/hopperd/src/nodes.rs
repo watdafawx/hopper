@@ -612,6 +612,13 @@ impl Nodes {
         self.save(&g);
     }
 
+    /// Each node's state, to notice the ones that change with time alone
+    /// (reconnecting, then offline).
+    pub fn states(&self) -> Vec<(String, NodeState)> {
+        let g = self.lock();
+        g.stored.nodes.iter().map(|n| (n.id.clone(), self.state_of(&g, n).0)).collect()
+    }
+
     fn state_of(&self, g: &Inner, n: &Node) -> (NodeState, Option<Duration>) {
         if !g.live.contains_key(&n.id) && let Some(s) = g.skew.get(&n.id) {
             let q = g.heard.get(&n.id).map(|h| h.elapsed());
@@ -917,6 +924,7 @@ pub fn commands(url: &str, key: &str, fingerprint: &str, version: &str) -> Optio
 pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/v1/nodes", get(list))
+        .route("/api/v1/nodes/live", get(live))
         .route("/api/v1/nodes/keys", post(key_create))
         .route("/api/v1/nodes/keys/{id}", delete(key_remove))
         .route("/api/v1/nodes/pending/{id}/answer", post(pending_answer))
@@ -1133,6 +1141,23 @@ async fn maintenance(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     let name = app.nodes.set_maintenance(&id, b.on, &who.name()).ok_or_else(|| not_found("node"))?;
     app.changes.emit(None, &["list"], None);
     Ok(noted(json!({ "ok": true }), format!("node \"{name}\" {}", if b.on { "under maintenance" } else { "out of maintenance" })))
+}
+
+/// Each node's head as the live feed sends it, for Hopper desktop (it
+/// lists servers without the feed): anyone signed in, like `GET /servers`,
+/// and only the nodes holding a server they may see when they're limited
+/// to some. `can_update` is also off for someone who may not update nodes
+/// (`require_owner_who`, as `POST /nodes/{id}/update` checks).
+async fn live(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    let who = crate::api::require(&app, &headers, &method)?;
+    let may_update = crate::api::require_owner_who(&app, &headers, &method).is_ok();
+    let (_, mut heads) = app.nodes.live_view(&who);
+    if !may_update {
+        for h in &mut heads {
+            h["can_update"] = json!(false);
+        }
+    }
+    Ok(Json(json!({ "version": main_version(), "nodes": heads })))
 }
 
 async fn list(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
@@ -1396,6 +1421,9 @@ async fn session(app: Arc<App>, node: Node, mut t: mux::Tunnel, addr: SocketAddr
         old.close("replaced by a new connection").await;
     }
     log::info!("node \"{}\" connected from {ip} (hopperd {})", node.name, t.peer.version);
+    // Hopper desktop lists node heads from `/nodes/live` and reads them
+    // again on a "list" change; without one it shows the old state.
+    app.changes.emit(None, &["list"], None);
     let feed = Follow(tokio::spawn(take_feed(app.clone(), node.id.clone(), t.handle.clone())));
     audit(&app, addr, &headers, &format!("node \"{}\"", node.name), format!("{} (connected, hopperd {})", crate::tunnel::ws::PATH, clean_version(&t.peer.version)), 101);
     let why = loop {
@@ -1420,6 +1448,7 @@ async fn session(app: Arc<App>, node: Node, mut t: mux::Tunnel, addr: SocketAddr
         MuxError::Protocol(_) | MuxError::GoAway(..) => "the connection broke".to_string(),
     };
     app.nodes.detach(&node.id, conn, quiet, plain);
+    app.changes.emit(None, &["list"], None);
 }
 
 /// The node's live feed: its server list, machine stats and changes,
@@ -1510,8 +1539,16 @@ pub fn follow(app: &App, ns: &str, who: &crate::auth::Who, tx: tokio::sync::mpsc
 pub fn start(app: Arc<App>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(5));
+        let mut last = Vec::new();
         loop {
             tick.tick().await;
+            // A quiet node turns reconnecting, then offline, with no event of
+            // its own; Hopper desktop reads node heads again on "list".
+            let states = app.nodes.states();
+            if states != last {
+                last = states;
+                app.changes.emit(None, &["list"], None);
+            }
             let s = crate::alerts::settings(&app);
             let after = s.node_on.then(|| Duration::from_secs(u64::from(s.node_minutes) * 60).max(ALERT_AFTER));
             let events: Vec<_> = app.nodes.health(after).into_iter().filter_map(|(id, name, gone)| crate::alerts::node_state(&id, &name, gone, s.node_minutes)).collect();

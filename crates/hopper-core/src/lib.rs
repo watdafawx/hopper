@@ -52,6 +52,7 @@ pub mod game;
 pub mod groupsync;
 pub mod history;
 pub mod hopperd;
+pub mod hopperd_nodes;
 pub mod hosting;
 pub mod imgcache;
 pub mod install;
