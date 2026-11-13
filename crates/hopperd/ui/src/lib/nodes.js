@@ -2,6 +2,10 @@
 // Kept apart from the component so the wording is tested
 // (tests/nodes.test.mjs).
 
+/** Nodes stay out of the UI until a node can run servers for its main
+ * (A2). Joining one before that would add a machine that does nothing. */
+export const NODES_SHOWN = false;
+
 /** The state chip: its text and the shared chip/dot class. */
 export const STATES = {
   connected: { label: 'Connected', cls: 'running' },

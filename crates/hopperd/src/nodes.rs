@@ -246,17 +246,12 @@ fn same(a: &[u8; 32], b: &[u8; 32]) -> bool {
     a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// The 6-digit code both sides show for a code request.
-///
-/// A machine in the middle shows the node its own certificate, so the codes
-/// can only differ if neither side's inputs can be chosen after seeing the
-/// other's. The node picks `nonce` and sends only its hash with the request;
-/// the main then picks `id` and `secret`; only then does the node reveal the
-/// nonce. A middle has to commit to what it tells each side before it learns
-/// the random part the other side adds, so it matches by luck only (one in a
-/// million per try, and every try is a request the owner sees).
+/// The 6-digit code both sides show for a code request: the same commit and
+/// reveal as desktop pairing ([`hopper_core::hopperd::committed_pair_code`]).
+/// The node picks `nonce` and sends only its hash with the request; the main
+/// then picks `id` and `secret`; only then does the node reveal the nonce.
 pub fn node_code(fingerprint: &str, id: &str, secret: &str, nonce: &str) -> String {
-    hopper_core::hopperd::pair_code(fingerprint, id, &format!("{secret}|{nonce}"))
+    hopper_core::hopperd::committed_pair_code(fingerprint, id, secret, nonce)
 }
 
 /// Wrong guesses from IPv6 count per /64: one machine usually holds a whole

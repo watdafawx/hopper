@@ -77,6 +77,8 @@ mod tls;
 mod nodes;
 #[cfg(test)]
 mod nodes_tests;
+#[cfg(test)]
+mod pair_tests;
 mod tunnel;
 
 #[cfg(windows)]

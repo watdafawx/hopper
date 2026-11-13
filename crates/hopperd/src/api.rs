@@ -27,7 +27,7 @@ pub const API_VERSION: u32 = 1;
 
 /// Features this panel has, so clients light up only what both sides know.
 pub const CAPABILITIES: &[&str] =
-    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "jvm.preview", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "rules", "users", "mcp", "sftp", "mods.profiles", "browse.install", "pack.check", "configs.batch", "configs.sync", "mods.records", "web.origins", "mods.staged", "files.fetch", "web.remote", "web.files", "nodes"];
+    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "jvm.preview", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "rules", "users", "mcp", "sftp", "mods.profiles", "browse.install", "pack.check", "configs.batch", "configs.sync", "mods.records", "web.origins", "mods.staged", "files.fetch", "web.remote", "web.files", "nodes", hopper_core::hopperd::PAIR_COMMIT];
 
 pub struct ApiError(pub StatusCode, pub String);
 
@@ -645,6 +645,10 @@ async fn me(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> 
 #[derive(Deserialize)]
 struct PairBody {
     device: String,
+    /// SHA-256 (hex) of the nonce the device reveals on its first status
+    /// ask. Hopper before commit-and-reveal pairing sends none.
+    #[serde(default)]
+    commit: String,
 }
 
 async fn pair_request(
@@ -652,10 +656,10 @@ async fn pair_request(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(b): Json<PairBody>,
 ) -> ApiResult<Json<Value>> {
-    let (id, secret, code) = app.auth.pair_request(&b.device, addr.ip(), &app.tls.fingerprint).map_err(bad)?;
-    log::info!("pairing request from {} ({}): code {code}", b.device.trim(), addr.ip());
+    let (id, secret) = app.auth.pair_request(&b.device, addr.ip(), &app.tls.fingerprint, &b.commit).map_err(bad)?;
+    log::info!("pairing request from {} ({})", b.device.trim(), addr.ip());
     // The code isn't sent: the device works it out from the certificate it
-    // sees, so a machine in the middle can't show the right one.
+    // sees and its nonce, so a machine in the middle can't show the right one.
     Ok(Json(json!({ "id": id, "secret": secret })))
 }
 
@@ -663,10 +667,12 @@ async fn pair_request(
 struct PairStatusBody {
     id: String,
     secret: String,
+    #[serde(default)]
+    nonce: String,
 }
 
 async fn pair_status(State(app): State<Arc<App>>, Json(b): Json<PairStatusBody>) -> Json<PairStatus> {
-    Json(app.auth.pair_status(&b.id, &b.secret))
+    Json(app.auth.pair_status(&b.id, &b.secret, &b.nonce))
 }
 
 async fn pair_pending(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {

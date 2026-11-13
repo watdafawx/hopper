@@ -64,9 +64,9 @@ async fn only_the_owner_manages_nodes() {
         assert_eq!(c.send(&t).await.0, StatusCode::UNAUTHORIZED, "anonymous: {m} {p}");
     }
     // A paired PC allowed to manage the panel still can't.
-    let (id, secret, _) = t.app.auth.pair_request("Hopper on FOX", "192.168.50.2".parse().unwrap(), "AA").unwrap();
+    let (id, secret, nonce) = t.app.auth.pair_revealed("Hopper on FOX", "192.168.50.2".parse().unwrap(), "AA");
     t.app.auth.answer(&id, true, None, true).unwrap();
-    let dev = match t.app.auth.pair_status(&id, &secret) {
+    let dev = match t.app.auth.pair_status(&id, &secret, &nonce) {
         crate::auth::PairStatus::Approved { token, .. } => token,
         other => panic!("{other:?}"),
     };
