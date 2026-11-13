@@ -1838,14 +1838,24 @@ mod tests {
         (s, dir)
     }
 
-    /// Saving slowly, a line a second for longer than the silent cap: the
-    /// stop waits for it and the server exits on its own.
+    /// Saving slowly, quiet between save lines for longer than the silent
+    /// cap: the stop waits for it and the server exits on its own.
     #[cfg(windows)]
     #[test]
     fn a_slow_save_is_waited_for() {
-        let (s, dir) = stoppable("slow", "STOPPING 1..6 | % { SAVING Start-Sleep -Seconds 1 }; SAVED exit 0");
+        let (s, dir) = stoppable("slow", "STOPPING SAVING Start-Sleep -Seconds 6; SAVING Start-Sleep -Seconds 6; SAVED exit 0");
+        // Its own waits: 6 s between save lines is past the silent cap, so
+        // only the saving allowance keeps it alive. That allowance is far
+        // above the gap: a busy CI box can stall the stand-in for seconds,
+        // and the 3 s one ended it mid-save there.
+        s.set_stop_wait(StopWait {
+            hard: Duration::from_secs(90),
+            silent: Duration::from_secs(4),
+            saving_quiet: Duration::from_secs(30),
+            linger: Duration::from_secs(2),
+        });
         s.stop().unwrap();
-        assert!(wait_dead(&s, Duration::from_secs(25)), "{:?}", s.console());
+        assert!(wait_dead(&s, Duration::from_secs(60)), "{:?}", s.console());
         // The last lines can reach the console a moment after the exit on a slow CI box.
         assert!(wait_for(&s, SAVED), "{:?}", s.console());
         std::thread::sleep(Duration::from_millis(400));
