@@ -324,9 +324,66 @@ struct Shared {
     stuck: Option<crate::stuckstart::StuckReport>,
     /// The player chose to wait this many more seconds before being asked again.
     stuck_snooze: Option<i64>,
+    /// The console file, read by the console thread and by [`reap`].
+    feed: Option<Feed>,
 }
 
+/// The console file as read so far. Shared, not the console thread's own:
+/// the check that sees the process end reads the file first, so the lines
+/// a server writes just before it exits ("All dimensions are saved") are in
+/// the console before anything sees it stopped.
+struct Feed {
+    file: File,
+    /// The start of a line not finished yet.
+    pending: Vec<u8>,
+}
+
+impl Feed {
+    fn open(path: &Path) -> Option<Feed> {
+        match File::open(path) {
+            Ok(file) => Some(Feed { file, pending: Vec::new() }),
+            Err(e) => {
+                log::warn!("reading {}: {e}", path.display());
+                None
+            }
+        }
+    }
+}
+
+/// The most one look at the console file reads. A process can't keep it
+/// reading under the lock by writing without a pause; the rest waits for
+/// the next look.
+const FEED_CAP: usize = 8 * 1024 * 1024;
+
 impl Shared {
+    /// Reads what's new in the console file into the tracker. Returns the
+    /// whole lines it got, and whether it read anything at all.
+    fn read_console(&mut self) -> (Vec<String>, bool) {
+        let Some(feed) = self.feed.as_mut() else { return (Vec::new(), false) };
+        let mut chunk = vec![0u8; 64 * 1024];
+        let mut read = 0;
+        while read < FEED_CAP {
+            match feed.file.read(&mut chunk) {
+                Ok(n @ 1..) => {
+                    feed.pending.extend_from_slice(&chunk[..n]);
+                    read += n;
+                }
+                _ => break,
+            }
+        }
+        let mut lines = Vec::new();
+        let mut start = 0;
+        while let Some(i) = feed.pending[start..].iter().position(|&b| b == b'\n') {
+            lines.push(String::from_utf8_lossy(&feed.pending[start..start + i]).trim_end_matches('\r').to_string());
+            start += i + 1;
+        }
+        feed.pending.drain(..start);
+        for l in &lines {
+            self.tracker.push(l.clone());
+        }
+        (lines, read > 0)
+    }
+
     /// A line of Hopper's in the console, in order with the server's.
     fn note(&mut self, line: &str) {
         match self.log.as_mut() {
@@ -807,6 +864,7 @@ impl LocalServer {
             g.started_with = Some(stamp);
             g.root = self.root.clone();
             g.info = info;
+            g.feed = Feed::open(&path);
             g.save_run();
             g.run
         };
@@ -893,6 +951,7 @@ impl LocalServer {
             g.started_with = Some(crate::disk_watch::content_stamp(&self.root));
             g.root = self.root.clone();
             g.info = Some(info);
+            g.feed = Feed::open(&path);
             g.save_run();
             g.note("[Hopper] Reconnected to the running server.");
             g.run
@@ -1109,6 +1168,9 @@ fn reap(g: &mut Shared) {
     let Some(p) = g.proc.as_mut() else { return };
     match try_wait(p) {
         Ok(Some(code)) => {
+            // Its last lines first: written before it exited, so they're in
+            // the file now, and the stop and its result can depend on them.
+            g.read_console();
             if let Some(began) = g.tracker.halt.began.filter(|_| g.stop_requested) {
                 g.finished = Some((Finished { kind: ProgressKind::Stop, secs: began.elapsed().as_secs() as u32, ago_secs: 0, restarting: g.restarting }, Instant::now()));
             } else {
@@ -1174,37 +1236,28 @@ fn tail(path: PathBuf, shared: Arc<Mutex<Shared>>, run: u64) {
     let spawned = std::thread::Builder::new()
         .name("server-console".into())
         .spawn(move || {
-            let mut f = match File::open(&path) {
-                Ok(f) => f,
-                Err(e) => {
-                    log::warn!("reading {}: {e}", path.display());
-                    return;
-                }
-            };
-            let mut pending = Vec::new();
-            let mut chunk = vec![0u8; 64 * 1024];
             // Stuck-start watch: fed the same lines, looked at every 5 s.
             let mut watch = crate::stuckstart::Watch::new(&path, true, crate::time::now(), true);
             let mut looked = Instant::now();
-            shared.lock().unwrap_or_else(|e| e.into_inner()).stuck = None;
-            loop {
-                let mut got = false;
-                while let Ok(n @ 1..) = f.read(&mut chunk) {
-                    pending.extend_from_slice(&chunk[..n]);
-                    got = true;
+            // When this thread first saw the process gone. Something it left
+            // running can keep writing to the file; read on only a little.
+            let mut gone: Option<Instant> = None;
+            {
+                let mut g = shared.lock().unwrap_or_else(|e| e.into_inner());
+                if g.run == run && g.feed.is_none() {
+                    return;
                 }
+                g.stuck = None;
+            }
+            loop {
                 let mut g = shared.lock().unwrap_or_else(|e| e.into_inner());
                 if g.run != run {
                     return;
                 }
-                let mut start = 0;
-                while let Some(i) = pending[start..].iter().position(|&b| b == b'\n') {
-                    let line = String::from_utf8_lossy(&pending[start..start + i]);
-                    watch.feed_line(line.trim_end_matches('\r'), crate::time::now());
-                    g.tracker.push(line.trim_end_matches('\r').to_string());
-                    start += i + 1;
+                let (lines, got) = g.read_console();
+                for l in &lines {
+                    watch.feed_line(l, crate::time::now());
                 }
-                pending.drain(..start);
                 g.save_boot();
                 reap(&mut g);
                 let linger = g.linger.unwrap_or(LINGER_AFTER_STOP);
@@ -1213,9 +1266,13 @@ fn tail(path: PathBuf, shared: Arc<Mutex<Shared>>, run: u64) {
                     // Once more, to read the note it left in the console file.
                     continue;
                 }
-                if g.proc.is_none() && !got {
-                    if !pending.is_empty() {
-                        g.tracker.push(String::from_utf8_lossy(&pending).trim_end_matches('\r').to_string());
+                // Ended, and its last lines are in: whatever saw the exit
+                // ([`reap`]) read the file after it.
+                if g.proc.is_none() && (!got || gone.get_or_insert_with(Instant::now).elapsed() >= Duration::from_secs(2)) {
+                    if let Some(f) = g.feed.take()
+                        && !f.pending.is_empty()
+                    {
+                        g.tracker.push(String::from_utf8_lossy(&f.pending).trim_end_matches('\r').to_string());
                     }
                     let msg = match g.exit {
                         Some(Some(c)) => format!("[Hopper] The server process ended (exit code {c})."),
@@ -1629,6 +1686,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Whatever sees the process end reads its last lines into the console
+    /// first, with no console thread to catch them later: a server's
+    /// "All dimensions are saved", written just before it exits, is never
+    /// missing once it counts as stopped.
+    #[test]
+    fn the_exit_check_reads_the_last_lines_first() {
+        let dir = std::env::temp_dir().join(format!("hopper-host-drain-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONSOLE_FILE);
+        // What the process wrote before it exited.
+        std::fs::write(&path, format!("{DONE}\n{STOPPING}\n{SAVED}\n")).unwrap();
+        #[cfg(windows)]
+        let child = Command::new("cmd").args(["/c", "exit 0"]).spawn().unwrap();
+        #[cfg(unix)]
+        let child = Command::new("true").spawn().unwrap();
+        #[cfg(windows)]
+        let proc = win::Process::open(child.id()).unwrap();
+        #[cfg(unix)]
+        let proc = ux::Process::spawned(child.id());
+        let mut g = Shared { proc: Some(proc), feed: Feed::open(&path), ..Default::default() };
+        let end = Instant::now() + Duration::from_secs(20);
+        while g.exit.is_none() && Instant::now() < end {
+            reap(&mut g);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(g.exit, Some(Some(0)));
+        assert!(g.tracker.lines.iter().any(|l| l == SAVED), "{:?}", g.tracker.lines);
+        assert!(g.tracker.saved_at.is_some());
+        drop(child);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A stand-in server that prints `lines` and then never exits, like Java
     /// held open by a mod's threads after the server stopped.
     #[cfg(windows)]
@@ -1856,8 +1945,7 @@ mod tests {
         });
         s.stop().unwrap();
         assert!(wait_dead(&s, Duration::from_secs(60)), "{:?}", s.console());
-        // The last lines can reach the console a moment after the exit on a slow CI box.
-        assert!(wait_for(&s, SAVED), "{:?}", s.console());
+        assert!(s.console().iter().any(|l| l == SAVED), "{:?}", s.console());
         std::thread::sleep(Duration::from_millis(400));
         let console = s.console();
         assert_eq!(s.state(), ServerState::Stopped);
