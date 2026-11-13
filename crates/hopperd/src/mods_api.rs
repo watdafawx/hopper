@@ -77,12 +77,18 @@ pub(crate) fn entry(app: &App, headers: &HeaderMap, method: &Method, id: &str) -
 /// ever the owner. It only reads who is asking; access is checked as before.
 pub(crate) fn changer(app: &App, headers: &HeaderMap, method: &Method) -> hopper_core::actor::Who {
     use crate::auth::Who as By;
+    // A change a main asked for always names who on which main.
+    if let Some(By::Main { main, user, .. }) = crate::relay::relayed() {
+        let main = if main.is_empty() { "the main".to_string() } else { main };
+        return hopper_core::actor::Who::panel(&format!("{user} via {main}"));
+    }
     if !names_people(app) {
         return hopper_core::actor::Who::you();
     }
     match require(app, headers, method) {
         Ok(By::User { name, .. } | By::Device { name, .. } | By::Token { name, .. }) => hopper_core::actor::Who::panel(&name),
         Ok(By::Owner) => hopper_core::actor::Who::panel("Owner"),
+        Ok(By::Main { user, .. }) => hopper_core::actor::Who::panel(&user),
         Err(_) => hopper_core::actor::Who::you(),
     }
 }

@@ -197,11 +197,12 @@ impl Audit {
     }
 }
 
-/// The server id a path is about (`/api/v1/servers/{id}/…`, `/api/v1/fs/{id}/…`).
-fn server_of(path: &str) -> Option<&str> {
+/// The server id a path is about (`/api/v1/servers/{id}/…`, `/api/v1/fs/{id}/…`);
+/// a node's server keeps its namespaced id (`node:id`, `:` maybe encoded).
+fn server_of(path: &str) -> Option<String> {
     let rest = path.strip_prefix("/api/v1/servers/").or_else(|| path.strip_prefix("/api/v1/fs/"))?;
     let id = rest.split('/').next()?;
-    (!id.is_empty() && !matches!(id, "infos" | "rescan" | "create")).then_some(id)
+    (!id.is_empty() && !matches!(id, "infos" | "rescan" | "create")).then(|| crate::relay::decode_seg(id))
 }
 
 /// What someone could guess at: passwords, codes, setup. These get the
@@ -234,14 +235,14 @@ pub(crate) fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Op
         Who::Token { read_only, servers, .. } => {
             if *read_only && !reading && path != "/api/v1/mcp" {
                 Some("This token can only read.")
-            } else if !servers.is_empty() && server_of(path).is_some_and(|id| !servers.iter().any(|s| s == id)) {
+            } else if !servers.is_empty() && server_of(path).is_some_and(|id| !servers.iter().any(|s| *s == id)) {
                 Some("This token isn't for that server.")
             } else {
                 None
             }
         }
         Who::User { role, servers, .. } => {
-            if server_of(path).is_some_and(|id| !who.sees(id)) {
+            if server_of(path).is_some_and(|id| !who.sees(&id)) {
                 return Some("You don't have access to that server.");
             }
             // MCP checks each tool call itself.
@@ -271,6 +272,12 @@ pub(crate) fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Op
                     }
                 }
             }
+        }
+        // A request the main relayed: the node's servers, with the role the
+        // main gave capped by this node's ceiling (never Manager).
+        Who::Main { role, .. } => {
+            let as_user = Who::User { id: String::new(), name: String::new(), role: crate::relay::cap(*role, Role::Admin), servers: Vec::new() };
+            refusal(&as_user, method, path)
         }
         _ => None,
     }
@@ -302,6 +309,11 @@ pub async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Res
 }
 
 async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String], manage_from_others: bool) -> Response {
+    // A request this node's main relayed (`crate::relay`): the main did its
+    // own sign-in and limits; here the role and ceiling apply, then the log.
+    if let Some(w) = crate::relay::relayed() {
+        return relayed_checks(app, w, req, next).await;
+    }
     let ip = req.extensions().get::<ConnectInfo<SocketAddr>>().map_or(IpAddr::from([127, 0, 0, 1]), |c| c.0.ip());
     let tls = req.extensions().get::<Transport>().is_none_or(|t| t.tls);
     let net = Net::of(ip);
@@ -358,10 +370,17 @@ async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String],
     }
 
     let client = req.headers().get("x-hopperd-client").and_then(|v| v.to_str().ok()).map(|v| v.chars().take(64).collect::<String>());
-    let res = next.run(req).await;
+    // A node's server: the request goes to that node over its tunnel. Its
+    // changes come back on the node's live feed, so none is sent here.
+    let node = if api { crate::relay::target(&path, req.uri().query()) } else { None };
+    let relayed_to_node = node.is_some();
+    let res = match node {
+        Some(t) => crate::relay::forward(app.clone(), t, req).await,
+        None => next.run(req).await,
+    };
 
     // A change went through: tell every open client what to show again.
-    if api && res.status().is_success()
+    if api && !relayed_to_node && res.status().is_success()
         && let Some((server, areas)) = crate::changes::from_request(&method, &path)
     {
         // The server list and headers come with the live snapshot: send it now.
@@ -390,14 +409,56 @@ async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String],
     res
 }
 
+/// The guard for a request the main relayed: role and ceiling, the
+/// change feed and the audit log, as for any other request. No sign-in
+/// (the main did it), no address limits (one main stands for many people).
+async fn relayed_checks(app: Arc<App>, who: crate::auth::Who, req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    let method = req.method().clone();
+    let log = |status: u16, path: String| Event {
+        at: now(),
+        who: who.name(),
+        role: who.role_name().into(),
+        ip: "main".into(),
+        proxy: String::new(),
+        net: Net::Internet,
+        method: method.to_string(),
+        path,
+        status,
+    };
+    if let Some(msg) = refusal(&who, &method, &path) {
+        app.audit.record(&log(403, path));
+        return deny(StatusCode::FORBIDDEN, msg);
+    }
+    let client = req.headers().get("x-hopperd-client").and_then(|v| v.to_str().ok()).map(|v| v.chars().take(64).collect::<String>());
+    let res = next.run(req).await;
+    if res.status().is_success()
+        && let Some((server, areas)) = crate::changes::from_request(&method, &path)
+    {
+        if areas.iter().any(|a| matches!(*a, "list" | "server")) {
+            app.refresh.notify_one();
+        }
+        app.changes.emit(server.as_deref(), &areas, client);
+    }
+    if method != Method::GET && method != Method::HEAD && !is_grant_request(&method, &path) {
+        let path = match res.extensions().get::<AuditNote>() {
+            Some(n) => format!("{path} ({})", n.0),
+            None => path,
+        };
+        app.audit.record(&log(res.status().as_u16(), path));
+    }
+    res
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn server_ids_in_paths() {
-        assert_eq!(server_of("/api/v1/servers/tnp/power"), Some("tnp"));
-        assert_eq!(server_of("/api/v1/fs/tnp/list"), Some("tnp"));
+        assert_eq!(server_of("/api/v1/servers/tnp/power").as_deref(), Some("tnp"));
+        assert_eq!(server_of("/api/v1/fs/tnp/list").as_deref(), Some("tnp"));
+        assert_eq!(server_of("/api/v1/fs/ab12%3Atnp/list").as_deref(), Some("ab12:tnp"));
         assert_eq!(server_of("/api/v1/servers"), None);
         assert_eq!(server_of("/api/v1/servers/infos"), None);
         assert_eq!(server_of("/api/v1/host"), None);

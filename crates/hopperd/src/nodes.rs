@@ -88,6 +88,53 @@ pub struct Node {
     /// The last time it was connected (unix seconds; 0 = never).
     #[serde(default)]
     pub last_seen: u64,
+    /// "Pause this node": its alerts are silent and nothing new starts
+    /// there from this main, until it's ended (design/multi-panel.md, A2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<Maintenance>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Maintenance {
+    pub since: u64,
+    pub by: String,
+}
+
+/// What the node last said about its servers and machine (its live feed).
+struct NodeSnap {
+    servers: Vec<Value>,
+    host: Value,
+}
+
+/// What the relay needs to know about a node (`crate::relay::forward`).
+pub struct RelayInfo {
+    pub name: String,
+    /// The ceiling as a role (the node checks its own copy too).
+    pub ceiling: crate::auth::Role,
+    pub maintenance: Option<Maintenance>,
+    /// The live connection, when there is one.
+    pub handle: Option<Handle>,
+    pub last_seen: u64,
+}
+
+/// A followed console of a node's server, or the node's live feed;
+/// dropping it ends the stream.
+pub struct Follow(pub(crate) tokio::task::JoinHandle<()>);
+
+impl Drop for Follow {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// "3 min", "2 h", "4 days".
+pub fn how_long(secs: u64) -> String {
+    match secs {
+        0..60 => "under a minute".into(),
+        60..3600 => format!("{} min", secs / 60),
+        3600..172800 => format!("{} h", secs / 3600),
+        _ => format!("{} days", secs / 86400),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -148,6 +195,9 @@ struct Inner {
     heard: HashMap<String, Instant>,
     /// Why the last connection ended, for the node's row.
     ended: HashMap<String, String>,
+    /// The node's server list and machine stats from its live feed (kept
+    /// while it's away: the list shows its last state, marked stale).
+    snaps: HashMap<String, NodeSnap>,
     fails: HashMap<IpAddr, (Instant, u32)>,
     conns: u64,
 }
@@ -429,6 +479,7 @@ impl Nodes {
         let live = g.live.remove(id).map(|l| l.handle);
         g.heard.remove(id);
         g.ended.remove(id);
+        g.snaps.remove(id);
         self.save(&g);
         Some((node, live))
     }
@@ -519,6 +570,7 @@ impl Nodes {
                     "via": n.via,
                     "created": n.created,
                     "ended": g.ended.get(&n.id),
+                    "maintenance": n.maintenance,
                 })
             })
             .collect();
@@ -539,25 +591,129 @@ impl Nodes {
     }
 
     /// Nodes gone long enough to alert about, and ones back after one.
-    fn health(&self) -> Vec<(String, String, bool)> {
+    ///
+    /// `alert`: after how long ("Node offline" in Alerts), or None when
+    /// that alert is off. `Some(true)` gone, `Some(false)` up, `None`
+    /// silent: a node under maintenance (or the alert switched off) says
+    /// nothing, and an alert that was up clears without a "back online".
+    fn health(&self, alert: Option<Duration>) -> Vec<(String, String, Option<bool>)> {
         let g = self.lock();
         g.stored
             .nodes
             .iter()
             .filter_map(|n| {
                 let (state, _) = self.state_of(&g, n);
+                let Some(after) = alert.filter(|_| n.maintenance.is_none()) else {
+                    return Some((n.id.clone(), n.name.clone(), None));
+                };
                 match state {
                     NodeState::New => None,
-                    NodeState::Connected => Some((n.id.clone(), n.name.clone(), false)),
+                    NodeState::Connected => Some((n.id.clone(), n.name.clone(), Some(false))),
                     NodeState::Reconnecting | NodeState::Offline => {
                         // Not heard from this run: count from the start, so a
                         // restart of the main doesn't alert about every node.
                         let gone = g.heard.get(&n.id).map_or(self.started.elapsed(), |h| h.elapsed());
-                        (gone >= ALERT_AFTER).then(|| (n.id.clone(), n.name.clone(), true))
+                        (gone >= after).then(|| (n.id.clone(), n.name.clone(), Some(true)))
                     }
                 }
             })
             .collect()
+    }
+
+    // ---- A2: relaying, the merged list, maintenance ----
+
+    pub fn relay_info(&self, id: &str) -> Option<RelayInfo> {
+        let g = self.lock();
+        let n = g.stored.nodes.iter().find(|n| n.id == id)?;
+        let live = g.live.get(id);
+        Some(RelayInfo {
+            name: n.name.clone(),
+            // Unknown reads as Look here; the node refuses everything then.
+            ceiling: crate::relay::ceiling_role(n.ceiling.id()).unwrap_or(crate::auth::Role::Viewer),
+            maintenance: n.maintenance.clone(),
+            handle: live.map(|l| l.handle.clone()),
+            last_seen: if live.is_some() { now() } else { n.last_seen },
+        })
+    }
+
+    /// Puts a node under maintenance or ends it; the node's name, or None
+    /// when there's no such node.
+    pub fn set_maintenance(&self, id: &str, on: bool, by: &str) -> Option<String> {
+        let mut g = self.lock();
+        let n = g.stored.nodes.iter_mut().find(|n| n.id == id)?;
+        n.maintenance = if on { n.maintenance.clone().or_else(|| Some(Maintenance { since: now(), by: by.into() })) } else { None };
+        let name = n.name.clone();
+        self.save(&g);
+        Some(name)
+    }
+
+    /// A node's live feed said this.
+    fn took(&self, id: &str, servers: Vec<Value>, host: Value) {
+        self.lock().snaps.insert(id.into(), NodeSnap { servers, host });
+    }
+
+    /// One node's servers as the main lists them: ids namespaced, the node
+    /// named, and marked `stale` while the node isn't connected.
+    fn servers_of(id: &str, snap: &NodeSnap, live: bool, who: &crate::auth::Who) -> Vec<Value> {
+        snap.servers
+            .iter()
+            .filter_map(|s| {
+                let local = s["id"].as_str()?;
+                let ns = crate::relay::join(id, local);
+                if !who.sees(&ns) {
+                    return None;
+                }
+                let mut s = s.clone();
+                s["id"] = json!(ns);
+                s["node"] = json!(id);
+                if !live {
+                    s["stale"] = json!(true);
+                }
+                Some(s)
+            })
+            .collect()
+    }
+
+    /// Every node's servers this person may see (`GET /servers`).
+    pub fn servers_for(&self, who: &crate::auth::Who) -> Vec<Value> {
+        self.live_view(who).0
+    }
+
+    /// The node servers and a header per node, for the live feed. Someone
+    /// limited to some servers sees only the nodes holding one of them.
+    pub fn live_view(&self, who: &crate::auth::Who) -> (Vec<Value>, Vec<Value>) {
+        let g = self.lock();
+        let limited = matches!(who, crate::auth::Who::Token { servers, .. } | crate::auth::Who::User { servers, .. } if !servers.is_empty());
+        let mut servers = Vec::new();
+        let mut heads = Vec::new();
+        for n in &g.stored.nodes {
+            let (state, quiet) = self.state_of(&g, n);
+            let live = g.live.get(&n.id);
+            let up = live.is_some() && matches!(state, NodeState::Connected | NodeState::Reconnecting);
+            let snap = g.snaps.get(&n.id);
+            let mine = snap.map(|s| Self::servers_of(&n.id, s, up, who)).unwrap_or_default();
+            if limited && mine.is_empty() {
+                continue;
+            }
+            // RAM promised: what the node's servers may take at most.
+            let promised: u64 = snap.map_or(0, |s| s.servers.iter().filter_map(|v| v["max_memory"].as_str()).map(crate::relay::memory_bytes).sum());
+            heads.push(json!({
+                "id": n.id,
+                "name": n.name,
+                "state": state,
+                "quiet_secs": quiet.map(|q| q.as_secs()),
+                "last_seen": if live.is_some() { now() } else { n.last_seen },
+                "rtt_ms": live.and_then(|l| l.handle.rtt()).map(|d| d.as_millis() as u64),
+                "version": n.version,
+                "ceiling": n.ceiling.id(),
+                "maintenance": n.maintenance,
+                "host": snap.map(|s| s.host.clone()),
+                "promised": promised,
+                "count": snap.map_or(0, |s| s.servers.len()),
+            }));
+            servers.extend(mine);
+        }
+        (servers, heads)
     }
 }
 
@@ -585,6 +741,7 @@ fn new_node(name: &str, ceiling: Ceiling, by: &str, via: &str, ip: IpAddr, versi
         last_ip: ip.to_string(),
         version: clean_version(version),
         last_seen: 0,
+        maintenance: None,
     };
     (token, node)
 }
@@ -623,6 +780,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/nodes/keys/{id}", delete(key_remove))
         .route("/api/v1/nodes/pending/{id}/answer", post(pending_answer))
         .route("/api/v1/nodes/{id}", delete(node_remove))
+        .route("/api/v1/nodes/{id}/maintenance", axum::routing::put(maintenance))
         // What nodes call (no session: a join key, a code request or a node token).
         .route("/api/v1/node/join", post(join))
         .route("/api/v1/node/request", post(request))
@@ -653,6 +811,22 @@ fn refused(status: StatusCode, msg: &str, note: String) -> Response {
     let mut r = (status, Json(json!({ "error": msg }))).into_response();
     r.extensions_mut().insert(AuditNote(note));
     r
+}
+
+#[derive(Deserialize)]
+struct MaintenanceBody {
+    on: bool,
+}
+
+/// "Pause this node" / "End maintenance": the owner or a manager
+/// (design/multi-panel.md, research point 5). Only this main's view of the
+/// node changes: its alerts go quiet and nothing new starts there from
+/// here. The node and its running servers carry on.
+async fn maintenance(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Json(b): Json<MaintenanceBody>) -> ApiResult<Response> {
+    let who = crate::api::require_owner_who(&app, &headers, &method)?;
+    let name = app.nodes.set_maintenance(&id, b.on, &who.name()).ok_or_else(|| not_found("node"))?;
+    app.changes.emit(None, &["list"], None);
+    Ok(noted(json!({ "ok": true }), format!("node \"{name}\" {}", if b.on { "under maintenance" } else { "out of maintenance" })))
 }
 
 async fn list(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
@@ -719,7 +893,7 @@ async fn node_remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
         // The node stops when it reads this; its next try would get a 401 anyway.
         h.close("removed").await;
     }
-    if let Some(e) = crate::alerts::node_state(&node.id, &node.name, None) {
+    if let Some(e) = crate::alerts::node_state(&node.id, &node.name, None, 0) {
         crate::webhooks::emit(&app, vec![e]);
     }
     Ok(noted(json!({ "ok": true }), format!("node \"{}\" removed", node.name)))
@@ -862,7 +1036,7 @@ async fn leave(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Socke
         if let Some(h) = live {
             h.close("left").await;
         }
-        if let Some(e) = crate::alerts::node_state(&node.id, &node.name, None) {
+        if let Some(e) = crate::alerts::node_state(&node.id, &node.name, None, 0) {
             crate::webhooks::emit(&app, vec![e]);
         }
     }
@@ -910,17 +1084,19 @@ async fn session(app: Arc<App>, node: Node, mut t: mux::Tunnel, addr: SocketAddr
         old.close("replaced by a new connection").await;
     }
     log::info!("node \"{}\" connected from {ip} (hopperd {})", node.name, t.peer.version);
+    let feed = Follow(tokio::spawn(take_feed(app.clone(), node.id.clone(), t.handle.clone())));
     audit(&app, addr, &headers, &format!("node \"{}\"", node.name), format!("{} (connected, hopperd {})", crate::tunnel::ws::PATH, clean_version(&t.peer.version)), 101);
     let why = loop {
         tokio::select! {
             s = t.incoming.recv() => match s {
-                // Nodes don't open streams to the main in A1.
+                // Nodes don't open streams to the main (A2: only the main asks).
                 Some(mut s) => s.tx.reset(code::REFUSED),
                 None => break t.done.await.unwrap_or(MuxError::Closed),
             },
             r = &mut t.done => break r.unwrap_or(MuxError::Closed),
         }
     };
+    drop(feed);
     let quiet = t.handle.quiet_for();
     log::info!("node \"{}\" disconnected: {why}", node.name);
     let plain = match &why {
@@ -934,13 +1110,81 @@ async fn session(app: Arc<App>, node: Node, mut t: mux::Tunnel, addr: SocketAddr
     app.nodes.detach(&node.id, conn, quiet, plain);
 }
 
-/// Alerts for nodes that are gone (once, after [`ALERT_AFTER`]) and back.
+/// The node's live feed: its server list, machine stats and changes,
+/// merged into this panel's (namespaced ids). Reopened if it breaks while
+/// the connection stays.
+async fn take_feed(app: Arc<App>, id: String, handle: Handle) {
+    let head = serde_json::to_vec(&crate::relay::Head { k: "live".into(), ..Default::default() }).unwrap_or_default();
+    while !handle.is_dead() {
+        let Ok(mut s) = handle.open(head.clone()).await else {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        };
+        let _ = s.tx.finish().await;
+        let mut lines = crate::relay::Lines::new(s.rx);
+        while let Some(v) = lines.next().await {
+            match v["t"].as_str() {
+                Some("snap") => {
+                    let servers = v["servers"].as_array().cloned().unwrap_or_default();
+                    app.nodes.took(&id, servers, v["host"].clone());
+                }
+                Some("changed") => {
+                    let server = v["server"].as_str().map(|s| crate::relay::join(&id, s));
+                    let areas: Vec<String> = v["areas"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).take(16).map(|x| x.chars().take(32).collect()).collect()).unwrap_or_default();
+                    let areas: Vec<&str> = areas.iter().map(String::as_str).collect();
+                    let by = v["by"].as_str().map(|b| b.chars().take(96).collect());
+                    app.changes.emit(server.as_deref(), &areas, by);
+                }
+                _ => {}
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// A node connected over an in-memory tunnel (relay tests): attached like
+/// a real one, with its live feed.
+#[cfg(test)]
+pub(crate) fn attach_for_test(app: &Arc<App>, node: &Node, handle: Handle) -> Follow {
+    app.nodes.attach(node, handle.clone(), IpAddr::from([127, 0, 0, 1]), "test").expect("the node is there");
+    Follow(tokio::spawn(take_feed(app.clone(), node.id.clone(), handle)))
+}
+
+/// Follows a node's server console for one live socket: its lines come on
+/// `tx` as live-feed `console` messages, with the namespaced id.
+pub fn follow(app: &App, ns: &str, who: &crate::auth::Who, tx: tokio::sync::mpsc::Sender<Value>) -> Option<Follow> {
+    let (node, local) = crate::relay::split(ns)?;
+    if !who.sees(ns) {
+        return None;
+    }
+    let info = app.nodes.relay_info(node)?;
+    let handle = info.handle?;
+    let role = crate::relay::cap(crate::relay::role_on_node(who), info.ceiling);
+    let head = crate::relay::Head { k: "console".into(), server: local.into(), user: crate::relay::clean(&who.name()), role: role.id().into(), ..Default::default() };
+    let ns = ns.to_string();
+    Some(Follow(tokio::spawn(async move {
+        let Ok(mut s) = handle.open(serde_json::to_vec(&head).unwrap_or_default()).await else { return };
+        let _ = s.tx.finish().await;
+        let mut lines = crate::relay::Lines::new(s.rx);
+        while let Some(v) = lines.next().await {
+            let msg = json!({ "t": "console", "server": ns, "lines": v["lines"], "reset": v["reset"] });
+            if tx.send(msg).await.is_err() {
+                return;
+            }
+        }
+    })))
+}
+
+/// Alerts for nodes that are gone (once, after the "Node offline" alert's
+/// minutes) and back; none for a node under maintenance.
 pub fn start(app: Arc<App>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         loop {
             tick.tick().await;
-            let events: Vec<_> = app.nodes.health().into_iter().filter_map(|(id, name, gone)| crate::alerts::node_state(&id, &name, Some(gone))).collect();
+            let s = crate::alerts::settings(&app);
+            let after = s.node_on.then(|| Duration::from_secs(u64::from(s.node_minutes) * 60).max(ALERT_AFTER));
+            let events: Vec<_> = app.nodes.health(after).into_iter().filter_map(|(id, name, gone)| crate::alerts::node_state(&id, &name, gone, s.node_minutes)).collect();
             crate::webhooks::emit(&app, events);
         }
     });
@@ -1063,14 +1307,22 @@ mod tests {
         let (node, _) = n.use_key(&key, "vm", IP, "").unwrap();
         let state = |n: &Nodes| n.list("")["nodes"][0]["state"].as_str().unwrap().to_string();
         assert_eq!(state(&n), "new");
-        assert!(n.health().is_empty(), "a node that never connected doesn't alert");
+        let h = |n: &Nodes| n.health(Some(ALERT_AFTER));
+        assert!(h(&n).is_empty(), "a node that never connected doesn't alert");
         n.lock().heard.insert(node.id.clone(), Instant::now() - Duration::from_secs(40));
         assert_eq!(state(&n), "reconnecting");
         n.lock().heard.insert(node.id.clone(), Instant::now() - Duration::from_secs(61));
         assert_eq!(state(&n), "offline");
-        assert!(n.health().is_empty(), "no alert before 2 minutes");
+        assert!(h(&n).is_empty(), "no alert before 2 minutes");
         n.lock().heard.insert(node.id.clone(), Instant::now() - ALERT_AFTER);
-        assert_eq!(n.health(), vec![(node.id.clone(), "vm".to_string(), true)]);
+        assert_eq!(h(&n), vec![(node.id.clone(), "vm".to_string(), Some(true))]);
+        // Maintenance silences it (and clears one that was up), and so
+        // does switching the "Node offline" alert off.
+        n.set_maintenance(&node.id, true, "owner").unwrap();
+        assert_eq!(h(&n), vec![(node.id.clone(), "vm".to_string(), None)]);
+        n.set_maintenance(&node.id, false, "owner").unwrap();
+        assert_eq!(h(&n), vec![(node.id.clone(), "vm".to_string(), Some(true))]);
+        assert_eq!(n.health(None), vec![(node.id.clone(), "vm".to_string(), None)]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

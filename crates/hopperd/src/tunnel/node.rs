@@ -129,12 +129,13 @@ pub fn status_now() -> Option<Status> {
 
 /// Keeps this panel connected to its main while `node.json` is there:
 /// starts when a join writes it, stops when `leave` removes it.
-pub fn start(dir: PathBuf) {
+pub fn start(app: Arc<App>) {
+    let dir: PathBuf = app.boot_dir.clone();
     tokio::spawn(async move {
         loop {
             match load(&dir) {
                 Some(j) => {
-                    run(&dir, &j).await;
+                    run(&app, &dir, &j).await;
                     // Stopped (refused, removed): wait for a new join or a leave.
                     while load(&dir).is_some_and(|n| n.token == j.token) {
                         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -166,7 +167,7 @@ fn tunnel_config() -> Config {
 
 /// Connects, and reconnects with backoff, until the main refuses this node
 /// or `node.json` changes. Returns when it stops.
-async fn run(dir: &Path, j: &Joined) {
+async fn run(app: &Arc<App>, dir: &Path, j: &Joined) {
     let Some(ca) = dial::from_pem(&j.ca_pem) else {
         set_status(dir, |s| {
             s.state = "stopped".into();
@@ -214,7 +215,7 @@ async fn run(dir: &Path, j: &Joined) {
                         s.rtt_ms = None;
                     });
                     let at = Instant::now();
-                    let why = session(dir, j, t).await;
+                    let why = session(app, dir, j, t).await;
                     // Start the backoff again only after a connection that
                     // lasted: a main that accepts and drops at once would
                     // otherwise get every node back each second (A0 review 8).
@@ -319,16 +320,15 @@ enum Ended {
     Mux(MuxError),
 }
 
-async fn session(dir: &Path, j: &Joined, mut t: mux::Tunnel) -> Ended {
+async fn session(app: &Arc<App>, dir: &Path, j: &Joined, mut t: mux::Tunnel) -> Ended {
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     let mut n = 0u32;
+    // The main's requests (A2). The ceiling is read strictly from the
+    // stored join: anything but look/operate/manage refuses every stream.
+    let incoming = std::mem::replace(&mut t.incoming, tokio::sync::mpsc::channel(1).1);
+    let _serving = crate::nodes::Follow(tokio::spawn(crate::relay::serve(app.clone(), crate::relay::ceiling_role(&j.ceiling), j.main_name.clone(), incoming)));
     loop {
         tokio::select! {
-            s = t.incoming.recv() => match s {
-                // Phase A1 connects only; relaying the main's requests is A2.
-                Some(mut s) => s.tx.reset(code::REFUSED),
-                None => break,
-            },
             r = &mut t.done => return Ended::Mux(r.unwrap_or(MuxError::Closed)),
             _ = tick.tick() => {
                 if !still_joined(dir, j) {
@@ -347,7 +347,6 @@ async fn session(dir: &Path, j: &Joined, mut t: mux::Tunnel) -> Ended {
             }
         }
     }
-    Ended::Mux(t.done.await.unwrap_or(MuxError::Closed))
 }
 
 // ---- hopperd node join|status|leave ----

@@ -10,6 +10,9 @@ export const live = $state({
   connected: false,
   servers: [],
   host: null,
+  /** This panel's nodes (design/multi-panel.md, A2): a header each; their
+   * servers are in `servers`, with `node` set and a `node:id` id. */
+  nodes: [],
   /** Round trip to the panel in ms, from the last /hello. */
   ping: null,
   /** How the panel sees this browser's connection (local, lan, tailscale,
@@ -73,6 +76,7 @@ export function connect() {
     if (msg.t === 'snapshot') {
       live.servers = msg.servers;
       live.host = msg.host;
+      live.nodes = msg.nodes || [];
       record(msg.servers, msg.host);
     } else if (msg.t === 'changed') {
       dispatch(msg);

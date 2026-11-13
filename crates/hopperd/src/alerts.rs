@@ -43,11 +43,14 @@ pub struct Settings {
     /// Turn RCON on for every server (new ones too) so TPS shows
     /// everywhere. Off unless the owner switches it on.
     pub auto_rcon: bool,
+    /// "Node offline": a node of this main gone this long (A2).
+    pub node_on: bool,
+    pub node_minutes: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { crash: true, tps_on: true, tps_below: 15.0, tps_minutes: 2, disk_on: true, disk_gb: 20, ram_on: true, ram_pct: 90, ram_minutes: 5, auto_rcon: false }
+        Settings { crash: true, tps_on: true, tps_below: 15.0, tps_minutes: 2, disk_on: true, disk_gb: 20, ram_on: true, ram_pct: 90, ram_minutes: 5, auto_rcon: false, node_on: true, node_minutes: 2 }
     }
 }
 
@@ -146,11 +149,11 @@ fn update(st: &mut Tracker, key: (String, &'static str), server: &str, on: bool,
 /// been gone long enough, raise the alert (once). `Some(false)`: it's
 /// connected; if an alert was up, clear it and say it's back (once).
 /// `None`: it was removed; clear quietly. Returns the webhook event to send.
-pub fn node_state(id: &str, name: &str, gone: Option<bool>) -> Option<crate::webhooks::Event> {
+pub fn node_state(id: &str, name: &str, gone: Option<bool>, minutes: u32) -> Option<crate::webhooks::Event> {
     let mut st = state().lock().unwrap();
     let key = (format!("node:{id}"), "node");
     match gone {
-        Some(true) => update(&mut st, key, name, true, || format!("Node {name} is offline: it hasn't been heard from for 2 minutes.")),
+        Some(true) => update(&mut st, key, name, true, || format!("Node {name} is offline: it hasn't been heard from for {} minutes.", minutes.max(2))),
         Some(false) => {
             let was_up = st.active.contains_key(&key);
             update(&mut st, key, name, false, String::new);
@@ -644,6 +647,7 @@ async fn save(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, J
         disk_gb: s.disk_gb.clamp(1, 10_000),
         ram_pct: s.ram_pct.clamp(50, 100),
         ram_minutes: s.ram_minutes.clamp(1, 60),
+        node_minutes: s.node_minutes.clamp(2, 120),
         ..s
     };
     let path = app.data_dir.join(FILE);

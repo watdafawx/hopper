@@ -69,6 +69,11 @@ pub(crate) fn token(headers: &HeaderMap) -> (String, bool) {
 /// Who is asking; refuses anonymous requests, and cookie requests that
 /// change state without the `X-Hopperd` header.
 pub(crate) fn require(app: &App, headers: &HeaderMap, method: &Method) -> ApiResult<Who> {
+    // A request this node's main relayed (`crate::relay`): who it says,
+    // capped by the ceiling. Only the node's own router call sets it.
+    if let Some(who) = crate::relay::relayed() {
+        return Ok(who);
+    }
     let (tok, from_cookie) = token(headers);
     let who = app
         .auth
@@ -629,6 +634,9 @@ async fn me(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> 
             "servers_folder": app.cfg.read().unwrap().servers_root,
         }),
         Who::User { id, name, role, servers } => json!({ "role": role, "user": true, "id": id, "name": name, "servers": servers, "min_password": MIN_PASSWORD }),
+        // A request relayed from a main (A2): the person there, with the
+        // role they have on this node.
+        Who::Main { main, user, role } => json!({ "role": role, "user": true, "name": user, "main": main, "servers": [] }),
     }))
 }
 
@@ -772,7 +780,9 @@ async fn host(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -
 async fn servers(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
     let who = require(&app, &headers, &method)?;
     let snap = app.snapshot.borrow().clone();
-    Ok(Json(json!(snap.servers.iter().filter(|s| who.sees(&s.id)).collect::<Vec<_>>())))
+    let mut list: Vec<Value> = snap.servers.iter().filter(|s| who.sees(&s.id)).map(|s| json!(s)).collect();
+    list.extend(app.nodes.servers_for(&who));
+    Ok(Json(json!(list)))
 }
 
 /// Every server as Hopper desktop describes one: folder, manager, loader,
@@ -1241,6 +1251,9 @@ async fn live(app: Arc<App>, who: Who, cred: LiveCred, mut socket: WebSocket) {
     let mut change_rx = app.changes.subscribe();
     let mut sent_rev = *change_rx.borrow_and_update();
     let mut follows: HashMap<String, u64> = HashMap::new();
+    // Consoles of a node's servers come over the tunnel, one stream each.
+    let (node_tx, mut node_rx) = tokio::sync::mpsc::channel::<Value>(64);
+    let mut node_follows: HashMap<String, crate::nodes::Follow> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_millis(150));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Signing out, Revoke or taking a page off the list ends the feed too,
@@ -1249,7 +1262,7 @@ async fn live(app: Arc<App>, who: Who, cred: LiveCred, mut socket: WebSocket) {
     recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     recheck.tick().await;
     let first = snap_rx.borrow_and_update().clone();
-    if send_snapshot(&mut socket, &first, &who).await.is_err() {
+    if send_snapshot(&mut socket, &app, &first, &who).await.is_err() {
         return;
     }
     loop {
@@ -1263,7 +1276,7 @@ async fn live(app: Arc<App>, who: Who, cred: LiveCred, mut socket: WebSocket) {
             changed = snap_rx.changed() => {
                 if changed.is_err() { break; }
                 let snap = snap_rx.borrow_and_update().clone();
-                if send_snapshot(&mut socket, &snap, &who).await.is_err() { break; }
+                if send_snapshot(&mut socket, &app, &snap, &who).await.is_err() { break; }
             }
             changed = change_rx.changed() => {
                 if changed.is_err() { break; }
@@ -1281,14 +1294,22 @@ async fn live(app: Arc<App>, who: Who, cred: LiveCred, mut socket: WebSocket) {
                     if socket.send(Message::Text(msg.to_string().into())).await.is_err() { return; }
                 }
             }
+            Some(msg) = node_rx.recv() => {
+                if socket.send(Message::Text(msg.to_string().into())).await.is_err() { return; }
+            }
             msg = socket.recv() => {
                 let Some(Ok(msg)) = msg else { break };
                 let Message::Text(text) = msg else { continue };
                 match serde_json::from_str::<ClientMsg>(&text) {
+                    Ok(ClientMsg::Console { server }) if who.sees(&server) && crate::relay::split(&server).is_some() => {
+                        if let Some(f) = crate::nodes::follow(&app, &server, &who, node_tx.clone()) {
+                            node_follows.insert(server, f);
+                        }
+                    }
                     // u64::MAX: send everything, flagged as a fresh console.
                     Ok(ClientMsg::Console { server }) if who.sees(&server) => { follows.insert(server, u64::MAX); }
                     Ok(ClientMsg::Console { .. }) => {}
-                    Ok(ClientMsg::Unconsole { server }) => { follows.remove(&server); }
+                    Ok(ClientMsg::Unconsole { server }) => { follows.remove(&server); node_follows.remove(&server); }
                     Err(e) => log::debug!("ws: {e}"),
                 }
             }
@@ -1319,8 +1340,17 @@ async fn send_changes(socket: &mut WebSocket, app: &App, who: &Who, sent: &mut u
     Ok(())
 }
 
-async fn send_snapshot(socket: &mut WebSocket, snap: &Snapshot, who: &Who) -> Result<(), axum::Error> {
+/// This panel's servers and, merged in, its nodes' servers (namespaced
+/// ids) with a header line per node (design/multi-panel.md, A2).
+async fn send_snapshot(socket: &mut WebSocket, app: &App, snap: &Snapshot, who: &Who) -> Result<(), axum::Error> {
     let servers: Vec<&Summary> = snap.servers.iter().filter(|s| who.sees(&s.id)).collect();
-    let msg = json!({ "t": "snapshot", "servers": servers, "host": snap.host });
+    let mut msg = json!({ "t": "snapshot", "servers": servers, "host": snap.host });
+    let (node_servers, nodes) = app.nodes.live_view(who);
+    if !nodes.is_empty()
+        && let Some(list) = msg["servers"].as_array_mut()
+    {
+        list.extend(node_servers);
+        msg["nodes"] = json!(nodes);
+    }
     socket.send(Message::Text(msg.to_string().into())).await
 }

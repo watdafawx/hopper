@@ -6,6 +6,7 @@
   import { api } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { alerts, refreshAlerts } from './lib/alerts.svelte.js';
+  import { live } from './lib/live.svelte.js';
 
   let s = $state(null);
   let dirty = $state(false);
@@ -24,7 +25,7 @@
 
   async function save() {
     try {
-      const r = await api('/alerts/settings', { method: 'PUT', body: { ...s, tps_below: Number(s.tps_below), disk_gb: Number(s.disk_gb), ram_pct: Number(s.ram_pct), tps_minutes: Number(s.tps_minutes), ram_minutes: Number(s.ram_minutes) } });
+      const r = await api('/alerts/settings', { method: 'PUT', body: { ...s, tps_below: Number(s.tps_below), disk_gb: Number(s.disk_gb), ram_pct: Number(s.ram_pct), tps_minutes: Number(s.tps_minutes), ram_minutes: Number(s.ram_minutes), node_minutes: Number(s.node_minutes) } });
       s = { ...r.settings };
       dirty = false;
       say('Alerts saved');
@@ -50,6 +51,11 @@
     <div class="f"><div class="l">PC memory above<small>% in use, for {s.ram_minutes} min</small></div>
       <div class="input w"><input type="number" min="50" max="100" value={s.ram_pct} oninput={(e) => set('ram_pct', e.target.value)} /></div>
       <label class="switch"><input type="checkbox" checked={s.ram_on} onchange={(e) => set('ram_on', e.target.checked)} /><span></span></label></div>
+    {#if (live.nodes || []).length}
+      <div class="f"><div class="l">Node offline<small>Not heard from for this many minutes. Nodes under maintenance stay quiet.</small></div>
+        <div class="input w"><input type="number" min="2" max="120" value={s.node_minutes} oninput={(e) => set('node_minutes', e.target.value)} /></div>
+        <label class="switch"><input type="checkbox" checked={s.node_on} onchange={(e) => set('node_on', e.target.checked)} /><span></span></label></div>
+    {/if}
     <p class="tiny muted">Each alert fires once, then again only after it has been clear for 10 minutes. Pick "Low TPS", "Drive nearly full" and "PC nearly out of memory" in a webhook to get them on Discord.</p>
   {:else if failed}
     <p class="small muted">Couldn't load the alert rules. Open this page again to retry.</p>

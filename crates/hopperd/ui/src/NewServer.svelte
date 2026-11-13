@@ -17,6 +17,7 @@
   import { dialog } from './lib/dialog.svelte.js';
   import { rightClear } from './lib/rightclear.js';
   import FolderPicker from './FolderPicker.svelte';
+  import { live } from './lib/live.svelte.js';
 
   // `preset`: a pack (and version) from Browse's "Make a server from this".
   let { close, preset = null } = $props();
@@ -72,7 +73,15 @@
   let startNow = $state(false);
   let port = $state('');
   let router = $state(null);
-  let hostInfo = $state(null);
+  let panelHost = $state(null);
+  // Where a fresh server is made: this panel ('') or one of its nodes
+  // (design/multi-panel.md, A2). Only a fresh one can go to a node for now.
+  let where = $state('');
+  const nodeChoices = $derived((live.nodes || []).filter((n) => n.ceiling === 'manage'));
+  const whereNode = $derived(where && from === 'fresh' ? nodeChoices.find((n) => n.id === where) : null);
+  const onNode = (path) => (whereNode ? `${path}${path.includes('?') ? '&' : '?'}node=${encodeURIComponent(whereNode.id)}` : path);
+  // The machine it lands on: its memory and disk are the ones that count.
+  const hostInfo = $derived(whereNode ? whereNode.host : panelHost);
   let addrEdit = $state(null);
   let eula = $state(false);
   let busy = $state('');
@@ -187,19 +196,23 @@
   // The port an empty Port box gets, and this machine's LAN address, so the
   // form can say where players will join.
   let autoInfo = $state(null);
-  api('/servers/port-check').then((r) => (autoInfo = r), () => {});
+  $effect(() => {
+    const path = onNode('/servers/port-check');
+    api(path).then((r) => (autoInfo = r), () => (autoInfo = null));
+  });
   const joinAt = $derived(address || (autoInfo?.lan && (port || autoInfo.auto) ? `${autoInfo.lan}:${port || autoInfo.auto}` : ''));
   let portTimer;
   $effect(() => {
     const p = Number(port);
     clearTimeout(portTimer);
     if (!port || !Number.isInteger(p) || p < 1 || p > 65535) { portCheck = null; return; }
-    portTimer = setTimeout(() => api(`/servers/port-check?port=${p}`).then((r) => { if (Number(port) === p) portCheck = r; }, () => (portCheck = null)), 300);
+    const check = onNode(`/servers/port-check?port=${p}`);
+    portTimer = setTimeout(() => api(check).then((r) => { if (Number(port) === p) portCheck = r; }, () => (portCheck = null)), 300);
   });
   api('/router').then((r) => (router = r), () => {});
   api('/templates').then((r) => (templates = r.templates || []), () => {});
   api('/settings/curseforge').then((r) => (cfKey = !!r.set), () => {});
-  api('/host').then((r) => (hostInfo = r), () => {});
+  api('/host').then((r) => (panelHost = r), () => {});
 
   // The first Minecraft picked is the newest release the default type has
   // (a brand-new release can be out before NeoForge is); a pick by hand stops it.
@@ -407,7 +420,7 @@
         } else r = res;
       } else {
         let req;
-        if (from === 'fresh') req = post('/servers/create', { ...common, mc_version: mc, loader, loader_version: loader === 'vanilla' ? '' : lv });
+        if (from === 'fresh') req = post(onNode('/servers/create'), { ...common, mc_version: mc, loader, loader_version: loader === 'vanilla' ? '' : lv });
         else if (from === 'template') req = post('/servers/from-template', { ...common, template: tpl });
         else if (from === 'zip') req = post('/servers/import-zip', { ...common, upload: upload || null, path: zipPath || null, ...(needsPick ? { mc_version: mc, loader: loaderId() } : {}) });
         else req = post('/servers/create-from-pack', { ...common, source: pack.source, project: pack.id, file: packFile });
@@ -634,6 +647,19 @@
           {/if}
         {/if}
 
+        {#if from === 'fresh' && nodeChoices.length}
+          <div class="f">
+            <span class="lbl" id="ns-where">Make it on</span>
+            <div class="seg" role="radiogroup" aria-labelledby="ns-where">
+              <button role="radio" aria-checked={!where} class:on={!where} disabled={!!busy} onclick={() => (where = '')}>This panel</button>
+              {#each nodeChoices as n (n.id)}
+                {@const blocked = n.state !== 'connected' ? `${n.name} is offline` : n.maintenance ? `${n.name} is under maintenance` : ''}
+                <button role="radio" aria-checked={where === n.id} class:on={where === n.id} disabled={!!busy || !!blocked} title={blocked} onclick={() => (where = n.id)}>{n.name}</button>
+              {/each}
+            </div>
+            {#if whereNode}<div class="tiny muted">It runs on {whereNode.name}, in that machine's servers folder. You use it from here like the others.</div>{/if}
+          </div>
+        {/if}
         {#if from === 'fresh'}{@render gameFields()}{/if}
 
         <div class="grid">

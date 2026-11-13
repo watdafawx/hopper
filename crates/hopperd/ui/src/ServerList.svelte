@@ -19,7 +19,9 @@
   // (BulkAction.svelte). Filters above the rows narrow to one panel or one
   // state.
   import { tick } from 'svelte';
-  import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy, Compass, ChevronRight, ChevronDown, Ellipsis, ExternalLink, LogOut, Trash2, ListChecks, Terminal } from '@lucide/svelte';
+  import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy, Compass, ChevronRight, ChevronDown, Ellipsis, ExternalLink, LogOut, Trash2, ListChecks, Terminal, Pause } from '@lucide/svelte';
+  import { put } from './lib/api.js';
+  import { bytes } from './lib/format.js';
   import { panels, retry, signOut, removePanel } from './lib/panels.svelte.js';
   import { tokenFor } from './lib/panelTokens.js';
   import { roleLabel } from './lib/me.svelte.js';
@@ -59,7 +61,36 @@
       // private window: not kept
     }
   }
-  const grouped = $derived(panels.list.length > 0);
+  // This panel's nodes: a group each, right under this panel's own servers.
+  const nodes = $derived(live.nodes || []);
+  const grouped = $derived(panels.list.length > 0 || nodes.length > 0);
+  const nodeKey = (n) => `node:${n.id}`;
+  /** A node's light: green connected, amber reconnecting, new or under maintenance, red offline. */
+  const nodeLight = (n) => (n.state === 'offline' ? 'crashed' : n.state === 'connected' && !n.maintenance ? 'running' : 'starting');
+  const CEILING = { look: 'Look only', operate: 'Operate', manage: 'Manage' };
+  const secsAgo = (t) => (t ? ago(t * 1000) : '');
+  /** The node's health line: what it runs, its machine, and the RAM its servers may take. */
+  function nodeHealth(n) {
+    const h = n.host;
+    const parts = [`Node · ${n.count} server${n.count === 1 ? '' : 's'}`];
+    if (h) {
+      parts.push(`CPU ${Math.round(h.cpu)}%`);
+      if (h.mem_total) parts.push(`RAM ${(h.mem_used / 2 ** 30).toFixed(1)} of ${bytes(h.mem_total)}`);
+      if (h.disk_total) parts.push(`${bytes(h.disk_free)} free`);
+    }
+    if (n.promised) parts.push(`${bytes(n.promised)} promised${h?.mem_total && n.promised > h.mem_total ? ', more than it has' : ''}`);
+    if (n.rtt_ms != null) parts.push(`${n.rtt_ms} ms`);
+    return parts.join(' · ');
+  }
+  async function maintain(n, on) {
+    if (on && !(await confirmIt(`Put ${n.name} under maintenance?`, { body: 'Its alerts go quiet and nothing new starts there from this panel. Servers that are running keep running.', ok: 'Pause node' }))) return;
+    try {
+      await put(`/nodes/${encodeURIComponent(n.id)}/maintenance`, { on }, { home: true });
+      say(on ? `${n.name} is under maintenance` : `${n.name} is out of maintenance`);
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
   // Only people signed in with a password keep a list of panels.
   const canAdd = $derived(homeRole && homeRole !== 'device' && homeRole !== 'token');
   let adding = $state(false);
@@ -127,9 +158,11 @@
   }
   const STATES = [['all', 'All'], ['running', 'Running'], ['stopped', 'Stopped'], ['crashed', 'Crashed']];
   // A saved filter for a panel that's no longer on the page shows them all.
-  const panelFilter = $derived(!grouped ? 'all' : filter.panel === 'home' || panels.list.some((p) => p.id === filter.panel) ? filter.panel : 'all');
+  const panelFilter = $derived(!grouped ? 'all' : filter.panel === 'home' || panels.list.some((p) => p.id === filter.panel) || nodes.some((n) => nodeKey(n) === filter.panel) ? filter.panel : 'all');
   const showGroup = (id) => panelFilter === 'all' || panelFilter === id;
-  const homeRows = $derived(shown.filter((s) => passes(s, filter.state)));
+  const homeRows = $derived(shown.filter((s) => !s.node && passes(s, filter.state)));
+  const nodeRows = (n) => shown.filter((s) => s.node === n.id && passes(s, filter.state));
+  const nodeOf = (s) => (s.node ? nodes.find((n) => n.id === s.node) : null);
   const rowsOf = (p) => sorted(p.servers).filter((s) => passes(s, filter.state));
   const noneText = $derived(`No ${filter.state} servers here.`);
   const anyServers = $derived(live.servers.length > 0 || panels.list.some((p) => p.servers.length));
@@ -143,6 +176,10 @@
   const flat = $derived.by(() => {
     const out = [];
     if (showGroup('home') && (!grouped || !fold.home)) for (const s of homeRows) out.push({ key: keyOf(null, s), p: null, s });
+    for (const n of nodes) {
+      if (!showGroup(nodeKey(n)) || fold[nodeKey(n)]) continue;
+      for (const s of nodeRows(n)) out.push({ key: keyOf(null, s), p: null, s });
+    }
     for (const p of panels.list) {
       if (!showGroup(p.id) || p.state === 'signin' || fold[p.id]) continue;
       for (const s of rowsOf(p)) out.push({ key: keyOf(p, s), p, s });
@@ -335,23 +372,25 @@
   {@const key = keyOf(p, s)}
   {@const ticked = selecting && picked.has(key)}
   {@const sel = selecting ? ticked : isSel(p, s)}
-  <a class="srv" class:picking={selecting} class:dim={p && dim(p)} class:row-sel={sel} class:row-hover={!sel} href={serverHref(p, s)} data-pick-ix={ixOf.get(key)}
+  {@const off = (p && dim(p)) || s.stale}
+  <a class="srv" class:picking={selecting} class:dim={off} class:row-sel={sel} class:row-hover={!sel} href={serverHref(p, s)} data-pick-ix={ixOf.get(key)}
     role={selecting ? 'checkbox' : undefined} aria-checked={selecting ? ticked : undefined} draggable={selecting ? 'false' : undefined}
     onclick={(e) => rowClick(e, p, s)} onpointerdown={(e) => rowDown(e, p, s)} ondragstart={(e) => selecting && e.preventDefault()} oncontextmenu={(e) => openMenu(e, s, p)}>
     <div class="line">
       {#if selecting}<input class="ck" type="checkbox" tabindex="-1" aria-hidden="true" checked={ticked} />{/if}
-      <span class="dot {p && dim(p) ? '' : stateKey(s)}"></span>
+      <span class="dot {off ? '' : stateKey(s)}"></span>
       <Avatar server={s} cls="sic" panel={p} />
       <span class="nm">{s.name}</span>
       {#if up}<span class="upd" title="Pack update: {up.from} → {up.to}"></span>{/if}
-      {#if pl && !(p && dim(p))}<span class="pill {stateKey(s)}" title={bootText(s) || stateTip(s)}>{#if pl.glow}<span class="glow"></span>{/if}{pl.text}</span>{/if}
+      {#if pl && !off}<span class="pill {stateKey(s)}" title={bootText(s) || stateTip(s)}>{#if pl.glow}<span class="glow"></span>{/if}{pl.text}</span>{/if}
     </div>
     {#if p && dim(p)}<div class="cap">{p.lastSeen ? `Seen ${ago(p.lastSeen)}` : 'Not seen yet'}</div>
+    {:else if s.stale}<div class="cap">Node offline · last known state</div>
     {:else if s.progress}<Progress server={s} compact />{:else if cap}<div class="cap">{cap}</div>{/if}
   </a>
 {/snippet}
 
-{#snippet head(id, name, role, lightKey, p)}
+{#snippet head(id, name, chipText, lightKey, p)}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div class="gh" role="group" aria-label={name} oncontextmenu={p ? (e) => openMenu(e, null, null, p) : undefined}>
     <button class="gfold" aria-expanded={!fold[id]} title="{name}: {fold[id] ? 'show its servers' : 'hide its servers'}" onclick={() => flip(id)}>
@@ -360,7 +399,7 @@
       <span class="gnm">{name}</span>
     </button>
     <span class="gfill"></span>
-    {#if role}<span class="chip">{roleLabel(role)}</span>{/if}
+    {#if chipText}<span class="chip">{chipText}</span>{/if}
     {#if p}<button class="btn ghost icon sm gmore" title="More" aria-label="More for {name}" onclick={(e) => openMenu(e, null, null, p)}><Ellipsis size={14} /></button>{/if}
   </div>
 {/snippet}
@@ -399,6 +438,7 @@
           <select class="sel" aria-label="Show the servers of" value={panelFilter} onchange={(e) => setFilter('panel', e.currentTarget.value)}>
             <option value="all">All panels</option>
             <option value="home">{homeName || 'This panel'}</option>
+            {#each nodes as n (n.id)}<option value={nodeKey(n)}>{n.name}</option>{/each}
             {#each panels.list as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
           </select>
         {/if}
@@ -409,7 +449,7 @@
       {#if selecting && !pickedRows.length}<div class="hint">Click or drag across servers to pick them.</div>{/if}
     {/if}
     {#if grouped && showGroup('home')}
-      {@render head('home', homeName || 'This panel', homeRole, live.connected ? 'running' : 'starting', null)}
+      {@render head('home', homeName || 'This panel', homeRole ? roleLabel(homeRole) : '', live.connected ? 'running' : 'starting', null)}
       <div class="health">Hopper Server · {live.servers.length} · this panel{homeVersion ? ` · ${homeVersion}` : ''}</div>
     {/if}
     {#if showGroup('home') && (!grouped || !fold.home)}
@@ -453,9 +493,33 @@
       {/each}
     {/if}
 
-    {#each panels.list.filter((q) => showGroup(q.id)) as p, i (p.id)}
+    {#each nodes.filter((n) => showGroup(nodeKey(n))) as n, i (n.id)}
+      {@const k = nodeKey(n)}
       {#if showGroup('home') || i > 0}<div class="gsep"></div>{/if}
-      {@render head(p.id, p.name, p.me && p.state !== 'signin' ? p.role : '', light(p), p)}
+      {@render head(k, n.name, CEILING[n.ceiling] || '', nodeLight(n), owner ? { node: n } : null)}
+      {#if n.maintenance}
+        <div class="health maint"><Pause size={11} />Under maintenance{n.maintenance.by ? ` · by ${n.maintenance.by}` : ''}{n.maintenance.since ? ` ${secsAgo(n.maintenance.since)}` : ''} · nothing starts here{#if owner} · <button class="link" onclick={() => maintain(n, false)}>End maintenance</button>{/if}</div>
+      {/if}
+      {#if n.state === 'connected' || n.state === 'reconnecting'}
+        <div class="health">{nodeHealth(n)}{n.state === 'reconnecting' ? ' · Reconnecting…' : ''}</div>
+      {:else if n.state === 'new'}
+        <div class="health">Node · waiting for it to connect</div>
+      {:else}
+        <div class="health trouble">Offline{n.last_seen ? ` · last seen ${secsAgo(n.last_seen)}` : ''}</div>
+      {/if}
+      {#if !fold[k]}
+        {#each nodeRows(n) as s (s.id)}
+          {@render row(s, null)}
+        {:else}
+          {#if n.count}<div class="cap none">{noneText}</div>
+          {:else if n.state === 'connected'}<div class="cap none">No servers on it yet.</div>{/if}
+        {/each}
+      {/if}
+    {/each}
+
+    {#each panels.list.filter((q) => showGroup(q.id)) as p, i (p.id)}
+      {#if showGroup('home') || nodes.some((n) => showGroup(nodeKey(n))) || i > 0}<div class="gsep"></div>{/if}
+      {@render head(p.id, p.name, p.me && p.state !== 'signin' ? roleLabel(p.role) : '', light(p), p)}
       {#if p.state === 'ok'}
         <div class="health">Hopper Server · {p.servers.length}{p.version ? ` · ${p.version}` : ''}{p.ping != null ? ` · ${p.ping} ms` : ''}</div>
       {:else if p.state === 'loading'}
@@ -502,7 +566,16 @@
 {#if adding}<AddPanel onClose={() => (adding = false)} />{/if}
 {#if bulk}<BulkAction action={bulk.action} groups={bulk.groups} onClose={() => (bulk = null)} />{/if}
 
-{#if menu?.g}
+{#if menu?.g?.node}
+  {@const n = menu.g.node}
+  <!-- svelte-ignore a11y_interactive_supports_focus -->
+  <div class="popover menu rmenu" role="menu" tabindex="-1" bind:this={menuEl} style:left="{menu.x}px" style:top="{menu.y}px" onkeydown={menuKeys}>
+    {#if n.maintenance}<button class="menu-item" role="menuitem" onclick={() => pick(() => maintain(n, false))}><Play size={14} />End maintenance</button>
+    {:else}<button class="menu-item" role="menuitem" onclick={() => pick(() => maintain(n, true))}><Pause size={14} />Pause node (maintenance)</button>{/if}
+    <div class="menu-sep"></div>
+    <button class="menu-item" role="menuitem" onclick={() => pick(() => (location.hash = '/settings/nodes'))}><Server size={14} />Node settings</button>
+  </div>
+{:else if menu?.g}
   {@const g = menu.g}
   <!-- svelte-ignore a11y_interactive_supports_focus -->
   <div class="popover menu rmenu" role="menu" tabindex="-1" bind:this={menuEl} style:left="{menu.x}px" style:top="{menu.y}px" onkeydown={menuKeys}>
@@ -515,12 +588,15 @@
 {:else if menu}
   {@const s = menu.s}
   {@const up = s.state === 'running' || s.state === 'starting'}
+  {@const nd = nodeOf(s)}
   <!-- svelte-ignore a11y_interactive_supports_focus -->
   <div class="popover menu rmenu" role="menu" tabindex="-1" bind:this={menuEl} style:left="{menu.x}px" style:top="{menu.y}px" onkeydown={menuKeys}>
     <button class="menu-item" role="menuitem" onclick={() => pick((v, p) => (location.hash = serverHref(p, v).slice(1)))}><Server size={14} />Open</button>
-    {#if canPowerOn(menu.p) && !(menu.p && dim(menu.p))}
+    {#if canPowerOn(menu.p) && !(menu.p && dim(menu.p)) && !s.stale && nd?.ceiling !== 'look'}
       <div class="menu-sep"></div>
-      {#if !up && s.state !== 'stopping'}
+      {#if !up && s.state !== 'stopping' && nd?.maintenance}
+        <button class="menu-item" role="menuitem" disabled title="{nd.name} is under maintenance"><Play size={14} />Start (node paused)</button>
+      {:else if !up && s.state !== 'stopping'}
         <button class="menu-item" role="menuitem" onclick={() => pick((v, p) => power(v, 'start', p))}><Play size={14} />Start</button>
       {:else if up}
         <button class="menu-item" role="menuitem" onclick={() => pick((v, p) => power(v, 'restart', p))}><RotateCw size={14} />Restart</button>
@@ -563,6 +639,8 @@
   .gmore { flex: none; }
   .health { padding: 0 10px 4px 32px; font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
   .health.trouble { color: var(--subtle); }
+  .health.maint { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; color: var(--subtle); }
+  .health.maint :global(svg) { color: var(--gold); flex: none; }
   /* Accent mixed toward the text colour: readable on light themes too (plain --acc is 3.4:1 there). */
   .link { background: none; border: 0; padding: 0; font: inherit; color: color-mix(in srgb, var(--acc) 60%, var(--text)); cursor: pointer; text-decoration: none; }
   .link:hover { text-decoration: underline; }

@@ -400,6 +400,12 @@ pub enum Who {
     Device { id: String, name: String, manage: bool },
     Token { id: String, name: String, read_only: bool, servers: Vec<String> },
     User { id: String, name: String, role: Role, servers: Vec<String> },
+    /// A request this node's main relayed over the tunnel
+    /// (design/multi-panel.md, A2): who asked there and the role they get
+    /// here, already capped by this node's ceiling (`crate::relay`). Only
+    /// ever Admin, Operator or Viewer, on every server of the node; never
+    /// owner-level, so owner-only routes refuse it whatever the main says.
+    Main { main: String, user: String, role: Role },
 }
 
 impl Who {
@@ -409,6 +415,7 @@ impl Who {
             Who::Device { name, .. } => name.clone(),
             Who::Token { name, .. } => format!("token \"{name}\""),
             Who::User { name, .. } => format!("user \"{name}\""),
+            Who::Main { main, user, role } => format!("{user} via {main} ({})", role.id()),
         }
     }
 
@@ -438,6 +445,7 @@ impl Who {
             Who::Device { .. } => "device",
             Who::Token { .. } => "token",
             Who::User { role, .. } => role.id(),
+            Who::Main { .. } => "main",
         }
     }
 

@@ -49,6 +49,9 @@ mod mods_upload;
 mod mods_table;
 mod motd_live;
 mod security;
+mod relay;
+#[cfg(test)]
+mod relay_tests;
 mod net;
 mod offsite;
 mod pack_api;
@@ -533,7 +536,7 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: tls::OwnCert, shutdown: Shu
     // As a main: alerts for nodes that are gone. As a node: the
     // connection to the main, while node.json is there.
     nodes::start(app.clone());
-    tunnel::node::start(app.boot_dir.clone());
+    tunnel::node::start(app.clone());
     if cfg.sftp_port != 0 {
         tokio::spawn(sftp::serve(app.clone(), cfg.bind.clone(), cfg.sftp_port));
     }
