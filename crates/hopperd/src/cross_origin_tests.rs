@@ -651,3 +651,90 @@ async fn hello_lists_web_remote() {
     assert!(body(&b)["capabilities"].as_array().unwrap().iter().any(|c| c == "web.remote"));
     assert_eq!(h["access-control-allow-origin"], LISTED);
 }
+
+// ---- found in the B1 security review ----------------------------------------------
+
+/// A link remembers its paths for 60 s, so asking must stay small: a viewer
+/// sending one big request (paths padded with `./`, which the folder check
+/// skips) must not park megabytes in memory per link, 64 links a session.
+#[tokio::test]
+async fn file_links_cannot_fill_memory() {
+    let t = panel();
+    t.app.auth.user_create("vic", "vicpass12", Role::Viewer, vec![]).unwrap();
+    let (_, _, b) = call("POST", "/api/v1/auth/login").origin(LISTED).json(json!({ "name": "vic", "password": "vicpass12", "bearer": true })).send(&t).await;
+    let vt = body(&b)["token"].as_str().unwrap().to_string();
+    let padded = format!("{}hello.txt", "./".repeat(1000));
+    let paths: Vec<String> = (0..1000).map(|_| padded.clone()).collect();
+    let (s, url) = link(&t, &vt, json!({ "paths": paths, "zip": true })).await;
+    assert_ne!(s, StatusCode::OK, "a 2 MB link request is refused");
+    assert!(url.is_empty());
+    // An ordinary zip of a few files still works, and the padding is gone
+    // from what the link keeps.
+    let (s, url) = link(&t, &vt, json!({ "paths": [padded, "world"], "zip": true })).await;
+    assert_eq!(s, StatusCode::OK);
+    let k = url.rsplit_once("k=").unwrap().1;
+    let g = t.app.grants.take(k).unwrap();
+    let crate::grants::Purpose::File { paths, .. } = g.purpose else { panic!("a file link") };
+    assert_eq!(paths, vec!["hello.txt".to_string(), "world".to_string()]);
+}
+
+/// An open live feed ends with its session: Revoke, signing out or taking
+/// the page off the list must stop the console and server updates too, not
+/// only the page's next request.
+#[tokio::test]
+async fn live_feed_ends_with_its_session() {
+    let t = panel();
+    let cookie = cookie_login(&t).await;
+    let own = |c: Call<'static>| c.origin(OWN).h("cookie", format!("hopperd_session={cookie}")).h("x-hopperd", "1");
+    // Revoked from the panel's own page.
+    let tok = remote_login(&t, LISTED).await;
+    let (who, cred) = crate::api::ws_access(&t.app, &ws_headers(LISTED, &ticket(&t, &tok, LISTED).await)).unwrap();
+    assert!(crate::api::live_still_allowed(&t.app, &cred, &who));
+    let id = crate::auth::Auth::session_id(&tok);
+    assert_eq!(own(call("DELETE", format!("/api/v1/auth/sessions/{id}"))).send(&t).await.0, StatusCode::OK);
+    assert!(!crate::api::live_still_allowed(&t.app, &cred, &who), "revoked: the feed closes");
+    // The page taken off the list.
+    let tok = remote_login(&t, LISTED).await;
+    let (who, cred) = crate::api::ws_access(&t.app, &ws_headers(LISTED, &ticket(&t, &tok, LISTED).await)).unwrap();
+    let (s, _, _) = own(call("PUT", "/api/v1/settings/web-access")).json(json!({ "origins": [LISTED_2] })).send(&t).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!crate::api::live_still_allowed(&t.app, &cred, &who), "page removed: the feed closes");
+    // The panel's own cookie feed, signed out elsewhere.
+    let mut h = HeaderMap::new();
+    h.insert("host", HOST.parse().unwrap());
+    h.insert("cookie", format!("hopperd_session={cookie}").parse().unwrap());
+    h.insert("origin", OWN.parse().unwrap());
+    let (who, cred) = crate::api::ws_access(&t.app, &h).unwrap();
+    assert!(crate::api::live_still_allowed(&t.app, &cred, &who));
+    t.app.auth.logout(&cookie);
+    assert!(!crate::api::live_still_allowed(&t.app, &cred, &who));
+    // A user's role changing ends the old feed (it reconnects as the new role).
+    t.app.auth.user_create("sam", "sampass12", Role::Admin, vec![]).unwrap();
+    // (Only the second page is still listed here.)
+    let (_, _, b) = call("POST", "/api/v1/auth/login").origin(LISTED_2).json(json!({ "name": "sam", "password": "sampass12", "bearer": true })).send(&t).await;
+    let st = body(&b)["token"].as_str().unwrap().to_string();
+    let (who, cred) = crate::api::ws_access(&t.app, &ws_headers(LISTED_2, &ticket(&t, &st, LISTED_2).await)).unwrap();
+    let Who::User { id: uid, .. } = &who else { panic!("a user") };
+    t.app.auth.user_update(uid, "sam", Role::Viewer, vec![t.server.clone()], None).unwrap();
+    assert!(!crate::api::live_still_allowed(&t.app, &cred, &who), "role changed: the feed closes");
+}
+
+/// Changing your password signs out the browser sessions other pages hold
+/// (their tokens are readable by the page, so they may have been copied);
+/// the session that changed it stays.
+#[tokio::test]
+async fn password_change_ends_browser_sessions() {
+    let t = panel();
+    let remote = remote_login(&t, LISTED).await;
+    let cookie = cookie_login(&t).await;
+    let (s, _, b) = call("POST", "/api/v1/auth/password")
+        .origin(OWN)
+        .h("cookie", format!("hopperd_session={cookie}"))
+        .h("x-hopperd", "1")
+        .json(json!({ "current": PASSWORD, "new": "password2" }))
+        .send(&t)
+        .await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    assert!(t.app.auth.check_from(&remote, Some(LISTED)).is_none(), "the copied page token is dead");
+    assert!(t.app.auth.check(&cookie).is_some(), "the session that changed it stays");
+}

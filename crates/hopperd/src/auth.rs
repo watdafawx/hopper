@@ -676,6 +676,21 @@ impl Auth {
         ended
     }
 
+    /// Ends `acct`'s sessions made for pages on other origins, except the
+    /// one signed in with `keep`: after a password change a token a page
+    /// held (and a script could have copied) stops working.
+    pub fn end_browser_sessions(&self, acct: Account, keep: &str) -> usize {
+        let keep = hash_token(keep);
+        let mut s = self.stored.lock().unwrap();
+        let before = s.sessions.len();
+        s.sessions.retain(|x| x.origin.is_none() || x.user.as_deref() != acct || x.hash == keep);
+        let ended = before - s.sessions.len();
+        if ended > 0 {
+            self.save(&s);
+        }
+        ended
+    }
+
     /// The origin `token`'s session was made for, when it is a session for
     /// a page on another origin.
     pub fn remote_origin(&self, token: &str) -> Option<String> {

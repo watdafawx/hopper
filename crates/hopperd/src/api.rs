@@ -434,6 +434,8 @@ async fn change_password(
 ) -> ApiResult<Json<Value>> {
     let who = account(&app, &headers, &method)?;
     app.auth.change_password(who.account().flatten(), &b.current, &b.new, addr.ip()).map_err(bad)?;
+    // Tokens other pages held may have been copied: they end with the old password.
+    app.auth.end_browser_sessions(who.account().flatten(), &token(&headers).0);
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1090,32 +1092,57 @@ async fn console(
 /// Devices: a bearer token. A page on another origin the owner listed: a
 /// one-use ticket in `Sec-WebSocket-Protocol` (see [`ws_ticket`]).
 pub(crate) fn ws_allowed(app: &App, headers: &HeaderMap) -> Option<Who> {
+    ws_access(app, headers).map(|(who, _)| who)
+}
+
+/// What an open live socket signed in with, so it can be checked again
+/// while it stays open (see [`live_still_allowed`]).
+pub(crate) struct LiveCred {
+    hash: String,
+    origin: Option<String>,
+}
+
+/// [`ws_allowed`], with the sign-in the socket rests on.
+pub(crate) fn ws_access(app: &App, headers: &HeaderMap) -> Option<(Who, LiveCred)> {
     if let Some(ticket) = crate::grants::ticket_in(headers) {
         return ws_ticket_who(app, headers, &ticket);
     }
     let (tok, from_cookie) = token(headers);
-    let who = app.auth.check_from(&tok, origin_of(headers))?;
+    let origin = origin_of(headers);
+    let who = app.auth.check_from(&tok, origin)?;
+    let cred = LiveCred { hash: crate::auth::hash_token(&tok), origin: origin.map(str::to_string) };
     if !from_cookie {
-        return Some(who);
+        return Some((who, cred));
     }
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).unwrap_or("");
     let origin_host = origin.split("://").nth(1).unwrap_or("");
-    (!host.is_empty() && origin_host == host).then_some(who)
+    (!host.is_empty() && origin_host == host).then_some((who, cred))
 }
 
 /// A ticket opens the socket only from a listed page, the same page that
 /// asked for it, while the session that asked is still signed in. The
 /// first try uses it up, right or wrong.
-fn ws_ticket_who(app: &App, headers: &HeaderMap, ticket: &str) -> Option<Who> {
+fn ws_ticket_who(app: &App, headers: &HeaderMap, ticket: &str) -> Option<(Who, LiveCred)> {
     let g = app.grants.take(ticket)?;
     let list = app.cfg.read().unwrap().web_origins.clone();
     let page = crate::web_access::listed_other(headers, &list)?;
     if g.purpose != crate::grants::Purpose::Live || g.origin.as_deref() != Some(page) {
         return None;
     }
-    app.auth.check_hash(&g.cred, Some(page))
+    let who = app.auth.check_hash(&g.cred, Some(page))?;
+    Some((who, LiveCred { hash: g.cred, origin: Some(page.to_string()) }))
 }
+
+/// Whether an open live socket may stay open: its session is still signed
+/// in (not signed out, revoked, its page taken off the list, its user
+/// removed) and still the same person with the same role and servers.
+pub(crate) fn live_still_allowed(app: &App, cred: &LiveCred, who: &Who) -> bool {
+    app.auth.check_hash(&cred.hash, cred.origin.as_deref()).as_ref() == Some(who)
+}
+
+/// How often an open live socket checks its sign-in again.
+const LIVE_RECHECK: Duration = Duration::from_secs(5);
 
 /// A one-use ticket for the live WebSocket, for a page on another origin
 /// the owner listed (browsers can't send `Authorization` on a WebSocket).
@@ -1135,13 +1162,13 @@ async fn ws_ticket(State(app): State<Arc<App>>, headers: HeaderMap, method: Meth
 }
 
 async fn ws(State(app): State<Arc<App>>, headers: HeaderMap, upgrade: WebSocketUpgrade) -> Response {
-    let Some(who) = ws_allowed(&app, &headers) else {
+    let Some((who, cred)) = ws_access(&app, &headers) else {
         return ApiError(StatusCode::UNAUTHORIZED, "Sign in first.".into()).into_response();
     };
     // A browser that offered subprotocols drops the socket unless the
     // panel picks one; the ticket's own entry is never echoed back.
     let upgrade = if crate::grants::ticket_in(&headers).is_some() { upgrade.protocols([crate::grants::WS_PROTOCOL]) } else { upgrade };
-    upgrade.on_upgrade(move |socket| live(app, who, socket))
+    upgrade.on_upgrade(move |socket| live(app, who, cred, socket))
 }
 
 #[derive(Deserialize)]
@@ -1155,19 +1182,30 @@ enum ClientMsg {
 /// One client's live feed: the servers and host snapshot whenever it
 /// changes (about once a second) and new console lines of the servers it
 /// follows (checked every 150 ms).
-async fn live(app: Arc<App>, who: Who, mut socket: WebSocket) {
+async fn live(app: Arc<App>, who: Who, cred: LiveCred, mut socket: WebSocket) {
     let mut snap_rx = app.snapshot.subscribe();
     let mut change_rx = app.changes.subscribe();
     let mut sent_rev = *change_rx.borrow_and_update();
     let mut follows: HashMap<String, u64> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_millis(150));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Signing out, Revoke or taking a page off the list ends the feed too,
+    // not only the next request; a changed role reconnects with the new one.
+    let mut recheck = tokio::time::interval(LIVE_RECHECK);
+    recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    recheck.tick().await;
     let first = snap_rx.borrow_and_update().clone();
     if send_snapshot(&mut socket, &first, &who).await.is_err() {
         return;
     }
     loop {
         tokio::select! {
+            _ = recheck.tick() => {
+                if !live_still_allowed(&app, &cred, &who) {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
+            }
             changed = snap_rx.changed() => {
                 if changed.is_err() { break; }
                 let snap = snap_rx.borrow_and_update().clone();

@@ -893,6 +893,16 @@ Server side only; the web UI does not use it yet (B2). Capability
 | Someone reading **logs or history** | See paths | See ticket or link secrets: tickets travel in a header, links in the query, logs keep paths only; grants are stored hashed | `grants::tests::secrets_are_stored_hashed`, `file_links_one_use_bound_and_expiring` (query, not path), `audit_names_the_page_a_sign_in_came_from` (no ticket lines) |
 | The **owner** after removing a page | Its sessions end at once | | `removing_a_page_ends_its_sessions` |
 
+Added after the security review (tests in `cross_origin_tests.rs`):
+an open live socket checks its sign-in every 5 seconds and closes when the
+session is revoked, signed out, its page taken off the list or the user's
+role changes (`live_feed_ends_with_its_session`); changing your password
+ends your sessions on other pages except the one you changed it from
+(`password_change_ends_browser_sessions`); a link request is at most
+256 KB, keeps its paths tidied (`./` padding dropped), and all waiting
+links together hold at most 16 MB of paths (`file_links_cannot_fill_memory`,
+`grants::tests::waiting_links_hold_little_memory`).
+
 Also unchanged and still tested: the setup code is never usable from
 another page (setup has no bearer path; `trusted_local` refuses a foreign
 `Origin`), TLS and the plain-HTTP rule, the cookie and `X-Hopperd` rules
