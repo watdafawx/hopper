@@ -1134,6 +1134,108 @@ router behind pairing, stores the key hash, and adds the rate limits.
 Per-connection memory cap (A3), relay heads and the allowlist (A2), and the
 node's `status` diagnostics (A1) are not built.
 
+## B4 as built (2026-11-13)
+
+Files of a server on another panel: downloads, uploads and previews from
+the page you have open. The other panel's sign-in is a token, which a plain
+`<a href>` or `<img src>` can't send, so:
+
+- **Downloads and "Open in a new tab"** ask that panel for a one-use link
+  (`POST /fs/{id}/link`, B1) and follow it. The file goes straight from that
+  panel to the browser, nothing passes through this page. `lib/panelfiles.svelte.js`
+  `linkFor(url)` turns this panel's own file URLs into a link body
+  (`lib/filelinks.js`, unit tested); `download()` uses it, so every download
+  button (Files, Worlds, Editor, Backups, zip entries) works on both. The
+  new tab is opened first and pointed at the link when it arrives, so
+  popup blockers leave it alone.
+- **Pictures and text shown in the page** (Files thumbnails and preview,
+  the file viewer, a text or picture inside a zip, server icons in the list,
+  header and hero) are read with the token (`fetchFrom`) into a blob URL:
+  `use:panelImg` for `<img>`, `panelSrc()` for components. Thumbnails load
+  when they come into view, so a big folder doesn't read every picture.
+- **Uploads** (Files, mod jars dropped on Mods) go to that panel's API with
+  its token: `fs` uploads in 8 MB chunks, mod jars streamed.
+
+### Backend
+
+- `POST /fs/{id}/link` takes two more kinds, each on its own:
+  - `{ path, entry, inline? }`: one entry of one zip (`zip` refused with it,
+    entry 1..4096 chars). Redeemed as `GET /fs/{id}/zip-entry`.
+  - `{ backup }`: one backup of the server, by name. The name passes
+    `backup::check` and must exist when the link is made. Redeemed as
+    `GET /servers/{id}/backups/{name}/download`.
+  - The grant stores the entry or backup name (`Purpose::File { entry }`,
+    `Purpose::Backup`); redeeming re-checks access as that GET route
+    (`security::refusal`) and every path again, like B1's file links.
+- `GET /api/v1/ca.crt`: the panel's certificate authority (public, like
+  `/hello`), as a download named `hopper-server-<name>-ca.crt`; 404 when the
+  panel has none (ACME only).
+- Capability `web.files` on `/hello`: a panel that can make backup and
+  zip-entry links. Older panels say "runs an older Hopper Server" instead
+  of failing on a 400.
+- Download and zip-entry bodies moved into `send_backup` / `send_entry` so
+  the route and the link share one copy.
+
+### Add a Hopper Server: certificate help
+
+The certificate problem now offers two ways: "This browser, for now" (open
+its page, accept the warning) and "This PC, for good": download its
+certificate (over plain http on the same port, which the panel answers on
+your own network and Tailscale) and install it as a trusted root, with
+steps for Windows, Mac and Firefox and the warning that this PC then
+trusts every certificate that panel makes. The unreachable case with a
+possible certificate offers the same. "Add it as a node instead" (A) is
+there but hidden until `/hello` lists `nodes`.
+
+### Home-only places (audit)
+
+Fixed to work for another panel's server: Files thumbnails and preview,
+file viewer (picture, new tab, zip entry text, picture and download),
+Backups download, zip-entry download, mod jar drop upload, the server page
+hero picture, `Avatar` (list, header, Overview).
+
+Left home-only, on purpose:
+
+- Dragging a file out of Files to the desktop (`DownloadURL`) needs a
+  URL ready when the drag starts; a one-use link can't be. Off for other
+  panels; Download works.
+- New server, incoming pack uploads (`upload.js`, New server only), the
+  Overview dashboard, Addresses, panel Settings (users, certificate, the
+  MCP address from `location.origin`) and the live socket of this panel:
+  these are about this panel. Another panel's are on its own page (the
+  group's "Open in browser").
+- "Change this on the panel's own page." (refusal of access settings from
+  another page) is by design (B1).
+- Not done: CA help in the server list's offline state for an added panel
+  (only in Add a Hopper Server).
+
+### Checked
+
+- Two scratch panels on 8851 and 8852 (loopback), the page on 8851, panel
+  8852 added and signed in to. 1 GiB of random bytes uploaded to a server
+  on 8852 in about 4 s (SHA-256 the same on disk); a zip of it plus a
+  folder downloaded through a one-use link in about 2 s (entry SHA-256 the
+  same). Panel 8852's memory, sampled every half second over the uploads,
+  downloads and a backup: private 13.5 MB idle, 28.5 MB peak; working set
+  39.5 MB peak.
+- Backup download, picture thumbnails and viewer, a text file inside a jar,
+  the CA download: all from the 8851 page against 8852.
+- `cross_origin_tests.rs`: zip-entry links, backup links (viewer allowed,
+  access removed refused, bad names refused), uploads from a listed page
+  (chunks, path traversal refused, mod jar, unlisted origin gets no CORS,
+  viewer refused), the CA download.
+
+### Threat list additions
+
+- A backup link names a backup, never a path: `backup::check` refuses
+  separators and dots, and the link only opens that one file.
+- A zip-entry link reads inside one zip the account could already read;
+  the entry name never touches the file system.
+- `ca.crt` is public: it's the same certificate every TLS handshake shows.
+  Installing it is the player's choice, with the warning above.
+- Zip-entry reads still buffer the entry in memory (up to 512 MB), as before
+  B4. Uploads and every other download stream.
+
 ## Open questions for the maintainer
 
 1. **Remote-session limits (B).** *Answered (maintainer, 2026-11-11): a

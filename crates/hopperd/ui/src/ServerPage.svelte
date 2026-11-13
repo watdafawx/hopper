@@ -38,6 +38,7 @@
   import ServerAlerts from './ServerAlerts.svelte';
   import Progress from './Progress.svelte';
   import HeroDrift from './HeroDrift.svelte';
+  import { panelSrc } from './lib/panelfiles.svelte.js';
   import { kick, jobStarted, jobEnded } from './lib/heroDrift.js';
   import ShareLog from './ShareLog.svelte';
   import PackUpdate from './PackUpdate.svelte';
@@ -62,6 +63,8 @@
   const filesTab = $derived(tab === 'files' || tab === 'edit' || tab === 'trash');
 
   const s = $derived(feed.servers.find((x) => x.id === id));
+  // The header backdrop's icon, read with the panel's token on another panel.
+  const hero = panelSrc(() => (s?.icon ? `/api/v1/servers/${encodeURIComponent(s.id)}/icon?v=${s.icon}` : ''), () => panel);
   const alive = $derived(s && ['running', 'starting', 'stopping'].includes(s.state));
   const cap = $derived(xmx(s?.max_memory));
   const online = $derived(s?.state === 'running' ? s.players.length : null);
@@ -244,7 +247,7 @@
 {:else}
   <!-- One header on every tab (the compact two-line one), so it doesn't jump when switching tabs. -->
   <div class="head">
-    <HeroDrift src={s.icon && !panel ? `/api/v1/servers/${encodeURIComponent(s.id)}/icon?v=${s.icon}` : ''} />
+    <HeroDrift src={hero.src} />
     <Avatar server={s} cls="ic big" />
     <div class="ttl">
       <div class="row wrap">

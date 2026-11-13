@@ -20,6 +20,7 @@ const UNLISTED: &str = "http://evil.example:8790";
 const HOST: &str = "rig:8791";
 const OWN: &str = "http://rig:8791";
 const PASSWORD: &str = "password1";
+const TEST_CA: &str = "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n";
 
 struct T {
     app: Arc<App>,
@@ -69,7 +70,7 @@ fn panel() -> T {
         scheduler: Default::default(),
         limiter: Default::default(),
         audit: crate::security::Audit::new(&data),
-        tls: crate::TlsInfo { fingerprint: "AA:BB".into(), ca_pem: String::new() },
+        tls: crate::TlsInfo { fingerprint: "AA:BB".into(), ca_pem: TEST_CA.into() },
         acme: crate::acme::Acme::new(&data),
         sftp_fingerprint: None,
     });
@@ -83,11 +84,12 @@ struct Call<'a> {
     path: String,
     headers: Vec<(&'a str, String)>,
     body: Option<Value>,
+    raw: Option<Vec<u8>>,
     ip: &'a str,
 }
 
 fn call<'a>(method: &'a str, path: impl Into<String>) -> Call<'a> {
-    Call { method, path: path.into(), headers: vec![("host", HOST.into())], body: None, ip: "192.168.50.21" }
+    Call { method, path: path.into(), headers: vec![("host", HOST.into())], body: None, raw: None, ip: "192.168.50.21" }
 }
 
 impl<'a> Call<'a> {
@@ -108,6 +110,11 @@ impl<'a> Call<'a> {
         self.body = Some(v);
         self
     }
+    /// A body of bytes (an upload chunk, a jar).
+    fn raw(mut self, v: Vec<u8>) -> Self {
+        self.raw = Some(v);
+        self
+    }
     fn from(mut self, ip: &'a str) -> Self {
         self.ip = ip;
         self
@@ -122,7 +129,13 @@ impl<'a> Call<'a> {
                 b = b.header("content-type", "application/json");
                 Body::from(v.to_string())
             }
-            None => Body::empty(),
+            None => match self.raw {
+                Some(r) => {
+                    b = b.header("content-type", "application/octet-stream");
+                    Body::from(r)
+                }
+                None => Body::empty(),
+            },
         };
         let mut req = b.body(body).unwrap();
         let addr: SocketAddr = format!("{}:50000", self.ip).parse().unwrap();
@@ -844,4 +857,161 @@ async fn managers_do_not_see_the_owners_sessions() {
     };
     assert_eq!(names(&mia).await, vec!["mia", "sam"], "no owner or other manager sessions");
     assert_eq!(names(&owner).await, vec!["mia", "moe", "owner", "owner", "owner", "sam"], "the owner sees all (setup, cookie, page)");
+}
+
+// ---- B4: zip entries, backups and uploads from another page ------------------------
+
+/// A zip in the server folder with one text entry and one HTML page.
+fn put_zip(t: &T, rel: &str) {
+    let srv = t.app.servers.get(&t.server).unwrap().root.clone();
+    let f = std::fs::File::create(srv.join(rel)).unwrap();
+    let mut z = zip::ZipWriter::new(f);
+    let o = zip::write::SimpleFileOptions::default();
+    z.start_file("assets/readme.txt", o).unwrap();
+    std::io::Write::write_all(&mut z, b"inside the zip").unwrap();
+    z.start_file("page.html", o).unwrap();
+    std::io::Write::write_all(&mut z, b"<script>alert(1)</script>").unwrap();
+    z.finish().unwrap();
+}
+
+/// One entry of a zip through a one-use link: the zip's path is checked
+/// against the server folder when asking and when used, one entry of one
+/// zip only, and previews stay sandboxed text.
+#[tokio::test]
+async fn zip_entry_links() {
+    let t = panel();
+    put_zip(&t, "pack.zip");
+    let tok = remote_login(&t, LISTED).await;
+    let (s, url) = link(&t, &tok, json!({ "path": "pack.zip", "entry": "assets/readme.txt" })).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, h, b) = call("GET", url.clone()).send(&t).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b, b"inside the zip");
+    assert!(h["content-disposition"].to_str().unwrap().starts_with("attachment"));
+    assert_eq!(call("GET", url).send(&t).await.0, StatusCode::UNAUTHORIZED, "single use");
+    // A preview of HTML inside a zip is text, sandboxed.
+    let (_, url) = link(&t, &tok, json!({ "path": "pack.zip", "entry": "page.html", "inline": true })).await;
+    let (_, h, _) = call("GET", url).send(&t).await;
+    assert_eq!(h["content-type"], "text/plain; charset=utf-8");
+    assert!(h["content-security-policy"].to_str().unwrap().contains("sandbox"));
+    assert_eq!(h["x-content-type-options"], "nosniff");
+    // Only a zip inside the server folder.
+    let outside = t.dir.join("outside.zip");
+    std::fs::copy(t.app.servers.get(&t.server).unwrap().root.join("pack.zip"), &outside).unwrap();
+    for p in ["../outside.zip", "..\\outside.zip", "world/../../outside.zip", outside.to_str().unwrap()] {
+        let (s, _) = link(&t, &tok, json!({ "path": p, "entry": "assets/readme.txt" })).await;
+        assert!(s.is_client_error(), "{p}: {s}");
+    }
+    // One entry of one zip: not with a zip of paths, not of a folder, not empty or huge.
+    assert_eq!(link(&t, &tok, json!({ "paths": ["pack.zip"], "zip": true, "entry": "page.html" })).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(link(&t, &tok, json!({ "path": "world", "entry": "x" })).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(link(&t, &tok, json!({ "path": "pack.zip", "entry": "" })).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(link(&t, &tok, json!({ "path": "pack.zip", "entry": "a".repeat(5000) })).await.0, StatusCode::BAD_REQUEST);
+    // An entry that isn't there: refused when used, and the link is gone.
+    let (s, url) = link(&t, &tok, json!({ "path": "pack.zip", "entry": "nope.txt" })).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(call("GET", url).send(&t).await.0, StatusCode::BAD_REQUEST);
+}
+
+/// A backup through a one-use link: named like on the Backups tab, checked
+/// to be one of this server's backups, and read access checked again when
+/// the link is used.
+#[tokio::test]
+async fn backup_links() {
+    let t = panel();
+    let root = t.app.servers.get(&t.server).unwrap().root.clone();
+    let dir = root.join(hopper_core::hosting::backup::DIR);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("2026-11-13_120000.zip"), b"PK-a-backup").unwrap();
+    let tok = remote_login(&t, LISTED).await;
+    let (s, url) = link(&t, &tok, json!({ "backup": "2026-11-13_120000.zip" })).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, h, b) = call("GET", url.clone()).send(&t).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b, b"PK-a-backup");
+    assert_eq!(h["content-type"], "application/zip");
+    assert!(h["content-disposition"].to_str().unwrap().starts_with("attachment"));
+    assert_eq!(call("GET", url).send(&t).await.0, StatusCode::UNAUTHORIZED, "single use");
+    // Only a backup's name: no paths, no folders, nothing that isn't there.
+    for n in ["../hello.txt", "..\\server.properties", "x/../../outside.zip", "hello.txt", "missing.zip", ""] {
+        let (s, _) = link(&t, &tok, json!({ "backup": n })).await;
+        assert!(s.is_client_error(), "{n}: {s}");
+    }
+    assert_eq!(link(&t, &tok, json!({ "backup": "2026-11-13_120000.zip", "path": "hello.txt" })).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(link(&t, &tok, json!({ "backup": "2026-11-13_120000.zip", "zip": true })).await.0, StatusCode::BAD_REQUEST);
+    // A viewer of this server may download its backups (a read), as on the panel's own page.
+    let u = t.app.auth.user_create("vi", "vipass123", Role::Viewer, vec![t.server.clone()]).unwrap();
+    let (_, _, b) = call("POST", "/api/v1/auth/login").origin(LISTED).json(json!({ "name": "vi", "password": "vipass123", "bearer": true })).send(&t).await;
+    let vt = body(&b)["token"].as_str().unwrap().to_string();
+    let (s, url) = link(&t, &vt, json!({ "backup": "2026-11-13_120000.zip" })).await;
+    assert_eq!(s, StatusCode::OK);
+    // Access taken away before the link is used: refused.
+    t.app.auth.user_update(&u.id, "vi", Role::Viewer, vec!["other".into()], None).unwrap();
+    assert_eq!(call("GET", url).send(&t).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(link(&t, &vt, json!({ "backup": "2026-11-13_120000.zip" })).await.0, StatusCode::FORBIDDEN);
+}
+
+/// Uploads from a listed page: the chunked file upload and a mod jar work
+/// with the page's token, answers are readable (CORS), the path check
+/// still applies, and an unlisted page reads nothing.
+#[tokio::test]
+async fn uploads_from_another_page() {
+    let t = panel();
+    let tok = remote_login(&t, LISTED).await;
+    let up = |p: &str| call("POST", format!("/api/v1/fs/{}/uploads", t.server)).origin(LISTED).bearer(&tok).json(json!({ "path": p, "size": 10 }));
+    let (s, h, b) = up("uploaded/big.bin").send(&t).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    assert_eq!(h["access-control-allow-origin"], LISTED);
+    let id = body(&b)["id"].as_str().unwrap().to_string();
+    let chunk = |off: u64, data: &[u8]| call("PUT", format!("/api/v1/fs/{}/uploads/{id}?offset={off}", t.server)).origin(LISTED).bearer(&tok).raw(data.to_vec());
+    let (s, h, _) = chunk(0, b"01234").send(&t).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(h["access-control-allow-origin"], LISTED);
+    let (s, _, b) = chunk(5, b"56789").send(&t).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body(&b)["done"], true);
+    let root = t.app.servers.get(&t.server).unwrap().root.clone();
+    assert_eq!(std::fs::read(root.join("uploaded").join("big.bin")).unwrap(), b"0123456789");
+    // The same folder check as on the panel's own page.
+    for p in ["../evil.bin", "..\\evil.bin", "world/../../evil.bin"] {
+        let (s, h, _) = up(p).send(&t).await;
+        assert!(s.is_client_error(), "{p}: {s}");
+        assert_eq!(h["access-control-allow-origin"], LISTED, "a refusal is readable too");
+    }
+    assert!(!t.dir.join("evil.bin").exists());
+    // A mod jar, streamed in one request.
+    let (s, h, b) = call("POST", format!("/api/v1/servers/{}/mods/upload?name=tiny.jar", t.server)).origin(LISTED).bearer(&tok).raw(b"PK\x03\x04not-really-a-jar".to_vec()).send(&t).await;
+    assert!(s.is_success(), "{s} {}", String::from_utf8_lossy(&b));
+    assert_eq!(h["access-control-allow-origin"], LISTED);
+    assert!(root.join("mods").join("tiny.jar").is_file());
+    // The same token sent from an unlisted page: refused, and nothing readable.
+    let (s, h, _) = call("POST", format!("/api/v1/fs/{}/uploads", t.server)).origin(UNLISTED).bearer(&tok).json(json!({ "path": "uploaded/other.bin", "size": 10 })).send(&t).await;
+    assert!(s.is_client_error());
+    assert!(no_cors(&h));
+    // A viewer can't upload from another page either.
+    t.app.auth.user_create("vi", "vipass123", Role::Viewer, vec![t.server.clone()]).unwrap();
+    let (_, _, b) = call("POST", "/api/v1/auth/login").origin(LISTED).json(json!({ "name": "vi", "password": "vipass123", "bearer": true })).send(&t).await;
+    let vt = body(&b)["token"].as_str().unwrap().to_string();
+    let (s, _, _) = call("POST", format!("/api/v1/fs/{}/uploads", t.server)).origin(LISTED).bearer(&vt).json(json!({ "path": "v.bin", "size": 1 })).send(&t).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+/// The panel's CA as a file to install: open to anyone (like /hello, which
+/// already carries it), never anything but the CA certificate.
+#[tokio::test]
+async fn ca_certificate_download() {
+    let t = panel();
+    for o in [None, Some(LISTED), Some(UNLISTED)] {
+        let mut c = call("GET", "/api/v1/ca.crt");
+        if let Some(o) = o {
+            c = c.origin(o);
+        }
+        let (s, h, b) = c.send(&t).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b, TEST_CA.as_bytes());
+        assert_eq!(h["content-type"], "application/x-x509-ca-cert");
+        assert!(h["content-disposition"].to_str().unwrap().starts_with("attachment"));
+        assert_eq!(h["x-content-type-options"], "nosniff");
+        assert!(!String::from_utf8_lossy(&b).contains("PRIVATE"), "never the key");
+    }
 }

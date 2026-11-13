@@ -145,6 +145,7 @@ async function refresh(p) {
   }
   p.ping = Math.round(performance.now() - t);
   p.version = h.version || '';
+  p.caps = h.capabilities || [];
   if (h.name && h.name !== p.name) {
     p.name = h.name;
     saveList();

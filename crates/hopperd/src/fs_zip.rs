@@ -92,8 +92,17 @@ async fn zip_entry(
 ) -> ApiResult<Response> {
     let rel = q.get("path").cloned().unwrap_or_default();
     let entry = q.get("entry").cloned().unwrap_or_default();
-    let inline = q.contains_key("inline");
-    let mut z = open(&app, &headers, &method, &id, &rel)?;
+    require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    send_entry(&e, &rel, entry, q.contains_key("inline")).await
+}
+
+/// The zip's entry itself, for [`zip_entry`] and one-use links. The zip's
+/// path goes through `files::resolve` (the server-folder check) here.
+pub(crate) async fn send_entry(e: &crate::servers::Entry, rel: &str, entry: String, inline: bool) -> ApiResult<Response> {
+    let p = crate::files::resolve(&e.root, rel).map_err(bad)?;
+    let f = std::fs::File::open(&p).map_err(|_| not_found("file"))?;
+    let mut z = zip::ZipArchive::new(f).map_err(|_| bad("That isn't a zip file Hopper can read."))?;
     let (name, bytes) = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, Vec<u8>)> {
         // Names are listed with forward slashes; a zip made on Windows may
         // store backslashes.

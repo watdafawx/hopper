@@ -27,7 +27,7 @@ pub const API_VERSION: u32 = 1;
 
 /// Features this panel has, so clients light up only what both sides know.
 pub const CAPABILITIES: &[&str] =
-    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "jvm.preview", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "rules", "users", "mcp", "sftp", "mods.profiles", "browse.install", "pack.check", "configs.batch", "configs.sync", "mods.records", "web.origins", "mods.staged", "files.fetch", "web.remote"];
+    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "jvm.preview", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "rules", "users", "mcp", "sftp", "mods.profiles", "browse.install", "pack.check", "configs.batch", "configs.sync", "mods.records", "web.origins", "mods.staged", "files.fetch", "web.remote", "web.files"];
 
 pub struct ApiError(pub StatusCode, pub String);
 
@@ -126,6 +126,7 @@ fn secure(t: &Option<axum::Extension<crate::net::Transport>>) -> bool {
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/api/v1/hello", get(hello))
+        .route("/api/v1/ca.crt", get(ca_cert))
         .route("/api/v1/auth/setup", post(setup))
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/auth/logout", post(logout))
@@ -235,6 +236,27 @@ async fn hello(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Socke
         "tls": { "fingerprint": app.tls.fingerprint, "ca": app.tls.ca_pem, "domain": cfg.acme_domain, "trusted": app.acme.trusted_url() },
         "sftp": (cfg.sftp_port != 0).then(|| json!({ "port": cfg.sftp_port, "fingerprint": app.sftp_fingerprint })),
     }))
+}
+
+/// The panel's own certificate authority as a file to install, so a
+/// browser on another PC trusts this panel's certificate from then on
+/// (design/multi-panel.md, B4). Open like `/hello`, which already carries
+/// it: a CA certificate holds no secret. Hopper keeps the CA across
+/// restarts, so installing it once is enough. A panel with no CA of its own
+/// (tests) has nothing to give.
+async fn ca_cert(State(app): State<Arc<App>>) -> ApiResult<Response> {
+    if app.tls.ca_pem.is_empty() {
+        return Err(not_found("certificate"));
+    }
+    let name: String = app.cfg.read().unwrap().name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
+    let file = if name.is_empty() { "hopper-server-ca.crt".to_string() } else { format!("hopper-server-{name}-ca.crt") };
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/x-x509-ca-cert")
+        .header(header::CONTENT_DISPOSITION, crate::fs_api::disposition(&file, false))
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(app.tls.ca_pem.clone()))
+        .map_err(bad)
 }
 
 #[derive(Deserialize)]

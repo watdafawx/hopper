@@ -4,6 +4,7 @@
 
 import { api, post, del, target, apiBase, headersFor } from './api.js';
 import { say } from './toast.svelte.js';
+import { linkFor } from './panelfiles.svelte.js';
 
 const CHUNK = 8 * 1024 * 1024;
 const PARALLEL = 3;
@@ -192,23 +193,12 @@ export function clearDone() {
 /** Starts a browser download (the panel supports ranges, so it resumes). */
 export async function download(url) {
   // Another panel's file: this page has no cookie there, so it asks that
-  // panel for a one-use link (60 s, this file only) and follows that.
-  const p = target.panel;
-  if (p) {
-    const m = url.match(/^\/api\/v1\/fs\/([^/?]+)\/(file|zip)\?(.*)$/);
-    if (!m) {
-      say(`This download only works on ${p.name}'s own page for now.`, true);
-      return;
-    }
-    const q = new URLSearchParams(m[3]);
-    const body = m[2] === 'file' ? { path: q.get('path') } : { paths: q.getAll('path'), zip: true };
-    try {
-      const r = await post(`/fs/${m[1]}/link`, body);
-      url = `${p.url}${r.url}`;
-    } catch (e) {
-      say(e.message, true);
-      return;
-    }
+  // panel for a one-use link (60 s, these files only) and follows that.
+  try {
+    url = await linkFor(url);
+  } catch (e) {
+    say(e.message, true);
+    return;
   }
   const a = document.createElement('a');
   a.href = url;

@@ -332,6 +332,19 @@ async fn convert(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
 /// A backup as a zip: an old zip as it is, a snapshot built on the fly.
 async fn download(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path((id, name)): Path<(String, String)>) -> ApiResult<Response> {
     let e = entry(&app, &headers, &method, &id)?;
+    send_backup(&e, name).await
+}
+
+/// Whether `name` is a backup of this server that can be downloaded, for
+/// one-use links (checked when asking, and again when used).
+pub(crate) fn backup_exists(e: &Entry, name: &str) -> ApiResult<()> {
+    backup::check(name).map_err(bad)?;
+    let ok = if name.ends_with(chunkstore::EXT) { backup::store(&e.root).manifest(name).is_ok() } else { e.root.join(backup::DIR).join(name).is_file() };
+    if ok { Ok(()) } else { Err(not_found("backup")) }
+}
+
+/// The backup download itself, for [`download`] and one-use links.
+pub(crate) async fn send_backup(e: &Entry, name: String) -> ApiResult<Response> {
     backup::check(&name).map_err(bad)?;
     let root = e.root.clone();
     let zip_name = format!("{}-{}.zip", e.id, name.trim_end_matches(".zip").trim_end_matches(chunkstore::EXT));

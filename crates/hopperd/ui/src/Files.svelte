@@ -12,11 +12,12 @@
     List, LayoutGrid, PanelLeft, PanelRight, Scissors, ClipboardPaste, Info, Package, ExternalLink, Layers, TriangleAlert,
     Link,
   } from '@lucide/svelte';
-  import { api, post, here } from './lib/api.js';
+  import { api, post, here, target } from './lib/api.js';
   import { bytes } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
   import { ask, confirmIt, dialog } from './lib/dialog.svelte.js';
   import { queueUploads, onUploaded, download } from './lib/transfers.svelte.js';
+  import { panelImg } from './lib/panelfiles.svelte.js';
   import { historyOf, clip, prefs, store, jump, TEXT, ARCHIVE, PACKED, IMAGE } from './lib/files.svelte.js';
   import { configOwners, ownerOf } from './lib/files-config.js';
   import { startPick, clickSwallowed, tickLabel } from './lib/dragpick.svelte.js';
@@ -544,7 +545,9 @@
     ev.dataTransfer.setData(INTERNAL, JSON.stringify({ sid, paths }));
     ev.dataTransfer.effectAllowed = 'copyMove';
     // Chrome and Edge can drop a single file onto the desktop as a download.
-    if (paths.length === 1 && !e.dir) {
+    // Not for another panel's file: the browser wants the address as the
+    // drag starts, and a one-use link takes a moment to ask for.
+    if (paths.length === 1 && !e.dir && !target.panel) {
       ev.dataTransfer.setData('DownloadURL', `application/octet-stream:${e.name}:${location.origin}${fileUrl(paths[0])}`);
     }
   }
@@ -868,7 +871,7 @@
                   onkeydown={() => {}}
                 >
                   <span class="dragh big" draggable="true" ondragstart={(ev) => dragStart(ev, e)} role="presentation">
-                    {#if IMAGE.test(e.name) && e.size < 4 * 1024 * 1024}<img src={fileUrl(join(e.name), true)} alt="" loading="lazy" />{:else}<Icon size={30} class={e.dir ? 'fold' : 'fic'} />{/if}
+                    {#if IMAGE.test(e.name) && e.size < 4 * 1024 * 1024}<img use:panelImg={fileUrl(join(e.name), true)} alt="" loading="lazy" />{:else}<Icon size={30} class={e.dir ? 'fold' : 'fic'} />{/if}
                   </span>
                   <span class="tn">{e.name}</span>
                 </div>
@@ -907,7 +910,7 @@
             {#if /\.jar$/i.test(preview.e.name) && path.startsWith('mods')}<button class="btn sm ghost" onclick={openMods}><Package size={12} />Mods tab</button>{/if}
           </div>
           {#if IMAGE.test(preview.e.name)}
-            <img class="pimg" src={fileUrl(preview.p, true)} alt="" />
+            <img class="pimg" use:panelImg={fileUrl(preview.p, true)} alt="" />
           {:else if preview.text != null}
             <pre class="mono">{preview.text}</pre>
           {:else if preview.zip}
