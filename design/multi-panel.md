@@ -934,6 +934,43 @@ another page (setup has no bearer path; `trusted_local` refuses a foreign
 `Origin`), TLS and the plain-HTTP rule, the cookie and `X-Hopperd` rules
 for the panel's own page (`same_origin_cookie_rules_unchanged`).
 
+## B2 as built (2026-11-13)
+
+The web UI uses B1. Mock: Option A (groups in the one server list).
+
+- **Saved list**: `GET/PUT /api/v1/auth/me/panels` on the home panel,
+  per account, in `web-panels.json`: only `{ url, name }`, at most 32,
+  names cut to 64 characters. No tokens. Tokens stay in this browser
+  (`localStorage`, or this tab only when "Don't keep me signed in" is
+  ticked).
+- **Add flow** (`AddPanel.svelte`, `check()` in `lib/panels.svelte.js`):
+  address parsed, then `hello` (does it answer, is it new enough, is it
+  set up), then a CORS call (does it list this page). A failure that
+  isn't CORS is told apart by a `no-cors` probe: it answers but refuses →
+  "doesn't let this page in yet" with the origin to copy; no answer over
+  https → maybe the certificate. Mixed content is caught before any call.
+  A panel that isn't set up can't list a page yet, so in practice it shows
+  as "not listed".
+- **Groups** (`ServerList.svelte`): the home panel first, then each added
+  panel, each with health (version, latency or "this panel"), a role chip
+  and a ⋯ menu (Open in browser, Try again, Sign out of it, Remove from
+  this page). Fold state per browser.
+- **Per-panel states**: loading, ok, signin, reconnecting (5 s timeout
+  hit; servers shown dimmed with "Seen X ago"), offline (after 15 s),
+  refused, old, setup. Every call to a panel has its own 5 s timeout; the
+  home list never waits for them.
+- **Session ended**: a 401, or the live socket closing and `/auth/me`
+  then failing, puts only that group in signin ("Your sign-in to X ended.
+  Sign in again."). Signing in reopens its socket.
+- **Server pages** on another panel: `/p/<panel>/server/<id>/…`,
+  `ServerPage` gets the panel, so every call, the ticket WebSocket and the
+  one-use file links go to it. Buttons follow that panel's role
+  (`session.role`); a viewer sees "View only".
+- **Not yet**: inline previews and backup downloads from another panel
+  (B4), live `changed` events from other panels, servers of a down panel
+  across a reload, "add it as a node instead" (needs phase A), server
+  alerts on other panels' pages.
+
 ## Open questions for the maintainer
 
 1. **Remote-session limits (B).** *Answered (maintainer, 2026-11-11): a

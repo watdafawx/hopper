@@ -8,7 +8,7 @@
   import { tick, onDestroy } from 'svelte';
   import { CornerDownLeft, Search, ArrowDown, Share2, Copy, TextSelect, X, SquareTerminal } from '@lucide/svelte';
   import { consoles } from './lib/live.svelte.js';
-  import { api, post } from './lib/api.js';
+  import { api, post, target } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { kind, shift } from './lib/consoleKit.js';
   import { rightClear } from './lib/rightclear.js';
@@ -35,7 +35,9 @@
 
   // Live lines keep their keys (and numbers) while the console trims its
   // top: how far the window moved, as desktop's line_select::shift.
-  const liveLines = $derived(consoles[id] || []);
+  // Another panel's server: its lines come over that panel's own feed.
+  const feedLines = target.panel ? target.panel.consoles : consoles;
+  const liveLines = $derived(feedLines[id] || []);
   let prevLive = [];
   let liveBase = 0;
   const liveKeyBase = $derived.by(() => {

@@ -52,7 +52,7 @@ export async function loadUpdate() {
   clearTimeout(timer);
   let lost = false;
   try {
-    upd.st = await api('/panel/update');
+    upd.st = await api('/panel/update', { home: true });
     if (upd.st.state === 'restarting') expectRestart();
     if (away) {
       away = false;

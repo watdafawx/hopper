@@ -189,6 +189,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::mods_hunt::routes())
         .merge(crate::fs_zip::routes())
         .merge(crate::control::routes())
+        .merge(crate::web_panels::routes())
         .merge(crate::worlds_api::routes())
         .merge(crate::packs_where_api::routes())
         .merge(crate::autoupdate::routes())

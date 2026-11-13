@@ -76,6 +76,7 @@ mod tls;
 mod tray;
 mod ui;
 mod web_access;
+mod web_panels;
 #[cfg(test)]
 mod cross_origin_tests;
 mod webhooks;

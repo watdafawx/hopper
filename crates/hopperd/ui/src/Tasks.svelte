@@ -20,7 +20,7 @@
 
   async function load() {
     try {
-      jobs = await api('/jobs');
+      jobs = await api('/jobs', { home: true });
     } catch (e) {
       // An older panel, or not the owner: no task list.
       if (e.status === 404 || e.status === 403) gone = true;
@@ -46,8 +46,8 @@
 
   async function act(j) {
     try {
-      if (j.done) await post(`/jobs/${j.id}/dismiss`);
-      else await post(`/jobs/${j.id}/cancel`);
+      if (j.done) await post(`/jobs/${j.id}/dismiss`, {}, { home: true });
+      else await post(`/jobs/${j.id}/cancel`, {}, { home: true });
       load();
     } catch (e) {
       say(e.message, true);
@@ -56,7 +56,7 @@
 
   async function clearFinished() {
     try {
-      await post('/jobs/clear-finished');
+      await post('/jobs/clear-finished', {}, { home: true });
       await load();
     } catch (e) {
       say(e.message, true);

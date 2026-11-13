@@ -3,7 +3,7 @@
 // for managers too, who have the owner's access; `trueOwner` only for the
 // owner, for the few things managers can't do (changing managers,
 // removing the owner's devices).
-export const session = $state({ owner: false, trueOwner: false, home: '', servers: '' });
+export const session = $state({ owner: false, trueOwner: false, role: '', home: '', servers: '' });
 
 /** The owner or a manager. */
 export const ownerLike = (me) => me?.role === 'owner' || me?.role === 'manager';

@@ -1,12 +1,13 @@
 <script>
   // The mod remove question and its Undo, for every Remove on this page (Mods, the crash card, the editor's mod panel).
   import ModsRemove from './ModsRemove.svelte';
-  import { session, outside } from './lib/me.svelte.js';
+  import { session, outside, roleLabel } from './lib/me.svelte.js';
   import Avatar from './Avatar.svelte';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown, Box, Blocks, Tag, Copy, Folder, SlidersHorizontal, Stethoscope, Database } from '@lucide/svelte';
   import { live, history, follow, unfollow } from './lib/live.svelte.js';
-  import { api, post } from './lib/api.js';
+  import { enter, leave, followOn, unfollowOn } from './lib/panels.svelte.js';
+  import { api, post, here } from './lib/api.js';
   import { bytes, uptime, xmx, stateText, stateKey, stateTip, bootLeft, memTitle, loaderText } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
   import { copyText } from './lib/browse.js';
@@ -44,16 +45,23 @@
   import LoaderVersions from './LoaderVersions.svelte';
   import { notePackCheck, shortVersions } from './lib/packs.svelte.js';
 
-  let { id, tab = 'console', path = '' } = $props();
+  // `panel`: another panel this server is on (lib/panels.svelte.js); null
+  // for this panel. Everything on the page then talks to that panel. Shell
+  // keys the page on panel and server, so it never changes under the page.
+  let { id, tab = 'console', path = '', panel: panelProp = null } = $props();
+  const panel = untrack(() => panelProp);
+  enter(panel);
+  const feed = panel ?? live;
+  const samples = panel ? panel.history : history;
 
   /** #/server/<id>/<tab>/<path> */
   function nav(t, p = '') {
     const segs = [id, t, ...(p ? p.split('/') : [])].map(encodeURIComponent);
-    location.hash = `/server/${segs.join('/')}`;
+    location.hash = `${here()}/server/${segs.join('/')}`;
   }
   const filesTab = $derived(tab === 'files' || tab === 'edit' || tab === 'trash');
 
-  const s = $derived(live.servers.find((x) => x.id === id));
+  const s = $derived(feed.servers.find((x) => x.id === id));
   const alive = $derived(s && ['running', 'starting', 'stopping'].includes(s.state));
   const cap = $derived(xmx(s?.max_memory));
   const online = $derived(s?.state === 'running' ? s.players.length : null);
@@ -220,24 +228,30 @@
   }
 
   onMount(() => {
-    follow(id);
+    if (panel) followOn(panel, id);
+    else follow(id);
     checkPack();
   });
-  onDestroy(() => unfollow(id));
+  onDestroy(() => {
+    if (panel) unfollowOn(panel, id);
+    else unfollow(id);
+    leave(panel);
+  });
 </script>
 
 {#if !s}
-  <div class="pad muted">{live.servers.length ? 'No server with that id.' : 'Loading…'}</div>
+  <div class="pad muted">{feed.servers.length ? 'No server with that id.' : panel && panel.state !== 'ok' ? `Can't reach ${panel.name} right now.` : 'Loading…'}</div>
 {:else}
   <!-- One header on every tab (the compact two-line one), so it doesn't jump when switching tabs. -->
   <div class="head">
-    <HeroDrift src={s.icon ? `/api/v1/servers/${encodeURIComponent(s.id)}/icon?v=${s.icon}` : ''} />
+    <HeroDrift src={s.icon && !panel ? `/api/v1/servers/${encodeURIComponent(s.id)}/icon?v=${s.icon}` : ''} />
     <Avatar server={s} cls="ic big" />
     <div class="ttl">
       <div class="row wrap">
         <h2 title={s.path}>{s.name}</h2>
         <span class="chip {stateKey(s)}" title={stateTip(s)}><span class="dot {stateKey(s)}"></span>{stateText(s)}{s.boot && !s.progress ? ` · ${s.boot.label}` : ''}{alive && !s.progress ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
         {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}{#if outside(s.path)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}<ServerAlerts server={s} part="chip" />
+        {#if panel}<span class="chip lan" title="This server is on {panel.name} ({panel.url})">On {panel.name}</span>{#if panel.role}<span class="chip">{roleLabel(panel.role)}</span>{/if}{/if}
         {#if packShort}<button class="chip acc packup" title="{packCheck.pack.name}: {packNewer.length} newer version{packNewer.length === 1 ? '' : 's'}. Review the changelog and update." onclick={() => openUpdate()}><PackagePlus size={12} />Pack update {packShort[0]} → {packShort[1]}</button>{/if}
       </div>
       <!-- Facts as in desktop's header: icon, then the value; the folder is in the "…" menu. -->
@@ -262,7 +276,9 @@
       {/if}
     </div>
     <div class="row acts">
-      {#if !alive}
+      <!-- A viewer can't start or stop servers: no buttons (each panel's own role). -->
+      {#if session.role === 'viewer'}<span class="chip">View only</span>
+      {:else if !alive}
         <button class="btn go" onclick={() => power('start')}><Play size={14} />Start</button>
       {:else}
         <button class="btn" disabled={s.state === 'stopping'} onclick={() => power('stop')}><Square size={14} />Stop</button>
@@ -333,9 +349,9 @@
         <h3><Gauge size={14} />Live</h3>
         <!-- As desktop's Live cards: a dash and the state while it isn't running. -->
         <div class="t">CPU<b>{alive ? `${Math.round(s.cpu)} %` : '—'}</b></div>
-        {#if alive}<Spark values={history[`${id}.cpu`]} color="var(--acc)" />{/if}
+        {#if alive}<Spark values={samples[`${id}.cpu`]} color="var(--acc)" />{/if}
         <div class="t gap" title={alive ? memTitle(s.mem_bytes, cap) : undefined}>RAM<b>{alive ? bytes(s.mem_bytes) : '—'}{#if cap}<span class="muted fw">{` · heap limit ${bytes(cap)}`}</span>{/if}</b></div>
-        {#if alive}<Spark values={history[`${id}.mem`]} color="var(--blue)" />{:else}<div class="tiny muted gap">{stateText(s)}</div>{/if}
+        {#if alive}<Spark values={samples[`${id}.mem`]} color="var(--blue)" />{:else}<div class="tiny muted gap">{stateText(s)}</div>{/if}
         <ServerAlerts server={s} part="live" />
       </div>
       <div class="card">

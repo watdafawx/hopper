@@ -32,7 +32,7 @@
   import SourceFind from './SourceFind.svelte';
   import { askPower } from './lib/consoleKit.js';
   import { showSourcesHint } from './lib/sourcehint.js';
-  import { api, post } from './lib/api.js';
+  import { api, post, here } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { ask, confirmIt } from './lib/dialog.svelte.js';
   import { followJob } from './lib/jobs.js';
@@ -478,7 +478,7 @@
 
   function openEditor(f) {
     cfgPick = null;
-    location.hash = `/server/${[server.id, 'edit', ...f.split('/')].map(encodeURIComponent).join('/')}`;
+    location.hash = `${here()}/server/${[server.id, 'edit', ...f.split('/')].map(encodeURIComponent).join('/')}`;
   }
 
   // Drag across rows, as in desktop: tick boxes tick as the pointer
@@ -995,7 +995,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   <div class="ctx popover menu" style:left="{menu.x}px" style:top="{menu.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
     {#if m.source && browseOf(m)}<a class="menu-item" href="#{browseHash('mods', server.id)}/{m.source}/{encodeURIComponent(browseOf(m))}" onclick={() => (menu = null)}><Search size={13} />Open in Browse</a>{/if}
     {#if m.source}<button class="menu-item" onclick={() => act((m) => (versionsFor = m))}><Clock size={13} />Versions and changelogs</button>{/if}
-    <button class="menu-item" onclick={() => act(() => (location.hash = `/server/${encodeURIComponent(server.id)}/files/mods`))}><FolderOpen size={13} />Show in Files</button>
+    <button class="menu-item" onclick={() => act(() => (location.hash = `${here()}/server/${encodeURIComponent(server.id)}/files/mods`))}><FolderOpen size={13} />Show in Files</button>
     {#if m.source}<button class="menu-item" onclick={() => act(editConfig)}><Pencil size={13} />Edit config…</button>{/if}
     {#if m.source}<button class="menu-item" onclick={() => act((m) => resetConfig(base, m))}><Settings2 size={13} />Reset config…</button>{/if}
     {#if m.page && m.source !== 'link'}<a class="menu-item" href={m.page} target="_blank" rel="noreferrer" onclick={() => (menu = null)}><ExternalLink size={13} />Open on {site(m)}</a>{/if}
