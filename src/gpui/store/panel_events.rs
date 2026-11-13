@@ -71,6 +71,7 @@ impl Store {
         if relist && let Some(p) = self.settings.hopper_panels_on().find(|p| p.id == panel).cloned() {
             if let Some(client) = Client::for_panel(&p) {
                 let id = p.id.clone();
+                self.list_node_heads(id.clone(), &p);
                 self.spawn(move || Msg::PanelServers(id, client.server_infos().map_err(|e| format!("{e:#}"))));
             }
         }

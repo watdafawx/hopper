@@ -30,12 +30,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::tunnel::frame::code;
-use crate::tunnel::mux::{RecvHalf, Stream};
+use crate::tunnel::mux::{RecvHalf, SendHalf, Stream};
 
 /// Between a node's id and its server's id.
 pub const SEP: char = ':';
-/// A relayed request body (an upload chunk is 8 MB in the web UI; the
-/// node's own routes accept 32 MB).
+/// A relayed request body the main reads whole before sending it on (JSON
+/// the main or the node checks for paths and starts). File bytes are
+/// streamed instead ([`streams_body`]) and only the node's own limits apply.
 pub const MAX_BODY: usize = crate::fs_api::MAX_CHUNK;
 /// A JSON answer the main reads whole (to put the node's id into job ids).
 const MAX_JSON: usize = 32 * 1024 * 1024;
@@ -166,6 +167,21 @@ pub fn allowed(method: &Method, route: &str) -> bool {
         // ([`ask_alerts`]) to show them on its own pages. Reading only:
         // dismissing stays on the node (the main hides them for itself).
         ("alerts", []) => *method == Method::GET,
+        _ => false,
+    }
+}
+
+/// Routes whose request body is a file's raw bytes: an upload chunk and a
+/// mod jar. Their bodies go through the main as a stream with the tunnel's
+/// credit window (design/multi-panel.md, A3), so a big upload costs the
+/// main one window per request, never the whole body or a temp file. They
+/// hold no paths or actions to check (their paths are in the URL and query,
+/// which both sides check), so nothing needs the body whole.
+pub fn streams_body(method: &Method, route: &str) -> bool {
+    let parts: Vec<&str> = route.split('/').collect();
+    match parts.as_slice() {
+        ["", "api", "v1", "fs", _, "uploads", _] => *method == Method::PUT,
+        ["", "api", "v1", "servers", _, "mods", "upload"] => *method == Method::POST,
         _ => false,
     }
 }
@@ -342,6 +358,10 @@ pub struct Head {
     /// allowlist (removing a server) work for them, as on their own panel.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lead: bool,
+    /// The hopperd version the main runs, for `update` (the node updates to
+    /// it).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
 }
 
 /// Request headers passed on to the node.
@@ -393,16 +413,28 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
     if let Some(_msg) = crate::security::refusal(&as_node, &method, &t.route) {
         return refuse(StatusCode::FORBIDDEN, format!("{} lets this panel {}.", info.name, ceiling_text(info.ceiling)));
     }
-    let body = match axum::body::to_bytes(body, MAX_BODY).await {
-        Ok(b) => b,
-        Err(_) => return refuse(StatusCode::PAYLOAD_TOO_LARGE, "That's too big to send to a node in one go."),
+    // File bytes stream through; everything else is read whole (bounded)
+    // so the maintenance check below can read it.
+    let (whole, stream_in) = if streams_body(&method, &t.route) {
+        (axum::body::Bytes::new(), Some(body))
+    } else {
+        match axum::body::to_bytes(body, MAX_BODY).await {
+            Ok(b) => (b, None),
+            Err(_) => return refuse(StatusCode::PAYLOAD_TOO_LARGE, "That's too big to send to a node in one go."),
+        }
     };
+    let body = whole;
     if info.maintenance.is_some() {
         if starts_server(&method, &t.route, &body) {
             return refuse(StatusCode::CONFLICT, format!("{} is under maintenance, so nothing starts there. End maintenance first.", info.name));
         }
     }
     let Some(handle) = info.handle else {
+        // Two tunnel versions apart: it can't connect at all until one of
+        // them is updated; the list keeps its last servers, read-only.
+        if let Some(s) = &info.skew {
+            return refuse(StatusCode::SERVICE_UNAVAILABLE, s.text(&info.name));
+        }
         let when = if info.last_seen > 0 { format!(" (last heard from {} ago)", crate::nodes::how_long(crate::security::now().saturating_sub(info.last_seen))) } else { String::new() };
         return refuse(StatusCode::SERVICE_UNAVAILABLE, format!("{} is offline{when}.", info.name));
     };
@@ -417,16 +449,27 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
         user: who_label(&who),
         role: role.id().into(),
         server: String::new(),
+        version: String::new(),
         lead: who.owner_level() && info.ceiling == Role::Admin,
     };
     let mut s = match handle.open(serde_json::to_vec(&head).unwrap_or_default()).await {
         Ok(s) => s,
         Err(_) => return refuse(StatusCode::SERVICE_UNAVAILABLE, format!("{} is busy or just went offline. Try again.", info.name)),
     };
-    if !body.is_empty() && s.tx.send(&body).await.is_err() {
-        return refuse(StatusCode::BAD_GATEWAY, format!("{} stopped answering.", info.name));
-    }
-    let _ = s.tx.finish().await;
+    // A streamed body goes on in its own task while the answer is awaited:
+    // the node may answer before it has read it all (a refusal), and the
+    // pump must not hold the answer up. It stops with the request (`_pump`
+    // lives as long as the answer does).
+    let _pump = match stream_in {
+        Some(b) => Some(Pump(tokio::spawn(pump_body(b, s.tx)))),
+        None => {
+            if !body.is_empty() && s.tx.send(&body).await.is_err() {
+                return refuse(StatusCode::BAD_GATEWAY, format!("{} stopped answering.", info.name));
+            }
+            let _ = s.tx.finish().await;
+            None
+        }
+    };
     let (answer, first) = match tokio::time::timeout(ANSWER_WAIT, read_answer(&mut s.rx)).await {
         Ok(Ok(a)) => a,
         Ok(Err(e)) => return refuse(StatusCode::BAD_GATEWAY, format!("{} sent an answer this panel can't read ({e}).", info.name)),
@@ -458,17 +501,51 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
         r.headers_mut().remove(header::CONTENT_ENCODING);
         return r;
     }
-    let stream = futures_util::stream::unfold((Some(first), s.rx), |(first, mut rx)| async move {
+    let stream = futures_util::stream::unfold((Some(first), s.rx, _pump), |(first, mut rx, pump)| async move {
         if let Some(f) = first.filter(|f| !f.is_empty()) {
-            return Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(f)), (None, rx)));
+            return Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(f)), (None, rx, pump)));
         }
         match rx.recv().await {
-            Ok(Some(d)) => Some((Ok(axum::body::Bytes::from(d)), (None, rx))),
+            Ok(Some(d)) => Some((Ok(axum::body::Bytes::from(d)), (None, rx, pump))),
             Ok(None) => None,
-            Err(_) => Some((Err(std::io::Error::other("the node stopped answering")), (None, rx))),
+            Err(_) => Some((Err(std::io::Error::other("the node stopped answering")), (None, rx, pump))),
         }
     });
     b.body(Body::from_stream(stream)).unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+/// The task sending a streamed request body; stopped when dropped.
+struct Pump(tokio::task::JoinHandle<()>);
+
+impl Drop for Pump {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Sends a request body to the node as it arrives. Each `send` waits for
+/// the node's credit, so at most one window is in flight and the main
+/// reads from the browser only as fast as the node takes it. A body that
+/// breaks off (the upload was cancelled, the connection dropped) resets the
+/// stream, so the node's handler sees an error and keeps nothing of it.
+async fn pump_body(body: Body, mut tx: crate::tunnel::mux::SendHalf) {
+    use futures_util::StreamExt as _;
+    let mut data = body.into_data_stream();
+    while let Some(chunk) = data.next().await {
+        match chunk {
+            Ok(c) if c.is_empty() => {}
+            Ok(c) => {
+                if tx.send(&c).await.is_err() {
+                    return;
+                }
+            }
+            Err(_) => {
+                tx.reset(code::CANCEL);
+                return;
+            }
+        }
+    }
+    let _ = tx.finish().await;
 }
 
 /// A node's TPS readings and alerts (its `GET /api/v1/alerts`), asked for by
@@ -748,7 +825,7 @@ async fn serve_stream(app: Arc<App>, router: axum::Router, ceiling: Option<Role>
     let Some(ceiling) = ceiling else {
         log::warn!("node: refused a request from the main: this node's ceiling in node.json can't be read");
         if head.k == "req" {
-            answer(&mut s, 403, "This node can't read what its main may do here (node.json). Join again to fix it.").await;
+            answer(&mut s.tx, 403, "This node can't read what its main may do here (node.json). Join again to fix it.").await;
         } else {
             s.tx.reset(code::REFUSED);
         }
@@ -758,34 +835,35 @@ async fn serve_stream(app: Arc<App>, router: axum::Router, ceiling: Option<Role>
         "req" => serve_request(app, router, ceiling, main, head, s).await,
         "live" => serve_live(app, s).await,
         "console" => serve_console(app, head, s).await,
+        "update" => serve_update(app, ceiling, main, head, s).await,
         _ => s.tx.reset(code::REFUSED),
     }
 }
 
 /// A refusal written as an answer.
-async fn answer(s: &mut Stream, status: u16, msg: &str) {
+async fn answer(s: &mut SendHalf, status: u16, msg: &str) {
     let body = json!({ "error": msg }).to_string().into_bytes();
     let head = Answer { s: status, h: vec![("content-type".into(), "application/json".into()), ("content-length".into(), body.len().to_string())] };
     let _ = write_answer(s, &head).await;
-    let _ = s.tx.send(&body).await;
-    let _ = s.tx.finish().await;
+    let _ = s.send(&body).await;
+    let _ = s.finish().await;
 }
 
-async fn write_answer(s: &mut Stream, a: &Answer) -> Result<(), crate::tunnel::mux::StreamError> {
+async fn write_answer(s: &mut SendHalf, a: &Answer) -> Result<(), crate::tunnel::mux::StreamError> {
     let h = serde_json::to_vec(a).unwrap_or_default();
     let mut out = (h.len() as u32).to_be_bytes().to_vec();
     out.extend_from_slice(&h);
-    s.tx.send(&out).await
+    s.send(&out).await
 }
 
 async fn serve_request(app: Arc<App>, router: axum::Router, ceiling: Role, main: String, head: Head, mut s: Stream) {
     use tower::ServiceExt as _;
     let Ok(method) = Method::from_bytes(head.m.as_bytes()) else {
-        return answer(&mut s, 400, "Bad request.").await;
+        return answer(&mut s.tx, 400, "Bad request.").await;
     };
     // The role the main says, strictly, capped by this node's ceiling.
     let Some(role) = Role::parse(&head.role).filter(|r| *r != Role::Manager) else {
-        return answer(&mut s, 403, "The main sent a role this node doesn't know.").await;
+        return answer(&mut s.tx, 403, "The main sent a role this node doesn't know.").await;
     };
     let role = cap(role, ceiling);
     let route = head.p.split('?').next().unwrap_or("").to_string();
@@ -793,37 +871,44 @@ async fn serve_request(app: Arc<App>, router: axum::Router, ceiling: Role, main:
         log::warn!("node: refused {method} {route} from the main (not something a main may do here)");
         let who = Who::Main { main: main.clone(), user: clean(&head.user), role, lead: false };
         record_refusal(&app, &who, &method, &route);
-        return answer(&mut s, 403, "This node doesn't let its main do that. Open the node's own page for it.").await;
-    }
-    // The body, bounded.
-    let mut body = Vec::new();
-    loop {
-        match s.rx.recv().await {
-            Ok(Some(d)) => {
-                if body.len() + d.len() > MAX_BODY {
-                    return answer(&mut s, 413, "That's too big.").await;
-                }
-                body.extend_from_slice(&d);
-            }
-            Ok(None) => break,
-            Err(_) => return,
-        }
+        return answer(&mut s.tx, 403, "This node doesn't let its main do that. Open the node's own page for it.").await;
     }
     // Owner-level only when this node's own ceiling is Manage.
     let lead = head.lead && ceiling == Role::Admin && role == Role::Admin;
     let who = Who::Main { main, user: clean(&head.user), role, lead };
-    if !body_paths_ok(&body) {
-        record_refusal(&app, &who, &method, &route);
-        return answer(&mut s, 400, "Paths can't go above the server folder.").await;
-    }
+    let body = if streams_body(&method, &route) {
+        // File bytes go to the handler as they arrive (its own body limit
+        // applies); credit goes back to the main only as the handler reads.
+        stream_body(s.rx)
+    } else {
+        // The body, bounded, read whole so its paths can be checked.
+        let mut body = Vec::new();
+        loop {
+            match s.rx.recv().await {
+                Ok(Some(d)) => {
+                    if body.len() + d.len() > MAX_BODY {
+                        return answer(&mut s.tx, 413, "That's too big.").await;
+                    }
+                    body.extend_from_slice(&d);
+                }
+                Ok(None) => break,
+                Err(_) => return,
+            }
+        }
+        if !body_paths_ok(&body) {
+            record_refusal(&app, &who, &method, &route);
+            return answer(&mut s.tx, 400, "Paths can't go above the server folder.").await;
+        }
+        Body::from(body)
+    };
     let mut b = Request::builder().method(method).uri(&head.p).header(header::HOST, "node");
     for (k, v) in &head.h {
         if PASS_IN.contains(&k.as_str()) {
             b = b.header(k.as_str(), v.as_str());
         }
     }
-    let Ok(mut req) = b.body(Body::from(body)) else {
-        return answer(&mut s, 400, "Bad request.").await;
+    let Ok(mut req) = b.body(body) else {
+        return answer(&mut s.tx, 400, "Bad request.").await;
     };
     req.extensions_mut().insert(ConnectInfo(SocketAddr::from(RELAY_ADDR)));
     let res = match RELAYED.scope(who, router.oneshot(req)).await {
@@ -832,7 +917,7 @@ async fn serve_request(app: Arc<App>, router: axum::Router, ceiling: Role, main:
     };
     let (parts, body) = res.into_parts();
     let h = parts.headers.iter().filter(|(k, _)| PASS_OUT.contains(&k.as_str())).filter_map(|(k, v)| v.to_str().ok().map(|v| (k.to_string(), v.to_string()))).collect();
-    if write_answer(&mut s, &Answer { s: parts.status.as_u16(), h }).await.is_err() {
+    if write_answer(&mut s.tx, &Answer { s: parts.status.as_u16(), h }).await.is_err() {
         return;
     }
     let mut data = body.into_data_stream();
@@ -849,6 +934,75 @@ async fn serve_request(app: Arc<App>, router: axum::Router, ceiling: Role, main:
                 return;
             }
         }
+    }
+    let _ = s.tx.finish().await;
+}
+
+/// A stream's incoming half as a request body. A reset (the upload was
+/// cancelled on the main) is an error, so the handler fails instead of
+/// keeping a cut-off file.
+fn stream_body(rx: RecvHalf) -> Body {
+    let s = futures_util::stream::unfold(rx, |mut rx| async move {
+        match rx.recv().await {
+            Ok(Some(d)) => Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(d)), rx)),
+            Ok(None) => None,
+            Err(_) => Some((Err(std::io::Error::other("the upload was cancelled on the main")), rx)),
+        }
+    });
+    Body::from_stream(s)
+}
+
+/// The main asks this node to update to the version the main runs
+/// (design/multi-panel.md, A3). Only under a Manage ceiling and for the
+/// main's owner or a manager, as the panel's own update is owner-only.
+/// Answers with JSON lines of its update state until it restarts, is ready
+/// or fails; the update goes on if the main stops listening.
+async fn serve_update(app: Arc<App>, ceiling: Role, main: String, head: Head, mut s: Stream) {
+    async fn line(s: &mut SendHalf, v: Value) -> bool {
+        let mut b = v.to_string().into_bytes();
+        b.push(b'\n');
+        s.send(&b).await.is_ok()
+    }
+    let lead = head.lead && ceiling == Role::Admin && Role::parse(&head.role) == Some(Role::Admin);
+    let who = Who::Main { main, user: clean(&head.user), role: cap(Role::Admin, ceiling), lead };
+    let version = clean_text(&head.version);
+    let path = format!("/api/v1/update (to {version}, asked by the main)");
+    if !lead {
+        log::warn!("node: refused an update from the main (needs the Manage level and the main's owner or a manager)");
+        record_refusal(&app, &who, &Method::POST, &path);
+        line(&mut s.tx, json!({ "state": "refused", "error": "This node lets its main update it only at the Manage level, for the main's owner or a manager." })).await;
+        let _ = s.tx.finish().await;
+        return;
+    }
+    let a = app.clone();
+    let v = version.clone();
+    let started = tokio::task::spawn_blocking(move || crate::autoupdate::install_for_main(&a, &v)).await;
+    let started = started.map_err(|e| anyhow::anyhow!("{e}")).and_then(|r| r);
+    app.audit.record(&crate::security::Event {
+        at: crate::security::now(),
+        who: who.name(),
+        role: who.role_name().into(),
+        ip: "main".into(),
+        proxy: String::new(),
+        net: crate::net::Net::Internet,
+        method: "POST".into(),
+        path,
+        status: if started.is_ok() { 200 } else { 400 },
+    });
+    if let Err(e) = started {
+        line(&mut s.tx, json!({ "state": "refused", "error": format!("{e:#}") })).await;
+        let _ = s.tx.finish().await;
+        return;
+    }
+    log::info!("node: updating to {version}, as the main asked");
+    loop {
+        let st = crate::autoupdate::status();
+        let end = matches!(st.state.as_str(), "error" | "ready" | "restarting");
+        let v = json!({ "state": st.state, "error": st.error, "target": st.target, "waiting_for": st.waiting_for });
+        if !line(&mut s.tx, v).await || end {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
     let _ = s.tx.finish().await;
 }

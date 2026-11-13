@@ -476,8 +476,9 @@ fn server_list(
             .iter()
             .filter(|m| match &g.kind {
                 GroupKind::Local => m.place.is_none(),
-                GroupKind::Panel(id) => m.place.as_ref() == Some(id),
-                GroupKind::Node(..) | GroupKind::Folder | GroupKind::Site(_) => false,
+                GroupKind::Panel(id) => m.place.as_ref() == Some(id) && m.node.is_none(),
+                GroupKind::Node(panel, node) => m.place.as_ref() == Some(panel) && m.node.as_ref() == Some(node),
+                GroupKind::Folder | GroupKind::Site(_) => false,
             })
             .collect();
         let mut members: Vec<&ServerInfo> = s.servers().iter().filter(|x| g.has(s, x)).collect();
@@ -608,9 +609,12 @@ fn groups(s: &Store) -> Vec<Group> {
             .iter()
             .filter_map(|x| x.remote.as_ref().filter(|r| r.panel == p.id).and_then(|r| hopper::hopperd::node_of(&r.id)).map(str::to_string))
             .collect();
+        // A node with no servers yet still gets its group (and its +).
+        nodes.extend(s.node_heads(&p.id).into_iter().flat_map(|h| h.nodes.iter().map(|n| n.id.clone())));
         nodes.sort();
         nodes.dedup();
-        let mut nodes: Vec<(String, String)> = nodes.into_iter().map(|n| (hopper::hopperd::node_name(&p.id, &n), n)).collect();
+        let named = |n: &str| s.node_head(&p.id, n).map(|h| h.name.clone()).unwrap_or_else(|| hopper::hopperd::node_name(&p.id, n));
+        let mut nodes: Vec<(String, String)> = nodes.into_iter().map(|n| (named(&n), n)).collect();
         nodes.sort_by_key(|(name, _)| name.to_lowercase());
         out.extend(nodes.into_iter().map(|(name, n)| Group {
             key: format!("node:{}:{n}", p.id),
@@ -658,15 +662,31 @@ fn group_head(
         GroupKind::Panel(id) => s.panel_waiting(id).filter(|w| w.as_secs() >= SLOW_SECS),
         _ => None,
     };
-    let (light, error) = match &g.kind {
-        GroupKind::Panel(id) | GroupKind::Node(id, _) => match s.panel_error(id) {
-            _ if slow.is_some() => (Some(theme.warning), slow.map(|w| format!("Waiting for {}… ({} s)", g.name, w.as_secs()))),
-            Some(e) => (Some(theme.danger), Some(e.to_string())),
+    // A node's own state, when its panel says (hopperd 0.64+): its light
+    // and the line under its name, as in the web UI.
+    let head = match &g.kind {
+        GroupKind::Node(panel, node) => s.node_head(panel, node).filter(|_| s.panel_error(panel).is_none()),
+        _ => None,
+    };
+    let (light, error) = match (&g.kind, head) {
+        (GroupKind::Node(..), Some(h)) => {
+            use hopper::hopperd_nodes::{Light, Tone};
+            let light = match h.light() {
+                Light::Good => theme.success,
+                Light::Busy => theme.warning,
+                Light::Bad => theme.danger,
+            };
+            let line = h.line(now_secs(), hopper::update_list::ago_text);
+            (Some(light), line.map(|(t, tone)| (t, if tone == Tone::Trouble { theme.danger } else { theme.muted_foreground })))
+        }
+        (GroupKind::Panel(id) | GroupKind::Node(id, _), _) => match s.panel_error(id) {
+            _ if slow.is_some() => (Some(theme.warning), slow.map(|w| (format!("Waiting for {}… ({} s)", g.name, w.as_secs()), theme.muted_foreground))),
+            Some(e) => (Some(theme.danger), Some((e.to_string(), theme.danger))),
             None if s.panel_listed(id) => (Some(theme.success), None),
             None => (Some(theme.warning), None),
         },
-        GroupKind::Site(id) => match s.site_error(id) {
-            Some(e) => (Some(theme.danger), Some(e.to_string())),
+        (GroupKind::Site(id), _) => match s.site_error(id) {
+            Some(e) => (Some(theme.danger), Some((e.to_string(), theme.danger))),
             None if s.site_listed(id) => (Some(theme.success), None),
             None => (Some(theme.warning), None),
         },
@@ -737,6 +757,23 @@ fn group_head(
                 })
                 .into_any_element()
         }),
+        // A node joined at Manage takes a fresh server, as in the web UI;
+        // only while it's connected (the main makes it there at once).
+        GroupKind::Node(panel, node) if head.is_some_and(|h| h.ceiling == "manage" && h.state == "connected") => {
+            let (store, panel, node) = (store.clone(), panel.clone(), node.clone());
+            Some(
+                Button::new(ElementId::Name(format!("group-new:{}", g.key).into()))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Plus)
+                    .tooltip(format!("New server on {}", g.name))
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        crate::host_dialog::open_on_node(store.clone(), panel.clone(), node.clone(), window, cx)
+                    })
+                    .into_any_element(),
+            )
+        }
         GroupKind::Node(..) | GroupKind::Folder | GroupKind::Site(_) => None,
     };
     let retry: Option<AnyElement> = match &g.kind {
@@ -757,6 +794,14 @@ fn group_head(
         }
         _ => None,
     };
+    // Update, for someone the panel lets update its nodes.
+    let update = match (&g.kind, head) {
+        (GroupKind::Node(panel, node), Some(h)) if h.can_update => {
+            let version = s.node_heads(panel).map(|v| v.version.clone()).unwrap_or_default();
+            Some((panel.clone(), node.clone(), g.name.clone(), version))
+        }
+        _ => None,
+    };
     let web = match &g.kind {
         GroupKind::Panel(id) | GroupKind::Node(id, _) => s.settings().hopper_panels.iter().find(|p| &p.id == id).map(|p| p.url.clone()),
         _ => None,
@@ -773,13 +818,29 @@ fn group_head(
                 .clickable(cx)
                 .hover(|st| widgets::row_hover(st, cx))
                 .on_click(fold)
-                .context_menu(move |menu, _, _| match web.clone() {
-                    Some(url) => menu.item(
-                        PopupMenuItem::new("Open in browser")
-                            .icon(IconName::ExternalLink)
-                            .on_click(move |_, _, cx| cx.open_url(&url)),
-                    ),
-                    None => menu,
+                .context_menu({
+                    let store = store.clone();
+                    move |menu, _, _| {
+                        let menu = match update.clone() {
+                            Some((panel, node, name, version)) => {
+                                let store = store.clone();
+                                menu.item(
+                                    PopupMenuItem::new(format!("Update to hopperd {version}"))
+                                        .icon(IconName::RefreshCw)
+                                        .on_click(move |_, window, cx| confirm_node_update(&store, &panel, &node, &name, &version, window, cx)),
+                                )
+                            }
+                            None => menu,
+                        };
+                        match web.clone() {
+                            Some(url) => menu.item(
+                                PopupMenuItem::new("Open in browser")
+                                    .icon(IconName::ExternalLink)
+                                    .on_click(move |_, _, cx| cx.open_url(&url)),
+                            ),
+                            None => menu,
+                        }
+                    }
                 })
                 .child(
                     Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown })
@@ -801,10 +862,39 @@ fn group_head(
                 .children(browse)
                 .children(add),
         )
-        .when_some(error.filter(|_| !folded), |c, e| {
-            c.child(div().px_3().pb_1().text_xs().text_color(if slow.is_some() { theme.muted_foreground } else { theme.danger }).child(e))
+        .when_some(error.filter(|_| !folded), |c, (e, color)| {
+            c.child(div().px_3().pb_1().text_xs().text_color(color).child(e))
         })
         .into_any_element()
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Asks before updating a node, as the web UI does; the node downloads the
+/// release from GitHub itself.
+fn confirm_node_update(store: &Entity<Store>, panel: &str, node: &str, name: &str, version: &str, window: &mut Window, cx: &mut App) {
+    use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
+    let (store, panel, node) = (store.clone(), panel.to_string(), node.to_string());
+    let title = format!("Update {name} to hopperd {version}?");
+    window.open_dialog(cx, move |dialog, window, _| {
+        let (store, panel, node) = (store.clone(), panel.clone(), node.clone());
+        dialog
+            .title(title.clone())
+            .w(rems(26.).to_pixels(window.rem_size()))
+            .margin_top(rems(widgets::DIALOG_TOP).to_pixels(window.rem_size()))
+            .child(div().text_sm().child("It downloads the new Hopper Server from GitHub and restarts into it, as its own update does. Its servers keep running."))
+            .footer(
+                DialogFooter::new()
+                    .child(DialogClose::new().child(Button::new("node-update-cancel").outline().label("Cancel")))
+                    .child(DialogAction::new().child(Button::new("node-update-ok").primary().label("Update"))),
+            )
+            .on_ok(move |_, _, cx| {
+                store.read(cx).update_node(&panel, &node);
+                true
+            })
+    });
 }
 
 /// A server being made: its name, what the job is doing with a progress

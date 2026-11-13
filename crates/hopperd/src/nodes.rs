@@ -111,6 +111,9 @@ struct NodeSnap {
 /// What the relay needs to know about a node (`crate::relay::forward`).
 pub struct RelayInfo {
     pub name: String,
+    /// Too far apart in tunnel version to connect ("Update needed" or
+    /// "Main is older"): the node is read-only from here until updated.
+    pub skew: Option<Skew>,
     /// The ceiling as a role (the node checks its own copy too).
     pub ceiling: crate::auth::Role,
     pub maintenance: Option<Maintenance>,
@@ -182,6 +185,9 @@ struct Pending {
 
 struct Live {
     handle: Handle,
+    /// What both sides can do: this panel's capabilities that the node
+    /// named in its hello too (design/multi-panel.md, A3 version skew).
+    caps: Vec<String>,
     /// Unix seconds it connected.
     since: u64,
     /// Which connection this is, so an old one ending can't remove a newer one.
@@ -202,6 +208,52 @@ struct Inner {
     snaps: HashMap<String, NodeSnap>,
     fails: HashMap<IpAddr, (Instant, u32)>,
     conns: u64,
+    /// Nodes whose last try was refused at hello for being two or more
+    /// tunnel versions apart (this run; cleared when one connects).
+    skew: HashMap<String, Skew>,
+    /// The last update asked from here, per node.
+    updates: HashMap<String, Update>,
+    /// "Update all": the run going on or the last one's outcome.
+    update_all: Option<Value>,
+}
+
+/// A node too far apart in tunnel version to connect.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Skew {
+    /// The node's tunnel version and this panel's.
+    pub theirs: u16,
+    pub ours: u16,
+    /// The hopperd version the node named.
+    pub version: String,
+}
+
+impl Skew {
+    /// The node is older (it needs the update), not this panel.
+    pub fn node_older(&self) -> bool {
+        self.theirs < self.ours
+    }
+
+    /// The row's sentence.
+    pub fn text(&self, name: &str) -> String {
+        let v = if self.version.is_empty() { String::new() } else { format!(" (hopperd {})", self.version) };
+        if self.node_older() {
+            format!("{name}{v} is too old for this panel. Update it on the node itself: its own update, or install the new hopperd there.")
+        } else {
+            format!("{name}{v} is newer than this panel can talk to. Update this panel first.")
+        }
+    }
+}
+
+/// An update this panel asked of a node.
+#[derive(Clone, Debug, Serialize)]
+pub struct Update {
+    /// "updating", "done" or "failed".
+    pub state: String,
+    pub target: String,
+    /// What it's doing or waiting for, or why it failed.
+    pub message: String,
+    pub at: u64,
+    pub by: String,
 }
 
 pub struct Nodes {
@@ -238,6 +290,28 @@ pub enum NodeState {
     Connected,
     Reconnecting,
     Offline,
+    /// Two or more tunnel versions behind this panel: read-only here.
+    #[serde(rename = "update_needed")]
+    UpdateNeeded,
+    /// Two or more tunnel versions ahead: this panel needs the update.
+    #[serde(rename = "main_older")]
+    MainOlder,
+}
+
+/// The capabilities both sides have.
+pub fn intersect(ours: &[&str], theirs: &[String]) -> Vec<String> {
+    ours.iter().filter(|c| theirs.iter().any(|t| t == *c)).map(|c| c.to_string()).collect()
+}
+
+/// This panel's version, as nodes are compared with it
+/// (`HOPPERD_TEST_VERSION` pretends another, as for its own update).
+pub fn main_version() -> String {
+    crate::autoupdate::current()
+}
+
+/// Whether a node at `version` is older than this panel.
+pub fn outdated(version: &str) -> bool {
+    !version.is_empty() && hopper_core::selfupdate::is_newer(&main_version(), version)
 }
 
 fn hash32(s: &str) -> [u8; 32] {
@@ -485,7 +559,7 @@ impl Nodes {
     /// None when the node was removed (or its token changed) since its token
     /// was checked: the upgrade and the hello take a while, and a removal in
     /// between must not leave a live tunnel nobody can see.
-    fn attach(&self, node: &Node, handle: Handle, ip: IpAddr, version: &str) -> Option<(u64, Option<Handle>)> {
+    fn attach(&self, node: &Node, handle: Handle, ip: IpAddr, version: &str, caps: Vec<String>) -> Option<(u64, Option<Handle>)> {
         let id = node.id.as_str();
         let mut g = self.lock();
         if !g.stored.nodes.iter().any(|n| n.id == id && n.token_hash == node.token_hash) {
@@ -493,9 +567,10 @@ impl Nodes {
         }
         g.conns += 1;
         let conn = g.conns;
-        let old = g.live.insert(id.into(), Live { handle, since: now(), conn }).map(|l| l.handle);
+        let old = g.live.insert(id.into(), Live { handle, caps, since: now(), conn }).map(|l| l.handle);
         g.heard.insert(id.into(), Instant::now());
         g.ended.remove(id);
+        g.skew.remove(id);
         if let Some(n) = g.stored.nodes.iter_mut().find(|n| n.id == id) {
             n.last_ip = ip.to_string();
             n.version = clean_version(version);
@@ -521,7 +596,34 @@ impl Nodes {
         }
     }
 
+    /// A node's hello was refused for being too far apart in tunnel
+    /// version. Kept for its row ("Update needed"), with the version it
+    /// named; its last list stays shown, read-only.
+    pub(crate) fn too_far(&self, id: &str, skew: Skew) {
+        let mut g = self.lock();
+        g.heard.insert(id.into(), Instant::now());
+        if let Some(n) = g.stored.nodes.iter_mut().find(|n| n.id == id) {
+            if !skew.version.is_empty() {
+                n.version = clean_version(&skew.version);
+            }
+        }
+        g.ended.insert(id.into(), if skew.node_older() { "too old for this panel".into() } else { "newer than this panel".into() });
+        g.skew.insert(id.into(), skew);
+        self.save(&g);
+    }
+
+    /// Each node's state, to notice the ones that change with time alone
+    /// (reconnecting, then offline).
+    pub fn states(&self) -> Vec<(String, NodeState)> {
+        let g = self.lock();
+        g.stored.nodes.iter().map(|n| (n.id.clone(), self.state_of(&g, n).0)).collect()
+    }
+
     fn state_of(&self, g: &Inner, n: &Node) -> (NodeState, Option<Duration>) {
+        if !g.live.contains_key(&n.id) && let Some(s) = g.skew.get(&n.id) {
+            let q = g.heard.get(&n.id).map(|h| h.elapsed());
+            return (if s.node_older() { NodeState::UpdateNeeded } else { NodeState::MainOlder }, q);
+        }
         if let Some(l) = g.live.get(&n.id) {
             let q = l.handle.quiet_for();
             let s = if q < QUIET_RECONNECTING {
@@ -568,6 +670,11 @@ impl Nodes {
                     "created": n.created,
                     "ended": g.ended.get(&n.id),
                     "maintenance": n.maintenance,
+                    "skew": g.skew.get(&n.id).map(|s| s.text(&n.name)),
+                    "capabilities": live.map(|l| &l.caps),
+                    "outdated": outdated(&n.version),
+                    "can_update": self.can_update(&g, n).is_ok(),
+                    "update": g.updates.get(&n.id),
                 })
             })
             .collect();
@@ -584,7 +691,7 @@ impl Nodes {
             .filter(|k| k.used_by.is_none() && t < k.expires)
             .map(|k| json!({ "id": k.id, "ceiling": k.ceiling.id(), "created": k.created, "expires": k.expires, "by": k.by }))
             .collect();
-        json!({ "nodes": nodes, "pending": pending, "keys": keys, "fingerprint": fingerprint, "version": env!("CARGO_PKG_VERSION") })
+        json!({ "nodes": nodes, "pending": pending, "keys": keys, "fingerprint": fingerprint, "version": main_version(), "update_all": g.update_all })
     }
 
     /// Nodes gone long enough to alert about, and ones back after one.
@@ -606,7 +713,7 @@ impl Nodes {
                 match state {
                     NodeState::New => None,
                     NodeState::Connected => Some((n.id.clone(), n.name.clone(), Some(false))),
-                    NodeState::Reconnecting | NodeState::Offline => {
+                    NodeState::Reconnecting | NodeState::Offline | NodeState::UpdateNeeded | NodeState::MainOlder => {
                         // Not heard from this run: count from the start, so a
                         // restart of the main doesn't alert about every node.
                         let gone = g.heard.get(&n.id).map_or(self.started.elapsed(), |h| h.elapsed());
@@ -617,6 +724,40 @@ impl Nodes {
             .collect()
     }
 
+    // ---- A3: updating nodes from here ----
+
+    /// Whether this panel may ask node `n` to update now, or why not.
+    fn can_update(&self, g: &Inner, n: &Node) -> Result<(), String> {
+        let Some(l) = g.live.get(&n.id) else {
+            return Err(format!("{} isn't connected.", n.name));
+        };
+        if !l.caps.iter().any(|c| c == "nodes.update") {
+            return Err(format!("{} is too old to be updated from here. Update it on the node itself.", n.name));
+        }
+        if n.ceiling != Ceiling::Manage {
+            return Err(format!("{} lets this panel update it only with the Manage level.", n.name));
+        }
+        if !outdated(&n.version) {
+            return Err(format!("{} already runs this panel's version or a newer one.", n.name));
+        }
+        if g.updates.get(&n.id).is_some_and(|u| u.state == "updating") {
+            return Err(format!("{} is updating already.", n.name));
+        }
+        Ok(())
+    }
+
+    fn set_update(&self, id: &str, f: impl FnOnce(&mut Update)) {
+        if let Some(u) = self.lock().updates.get_mut(id) {
+            f(u);
+        }
+    }
+
+    /// The nodes "Update all" would update, in list order.
+    fn updatable(&self) -> Vec<String> {
+        let g = self.lock();
+        g.stored.nodes.iter().filter(|n| self.can_update(&g, n).is_ok()).map(|n| n.id.clone()).collect()
+    }
+
     // ---- A2: relaying, the merged list, maintenance ----
 
     pub fn relay_info(&self, id: &str) -> Option<RelayInfo> {
@@ -625,6 +766,7 @@ impl Nodes {
         let live = g.live.get(id);
         Some(RelayInfo {
             name: n.name.clone(),
+            skew: if live.is_none() { g.skew.get(id).cloned() } else { None },
             // Unknown reads as Look here; the node refuses everything then.
             ceiling: crate::relay::ceiling_role(n.ceiling.id()).unwrap_or(crate::auth::Role::Viewer),
             maintenance: n.maintenance.clone(),
@@ -711,6 +853,11 @@ impl Nodes {
                 "host": snap.map(|s| s.host.clone()),
                 "promised": promised,
                 "count": snap.map_or(0, |s| s.servers.len()),
+                "capabilities": live.map(|l| &l.caps),
+                "skew": g.skew.get(&n.id).map(|s| s.text(&n.name)),
+                "outdated": outdated(&n.version),
+                "can_update": self.can_update(&g, n).is_ok(),
+                "update": g.updates.get(&n.id),
             }));
             servers.extend(mine);
         }
@@ -777,11 +924,14 @@ pub fn commands(url: &str, key: &str, fingerprint: &str, version: &str) -> Optio
 pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/v1/nodes", get(list))
+        .route("/api/v1/nodes/live", get(live))
         .route("/api/v1/nodes/keys", post(key_create))
         .route("/api/v1/nodes/keys/{id}", delete(key_remove))
         .route("/api/v1/nodes/pending/{id}/answer", post(pending_answer))
         .route("/api/v1/nodes/{id}", delete(node_remove))
         .route("/api/v1/nodes/{id}/maintenance", axum::routing::put(maintenance))
+        .route("/api/v1/nodes/{id}/update", post(node_update))
+        .route("/api/v1/nodes/update-all", post(nodes_update_all))
         // What nodes call (no session: a join key, a code request or a node token).
         .route("/api/v1/node/join", post(join))
         .route("/api/v1/node/request", post(request))
@@ -814,6 +964,169 @@ fn refused(status: StatusCode, msg: &str, note: String) -> Response {
     r
 }
 
+/// How long a node may take from "restarting" to connecting again on the
+/// new version.
+const BACK_WITHIN: Duration = if cfg!(test) { Duration::from_secs(3) } else { Duration::from_secs(10 * 60) };
+/// The longest a whole update may take (a Linux node waits for servers the
+/// new panel can't take over to stop, as its own update does).
+const UPDATE_WITHIN: Duration = if cfg!(test) { Duration::from_secs(10) } else { Duration::from_secs(60 * 60) };
+
+/// Updates one node through its own update path (design/multi-panel.md,
+/// A3): this panel names the version it runs itself, and the node fetches
+/// that release from GitHub and checks it as it does for its own updates,
+/// never a file from here. Its servers keep running as in its own update.
+/// Done when the node is back on that version.
+pub async fn update_node(app: &Arc<App>, id: &str, who: &crate::auth::Who) -> Result<String, String> {
+    let target = main_version();
+    let (name, handle) = {
+        let mut g = app.nodes.lock();
+        let n = g.stored.nodes.iter().find(|n| n.id == id).cloned().ok_or("No node with that id.")?;
+        app.nodes.can_update(&g, &n)?;
+        let handle = g.live.get(id).map(|l| l.handle.clone()).ok_or_else(|| format!("{} isn't connected.", n.name))?;
+        g.updates.insert(id.into(), Update { state: "updating".into(), target: target.clone(), message: "Asking it to update".into(), at: now(), by: who.name() });
+        (n.name, handle)
+    };
+    app.changes.emit(None, &["list"], None);
+    let r = tokio::time::timeout(UPDATE_WITHIN, run_update(app, id, &name, &target, handle, who))
+        .await
+        .unwrap_or_else(|_| Err(format!("{name} didn't finish updating in time. Check it on the node.")));
+    let (state, message) = match &r {
+        Ok(m) => ("done", m.clone()),
+        Err(e) => ("failed", e.clone()),
+    };
+    app.nodes.set_update(id, |u| {
+        u.state = state.into();
+        u.message = message.clone();
+        u.at = now();
+    });
+    app.changes.emit(None, &["list"], None);
+    log::info!("node \"{name}\": update to {target}: {message}");
+    r
+}
+
+async fn run_update(app: &Arc<App>, id: &str, name: &str, target: &str, handle: Handle, who: &crate::auth::Who) -> Result<String, String> {
+    let head = crate::relay::Head {
+        k: "update".into(),
+        user: crate::relay::clean(&who.name()),
+        role: crate::auth::Role::Admin.id().into(),
+        lead: who.owner_level(),
+        version: target.into(),
+        ..Default::default()
+    };
+    let mut s = handle.open(serde_json::to_vec(&head).unwrap_or_default()).await.map_err(|_| format!("{name} is busy or just went offline. Try again."))?;
+    let _ = s.tx.finish().await;
+    let mut lines = crate::relay::Lines::new(s.rx);
+    let mut restarting = false;
+    while let Some(v) = lines.next().await {
+        let state = v["state"].as_str().unwrap_or("");
+        let text = |k: &str| v[k].as_str().map(crate::relay::clean_text).filter(|t| !t.is_empty());
+        match state {
+            "refused" | "error" => return Err(format!("{name}: {}", text("error").unwrap_or_else(|| "the update failed.".into()))),
+            "ready" => return Ok(format!("Installed hopperd {target} on {name}. It runs from the node's next start.")),
+            "restarting" => {
+                restarting = true;
+                break;
+            }
+            _ => {
+                let msg = match (state, text("waiting_for")) {
+                    ("waiting", Some(w)) => format!("Waiting for {w} to stop"),
+                    ("waiting", None) => "Waiting to restart".to_string(),
+                    _ => format!("Downloading hopperd {target}"),
+                };
+                app.nodes.set_update(id, |u| u.message = msg);
+                app.changes.emit(None, &["list"], None);
+            }
+        }
+    }
+    // A node that restarts drops the connection, sometimes before its last
+    // line gets here.
+    for _ in 0..20 {
+        if restarting || handle.is_dead() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !restarting && !handle.is_dead() {
+        return Err(format!("{name} stopped telling how its update went. Check it on the node."));
+    }
+    app.nodes.set_update(id, |u| u.message = "Restarting".into());
+    app.changes.emit(None, &["list"], None);
+    // Back on the new version, over a new connection.
+    let until = Instant::now() + BACK_WITHIN;
+    while Instant::now() < until {
+        {
+            let g = app.nodes.lock();
+            let live = g.live.get(id).is_some_and(|l| !l.handle.is_dead());
+            let v = g.stored.nodes.iter().find(|n| n.id == id).map(|n| n.version.clone()).unwrap_or_default();
+            if live && v == target {
+                return Ok(format!("{name} runs hopperd {target} now."));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    Err(format!("{name} didn't come back on hopperd {target} in time. Check it on the node."))
+}
+
+/// "Update all": the outdated nodes one at a time, stopping at the first
+/// that fails (design/multi-panel.md, research point 14).
+pub async fn update_all(app: &Arc<App>, ids: Vec<String>, who: &crate::auth::Who) {
+    let total = ids.len();
+    for (i, id) in ids.iter().enumerate() {
+        let name = app.nodes.relay_info(id).map(|r| r.name).unwrap_or_else(|| id.clone());
+        app.nodes.lock().update_all = Some(json!({ "state": "running", "at": name, "done": i, "total": total }));
+        app.changes.emit(None, &["list"], None);
+        if let Err(e) = update_node(app, id, who).await {
+            let left = total - i - 1;
+            let msg = if left == 0 { format!("Stopped: {e}") } else { format!("Stopped at {name}: {e} {left} more not updated.") };
+            app.nodes.lock().update_all = Some(json!({ "state": "stopped", "at": name, "done": i, "total": total, "message": msg }));
+            app.changes.emit(None, &["list"], None);
+            return;
+        }
+    }
+    let s = if total == 1 { "" } else { "s" };
+    app.nodes.lock().update_all = Some(json!({ "state": "done", "done": total, "total": total, "message": format!("Updated {total} node{s}.") }));
+    app.changes.emit(None, &["list"], None);
+}
+
+/// "Update" on one node: the owner or a manager, under a Manage ceiling.
+async fn node_update(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Response> {
+    let who = crate::api::require_owner_who(&app, &headers, &method)?;
+    let name = {
+        let g = app.nodes.lock();
+        if g.update_all.as_ref().is_some_and(|u| u["state"] == "running") {
+            return Err(ApiError(StatusCode::CONFLICT, "Update all is running. Wait for it to finish.".into()));
+        }
+        let n = g.stored.nodes.iter().find(|n| n.id == id).ok_or_else(|| not_found("node"))?;
+        app.nodes.can_update(&g, n).map_err(|e| ApiError(StatusCode::CONFLICT, e))?;
+        n.name.clone()
+    };
+    let a = app.clone();
+    tokio::spawn(async move {
+        let _ = update_node(&a, &id, &who).await;
+    });
+    Ok(noted(json!({ "ok": true }), format!("node \"{name}\" asked to update to {}", main_version())))
+}
+
+/// "Update all": every node that is behind and can be updated from here.
+async fn nodes_update_all(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Response> {
+    let who = crate::api::require_owner_who(&app, &headers, &method)?;
+    let ids = app.nodes.updatable();
+    if ids.is_empty() {
+        return Err(ApiError(StatusCode::CONFLICT, "No node needs an update that this panel can do.".into()));
+    }
+    {
+        let mut g = app.nodes.lock();
+        if g.update_all.as_ref().is_some_and(|u| u["state"] == "running") {
+            return Err(ApiError(StatusCode::CONFLICT, "Update all is running already.".into()));
+        }
+        g.update_all = Some(json!({ "state": "running", "done": 0, "total": ids.len() }));
+    }
+    let n = ids.len();
+    let a = app.clone();
+    tokio::spawn(async move { update_all(&a, ids, &who).await });
+    Ok(noted(json!({ "ok": true, "count": n }), format!("{n} node(s) asked to update to {}, one at a time", main_version())))
+}
+
 #[derive(Deserialize)]
 struct MaintenanceBody {
     on: bool,
@@ -828,6 +1141,23 @@ async fn maintenance(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     let name = app.nodes.set_maintenance(&id, b.on, &who.name()).ok_or_else(|| not_found("node"))?;
     app.changes.emit(None, &["list"], None);
     Ok(noted(json!({ "ok": true }), format!("node \"{name}\" {}", if b.on { "under maintenance" } else { "out of maintenance" })))
+}
+
+/// Each node's head as the live feed sends it, for Hopper desktop (it
+/// lists servers without the feed): anyone signed in, like `GET /servers`,
+/// and only the nodes holding a server they may see when they're limited
+/// to some. `can_update` is also off for someone who may not update nodes
+/// (`require_owner_who`, as `POST /nodes/{id}/update` checks).
+async fn live(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    let who = crate::api::require(&app, &headers, &method)?;
+    let may_update = crate::api::require_owner_who(&app, &headers, &method).is_ok();
+    let (_, mut heads) = app.nodes.live_view(&who);
+    if !may_update {
+        for h in &mut heads {
+            h["can_update"] = json!(false);
+        }
+    }
+    Ok(Json(json!({ "version": main_version(), "nodes": heads })))
 }
 
 async fn list(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
@@ -1065,9 +1395,14 @@ async fn connect(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Soc
         .max_frame_size(MAX_FRAME)
         .on_upgrade(move |socket| async move {
             let (tx, rx) = crate::tunnel::ws::split_axum(socket);
-            let cfg = Config { capabilities: crate::api::CAPABILITIES.iter().map(|c| c.to_string()).collect(), ..Config::default() };
+            let cfg = Config { capabilities: crate::api::CAPABILITIES.iter().map(|c| c.to_string()).collect(), version: main_version(), ..Config::default() };
             match mux::start(Side::Main, cfg, tx, rx).await {
                 Ok(t) => session(app, node, t, addr, headers).await,
+                Err(MuxError::Version { ours, theirs, peer }) => {
+                    log::warn!("node \"{}\": refused at hello: tunnel {theirs} (hopperd {peer}) is too far from this panel's {ours}", node.name);
+                    app.nodes.too_far(&node.id, Skew { theirs, ours, version: peer });
+                    app.changes.emit(None, &["list"], None);
+                }
                 Err(e) => log::warn!("node \"{}\": the connection failed at hello: {e}", node.name),
             }
         })
@@ -1075,7 +1410,8 @@ async fn connect(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Soc
 
 async fn session(app: Arc<App>, node: Node, mut t: mux::Tunnel, addr: SocketAddr, headers: HeaderMap) {
     let ip = client(addr, &headers);
-    let Some((conn, old)) = app.nodes.attach(&node, t.handle.clone(), ip, &t.peer.version) else {
+    let caps = intersect(crate::api::CAPABILITIES, &t.peer.capabilities);
+    let Some((conn, old)) = app.nodes.attach(&node, t.handle.clone(), ip, &t.peer.version, caps) else {
         log::info!("node \"{}\" was removed while it connected; closed", node.name);
         t.handle.close("removed").await;
         return;
@@ -1085,6 +1421,9 @@ async fn session(app: Arc<App>, node: Node, mut t: mux::Tunnel, addr: SocketAddr
         old.close("replaced by a new connection").await;
     }
     log::info!("node \"{}\" connected from {ip} (hopperd {})", node.name, t.peer.version);
+    // Hopper desktop lists node heads from `/nodes/live` and reads them
+    // again on a "list" change; without one it shows the old state.
+    app.changes.emit(None, &["list"], None);
     let feed = Follow(tokio::spawn(take_feed(app.clone(), node.id.clone(), t.handle.clone())));
     audit(&app, addr, &headers, &format!("node \"{}\"", node.name), format!("{} (connected, hopperd {})", crate::tunnel::ws::PATH, clean_version(&t.peer.version)), 101);
     let why = loop {
@@ -1109,6 +1448,7 @@ async fn session(app: Arc<App>, node: Node, mut t: mux::Tunnel, addr: SocketAddr
         MuxError::Protocol(_) | MuxError::GoAway(..) => "the connection broke".to_string(),
     };
     app.nodes.detach(&node.id, conn, quiet, plain);
+    app.changes.emit(None, &["list"], None);
 }
 
 /// The node's live feed: its server list, machine stats and changes,
@@ -1151,7 +1491,21 @@ async fn take_feed(app: Arc<App>, id: String, handle: Handle) {
 /// a real one, with its live feed.
 #[cfg(test)]
 pub(crate) fn attach_for_test(app: &Arc<App>, node: &Node, handle: Handle) -> Follow {
-    app.nodes.attach(node, handle.clone(), IpAddr::from([127, 0, 0, 1]), "test").expect("the node is there");
+    let caps = crate::api::CAPABILITIES.iter().map(|c| c.to_string()).collect();
+    attach_for_test_as(app, node, handle, "test", caps)
+}
+
+/// The node's connection ended (relay tests, which attach without a
+/// session).
+#[cfg(test)]
+pub(crate) fn detach_for_test(app: &Arc<App>, id: &str) {
+    app.nodes.lock().live.remove(id);
+}
+
+/// The same, for a node that says it runs `version` and has `caps`.
+#[cfg(test)]
+pub(crate) fn attach_for_test_as(app: &Arc<App>, node: &Node, handle: Handle, version: &str, caps: Vec<String>) -> Follow {
+    app.nodes.attach(node, handle.clone(), IpAddr::from([127, 0, 0, 1]), version, caps).expect("the node is there");
     Follow(tokio::spawn(take_feed(app.clone(), node.id.clone(), handle)))
 }
 
@@ -1185,8 +1539,16 @@ pub fn follow(app: &App, ns: &str, who: &crate::auth::Who, tx: tokio::sync::mpsc
 pub fn start(app: Arc<App>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(5));
+        let mut last = Vec::new();
         loop {
             tick.tick().await;
+            // A quiet node turns reconnecting, then offline, with no event of
+            // its own; Hopper desktop reads node heads again on "list".
+            let states = app.nodes.states();
+            if states != last {
+                last = states;
+                app.changes.emit(None, &["list"], None);
+            }
             let s = crate::alerts::settings(&app);
             let after = s.node_on.then(|| Duration::from_secs(u64::from(s.node_minutes) * 60).max(ALERT_AFTER));
             let events: Vec<_> = app.nodes.health(after).into_iter().filter_map(|(id, name, gone)| crate::alerts::node_state(&id, &name, gone, s.node_minutes)).collect();

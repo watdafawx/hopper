@@ -21,6 +21,7 @@ mod config_sync;
 mod disk_sync;
 mod friends;
 mod only_here;
+mod node_heads;
 mod panel_events;
 mod server_mods;
 // Invite and SyncStatus are for the Friends screen being rebuilt on top.
@@ -54,6 +55,10 @@ pub enum Msg {
     RigServers(Vec<ServerInfo>),
     /// A Hopper Server's servers (by panel id), or why it couldn't list them.
     PanelServers(String, Result<Vec<ServerInfo>, String>),
+    /// A Hopper Server's nodes (`None`: it couldn't say; see `node_heads`).
+    NodeHeads(String, Option<hopper::hopperd_nodes::NodeHeads>),
+    /// Asked a panel to update a node: its nodes now, and why it refused.
+    NodeUpdateAsked(String, Option<hopper::hopperd_nodes::NodeHeads>, Option<String>),
     /// An SFTP / FTP site's servers (and its SSH key, to pin), or why not.
     SiteServers(String, Result<(Vec<ServerInfo>, Option<String>), String>),
     /// What changed on a paired Hopper Server (see `panel_events`).
@@ -403,6 +408,9 @@ pub struct Making {
     pub name: String,
     /// None: this PC; else a paired Hopper Server's id.
     pub place: Option<String>,
+    /// The node behind that Hopper Server it's made on, if any: its row
+    /// shows in the node's group.
+    pub node: Option<String>,
     /// Its folder once made (a Hopper Server's: as this PC lists it).
     pub root: Option<PathBuf>,
     /// Its id on the Hopper Server, once made there.
@@ -488,6 +496,8 @@ pub struct Store {
     panel_servers: HashMap<String, Result<Vec<ServerInfo>, String>>,
     /// Paired panels asked for their list and not answered yet, since when.
     panel_asked: HashMap<String, std::time::Instant>,
+    /// Each Hopper Server's nodes, by panel id (see `node_heads`).
+    node_heads: HashMap<String, hopper::hopperd_nodes::NodeHeads>,
     /// Each SFTP / FTP site's servers (by site id), or why it couldn't list them.
     site_servers: HashMap<String, Result<Vec<ServerInfo>, String>>,
     /// Pack files that couldn't be downloaded automatically, per instance.
@@ -739,6 +749,7 @@ impl Store {
             folder_servers: Vec::new(),
             panel_servers: HashMap::new(),
             panel_asked: HashMap::new(),
+            node_heads: HashMap::new(),
             site_servers: HashMap::new(),
             started_with: HashMap::new(),
             live_syncs: HashMap::new(),
@@ -1511,6 +1522,22 @@ impl Store {
                 self.merge_servers(cx);
             }
             Msg::PanelEvents(panel, changes) => self.panel_changed(panel, changes, cx),
+            Msg::NodeHeads(panel, heads) => {
+                match heads {
+                    Some(h) => self.node_heads.insert(panel, h),
+                    None => self.node_heads.remove(&panel),
+                };
+                cx.notify();
+            }
+            Msg::NodeUpdateAsked(panel, heads, refused) => {
+                if let Some(e) = refused {
+                    cx.emit(StoreEvent::Notice(e, true));
+                }
+                if let Some(h) = heads {
+                    self.node_heads.insert(panel, h);
+                }
+                cx.notify();
+            }
             Msg::PanelServers(panel, list) => {
                 if let Err(e) = &list {
                     log::warn!("Hopper Server {panel:?}: {e}");
@@ -3756,11 +3783,13 @@ impl Store {
         let before = self.panel_servers.len();
         self.panel_servers.retain(|k, _| ids.contains(k));
         self.panel_asked.retain(|k, _| ids.contains(k));
+        self.node_heads.retain(|k, _| ids.contains(k));
         if self.panel_servers.len() != before {
             self.merge_servers_quiet();
         }
         for p in self.settings.hopper_panels_on().cloned().collect::<Vec<_>>() {
             let id = p.id.clone();
+            self.list_node_heads(id.clone(), &p);
             match hopper::hopperd::Client::for_panel(&p) {
                 Some(client) => {
                     self.panel_asked.insert(id.clone(), std::time::Instant::now());

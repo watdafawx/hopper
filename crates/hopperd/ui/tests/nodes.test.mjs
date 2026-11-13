@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { nodeLine, span, codeGroups, defaultAddress, STATES, ceilingLabel, onNode, canShareLog, nodeOf, alertShows } from '../src/lib/nodes.js';
+import { nodeLine, span, codeGroups, defaultAddress, STATES, ceilingLabel, onNode, canShareLog, nodeOf, alertShows, stateOf, updateLine, updateLabel, behind, behindLine } from '../src/lib/nodes.js';
 
 const now = 1_800_000_000;
 
@@ -58,4 +58,34 @@ test('a node machine alert shows on that node servers and the Overview only', ()
   assert.ok(alertShows(dgTps, 'ab12:dg'));
   assert.ok(!alertShows(dgTps, 'dg'));
   assert.ok(!alertShows(dgTps, ''), 'a server alert stays on its page');
+});
+
+test('a node two versions apart says what to do, read-only', () => {
+  const n = { state: 'update_needed', skew: 'vm (hopperd 0.40.0) is too old for this panel. Update it on the node itself: its own update, or install the new hopperd there.' };
+  assert.equal(stateOf(n).label, 'Update needed');
+  assert.equal(nodeLine(n, now), n.skew);
+  assert.match(nodeLine({ state: 'main_older' }, now), /Update this panel first/);
+  assert.equal(STATES.main_older.label, 'Update this panel');
+});
+
+test('an update in progress, failed and done', () => {
+  const n = { state: 'connected', outdated: true, can_update: true };
+  assert.equal(updateLine(n), null);
+  assert.equal(updateLabel(n, '0.63.0'), 'Update to 0.63.0');
+  const going = { ...n, update: { state: 'updating', message: 'Downloading hopperd 0.63.0' } };
+  assert.equal(stateOf(going).label, 'Updating');
+  assert.deepEqual(updateLine(going), { text: 'Updating · Downloading hopperd 0.63.0', bad: false });
+  const failed = { ...n, update: { state: 'failed', message: "vm: A development build: it doesn't update itself." } };
+  assert.equal(updateLine(failed).bad, true);
+  assert.equal(updateLabel(failed, '0.63.0'), 'Try again');
+  assert.equal(stateOf(failed).label, 'Connected');
+  // Done and current: the message shows; done but still behind: nothing.
+  assert.equal(updateLine({ state: 'connected', outdated: false, update: { state: 'done', message: 'vm runs hopperd 0.63.0 now.' } }).text, 'vm runs hopperd 0.63.0 now.');
+});
+
+test('the list head counts nodes behind and what Update all does', () => {
+  const data = { version: '0.63.0', nodes: [{ outdated: true, can_update: true }, { state: 'update_needed' }, { outdated: false }] };
+  assert.deepEqual(behind(data), { older: 2, updatable: 1 });
+  assert.equal(behindLine(data), 'This panel runs hopperd 0.63.0. 2 nodes run an older one.');
+  assert.equal(behindLine({ nodes: [{}] }), '');
 });

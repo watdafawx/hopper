@@ -574,3 +574,9 @@ async fn a_look_node_sends_no_secret() {
     let (_, v) = send(&p.main, &p.main_cookie, "GET", "/api/v1/servers/infos", None).await;
     assert!(!v.to_string().contains("hunter22"));
 }
+
+#[path = "relay_stream_tests.rs"]
+mod stream;
+
+#[path = "relay_skew_tests.rs"]
+mod skew;
