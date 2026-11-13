@@ -12,11 +12,13 @@ const ROLE_LABELS = { owner: 'Owner', manager: 'Manager', admin: 'Admin', operat
 /** A role as people read it ("API token", not "token"). */
 export const roleLabel = (r) => ROLE_LABELS[r] || r || '';
 
-/** Whether `path` is outside both the panel folder and the servers folder
- * (false while none is set): a server the panel made in its own servers
- * folder is never "outside", wherever that folder is. */
-export function outside(path) {
-  if (!session.home || !path) return false;
+/** Whether server `s` sits outside both the panel folder and the servers
+ * folder (false while none is set): a server the panel made in its own
+ * servers folder is never "outside", wherever that folder is. A node's
+ * server lives in the node's folders, which this panel can't judge. */
+export function outside(s) {
+  const path = s?.path;
+  if (!session.home || !path || s.node) return false;
   const n = (p) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
   const q = n(path);
   const under = (dir) => !!dir && (q === n(dir) || q.startsWith(n(dir) + '/'));

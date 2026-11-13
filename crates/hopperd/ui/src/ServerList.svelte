@@ -72,12 +72,13 @@
   /** The node's health line: what it runs, its machine, and the RAM its servers may take. */
   function nodeHealth(n) {
     const h = n.host;
-    const parts = [`Node · ${n.count} server${n.count === 1 ? '' : 's'}`];
+    const parts = ['Node'];
     if (h) {
       parts.push(`CPU ${Math.round(h.cpu)}%`);
-      if (h.mem_total) parts.push(`RAM ${(h.mem_used / 2 ** 30).toFixed(1)} of ${bytes(h.mem_total)}`);
+      if (h.mem_total) parts.push(`RAM ${Math.round(h.mem_used / 2 ** 30)} of ${Math.round(h.mem_total / 2 ** 30)} GB`);
       if (h.disk_total) parts.push(`${bytes(h.disk_free)} free`);
     }
+    // RAM promised: what its servers may take at most, against what it has.
     if (n.promised) parts.push(`${bytes(n.promised)} promised${h?.mem_total && n.promised > h.mem_total ? ', more than it has' : ''}`);
     if (n.rtt_ms != null) parts.push(`${n.rtt_ms} ms`);
     return parts.join(' · ');
@@ -160,7 +161,8 @@
   // A saved filter for a panel that's no longer on the page shows them all.
   const panelFilter = $derived(!grouped ? 'all' : filter.panel === 'home' || panels.list.some((p) => p.id === filter.panel) || nodes.some((n) => nodeKey(n) === filter.panel) ? filter.panel : 'all');
   const showGroup = (id) => panelFilter === 'all' || panelFilter === id;
-  const homeRows = $derived(shown.filter((s) => !s.node && passes(s, filter.state)));
+  const homeAll = $derived(shown.filter((s) => !s.node));
+  const homeRows = $derived(homeAll.filter((s) => passes(s, filter.state)));
   const nodeRows = (n) => shown.filter((s) => s.node === n.id && passes(s, filter.state));
   const nodeOf = (s) => (s.node ? nodes.find((n) => n.id === s.node) : null);
   const rowsOf = (p) => sorted(p.servers).filter((s) => passes(s, filter.state));
@@ -450,7 +452,7 @@
     {/if}
     {#if grouped && showGroup('home')}
       {@render head('home', homeName || 'This panel', homeRole ? roleLabel(homeRole) : '', live.connected ? 'running' : 'starting', null)}
-      <div class="health">Hopper Server · {live.servers.length} · this panel{homeVersion ? ` · ${homeVersion}` : ''}</div>
+      <div class="health">Hopper Server · {homeAll.length} · this panel{homeVersion ? ` · ${homeVersion}` : ''}</div>
     {/if}
     {#if showGroup('home') && (!grouped || !fold.home)}
       {#if loading}
@@ -479,8 +481,10 @@
       {#each homeRows as s (s.id)}
         {@render row(s, null)}
       {:else}
-        {#if shown.length}
+        {#if homeAll.length}
           <div class="cap none" class:flat={!grouped}>{noneText}</div>
+        {:else if shown.length && !making.length}
+          <div class="cap none">No servers on this panel itself.</div>
         {:else if !loading && !making.length}
           <div class="empty-state">
             <span class="es-ic"><Server size={18} /></span>
@@ -498,7 +502,7 @@
       {#if showGroup('home') || i > 0}<div class="gsep"></div>{/if}
       {@render head(k, n.name, CEILING[n.ceiling] || '', nodeLight(n), owner ? { node: n } : null)}
       {#if n.maintenance}
-        <div class="health maint"><Pause size={11} />Under maintenance{n.maintenance.by ? ` · by ${n.maintenance.by}` : ''}{n.maintenance.since ? ` ${secsAgo(n.maintenance.since)}` : ''} · nothing starts here{#if owner} · <button class="link" onclick={() => maintain(n, false)}>End maintenance</button>{/if}</div>
+        <div class="health maint"><Pause size={11} /> Under maintenance{n.maintenance.by ? ` · by ${n.maintenance.by}` : ''}{n.maintenance.since ? ` ${secsAgo(n.maintenance.since)}` : ''} · nothing starts here{#if owner}{' · '}<button class="link" onclick={() => maintain(n, false)}>End maintenance</button>{/if}</div>
       {/if}
       {#if n.state === 'connected' || n.state === 'reconnecting'}
         <div class="health">{nodeHealth(n)}{n.state === 'reconnecting' ? ' · Reconnecting…' : ''}</div>
@@ -639,8 +643,10 @@
   .gmore { flex: none; }
   .health { padding: 0 10px 4px 32px; font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
   .health.trouble { color: var(--subtle); }
-  .health.maint { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; color: var(--subtle); }
-  .health.maint :global(svg) { color: var(--gold); flex: none; }
+  /* Inline so it wraps as one sentence; the icon keeps the text's colour
+     (the amber light already marks it, and amber fails 3:1 on light). */
+  .health.maint { color: var(--subtle); }
+  .health.maint :global(svg) { vertical-align: -1px; }
   /* Accent mixed toward the text colour: readable on light themes too (plain --acc is 3.4:1 there). */
   .link { background: none; border: 0; padding: 0; font: inherit; color: color-mix(in srgb, var(--acc) 60%, var(--text)); cursor: pointer; text-decoration: none; }
   .link:hover { text-decoration: underline; }

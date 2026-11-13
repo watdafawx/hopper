@@ -312,6 +312,11 @@ pub struct Head {
     /// The server, for `console`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub server: String,
+    /// The person is the owner or a manager on the main. The node honours
+    /// it only under a Manage ceiling: then owner-only routes on the
+    /// allowlist (removing a server) work for them, as on their own panel.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lead: bool,
 }
 
 /// Request headers passed on to the node.
@@ -359,7 +364,7 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
     }
     // The main's copy of the ceiling answers early; the node checks again.
     let role = cap(role_on_node(&who), info.ceiling);
-    let as_node = Who::Main { main: String::new(), user: String::new(), role };
+    let as_node = Who::Main { main: String::new(), user: String::new(), role, lead: false };
     if let Some(_msg) = crate::security::refusal(&as_node, &method, &t.route) {
         return refuse(StatusCode::FORBIDDEN, format!("{} lets this panel {}.", info.name, ceiling_text(info.ceiling)));
     }
@@ -388,6 +393,7 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
         user: who_label(&who),
         role: role.id().into(),
         server: String::new(),
+        lead: who.owner_level() && info.ceiling == Role::Admin,
     };
     let mut s = match handle.open(serde_json::to_vec(&head).unwrap_or_default()).await {
         Ok(s) => s,
@@ -412,6 +418,10 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
         }
         if k == "content-type" && v.starts_with("application/json") {
             json_answer = true;
+        }
+        // A JSON answer is rewritten (job ids), so its length is set below.
+        if k == "content-length" && answer.h.iter().any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v.starts_with("application/json")) {
+            continue;
         }
         if let Ok(v) = HeaderValue::from_str(v) {
             b = b.header(k, v);
@@ -605,7 +615,7 @@ async fn serve_request(app: Arc<App>, router: axum::Router, ceiling: Role, main:
     let route = head.p.split('?').next().unwrap_or("").to_string();
     if !allowed(&method, &route) || !query_paths_ok(&head.p) {
         log::warn!("node: refused {method} {route} from the main (not something a main may do here)");
-        let who = Who::Main { main: main.clone(), user: clean(&head.user), role };
+        let who = Who::Main { main: main.clone(), user: clean(&head.user), role, lead: false };
         record_refusal(&app, &who, &method, &route);
         return answer(&mut s, 403, "This node doesn't let its main do that. Open the node's own page for it.").await;
     }
@@ -623,7 +633,9 @@ async fn serve_request(app: Arc<App>, router: axum::Router, ceiling: Role, main:
             Err(_) => return,
         }
     }
-    let who = Who::Main { main, user: clean(&head.user), role };
+    // Owner-level only when this node's own ceiling is Manage.
+    let lead = head.lead && ceiling == Role::Admin && role == Role::Admin;
+    let who = Who::Main { main, user: clean(&head.user), role, lead };
     if !body_paths_ok(&body) {
         record_refusal(&app, &who, &method, &route);
         return answer(&mut s, 400, "Paths can't go above the server folder.").await;

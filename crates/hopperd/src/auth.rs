@@ -413,7 +413,7 @@ pub enum Who {
     /// here, already capped by this node's ceiling (`crate::relay`). Only
     /// ever Admin, Operator or Viewer, on every server of the node; never
     /// owner-level, so owner-only routes refuse it whatever the main says.
-    Main { main: String, user: String, role: Role },
+    Main { main: String, user: String, role: Role, lead: bool },
 }
 
 impl Who {
@@ -423,7 +423,7 @@ impl Who {
             Who::Device { name, .. } => name.clone(),
             Who::Token { name, .. } => format!("token \"{name}\""),
             Who::User { name, .. } => format!("user \"{name}\""),
-            Who::Main { main, user, role } => format!("{user} via {main} ({})", role.id()),
+            Who::Main { main, user, role, .. } => format!("{user} via {main} ({})", role.id()),
         }
     }
 
@@ -437,7 +437,7 @@ impl Who {
 
     /// The owner or a manager: what owner-only routes (`require_owner`) allow.
     pub fn owner_level(&self) -> bool {
-        matches!(self, Who::Owner | Who::User { role: Role::Manager, .. } | Who::Device { manage: true, .. })
+        matches!(self, Who::Owner | Who::User { role: Role::Manager, .. } | Who::Device { manage: true, .. } | Who::Main { lead: true, .. })
     }
 
     /// The true owner (not a manager, not a device): the only one who may

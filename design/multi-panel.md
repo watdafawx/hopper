@@ -1454,6 +1454,130 @@ strictly). Both sides leaving: a node left offline stays listed on the
 main as Offline until removed there (the message says so); a node removed
 while offline stops at its next 401 and `leave` then clears it.
 
+## A2 as built (2026-11-13)
+
+A node's servers now show in the main's server list and open the same
+server pages (console, files, mods, configs, logs, backups, properties,
+power) as the main's own. One shared view: the server page gets a
+namespaced id and every request goes through the main, which relays it.
+No mock: the node group reuses B2's group header and health line, so the
+look was already agreed; only the maintenance line and the "Make it on"
+choice are new, and both reuse existing pieces (the health line, the
+segmented control).
+
+### Ids and routes
+
+- A node's server is `<node id>:<server id>` in the main's API and UI
+  (`relay::SEP`). The main's guard sees the prefix (`relay::target`) and
+  forwards the request on a tunnel stream (`relay::forward`); everything
+  else stays local. Job ids in a node's answers get the same prefix, so
+  `/jobs/{id}` finds its way back.
+- Allowlist (`relay::allowed`, checked on the main and again on the node,
+  where it counts): `servers/create`, `servers/port-check`, `GET servers/{id}`,
+  `servers/{id}/<part>` for the parts in `SERVER_PARTS`, `fs/{id}/<part>` for
+  `FS_PARTS`, `jobs/{id}` and its cancel/dismiss. Not relayed: copying a
+  server or saving it as a template (they write outside its folder),
+  off-site backup copies (the node's targets and keys), sharing a log to
+  the web, `fs/link` (the main issues its own one-use links), `fs/fetch`
+  (it would make the node download from its own network), the browse and
+  infos routes. Empty, `.` and `..` path parts are refused before any
+  handler runs; query values with `..`, a leading `/` or a drive
+  (`query_paths_ok`) too. The node's handlers then check every path against
+  the server folder as they do for their own people (`files::resolve`,
+  which follows symlinks).
+- Only a few headers cross (`PASS_IN` / `PASS_OUT`); bodies are capped at
+  `MAX_BODY` (one upload chunk, 8 MB), JSON answers the main rewrites at
+  32 MB. A relayed request reaches the node's handlers from 192.0.2.1 (a
+  documentation address), so nothing treats it as the node's own PC or LAN.
+
+### Identity and the ceiling
+
+- The stream's OPEN head carries the person: user name, the role they
+  have *on the node* and a `lead` flag. The main works the role out
+  (`role_on_node`: owner and managers count as Admin) and caps it by the
+  ceiling it stored; the node caps it again by the ceiling in its own
+  `node.json`. An unknown or missing ceiling or role, or "manager", is
+  refused outright.
+- On the node the request runs as `Who::Main { main, user, role, lead }`.
+  Look = Viewer, Operate = Operator, Manage = Admin. A Look ceiling refuses
+  Start with 403 on both sides (tested).
+- `lead` is set only when the person is owner-level on the main *and* both
+  ceilings are Manage. It lets owner-only routes on the allowlist (removing
+  a server) work for the main's owner and managers, as on their own panel;
+  a main admin who isn't owner-level, or any ceiling under Manage, still
+  gets 403 (tested). It never makes the main the node's owner (`is_owner`
+  stays false), so nothing outside the allowlist opens up.
+- History and the audit log name who did it: "mia via rig (operator)".
+
+### Live list
+
+- The node sends its snapshot (servers + host stats) and change frames on
+  a feed stream; the main keeps the last snapshot per node and merges it
+  into `/servers` and the live feed (`live.nodes` carries each node's
+  header: state, last seen, RTT, version, ceiling, maintenance, host stats,
+  RAM promised, server count). People limited to some servers see only
+  those on the node too.
+- A node that drops keeps its servers listed, dimmed, with "Node offline ·
+  last known state"; their power actions are hidden.
+
+### Maintenance
+
+- `PUT /api/v1/nodes/{id}/maintenance {on}` (owner or manager). While on:
+  the node's offline alert is silent, the main refuses Start, Restart and
+  New server there with 409, running servers keep running. Stored in
+  `nodes.json` with who and when.
+- New alert rule "Node offline" in Settings › Alerts (on by default, after
+  2 minutes, 2–120), shown when the panel has nodes.
+
+### Web UI
+
+- Node groups follow the home group: the B2 header (light, name, ceiling
+  chip, ⋯ menu with Pause node / End maintenance / Node settings), then the
+  health line "Node · CPU · RAM a of b GB · free disk · RAM promised · RTT",
+  and under maintenance "Under maintenance · by X · nothing starts here ·
+  End maintenance". The home group counts only its own servers and says
+  "No servers on this panel itself." when they all live on nodes.
+- New server: "Make it on" (This panel | each node with a Manage ceiling;
+  disabled while offline or under maintenance); the memory slider and disk
+  line show the chosen node's numbers.
+- "Outside the panel folder" is no longer shown for a node's server (the
+  main can't judge the node's folders).
+- `NODES_SHOWN = true`: Settings › Nodes and the Add panel's node entry are
+  visible again.
+
+### Checked
+
+- Tests (`relay_tests.rs`, a main and a node over an in-memory tunnel):
+  the same requests answer the same through the main (file list, text,
+  server, a write, one Content-Length after the job-id rewrite, audit);
+  History names "mia via rig"; a Look ceiling refuses Start; an unknown
+  ceiling refuses everything; `..`, encoded `..`, absolute, drive and
+  symlink paths are refused by the node; unlisted routes (fetch, clone)
+  never reach a handler; maintenance blocks Start and New server and the
+  alert stays silent (`nodes` test); limited people see only their
+  servers; removing needs Manage plus an owner-level person.
+- Real run: two scratch panels on loopback (main 8861, node 8862, joined
+  with a key, ceiling Manage). From the main's web UI: made a fake server
+  on the node, started it, console lines arrived, stopped it, removed a
+  second one. Found and fixed on the way: the node's Content-Length was
+  passed on after the main grew the body (create showed an error), and
+  remove was refused for the main's owner (now `lead`).
+- **Node idle memory**, one stopped server attached, connected to its main,
+  `fast` profile build, sampled every 5 s for 60 s: working set 28.4–28.5
+  MB, private 13.9 MB.
+
+### Left for later
+
+- The "making" row for a server being created on a node shows under the
+  home group until the job ends.
+- Browse/install from the mod browser onto a node's server, server infos,
+  copying, templates, `fs/fetch` and off-site backup copies.
+- "Share on mclo.gs" still shows on a node's server (console, logs, crash,
+  editor) but `logs/share` isn't relayed, so it answers 403. Hide it for
+  node servers, or relay it (it only ever posts to mclo.gs).
+- MCP over nodes, node-scoped access for users ("everything on vm-a2"),
+  bulk actions per node: A4.
+
 ## Open questions for the maintainer
 
 1. **Remote-session limits (B).** *Answered (maintainer, 2026-11-11): a

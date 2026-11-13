@@ -95,6 +95,11 @@ async fn the_same_requests_answer_the_same_through_the_main() {
         let relayed = send(&p.main, &p.main_cookie, "GET", &r.replace("{}", &ns), None).await;
         assert_eq!(direct, relayed, "{r}");
     }
+    // One length, the true one, on a relayed JSON answer (a browser drops
+    // a body whose two lengths disagree).
+    let (_, h, raw) = call("GET", format!("/api/v1/fs/{ns}/list?path=")).origin(OWN).h("cookie", format!("hopperd_session={}", p.main_cookie)).send(&p.main).await;
+    let lens: Vec<&str> = h.get_all("content-length").iter().filter_map(|v| v.to_str().ok()).collect();
+    assert_eq!(lens, vec![raw.len().to_string().as_str()]);
     // A server page: the same server, its own id kept on the node.
     let (s, direct) = send(&p.node, &p.node_cookie, "GET", &format!("/api/v1/servers/{local}"), None).await;
     let (s2, relayed) = send(&p.main, &p.main_cookie, "GET", &format!("/api/v1/servers/{ns}"), None).await;
@@ -120,7 +125,7 @@ async fn the_same_requests_answer_the_same_through_the_main() {
 #[tokio::test]
 async fn history_names_who_on_which_main() {
     let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
-    let who = Who::Main { main: "rig".into(), user: "mia".into(), role: Role::Operator };
+    let who = Who::Main { main: "rig".into(), user: "mia".into(), role: Role::Operator, lead: false };
     let by = crate::relay::as_relayed(who, async { crate::mods_api::changer(&p.node.app, &Default::default(), &axum::http::Method::POST) }).await;
     assert_eq!(serde_json::to_value(&by).unwrap().to_string().contains("mia via rig"), true, "{:?}", serde_json::to_value(&by));
 }
@@ -186,6 +191,26 @@ async fn paths_out_of_the_server_folder_are_refused() {
     } else {
         eprintln!("skipped the link part: this account can't make links");
     }
+}
+
+/// The owner on the main may remove a server on a Manage node (an
+/// owner-only route there); not when the node's own ceiling is lower, and
+/// not an admin who isn't owner-level on the main.
+#[tokio::test]
+async fn removing_a_server_needs_manage_and_the_owner() {
+    let p = pair(Ceiling::Manage, Some(Role::Operator)).await;
+    let (s, _) = send(&p.main, &p.main_cookie, "POST", &format!("/api/v1/servers/{}/remove", p.ns()), Some(json!({ "mode": "remove" }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert!(p.node.app.servers.get(&p.node.server).is_some());
+
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    p.main.app.auth.user_create("ada", "adapass12", Role::Admin, vec![]).unwrap();
+    let ada = crate::cross_origin_tests::user_cookie(&p.main, "ada", "adapass12").await;
+    let (s, _) = send(&p.main, &ada, "POST", &format!("/api/v1/servers/{}/remove", p.ns()), Some(json!({ "mode": "remove" }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "an admin on the main isn't owner-level");
+    let (s, b) = send(&p.main, &p.main_cookie, "POST", &format!("/api/v1/servers/{}/remove", p.ns()), Some(json!({ "mode": "remove" }))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert!(p.node.app.servers.get(&p.node.server).is_none());
 }
 
 /// Routes that aren't on the allowlist never reach the node's handlers.

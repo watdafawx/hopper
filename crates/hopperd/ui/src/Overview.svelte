@@ -32,7 +32,7 @@
 {#snippet chips(s, up)}
   {#if up}<a class="chip acc" href={href(s)} title="Pack update: {up.from} → {up.to}">Pack update · {up.to}</a>{/if}
   {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder">Also in {s.managed_by}</span>{/if}
-  {#if outside(s.path)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}
+  {#if outside(s)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}
 {/snippet}
 
 <div class="pad">
@@ -77,7 +77,7 @@
       {@const mem = on ? s.mem_bytes : 0}
       <!-- The figure is the whole Java process and -Xmx only caps its heap, so the bar is out of this PC's memory, with a tick at the heap limit: never "10 GB of 8 GB". -->
       {@const span = Math.max(h?.mem_total || 0, mem, cap)}
-      {@const nchips = Number(!!up) + Number(!!s.managed_by) + Number(outside(s.path))}
+      {@const nchips = Number(!!up) + Number(!!s.managed_by) + Number(outside(s))}
       <div class="scard">
         <div class="row">
           <a class="icl" href={href(s)}><Avatar server={s} cls="ic" /></a>

@@ -636,7 +636,7 @@ async fn me(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> 
         Who::User { id, name, role, servers } => json!({ "role": role, "user": true, "id": id, "name": name, "servers": servers, "min_password": MIN_PASSWORD }),
         // A request relayed from a main (A2): the person there, with the
         // role they have on this node.
-        Who::Main { main, user, role } => json!({ "role": role, "user": true, "name": user, "main": main, "servers": [] }),
+        Who::Main { main, user, role, .. } => json!({ "role": role, "user": true, "name": user, "main": main, "servers": [] }),
     }))
 }
 
