@@ -5,8 +5,20 @@
   // Running servers first. Drag the edge to resize; dragged narrow, it
   // becomes a rail of tiles (desktop's server_rail). Right-click a server
   // for desktop's row menu: Open, Start / Stop / Restart, Open folder.
+  //
+  // Other panels added to this page each get a group under this panel's,
+  // like desktop's server groups: chevron, light, name, "Hopper Server · N",
+  // its health (version and round trip) or what's wrong, in place. Each
+  // group loads on its own (lib/panels.svelte.js), so a dead one never
+  // holds the list.
   import { tick } from 'svelte';
-  import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy, Compass } from '@lucide/svelte';
+  import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy, Compass, ChevronRight, ChevronDown, Ellipsis, ExternalLink, LogOut, Trash2 } from '@lucide/svelte';
+  import { panels, retry, signOut, removePanel } from './lib/panels.svelte.js';
+  import { tokenFor } from './lib/panelTokens.js';
+  import { roleLabel } from './lib/me.svelte.js';
+  import { confirmIt } from './lib/dialog.svelte.js';
+  import PanelSignIn from './PanelSignIn.svelte';
+  import AddPanel from './AddPanel.svelte';
   import { power } from './lib/power.js';
   import { say } from './lib/toast.svelte.js';
   import { live } from './lib/live.svelte.js';
@@ -16,7 +28,42 @@
   import Progress from './Progress.svelte';
   import { making, cancel, forget } from './lib/making.svelte.js';
 
-  let { selected = null, owner = false, canPower = true, onNew, onRescan } = $props();
+  let { selected = null, selectedPanel = null, owner = false, canPower = true, homeName = '', homeVersion = '', homeRole = '', onNew, onRescan } = $props();
+
+  // ---- groups: this panel, then each added one ----
+  const FOLD = 'hopperd.servers.fold';
+  let fold = $state((() => {
+    try {
+      return JSON.parse(localStorage.getItem(FOLD) || '{}');
+    } catch {
+      return {};
+    }
+  })());
+  function flip(id) {
+    fold[id] = !fold[id];
+    try {
+      localStorage.setItem(FOLD, JSON.stringify(fold));
+    } catch {
+      // private window: not kept
+    }
+  }
+  const grouped = $derived(panels.list.length > 0);
+  // Only people signed in with a password keep a list of panels.
+  const canAdd = $derived(homeRole && homeRole !== 'device' && homeRole !== 'token');
+  let adding = $state(false);
+  const sorted = (list) => [...list].sort((a, b) => Number(alive(b)) - Number(alive(a)));
+  /** The group's light: green up, amber on its way or waiting for a sign-in, red when it can't be used. */
+  const light = (p) => (p.state === 'ok' ? 'running' : p.state === 'loading' || p.state === 'reconnecting' || p.state === 'signin' ? 'starting' : 'crashed');
+  const dim = (p) => p.state !== 'ok';
+  const canPowerOn = (p) => (p ? p.role !== 'viewer' : canPower);
+  function ago(ms) {
+    const s = Math.round((Date.now() - ms) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.round(s / 60)} min ago`;
+    return `${Math.round(s / 3600)} h ago`;
+  }
+  const serverHref = (p, s, rest = '') => `#${p ? `/p/${encodeURIComponent(p.id)}` : ''}/server/${encodeURIComponent(s.id)}${rest}`;
+  const isSel = (p, s) => selected === s.id && (p ? selectedPanel === p.id : !selectedPanel);
 
   const KEY = 'hopperd.servers.list';
   const MIN = 200, MAX = 420, DEF = 248, RAIL = 64;
@@ -108,10 +155,10 @@
   }
 
   // ---- the row menu ----
-  let menu = $state(null); // { s, x, y }
+  let menu = $state(null); // { s, p, x, y } for a server, { g, x, y } for a group
   let menuEl = $state();
 
-  async function openMenu(e, s) {
+  async function openMenu(e, s, p = null, g = null) {
     e.preventDefault();
     // From the keyboard (the menu key, Shift+F10) there's no pointer: under the row.
     let { clientX: x, clientY: y } = e;
@@ -120,7 +167,7 @@
       x = r.left + 12;
       y = r.bottom;
     }
-    menu = { s, x, y };
+    menu = { s, p, g, x, y };
     await tick();
     if (!menuEl) return;
     const r = menuEl.getBoundingClientRect();
@@ -134,9 +181,14 @@
   }
 
   function pick(f) {
-    const s = menu?.s;
+    const m = menu;
     closeMenu();
-    if (s) f(s);
+    if (m) f(m.s ?? m.g, m.p);
+  }
+
+  async function drop(p) {
+    if (!(await confirmIt(`Remove ${p.name} from this page?`, { body: 'Its servers leave this list and this browser signs out of it. Nothing changes on that panel.', ok: 'Remove' }))) return;
+    removePanel(p);
   }
 
   function menuKeys(e) {
@@ -170,17 +222,57 @@
     save();
   }
 
-  const href = (s) => `#/server/${encodeURIComponent(s.id)}`;
 </script>
+
+{#snippet row(s, p)}
+  {@const pl = pill(s)}
+  {@const cap = caption(s)}
+  {@const up = p ? null : packUpdates.byId[s.id]}
+  {@const sel = isSel(p, s)}
+  <a class="srv" class:dim={p && dim(p)} class:row-sel={sel} class:row-hover={!sel} href={serverHref(p, s)} oncontextmenu={(e) => openMenu(e, s, p)}>
+    <div class="line">
+      <span class="dot {p && dim(p) ? '' : stateKey(s)}"></span>
+      <Avatar server={s} cls="sic" panel={p} />
+      <span class="nm">{s.name}</span>
+      {#if up}<span class="upd" title="Pack update: {up.from} → {up.to}"></span>{/if}
+      {#if pl && !(p && dim(p))}<span class="pill {stateKey(s)}" title={bootText(s) || stateTip(s)}>{#if pl.glow}<span class="glow"></span>{/if}{pl.text}</span>{/if}
+    </div>
+    {#if p && dim(p)}<div class="cap">{p.lastSeen ? `Seen ${ago(p.lastSeen)}` : 'Not seen yet'}</div>
+    {:else if s.progress}<Progress server={s} compact />{:else if cap}<div class="cap">{cap}</div>{/if}
+  </a>
+{/snippet}
+
+{#snippet head(id, name, role, lightKey, p)}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <div class="gh" role="group" aria-label={name} oncontextmenu={p ? (e) => openMenu(e, null, null, p) : undefined}>
+    <button class="gfold" aria-expanded={!fold[id]} title="{name}: {fold[id] ? 'show its servers' : 'hide its servers'}" onclick={() => flip(id)}>
+      {#if fold[id]}<ChevronRight size={14} />{:else}<ChevronDown size={14} />{/if}
+      <span class="dot {lightKey}"></span>
+      <span class="gnm">{name}</span>
+    </button>
+    <span class="gfill"></span>
+    {#if role}<span class="chip">{roleLabel(role)}</span>{/if}
+    {#if p}<button class="btn ghost icon sm gmore" title="More" aria-label="More for {name}" onclick={(e) => openMenu(e, null, null, p)}><Ellipsis size={14} /></button>{/if}
+  </div>
+{/snippet}
 
 <aside class="list" class:rail={collapsed} style:width="{collapsed ? RAIL : width}px">
   {#if collapsed}
     <button class="btn ghost icon" title="Show server list" onclick={toggle}><PanelLeftOpen size={15} /></button>
     {#each servers as s (s.id)}
-      <a class="tile" class:row-sel={selected === s.id} class:row-hover={selected !== s.id} href={href(s)} title={s.name} oncontextmenu={(e) => openMenu(e, s)}>
-        {#if s.icon}<Avatar server={s} cls="sic tic" />{:else}{initials(s.name)}{/if}
+      <a class="tile" class:row-sel={isSel(null, s)} class:row-hover={!isSel(null, s)} href={serverHref(null, s)} title={s.name} oncontextmenu={(e) => openMenu(e, s)}>
+        {#if s.icon}<Avatar server={s} cls="sic tic" panel={null} />{:else}{initials(s.name)}{/if}
         <span class="dot {stateKey(s)} tdot"></span>
       </a>
+    {/each}
+    {#each panels.list as p (p.id)}
+      {#if p.servers.length}<div class="rsep" title={p.name}></div>{/if}
+      {#each sorted(p.servers) as s (s.id)}
+        <a class="tile" class:dim={dim(p)} class:row-sel={isSel(p, s)} class:row-hover={!isSel(p, s)} href={serverHref(p, s)} title="{s.name} · {p.name}" oncontextmenu={(e) => openMenu(e, s, p)}>
+          {#if s.icon}<Avatar server={s} cls="sic tic" panel={p} />{:else}{initials(s.name)}{/if}
+          <span class="dot {dim(p) ? '' : stateKey(s)} tdot"></span>
+        </a>
+      {/each}
     {/each}
   {:else}
     <div class="hd">
@@ -190,54 +282,79 @@
       <button class="btn ghost icon" title="New server" onclick={onNew}><Plus size={15} /></button>
       <button class="btn ghost icon" title="Hide server list" onclick={toggle}><PanelLeftClose size={15} /></button>
     </div>
-    {#if loading}
-      <div class="skels">{#each [0, 1, 2] as i (i)}<div class="skel"><i></i></div>{/each}</div>
+    {#if grouped}
+      {@render head('home', homeName || 'This panel', homeRole, live.connected ? 'running' : 'starting', null)}
+      <div class="health">Hopper Server · {live.servers.length} · this panel{homeVersion ? ` · ${homeVersion}` : ''}</div>
     {/if}
-    {#each making as m (m.job)}
-      <div class="srv making" class:ready={m.state === 'ready'}>
-        <div class="line">
-          <span class="dot {m.state === 'failed' ? 'crashed' : m.state === 'ready' ? 'running' : 'starting'}"></span>
-          <Avatar server={{ name: m.name }} cls="sic" />
-          <span class="nm">{m.name}</span>
+    {#if !grouped || !fold.home}
+      {#if loading}
+        <div class="skels">{#each [0, 1, 2] as i (i)}<div class="skel"><i></i></div>{/each}</div>
+      {/if}
+      {#each making as m (m.job)}
+        <div class="srv making" class:ready={m.state === 'ready'}>
+          <div class="line">
+            <span class="dot {m.state === 'failed' ? 'crashed' : m.state === 'ready' ? 'running' : 'starting'}"></span>
+            <Avatar server={{ name: m.name }} cls="sic" panel={null} />
+            <span class="nm">{m.name}</span>
+          </div>
+          <div class="cap mk" class:bad={m.state === 'failed'} class:ok={m.state === 'ready'} title={m.error || m.detail}>
+            {m.state === 'running' ? m.detail || 'Getting ready' : m.state === 'cancelled' ? 'Cancelled. Nothing was made.' : m.state === 'failed' ? m.error.split('\n')[0] : `${m.detail || 'Ready'}${m.start ? ' · starting' : ''}`}
+          </div>
+          {#if m.state === 'running'}<div class="mkbar"><i style:width="{Math.max(3, (m.progress || 0) * 100)}%"></i></div>{/if}
+          <div class="mkact">
+            {#if m.state === 'running'}<button class="btn sm" onclick={() => cancel(m.job)}>Cancel</button>
+            {:else if m.state === 'ready'}
+              {#if !m.start && canPower}<button class="btn sm go" onclick={() => startMade(m)}><Play size={12} />Start</button>{/if}
+              <button class="btn sm" onclick={() => openMade(m)}>Open</button>
+            {:else}<button class="btn sm ghost" onclick={() => forget(m.job)}>Dismiss</button>{/if}
+          </div>
         </div>
-        <div class="cap mk" class:bad={m.state === 'failed'} class:ok={m.state === 'ready'} title={m.error || m.detail}>
-          {m.state === 'running' ? m.detail || 'Getting ready' : m.state === 'cancelled' ? 'Cancelled. Nothing was made.' : m.state === 'failed' ? m.error.split('\n')[0] : `${m.detail || 'Ready'}${m.start ? ' · starting' : ''}`}
-        </div>
-        {#if m.state === 'running'}<div class="mkbar"><i style:width="{Math.max(3, (m.progress || 0) * 100)}%"></i></div>{/if}
-        <div class="mkact">
-          {#if m.state === 'running'}<button class="btn sm" onclick={() => cancel(m.job)}>Cancel</button>
-          {:else if m.state === 'ready'}
-            {#if !m.start && canPower}<button class="btn sm go" onclick={() => startMade(m)}><Play size={12} />Start</button>{/if}
-            <button class="btn sm" onclick={() => openMade(m)}>Open</button>
-          {:else}<button class="btn sm ghost" onclick={() => forget(m.job)}>Dismiss</button>{/if}
-        </div>
-      </div>
-    {/each}
-    {#each shown as s (s.id)}
-      {@const p = pill(s)}
-      {@const cap = caption(s)}
-      {@const up = packUpdates.byId[s.id]}
-      <a class="srv" class:row-sel={selected === s.id} class:row-hover={selected !== s.id} href={href(s)} oncontextmenu={(e) => openMenu(e, s)}>
-        <div class="line">
-          <span class="dot {stateKey(s)}"></span>
-          <Avatar server={s} cls="sic" />
-          <span class="nm">{s.name}</span>
-          {#if up}<span class="upd" title="Pack update: {up.from} → {up.to}"></span>{/if}
-          {#if p}<span class="pill {stateKey(s)}" title={bootText(s) || stateTip(s)}>{#if p.glow}<span class="glow"></span>{/if}{p.text}</span>{/if}
-        </div>
-        {#if s.progress}<Progress server={s} compact />{:else if cap}<div class="cap">{cap}</div>{/if}
-      </a>
-    {:else}
-      {#if !loading && !making.length}
-        <div class="empty-state">
-          <span class="es-ic"><Server size={18} /></span>
-          <b>No servers yet</b>
-          <p>Make one with New server{owner ? ', or put server folders in the panel folder' : ''}.</p>
-          <button class="btn sm pri" onclick={onNew}><Plus size={13} />New server</button>
-          <a class="btn sm" href="#/browse"><Compass size={13} />Browse modpacks</a>
-        </div>
+      {/each}
+      {#each shown as s (s.id)}
+        {@render row(s, null)}
+      {:else}
+        {#if !loading && !making.length}
+          <div class="empty-state">
+            <span class="es-ic"><Server size={18} /></span>
+            <b>No servers yet</b>
+            <p>Make one with New server{owner ? ', or put server folders in the panel folder' : ''}.</p>
+            <button class="btn sm pri" onclick={onNew}><Plus size={13} />New server</button>
+            <a class="btn sm" href="#/browse"><Compass size={13} />Browse modpacks</a>
+          </div>
+        {/if}
+      {/each}
+    {/if}
+
+    {#each panels.list as p (p.id)}
+      <div class="gsep"></div>
+      {@render head(p.id, p.name, p.me && p.state !== 'signin' ? p.role : '', light(p), p)}
+      {#if p.state === 'ok'}
+        <div class="health">Hopper Server · {p.servers.length}{p.version ? ` · ${p.version}` : ''}{p.ping != null ? ` · ${p.ping} ms` : ''}</div>
+      {:else if p.state === 'loading'}
+        <div class="health">Connecting…</div>
+      {:else if p.state === 'reconnecting' || p.state === 'offline'}
+        <div class="health trouble">Can't reach {p.name}{p.state === 'reconnecting' ? ' · Reconnecting…' : ''} · <button class="link" onclick={() => retry(p)}>Try again</button></div>
+      {:else if p.state === 'refused'}
+        <div class="health trouble">{p.error || `${p.name} doesn't let this page in.`} On its page, add {location.origin} in Settings › Access & devices › Other web pages. <a class="link" href={p.url} target="_blank" rel="noopener">Open its page</a> · <button class="link" onclick={() => retry(p)}>Try again</button></div>
+      {:else if p.state === 'old'}
+        <div class="health trouble">Runs Hopper Server {p.version}, too old to use from here. <a class="link" href={p.url} target="_blank" rel="noopener">Update it on its page</a></div>
+      {:else if p.state === 'setup'}
+        <div class="health trouble">Not set up yet. <a class="link" href={p.url} target="_blank" rel="noopener">Open its page</a> to make its owner account.</div>
+      {/if}
+      {#if p.state === 'signin'}
+        <PanelSignIn panel={p} />
+      {:else if !fold[p.id]}
+        {#each sorted(p.servers) as s (s.id)}
+          {@render row(s, p)}
+        {:else}
+          {#if p.state === 'ok'}<div class="cap none">No servers on it yet.</div>{/if}
+        {/each}
       {/if}
     {/each}
+
+    {#if canAdd}
+      <button class="btn sm ghost addp" onclick={() => (adding = true)}><Plus size={13} />Add a Hopper Server</button>
+    {/if}
   {/if}
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div class="grip" class:on={drag} role="separator" aria-orientation="vertical" aria-label="Server list width" aria-valuenow={collapsed ? RAIL : width} aria-valuemin={RAIL} aria-valuemax={MAX} tabindex="0" title="Drag to resize" onpointerdown={down} ondblclick={toggle} onkeydown={gripKey}></div>
@@ -245,23 +362,35 @@
 
 <svelte:window onpointerdown={away} onresize={closeMenu} onblur={closeMenu} />
 
-{#if menu}
+{#if adding}<AddPanel onClose={() => (adding = false)} />{/if}
+
+{#if menu?.g}
+  {@const g = menu.g}
+  <!-- svelte-ignore a11y_interactive_supports_focus -->
+  <div class="popover menu rmenu" role="menu" tabindex="-1" bind:this={menuEl} style:left="{menu.x}px" style:top="{menu.y}px" onkeydown={menuKeys}>
+    <button class="menu-item" role="menuitem" onclick={() => pick((v) => window.open(v.url, '_blank', 'noopener'))}><ExternalLink size={14} />Open in browser</button>
+    {#if g.state !== 'ok' && g.state !== 'signin'}<button class="menu-item" role="menuitem" onclick={() => pick((v) => retry(v))}><RotateCw size={14} />Try again</button>{/if}
+    {#if tokenFor(g.url) && g.state !== 'signin'}<button class="menu-item" role="menuitem" onclick={() => pick((v) => signOut(v))}><LogOut size={14} />Sign out of it</button>{/if}
+    <div class="menu-sep"></div>
+    <button class="menu-item" role="menuitem" onclick={() => pick(drop)}><Trash2 size={14} />Remove from this page</button>
+  </div>
+{:else if menu}
   {@const s = menu.s}
   {@const up = s.state === 'running' || s.state === 'starting'}
   <!-- svelte-ignore a11y_interactive_supports_focus -->
   <div class="popover menu rmenu" role="menu" tabindex="-1" bind:this={menuEl} style:left="{menu.x}px" style:top="{menu.y}px" onkeydown={menuKeys}>
-    <button class="menu-item" role="menuitem" onclick={() => pick((v) => (location.hash = `/server/${encodeURIComponent(v.id)}`))}><Server size={14} />Open</button>
-    {#if canPower}
+    <button class="menu-item" role="menuitem" onclick={() => pick((v, p) => (location.hash = serverHref(p, v).slice(1)))}><Server size={14} />Open</button>
+    {#if canPowerOn(menu.p) && !(menu.p && dim(menu.p))}
       <div class="menu-sep"></div>
       {#if !up && s.state !== 'stopping'}
-        <button class="menu-item" role="menuitem" onclick={() => pick((v) => power(v, 'start'))}><Play size={14} />Start</button>
+        <button class="menu-item" role="menuitem" onclick={() => pick((v, p) => power(v, 'start', p))}><Play size={14} />Start</button>
       {:else if up}
-        <button class="menu-item" role="menuitem" onclick={() => pick((v) => power(v, 'restart'))}><RotateCw size={14} />Restart</button>
-        <button class="menu-item" role="menuitem" onclick={() => pick((v) => power(v, 'stop'))}><Square size={14} />Stop</button>
+        <button class="menu-item" role="menuitem" onclick={() => pick((v, p) => power(v, 'restart', p))}><RotateCw size={14} />Restart</button>
+        <button class="menu-item" role="menuitem" onclick={() => pick((v, p) => power(v, 'stop', p))}><Square size={14} />Stop</button>
       {/if}
     {/if}
     <div class="menu-sep"></div>
-    <button class="menu-item" role="menuitem" onclick={() => pick((v) => (location.hash = `/server/${encodeURIComponent(v.id)}/files`))}><FolderOpen size={14} />Open folder</button>
+    <button class="menu-item" role="menuitem" onclick={() => pick((v, p) => (location.hash = serverHref(p, v, '/files').slice(1)))}><FolderOpen size={14} />Open folder</button>
     {#if s.addresses?.length}
       <button class="menu-item" role="menuitem" onclick={() => pick(copyAddress)}><Copy size={14} />Copy address</button>
     {/if}
@@ -286,6 +415,24 @@
   .mkbar i { display: block; height: 100%; background: var(--acc); }
   .mkact { display: flex; gap: 6px; padding-left: 44px; }
   .skels { display: flex; flex-direction: column; }
+  /* A panel's group: desktop's server group header (chevron, light, name, count). */
+  .gh { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 4px 4px 0 2px; }
+  .gfold { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 0 1 auto; background: none; border: 0; padding: 4px 4px; border-radius: var(--radius); color: var(--text); cursor: pointer; font: inherit; }
+  .gfold:hover { background: var(--hover, #ededef10); }
+  .gfold :global(svg) { color: var(--muted); flex: none; }
+  .gnm { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .gfill { flex: 1; }
+  .gmore { flex: none; }
+  .health { padding: 0 10px 4px 32px; font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+  .health.trouble { color: var(--subtle); }
+  /* Accent mixed toward the text colour: readable on light themes too (plain --acc is 3.4:1 there). */
+  .link { background: none; border: 0; padding: 0; font: inherit; color: color-mix(in srgb, var(--acc) 60%, var(--text)); cursor: pointer; text-decoration: none; }
+  .link:hover { text-decoration: underline; }
+  .gsep { height: 1px; background: var(--line); margin: 8px 4px 4px; flex: none; }
+  .srv.dim, .tile.dim { opacity: .55; }
+  .cap.none { padding: 2px 10px 6px 32px; }
+  .addp { align-self: flex-start; margin: 10px 0 0 4px; color: var(--subtle); }
+  .rsep { width: 28px; height: 1px; background: var(--line); flex: none; }
   .rmenu { position: fixed; z-index: 66; }
   .tile { position: relative; width: 44px; height: 44px; flex: none; display: grid; place-items: center; border: 1px solid var(--line); border-radius: var(--radius-lg); color: var(--text); font-size: 12.5px; font-weight: 600; }
   .tile :global(.tic) { width: 26px; height: 26px; }

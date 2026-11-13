@@ -8,7 +8,7 @@
   // start files kept aside, a Minecraft change only from that backup. The
   // result, with Undo when there is one, stays here until the next change.
   import { RotateCcw, Play, ArrowRightLeft, Check, CircleAlert, Info, Archive, ChevronDown, ChevronRight } from '@lucide/svelte';
-  import { api, post } from './lib/api.js';
+  import { api, post, here } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
   import { followJob } from './lib/jobs.js';
@@ -152,7 +152,7 @@
   }
 
   async function startWatch() {
-    if (await power(server, 'start')) location.hash = `/server/${encodeURIComponent(server.id)}/console`;
+    if (await power(server, 'start')) location.hash = `${here()}/server/${encodeURIComponent(server.id)}/console`;
   }
 
   $effect(() => {

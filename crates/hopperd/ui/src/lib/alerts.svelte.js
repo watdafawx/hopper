@@ -9,7 +9,7 @@ let users = 0;
 
 export async function refreshAlerts() {
   try {
-    Object.assign(alerts, await api('/alerts'));
+    Object.assign(alerts, await api('/alerts', { home: true }));
   } catch {
     // signed out or offline: keep the last look
   }
@@ -33,7 +33,7 @@ export function watchAlerts() {
 
 export async function dismissAlert(a) {
   try {
-    await post('/alerts/dismiss', { server_id: a.server_id, kind: a.kind });
+    await post('/alerts/dismiss', { server_id: a.server_id, kind: a.kind }, { home: true });
   } finally {
     refreshAlerts();
   }

@@ -1,4 +1,5 @@
 <script>
+  import { here } from './lib/api.js';
   // A mod's config in the Mods tab's side panel (desktop's config icon on a
   // mod row opens the same): its files and settings stacked for the narrow
   // width, the unsaved bar under them, and "Open in Configs" for the page.
@@ -15,7 +16,7 @@
     jump.path = rel;
     jump.line = line || 0;
     jump.text = true;
-    location.hash = `/server/${[server.id, 'edit', ...rel.split('/')].map(encodeURIComponent).join('/')}`;
+    location.hash = `${here()}/server/${[server.id, 'edit', ...rel.split('/')].map(encodeURIComponent).join('/')}`;
   }
 </script>
 

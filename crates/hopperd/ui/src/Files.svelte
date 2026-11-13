@@ -12,7 +12,7 @@
     List, LayoutGrid, PanelLeft, PanelRight, Scissors, ClipboardPaste, Info, Package, ExternalLink, Layers, TriangleAlert,
     Link,
   } from '@lucide/svelte';
-  import { api, post } from './lib/api.js';
+  import { api, post, here } from './lib/api.js';
   import { bytes } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
   import { ask, confirmIt, dialog } from './lib/dialog.svelte.js';
@@ -690,7 +690,7 @@
     node.focus();
     node.select();
   };
-  const openMods = () => (location.hash = `/server/${encodeURIComponent(server.id)}/mods`);
+  const openMods = () => (location.hash = `${here()}/server/${encodeURIComponent(server.id)}/mods`);
 
   // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
   $effect(() => onChange(sid, ['files', 'mods', 'configs', 'worlds', 'backups', 'server', 'players', 'schedule'], refresh));

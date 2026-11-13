@@ -8,7 +8,7 @@ export const packUpdates = $state({ byId: {} });
 /** Reads every server's cached check (the panel checks stale ones in the background). */
 export async function refreshPackUpdates() {
   try {
-    packUpdates.byId = (await api('/pack-updates')).servers || {};
+    packUpdates.byId = (await api('/pack-updates', { home: true })).servers || {};
   } catch {
     // older panel, or signed out: no dots
   }

@@ -42,7 +42,7 @@
     clearTimeout(retry);
     if (fresh) checking = true;
     try {
-      const r = await api(`/panel/releases${fresh ? '?fresh=1' : ''}`);
+      const r = await api(`/panel/releases${fresh ? '?fresh=1' : ''}`, { home: true });
       list = r.releases;
       // An update on offer opens on the newest release.
       if (!picked || (picked === r.current && list[0] && isNewer(list[0].version, r.current))) {
@@ -95,7 +95,7 @@
     try {
       const a = await askAboutServers(st);
       if (!a) return;
-      await post('/panel/update/install', a.stop ? { version: v, stop_servers: true } : { version: v });
+      await post('/panel/update/install', a.stop ? { version: v, stop_servers: true } : { version: v }, { home: true });
       if (upd.st) {
         upd.st.state = 'downloading';
         upd.st.target = v;

@@ -4,7 +4,7 @@
   // address and schedule stay with this one). Save as template keeps it
   // without world or players for New server › Template.
   import { Copy, LayoutTemplate, X } from '@lucide/svelte';
-  import { api, post } from './lib/api.js';
+  import { api, post, here } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { ask } from './lib/dialog.svelte.js';
   import { followJob } from './lib/jobs.js';
@@ -52,7 +52,7 @@
       const r = await followJob(job, (st) => (busy = st.detail || 'Copying'));
       say(`Made ${name.trim()}, a copy of ${server.name}${withWorld ? '' : ' with a fresh world'}.`);
       open = false;
-      if (r?.id) location.hash = `/server/${encodeURIComponent(r.id)}/console`;
+      if (r?.id) location.hash = `${here()}/server/${encodeURIComponent(r.id)}/console`;
     } catch (e) {
       error = e.message;
       busy = '';
