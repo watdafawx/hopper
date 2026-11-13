@@ -4518,7 +4518,9 @@ net.neoforged.neoforge.logging.CrashReportExtender$ModLoadingCrashException: Mod
         versioned_jar(&dir.join("vista-advanced-player-1.21.1-1.0.1.jar"), "vista_advanced_player", "Vista: Advanced Player", "1.0.1", &["com.animenkin.vistaplus.mixin.WebUrlVideoSourceMixin"]);
         versioned_jar(&dir.join("connectivity-1.21.1-7.7.jar"), "connectivity", "Connectivity Mod", "7.7", &["com.connectivity.Connectivity"]);
         let old_ver = set_aside.split('-').nth(2).unwrap_or_default();
-        let set = root.join(crate::sync::BACKUP_DIR).join((crate::time::now() - 4 * 3600).to_string());
+        // 20 minutes back, not hours: the card says "today", and a few hours
+        // back crossed midnight for runs in the small hours.
+        let set = root.join(crate::sync::BACKUP_DIR).join((crate::time::now() - 1200).to_string());
         fs::create_dir_all(&set).unwrap();
         let old = set.join(set_aside);
         versioned_jar(&old, "vista", "Vista", &format!("1.21.1-{old_ver}"), &[class]);
