@@ -34,6 +34,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 const SAVED_KEY: &str = "Saved. Paste a new key to replace it";
+/// GitHub's page for a new fine-grained token; with no permissions ticked
+/// it reads public repos only, which is all Hopper needs.
+const GITHUB_NEW_TOKEN: &str = "https://github.com/settings/personal-access-tokens/new";
 /// How wide the cards get.
 const MAX_W: f32 = 48.;
 /// How long a "Saved" tick and a search highlight stay.
@@ -273,7 +276,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Content, "browse-source", "Browse searches", "Which site Browse opens on. Switch any time in Browse too.", "modrinth curseforge source search"),
     e(C::Content, "web-downloads", "Parallel web downloads", "Some CurseForge files only download from the website. Hopper's download window gets this many at once. Fewer helps if CurseForge keeps asking it to wait.", "curseforge website download window parallel tabs pages at once speed cloudflare"),
     e(C::Content, "allow-sources", "Allow mods from GitHub and other links", "Lets Add content's \"From GitHub or a link\" and a mod's \"Follow a source\" get mods from there. These files skip CurseForge's and Modrinth's checks, so add them only from people you trust.", "github maven jenkins link url source release jar"),
-    e(C::Content, "github-token", "GitHub token", "Optional. Without one GitHub allows 60 checks an hour; Hopper asks only when something may have changed. A token (no scopes needed) raises that to 5,000. Kept in Windows Credential Manager.", "github token api rate limit"),
+    e(C::Content, "github-token", "GitHub token", "Optional. Without one, GitHub lets this PC look up mods 60 times an hour, and big group packs can use that up. A token raises it to 5,000. It only needs public access: leave every permission off when you make it. Hopper sends it to GitHub and nowhere else, and keeps it in Windows Credential Manager.", "github token api rate limit"),
     e(C::Content, "files-changes", "Changes in the files", hopper::changelog_files::SETTING_HELP, "changelog compare jar files diff what changed no changelog author scan download"),
     e(C::Content, "clip-links", "Offer to open copied mod links", "Copy a CurseForge or Modrinth link anywhere, like in Discord, and Hopper asks if you want to open it here. Never while a game is fullscreen.", "clipboard copy copied link discord notification curseforge modrinth"),
     e(C::Content, "open-links", "Open mod links in Hopper", "Clicked CurseForge and Modrinth links open in Hopper. Every other link goes straight to your browser.", "browser default apps link click curseforge modrinth open"),
@@ -2273,7 +2276,9 @@ impl SettingsPage {
         };
         let files = Row::new("files-changes").control(self.switch("files-changes", s.files_changes, |st, v| st.files_changes = v, cx));
         let mut rows = vec![key, browse, web, allow];
-        if s.allow_sources {
+        // Shown whether or not adding from links is on: group packs and
+        // mod pages read GitHub too, and the rate-limit notice points here.
+        {
             let saved = hopper::sources::http::has_github_token();
             let typed = !self.gh_token.read(cx).value().trim().is_empty();
             rows.push(
@@ -2288,6 +2293,7 @@ impl SettingsPage {
                             .gap_2()
                             .flex_wrap()
                             .child(div().w(rems(22.)).child(Input::new(&self.gh_token).small().mask_toggle()))
+                            // Same order as the CurseForge key's row: Save, then the link.
                             .child(
                                 Button::new("gh-token-save")
                                     .small()
@@ -2295,6 +2301,15 @@ impl SettingsPage {
                                     .label("Save")
                                     .disabled(!typed)
                                     .on_click(cx.listener(|this, _, window, cx| this.save_gh_token(false, window, cx))),
+                            )
+                            .child(
+                                Button::new("gh-token-get")
+                                    .small()
+                                    .outline()
+                                    .icon(IconName::ExternalLink)
+                                    .label("Get a token")
+                                    .tooltip("Opens GitHub's new token page: name it, leave every permission off, and copy the token")
+                                    .on_click(|_, _, cx| cx.open_url(GITHUB_NEW_TOKEN)),
                             )
                             .when(saved, |r| {
                                 r.child(

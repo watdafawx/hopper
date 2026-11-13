@@ -243,6 +243,30 @@ impl AppView {
                         crate::tray::notify("Hopper", msg, true);
                     }
                 }
+                StoreEvent::GitHubLimited(msg) => {
+                    // One notice whatever holds it up: a second one replaces
+                    // the first rather than stacking.
+                    struct GitHubLimit;
+                    let token = hopper::sources::http::has_github_token();
+                    let text = if token { msg.clone() } else { format!("{msg} A free GitHub token lifts the limit; it needs no permissions.") };
+                    let mut n = gpui_kit::component::notification::Notification::warning(text).id::<GitHubLimit>();
+                    if !token {
+                        let app = cx.entity().downgrade();
+                        n = n.action(move |_, _, cx| {
+                            let app = app.clone();
+                            gpui_kit::component::button::Button::new("gh-limit-token")
+                                .label("Add a GitHub token")
+                                .on_click(cx.listener(move |note, _, window, cx| {
+                                    app.update(cx, |a, cx| a.open_settings_at("github-token", cx)).ok();
+                                    note.dismiss(window, cx);
+                                }))
+                        });
+                    }
+                    window.push_notification(n, cx);
+                    if !window.is_window_active() {
+                        crate::tray::notify("Hopper", msg, true);
+                    }
+                }
                 StoreEvent::GameCrashed(name, top, open) => {
                     let mut body = match top {
                         Some(m) => format!("Hopper thinks {m} caused it. Open Hopper → Logs & crashes for more."),

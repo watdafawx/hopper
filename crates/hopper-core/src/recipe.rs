@@ -272,6 +272,14 @@ pub struct Retry {
     /// The failed task, taken off the task list when the next try starts,
     /// so retries don't pile up there.
     pub job: u64,
+    /// GitHub's rate limit is why: nothing is tried (not even a newer code)
+    /// before it resets.
+    pub limited: Option<Instant>,
+    /// Whether this failure is news for the player: the first one, or a
+    /// different reason than the last. The same reason again (another
+    /// retry, a newer code failing the same way) stays quiet; the row
+    /// still says it.
+    pub tell: bool,
 }
 
 impl Retry {
@@ -279,13 +287,27 @@ impl Retry {
     pub fn failed(prev: Option<&Retry>, code: &str, e: &anyhow::Error, job: u64, now: Instant) -> Retry {
         let failures = prev.filter(|p| p.code == code).map_or(0, |p| p.failures) + 1;
         let stuck = e.downcast_ref::<NoFit>().is_some();
+        let limit = crate::sources::http::rate_limited(e);
+        let limited = limit.map(|l| now + l.wait());
+        let error = says(e);
+        // A limit's text names its end time, which may move; it's the same
+        // failure all the same.
+        let same = prev.is_some_and(|p| if limited.is_some() { p.limited.is_some() } else { p.limited.is_none() && p.error == error });
         Retry {
             code: code.to_string(),
             failures,
-            next: (!stuck).then(|| now + retry_after(failures)),
-            error: says(e),
+            // Back when GitHub resets, not every few seconds.
+            next: (!stuck).then(|| limited.unwrap_or_else(|| now + retry_after(failures))),
+            error,
             job,
+            limited,
+            tell: !same,
         }
+    }
+
+    /// Still waiting out GitHub's rate limit at `now`.
+    pub fn waits_for_limit(&self, now: Instant) -> bool {
+        self.limited.is_some_and(|t| now < t)
     }
 }
 
@@ -301,6 +323,7 @@ pub fn due(f: &crate::settings::FollowedRecipe, retry: Option<&Retry>, busy: boo
         return false;
     }
     match retry {
+        Some(r) if r.waits_for_limit(now) => false,
         Some(r) if r.code == f.seen => r.next.is_some_and(|t| now >= t),
         _ => true,
     }
@@ -311,6 +334,9 @@ pub fn due(f: &crate::settings::FollowedRecipe, retry: Option<&Retry>, busy: boo
 pub fn says(e: &anyhow::Error) -> String {
     if let Some(n) = e.downcast_ref::<NoFit>() {
         return n.0.clone();
+    }
+    if let Some(l) = crate::sources::http::rate_limited(e) {
+        return l.to_string();
     }
     let all = format!("{e:#}").to_lowercase();
     let net = ["dns", "connect", "timed out", "timeout", "network", "unreachable", "connection"];
@@ -572,6 +598,35 @@ mod tests {
         let r3 = Retry::failed(Some(&r2), "HOP-2", &net, 12, t0);
         assert_eq!(r3.failures, 1);
         assert_eq!(r3.error, "Couldn't reach CurseForge or Modrinth. Check your internet connection.");
+    }
+
+    #[test]
+    fn a_github_rate_limit_waits_for_its_reset_and_is_said_once() {
+        use crate::sources::http::RateLimited;
+        use crate::settings::FollowedRecipe;
+        let t0 = Instant::now();
+        let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let limit = || anyhow::Error::new(RateLimited { until: unix + 600 }).context("EZActions wasn't added");
+        let r1 = Retry::failed(None, "HOP-1", &limit(), 1, t0);
+        assert!(r1.tell);
+        assert!(r1.error.starts_with("GitHub is limiting downloads for now. Hopper tries again at "), "{}", r1.error);
+        // Waits about ten minutes, not 2 to 15 seconds.
+        let wait = r1.next.unwrap() - t0;
+        assert!(wait > Duration::from_secs(590) && wait <= Duration::from_secs(600), "{wait:?}");
+        // A retry, or a newer code from another member, failing the same
+        // way: quiet, and a newer code waits for the reset too.
+        let r2 = Retry::failed(Some(&r1), "HOP-1", &limit(), 2, t0);
+        let r3 = Retry::failed(Some(&r2), "HOP-2", &limit(), 3, t0);
+        assert!(!r2.tell && !r3.tell);
+        let f = FollowedRecipe { code: "HOP-1".into(), seen: "HOP-3".into(), ..Default::default() };
+        assert!(!due(&f, Some(&r3), false, t0 + Duration::from_secs(60)));
+        assert!(due(&f, Some(&r3), false, t0 + Duration::from_secs(601)));
+        assert!(!due(&f, Some(&r3), false, t0 + Duration::from_secs(589)));
+        // Another reason after that is news again; the same one twice isn't.
+        let net = anyhow::anyhow!("dns error");
+        let r4 = Retry::failed(Some(&r3), "HOP-3", &net, 4, t0);
+        let r5 = Retry::failed(Some(&r4), "HOP-4", &net, 5, t0);
+        assert!(r4.tell && !r5.tell && r4.limited.is_none());
     }
 
     #[test]

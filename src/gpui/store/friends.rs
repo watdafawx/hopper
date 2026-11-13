@@ -910,7 +910,9 @@ impl Store {
         }
         let r = hopper::recipe::Retry::failed(prev, &code, &e, job, Instant::now());
         log::warn!("applying a followed pack at {}: {e:#} (try {})", root.display(), r.failures);
-        if r.failures == 1
+        if r.limited.is_some() {
+            self.tell_github_limit(&r, cx);
+        } else if r.tell
             && let Some(f) = self.follow_at(&root)
         {
             let local = self.instance(&root).map(|i| i.name.clone()).unwrap_or_else(|| f.name.clone());
@@ -922,15 +924,29 @@ impl Store {
         cx.notify();
     }
 
+    /// Says GitHub's rate limit once until it resets, however many packs
+    /// and retries it holds up.
+    fn tell_github_limit(&mut self, r: &hopper::recipe::Retry, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        if self.github_limit_told.is_some_and(|t| now < t) {
+            return;
+        }
+        self.github_limit_told = r.limited;
+        cx.emit(StoreEvent::GitHubLimited(r.error.clone()));
+    }
+
     /// Why the last automatic update of the follow at `root` failed, and
     /// whether Hopper tries again by itself.
     pub fn follow_error(&self, root: &Path) -> Option<(&str, bool)> {
         if let Some(c) = self.group_copy(root) {
-            let r = self.group_retry.get(&c.local).filter(|r| !c.waiting.is_empty() && r.code == newest_waiting(c))?;
+            let r = self
+                .group_retry
+                .get(&c.local)
+                .filter(|r| !c.waiting.is_empty() && (r.code == newest_waiting(c) || r.waits_for_limit(Instant::now())))?;
             return Some((r.error.as_str(), r.next.is_some()));
         }
         let f = self.follow_at(root)?;
-        let r = self.follow_retry.get(root).filter(|r| r.code == f.seen && f.waiting())?;
+        let r = self.follow_retry.get(root).filter(|r| f.waiting() && (r.code == f.seen || r.waits_for_limit(Instant::now())))?;
         Some((r.error.as_str(), r.next.is_some()))
     }
 
@@ -1022,6 +1038,8 @@ impl Store {
                 _ => false,
             };
             let due = match self.group_retry.get(&c.local) {
+                // GitHub's limit: a newer code would fail the same way.
+                Some(r) if r.waits_for_limit(now) => false,
                 Some(r) if r.code == newest_waiting(c) => r.next.is_some_and(|t| now >= t),
                 _ => true,
             };
@@ -1222,7 +1240,9 @@ impl Store {
         let r = hopper::recipe::Retry::failed(prev, &key, &e, job, Instant::now());
         log::warn!("taking group changes into {local}: {e:#} (try {})", r.failures);
         let root = self.instances.iter().find(|i| i.id == local).map(|i| (i.root.clone(), i.name.clone()));
-        if r.failures == 1
+        if r.limited.is_some() {
+            self.tell_github_limit(&r, cx);
+        } else if r.tell
             && let Some((_, name)) = &root
         {
             let again = if r.next.is_some() { " Hopper tries again in a moment." } else { "" };

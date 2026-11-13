@@ -214,6 +214,9 @@ pub enum StoreEvent {
     PanelChanged(PathBuf, Vec<String>),
     /// Something to tell the user in a notice: (text, is a problem).
     Notice(String, bool),
+    /// GitHub's rate limit for this PC is used up: one notice for every
+    /// pack and retry it holds up, with a way to add a token.
+    GitHubLimited(String),
     /// Open Browse on modpacks to host one (New server's Modpack tab):
     /// None on this PC, else on that paired Hopper Server.
     BrowsePacksFor(Option<String>),
@@ -571,6 +574,9 @@ pub struct Store {
     /// change to be sent (by the `sent_seq` they waited at).
     group_merging: HashSet<String>,
     group_retry: HashMap<String, hopper::recipe::Retry>,
+    /// Until when the GitHub rate-limit notice already told the player, so
+    /// each pack and retry it holds up doesn't say it again.
+    github_limit_told: Option<Instant>,
     group_held: HashMap<String, (u64, Instant)>,
     /// Members' copies that came before this PC's copy of the pack was
     /// set up, by sender and pack; the newest of each.
@@ -773,6 +779,7 @@ impl Store {
             follow_retry: Default::default(),
             group_merging: Default::default(),
             group_retry: Default::default(),
+            github_limit_told: None,
             group_held: Default::default(),
             group_strays: Default::default(),
             server_files_got: Default::default(),

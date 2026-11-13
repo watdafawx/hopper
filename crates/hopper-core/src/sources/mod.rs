@@ -1328,7 +1328,52 @@ pub fn pinned_candidate(src: &ModSource, file_name: &str) -> anyhow::Result<Cand
 /// release and sha256 it names. The source isn't trusted by this; its
 /// updates wait for the player.
 pub fn install_pinned(inst: &mut Instance, pin: &carry::Pin, enabled_on: bool, job: &Job) -> anyhow::Result<String> {
+    // A GitHub file goes straight from the release's link, with no API
+    // call; only a link that's gone (the file renamed) asks GitHub.
+    if let Some(c) = github_direct(&pin.source, &pin.file) {
+        match install_candidate(inst, pin, &c, enabled_on, job) {
+            Err(e) if gone(&e) => log::warn!("{}: {e:#}; looking the release up", pin.file),
+            r => return r,
+        }
+    }
     let c = pinned_candidate(&pin.source, &pin.file)?;
+    install_candidate(inst, pin, &c, enabled_on, job)
+}
+
+/// A pinned GitHub file as its release's download link: the tag, file name
+/// and sha256 the pin carries are all a download needs, and the hash is
+/// checked as it lands. `None` when the pin lacks one of them.
+pub fn github_direct(src: &ModSource, file_name: &str) -> Option<Candidate> {
+    if src.kind != Kind::GitHub
+        || tree::of_url(&src.url).is_some()
+        || src.seen.is_empty()
+        // A tag with a slash isn't written the same way in every link.
+        || src.seen.contains('/')
+        || file_name.is_empty()
+        || src.sha256.len() != 64
+        || !src.url.contains('/')
+    {
+        return None;
+    }
+    Some(Candidate {
+        file_name: file_name.to_string(),
+        url: http::release_download_url(&src.url, &src.seen, file_name),
+        version: src.seen.clone(),
+        title: src.seen.clone(),
+        digest: src.sha256.to_ascii_lowercase(),
+        page: format!("https://github.com/{}/releases/tag/{}", src.url, enc(&src.seen)),
+        fit: Fit::Unknown,
+        ..Default::default()
+    })
+}
+
+/// The download link answered 404 or 410: the file isn't there by that name.
+fn gone(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| matches!(c.downcast_ref::<ureq::Error>(), Some(ureq::Error::StatusCode(404 | 410))))
+}
+
+fn install_candidate(inst: &mut Instance, pin: &carry::Pin, c: &Candidate, enabled_on: bool, job: &Job) -> anyhow::Result<String> {
+    let c = c.clone();
     let id = src_id(&format!("{}|{}", pin.source.key(), pin.source.pattern));
     let name = crate::scan::strip_version_suffix(&pin.file);
     // A pack goes in the instance's own pack folder, the pack way.
