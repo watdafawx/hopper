@@ -22,6 +22,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/browse/deps", get(deps))
         .route("/api/v1/browse/author", get(author))
         .route("/api/v1/browse/link", get(link))
+        .route("/api/v1/browse/comments", get(comments))
 }
 
 fn project_of(q: &std::collections::HashMap<String, String>) -> ApiResult<u64> {
@@ -123,6 +124,43 @@ async fn author(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
             "name": m.author(),
             "url": m.authors.first().map(|a| a.url.clone()).unwrap_or_default(),
             "projects": list.iter().map(mini).collect::<Vec<_>>(),
+        }))
+    })
+    .await?;
+    Ok(Json(v))
+}
+
+fn comment_json(c: &hopper_core::cfcomments::Comment) -> Value {
+    json!({
+        "id": c.id.to_string(),
+        "author": c.author,
+        "avatar": c.avatar,
+        // Seconds, as the browse routes' other dates.
+        "date": c.posted,
+        "text": c.text,
+        "pinned": c.pinned,
+        "removed": c.removed,
+        "replies": c.replies.iter().map(comment_json).collect::<Vec<_>>(),
+    })
+}
+
+/// One page of a CurseForge project's comments (desktop's Comments tab),
+/// fetched here so the browser never talks to CurseForge's website. Only a
+/// CurseForge project's number is taken; Modrinth has no comments.
+async fn comments(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Query(q): Q) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let project = project_of(&q)?;
+    if hopper_core::modrinth::is_mr(project) || hopper_core::sources::is_src(project) {
+        return Err(bad("Only CurseForge projects have comments."));
+    }
+    let page: u32 = arg(&q, "page").parse().unwrap_or(0).min(10_000);
+    let v = blocking(move || {
+        let p = hopper_core::cfcomments::page(project, page)?;
+        Ok(json!({
+            "comments": p.comments.iter().map(comment_json).collect::<Vec<_>>(),
+            "page": p.index,
+            "total": p.total,
+            "more": p.more(),
         }))
     })
     .await?;
