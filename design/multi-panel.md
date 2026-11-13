@@ -1,7 +1,10 @@
 # Hopper Server: several panels in one web UI, and node mode (draft)
 
 Status: B0 built (CSP, `web_origins` and CORS, the access-management
-switch; `crates/hopperd/src/web_access.rs`, `ui.rs`); the rest is design. Mock: `.claude/changes/multi-panel/mock.html`
+switch; `crates/hopperd/src/web_access.rs`, `ui.rs`); B1 built (browser
+sessions, live tickets, file links; `auth.rs`, `grants.rs`, `api.rs`,
+`fs_api.rs`, tests in `cross_origin_tests.rs`, see "B1 as built"); the rest
+is design. Mock: `.claude/changes/multi-panel/mock.html`
 (published as a Design Artifact), picks in `.claude/changes/multi-panel/picks.md`.
 
 Two features share one web UI and one idea of "a place servers live":
@@ -794,6 +797,107 @@ with measured gaps and a 375 px one.
 
 New open questions from this section: 11 and 12 below.
 
+## B1 as built (2026-11-13)
+
+Server side only; the web UI does not use it yet (B2). Capability
+`web.remote` is now in `hello`.
+
+### What a listed page can do
+
+- **Sign in**: `POST /api/v1/auth/login` with `{ name, password, code?,
+  bearer: true }`. Only from a page whose `Origin` is in `web_origins` and
+  is not the panel's own; anything else (no `Origin`, the panel's own page,
+  an unlisted page, `null`) gets 403 **before the password is checked**, so
+  a refused page uses up no try. The same lockout (5 wrong, 10 minutes),
+  the same 20/minute sign-in limit and the same "two-factor needed from the
+  internet" rule apply. Answer: `{ ok, token, expires_in }`, no
+  `Set-Cookie`. The audit log records the sign-in, right or wrong, as
+  `/api/v1/auth/login (from <origin>)`.
+- **Use the token**: `Authorization: Bearer <token>` from that same page.
+  The session remembers its origin and is accepted **only with that exact
+  `Origin`**: not with none (a script), not from another listed page, not
+  as a cookie, not for SFTP. It lasts 7 days from last use (cookie sessions
+  keep 30). At most 20 per account and page; a page signing in in a loop
+  pushes out its oldest.
+- **Live feed**: `POST /api/v1/ws/ticket` (only from a listed page) →
+  `{ ticket, expires_in: 30, protocols }`, then `new WebSocket(url,
+  protocols)` where `protocols` is `["hopperd", "hopperd-ticket.<t>"]`.
+  The ticket rides in `Sec-WebSocket-Protocol`; the panel answers with
+  `hopperd` only. *Spike result (open question 4): axum's
+  `WebSocketUpgrade::protocols` handles this cleanly, so the ticket is
+  never in a URL.* It opens one socket, from the page that asked, while the
+  session that asked is still signed in; roles and server scope are read
+  again when it opens.
+- **Files**: `POST /api/v1/fs/{id}/link` with `{ path }` or `{ paths, zip:
+  true }`, optional `inline` and `name` → `{ url: "/api/v1/link?k=<k>",
+  expires_in: 60 }`. Path checks (`files::resolve`) run when asking and
+  again when used; the file must exist; a folder only as a zip; at most
+  1000 paths. Using the link needs no token and no `Origin` (it is a
+  navigation); the session that asked must still be signed in, and its role
+  and server access are checked again as a read of that server's files.
+  Inline previews keep today's rules (text or raster image only, sandbox
+  CSP, `nosniff`). The secret is in the query because the panel's logs
+  record paths only.
+- **Sessions**: `GET /api/v1/auth/sessions` (yours; every one for the owner
+  and managers) shows `kind: browser | cookie`, `origin`, browser name, IP,
+  last used, `expires`, `current`. `DELETE /api/v1/auth/sessions/{id}` ends
+  one: your own, any for the owner, users' (not managers') for a manager.
+- **Refusals are readable**: every answer to a listed page carries
+  `Access-Control-Allow-Origin` and `Vary: Origin`, 401, 403 and 429
+  included (`security::guard` wraps every check). Unlisted pages get no
+  `Access-Control-*` header on any answer.
+
+### Choices made where the design was open (safest option)
+
+1. **Bearer sign-in needs a listed origin.** The design didn't say what
+   `bearer: true` does without one. Refused: scripts use API tokens, and
+   the panel's own page has its cookie.
+2. **Sessions are bound to their page's origin.** Not in the design. It
+   stops a token taken from one page being used by another page in the
+   browser, and lets the panel treat the token as "that page" whatever
+   headers come with it (next point). A script can fake `Origin`, so this
+   is not protection against a stolen token outside a browser; the 7-day
+   life, the session list and Revoke are.
+3. **The access-management rule follows the token, not the headers.** B0
+   checked "is this request from a listed other page" by `Origin` and
+   `Host`. A copied browser-session token sent with `Host` made equal to
+   the page would have looked like the panel's own page. Now a request
+   signed in with a browser session always counts as that other page.
+4. **Taking a page off the list signs its sessions out** (and so do hand
+   edits of `hopperd.toml`, at the next start).
+5. **Tickets and links are one-use even when the use fails** (wrong page,
+   wrong purpose, expired): a guess or a wrong try burns it. They are
+   bound to the session's hash, the asking page's origin and their purpose
+   (a ticket is not a file link). Only their SHA-256 is kept, in memory;
+   at most 64 per session and 2048 in all.
+6. **Route names**: `/fs/{id}/link` instead of `/files/{id}/link` (the file
+   routes are all under `/fs/`, so server scope applies as for any other
+   file route) and `/link?k=` for redemption.
+7. **Roles treat asking for a ticket or a link as a read**, so a viewer or a
+   read-only token can open the live feed and download what they can
+   already see. Neither request is written to the audit log (reads aren't).
+8. **The session list is "who can get in"**: ending someone's session from
+   another page is refused unless the owner's switch is on. Signing
+   yourself out (`/auth/logout`) always works.
+
+### Threat list
+
+| Who | Can | Can't | Test (`cross_origin_tests.rs` unless noted) |
+|---|---|---|---|
+| A page on an **unlisted** origin | Send requests (browsers allow sending simple ones); a cookie sign-in works server-side as before B1 | Read any answer (no CORS headers on any status); get a bearer token; pass a preflight; open a ticketed socket; use the person's cookie (SameSite=Strict) | `unlisted_page_gets_nothing_usable`, `bearer_sign_in_only_for_listed_pages`, `tickets_one_use_bound_and_expiring`; `web_access::tests::preflight_for_unlisted_or_empty_list` |
+| A page on an unlisted origin holding a **stolen token** | Nothing in a browser | Use it: the session only works with its own page's `Origin` | `remote_session_is_bound_to_its_page` |
+| A **listed but compromised** page (XSS on it) | Everything the signed-in person may do day to day on this panel until the session is revoked or 7 days unused; read the tokens it holds | Change users, devices, tokens, passwords, two-factor, the certificate or end others' sessions (unless the owner turned that on); change the allowed-pages list (never); ride the person's cookie (dropped, no credentialed CORS); go beyond the person's role or servers; name a path outside a server folder; reuse a ticket or link; pile up sessions | `remote_session_cannot_manage_access`, `sessions_listed_and_revoked`, `file_links_follow_server_access`, `file_links_one_use_bound_and_expiring`, `remote_sessions_are_capped`, `same_origin_cookie_rules_unchanged` |
+| A **script with a copied token** (made-up headers) | Use it with the right `Origin`, like the page could | Manage access by faking `Host` or leaving `Origin` out; use it for SFTP | `remote_session_cannot_manage_access` (made-up Host), `remote_session_is_bound_to_its_page` |
+| Someone **guessing passwords** through a listed page | 20 sign-ins a minute per address, 5 wrong then 10 minutes locked, as on the panel's own page | More, by using preflights or another origin | `sign_in_limits_apply_across_origins`, `refusals_carry_cors_for_listed_pages` (429) |
+| A **network observer** on plain HTTP (LAN, as allowed today) | Read tokens, tickets and links in transit, the same as cookies today | Anything over HTTPS; reuse a used ticket or link; use a ticket after 30 s or a link after 60 s | Not testable as a unit; `grants::tests::one_use_and_expiring` covers reuse and expiry. Plain HTTP stays private-network only (unchanged). |
+| Someone reading **logs or history** | See paths | See ticket or link secrets: tickets travel in a header, links in the query, logs keep paths only; grants are stored hashed | `grants::tests::secrets_are_stored_hashed`, `file_links_one_use_bound_and_expiring` (query, not path), `audit_names_the_page_a_sign_in_came_from` (no ticket lines) |
+| The **owner** after removing a page | Its sessions end at once | | `removing_a_page_ends_its_sessions` |
+
+Also unchanged and still tested: the setup code is never usable from
+another page (setup has no bearer path; `trusted_local` refuses a foreign
+`Origin`), TLS and the plain-HTTP rule, the cookie and `X-Hopperd` rules
+for the panel's own page (`same_origin_cookie_rules_unchanged`).
+
 ## Open questions for the maintainer
 
 1. **Remote-session limits (B).** *Answered (maintainer, 2026-11-11): a
@@ -813,6 +917,7 @@ New open questions from this section: 11 and 12 below.
    keep it in the browser only? I recommend on the home panel.
 4. **Ticket carrier (B/A).** Query string versus `Sec-WebSocket-Protocol`:
    prefer the subprotocol if the spike shows axum handles it cleanly.
+   **Settled in B1: the subprotocol; no query-string tickets.**
 5. **Default node ceiling (A).** Manage (everything on servers), or Operate and
    an explicit upgrade? I recommend Manage with a clear warning, because
    Operate-only nodes are not useful for most people's first try.
