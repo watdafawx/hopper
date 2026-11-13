@@ -275,9 +275,15 @@ async fn run_node(dir: PathBuf, url: Option<String>, window_kib: u32) -> anyhow:
         match ws::connect(&url, tls.clone(), &token).await {
             Ok((tx, rx)) => match mux::start(Side::Node, cfg.clone(), tx, rx).await {
                 Ok(t) => {
-                    backoff = Duration::from_secs(1);
                     log::info!("connected to the main (hopperd {})", t.peer.version);
+                    let at = Instant::now();
                     let why = node_session(t).await;
+                    // Start the backoff again only after a connection that
+                    // lasted: a main that accepts and drops at once would
+                    // otherwise get every node back each second.
+                    if at.elapsed() >= Duration::from_secs(60) {
+                        backoff = Duration::from_secs(1);
+                    }
                     log::info!("tunnel ended: {why}");
                     if matches!(why, MuxError::GoAway(code::BYE, _)) {
                         return Ok(());
