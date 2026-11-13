@@ -738,3 +738,110 @@ async fn password_change_ends_browser_sessions() {
     assert!(t.app.auth.check_from(&remote, Some(LISTED)).is_none(), "the copied page token is dead");
     assert!(t.app.auth.check(&cookie).is_some(), "the session that changed it stays");
 }
+
+// ---- found in the second look at B1 (low findings) ---------------------------------
+
+/// One account with dozens of sessions (two listed pages, 20 each) asking
+/// for tickets in a loop can't use up the shared pool: the owner's own
+/// newest request still works (its oldest grants go), and another account
+/// still gets its live feed and its file links.
+#[tokio::test]
+async fn one_account_cannot_fill_the_grant_pool() {
+    let t = panel();
+    let mut sessions = Vec::new();
+    for (n, page) in [LISTED, LISTED_2].iter().enumerate() {
+        for i in 0..20 {
+            // An address each, so the sign-in and request limits aren't what stops it.
+            let ip = format!("192.168.{}.{}", 70 + n, i + 1);
+            let (s, _, b) = call("POST", "/api/v1/auth/login").origin(page).from(&ip).json(json!({ "password": PASSWORD, "bearer": true })).send(&t).await;
+            assert_eq!(s, StatusCode::OK);
+            sessions.push((body(&b)["token"].as_str().unwrap().to_string(), *page, ip));
+        }
+    }
+    t.app.auth.user_create("vic", "vicpass12", Role::Viewer, vec![]).unwrap();
+    let (_, _, b) = call("POST", "/api/v1/auth/login").origin(LISTED).from("192.168.80.1").json(json!({ "name": "vic", "password": "vicpass12", "bearer": true })).send(&t).await;
+    let vic = body(&b)["token"].as_str().unwrap().to_string();
+    // 40 sessions x 64 tickets = 2560, more than the 2048 the pool holds.
+    for (tok, page, ip) in &sessions {
+        for _ in 0..64 {
+            let (s, _, b) = call("POST", "/api/v1/ws/ticket").origin(page).bearer(tok).from(ip).send(&t).await;
+            assert_eq!(s, StatusCode::OK, "the owner is never refused for asking: {}", String::from_utf8_lossy(&b));
+        }
+    }
+    let (s, _, b) = call("POST", "/api/v1/ws/ticket").origin(LISTED).bearer(&vic).from("192.168.80.1").send(&t).await;
+    assert_eq!(s, StatusCode::OK, "someone else's live feed: {}", String::from_utf8_lossy(&b));
+    let (s, _) = link(&t, &vic, json!({ "path": "hello.txt" })).await;
+    assert_eq!(s, StatusCode::OK, "someone else's file link");
+}
+
+/// A browser session ends 30 days after sign-in however often it is used,
+/// and the session list says when.
+#[tokio::test]
+async fn browser_sessions_end_after_thirty_days() {
+    let t = panel();
+    let tok = remote_login(&t, LISTED).await;
+    let cookie = cookie_login(&t).await;
+    t.app.auth.age_sign_ins(28 * 24 * 3600);
+    // Used just now (so 7 days idle would start again), but only 2 days of its 30 are left.
+    assert!(t.app.auth.check_from(&tok, Some(LISTED)).is_some());
+    let mine = t.app.auth.sessions(true, None);
+    let ends = mine.iter().find(|s| s.kind == "browser").unwrap().expires;
+    let now = crate::security::now();
+    assert!(ends > now && ends <= now + 2 * 24 * 3600 + 5, "ends in {} s", ends.saturating_sub(now));
+    t.app.auth.age_sign_ins(3 * 24 * 3600);
+    assert!(t.app.auth.check_from(&tok, Some(LISTED)).is_none(), "30 days after sign-in, used or not");
+    assert!(t.app.auth.sessions(true, None).iter().all(|s| s.kind == "cookie"));
+    assert!(t.app.auth.check(&cookie).is_some(), "cookie sessions keep their own 30 days from last use");
+}
+
+/// A sign-in a listed-page check turns away (403, before the password) is
+/// still in the audit log with where it came from; long or odd origins are cut.
+#[tokio::test]
+async fn refused_bearer_sign_in_is_logged_with_its_origin() {
+    let t = panel();
+    call("POST", "/api/v1/auth/login").origin(UNLISTED).json(json!({ "password": "secret-pass-123", "bearer": true })).send(&t).await;
+    let long = format!("http://{}.example", "a".repeat(500));
+    call("POST", "/api/v1/auth/login").origin(&long).json(json!({ "password": "secret-pass-123", "bearer": true })).send(&t).await;
+    call("POST", "/api/v1/auth/login").json(json!({ "password": "secret-pass-123", "bearer": true })).send(&t).await;
+    let ev = t.app.audit.recent(10);
+    let paths: Vec<&str> = ev.iter().filter(|e| e.status == 403).map(|e| e.path.as_str()).collect();
+    assert_eq!(paths.len(), 3, "{paths:?}");
+    assert!(paths.contains(&format!("/api/v1/auth/login (from {UNLISTED})").as_str()), "{paths:?}");
+    assert!(paths.iter().any(|p| p.starts_with("/api/v1/auth/login (from http://aaaa") && p.len() < 200), "{paths:?}");
+    assert!(paths.contains(&"/api/v1/auth/login (from no Origin)"), "{paths:?}");
+    assert!(ev.iter().all(|e| !e.path.contains("secret-pass-123")));
+}
+
+async fn user_cookie(t: &T, name: &str, password: &str) -> String {
+    let (s, h, _) = call("POST", "/api/v1/auth/login").origin(OWN).json(json!({ "name": name, "password": password })).send(t).await;
+    assert_eq!(s, StatusCode::OK);
+    h["set-cookie"].to_str().unwrap().split(';').next().unwrap().strip_prefix("hopperd_session=").unwrap().to_string()
+}
+
+/// A manager's session list shows their own and the users' sessions, not
+/// the owner's or another manager's (IP, page, browser); the owner sees all.
+#[tokio::test]
+async fn managers_do_not_see_the_owners_sessions() {
+    let t = panel();
+    t.app.auth.user_create("mia", "miapass12", Role::Manager, vec![]).unwrap();
+    t.app.auth.user_create("moe", "moepass12", Role::Manager, vec![]).unwrap();
+    t.app.auth.user_create("sam", "sampass12", Role::Admin, vec![]).unwrap();
+    let owner = cookie_login(&t).await;
+    remote_login(&t, LISTED).await;
+    let mia = user_cookie(&t, "mia", "miapass12").await;
+    user_cookie(&t, "moe", "moepass12").await;
+    user_cookie(&t, "sam", "sampass12").await;
+    let names = |c: &str| {
+        let c = c.to_string();
+        let t = &t;
+        async move {
+            let (s, _, b) = call("GET", "/api/v1/auth/sessions").origin(OWN).h("cookie", format!("hopperd_session={c}")).send(t).await;
+            assert_eq!(s, StatusCode::OK);
+            let mut n: Vec<String> = body(&b).as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap().to_string()).collect();
+            n.sort();
+            n
+        }
+    };
+    assert_eq!(names(&mia).await, vec!["mia", "sam"], "no owner or other manager sessions");
+    assert_eq!(names(&owner).await, vec!["mia", "moe", "owner", "owner", "owner", "sam"], "the owner sees all (setup, cookie, page)");
+}

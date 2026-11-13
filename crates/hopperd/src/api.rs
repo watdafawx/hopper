@@ -292,7 +292,11 @@ async fn login(
         match crate::web_access::listed_other(&headers, &list) {
             Some(o) => Some((o.to_string(), crate::auth::agent_label(headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("")))),
             None => {
-                return ApiError(StatusCode::FORBIDDEN, "This page can't sign in to this panel. Its owner can add it in Settings › Access & devices.".into()).into_response();
+                let mut r = ApiError(StatusCode::FORBIDDEN, "This page can't sign in to this panel. Its owner can add it in Settings › Access & devices.".into()).into_response();
+                // Refused before the password, but still worth a line: who
+                // is trying to sign in from where. Only the (capped) origin.
+                r.extensions_mut().insert(crate::security::AuditNote(refused_origin_note(origin_of(&headers))));
+                return r;
             }
         }
     } else {
@@ -323,16 +327,38 @@ async fn login(
     r
 }
 
+/// "from <origin>" for the audit log line of a refused bearer sign-in. The
+/// header is whatever the client sent: keep the start, printable characters
+/// only, so it can't flood or forge the log.
+fn refused_origin_note(origin: Option<&str>) -> String {
+    match origin {
+        Some(o) => {
+            let shown: String = o.chars().filter(|c| !c.is_control()).take(100).collect();
+            format!("from {shown}{}", if o.chars().count() > 100 { "…" } else { "" })
+        }
+        None => "from no Origin".into(),
+    }
+}
+
 // ---- sessions (your own; every one for the owner and managers) ------------------------
 
 async fn sessions(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
     let who = account(&app, &headers, &method)?;
     let current = crate::auth::Auth::session_id(&token(&headers).0);
-    let names: HashMap<String, String> = app.auth.users().into_iter().map(|u| (u.id, u.name)).collect();
+    let users = app.auth.users();
+    let names: HashMap<String, String> = users.iter().map(|u| (u.id.clone(), u.name.clone())).collect();
+    let me = who.account().flatten();
     let list: Vec<Value> = app
         .auth
-        .sessions(who.owner_level(), who.account().flatten())
+        .sessions(who.owner_level(), me)
         .into_iter()
+        // A manager sees (and can end) their own and the users' sessions, not
+        // the owner's or another manager's: the same rule as ending one, so
+        // their IP, page and browser stay private.
+        .filter(|s| match s.user.as_deref() {
+            None => who.is_owner(),
+            Some(uid) => me == Some(uid) || who.is_owner() || !users.iter().any(|u| u.id == uid && u.role == crate::auth::Role::Manager),
+        })
         .map(|s| {
             let mut v = serde_json::to_value(&s).unwrap_or_default();
             v["current"] = json!(s.id == current);
@@ -1153,7 +1179,8 @@ async fn ws_ticket(State(app): State<Arc<App>>, headers: HeaderMap, method: Meth
         return Err(ApiError(StatusCode::FORBIDDEN, "Tickets are only for pages on another address that this panel lists.".into()));
     };
     let cred = crate::auth::hash_token(&token(&headers).0);
-    let ticket = app.grants.issue(crate::grants::Purpose::Live, &cred, Some(page)).map_err(|m| ApiError(StatusCode::TOO_MANY_REQUESTS, m.into()))?;
+    let acct = app.auth.account_key(&cred).unwrap_or_else(|| cred.clone());
+    let ticket = app.grants.issue(crate::grants::Purpose::Live, &cred, &acct, Some(page)).map_err(|m| ApiError(StatusCode::TOO_MANY_REQUESTS, m.into()))?;
     Ok(Json(json!({
         "ticket": ticket,
         "expires_in": crate::grants::TICKET_TTL.as_secs(),

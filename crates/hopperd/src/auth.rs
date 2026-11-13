@@ -23,6 +23,9 @@ const SESSION_IDLE: u64 = 30 * 24 * 3600;
 /// Sessions a page on another origin holds (design/multi-panel.md, B1):
 /// the page can read their token, so they live shorter.
 pub const REMOTE_IDLE: u64 = 7 * 24 * 3600;
+/// ...and never longer than this from sign-in, however often they are used,
+/// so a token that leaked once can't be kept alive by using it.
+pub const REMOTE_MAX_LIFE: u64 = 30 * 24 * 3600;
 /// Most sessions one listed page may hold for one account; the oldest go.
 const MAX_REMOTE_PER_ACCOUNT: usize = 20;
 /// Failed logins from one address before it has to wait.
@@ -103,7 +106,7 @@ pub struct Session {
     pub ip: String,
     /// A browser session for a page on another origin (its exact origin):
     /// the token is only accepted with that `Origin`, lives 7 days from
-    /// last use, and ends when the owner takes the origin off the list.
+    /// last use (30 from sign-in at most), and ends when the owner takes the origin off the list.
     /// `None`: the panel's own cookie session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     origin: Option<String>,
@@ -115,6 +118,13 @@ pub struct Session {
 impl Session {
     fn idle_limit(&self) -> u64 {
         if self.origin.is_some() { REMOTE_IDLE } else { SESSION_IDLE }
+    }
+
+    /// Unix seconds it ends: when unused for its idle limit, or (browser
+    /// sessions) [`REMOTE_MAX_LIFE`] after sign-in, whichever comes first.
+    fn ends(&self) -> u64 {
+        let idle = self.last_seen + self.idle_limit();
+        if self.origin.is_some() { idle.min(self.created + REMOTE_MAX_LIFE) } else { idle }
     }
 
     /// A short id for listing and revoking: the start of the token's hash,
@@ -622,7 +632,7 @@ impl Auth {
         let mut out: Vec<SessionInfo> = s
             .sessions
             .iter()
-            .filter(|x| t.saturating_sub(x.last_seen) < x.idle_limit())
+            .filter(|x| t < x.ends())
             .filter(|x| all || x.user.as_deref() == acct)
             .map(|x| SessionInfo {
                 id: x.id().to_string(),
@@ -633,7 +643,7 @@ impl Auth {
                 created: x.created,
                 last_seen: x.last_seen,
                 ip: x.ip.clone(),
-                expires: x.last_seen + x.idle_limit(),
+                expires: x.ends(),
             })
             .collect();
         out.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
@@ -691,6 +701,20 @@ impl Auth {
         ended
     }
 
+    /// Whose a sign-in is, for counting what it asks for: the account
+    /// (owner, or the user's id), or the paired PC or API token. `None`
+    /// when `h` isn't a sign-in the panel knows.
+    pub fn account_key(&self, h: &str) -> Option<String> {
+        let s = self.stored.lock().unwrap();
+        if let Some(x) = s.sessions.iter().find(|x| x.hash == h) {
+            return Some(x.user.as_ref().map_or_else(|| "owner".to_string(), |u| format!("user:{u}")));
+        }
+        if let Some(d) = s.devices.iter().find(|x| x.hash == h) {
+            return Some(format!("device:{}", d.id));
+        }
+        s.tokens.iter().find(|x| x.hash == h).map(|t| format!("token:{}", t.id))
+    }
+
     /// The origin `token`'s session was made for, when it is a session for
     /// a page on another origin.
     pub fn remote_origin(&self, token: &str) -> Option<String> {
@@ -706,6 +730,15 @@ impl Auth {
     pub(crate) fn age_sessions(&self, secs: u64) {
         for x in self.stored.lock().unwrap().sessions.iter_mut() {
             x.last_seen = x.last_seen.saturating_sub(secs);
+        }
+    }
+
+    /// Tests: makes every session look `secs` longer since sign-in, though
+    /// just used.
+    #[cfg(test)]
+    pub(crate) fn age_sign_ins(&self, secs: u64) {
+        for x in self.stored.lock().unwrap().sessions.iter_mut() {
+            x.created = x.created.saturating_sub(secs);
         }
     }
 
@@ -758,7 +791,7 @@ impl Auth {
     pub fn check_hash(&self, h: &str, origin: Option<&str>) -> Option<Who> {
         let t = now();
         let mut s = self.stored.lock().unwrap();
-        s.sessions.retain(|x| t.saturating_sub(x.last_seen) < x.idle_limit());
+        s.sessions.retain(|x| t < x.ends());
         if let Some(sess) = s.sessions.iter_mut().find(|x| x.hash == h) {
             if sess.origin.is_some() && sess.origin.as_deref() != origin {
                 return None;

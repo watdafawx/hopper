@@ -324,7 +324,8 @@ async fn link(
     let name = b.name.map(|n| n.chars().filter(|c| !c.is_control() && !matches!(c, '/' | '\\')).take(200).collect::<String>()).filter(|n| !n.is_empty());
     let cred = crate::auth::hash_token(&crate::api::token(&headers).0);
     let purpose = crate::grants::Purpose::File { server: id, paths, zip: b.zip, inline: b.inline && !b.zip, name };
-    let k = app.grants.issue(purpose, &cred, crate::api::origin_of(&headers)).map_err(|m| ApiError(StatusCode::TOO_MANY_REQUESTS, m.into()))?;
+    let acct = app.auth.account_key(&cred).unwrap_or_else(|| cred.clone());
+    let k = app.grants.issue(purpose, &cred, &acct, crate::api::origin_of(&headers)).map_err(|m| ApiError(StatusCode::TOO_MANY_REQUESTS, m.into()))?;
     // The secret goes in the query: the panel's logs record paths only.
     Ok(Json(json!({ "url": format!("/api/v1/link?k={k}"), "expires_in": crate::grants::LINK_TTL.as_secs() })))
 }

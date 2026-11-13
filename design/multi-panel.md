@@ -816,8 +816,9 @@ Server side only; the web UI does not use it yet (B2). Capability
 - **Use the token**: `Authorization: Bearer <token>` from that same page.
   The session remembers its origin and is accepted **only with that exact
   `Origin`**: not with none (a script), not from another listed page, not
-  as a cookie, not for SFTP. It lasts 7 days from last use (cookie sessions
-  keep 30). At most 20 per account and page; a page signing in in a loop
+  as a cookie, not for SFTP. It lasts 7 days from last use and ends 30
+  days after sign-in whatever its use (cookie sessions keep 30 from last
+  use). At most 20 per account and page; a page signing in in a loop
   pushes out its oldest.
 - **Live feed**: `POST /api/v1/ws/ticket` (only from a listed page) →
   `{ ticket, expires_in: 30, protocols }`, then `new WebSocket(url,
@@ -840,8 +841,11 @@ Server side only; the web UI does not use it yet (B2). Capability
   record paths only.
 - **Sessions**: `GET /api/v1/auth/sessions` (yours; every one for the owner
   and managers) shows `kind: browser | cookie`, `origin`, browser name, IP,
-  last used, `expires`, `current`. `DELETE /api/v1/auth/sessions/{id}` ends
-  one: your own, any for the owner, users' (not managers') for a manager.
+  last used, `expires` (the earlier of 7 days idle and 30 days from sign-in),
+  `current`. The owner sees every session; a manager sees their own and the
+  users', never the owner's or another manager's (IP, page, browser).
+  `DELETE /api/v1/auth/sessions/{id}` ends one: your own, any for the owner,
+  users' (not managers') for a manager.
 - **Refusals are readable**: every answer to a listed page carries
   `Access-Control-Allow-Origin` and `Vary: Origin`, 401, 403 and 429
   included (`security::guard` wraps every check). Unlisted pages get no
@@ -869,7 +873,12 @@ Server side only; the web UI does not use it yet (B2). Capability
    wrong purpose, expired): a guess or a wrong try burns it. They are
    bound to the session's hash, the asking page's origin and their purpose
    (a ticket is not a file link). Only their SHA-256 is kept, in memory;
-   at most 64 per session and 2048 in all.
+   waiting at once: at most 64 per session (a looping page is refused),
+   64 and 2 MB of paths per account over all its sessions, 2048 and 16 MB
+   in all. An account at its share loses its own oldest waiting grant
+   instead of being refused (it can't lock itself out of its console; it
+   can't take the pool from others either). When the whole pool is full the
+   biggest holder gives one up.
 6. **Route names**: `/fs/{id}/link` instead of `/files/{id}/link` (the file
    routes are all under `/fs/`, so server scope applies as for any other
    file route) and `/link?k=` for redemption.
@@ -886,11 +895,12 @@ Server side only; the web UI does not use it yet (B2). Capability
 |---|---|---|---|
 | A page on an **unlisted** origin | Send requests (browsers allow sending simple ones); a cookie sign-in works server-side as before B1 | Read any answer (no CORS headers on any status); get a bearer token; pass a preflight; open a ticketed socket; use the person's cookie (SameSite=Strict) | `unlisted_page_gets_nothing_usable`, `bearer_sign_in_only_for_listed_pages`, `tickets_one_use_bound_and_expiring`; `web_access::tests::preflight_for_unlisted_or_empty_list` |
 | A page on an unlisted origin holding a **stolen token** | Nothing in a browser | Use it: the session only works with its own page's `Origin` | `remote_session_is_bound_to_its_page` |
-| A **listed but compromised** page (XSS on it) | Everything the signed-in person may do day to day on this panel until the session is revoked or 7 days unused; read the tokens it holds | Change users, devices, tokens, passwords, two-factor, the certificate or end others' sessions (unless the owner turned that on); change the allowed-pages list (never); ride the person's cookie (dropped, no credentialed CORS); go beyond the person's role or servers; name a path outside a server folder; reuse a ticket or link; pile up sessions | `remote_session_cannot_manage_access`, `sessions_listed_and_revoked`, `file_links_follow_server_access`, `file_links_one_use_bound_and_expiring`, `remote_sessions_are_capped`, `same_origin_cookie_rules_unchanged` |
+| A **listed but compromised** page (XSS on it) | Everything the signed-in person may do day to day on this panel until the session is revoked, 7 days unused or 30 days old; read the tokens it holds | Change users, devices, tokens, passwords, two-factor, the certificate or end others' sessions (unless the owner turned that on); change the allowed-pages list (never); ride the person's cookie (dropped, no credentialed CORS); go beyond the person's role or servers; name a path outside a server folder; reuse a ticket or link; pile up sessions; keep a token alive past 30 days by using it; use up the shared ticket and link pool for others | `remote_session_cannot_manage_access`, `sessions_listed_and_revoked`, `file_links_follow_server_access`, `file_links_one_use_bound_and_expiring`, `remote_sessions_are_capped`, `browser_sessions_end_after_thirty_days`, `one_account_cannot_fill_the_grant_pool`, `same_origin_cookie_rules_unchanged` |
 | A **script with a copied token** (made-up headers) | Use it with the right `Origin`, like the page could | Manage access by faking `Host` or leaving `Origin` out; use it for SFTP | `remote_session_cannot_manage_access` (made-up Host), `remote_session_is_bound_to_its_page` |
 | Someone **guessing passwords** through a listed page | 20 sign-ins a minute per address, 5 wrong then 10 minutes locked, as on the panel's own page | More, by using preflights or another origin | `sign_in_limits_apply_across_origins`, `refusals_carry_cors_for_listed_pages` (429) |
 | A **network observer** on plain HTTP (LAN, as allowed today) | Read tokens, tickets and links in transit, the same as cookies today | Anything over HTTPS; reuse a used ticket or link; use a ticket after 30 s or a link after 60 s | Not testable as a unit; `grants::tests::one_use_and_expiring` covers reuse and expiry. Plain HTTP stays private-network only (unchanged). |
-| Someone reading **logs or history** | See paths | See ticket or link secrets: tickets travel in a header, links in the query, logs keep paths only; grants are stored hashed | `grants::tests::secrets_are_stored_hashed`, `file_links_one_use_bound_and_expiring` (query, not path), `audit_names_the_page_a_sign_in_came_from` (no ticket lines) |
+| Someone reading **logs or history** | See paths; see which page tried to sign in, refused ones too | See ticket or link secrets: tickets travel in a header, links in the query, logs keep paths only; grants are stored hashed; a refused sign-in's log line holds only the origin, cut at 100 characters | `grants::tests::secrets_are_stored_hashed`, `file_links_one_use_bound_and_expiring` (query, not path), `audit_names_the_page_a_sign_in_came_from` (no ticket lines), `refused_bearer_sign_in_is_logged_with_its_origin` |
+| A **manager** | See and end their own and the users' sessions | See the owner's or another manager's session details (IP, page, browser) | `managers_do_not_see_the_owners_sessions` |
 | The **owner** after removing a page | Its sessions end at once | | `removing_a_page_ends_its_sessions` |
 
 Added after the security review (tests in `cross_origin_tests.rs`):
@@ -902,6 +912,22 @@ ends your sessions on other pages except the one you changed it from
 256 KB, keeps its paths tidied (`./` padding dropped), and all waiting
 links together hold at most 16 MB of paths (`file_links_cannot_fill_memory`,
 `grants::tests::waiting_links_hold_little_memory`).
+
+Closed in a second pass over the review's low findings (`cross_origin_tests.rs`):
+one account with dozens of sessions can't fill the shared grant pool, so
+other people's live feeds and file links keep working
+(`one_account_cannot_fill_the_grant_pool`,
+`grants::tests::one_account_cannot_fill_the_pool`,
+`grants::tests::one_account_cannot_hold_much_memory`); browser sessions end
+30 days after sign-in however often used, and the list shows when
+(`browser_sessions_end_after_thirty_days`); a bearer sign-in refused for its
+page (403, before the password) is logged as `(from <origin>)`, origin cut at
+100 characters, nothing else from the request
+(`refused_bearer_sign_in_is_logged_with_its_origin`); managers don't see the
+owner's or other managers' sessions (`managers_do_not_see_the_owners_sessions`).
+Left as is: your own cookie sessions survive a password change (only browser
+sessions end), the same as before B1; ending them too would sign the person
+out of the panel's own page on every other device, which needs a UI decision.
 
 Also unchanged and still tested: the setup code is never usable from
 another page (setup has no bearer path; `trusted_local` refuses a foreign
