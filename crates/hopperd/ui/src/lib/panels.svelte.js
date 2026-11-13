@@ -461,7 +461,9 @@ export async function check(input) {
   let last = null;
   for (const url of list) {
     if (mixed(url)) {
-      last = { ok: false, problem: 'mixed', url, steps: [{ text: 'This secure page may talk to it', ok: false }] };
+      // A bare address tried https first: when that failed on its
+      // certificate, the certificate is the thing to fix, not http.
+      if (!last) last = { ok: false, problem: 'mixed', url, steps: [{ text: 'This secure page may talk to it', ok: false }] };
       continue;
     }
     let h = null;
