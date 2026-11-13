@@ -227,6 +227,7 @@ export function check(e, text) {
   const t = String(text).trim();
   if (e.kind === 'int' && !/^[-+]?\d+$/.test(t)) return 'Type a whole number.';
   if ((e.kind === 'float' || e.kind === 'int') && (t === '' || Number.isNaN(Number(t)))) return 'Type a number.';
+  if (e.kind === 'color' && swatchOf(e, t) == null) return 'Type a colour like #38BDF8.';
   if ((e.kind === 'int' || e.kind === 'float') && e.range) {
     const n = Number(t);
     const [lo, hi] = e.range;

@@ -232,6 +232,11 @@ pub struct ConfigView {
     editing: Option<(String, Vec<String>, String, Typing)>,
     edit_input: Entity<InputState>,
     edit_error: Option<String>,
+    /// What the open field's setting was when it opened (Escape puts it back).
+    edit_from: Option<Value>,
+    /// Where the keyboard rests when a field lets go, so Escape and Enter
+    /// still reach this view (and its dialog).
+    hold: FocusHandle,
     /// Values refused on Save, by setting.
     errors: HashMap<String, String>,
     sliders: HashMap<String, Entity<SliderState>>,
@@ -297,11 +302,14 @@ impl ConfigView {
                         this.commit_edit(window, cx);
                     }
                 }
-                InputEvent::Change => {
-                    this.edit_error = None;
-                    cx.notify();
-                }
+                InputEvent::Change => this.live_edit(window, cx),
                 _ => {}
+            }),
+            // The text view counts as you type, like the fields do.
+            cx.subscribe_in(&editor, window, |this, _, e: &InputEvent, _, cx| {
+                if let InputEvent::Change = e {
+                    this.text_typed(cx);
+                }
             }),
         ];
         // Settings files first: those open as settings.
@@ -326,6 +334,8 @@ impl ConfigView {
             editing: None,
             edit_input,
             edit_error: None,
+            edit_from: None,
+            hold: cx.focus_handle(),
             errors: HashMap::new(),
             sliders: HashMap::new(),
             colors: HashMap::new(),
@@ -554,6 +564,24 @@ impl ConfigView {
         cx.notify();
     }
 
+    /// The text view changed: the file's text is now what's typed, so the
+    /// unsaved count and Save follow it right away.
+    fn text_typed(&mut self, cx: &mut Context<Self>) {
+        if !self.text_view {
+            return;
+        }
+        let t = self.editor.read(cx).value().to_string();
+        let Some(st) = self.states.get_mut(&self.rel) else { return };
+        if st.problem.is_some() || t == st.text {
+            return;
+        }
+        st.typed = true;
+        st.edits.clear();
+        st.text = t;
+        cx.emit(ConfigViewEvent::Changed);
+        cx.notify();
+    }
+
     /// Sets one setting (unsaved). Setting it back to how it was drops the edit.
     fn set(&mut self, rel: String, path: Vec<String>, key: String, v: Value, window: &mut Window, cx: &mut Context<Self>) {
         let Some(f) = Format::of(&rel) else { return };
@@ -600,6 +628,7 @@ impl ConfigView {
 
     fn start_edit(&mut self, path: Vec<String>, key: String, value: String, typing: Typing, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_edit(window, cx);
+        self.edit_from = self.states.get(&self.rel).and_then(|s| s.entry(&path, &key)).map(|e| e.value.clone());
         self.editing = Some((self.rel.clone(), path, key, typing));
         self.edit_error = None;
         self.edit_input.update(cx, |s, cx| {
@@ -617,45 +646,94 @@ impl ConfigView {
             return;
         };
         let typed = self.edit_input.read(cx).value().to_string();
-        let v = if typing == Typing::ListItem {
-            if typed.trim().is_empty() {
-                self.editing = None;
+        if typing == Typing::ListItem && typed.trim().is_empty() {
+            self.editing = None;
+            cx.notify();
+            return;
+        }
+        let v = match Self::typed_value(&entry, &typing, &typed) {
+            Ok(v) => v,
+            Err(e) => {
+                self.edit_error = Some(e);
                 cx.notify();
                 return;
             }
+        };
+        self.editing = None;
+        self.edit_error = None;
+        // Typing already applied it, so only a different value needs setting.
+        if typing == Typing::ListItem || !configedit::same(&entry.value, &v) {
+            self.set(rel, path, key, v, window, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// What the field holds as the setting's value, or why it can't be one.
+    fn typed_value(entry: &Entry, typing: &Typing, typed: &str) -> Result<Value, String> {
+        let v = if *typing == Typing::ListItem {
             let mut items = configedit::list_items(&entry.value.text()).unwrap_or_default();
             items.push(typed.trim().to_string());
             Value::Text(configedit::list_text(&items, configedit::list_quoted(&entry.value.text(), &items)))
         } else {
             let like = if matches!(entry.kind(), Kind::List) { Value::Text(String::new()) } else { entry.value.clone() };
-            match like.parse_like(&typed) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.edit_error = Some(e);
-                    cx.notify();
-                    return;
-                }
-            }
+            like.parse_like(typed)?
         };
         if let Some(e) = entry.check(&v) {
-            self.edit_error = Some(e);
+            return Err(e);
+        }
+        // A colour typed as #hex keeps the file's own way of writing it.
+        match (entry.kind(), &v) {
+            (Kind::Color(_), Value::Str(s)) if !matches!(entry.value, Value::Str(_)) => match configedit::parse_color(s) {
+                Some((c, _)) => Ok(configedit::color_value(c & 0xFF_FFFF, &entry.value)),
+                None => Err("Type a colour like #38BDF8.".into()),
+            },
+            _ => Ok(v),
+        }
+    }
+
+    /// Every keystroke in the open field: a valid value is taken at once (the
+    /// footer counts it, Save lights up); an invalid one shows its reason
+    /// under the field and leaves the last good value in place.
+    fn live_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((rel, path, key, typing)) = self.editing.clone() else { return };
+        self.edit_error = None;
+        // A new list item isn't a value until it's added.
+        if typing == Typing::ListItem {
             cx.notify();
             return;
         }
-        // A colour typed as #hex keeps the file's own way of writing it.
-        let v = match (entry.kind(), &v) {
-            (Kind::Color(_), Value::Str(s)) if !matches!(entry.value, Value::Str(_)) => match configedit::parse_color(s) {
-                Some((c, _)) => configedit::color_value(c & 0xFF_FFFF, &entry.value),
-                None => {
-                    self.edit_error = Some("Type a colour like #38BDF8.".into());
-                    cx.notify();
-                    return;
-                }
-            },
-            _ => v,
-        };
-        self.editing = None;
-        self.set(rel, path, key, v, window, cx);
+        let Some(entry) = self.states.get(&rel).and_then(|s| s.entry(&path, &key)).cloned() else { return };
+        let typed = self.edit_input.read(cx).value().to_string();
+        match Self::typed_value(&entry, &typing, &typed) {
+            Ok(v) if !configedit::same(&entry.value, &v) => self.set(rel, path, key, v, window, cx),
+            Ok(_) => cx.notify(),
+            Err(e) => {
+                self.edit_error = Some(e);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Escape in the open field: it closes, and the setting goes back to
+    /// what it was when the field opened (typing already applied it).
+    fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((rel, path, key, typing)) = self.editing.take() else { return };
+        self.edit_error = None;
+        let now = self.states.get(&rel).and_then(|s| s.entry(&path, &key)).map(|e| e.value.clone());
+        match (self.edit_from.take(), now) {
+            (Some(from), Some(now)) if typing == Typing::Value && !configedit::same(&from, &now) => self.set(rel, path, key, from, window, cx),
+            _ => cx.notify(),
+        }
+    }
+
+    /// A click outside the open field: take what's valid and let go of the keyboard.
+    fn leave_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing.is_none() {
+            return;
+        }
+        self.commit_edit(window, cx);
+        window.focus(&self.hold, cx);
     }
 
     pub fn discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1028,10 +1106,12 @@ impl ConfigView {
         let (path, key) = (e.path.clone(), e.key.clone());
         let k = key_of(&rel, &path, &key);
         let editing = self.editing.as_ref().filter(|(r, p, kk, _)| *r == rel && *p == path && *kk == key).map(|x| x.3.clone());
-        let field = |this: &Self| {
+        let field = |this: &Self, cx: &mut Context<Self>| {
             v_flex()
                 .w_full()
                 .gap_0p5()
+                // Clicking anywhere else lets go of the field.
+                .on_mouse_down_out(cx.listener(|this, _, window, cx| this.leave_edit(window, cx)))
                 .child(Input::new(&this.edit_input).small())
                 .when_some(this.edit_error.clone(), |d, err| d.child(div().text_xs().text_color(theme.danger).whitespace_normal().child(err)))
                 .into_any_element()
@@ -1072,7 +1152,7 @@ impl ConfigView {
                 .into_any_element()
             }
             Kind::Int | Kind::Float => {
-                let input: AnyElement = if editing.is_some() { field(self) } else { value_button(format!("{id}-v"), e.value.text(), path.clone(), key.clone(), cx) };
+                let input: AnyElement = if editing.is_some() { field(self, cx) } else { value_button(format!("{id}-v"), e.value.text(), path.clone(), key.clone(), cx) };
                 if let Some((lo, hi)) = e.slider() {
                     let s = self.slider(&k, e, lo, hi, window, cx);
                     h_flex()
@@ -1117,7 +1197,7 @@ impl ConfigView {
             }
             Kind::Color(_) => {
                 let state = self.color(&k, e, window, cx);
-                let input: AnyElement = if editing.is_some() { field(self) } else { value_button(format!("{id}-v"), color_text(&e.value), path.clone(), key.clone(), cx) };
+                let input: AnyElement = if editing.is_some() { field(self, cx) } else { value_button(format!("{id}-v"), color_text(&e.value), path.clone(), key.clone(), cx) };
                 h_flex()
                     .w_full()
                     .gap_2()
@@ -1159,7 +1239,7 @@ impl ConfigView {
                     col = col.child(widgets::caption("Empty list", cx).text_xs());
                 }
                 let add: AnyElement = if editing == Some(Typing::ListItem) {
-                    field(self)
+                    field(self, cx)
                 } else {
                     let (path, key) = (path.clone(), key.clone());
                     Button::new(SharedString::from(format!("{id}-add")))
@@ -1182,7 +1262,7 @@ impl ConfigView {
                     .on_click(cx.listener(move |this, _, window, cx| this.show_text(Some(line), window, cx)))
                     .into_any_element()
             }
-            _ if editing.is_some() => field(self),
+            _ if editing.is_some() => field(self, cx),
             _ => value_button(id.to_string(), e.value.text(), path, key, cx),
         }
     }
@@ -1577,12 +1657,11 @@ impl Render for ConfigView {
         v_flex()
             .size_full()
             .min_h_0()
+            .track_focus(&self.hold)
             .on_action(cx.listener(|this, _: &Confirm, window, cx| this.commit_edit(window, cx)))
             .on_action(cx.listener(|this, _: &Cancel, window, cx| {
                 if this.editing.is_some() {
-                    this.editing = None;
-                    this.edit_error = None;
-                    cx.notify();
+                    this.cancel_edit(window, cx);
                 } else if this.host == Host::Dialog {
                     if this.unsaved() > 0 {
                         window.push_notification(Notification::info("Not saved yet: Save, or Discard."), cx);

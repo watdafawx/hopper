@@ -41,10 +41,23 @@
     setEdit(rel, e, text);
   }
 
+  /** Each keystroke: a good value counts at once (the bar counts it, Save lights up); a bad one shows why and waits. */
+  function typing(text) {
+    draft = text;
+    const err = check(e, text);
+    localError = err;
+    if (!err) setEdit(rel, e, text);
+  }
+  /** Leaving a field: a kept value shows as the file will have it; a refused one stays for the player to fix. */
+  function leave() {
+    if (!localError) draft = null;
+  }
+
   function fieldKeys(ev) {
     if (ev.key === 'Enter') {
       ev.preventDefault();
       take(ev.currentTarget.value);
+      if (!localError) ev.currentTarget.blur();
     } else if (ev.key === 'Escape') {
       draft = null;
       localError = '';
@@ -115,11 +128,11 @@
     {:else if (e.kind === 'int' || e.kind === 'float') && e.slider}
       <div class="sl">
         <input type="range" min={e.slider[0]} max={e.slider[1]} step={step} value={Number(draft ?? value)} oninput={(ev) => (draft = ev.currentTarget.value)} onchange={(ev) => slide(ev.currentTarget.value)} aria-label={e.label} />
-        <input class="input num mono" value={draft ?? value} onkeydown={fieldKeys} oninput={() => (localError = '')} onchange={(ev) => take(ev.currentTarget.value)} aria-label="{e.label} value" />
+        <input class="input num mono" value={draft ?? value} onkeydown={fieldKeys} oninput={(ev) => typing(ev.currentTarget.value)} onchange={(ev) => take(ev.currentTarget.value)} onblur={leave} aria-label="{e.label} value" />
       </div>
     {:else if e.kind === 'int' || e.kind === 'float'}
       <div class="sl">
-        <input class="input num wide mono" value={draft ?? value} onkeydown={fieldKeys} oninput={() => (localError = '')} onchange={(ev) => take(ev.currentTarget.value)} aria-label={e.label} />
+        <input class="input num wide mono" value={draft ?? value} onkeydown={fieldKeys} oninput={(ev) => typing(ev.currentTarget.value)} onchange={(ev) => take(ev.currentTarget.value)} onblur={leave} aria-label={e.label} />
         <button class="btn icon ghost step" title="Less" aria-label="Less" onclick={() => bump(-1)}><Minus size={13} /></button>
         <button class="btn icon ghost step" title="More" aria-label="More" onclick={() => bump(1)}><Plus size={13} /></button>
       </div>
@@ -148,12 +161,12 @@
         <label class="sw" style:background={swatch || 'transparent'} title="Pick a colour">
           <input type="color" value={swatch || '#000000'} onchange={(ev) => setEdit(rel, e, colorText(e, ev.currentTarget.value))} aria-label={e.label} />
         </label>
-        <input class="input mono hex" value={draft ?? value} oninput={() => (localError = '')} onkeydown={fieldKeys} onchange={(ev) => take(ev.currentTarget.value)} aria-label="{e.label} value" />
+        <input class="input mono hex" value={draft ?? value} oninput={(ev) => typing(ev.currentTarget.value)} onkeydown={fieldKeys} onchange={(ev) => take(ev.currentTarget.value)} onblur={leave} aria-label="{e.label} value" />
       </div>
     {:else if e.kind === 'opaque'}
       <button class="btn" onclick={() => onEditText?.(rel, e.line)}><FileText size={13} />Edit as text · line {e.line}</button>
     {:else}
-      <input class="input txtv" class:mono={!e.masked} value={draft ?? value} placeholder={e.masked ? 'Hidden. Type to replace it.' : ''} onfocus={(ev) => e.masked && value === e.value && (ev.currentTarget.value = '')} onblur={(ev) => e.masked && ev.currentTarget.value === '' && (ev.currentTarget.value = value)} onkeydown={fieldKeys} onchange={(ev) => (!e.masked || ev.currentTarget.value !== '') && take(ev.currentTarget.value)} aria-label={e.label} />
+      <input class="input txtv" class:mono={!e.masked} value={draft ?? value} placeholder={e.masked ? 'Hidden. Type to replace it.' : ''} onfocus={(ev) => e.masked && value === e.value && (ev.currentTarget.value = '')} oninput={(ev) => (!e.masked || ev.currentTarget.value !== '') && typing(ev.currentTarget.value)} onblur={(ev) => { if (e.masked && ev.currentTarget.value === '') ev.currentTarget.value = value; leave(); }} onkeydown={fieldKeys} onchange={(ev) => (!e.masked || ev.currentTarget.value !== '') && take(ev.currentTarget.value)} aria-label={e.label} />
     {/if}
     {#if e.default_value != null}
       <button class="btn icon ghost reset" class:hid={!canReset} disabled={!canReset} title="Back to default {e.default_value}" aria-label="Back to default" onclick={() => { draft = null; localError = ''; setEdit(rel, e, e.default_value); }}><RotateCcw size={13} /></button>
