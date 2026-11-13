@@ -71,6 +71,7 @@ mod service;
 mod sftp;
 mod sources_api;
 mod tls;
+mod tunnel;
 
 #[cfg(windows)]
 mod tray;
@@ -246,6 +247,11 @@ fn main() -> anyhow::Result<()> {
     if argv.first().map(String::as_str) == Some("service") {
         log.init();
         return service::command(&argv[1..]);
+    }
+    // Hidden: phase A0's tunnel measurements (design/multi-panel.md).
+    if argv.first().map(String::as_str) == Some("tunnel-spike") {
+        log.init();
+        return tunnel::spike::command(&argv[1..]);
     }
     let Some(args) = parse_args()? else { return Ok(()) };
     if args.service {
@@ -518,6 +524,7 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: tls::OwnCert, shutdown: Shu
     }
     rules::start(app.clone());
     router::start(app.clone());
+    tunnel::spike::from_env();
     if cfg.sftp_port != 0 {
         tokio::spawn(sftp::serve(app.clone(), cfg.bind.clone(), cfg.sftp_port));
     }

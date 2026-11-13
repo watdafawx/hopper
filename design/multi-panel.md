@@ -750,7 +750,7 @@ with measured gaps and a 375 px one.
 
 **A**
 
-- **A0, protocol spike (S).** Frame format, credit flow, ticket carrier,
+- **A0, protocol spike (S): done** (see "A0 as built"). Frame format, credit flow, ticket carrier,
   echo between a throwaway main and node; measure the node's idle memory and
   CPU with the tunnel open on `a1-atm10`.
   *Accept:* numbers written into this file; node idle under the 30 MB
@@ -1010,6 +1010,129 @@ Bulk actions and filters in the web UI's server list. No new backend route.
   actions yet; this is web UI only for now.
 - **Not yet**: an "All on <panel>" pick from a group's ⋯ menu, bulk
   backups, a players-online check seen on screen (covered by a unit test).
+
+## A0 as built (2026-11-13)
+
+Code: `crates/hopperd/src/tunnel/` (`frame.rs`, `mux.rs`, `ws.rs`, and the
+throwaway `spike.rs`). Nothing in the panel uses it yet; the only entry is
+the hidden `hopperd tunnel-spike main|node` subcommand and, for measuring a
+whole panel as a node, `HOPPERD_TUNNEL_SPIKE_NODE=<folder>` (read once in
+`serve`). One new dependency: `tokio-tungstenite` 0.29 (already in the tree
+under axum) for the node's client side, and futures-util's `sink` feature.
+
+### The protocol
+
+- **Transport**: one WebSocket over TLS, node to main
+  (`wss://main/api/v1/node/connect`), as designed. Plain `ws://` is refused by
+  the client. One binary WebSocket message carries exactly one frame, so
+  WebSocket does the length framing; text messages are an error. Both sides
+  cap WebSocket messages and frames at one tunnel frame (64 KiB + 5) before
+  buffering, and keep a 16 KiB read buffer.
+- **Frame**: 1 byte type, 4 bytes stream id (big-endian, 0 = the
+  connection), then the payload. Types: `HELLO` (JSON), `OPEN` (stream head,
+  JSON, ≤ 16 KiB), `DATA` (≤ 64 KiB), `CREDIT` (u32), `CLOSE` (half close,
+  empty), `RESET` (u16 code + reason ≤ 256 bytes), `PING`/`PONG` (u64),
+  `GOAWAY` (code + reason). Connection frames on a stream id, stream frames
+  on 0, unknown types, wrong fixed sizes and non-UTF-8 reasons are refused.
+- **HELLO** first, each way, within 10 s: `{tunnel, version, capabilities,
+  window}`. Tunnel versions equal or one apart talk; two apart get `GOAWAY
+  VERSION` (the "Update needed" state in A3 starts here).
+- **Streams**: the main opens even ids, the node odd (both may open, no
+  coordination); ids only grow, reuse or the other side's parity is a
+  protocol error. A stream's `OPEN` head says what it is (A2: method, path
+  under the allowlist, acting user and role). Each direction closes on its
+  own (`CLOSE`, like a TCP FIN), so a request body and its answer share one
+  stream; `RESET` kills both directions; dropping both halves of a stream
+  that hasn't finished both ways sends `RESET CANCEL`. At most 64 open
+  streams per connection; more get `RESET REFUSED`.
+- **Credit**: each side announces its per-stream receive `window` in HELLO
+  (default 512 KiB, accepted range 4 KiB to 16 MiB). A sender takes credit
+  before each `DATA` and waits at zero. The receiver returns credit
+  (`CREDIT n`) only after the *application has read* half a window, so each
+  stream buffers at most one window on the receiving side; data past the
+  window is a protocol error that closes the connection (`GOAWAY PROTOCOL`).
+  `CREDIT`, `PING`, `PONG` and `RESET` go on a small priority queue ahead of
+  data, so a full data queue never holds back the credit the peer is waiting
+  for. The data queue to the socket is 8 frames (512 KiB). Worst case per
+  connection: 64 × 512 KiB = 32 MiB buffered; A3 adds a per-connection cap
+  for the main (many nodes) and for the node (30 MB budget).
+- **Keepalive**: both sides `PING` every 20 s; *any* frame received counts as
+  alive; nothing for 60 s = dead (`Timeout`). The node reconnects 1 s
+  doubling to 60 s plus up to 1 s jitter. RTT comes from `PONG` (for the
+  node header in A2).
+- **Tickets / auth**: the node key goes in `Authorization: Bearer` on the
+  upgrade request; the main compares SHA-256 hashes in constant time and
+  answers 401 before upgrading. No ticket in the URL or a subprotocol (no
+  browser is involved, and the key must not land in access logs). A 401/403
+  **stops** the node ("the main refused this node's key"), proven when the
+  spike's main had a new key. Browser tickets and one-use file links (B1)
+  stay on the main: the main checks them and relays with its own `OPEN`, the
+  node never sees a browser credential.
+- **Pinning**: the node's TLS trusts only the main's CA from pairing (no
+  system roots); connect errors are classed as address / DNS / TCP /
+  certificate mismatch / key refused / other (point 7).
+- **Change to the design**: the per-frame "main id and per-connection
+  counter" against replay (Trust model, item 6) is dropped. TLS already
+  numbers and authenticates every record, and stream ids live only for one
+  connection, so a frame from an old connection has nothing to apply to.
+
+### Tests
+
+`cargo test -p hopperd tunnel` (16, all pass; 5 repeated runs clean):
+round trip of every frame and the header layout; refusal of short,
+oversized, unknown, misplaced and malformed frames; 1 MiB echo through a
+64 KiB window and clean close (stream forgotten on both sides); **sender
+stops at exactly one window on the wire** until the reader reads, and
+reading under half a window gives no credit; drop → `RESET CANCEL`, explicit
+reset keeps its code, send on a reset stream fails instead of hanging;
+half close; stream limit → `REFUSED`; sending past the window, a peer using
+our id parity or reusing an id → protocol error; version one apart ok, two
+apart refused; silent peer → `Timeout` within 190 to 600 ms of a 200 ms
+limit; pings keep an idle link alive and give an RTT, and a dead peer fails
+waiting streams; `GOAWAY` ends both sides. Whole crate: 195 passed.
+
+### Measured
+
+Local (Windows, two scratch `hopperd tunnel-spike` processes on
+127.0.0.1, `HOPPERD_SERVICE=hopperd-test HOPPER_LOOPBACK=1`, scratch
+`--data`): small echo 0.2 ms; **200 MiB echoed both ways at once in 0.7 s
+(306 MiB/s each way), CRC equal**. Node working set 15.8 MiB idle after
+that. With a 64-frame data queue the node stayed at 30.9 MiB after the same
+transfer, which is why the queue is 8 frames.
+
+Oracle VM `a1-atm10` (aarch64, 2 OCPU, glibc 2.39, the real panel and
+Minecraft server busy on the same box and untouched). Binary cross-built
+with `cargo-zigbuild` for `aarch64-unknown-linux-gnu.2.35` (`local`
+profile); throwaway processes in `/tmp/a0-spike` on their own ports and
+data folders, loopback only, SFTP and auto-update off; the main ran on the
+maintainer's PC, reached through an SSH reverse forward (RTT ~98 ms). Three
+processes side by side for 7.5 min, sampled every minute with `ps` and
+`/proc/<pid>/stat`:
+
+| Process on the VM | RSS (steady) | CPU idle (after the first minute) |
+|---|---|---|
+| Scratch panel, no servers, **no tunnel** | 20.1 MB | 0.047% (170 ms in 360 s) |
+| Same scratch panel **plus tunnel** (`HOPPERD_TUNNEL_SPIKE_NODE`) | 22.2 MB | 0.053% (190 ms in 360 s) |
+| Tunnel only (`tunnel-spike node`) | 14.4 MB | 0.006% (20 ms in 360 s) |
+
+So the tunnel costs a node about **2 MB and ~0.005% CPU**, and a node with
+an empty panel sits at **22 MB, inside the 30 MB budget** with ~8 MB to
+spare. Both nodes first echoed 16 MiB each way: 0.2 MiB/s each, the
+maintainer's upload link (a raw `ssh cat` upload measured 0.5 MiB/s for the
+two together), not the window (512 KiB at 98 ms allows ~5 MiB/s per
+stream). For comparison, the VM's real panel (one Minecraft server, 74 min
+up) was at 29.6 MB RSS: a node with servers will be close to the budget
+from the panel itself, not from the tunnel. A2/A3 should keep the merged
+snapshot and stats off the node (the node sends what it already makes) and
+re-measure with a server attached.
+
+### Left for A1 and later
+
+The spike's main serves the route on its own listener with a fresh key per
+run and a CA in its scratch folder; A1 moves the route into the panel's
+router behind pairing, stores the key hash, and adds the rate limits.
+Per-connection memory cap (A3), relay heads and the allowlist (A2), and the
+node's `status` diagnostics (A1) are not built.
 
 ## Open questions for the maintainer
 

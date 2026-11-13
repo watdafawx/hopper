@@ -54,7 +54,9 @@ x509-parser = "0.18"
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
 tower = { version = "0.5", features = ["util"] }
-futures-util = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# The node tunnel's client side (multi-panel A); axum already uses it for the server side.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 # Two-factor sign-in: the QR code to scan.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
