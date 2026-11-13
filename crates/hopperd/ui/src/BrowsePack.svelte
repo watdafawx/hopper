@@ -16,6 +16,7 @@
   import Brand from './lib/Brand.svelte';
   import { say } from './lib/toast.svelte.js';
   import Changelog from './lib/Changelog.svelte';
+  import Comments from './lib/Comments.svelte';
   import VersionCard from './lib/VersionCard.svelte';
   import BrowseMenu from './BrowseMenu.svelte';
   import { packQuery, packPage, preloadNow, warm, cancelWarm } from './lib/prefetch.js';
@@ -103,6 +104,8 @@
   };
   const isMods = $derived(kind === 'mods');
   const canInstall = $derived(!!target && (!isMods || !!target.loader));
+  // Only CurseForge has comments (its website's, desktop's Comments tab).
+  const hasComments = $derived(p?.source === 'curseforge' && !!p?.num);
   const otherSite = $derived(cur.source === 'modrinth' ? 'CurseForge' : 'Modrinth');
   // Desktop's facts: Minecraft (first five, the rest in a tooltip), loaders, where it runs.
   const mcs = $derived(p?.all_versions?.length ? p.all_versions : p?.mc_versions || []);
@@ -353,6 +356,7 @@
             <button class:tab-sel={tab === 'versions'} onclick={() => pickTab('versions')}>Versions{versions ? ` ${versions.length}` : ''}</button>
             {#if !packs}<button class:tab-sel={tab === 'deps'} onclick={() => pickTab('deps')}>Dependencies{Array.isArray(deps) ? ` ${deps.length}` : ''}</button>{/if}
             {#if p.gallery.length}<button class:tab-sel={tab === 'gallery'} onclick={() => pickTab('gallery')}>Gallery {p.gallery.length}</button>{/if}
+            {#if hasComments}<button class:tab-sel={tab === 'comments'} onclick={() => pickTab('comments')}>Comments</button>{/if}
           </div>
         </div>
       </div>
@@ -492,6 +496,7 @@
         <button class:tab-sel={tab === 'versions'} onclick={() => (tab = 'versions')}>Versions{versions ? ` ${versions.length}` : ''}</button>
         {#if !packs}<button class:tab-sel={tab === 'deps'} onclick={() => (tab = 'deps')}>Dependencies{Array.isArray(deps) ? ` ${deps.length}` : ''}</button>{/if}
         {#if p.gallery.length}<button class:tab-sel={tab === 'gallery'} onclick={() => (tab = 'gallery')}>Gallery {p.gallery.length}</button>{/if}
+        {#if hasComments}<button class:tab-sel={tab === 'comments'} onclick={() => (tab = 'comments')}>Comments</button>{/if}
       </div>
 
       {#if tab === 'description'}
@@ -536,6 +541,8 @@
             {/each}
           {/if}
         </div>
+      {:else if tab === 'comments' && hasComments}
+        <Comments project={p.num} url={p.url} />
       {:else if tab === 'deps'}
         <div class="plist">
           {#if deps === null}

@@ -9,6 +9,7 @@ use crate::widgets;
 /// The result card's hover group: the changelog shows while it's hovered.
 const BROWSE_ROW: &str = "browse-row";
 use gpui_kit::assets::IconName;
+use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
@@ -142,6 +143,23 @@ struct TypeMemory {
 struct PeekSpot {
     scroll: Point<Pixels>,
     tab: usize,
+}
+
+/// The project panel's Comments tab (after Description, Files and
+/// Dependencies), shown for CurseForge projects only.
+const COMMENTS_TAB: usize = 3;
+
+/// Only CurseForge has comments: not Modrinth, GitHub or a link.
+fn has_comments(m: &cf::Mod) -> bool {
+    m.modrinth.is_none() && !hopper::modrinth::is_mr(m.id) && !hopper::sources::is_src(m.id)
+}
+
+/// A project's comments as far as they've loaded (`hopper::cfcomments`).
+#[derive(Default)]
+struct Comments {
+    pages: Vec<std::sync::Arc<hopper::cfcomments::Page>>,
+    busy: bool,
+    failed: bool,
 }
 
 /// The list a history place showed when it was left: stepping back brings
@@ -407,8 +425,10 @@ pub struct BrowseView {
     pending_query: Option<String>,
     /// The file a curseforge.com Install link asked for.
     link_file: Option<cf::File>,
-    /// Description, Files or Dependencies in the project panel.
+    /// Description, Files, Dependencies or Comments in the project panel.
     detail_tab: usize,
+    /// CurseForge projects' comments, asked for when their tab opens.
+    comments: HashMap<u64, Comments>,
     /// The open project's description, a view of its own so its GIFs
     /// redraw it alone.
     desc: Entity<widgets::DescView>,
@@ -578,6 +598,7 @@ impl BrowseView {
             suggest: Default::default(),
             server_files: HashMap::new(),
             detail_tab: 0,
+            comments: HashMap::new(),
             desc,
             parts: None,
             logos: Default::default(),
@@ -1737,6 +1758,9 @@ impl BrowseView {
             self.peek_scroll_after = back.map(|b| b.scroll);
             self.peek_scroll_set = (Point::default(), 0);
             self.detail_tab = spot.tab;
+            if self.detail_tab == COMMENTS_TAB {
+                self.want_comments(id, false, cx);
+            }
         }
         // Files for the current Minecraft and loader filters (they follow the
         // target instance); the newest 50 overall are mostly other loaders.
@@ -3777,6 +3801,8 @@ impl BrowseView {
 
     fn detail(&self, m: &cf::Mod, target: Option<&Instance>, width: f32, cx: &mut Context<Self>) -> AnyElement {
         let banner = self.link_banner(m, target, cx);
+        // Built only while its tab is open.
+        let mut comments = (self.detail_tab == COMMENTS_TAB && has_comments(m)).then(|| self.comments_tab(m, cx));
         let store = self.store.read(cx);
         let theme = cx.theme();
         let icon = m.icon().and_then(|u| store.image(u)).map(Path::to_path_buf);
@@ -4165,6 +4191,7 @@ impl BrowseView {
                     ),
                 };
                 let tab = self.detail_tab;
+                let id = m.id;
                 v_flex()
                     .gap_4()
                     .child(
@@ -4177,14 +4204,19 @@ impl BrowseView {
                                     .child(Tab::new().label("Description"))
                                     .child(Tab::new().label(files_label.clone()))
                                     .child(Tab::new().label(format!("Dependencies {n_deps}")))
-                                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                    .when(has_comments(m), |t| t.child(Tab::new().label("Comments")))
+                                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                                         this.detail_tab = *ix;
+                                        if *ix == COMMENTS_TAB {
+                                            this.want_comments(id, false, cx);
+                                        }
                                         cx.notify();
                                     })),
                             )
                             .child(page_mark(self.sticky.tabs.clone(), true)),
                     )
                     .map(|c| match (tab, files_state) {
+                        (COMMENTS_TAB, _) if comments.is_some() => c.children(comments.take()),
                         (1 | 2, Some(wait)) => c.child(wait),
                         (1, _) => c.child(files),
                         (2, _) if n_deps == 0 => c.child(widgets::caption("No dependencies.", cx)),
@@ -4289,6 +4321,203 @@ impl BrowseView {
 }
 
 impl BrowseView {
+    /// Asks for project `id`'s first page of comments (again, after a
+    /// failure), or with `more` its next page. One request at a time.
+    fn want_comments(&mut self, id: u64, more: bool, cx: &mut Context<Self>) {
+        let c = self.comments.entry(id).or_default();
+        if c.busy {
+            return;
+        }
+        let page = c.pages.len() as u32;
+        let go = if more { c.pages.last().is_some_and(|p| p.more()) } else { c.pages.is_empty() };
+        if !go {
+            return;
+        }
+        c.busy = true;
+        c.failed = false;
+        cx.spawn(async move |this, cx| {
+            let r = cx.background_spawn(async move { hopper::cfcomments::page(id, page) }).await;
+            this.update(cx, |this, cx| {
+                let c = this.comments.entry(id).or_default();
+                c.busy = false;
+                match r {
+                    Ok(p) => {
+                        let urls: Vec<String> = p
+                            .comments
+                            .iter()
+                            .flat_map(|c| std::iter::once(c).chain(&c.replies))
+                            .filter_map(|c| c.avatar.clone())
+                            .collect();
+                        if c.pages.len() as u32 == page {
+                            c.pages.push(p);
+                        }
+                        this.store.update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
+                    }
+                    Err(_) => c.failed = true,
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The Comments tab: CurseForge's comments, pinned first, as plain
+    /// text (never the site's HTML), with "Show more" and a link to them on
+    /// the site, which is also where a failed load points.
+    fn comments_tab(&self, m: &cf::Mod, cx: &mut Context<Self>) -> AnyElement {
+        use hopper::cfcomments::{Comment, LOAD_FAILED};
+        let id = m.id;
+        let c = self.comments.get(&id);
+        // A later page can repeat the end of the one before when comments
+        // came in meanwhile.
+        let mut seen = HashSet::new();
+        let list: Vec<&Comment> = c
+            .into_iter()
+            .flat_map(|c| &c.pages)
+            .flat_map(|p| &p.comments)
+            .filter(|c| seen.insert(c.id))
+            .collect();
+        let busy = c.is_none_or(|c| c.busy);
+        let failed = c.is_some_and(|c| c.failed);
+        let more = c.and_then(|c| c.pages.last()).is_some_and(|p| p.more());
+        let url = hopper::cfcomments::site_url(&m.page());
+        let store = self.store.read(cx);
+        let one = |c: &Comment, cx: &App| -> Div {
+            let theme = cx.theme();
+            let pic = c.avatar.as_deref().and_then(|u| store.image(u)).map(Path::to_path_buf);
+            // A removed comment shows no one's picture or initials.
+            let avatar = Avatar::new()
+                .small()
+                .when(!c.removed, |a| a.name(c.author.clone()))
+                .when_some(pic.filter(|_| !c.removed), |a, p| a.src(p));
+            let posted = (c.posted > 0).then(|| hopper::time::relative_secs(c.posted));
+            h_flex()
+                .gap_2p5()
+                .items_start()
+                .child(avatar)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .min_w_0()
+                                .child(div().text_sm().font_semibold().truncate().child(if c.removed {
+                                    "Removed".to_string()
+                                } else {
+                                    c.author.clone()
+                                }))
+                                .when(c.pinned, |r| {
+                                    r.child(widgets::chip(theme.primary).child(
+                                        h_flex().gap_1().child(Icon::new(IconName::Pin).xsmall()).child("Pinned"),
+                                    ))
+                                })
+                                .children(posted.map(|p| {
+                                    div().flex_none().text_xs().text_color(theme.muted_foreground).child(p)
+                                })),
+                        )
+                        .child(if c.removed {
+                            div().text_sm().text_color(theme.muted_foreground).child("This comment was removed.")
+                        } else {
+                            div().text_sm().child(c.text.clone())
+                        })
+                        .children(c.replies.iter().map(|r| div().pt_2().child(one_reply(r, store, cx)))),
+                )
+        };
+        // Replies draw the same way, one level down (core lists a whole thread
+        // at that one level).
+        fn one_reply(c: &Comment, store: &Store, cx: &App) -> Div {
+            let theme = cx.theme();
+            let pic = c.avatar.as_deref().and_then(|u| store.image(u)).map(Path::to_path_buf);
+            let avatar = Avatar::new().name(c.author.clone()).small().when_some(pic, |a, p| a.src(p));
+            h_flex()
+                .gap_2()
+                .items_start()
+                .child(avatar)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .min_w_0()
+                                .child(div().text_sm().font_semibold().truncate().child(c.author.clone()))
+                                .when(c.posted > 0, |r| {
+                                    r.child(
+                                        div()
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(hopper::time::relative_secs(c.posted)),
+                                    )
+                                }),
+                        )
+                        .child(div().text_sm().child(c.text.clone())),
+                )
+        }
+        let border = cx.theme().border;
+        let body: AnyElement = if !list.is_empty() {
+            v_flex()
+                .children(list.iter().enumerate().map(|(i, c)| {
+                    one(c, cx).py_3().when(i > 0, |r| r.border_t_1().border_color(border))
+                }))
+                .into_any_element()
+        } else if busy {
+            widgets::skeleton_rows(4, rems(2.5), cx).into_any_element()
+        } else if failed {
+            widgets::empty_state(
+                IconName::TriangleAlert,
+                LOAD_FAILED,
+                Some("CurseForge didn't answer. They're still on its page.".into()),
+                cx,
+            )
+            .into_any_element()
+        } else {
+            widgets::empty_state(
+                IconName::MessageSquareOff,
+                "No comments",
+                Some("Nobody has commented yet, or comments are off.".into()),
+                cx,
+            )
+            .into_any_element()
+        };
+        let danger = cx.theme().danger;
+        v_flex()
+            .gap_2()
+            .child(body)
+            .when(!list.is_empty() && failed, |c| c.child(div().text_sm().text_color(danger).child(LOAD_FAILED)))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .when(more && !list.is_empty(), |r| {
+                        r.child(
+                            Button::new("comments-more")
+                                .small()
+                                .outline()
+                                .label(if busy { "Loading…" } else { "Show more" })
+                                .disabled(busy)
+                                .on_click(cx.listener(move |this, _, _, cx| this.want_comments(id, true, cx))),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("comments-site")
+                            .small()
+                            .ghost()
+                            .icon(IconName::ExternalLink)
+                            .label("Open comments on CurseForge")
+                            .tooltip(url.clone())
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// The panel listing everything one author made.
     fn author_panel(&self, target: Option<&Instance>, cx: &mut Context<Self>) -> AnyElement {
         let Some(a) = self.author.as_ref() else { return div().into_any_element() };
@@ -4514,6 +4743,7 @@ impl BrowseView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let action = self.sticky_action(m, target, cx);
+        let id = m.id;
         let icon = m.icon().and_then(|u| self.store.read(cx).image(u)).map(Path::to_path_buf);
         let theme = cx.theme();
         let author = m.authors.first().map(|a| format!("by {}", a.name));
@@ -4567,8 +4797,12 @@ impl BrowseView {
                     .child(Tab::new().label("Description"))
                     .child(Tab::new().label(files_label))
                     .child(Tab::new().label(format!("Dependencies {n_deps}")))
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                    .when(has_comments(m), |t| t.child(Tab::new().label("Comments")))
+                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                         this.detail_tab = *ix;
+                        if *ix == COMMENTS_TAB {
+                            this.want_comments(id, false, cx);
+                        }
                         // Past the page's own tabs, tuck them under the
                         // bar so the new tab reads from its start.
                         if let Some(tabs) = this.sticky.down_page(&this.sticky.tabs) {
