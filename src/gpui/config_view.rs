@@ -6,7 +6,7 @@
 //! timing when the file says. Edits stay unsaved until Save, which checks
 //! them together, backs up the old copy and writes only those values.
 
-use crate::store::Store;
+use crate::store::{Store, StoreEvent};
 use crate::switch::Switch;
 use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
@@ -288,6 +288,15 @@ impl ConfigView {
         let search = cx.new(|cx| InputState::new(window, cx).clean_on_escape().placeholder(if title.is_empty() { "Search settings".to_string() } else { format!("Search {title}'s settings") }));
         let edit_input = cx.new(|cx| InputState::new(window, cx));
         let subs = vec![
+            // Friends' shared settings went into these files: show them,
+            // unless the player is in the middle of editing that file.
+            cx.subscribe_in(&store, window, |this, _, e: &StoreEvent, window, cx| {
+                if let StoreEvent::SettingsWritten(r) = e
+                    && *r == this.root
+                {
+                    this.reload_clean(window, cx);
+                }
+            }),
             cx.subscribe_in(&search, window, |this, s, e: &InputEvent, window, cx| {
                 if let InputEvent::Change = e {
                     this.query = s.read(cx).value().to_string();
@@ -491,6 +500,20 @@ impl ConfigView {
         self.editor.update(cx, |e, cx| e.set_value(text, window, cx));
         if self.text_view {
             self.mark_line(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Reads again every open file without unsaved edits.
+    fn reload_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let clean: Vec<String> = self.states.iter().filter(|(_, s)| !s.dirty()).map(|(r, _)| r.clone()).collect();
+        for rel in clean {
+            let st = self.read_state(&rel);
+            if rel == self.rel {
+                let text = st.text.clone();
+                self.editor.update(cx, |e, cx| e.set_value(text, window, cx));
+            }
+            self.states.insert(rel, st);
         }
         cx.notify();
     }
@@ -1258,11 +1281,21 @@ impl ConfigView {
                     .gap_1p5()
                     .min_w_0()
                     .when(not_default || edited, |d| d.child(div().size(px(6.)).flex_none().rounded_full().bg(theme.primary)))
-                    .child(div().min_w_0().truncate().text_sm().font_semibold().child(widgets::marked(e.label(), &words, cx)))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .font_semibold()
+                            // With a shared note beside it the name keeps most of the
+                            // row and the note gets cut first.
+                            .when(shared.is_some(), |d| d.flex_shrink_0().max_w(relative(0.7)))
+                            .child(widgets::marked(e.label(), &words, cx)),
+                    )
                     .when_some(restart, |d, r| d.child(widgets::chip(theme.warning).child(r)))
                     .when(e.guessed, |d| d.child(widgets::chip(theme.muted_foreground).child("guessed")))
                     .when_some(shared, |d, (text, mine)| {
-                        d.child(if mine { widgets::chip(theme.primary).child(text).into_any_element() } else { widgets::caption(text, cx).text_xs().flex_none().into_any_element() })
+                        d.child(if mine { widgets::chip(theme.primary).child(text).into_any_element() } else { widgets::caption(text, cx).text_xs().min_w_0().into_any_element() })
                     });
                 let info = v_flex()
                     .flex_1()
@@ -1439,7 +1472,10 @@ impl ConfigView {
             Some((if v.seq == 0 { "Changed, goes out".to_string() } else { "You changed this".to_string() }, v.seq == 0))
         } else {
             let who = if v.name.is_empty() { "a friend" } else { &v.name };
-            Some((format!("Changed by {who}"), false))
+            // Undone here, Keep mine, or the game put its own back: the
+            // value on this PC isn't the friend's.
+            let theirs = e.value.parse_like(&v.v).is_ok_and(|t| hopper::configedit::same(&e.value, &t));
+            Some((if theirs { format!("Changed by {who}") } else { format!("{who} changed this, you kept yours") }, false))
         }
     }
 
@@ -1488,7 +1524,8 @@ impl ConfigView {
             .child(div().flex_1().min_w_0().truncate().text_sm().child(format!("Share these settings with {group}")))
             .when(usually, |d| d.child(widgets::chip(theme.muted_foreground).child("Usually personal")))
             .child(switch);
-        let line = |text: String, cx: &App| widgets::caption(text, cx).text_xs().whitespace_normal();
+        // Not `caption`: that one cuts to one line, and these wrap.
+        let line = |text: String, cx: &App| div().text_xs().text_color(cx.theme().muted_foreground).whitespace_normal().child(text);
         let mut col = v_flex().gap_1p5().px_3().py_2().rounded(theme.radius).border_1().border_color(theme.border).child(head);
         if self.confirm_share && !on {
             let text = match differs {
@@ -1558,9 +1595,10 @@ impl ConfigView {
                     .gap_1p5()
                     .items_start()
                     .text_xs()
-                    .text_color(theme.warning)
-                    .child(Icon::new(IconName::TriangleAlert).xsmall().flex_none().mt_0p5())
-                    .child(div().flex_1().min_w_0().whitespace_normal().child(format!(
+                    // Orange icon, muted text, like the Friends panel's
+                    // warnings: orange text is too faint on the light theme.
+                    .child(Icon::new(IconName::TriangleAlert).xsmall().flex_none().mt_0p5().text_color(theme.warning))
+                    .child(div().flex_1().min_w_0().whitespace_normal().text_color(theme.muted_foreground).child(format!(
                         "On {}, {names} {looks}. Hopper never shares settings like that, even when you share the mod.",
                         self.title
                     ))),

@@ -222,6 +222,9 @@ pub enum StoreEvent {
     /// A friend's shared settings were written into a mod's files: the
     /// notice offers Undo.
     SettingsArrived { root: PathBuf, wrote: hopper::configsync::Wrote1, group: String },
+    /// Shared settings were written into (or put back in) the instance at
+    /// this root: an open settings view reads its files again.
+    SettingsWritten(PathBuf),
     /// A friend started sharing a mod's settings: the notice offers Keep
     /// mine.
     SettingsShared { root: PathBuf, m: String, mod_name: String, who: String },

@@ -40,6 +40,9 @@ pub struct CfgState {
     /// The mailbox passes shared settings on (None: not asked yet).
     relay: Option<bool>,
     relay_asked: bool,
+    /// Who started or stopped sharing, taken where no notice could be
+    /// shown (a copy set up late); said on the next tick.
+    pub(super) unsaid: Vec<(PathBuf, Taken)>,
 }
 
 /// What a background read / write of one copy found.
@@ -208,6 +211,7 @@ impl Store {
         match configsync::undo(root, w) {
             Ok(()) => {
                 cx.emit(StoreEvent::Notice(format!("Your {} settings are back.", w.mod_name), false));
+                cx.emit(StoreEvent::SettingsWritten(root.to_path_buf()));
                 self.handle(Msg::InstanceChanged(root.to_path_buf()), cx);
             }
             Err(e) => cx.emit(StoreEvent::Notice(format!("Couldn't undo that. {e:#}"), true)),
@@ -280,6 +284,10 @@ impl Store {
             })
             .detach();
         }
+        if !self.cfg.unsaid.is_empty() {
+            let unsaid = std::mem::take(&mut self.cfg.unsaid);
+            self.say_taken(unsaid, cx);
+        }
         if self.cfg.at.is_some_and(|t| t.elapsed() < TICK_EVERY) {
             return;
         }
@@ -331,6 +339,7 @@ impl Store {
                 [one] => format!("Settings from {one}"),
                 _ => "Friends' settings".to_string(),
             };
+            log::info!("shared settings held while the game runs: {:?}", h.held);
             cx.emit(StoreEvent::Notice(format!("{from} wait until you close the game. Hopper puts them in then."), false));
         }
         if h.held.is_empty() {
@@ -387,6 +396,7 @@ impl Store {
             for w in t.wrote {
                 cx.emit(StoreEvent::SettingsArrived { root: root.clone(), wrote: w, group: group.clone() });
             }
+            cx.emit(StoreEvent::SettingsWritten(root.clone()));
             self.handle(Msg::InstanceChanged(root), cx);
         }
         cx.notify();

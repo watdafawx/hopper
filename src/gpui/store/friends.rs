@@ -1095,12 +1095,18 @@ impl Store {
                 c.arrive(&e.from, Got { code: e.code, seq: e.seq, at: e.at, name: e.from_name, stamps: e.marks });
             }
         }
+        // A copy set up only now (the follow went in after the sharer's
+        // recipe came) catches up on the sharer's shared settings as well.
+        for c in copies.iter().filter(|c| c.local != c.inst && !self.settings.group_copies.iter().any(|o| o.local == c.local && o.inst == c.inst)) {
+            late.extend(self.mailbox_recipes.iter().filter(|e| e.inst == c.inst && !e.configs.is_empty()).cloned());
+        }
         if copies != self.settings.group_copies {
             self.update_settings_quietly(|st| st.group_copies = copies);
         }
         // Their shared settings too: a copy set up now catches up on them.
         for e in &late {
-            self.take_configs(e);
+            let taken = self.take_configs(e);
+            self.cfg.unsaid.extend(taken);
         }
         let back: Vec<PackCopy> = gone.into_iter().filter(|c| c.local != c.inst).collect();
         for c in &back {

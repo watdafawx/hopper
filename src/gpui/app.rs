@@ -235,7 +235,8 @@ impl AppView {
                 StoreEvent::SettingsArrived { root, wrote, group } => {
                     let what = if wrote.n == 1 { "1".to_string() } else { wrote.n.to_string() };
                     let title = format!("{} changed {what} {} setting{}", wrote.who, wrote.mod_name, if wrote.n == 1 { "" } else { "s" });
-                    let body = format!("{group}'s pack has them now. Your other settings stayed the same.");
+                    let inst = this.store.read(cx).instance(root).map(|i| i.name.clone()).unwrap_or_else(|| group.clone());
+                    let body = format!("They're in {inst} now. Your other settings stayed the same.");
                     let (store, root, wrote) = (this.store.clone(), root.clone(), wrote.clone());
                     let done = std::rc::Rc::new(std::cell::Cell::new(false));
                     let n = gpui_kit::component::notification::Notification::info(body).title(title).action(move |_, _, cx| {
@@ -251,6 +252,8 @@ impl AppView {
                     });
                     window.push_notification(n, cx);
                 }
+                // The open settings views read their files again themselves.
+                StoreEvent::SettingsWritten(_) => {}
                 StoreEvent::SettingsShared { root, m, mod_name, who } => {
                     let title = format!("{who} now shares {mod_name} settings");
                     let body = "Changes to them reach everyone in the group. Keep yours, and theirs wait until you sync again.".to_string();

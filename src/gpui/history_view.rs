@@ -495,11 +495,14 @@ impl BackupsView {
             Some(n) => n
                 .changes
                 .iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    let label = hopper::configedit::label(&c.key);
-                    // The first says the values; the rest only their names, so the line fits.
-                    if i == 0 { format!("{label}: {} to {}", c.was, c.now) } else { label }
+                .map(|c| {
+                    // Switches read as on / off, like the settings view shows them.
+                    let say = |v: &str| match v {
+                        "true" => "on".to_string(),
+                        "false" => "off".to_string(),
+                        v => v.to_string(),
+                    };
+                    format!("{}: {} to {}", hopper::configedit::label(&c.key), say(&c.was), say(&c.now))
                 })
                 .collect::<Vec<_>>()
                 .join(" · "),
