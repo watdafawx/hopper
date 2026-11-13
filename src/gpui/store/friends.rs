@@ -848,9 +848,26 @@ impl Store {
         self._mailbox_publish = None;
     }
 
+    /// A new instance following a friend's pack exists and its mods are
+    /// going in: it's the follow from now on, even if that never finishes
+    /// (`code` stays empty until it does, so the update shows waiting).
+    pub(super) fn on_follow_made(&mut self, f: FollowedRecipe, cx: &mut Context<Self>) {
+        let root = PathBuf::from(&f.root);
+        // The install is still running on it; the tick leaves it alone.
+        self.follow_applying.insert(root.clone());
+        self.update_settings(
+            |st| {
+                st.followed_recipes.retain(|x| Path::new(&x.root) != root);
+                st.followed_recipes.push(f);
+            },
+            cx,
+        );
+    }
+
     /// A new instance following a friend's pack was made.
     pub(super) fn on_followed(&mut self, f: FollowedRecipe, cx: &mut Context<Self>) {
         let root = PathBuf::from(&f.root);
+        self.follow_applying.remove(&root);
         self.auto_following.remove(&format!("{}/{}", f.peer_id, f.inst));
         self.update_settings(
             |st| {
@@ -1547,36 +1564,15 @@ impl Store {
 
     /// For each group kept in step: every group pack a member follows is
     /// followed here too, as a new instance, unless this PC already
-    /// follows it or stopped following it.
+    /// follows it or stopped following it (`groupsync::to_follow`).
     fn keep_in_step(&mut self, cx: &mut Context<Self>) {
-        let me = self.mailbox_id();
-        let mut todo: Vec<(FollowReq, String, String)> = Vec::new();
-        for g in self.mailbox_groups.iter().filter(|g| g.me.joined && g.me.in_step) {
-            let stopped = self
-                .settings
-                .friend_groups
-                .iter()
-                .find(|x| x.id == g.id)
-                .map(|x| x.stopped.clone())
-                .unwrap_or_default();
-            for f in &g.follows {
-                let key = format!("{}/{}", f.from, f.inst);
-                if f.from == me
-                    || stopped.contains(&key)
-                    || self.auto_following.contains(&key)
-                    || todo.iter().any(|(r, _, _)| r.peer_id == f.from && r.inst == f.inst)
-                    || !self.settings.followers(&f.from, &f.inst, "").is_empty()
-                {
-                    continue;
-                }
-                let Some(e) = self.mailbox_recipes.iter().find(|e| e.from == f.from && e.inst == f.inst) else {
-                    // Its code hasn't arrived yet; the next look gets it.
-                    continue;
-                };
-                todo.push((FollowReq::of(e), g.id.clone(), g.name.clone()));
-            }
-        }
-        for (req, gid, gname) in todo {
+        // `auto_following` covers the minutes before the new instance
+        // exists; from then on the follow is in settings.
+        let todo = groupsync::to_follow(&self.settings, &self.mailbox_groups, &self.mailbox_recipes, &self.mailbox_id(), |k| {
+            self.auto_following.contains(k)
+        });
+        for (e, gid, gname) in todo {
+            let req = FollowReq::of(&e);
             self.auto_following.insert(format!("{}/{}", req.peer_id, req.inst));
             cx.emit(StoreEvent::Notice(
                 format!("Following {}'s {}, so your packs stay the same as {gname}.", req.who(), req.pack()),
@@ -1622,9 +1618,37 @@ impl Store {
                 let (share, note) = hopper::sharecode::without(&share, &skip);
                 let base = PathBuf::from(&self.settings.instances_root);
                 let f = req.recipe(Path::new(""), "", &req.code, group);
+                let (tx, wake) = (self.tx.clone(), self.wake.clone());
                 self.spawn_job(title, move |job| {
                     job.announce();
-                    let inst = hopper::sharecode::install_share(&base, &share, job)?;
+                    // The follow is recorded as soon as the instance exists,
+                    // with nothing applied yet: if putting the mods in fails,
+                    // is cancelled or Hopper closes first, the follow finishes
+                    // into this instance later instead of a new copy.
+                    let mut made: Option<PathBuf> = None;
+                    let r = hopper::sharecode::install_share_then(&base, &share, job, |inst| {
+                        made = Some(inst.root.clone());
+                        let started = FollowedRecipe {
+                            root: inst.root.to_string_lossy().into_owned(),
+                            local: inst.id.clone(),
+                            code: String::new(),
+                            ..f.clone()
+                        };
+                        let _ = tx.send(Msg::FollowMade(Box::new(started)));
+                        wake();
+                    });
+                    let inst = match (r, made) {
+                        (Ok(inst), _) => inst,
+                        // Shown on the follow and tried again like a failed
+                        // update; the task keeps the same text.
+                        (Err(e), Some(root)) => {
+                            let text = format!("{e:#}");
+                            let _ = tx.send(Msg::InstanceChanged(root.clone()));
+                            let _ = tx.send(Msg::RecipeFailed(root, f.code.clone(), e, job.id()));
+                            return Err(anyhow::anyhow!(text));
+                        }
+                        (Err(e), None) => return Err(e),
+                    };
                     job.detail(format!("Installed {}", inst.name));
                     if let Some(n) = note {
                         job.note(n);

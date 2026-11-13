@@ -707,6 +707,16 @@ pub fn without(share: &Share, skip: &[crate::sources::carry::Pin]) -> (Share, Op
 
 /// [`install`] for a decoded code.
 pub fn install_share(instances_root: &Path, share: &Share, job: &Job) -> anyhow::Result<Instance> {
+    install_share_then(instances_root, share, job, |_| {})
+}
+
+/// [`install_share`], calling `made` once the instance is saved with its
+/// id and before the code's mods go in. Following a pack records the
+/// follow there: putting the mods in takes minutes for a big pack, and an
+/// install that fails, is cancelled or is cut short by Hopper closing
+/// must still leave its instance known as the follow, so the follow
+/// finishes into it instead of making another copy on the next start.
+pub fn install_share_then(instances_root: &Path, share: &Share, job: &Job, made: impl FnOnce(&Instance)) -> anyhow::Result<Instance> {
     let share = share.clone();
     let mut inst = match &share.base {
         Base::Plain { game_version, loader } => {
@@ -727,7 +737,6 @@ pub fn install_share(instances_root: &Path, share: &Share, job: &Job) -> anyhow:
             crate::modpack::install_mrpack(instances_root, &m, &f, job)?
         }
     };
-    job.check_cancelled()?;
     if let (Some(name), false) = (&share.name, matches!(share.base, Base::Plain { .. })) {
         inst.name = name.clone();
     }
@@ -739,6 +748,10 @@ pub fn install_share(instances_root: &Path, share: &Share, job: &Job) -> anyhow:
     // Its first mods aren't changes for History.
     let _quiet = crate::actor::quiet(&inst.root);
     inst.save()?;
+    made(&inst);
+    // Checked only now: the pack is on disk either way, and a cancel
+    // before `made` would leave it there unknown.
+    job.check_cancelled()?;
     apply_existing(&mut inst, &share, None, job)?;
     Ok(inst)
 }
@@ -1265,5 +1278,31 @@ mod real_tests {
         // And back: the installed instance makes the same code.
         let again = make(&crate::instances::load(&inst.root).unwrap(), &jobs.start("make")).unwrap();
         assert_eq!(again.share, share);
+    }
+
+    /// A follow is recorded from `made`, so `made` sees the saved instance
+    /// with its id even when the install stops before its mods go in
+    /// (here: cancelled); the instance is still there afterwards.
+    #[test]
+    fn made_runs_before_the_mods_go_in() {
+        let root = std::env::temp_dir().join(format!("hopper-share-made-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let share = Share {
+            base: Base::Plain { game_version: "1.21.1".into(), loader: "fabric".into() },
+            name: Some("Made test".into()),
+            loader: None,
+            entries: vec![Entry::CurseFile { file: 1, enabled: true }],
+        };
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("install");
+        job.cancel();
+        let mut seen = None;
+        let r = install_share_then(&root, &share, &job, |i| seen = Some((i.root.clone(), i.id.clone())));
+        assert!(r.is_err(), "a cancelled install stops before the mods");
+        let (at, id) = seen.expect("made ran");
+        assert!(!id.is_empty());
+        let disk = crate::instances::load(&at).expect("the instance stays");
+        assert_eq!(disk.id, id);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

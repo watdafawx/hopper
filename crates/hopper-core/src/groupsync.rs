@@ -684,6 +684,46 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, job
     Ok(merged)
 }
 
+/// The group packs "Keep everyone in step" follows here as new instances:
+/// each pack a member follows in a group this PC joined and keeps in step,
+/// with its group's id and name, once its code has come (`recipes`: the
+/// packs friends share with this PC). Left out: this PC's own packs, ones
+/// it stopped following in that group, ones `busy` says are being followed
+/// right now (`"<from>/<inst>"`), and ones something here follows already.
+/// A follow counts from the moment its instance is made, before its first
+/// version is in, so a pack whose install failed, was cancelled or was cut
+/// short by Hopper closing isn't installed again as another copy.
+pub fn to_follow(
+    st: &Settings,
+    groups: &[crate::mailbox::Group],
+    recipes: &[crate::mailbox::Event],
+    me: &str,
+    busy: impl Fn(&str) -> bool,
+) -> Vec<(crate::mailbox::Event, String, String)> {
+    let mut out: Vec<(crate::mailbox::Event, String, String)> = Vec::new();
+    for g in groups.iter().filter(|g| g.me.joined && g.me.in_step) {
+        let stopped = st.friend_groups.iter().find(|x| x.id == g.id).map(|x| x.stopped.as_slice()).unwrap_or_default();
+        for f in &g.follows {
+            let key = format!("{}/{}", f.from, f.inst);
+            if f.from == me
+                || stopped.contains(&key)
+                || busy(&key)
+                || out.iter().any(|(e, _, _)| e.from == f.from && e.inst == f.inst)
+            {
+                continue;
+            }
+            // Its code hasn't arrived yet; the next look gets it.
+            let Some(e) = recipes.iter().find(|e| e.from == f.from && e.inst == f.inst) else { continue };
+            // A follow from before ids names the pack by its folder name.
+            if !st.followers(&e.from, &e.inst, &e.key).is_empty() {
+                continue;
+            }
+            out.push((e.clone(), g.id.clone(), g.name.clone()));
+        }
+    }
+    out
+}
+
 /// The group packs this PC keeps the same as the group: each pack it
 /// shares into a group it's in, and each group pack it follows once the
 /// follow's first version is in (`groups_of`: the groups a followed pack
@@ -1516,5 +1556,98 @@ mod tests {
         assert!(jar.with_extension("jar.disabled").is_file());
         assert!(!crate::instances::load(&inst.root).unwrap().addons[0].enabled);
         let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    // ---- which group packs keeping in step follows ----
+
+    fn in_step(id: &str, follows: &[(&str, &str)]) -> crate::mailbox::Group {
+        crate::mailbox::Group {
+            id: id.into(),
+            name: format!("{id} group"),
+            me: crate::mailbox::GroupMe { joined: true, in_step: true },
+            follows: follows.iter().map(|(from, inst)| crate::mailbox::GroupFollow { from: (*from).into(), inst: (*inst).into() }).collect(),
+            ..Default::default()
+        }
+    }
+    fn pack(from: &str, inst: &str, key: &str) -> crate::mailbox::Event {
+        crate::mailbox::Event { from: from.into(), inst: inst.into(), key: key.into(), code: "code".into(), ..Default::default() }
+    }
+    fn picked(st: &Settings, groups: &[crate::mailbox::Group], recipes: &[crate::mailbox::Event]) -> Vec<String> {
+        to_follow(st, groups, recipes, "me", |_| false).into_iter().map(|(e, g, _)| format!("{}/{}@{g}", e.from, e.inst)).collect()
+    }
+
+    #[test]
+    fn in_step_follows_what_members_follow() {
+        let groups = [in_step("g", &[("ann", "atm"), ("ann", "atm")])];
+        // Once, however many members follow it.
+        assert_eq!(picked(&Settings::default(), &groups, &[pack("ann", "atm", "ATM10")]), ["ann/atm@g"]);
+        // Its code hasn't come yet.
+        assert!(picked(&Settings::default(), &groups, &[]).is_empty());
+        // A group not kept in step, or not joined.
+        let mut off = in_step("g", &[("ann", "atm")]);
+        off.me.in_step = false;
+        assert!(picked(&Settings::default(), &[off], &[pack("ann", "atm", "")]).is_empty());
+        // Being followed right now.
+        assert!(to_follow(&Settings::default(), &groups, &[pack("ann", "atm", "")], "me", |k| k == "ann/atm").is_empty());
+    }
+
+    #[test]
+    fn in_step_skips_own_and_stopped_packs() {
+        let groups = [in_step("g", &[("me", "mine"), ("ann", "atm")])];
+        let recipes = [pack("me", "mine", ""), pack("ann", "atm", "")];
+        let mut st = Settings::default();
+        st.friend_groups.push(crate::settings::FriendGroup { id: "g".into(), stopped: vec!["ann/atm".into()], ..Default::default() });
+        assert!(picked(&st, &groups, &recipes).is_empty());
+        // Stopped in another group only: still followed through this one.
+        st.friend_groups[0].id = "other".into();
+        assert_eq!(picked(&st, &groups, &recipes), ["ann/atm@g"]);
+    }
+
+    #[test]
+    fn in_step_skips_packs_followed_already() {
+        let groups = [in_step("g", &[("ann", "atm")])];
+        let recipes = [pack("ann", "atm", "ATM10")];
+        let follow = |inst: &str| FollowedRecipe { peer_id: "ann".into(), inst: inst.into(), root: "/i/ATM10".into(), local: "l1".into(), ..Default::default() };
+        let mut st = Settings::default();
+        st.followed_recipes.push(follow("atm"));
+        assert!(picked(&st, &groups, &recipes).is_empty());
+        // Saved by an older build, by the sender's folder name.
+        st.followed_recipes[0] = follow("atm10");
+        assert!(picked(&st, &groups, &recipes).is_empty());
+        // Someone else's pack of the same name is another pack.
+        st.followed_recipes[0].peer_id = "bob".into();
+        assert_eq!(picked(&st, &groups, &recipes), ["ann/atm@g"]);
+    }
+
+    /// The bug this guards: a follow recorded when its instance was made,
+    /// whose first version never finished going in (the install failed or
+    /// Hopper closed), must still count after a restart, or keeping in
+    /// step makes another copy on every start.
+    #[test]
+    fn unfinished_follow_survives_a_restart() {
+        let groups = [in_step("g", &[("ann", "atm")])];
+        let recipes = [pack("ann", "atm", "")];
+        let mut st = Settings::default();
+        st.followed_recipes.push(FollowedRecipe {
+            peer_id: "ann".into(),
+            inst: "atm".into(),
+            root: "/i/ATM10".into(),
+            local: "l1".into(),
+            code: String::new(),
+            seen: "code".into(),
+            group: "g".into(),
+            ..Default::default()
+        });
+        st.friend_groups.push(crate::settings::FriendGroup { id: "g".into(), in_step: true, ..Default::default() });
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
+        let f = &back.followed_recipes[0];
+        // Still waiting for its first version, so it's applied into the
+        // same instance; and no new copy is made.
+        assert!(f.waiting() && f.code.is_empty() && f.local == "l1");
+        assert!(picked(&back, &groups, &recipes).is_empty());
+        // And it isn't kept both ways before that version is in.
+        let mut copies = Vec::new();
+        reconcile(&mut copies, &back, |_| vec!["g".into()]);
+        assert!(copies.is_empty());
     }
 }

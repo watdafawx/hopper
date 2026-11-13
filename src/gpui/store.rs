@@ -96,6 +96,9 @@ pub enum Msg {
     /// A new instance was made by following a friend's pack: remember the
     /// recipe for its root (known only once it was made).
     Followed(Box<hopper::settings::FollowedRecipe>),
+    /// That new instance exists and its mods are going in: the follow is
+    /// recorded now, so an install that never finishes still has one.
+    FollowMade(Box<hopper::settings::FollowedRecipe>),
     /// Projects updated, download pages to fetch, and the project whose
     /// install or update asked for them (its button shows their progress).
     Updated(PathBuf, Vec<u64>, Vec<String>, Option<u64>),
@@ -1193,6 +1196,7 @@ impl Store {
                 }
             }
             Msg::Followed(f) => self.on_followed(*f, cx),
+            Msg::FollowMade(f) => self.on_follow_made(*f, cx),
             Msg::RecipeApplied(r) => self.on_recipe_applied(*r, cx),
             Msg::RecipeFailed(root, code, e, job) => self.on_recipe_failed(root, code, e, job, cx),
             Msg::GroupMerged(m) => self.on_group_merged(*m, cx),
