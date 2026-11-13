@@ -795,8 +795,9 @@ async fn servers(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
 /// Java, memory and server.properties.
 async fn infos(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
     let who = require(&app, &headers, &method)?;
+    let nodes = node_infos(&app, &who).await;
     let a = app.clone();
-    let list = tokio::task::spawn_blocking(move || {
+    let mut list = tokio::task::spawn_blocking(move || {
         a.servers
             .list()
             .iter()
@@ -812,7 +813,43 @@ async fn infos(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) 
     })
     .await
     .map_err(bad)?;
+    list.extend(nodes);
     Ok(Json(json!(list)))
+}
+
+/// How long `/servers/infos` waits for nodes' `server.properties`; a node
+/// that is slower still lists its servers, without them.
+const NODE_INFOS_WAIT: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// The node servers this person sees, described like the panel's own
+/// (design/multi-panel.md, "How the desktop fits"): Hopper desktop lists a
+/// paired panel's servers from `/servers/infos`, so without them a node's
+/// servers never showed there.
+async fn node_infos(app: &Arc<App>, who: &Who) -> Vec<Value> {
+    let servers = app.nodes.servers_for(who);
+    let asks: Vec<_> = servers
+        .iter()
+        .map(|s| {
+            let node = s["node"].as_str().unwrap_or("").to_string();
+            let local = s["id"].as_str().and_then(crate::relay::split).map(|(_, id)| id.to_string()).unwrap_or_default();
+            let info = app.nodes.relay_info(&node);
+            let name = info.as_ref().map(|i| i.name.clone()).unwrap_or_default();
+            let handle = info.and_then(|i| i.handle).filter(|_| !s["stale"].as_bool().unwrap_or(false));
+            let ask = tokio::spawn(async move {
+                match handle {
+                    Some(h) => tokio::time::timeout(NODE_INFOS_WAIT, crate::relay::ask_properties(&h, &local)).await.ok().flatten(),
+                    None => None,
+                }
+            });
+            (name, ask)
+        })
+        .collect();
+    let mut out = Vec::new();
+    for (s, (name, ask)) in servers.iter().zip(asks) {
+        let props = ask.await.ok().flatten();
+        out.push(crate::relay::node_info(s, &name, props.as_ref()));
+    }
+    out
 }
 
 /// The server's mods, read from the jars here so only the list travels.

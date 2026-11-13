@@ -477,13 +477,53 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
 /// the namespaced ids (`crate::alerts`). `None` when the node refuses,
 /// stops or sends something that isn't a small JSON object.
 pub async fn ask_alerts(handle: &crate::tunnel::mux::Handle) -> Option<Value> {
-    const PATH: &str = "/api/v1/alerts";
-    /// Plenty for a node's alerts and a reading per server.
-    const MAX: usize = 1024 * 1024;
-    if !allowed(&Method::GET, PATH) {
+    // Plenty for a node's alerts and a reading per server.
+    ask_get(handle, "/api/v1/alerts", "alerts", 1024 * 1024).await
+}
+
+/// A node's server's `server.properties` (`GET /servers/{id}/properties`,
+/// on the allowlist), asked by the main itself as Look so `/servers/infos`
+/// describes a node's server as fully as its own (Hopper desktop shows the
+/// players, world name and MOTD from it). Its `values` map, unchecked:
+/// [`node_info`] reads it as untrusted.
+pub async fn ask_properties(handle: &crate::tunnel::mux::Handle, id: &str) -> Option<Value> {
+    if !plain_id(id) {
         return None;
     }
-    let head = Head { k: "req".into(), m: "GET".into(), p: PATH.into(), user: "alerts".into(), role: Role::Viewer.id().into(), ..Default::default() };
+    let v = ask_get(handle, &format!("/api/v1/servers/{id}/properties"), "infos", 256 * 1024).await?;
+    v.get("values").filter(|p| p.is_object()).cloned()
+}
+
+/// One node server as the main's `/servers/infos` lists it, from its entry
+/// in the merged server list (`s`, id already namespaced) and the
+/// properties the node sent (or none when it didn't answer in time). Java
+/// isn't known on the main. Property keys and values are a node's text:
+/// strings only, at most 200 of them, keys up to 64 characters, values cut
+/// to 500.
+pub fn node_info(s: &Value, node_name: &str, props: Option<&Value>) -> Value {
+    let properties: serde_json::Map<String, Value> = props
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(k, v)| !k.is_empty() && k.chars().count() <= 64 && v.is_string())
+        .take(200)
+        .map(|(k, v)| (k.clone(), Value::String(v.as_str().unwrap_or("").chars().take(500).collect())))
+        .collect();
+    json!({
+        "id": s["id"], "name": s["name"], "path": s["path"], "managed_by": s["managed_by"],
+        "loader": s["loader"], "java": Value::Null, "max_memory": s["max_memory"], "properties": properties,
+        "node": s["node"], "node_name": node_name, "stale": s["stale"].as_bool().unwrap_or(false),
+    })
+}
+
+/// `GET path` on a node, asked by the main itself (`user` names what for
+/// the node's log) with the lowest role; the JSON object it answered, or
+/// `None` when it's refused, broken, not an object or over `max` bytes.
+async fn ask_get(handle: &crate::tunnel::mux::Handle, path: &str, user: &str, max: usize) -> Option<Value> {
+    if !allowed(&Method::GET, path) {
+        return None;
+    }
+    let head = Head { k: "req".into(), m: "GET".into(), p: path.into(), user: user.into(), role: Role::Viewer.id().into(), ..Default::default() };
     let mut s = handle.open(serde_json::to_vec(&head).ok()?).await.ok()?;
     s.tx.finish().await.ok()?;
     let (answer, mut all) = read_answer(&mut s.rx).await.ok()?;
@@ -492,7 +532,7 @@ pub async fn ask_alerts(handle: &crate::tunnel::mux::Handle) -> Option<Value> {
     }
     loop {
         match s.rx.recv().await {
-            Ok(Some(d)) if all.len() + d.len() <= MAX => all.extend_from_slice(&d),
+            Ok(Some(d)) if all.len() + d.len() <= max => all.extend_from_slice(&d),
             Ok(None) => break,
             _ => return None,
         }
@@ -627,6 +667,25 @@ fn namespace_answer(node: &str, route: &str, body: Vec<u8>) -> Vec<u8> {
         && id.is_string()
     {
         *id = id.as_str().filter(|s| plain_id(s)).map_or(Value::Null, |s| Value::String(join(node, s)));
+        changed = true;
+    }
+    // One server (`GET /servers/{id}`): it reads as it does in the main's
+    // list, so a client that keys on the answer's id finds it there.
+    let one_server = route.strip_prefix("/api/v1/servers/").is_some_and(|rest| !rest.is_empty() && !rest.contains('/'));
+    if one_server && let Some(id) = v.get_mut("id").filter(|id| id.is_string()) {
+        *id = id.as_str().filter(|s| plain_id(s)).map_or(Value::Null, |s| Value::String(join(node, s)));
+        v["node"] = Value::String(node.to_string());
+        changed = true;
+    }
+    // A server's backups: its off-site copies are the node's own setting
+    // (`backups/copies` and `backups/remote` aren't relayed), so the main's
+    // pages don't offer to change them or bring a backup back from there.
+    let backups = route
+        .strip_prefix("/api/v1/servers/")
+        .and_then(|rest| rest.strip_suffix("/backups"))
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'));
+    if backups && let Some(edit) = v.get_mut("can_edit_targets").filter(|e| e.as_bool() == Some(true)) {
+        *edit = Value::Bool(false);
         changed = true;
     }
     if changed { serde_json::to_vec(&v).unwrap_or(body) } else { body }
@@ -1026,5 +1085,53 @@ mod tests {
         assert_eq!(serde_json::from_slice::<Value>(&b).unwrap()["job"], "ab12:7");
         let b = namespace_answer("ab12", "/api/v1/jobs/7", br#"{"done":true,"result":{"id":"new","path":"/x"}}"#.to_vec());
         assert_eq!(serde_json::from_slice::<Value>(&b).unwrap()["result"]["id"], "ab12:new");
+    }
+
+    #[test]
+    fn one_server_reads_as_in_the_list() {
+        let b = namespace_answer("ab12", "/api/v1/servers/smp", br#"{"id":"smp","name":"SMP"}"#.to_vec());
+        let v = serde_json::from_slice::<Value>(&b).unwrap();
+        assert_eq!((v["id"].as_str(), v["node"].as_str()), (Some("ab12:smp"), Some("ab12")));
+        // An id a URL can't carry safely is dropped.
+        let b = namespace_answer("ab12", "/api/v1/servers/smp", br#"{"id":"../x"}"#.to_vec());
+        assert!(serde_json::from_slice::<Value>(&b).unwrap()["id"].is_null());
+        // Deeper routes keep their own ids (a mod's, a backup's).
+        let b = namespace_answer("ab12", "/api/v1/servers/smp/backups", br#"{"id":"b1"}"#.to_vec());
+        assert_eq!(serde_json::from_slice::<Value>(&b).unwrap()["id"], "b1");
+    }
+
+    #[test]
+    fn node_off_site_copies_stay_on_the_node() {
+        let list = br#"{"backups":[],"targets":[{"id":"t1","on":true}],"can_edit_targets":true}"#.to_vec();
+        let b = namespace_answer("ab12", "/api/v1/servers/smp/backups", list.clone());
+        let v = serde_json::from_slice::<Value>(&b).unwrap();
+        assert_eq!(v["can_edit_targets"], false);
+        // What the node copies to still shows.
+        assert_eq!(v["targets"][0]["id"], "t1");
+        // Other routes keep their answer as it is.
+        let b = namespace_answer("ab12", "/api/v1/servers/smp/worlds", list.clone());
+        assert_eq!(b, list);
+    }
+
+    #[test]
+    fn node_infos_read_like_local_ones() {
+        let s = json!({ "id": "ab12:smp", "name": "SMP", "path": "/srv/smp", "managed_by": null, "loader": "fabric", "max_memory": "4G", "node": "ab12", "stale": true });
+        let mut props = serde_json::Map::new();
+        props.insert("motd".into(), json!("Hi"));
+        props.insert("max-players".into(), json!(12));
+        props.insert("x".repeat(65), json!("long key"));
+        props.insert("level-name".into(), json!("w".repeat(600)));
+        let v = node_info(&s, "vm-a", Some(&Value::Object(props)));
+        assert_eq!(v["id"], "ab12:smp");
+        assert_eq!((v["node"].as_str(), v["node_name"].as_str(), v["stale"].as_bool()), (Some("ab12"), Some("vm-a"), Some(true)));
+        assert_eq!((v["loader"].as_str(), v["max_memory"].as_str()), (Some("fabric"), Some("4G")));
+        let p = v["properties"].as_object().unwrap();
+        // Strings only, short keys, values cut to 500 characters.
+        assert_eq!(p.get("motd").and_then(Value::as_str), Some("Hi"));
+        assert!(p.get("max-players").is_none() && p.len() == 2);
+        assert_eq!(p["level-name"].as_str().unwrap().chars().count(), 500);
+        // A node that didn't answer: no properties, still listed.
+        let v = node_info(&s, "vm-a", None);
+        assert_eq!(v["properties"], json!({}));
     }
 }
