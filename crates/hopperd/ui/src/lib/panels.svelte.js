@@ -13,6 +13,7 @@ import { api, hooks, ApiError, apiBase, headersFor, target } from './api.js';
 import { tokenFor, setToken, forgetToken } from './panelTokens.js';
 import { session, ownerLike } from './me.svelte.js';
 import { savedList, stuck } from './panelOff.js';
+import { createWatchdog, SILENT_AFTER } from './socketWatch.js';
 
 /** Lists and sign-in checks give up after this (a dead panel mustn't hold the page). */
 export const LIST_TIMEOUT = 5000;
@@ -28,7 +29,7 @@ export const panels = $state({ list: [], loaded: false });
 const rt = new Map();
 const runtime = (p) => {
   let r = rt.get(p.id);
-  if (!r) rt.set(p.id, (r = { socket: null, retry: 0, timer: 0, ping: 0, grace: 0, followed: new Set(), stopped: false }));
+  if (!r) rt.set(p.id, (r = { socket: null, retry: 0, timer: 0, ping: 0, grace: 0, watch: null, followed: new Set(), stopped: false }));
   return r;
 };
 
@@ -225,10 +226,17 @@ function stopRuntime(r) {
   clearTimeout(r.timer);
   clearTimeout(r.grace);
   clearInterval(r.ping);
+  detach(r);
+}
+
+/** Lets go of a panel's live socket without waiting to hear it close. */
+function detach(r) {
+  r.watch?.stop();
+  r.watch = null;
   const s = r.socket;
   r.socket = null;
   if (s) {
-    s.onclose = null;
+    s.onopen = s.onmessage = s.onclose = null;
     s.close();
   }
 }
@@ -309,7 +317,21 @@ async function openSocket(p) {
   if (r.socket || r.stopped || p.off) return;
   const ws = new WebSocket(`${p.url.replace(/^http/, 'ws')}/api/v1/ws`, t.protocols);
   r.socket = ws;
+  // A panel that freezes keeps the connection open, so "closed" may never
+  // come (and a browser can take minutes to say it). The panel sends its
+  // servers every second: silence means it's gone. Same if it freezes
+  // before the socket even opens.
+  r.watch?.stop();
+  r.watch = createWatchdog(() => {
+    if (r.socket !== ws) return;
+    detach(r);
+    if (r.stopped || p.state === 'signin') return;
+    down(p);
+    later(p);
+  });
+  r.watch.arm(LIST_TIMEOUT);
   ws.onopen = () => {
+    r.watch?.arm(SILENT_AFTER);
     p.connected = true;
     p.downSince = 0;
     p.state = 'ok';
@@ -318,6 +340,7 @@ async function openSocket(p) {
     for (const id of r.followed) ws.send(JSON.stringify({ op: 'console', server: id }));
   };
   ws.onmessage = (ev) => {
+    r.watch?.arm(SILENT_AFTER);
     let msg;
     try {
       msg = JSON.parse(ev.data);
@@ -343,7 +366,10 @@ async function openSocket(p) {
     }
   };
   ws.onclose = () => {
-    if (r.socket === ws) r.socket = null;
+    if (r.socket === ws) {
+      r.socket = null;
+      r.watch?.stop();
+    }
     if (r.stopped || p.state === 'signin') {
       p.connected = false;
       return;
@@ -361,12 +387,7 @@ hooks.signedOut = (q) => {
   forgetToken(p.url);
   const r = runtime(p);
   clearTimeout(r.timer);
-  const s = r.socket;
-  r.socket = null;
-  if (s) {
-    s.onclose = null;
-    s.close();
-  }
+  detach(r);
   p.connected = false;
   if (p.state !== 'signin') p.reason = p.reason === 'new' ? 'new' : 'expired';
   p.state = 'signin';
