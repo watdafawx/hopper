@@ -516,6 +516,9 @@ same flat grouping so both apps read the same.
 
 ## Phased plan
 
+Superseded by the phase list in "Adjusted after research" below; kept for
+the day estimates.
+
 Sizes use AGENTS.md's S/M/L plus a day estimate for one agent with review.
 
 **B (first)**
@@ -551,6 +554,246 @@ Sizes use AGENTS.md's S/M/L plus a day estimate for one agent with review.
 - **A4, hardening (M, ~2 d).** The security review items, docs, a real VM
   test (a throwaway node, never a real server).
 
+## Adjusted after research (2026-11-13)
+
+Source: `design/panel-research.md` (Pterodactyl/Pelican, AMP, MCSManager,
+Crafty, PufferPanel, Multicraft, Lodestone, Komodo, Portainer, Beszel,
+Netdata, Coolify/Dokploy, Tailscale). The phase list in this section
+**replaces** "Phased plan" above. The security model above is unchanged;
+every addition below is checked against the "never weaken" tables.
+
+### What the research changes
+
+1. **A is the main multi-node story; B is for panels the browser can
+   already reach.** Every panel whose browser or main must reach the node
+   inbound (Pterodactyl, MCSManager, AMP) has certs, ports and mixed content
+   as its top complaint (Pterodactyl #2483, ~115 reactions; MCSManager
+   #1570/#1129/#2340). Komodo, Beszel, Netdata and Portainer Edge all moved
+   to "agent dials out". So B stays as designed, but its add flow is honest
+   about where it works (same LAN, Tailscale, or a panel with a real
+   certificate), and when the probe ends in "untrusted certificate" or
+   "secure page, plain HTTP panel" it offers **"Add it as a node of this
+   panel instead"** once A exists. Order stays B then A: B0 is built and B1
+   is small, and A reuses B1's tickets and file links.
+2. **Refusals must be readable cross-origin.** Lodestone (#696) learned that
+   a refusal without CORS headers reaches the page as an opaque network
+   error. Every response to an allowed origin, including 401, 403 and 429
+   from `security::guard` and `web_access::access_refusal`, carries the CORS
+   headers, so the page can say "Sign in again", "Not allowed from here:
+   open on rig" or "Too many tries, wait 10 minutes" instead of "Can't
+   reach it". Non-listed origins still get no CORS headers.
+3. **A dead panel or node never slows anything else** (PufferPanel #1246,
+   Pterodactyl #3936). B: each panel's calls have their own short timeout
+   (5 s for lists, no timeout on streams), and the home list renders before
+   any other panel answers. A: the main serves a node's servers from its last
+   snapshot and never blocks a page on a node; relayed calls to an offline
+   node fail fast with "rig-vm is offline since 14:02".
+4. **Offline is debounced and alerts once** (Coolify #4407, Netdata
+   #18436). A node is "Reconnecting" after one missed ping and "Offline"
+   after 60 s. A **Node offline** alert rule (existing `rules`/`alerts`, so
+   webhooks and Discord come for free) fires once after 2 minutes offline
+   and once on recovery. Nothing is switched off on either side because of
+   an outage; the node keeps its schedules (already in the plan).
+5. **Maintenance mode per node** (Pterodactyl's standard workaround for
+   #3936). "Pause this node" on the main: hides actions, silences its alerts,
+   shows "Under maintenance" instead of "Offline". Owner or manager. Pure
+   main-side display; the node and its servers are unaffected.
+6. **Two ways to join a node** (Tailscale, Beszel, Netdata):
+   - *Code* (as designed): `hopperd node join https://main` on the node,
+     compare the 6-digit codes, allow on the main.
+   - *Join command*: the owner clicks "Add a node" on the main, picks the
+     ceiling and gets a one-line command for Linux and for Windows that
+     installs hopperd as a service and joins. The command carries the main's
+     address, **the main's CA fingerprint** (so the node pins it before
+     sending anything) and a **join key**: single use, 30-minute expiry,
+     shown once, hash stored, owner-only to create, listed and revocable
+     under Settings › Nodes, every use in the audit log. A join key can only
+     create one node request that is auto-approved with the ceiling chosen
+     when the key was made; it is never the node's identity (Komodo's
+     onboarding keys). The node still gets its own node token at the end.
+     Why this is not weaker than the code: the code proves "the CA the node
+     sees is the main's"; the command proves the same by carrying the
+     fingerprint from the owner's signed-in page, and the key replaces the
+     owner's "Allow" click.
+7. **Pairing and connection say which step failed** (AMP's silent spinner,
+   Portainer #8531). `hopperd node status` on the node and the node's row on
+   the main show the last attempt as one of: address not found (DNS), can't
+   connect (TCP), certificate doesn't match the pinned one (with "re-pair"
+   steps), node key refused (revoked), versions too far apart, connected.
+   DNS failures are retried like any other (Beszel #1341). The node honours
+   `HTTPS_PROXY`. TLS uses rustls with bundled web roots so a bare VM image
+   works (Beszel #2291).
+8. **Per-node health in the group header** (Pelican, Calagopus, Beszel
+   #1017): state, version, last seen, round-trip time, CPU, RAM, disk free,
+   and **RAM promised** (sum of the servers' max memory) against the box's
+   RAM. Creating or moving a server that would promise more than the box has
+   warns plainly and lets the owner continue; no overallocate percentages and
+   no `-1` magic (Pterodactyl #4940). B shows the same header per panel from
+   its `/host`.
+9. **Ports: no allocation records.** The node picks a free port with the
+   existing port check; the main shows conflicts. Players reach the node's
+   own address; if the node is behind CGNAT the create/move dialog says
+   "Players can't reach servers on this node from the internet" from the
+   existing port check (Pterodactyl #2754 shows what records cost).
+10. **Move or copy a server between nodes** (the top ask once people have two
+    machines: Dokploy #812 89, Pterodactyl #18 ~69). Built on what exists:
+    clone, the content-addressed backup store and the `hopper` backup-copy
+    target (`offsite.rs`), streamed through the main over the two node
+    tunnels. Rules from Pterodactyl's failures: precheck disk space, port,
+    Java and loader on the target; ask to stop the server first; resumable
+    (only missing chunks are sent again); symlinks and file modes kept (test);
+    **the source is kept by default**, stopped and marked "Moved to
+    rig-vm", with "Delete the old copy" as a separate later action; a failed
+    move cleans up the target; History entries on both nodes. Backups are not
+    copied unless the user ticks "Bring backups" (no automatic backups rule).
+    Main-to-node and node-to-main moves use the same path. Between B panels a
+    move is out of scope (the browser cannot carry it); the existing backup
+    copy to another panel stays the way to do it.
+11. **Node-scoped access** (Pterodactyl #279, ~118, the largest count found).
+    A user's server list can also hold "all servers on rig-vm", which
+    includes servers created there later. API tokens can be scoped to a node
+    the same way. This only narrows or names a set of servers; roles are
+    unchanged and the node ceiling still caps everything.
+12. **Bulk actions across groups** (Pterodactyl #278, never built). Select
+    servers in the list (drag-pick, `lib/dragpick.svelte.js`) across panels
+    or nodes, or "All on rig-vm" from the group menu, then start, stop,
+    restart or send a command. One confirmation lists what will happen per
+    group; each server's result is shown; servers your role can't touch are
+    listed as skipped. In B each panel gets its own calls with its own
+    token; in A the main fans out.
+13. **One complete audit trail** (Pterodactyl #1219 shipped with holes
+    because console and power went browser-direct). In A every action passes
+    the main, so the main's audit log has all of it, with a node filter, and
+    the node keeps its own History (already in the plan). In B each panel's
+    own audit log is complete because the browser calls it directly.
+14. **Updates without breaking the link** (Portainer #12925, 327 reactions;
+    AMP; Komodo v2). On top of N/N-1 tunnel support: the main's own update
+    screen lists nodes that will show "Update needed" after the update;
+    "Update all nodes" updates them one at a time through each node's signed
+    update path, stopping at the first failure; an optional per-node "Keep
+    this node up to date with the main" (off by default). A main never
+    refuses to talk to an older node silently: the row says why.
+15. **Everything through the API, CLI and MCP.** Every node action in the
+    UI (join keys, ceiling read, maintenance, update, move) is an API route
+    with `require_owner`/`require` like its neighbours. `hopperd node
+    join|status|leave|ceiling` on the node, because an Oracle VM has no
+    browser and the node's UI is loopback-only. MCP tools list node servers
+    the same as local ones.
+16. **Mobile.** Group headers collapse; the per-panel and per-node header
+    wraps to two lines at 375 px; bulk select works by tapping row ticks. The
+    acceptance checks include a 375 px screenshot.
+
+### Cut or deferred
+
+- **LAN panel finder in the add flow** (open question 10): deferred. Nobody
+  asked for it and A's join command covers the remote case.
+- **"Remember me" choice** (open question 6): no choice; 7 days sliding plus
+  the existing "Don't keep me signed in on this browser" covers it.
+- **Moving servers between B panels**: out of scope (point 10).
+- **SSO / OIDC / proxy-header sign-in**: wanted (Pterodactyl #4026 71,
+  MCSManager #1160), but a separate design; not part of multi-panel.
+- **Fingerprint shown as proof in the browser**: stays cut (see TLS above).
+
+### Defaults
+
+| Setting | Default | Why |
+|---|---|---|
+| Node ceiling | Manage, with the warning | Open question 5; Crafty #763 uses the same three levels |
+| Join method | Code; join command offered next to it | Code needs nothing pre-made; command for scripts and VMs |
+| Join key life | 30 min, single use | Tailscale/Komodo practice |
+| Offline alert | After 2 min, once, plus recovery | Coolify #4407 |
+| Moved server's source | Kept, stopped | Pterodactyl #18 thread, #5555 |
+| Node auto-update | Off | Updates are the most-cited breakage |
+| RAM promised over total | Warn, allow | No overallocate maths |
+| Per-panel list timeout (B) | 5 s | One slow panel must not hold the page |
+
+### Phases (B first, then A)
+
+Sizes are AGENTS.md's S/M/L. Every phase ends with its acceptance check run
+for real (scratch panels with `HOPPERD_SERVICE=hopperd-test`, `--data` and
+`HOPPER_LOOPBACK=1`; A's VM steps on a throwaway server on `a1-atm10`,
+never a real one) and a review; UI phases add light and dark screenshots
+with measured gaps and a 375 px one.
+
+**B**
+
+- **B0, CSP and allowed pages: done.**
+- **B1, browser sessions, tickets, file links (M).** `login {bearer:true}`,
+  7-day sliding life, Browser label + Revoke, ws ticket (subprotocol if the
+  spike allows), `POST /files/{id}/link`, CORS headers on every refusal to an
+  allowed origin (point 2), `web.remote` capability.
+  *Accept:* Rust tests for each refusal and for ticket/link single use,
+  expiry and binding; a page on a listed origin reads a 401 and a 403 body; a
+  non-listed origin gets no CORS headers on any status.
+- **B2, the web UI with several panels (L).** Per-panel `api`/`live`/`me`,
+  namespaced routes, groups, add flow with probe and the four messages,
+  per-panel header (point 8), offline/expired states, 5 s list timeout, panel
+  list stored on the home panel.
+  *Accept:* two scratch panels; stop one, the other group keeps working and
+  the page's list renders in under 1 s with "Can't reach … · retry"; revoke
+  the browser session on panel 2, its group shows "Sign in again" and nothing
+  else changes; role chip and buttons follow each panel's role.
+- **B3, bulk actions and filters (M).** Drag-pick selection across groups,
+  bulk start/stop/restart/command with one grouped confirmation, per-server
+  results, filter by panel and state.
+  *Accept:* restart three servers on two scratch panels where the user is
+  viewer on one: two restart, one is listed as skipped, each panel's audit log
+  has its own entries.
+- **B4, cross-origin files and polish (M).** Uploads, downloads, previews
+  through one-use links, bare-URL audit, CA download help, the "add it as a
+  node instead" pointer (shown once A ships), docs.
+  *Accept:* 1 GB upload and zip download between two scratch panels on
+  different ports; a list of every place that still says "Open on rig".
+
+**A**
+
+- **A0, protocol spike (S).** Frame format, credit flow, ticket carrier,
+  echo between a throwaway main and node; measure the node's idle memory and
+  CPU with the tunnel open on `a1-atm10`.
+  *Accept:* numbers written into this file; node idle under the 30 MB
+  budget in `server-panel.md`.
+- **A1, join and connect (L).** Code pairing, join keys and the generated
+  commands (Linux systemd, Windows service), pending list, node token, CA pin,
+  keepalive, reconnect with jitter (DNS included), revoke from both sides,
+  `hopperd node join|status|leave`, step-by-step diagnostics (point 7),
+  `HTTPS_PROXY`.
+  *Accept:* on a throwaway `a1-atm10` setup, the generated command joins and
+  the node appears within 10 s; block outbound traffic → "Reconnecting", then
+  "Offline" at 60 s, one alert at 2 min, one on recovery; change the main's
+  CA → node status says the certificate doesn't match; a used or expired join
+  key is refused and logged.
+- **A2, relay, ceiling, health (L).** Route allowlist, `Who::Main`, ceiling,
+  namespaced ids, merged snapshot, History attribution, node header stats and
+  RAM promised, maintenance mode, Node offline alert rule.
+  *Accept:* the parity tests run the same handler tests through a fake node;
+  a Look ceiling refuses start; `..` and symlink paths sent via the main are
+  refused by the node; maintenance silences the alert.
+- **A3, files, version skew, updates, apps (L).** Streamed files with credit
+  windows, capability intersection, "Update needed" state, update one / all
+  nodes, desktop and web groups for nodes.
+  *Accept:* 2 GB upload to a node through the main with the main's memory
+  growing by under 64 MB and no temp file; a node one tunnel version behind
+  works, two behind shows "Update needed" read-only; "Update all" stops at
+  the first failure.
+- **A4, node-scoped access, bulk, API, MCP (M).** "All servers on node X"
+  in user lists and API tokens, bulk actions and "All on node" through the
+  main, audit filter by node, CLI `ceiling`, MCP tools.
+  *Accept:* a user scoped to node X sees a server created there afterwards
+  and nothing on node Y; a node-scoped token is refused on another node; bulk
+  restart across main and node lands in one audit view.
+- **A5, move or copy a server between nodes (L).** Point 10.
+  *Accept:* move a throwaway 1 GB server from a scratch main to the
+  `a1-atm10` node; cut the link mid-way, resume sends only the missing
+  chunks; symlinks and file modes survive (test); the source stays, stopped
+  and marked; a forced failure leaves nothing on the target; both Histories
+  have the entry.
+- **A6, hardening (M).** The security review list above plus join keys,
+  node-scoped access and moves; docs; a full run on the VM.
+  *Accept:* review findings closed or written down as accepted; docs list
+  what a node can and can't do.
+
+New open questions from this section: 11 and 12 below.
+
 ## Open questions for the maintainer
 
 1. **Remote-session limits (B).** *Answered (maintainer, 2026-11-11): a
@@ -585,3 +828,11 @@ Sizes use AGENTS.md's S/M/L plus a day estimate for one agent with review.
    "Allowed web UIs". The first is plainer; please confirm the wording.
 10. **Finding panels (B).** Should the add flow list panels the home panel can
     see on its LAN (browsers can't do mDNS) next to typing an address?
+    *Deferred after research (see "Adjusted after research").*
+11. **Join command (A).** Offer the generated one-line join command with a
+    single-use 30-minute join key next to the code, or code only? I
+    recommend both: the code for people at the VM's console, the command for
+    scripts and fresh VMs.
+12. **Moved server's old copy (A).** Keep the source stopped and marked until
+    the user deletes it (my pick), or delete it automatically after a
+    successful move?
