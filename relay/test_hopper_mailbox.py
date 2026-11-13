@@ -1218,6 +1218,40 @@ class ResilienceTest(Base):
         self.a.post("/v1/recipes", dict(recipe("p1", code="HOP-3"), to=[], groups=[gid]))
         self.assertNotIn("marks", self.b.events()[-1])
 
+    def test_shared_settings_ride_with_the_recipe(self):
+        # The desktop asks once whether the relay carries them.
+        self.assertIs(self.a.get("/v1/health")["configs"], True)
+        self.a.befriend(self.b)
+        gid = self.make_group(self.a, [self.b])
+        self.b.post("/v1/groups/%s/accept" % gid)
+        self.b.events()
+        self.a.post("/v1/recipes", dict(recipe("p1", configs="eJxL"), to=[], groups=[gid]))
+        self.assertEqual(self.b.events()[-1]["configs"], "eJxL")
+        # Kept with the group's pack, so a member who joins later gets it.
+        self.a.befriend(self.c)
+        self.a.post("/v1/groups/%s" % gid, {"add": [self.c.id]})
+        self.c.post("/v1/groups/%s/accept" % gid)
+        late = [e for e in self.c.events() if e["kind"] == "recipe"]
+        self.assertEqual([e.get("configs") for e in late], ["eJxL"])
+        # Counted in the sender's group storage.
+        with mb.lock:
+            p = mb.state["groups"][gid]["packs"][self.a.id + "/p1"]
+            self.assertEqual(mb.pack_bytes(p) - mb.pack_bytes(dict(p, configs="")), 4)
+        # A newer recipe replaces it; one without settings has none.
+        self.a.post("/v1/recipes", dict(recipe("p1", code="HOP-2", configs="eJyr"), to=[], groups=[gid]))
+        self.assertEqual(self.b.events()[-1]["configs"], "eJyr")
+        self.a.post("/v1/recipes", dict(recipe("p1", code="HOP-3"), to=[], groups=[gid]))
+        self.assertNotIn("configs", self.b.events()[-1])
+        # Over 16 KB is refused out loud, never cut, and nothing is stored.
+        r = self.a.post("/v1/recipes", dict(recipe("p1", code="HOP-4", configs="x" * 16385), to=[], groups=[gid]))
+        self.assertEqual((r["status"], r["code"]), (413, "too_large"))
+        self.assertEqual(self.b.events(), [])
+        ok = self.a.post("/v1/recipes", dict(recipe("p1", code="HOP-5", configs="x" * 16384), to=[], groups=[gid]))
+        self.assertIn("seq", ok)
+        self.assertEqual(len(self.b.events()[-1]["configs"]), 16384)
+        r = self.a.post("/v1/recipes", dict(recipe("p1", code="HOP-6", configs=["x"]), to=[], groups=[gid]))
+        self.assertEqual(r["status"], 413)
+
     def test_a_pack_published_after_joining_comes_once_through_the_queue(self):
         self.a.befriend(self.b)
         gid = self.make_group(self.a, [self.b])
