@@ -1303,8 +1303,10 @@ Manage) is chosen and stored at join time; A2 enforces it.
   shell-safe (unit tested); the dialog shows the key once.
 - **Code pairing** (`hopperd node join <url>` with no key). The node trusts
   whatever certificate the main shows *for this request only*, sends a
-  request, and both sides show the same 6-digit code (`pair_code` over the
-  fingerprint, request id and a secret only the node knows). The owner
+  request, and both sides show the same 6-digit code (`nodes::node_code`:
+  `pair_code` over the fingerprint, the main's request id and secret, and a
+  nonce the node committed to by hash in the request and reveals on its
+  first status ask; the main shows the code only after the reveal). The owner
   compares, picks the ceiling and allows or refuses. Requests last 5
   minutes, at most 8 at once. Only after "Allow" does the node save the CA
   it saw.
@@ -1408,6 +1410,49 @@ light themes (now `color-mix(var(--text) 8%)`, the same colour in dark).
   text contrast) are under 4.5:1 everywhere they're used, not only here.
 - The segmented controls in CopyServer and BackupTargets fill the chosen
   option orange; the rule (and Nodes) uses the selected tint.
+
+### A1 security review (2026-11-13)
+
+Read against the A threat list (pairing, tokens, revocation, owner-only
+routes, pinning, proxy, generated commands, secrets in output, node data
+files). Each fixed High and Medium has a test written first that failed on
+the old code.
+
+| # | Rank | Finding (attack) | Status |
+|---|---|---|---|
+| 1 | High | **A machine in the middle could choose the code.** The main made the id and secret the code came from and sent them to the node, so a middle that showed the node its own certificate (code pairing trusts any certificate until Allow) asked the real main itself, worked out the main's code from its answer (the main's fingerprint is public), and tried secrets for the node until `pair_code(its fp, id, secret)` equalled the main's code: about a million SHA-256s, under a second. The owner saw matching codes and allowed it; the middle got the node token, and the node pinned the middle as its main. | Fixed: commit and reveal. The node sends only `sha256(nonce)`, the main then picks id and secret, the node reveals the nonce, and the code covers all of them (`nodes::node_code`). The main lists a request, and lets it be allowed, only after a reveal that matches; a wrong reveal ends it; a request without a commitment gets 400. A middle now matches by luck only (1 in 10^6 per try, each try a request the owner sees). Test `the_code_needs_the_nonce_the_node_committed_to`. |
+| 2 | Medium | **Removing a node during its hello left it connected.** The token was checked before the upgrade and the node attached after both hellos (up to 10 s, and the node decides when to send its own). A removal or `leave` in between left a live tunnel for a node no longer in `nodes.json`, invisible in Settings › Nodes. | Fixed: attaching re-checks the node and its token hash under the same lock as removal, and closes with "removed" otherwise. Test `a_node_removed_during_hello_does_not_stay_connected`. |
+| 3 | Medium | **The wrong-guess table had no size limit.** One entry per address for the 10-minute window; the clean-up only dropped expired ones. An IPv6 client (a /64 is 2^64 addresses), or a LAN client sending `X-Forwarded-For` (trusted from private peers), could grow it without end. | Fixed: IPv6 counts per /64, at most 4096 addresses tracked, the oldest forgotten past that. Test `wrong_guesses_from_many_addresses_use_bounded_memory`. |
+| 4 | High (not A1) | **Desktop pairing has the same flaw as #1**: `Auth::pair_request` makes id and secret on the panel and the PC computes the code from the certificate it saw. | Listed for its own change (desktop, `hopper-core` and hopperd together). |
+| 5 | Low | Text from the main (errors, its name) was printed raw in the joining terminal, often a root one, while nothing about the main is proven (code pairing): escape sequences could redraw the screen. The ceiling and token were saved without checks. | Fixed: control characters dropped, lengths capped; node id and token must be plain ASCII, the ceiling one of look / operate / manage. Test `answers_from_the_main_are_checked_before_printing_or_saving`. |
+| 6 | Low | A host with a line break or space (typed address, `node.json`) went straight into the proxy's `CONNECT` line and the `Host` header. | Fixed: hosts are letters, digits, `.-_:` only. Test `addresses_with_and_without_ports`. |
+| 7 | Low | Join keys were found with a plain `==` on their hashes. | Fixed: constant-time, like tokens. |
+| 8 | Low | The join key is on the command line: visible in `ps` to other users of the node for the seconds the join takes, and in shell history. A local user who copies it in time can join first (the real join then fails loudly, "already used"). | Listed: read it from stdin (`--key -`) in the generated command if this matters. |
+| 9 | Low | The Linux command pipes a GitHub download into `sudo tar` without checking a signature (`autoupdate.rs` checks signed releases; the join command doesn't). | Listed. |
+| 10 | Low | The wrong-guess check runs before the token check on `/node/connect`, and `X-Forwarded-For` is trusted from private peers, so someone on the main's LAN can lock a node's address out for 10 minutes (the node keeps retrying and recovers). 8 waiting code requests in all can also be kept full by one sender rotating addresses (join commands still work). | Listed. |
+| 11 | Low | Anonymous code requests put their name (60 chars, no control characters, may contain quotes) in the audit line `node "…" asks to join`. | Listed. |
+| 12 | Low | The systemd unit writes `--data "<path>"` without escaping `"` or `%` (pre-A1 `service.rs`; the join command never passes `--data`). | Listed. |
+
+Checked and found sound: keys 96 bits and tokens 128 bits from the system
+generator, stored as SHA-256 only, tokens compared in constant time; one
+key, two joins at once: one wins (one lock); expiry checked on use, keys
+listed only while usable; request status needs the 128-bit secret and
+wrong ones count toward the limit; every `/nodes` route needs the real
+owner (`Who::Owner`: not a manager, device, API token) and the changing
+ones are refused from listed other pages and their bearer sessions
+(`web_access::manages_access` covers `/nodes` and `/this-node`); removal
+and `leave` close the live tunnel with "removed"/"left" and the node stops;
+`wss` only, the CA pinned with no system roots, the host-name mismatch
+accepted only under that CA, which signs only this panel's own server
+certificates; with a proxy TLS still runs end to end through `CONNECT`, the
+proxy's password goes only to the proxy and never into messages or logs;
+`--service` doesn't pass the key on (only `--data`); the token is never in
+a URL, log line, audit entry or CLI output; `node.json` is written 0600 via
+a fresh temp file; a node refuses every stream the main opens (A1 serves
+nothing, so the stored ceiling isn't relied on yet; A2 must read it
+strictly). Both sides leaving: a node left offline stays listed on the
+main as Offline until removed there (the message says so); a node removed
+while offline stops at its next 401 and `leave` then clears it.
 
 ## Open questions for the maintainer
 

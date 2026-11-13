@@ -116,7 +116,13 @@ struct Stored {
 struct Pending {
     id: String,
     secret_hash: [u8; 32],
-    code: String,
+    /// SHA-256 of the nonce the node chose before it learnt the id and
+    /// secret (see [`node_code`]).
+    commit: [u8; 32],
+    /// This panel's fingerprint when it was asked.
+    fingerprint: String,
+    /// Set once the node revealed its nonce; only then is it shown.
+    code: Option<String>,
     name: String,
     ip: IpAddr,
     version: String,
@@ -190,6 +196,36 @@ fn same(a: &[u8; 32], b: &[u8; 32]) -> bool {
     a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// The 6-digit code both sides show for a code request.
+///
+/// A machine in the middle shows the node its own certificate, so the codes
+/// can only differ if neither side's inputs can be chosen after seeing the
+/// other's. The node picks `nonce` and sends only its hash with the request;
+/// the main then picks `id` and `secret`; only then does the node reveal the
+/// nonce. A middle has to commit to what it tells each side before it learns
+/// the random part the other side adds, so it matches by luck only (one in a
+/// million per try, and every try is a request the owner sees).
+pub fn node_code(fingerprint: &str, id: &str, secret: &str, nonce: &str) -> String {
+    hopper_core::hopperd::pair_code(fingerprint, id, &format!("{secret}|{nonce}"))
+}
+
+/// Wrong guesses from IPv6 count per /64: one machine usually holds a whole
+/// network of addresses.
+fn guess_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) if v6.to_ipv4_mapped().is_none() => {
+            let s = v6.segments();
+            IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+        }
+        IpAddr::V6(v6) => IpAddr::V4(v6.to_ipv4_mapped().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED)),
+        v4 => v4,
+    }
+}
+
+/// At most this many addresses are tracked for wrong guesses; past it the
+/// oldest is forgotten, so a flood of addresses can't use up memory.
+const MAX_TRACKED: usize = 4096;
+
 /// A node name as shown: one line, no control characters, at most 60 chars.
 fn clean_name(s: &str) -> String {
     let n: String = s.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(60).collect();
@@ -223,6 +259,7 @@ impl Nodes {
 
     /// Whether this address made too many wrong guesses lately.
     pub fn blocked(&self, ip: IpAddr) -> bool {
+        let ip = guess_key(ip);
         let mut g = self.lock();
         match g.fails.get(&ip) {
             Some((at, _)) if at.elapsed() >= FAIL_WINDOW => {
@@ -235,9 +272,16 @@ impl Nodes {
     }
 
     pub fn failed(&self, ip: IpAddr) {
+        let ip = guess_key(ip);
         let mut g = self.lock();
-        if g.fails.len() > 10_000 {
+        if g.fails.len() >= MAX_TRACKED && !g.fails.contains_key(&ip) {
             g.fails.retain(|_, (at, _)| at.elapsed() < FAIL_WINDOW);
+            if g.fails.len() >= MAX_TRACKED {
+                let oldest = g.fails.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| *k);
+                if let Some(k) = oldest {
+                    g.fails.remove(&k);
+                }
+            }
         }
         let e = g.fails.entry(ip).or_insert((Instant::now(), 0));
         if e.0.elapsed() >= FAIL_WINDOW {
@@ -273,10 +317,10 @@ impl Nodes {
 
     /// Uses a join key: a new node with the key's ceiling, and its token.
     pub fn use_key(&self, key: &str, name: &str, ip: IpAddr, version: &str) -> Result<(Node, String), KeyRefusal> {
-        let h = hash_token(key);
+        let h = hash32(key);
         let t = now();
         let mut g = self.lock();
-        let k = g.stored.keys.iter_mut().find(|k| k.hash == h).ok_or(KeyRefusal::Unknown)?;
+        let k = g.stored.keys.iter_mut().find(|k| hex32(&k.hash).is_some_and(|x| same(&x, &h))).ok_or(KeyRefusal::Unknown)?;
         if k.used_by.is_some() {
             return Err(KeyRefusal::Used);
         }
@@ -293,18 +337,21 @@ impl Nodes {
 
     // ---- code requests ----
 
-    pub fn request(&self, name: &str, ip: IpAddr, version: &str, fingerprint: &str) -> Result<(String, String), &'static str> {
+    /// A code request; `commit` is the SHA-256 of the node's nonce. The code
+    /// exists only once the node reveals it ([`Nodes::request_status`]).
+    pub fn request(&self, name: &str, ip: IpAddr, version: &str, fingerprint: &str, commit: [u8; 32]) -> Result<(String, String), &'static str> {
         let mut g = self.lock();
         g.pending.retain(|p| p.at.elapsed() < REQUEST_TTL);
         if g.pending.iter().filter(|p| p.answer.is_none()).count() >= MAX_PENDING {
             return Err("Too many nodes are waiting. Answer them in Settings › Nodes first.");
         }
         let (id, secret) = (random_hex(8), random_hex(32));
-        let code = hopper_core::hopperd::pair_code(fingerprint, &id, &secret);
         g.pending.push(Pending {
             id: id.clone(),
             secret_hash: hash32(&secret),
-            code,
+            commit,
+            fingerprint: fingerprint.into(),
+            code: None,
             name: clean_name(name),
             ip,
             version: clean_version(version),
@@ -314,13 +361,23 @@ impl Nodes {
         Ok((id, secret))
     }
 
-    /// What a waiting node learns. The token is handed over once.
-    pub fn request_status(&self, id: &str, secret: &str) -> Option<Value> {
+    /// What a waiting node learns. Its first ask reveals the nonce it
+    /// committed to; a nonce that doesn't match ends the request. The token
+    /// is handed over once.
+    pub fn request_status(&self, id: &str, secret: &str, nonce: &str) -> Option<Value> {
         let mut g = self.lock();
         let i = g.pending.iter().position(|p| p.id == id && same(&p.secret_hash, &hash32(secret)))?;
         if g.pending[i].at.elapsed() >= REQUEST_TTL {
             g.pending.remove(i);
             return Some(json!({ "state": "expired" }));
+        }
+        if g.pending[i].code.is_none() {
+            let p = &mut g.pending[i];
+            if nonce.len() < 32 || nonce.len() > 128 || !same(&p.commit, &hash32(nonce)) {
+                g.pending.remove(i);
+                return None;
+            }
+            p.code = Some(node_code(&p.fingerprint, &p.id, secret, nonce));
         }
         match &g.pending[i].answer {
             None => Some(json!({ "state": "waiting" })),
@@ -339,7 +396,8 @@ impl Nodes {
     /// The owner's answer to a code request. Returns the node's name.
     pub fn answer(&self, id: &str, allow: bool, ceiling: Ceiling, by: &str) -> Option<String> {
         let mut g = self.lock();
-        let p = g.pending.iter_mut().find(|p| p.id == id && p.answer.is_none() && p.at.elapsed() < REQUEST_TTL)?;
+        // Only a request whose code the owner could compare.
+        let p = g.pending.iter_mut().find(|p| p.id == id && p.code.is_some() && p.answer.is_none() && p.at.elapsed() < REQUEST_TTL)?;
         let name = p.name.clone();
         if !allow {
             p.answer = Some(None);
@@ -375,9 +433,16 @@ impl Nodes {
         Some((node, live))
     }
 
-    /// A connection came up; returns its number and the one it replaces.
-    fn attach(&self, id: &str, handle: Handle, ip: IpAddr, version: &str) -> (u64, Option<Handle>) {
+    /// A connection came up; returns its number and the one it replaces, or
+    /// None when the node was removed (or its token changed) since its token
+    /// was checked: the upgrade and the hello take a while, and a removal in
+    /// between must not leave a live tunnel nobody can see.
+    fn attach(&self, node: &Node, handle: Handle, ip: IpAddr, version: &str) -> Option<(u64, Option<Handle>)> {
+        let id = node.id.as_str();
         let mut g = self.lock();
+        if !g.stored.nodes.iter().any(|n| n.id == id && n.token_hash == node.token_hash) {
+            return None;
+        }
         g.conns += 1;
         let conn = g.conns;
         let old = g.live.insert(id.into(), Live { handle, since: now(), conn }).map(|l| l.handle);
@@ -389,7 +454,7 @@ impl Nodes {
             n.last_seen = now();
         }
         self.save(&g);
-        (conn, old)
+        Some((conn, old))
     }
 
     /// A connection ended (`quiet`: how long it had been silent).
@@ -460,7 +525,7 @@ impl Nodes {
         let pending: Vec<Value> = g
             .pending
             .iter()
-            .filter(|p| p.answer.is_none())
+            .filter(|p| p.answer.is_none() && p.code.is_some())
             .map(|p| json!({ "id": p.id, "name": p.name, "ip": p.ip.to_string(), "code": p.code, "version": p.version, "expires_in": REQUEST_TTL.saturating_sub(p.at.elapsed()).as_secs() }))
             .collect();
         let keys: Vec<Value> = g
@@ -702,11 +767,15 @@ struct RequestBody {
     name: String,
     #[serde(default)]
     version: String,
+    /// SHA-256 (hex) of the nonce the node reveals on its first status ask.
+    #[serde(default)]
+    commit: String,
 }
 
 async fn request(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(b): Json<RequestBody>) -> ApiResult<Response> {
     let ip = client(addr, &headers);
-    let (id, secret) = app.nodes.request(&b.name, ip, &b.version, &app.tls.fingerprint).map_err(|e| ApiError(StatusCode::TOO_MANY_REQUESTS, e.into()))?;
+    let commit = hex32(b.commit.trim()).ok_or_else(|| bad("This Hopper Server is too old to join with a code. Update it, or use a join command."))?;
+    let (id, secret) = app.nodes.request(&b.name, ip, &b.version, &app.tls.fingerprint, commit).map_err(|e| ApiError(StatusCode::TOO_MANY_REQUESTS, e.into()))?;
     log::info!("node \"{}\" asks to join from {ip}", clean_name(&b.name));
     // The code isn't sent: the node works it out from the certificate it
     // sees, so a machine in the middle can't show the right one.
@@ -717,6 +786,8 @@ async fn request(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Soc
 struct StatusBody {
     id: String,
     secret: String,
+    #[serde(default)]
+    nonce: String,
 }
 
 async fn request_status(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(b): Json<StatusBody>) -> Response {
@@ -724,7 +795,7 @@ async fn request_status(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectI
     if app.nodes.blocked(ip) {
         return refused(StatusCode::TOO_MANY_REQUESTS, TOO_MANY, String::new());
     }
-    match app.nodes.request_status(&b.id, &b.secret) {
+    match app.nodes.request_status(&b.id, &b.secret, &b.nonce) {
         Some(mut v) => {
             // Allowed: the node shows this panel by name, like a key join does.
             if v.get("token").is_some() {
@@ -829,7 +900,11 @@ async fn connect(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Soc
 
 async fn session(app: Arc<App>, node: Node, mut t: mux::Tunnel, addr: SocketAddr, headers: HeaderMap) {
     let ip = client(addr, &headers);
-    let (conn, old) = app.nodes.attach(&node.id, t.handle.clone(), ip, &t.peer.version);
+    let Some((conn, old)) = app.nodes.attach(&node, t.handle.clone(), ip, &t.peer.version) else {
+        log::info!("node \"{}\" was removed while it connected; closed", node.name);
+        t.handle.close("removed").await;
+        return;
+    };
     if let Some(old) = old {
         // The node reconnected before the old connection timed out.
         old.close("replaced by a new connection").await;
@@ -919,27 +994,31 @@ mod tests {
     fn code_requests_hand_the_token_over_once() {
         let (n, dir) = nodes();
         let fp = "AB:CD";
-        let (id, secret) = n.request("oracle", IP, "0.62.0", fp).unwrap();
+        let nonce = random_hex(32);
+        let commit = hash32(&nonce);
+        let (id, secret) = n.request("oracle", IP, "0.62.0", fp, commit).unwrap();
+        assert!(n.list(fp)["pending"].as_array().unwrap().is_empty(), "no code before the reveal");
+        assert!(n.request_status(&id, "wrong secret", &nonce).is_none());
+        assert_eq!(n.request_status(&id, &secret, &nonce).unwrap()["state"], "waiting");
         let listed = n.list(fp);
         let code = listed["pending"][0]["code"].as_str().unwrap().to_string();
-        assert_eq!(code, hopper_core::hopperd::pair_code(fp, &id, &secret), "the node computes the same code");
-        assert!(n.request_status(&id, "wrong secret").is_none());
-        assert_eq!(n.request_status(&id, &secret).unwrap()["state"], "waiting");
+        assert_eq!(code, node_code(fp, &id, &secret, &nonce), "the node computes the same code");
         assert_eq!(n.answer(&id, true, Ceiling::Look, "owner").as_deref(), Some("oracle"));
         assert!(n.answer(&id, false, Ceiling::Look, "owner").is_none(), "answered once");
-        let v = n.request_status(&id, &secret).unwrap();
+        let v = n.request_status(&id, &secret, "").unwrap();
         assert_eq!((v["state"].as_str(), v["ceiling"].as_str()), (Some("allowed"), Some("look")));
         assert!(n.by_token(v["token"].as_str().unwrap()).is_some());
-        assert!(n.request_status(&id, &secret).is_none(), "the token is handed over once");
+        assert!(n.request_status(&id, &secret, &nonce).is_none(), "the token is handed over once");
         // Refused requests say so.
-        let (id2, s2) = n.request("other", IP, "", fp).unwrap();
+        let (id2, s2) = n.request("other", IP, "", fp, commit).unwrap();
+        assert_eq!(n.request_status(&id2, &s2, &nonce).unwrap()["state"], "waiting");
         n.answer(&id2, false, Ceiling::Manage, "owner");
-        assert_eq!(n.request_status(&id2, &s2).unwrap()["state"], "denied");
+        assert_eq!(n.request_status(&id2, &s2, &nonce).unwrap()["state"], "denied");
         // At most MAX_PENDING wait at once.
         for i in 0..MAX_PENDING {
-            n.request(&format!("n{i}"), IP, "", fp).unwrap();
+            n.request(&format!("n{i}"), IP, "", fp, commit).unwrap();
         }
-        assert!(n.request("one too many", IP, "", fp).is_err());
+        assert!(n.request("one too many", IP, "", fp, commit).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -955,6 +1034,25 @@ mod tests {
         assert!(!n.blocked(other), "only that address");
         n.lock().fails.get_mut(&IP).unwrap().0 = Instant::now() - FAIL_WINDOW;
         assert!(!n.blocked(IP), "until the window passes");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Security review M2: the wrong-guess table grew by one entry per new
+    /// address for as long as the window lasted, and an IPv6 client (or a
+    /// LAN client behind a trusted proxy header) has endless addresses.
+    #[test]
+    fn wrong_guesses_from_many_addresses_use_bounded_memory() {
+        let (n, dir) = nodes();
+        let v6 = |a: u16, b: u16, last: u16| IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, a, b, 0, 0, 0, last));
+        for i in 0..MAX_FAILS {
+            n.failed(v6(1, 2, i as u16 + 1));
+        }
+        assert!(n.blocked(v6(1, 2, 0xffff)), "one IPv6 network counts as one address");
+        assert!(!n.blocked(v6(1, 3, 1)), "the next network doesn't");
+        for i in 0..30_000u32 {
+            n.failed(v6((i >> 16) as u16 + 10, i as u16, 1));
+        }
+        assert!(n.lock().fails.len() <= 10_000, "{} entries", n.lock().fails.len());
         let _ = std::fs::remove_dir_all(dir);
     }
 

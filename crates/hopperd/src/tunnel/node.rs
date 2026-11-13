@@ -453,12 +453,15 @@ async fn join(dir: &Path, o: Opts) -> anyhow::Result<()> {
                 bail!("The main refused the join key: it was used already, expired (keys last 30 minutes) or was removed. Make a new join command on the main: Settings › Nodes › Make a join command.");
             }
             429 => bail!("The main is refusing this address for a while (too many wrong keys). Try again in 10 minutes."),
-            s => bail!("The main answered {s}: {}", v["error"].as_str().unwrap_or("")),
+            s => bail!("The main answered {s}: {}", plain(v["error"].as_str().unwrap_or(""))),
         }
         say("Join key accepted", true, "");
         joined_from(&url, &ca, &v, "key")?
     } else {
-        let body = json!({ "name": name, "version": version });
+        // The nonce goes out only as its hash, and is revealed after the main
+        // has picked the id and secret (see `nodes::node_code`).
+        let nonce = crate::auth::random_hex(32);
+        let body = json!({ "name": name, "version": version, "commit": crate::auth::hash_token(&nonce) });
         let (status, v, ca) = match dial::request(&target, &pin, "POST", "/api/v1/node/request", None, Some(&body)).await {
             Ok(r) => r,
             Err(e) => {
@@ -467,11 +470,22 @@ async fn join(dir: &Path, o: Opts) -> anyhow::Result<()> {
             }
         };
         if status != 200 {
-            bail!("The main answered {status}: {}", v["error"].as_str().unwrap_or("it doesn't take nodes (update it first?)"));
+            bail!("The main answered {status}: {}", plain(v["error"].as_str().unwrap_or("it doesn't take nodes (update it first?)")));
         }
         let (id, secret) = (v["id"].as_str().unwrap_or_default().to_string(), v["secret"].as_str().unwrap_or_default().to_string());
         let fp = crate::tls::fingerprint(&ca);
-        let code = hopper_core::hopperd::pair_code(&fp, &id, &secret);
+        let pin = Pin::Ca(ca.clone());
+        let ask = |id: &str, secret: &str| json!({ "id": id, "secret": secret, "nonce": nonce });
+        // The reveal: only now does the main show the code.
+        match dial::request(&target, &pin, "POST", "/api/v1/node/request/status", None, Some(&ask(&id, &secret))).await {
+            Ok((200, v, _)) if v["state"] == "waiting" => {}
+            Ok((s, v, _)) => bail!("The main answered {s}: {}", plain(v["error"].as_str().or(v["state"].as_str()).unwrap_or(""))),
+            Err(e) => {
+                print_failure(&e);
+                bail!("Couldn't ask to join.");
+            }
+        }
+        let code = crate::nodes::node_code(&fp, &id, &secret, &nonce);
         println!();
         println!("  On the main, open Settings › Nodes. It should show this code:");
         println!();
@@ -479,17 +493,15 @@ async fn join(dir: &Path, o: Opts) -> anyhow::Result<()> {
         println!();
         println!("  Allow it there only if the codes match. Main's certificate: {fp}");
         println!("  Waiting (up to 5 minutes)...");
-        let pin = Pin::Ca(ca.clone());
         let started = Instant::now();
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             if started.elapsed() > Duration::from_secs(5 * 60 + 10) {
                 bail!("Nobody allowed it within 5 minutes. Run the command again for a new code.");
             }
-            let body = json!({ "id": id, "secret": secret });
-            let v = match dial::request(&target, &pin, "POST", "/api/v1/node/request/status", None, Some(&body)).await {
+            let v = match dial::request(&target, &pin, "POST", "/api/v1/node/request/status", None, Some(&ask(&id, &secret))).await {
                 Ok((200, v, _)) => v,
-                Ok((s, v, _)) => bail!("The main answered {s}: {}", v["error"].as_str().unwrap_or("")),
+                Ok((s, v, _)) => bail!("The main answered {s}: {}", plain(v["error"].as_str().unwrap_or(""))),
                 // A blip while waiting: keep waiting.
                 Err(e) => {
                     log::debug!("waiting: {e}");
@@ -522,21 +534,34 @@ async fn join(dir: &Path, o: Opts) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Text from the main, made safe to print in a terminal (often a root one):
+/// no control characters, so no escape sequences that could redraw the
+/// screen, and short.
+fn plain(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(300).collect()
+}
+
 fn joined_from(url: &str, ca: &rustls::pki_types::CertificateDer<'_>, v: &Value, via: &str) -> anyhow::Result<Joined> {
-    let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+    let s = |k: &str| plain(v[k].as_str().unwrap_or_default());
     let (node_id, token) = (s("node_id"), s("token"));
-    if node_id.is_empty() || token.is_empty() {
+    // Both end up in file names, headers and A2's checks: plain ASCII only.
+    let tidy = |x: &str| !x.is_empty() && x.len() <= 128 && x.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !tidy(&node_id) || !tidy(&token) {
         bail!("The main's answer had no node key.");
+    }
+    let ceiling = s("ceiling");
+    if !matches!(ceiling.as_str(), "look" | "operate" | "manage") {
+        bail!("The main's answer didn't say what it may do here.");
     }
     let target = Target::parse(url).map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(Joined {
         main_url: target.url(),
-        main_name: s("main_name"),
+        main_name: s("main_name").chars().take(100).collect(),
         ca_pem: dial::to_pem(ca),
         fingerprint: crate::tls::fingerprint(ca),
         node_id,
         token,
-        ceiling: s("ceiling"),
+        ceiling,
         joined_at: now(),
         via: via.into(),
     })
@@ -600,7 +625,7 @@ async fn status(dir: &Path) -> anyhow::Result<()> {
                 }
                 Ok((401 | 403, _, _)) => print_failure(&ConnectError::Refused(401)),
                 Ok((429, _, _)) => println!("The main is refusing this address for a while (too many wrong keys)."),
-                Ok((s, v, _)) => println!("The main answered {s}: {}", v["error"].as_str().unwrap_or("")),
+                Ok((s, v, _)) => println!("The main answered {s}: {}", plain(v["error"].as_str().unwrap_or(""))),
                 Err(e) => print_failure(&e),
             }
         }
@@ -662,4 +687,27 @@ async fn this_node_leave(State(app): State<Arc<App>>, headers: HeaderMap, method
     let mut res = Json(json!({ "ok": true, "message": msg })).into_response();
     res.extensions_mut().insert(crate::security::AuditNote("left the main panel".into()));
     Ok(res)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Security review (low): what the main answers is printed in a root
+    /// terminal, and during code pairing nothing about the main is proven
+    /// yet; its words can't carry escape sequences, and an answer that
+    /// doesn't say what it may do here isn't saved.
+    #[test]
+    fn answers_from_the_main_are_checked_before_printing_or_saving() {
+        assert_eq!(plain("ok\u{1b}[2J\u{1b}[1;1HJoined\r\n"), "ok[2J[1;1HJoined");
+        let ca = rustls::pki_types::CertificateDer::from(vec![1u8, 2, 3]);
+        let good = json!({ "node_id": "ab12", "token": "hnt_00ff", "ceiling": "look", "main_name": "rig\u{7}" });
+        let j = joined_from("https://rig:8790", &ca, &good, "code").unwrap();
+        assert_eq!((j.ceiling.as_str(), j.main_name.as_str()), ("look", "rig"));
+        for (k, v) in [("ceiling", "admin"), ("ceiling", ""), ("token", "hnt_x\r\nX: y"), ("node_id", "../x")] {
+            let mut bad = good.clone();
+            bad[k] = json!(v);
+            assert!(joined_from("https://rig:8790", &ca, &bad, "code").is_err(), "{k}={v:?}");
+        }
+    }
 }

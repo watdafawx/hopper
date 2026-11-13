@@ -157,17 +157,19 @@ async fn wrong_keys_are_rate_limited_per_address() {
 async fn code_pairing_through_the_routes() {
     let (t, _) = main_panel();
     let me = owner(&t).await;
-    let (s, _, b) = call("POST", "/api/v1/node/request").from("10.3.3.3").json(json!({ "name": "oracle-a1", "version": "0.62.0" })).send(&t).await;
+    let nonce = crate::auth::random_hex(32);
+    let commit = crate::auth::hash_token(&nonce);
+    let (s, _, b) = call("POST", "/api/v1/node/request").from("10.3.3.3").json(json!({ "name": "oracle-a1", "version": "0.62.0", "commit": commit })).send(&t).await;
     assert_eq!(s, StatusCode::OK);
     let r = body(&b);
     let (id, secret) = (r["id"].as_str().unwrap().to_string(), r["secret"].as_str().unwrap().to_string());
     assert!(r.get("code").is_none(), "the code is never sent");
+    let status = || call("POST", "/api/v1/node/request/status").from("10.3.3.3").json(json!({ "id": id, "secret": secret, "nonce": nonce }));
+    assert_eq!(body(&status().send(&t).await.2)["state"], "waiting");
     let (_, list) = owner_call(&t, &me, "GET", "/api/v1/nodes", None).await;
     let p = &list["pending"][0];
-    assert_eq!(p["code"].as_str().unwrap(), hopper_core::hopperd::pair_code(&t.app.tls.fingerprint, &id, &secret));
+    assert_eq!(p["code"].as_str().unwrap(), hopper_core::hopperd::pair_code(&t.app.tls.fingerprint, &id, &format!("{secret}|{nonce}")));
     assert_eq!((p["name"].as_str(), p["ip"].as_str()), (Some("oracle-a1"), Some("10.3.3.3")));
-    let status = || call("POST", "/api/v1/node/request/status").from("10.3.3.3").json(json!({ "id": id, "secret": secret }));
-    assert_eq!(body(&status().send(&t).await.2)["state"], "waiting");
     let (s, _) = owner_call(&t, &me, "POST", &format!("/api/v1/nodes/pending/{id}/answer"), Some(json!({ "allow": true, "ceiling": "look" }))).await;
     assert_eq!(s, StatusCode::OK);
     let v = body(&status().send(&t).await.2);
@@ -180,6 +182,46 @@ async fn code_pairing_through_the_routes() {
     let log = audit_paths(&t);
     assert!(log.iter().any(|(p, _)| p.contains("node \"oracle-a1\" allowed, may: look")), "{log:?}");
     assert!(!log.iter().any(|(p, _)| p.starts_with("/api/v1/node/request/status")), "polling isn't logged");
+}
+
+/// A machine in the middle can't steer the 6-digit code (security review
+/// H1). Before, the main handed out the id and secret the code is made
+/// from, so a middle that showed the node its own certificate could pick a
+/// secret for the node until its code equalled the main's (a million tries,
+/// well under a second). Now the node commits to a nonce before it learns
+/// anything, the code includes that nonce, and the main shows the code only
+/// once the node has revealed a nonce matching its commitment.
+#[tokio::test]
+async fn the_code_needs_the_nonce_the_node_committed_to() {
+    let (t, me) = {
+        let (t, _) = main_panel();
+        let me = owner(&t).await;
+        (t, me)
+    };
+    // No commitment (a made-up or older node): refused.
+    let (s, _, _) = call("POST", "/api/v1/node/request").from("10.4.4.4").json(json!({ "name": "old" })).send(&t).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let ask = |commit: String| call("POST", "/api/v1/node/request").from("10.4.4.4").json(json!({ "name": "vm", "commit": commit }));
+    let pending = || async { owner_call(&t, &me, "GET", "/api/v1/nodes", None).await.1["pending"].as_array().unwrap().clone() };
+
+    let nonce = crate::auth::random_hex(32);
+    let r = body(&ask(crate::auth::hash_token(&nonce)).send(&t).await.2);
+    let (id, secret) = (r["id"].as_str().unwrap().to_string(), r["secret"].as_str().unwrap().to_string());
+    assert!(pending().await.is_empty(), "no code is shown before the node reveals its nonce");
+    // The owner can't allow a request whose code nobody has seen.
+    let (s, _) = owner_call(&t, &me, "POST", &format!("/api/v1/nodes/pending/{id}/answer"), Some(json!({ "allow": true }))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let status = |id: &str, secret: &str, nonce: &str| call("POST", "/api/v1/node/request/status").from("10.4.4.4").json(json!({ "id": id, "secret": secret, "nonce": nonce }));
+    assert_eq!(body(&status(&id, &secret, &nonce).send(&t).await.2)["state"], "waiting");
+    let p = pending().await;
+    assert_eq!(p[0]["code"].as_str().unwrap(), hopper_core::hopperd::pair_code(&t.app.tls.fingerprint, &id, &format!("{secret}|{nonce}")));
+
+    // A reveal that doesn't match the commitment ends that request.
+    let r = body(&ask(crate::auth::hash_token(&crate::auth::random_hex(32))).send(&t).await.2);
+    let (id2, secret2) = (r["id"].as_str().unwrap().to_string(), r["secret"].as_str().unwrap().to_string());
+    assert_eq!(body(&status(&id2, &secret2, "chosen-later").send(&t).await.2)["state"], "unknown");
+    assert_eq!(body(&status(&id2, &secret2, "").send(&t).await.2)["state"], "unknown", "gone");
+    assert_eq!(pending().await.len(), 1, "only the first one waits");
 }
 
 /// Serves `t`'s router over real TLS on 127.0.0.1; returns the address.
@@ -267,6 +309,34 @@ async fn a_node_joins_connects_and_is_removed() {
         other => panic!("{:?}", other.map(|_| ())),
     }
     assert!(audit_paths(&t).iter().any(|(p, _)| p.contains("node \"vm\" removed")));
+}
+
+/// Removing a node while its connection is still saying hello closes that
+/// connection too (security review M1). Before, the token was checked
+/// before the upgrade and the node attached after the hello, so a removal
+/// in between (or a node that held its hello back) left a live tunnel for a
+/// node that no longer existed, hidden from Settings › Nodes.
+#[tokio::test]
+async fn a_node_removed_during_hello_does_not_stay_connected() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (t, ca) = main_panel();
+    let me = owner(&t).await;
+    let target = serve_tls(&t, &ca).await;
+    let (_, k) = owner_call(&t, &me, "POST", "/api/v1/nodes/keys", Some(json!({ "url": target.url() }))).await;
+    let (_, v, seen) = dial::request(&target, &Pin::Fingerprint(t.app.tls.fingerprint.clone()), "POST", "/api/v1/node/join", None, Some(&json!({ "key": k["key"], "name": "late" })))
+        .await
+        .unwrap();
+    let (node_id, token) = (v["node_id"].as_str().unwrap().to_string(), v["token"].as_str().unwrap().to_string());
+    // Upgraded (the token was good), but no hello yet.
+    let (tx, rx) = crate::tunnel::ws::connect(&target, &Pin::Ca(seen), &token).await.unwrap();
+    let (s, _) = owner_call(&t, &me, "DELETE", &format!("/api/v1/nodes/{node_id}"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    if let Ok(tun) = mux::start(Side::Node, Config::default(), tx, rx).await {
+        let why = tokio::time::timeout(Duration::from_secs(5), tun.done).await.expect("the main closed the removed node's connection").unwrap();
+        assert!(matches!(&why, MuxError::GoAway(crate::tunnel::frame::code::BYE, r) if r == "removed"), "{why}");
+    }
+    let (_, list) = owner_call(&t, &me, "GET", "/api/v1/nodes", None).await;
+    assert!(list["nodes"].as_array().unwrap().is_empty());
 }
 
 /// `hopperd node leave` from the node: the main forgets it.

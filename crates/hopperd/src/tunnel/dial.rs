@@ -108,6 +108,11 @@ pub fn host_port(authority: &str) -> Result<(String, u16), ConnectError> {
     if host.is_empty() {
         return Err(bad("no host"));
     }
+    // The host goes into the proxy's CONNECT line and the Host header: a
+    // line break or space there would add headers of its own.
+    if !host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':')) {
+        return Err(bad("the host name has characters an address can't have"));
+    }
     Ok((host.to_string(), port))
 }
 
@@ -448,7 +453,7 @@ mod tests {
         assert_eq!(ok("[::1]:8790"), ("::1".into(), 8790));
         // Used to be read as host "[:" and port "1]".
         assert_eq!(ok("[::1]"), ("::1".into(), 443));
-        for bad in ["", ":8790", "h:", "h:99999", "h:0", "[::1", "[::1]x", "[::1]:"] {
+        for bad in ["", ":8790", "h:", "h:99999", "h:0", "[::1", "[::1]x", "[::1]:", "h\r\nX-Evil: 1:8790", "a b:8790", "[::1\r\n]:9"] {
             assert!(host_port(bad).is_err(), "{bad}");
         }
     }
