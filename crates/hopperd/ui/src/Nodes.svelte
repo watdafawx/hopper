@@ -4,12 +4,12 @@
   // them. Owner only. When this panel is itself a node, its main is at
   // the top with how the connection is doing.
   import { onMount } from 'svelte';
-  import { Check, X, Trash2, Plus, Copy, ServerCog, TriangleAlert, Unplug } from '@lucide/svelte';
+  import { Check, X, Trash2, Plus, Copy, ServerCog, TriangleAlert, Unplug, RefreshCw } from '@lucide/svelte';
   import { api, post, del } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
   import { copyText } from './lib/browse.js';
-  import { STATES, CEILINGS, NODE_SIDE, ceilingLabel, nodeLine, clock, codeGroups, defaultAddress } from './lib/nodes.js';
+  import { CEILINGS, NODE_SIDE, ceilingLabel, nodeLine, clock, codeGroups, defaultAddress, stateOf, updateLine, updateLabel, behind, behindLine } from './lib/nodes.js';
 
   let { hello } = $props();
   let data = $state(null);
@@ -87,6 +87,37 @@
     try {
       await del(`/nodes/${n.id}`);
       say(`Removed ${n.name}.`);
+      load();
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
+
+  // Updating runs on the node, through its own update; this panel only
+  // asks and follows it (design/multi-panel.md, A3).
+  async function update(n) {
+    const ok = await confirmIt(`Update ${n.name} to hopperd ${data.version}?`, {
+      body: 'It downloads the new Hopper Server from GitHub and restarts into it, as its own update does. Its servers keep running.',
+      ok: 'Update',
+    });
+    if (!ok) return;
+    try {
+      await post(`/nodes/${n.id}/update`, {});
+      load();
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
+
+  async function updateAll() {
+    const { updatable } = behind(data);
+    const ok = await confirmIt(`Update ${updatable === 1 ? '1 node' : `${updatable} nodes`} to hopperd ${data.version}?`, {
+      body: 'One at a time, each through its own update. It stops at the first one that fails. Their servers keep running.',
+      ok: 'Update all',
+    });
+    if (!ok) return;
+    try {
+      await post('/nodes/update-all', {});
       load();
     } catch (e) {
       say(e.message, true);
@@ -181,16 +212,30 @@
   {/if}
 
   <div class="card list">
+    {#if behindLine(data)}
+      {@const b = behind(data)}
+      {@const all = data.update_all}
+      <div class="row node behind">
+        <div class="grow">
+          <div class="small subtle">{behindLine(data)}</div>
+          {#if all?.message || all?.state === 'running'}<div class="tiny ell" class:bad={all.state === 'stopped'} class:muted={all.state !== 'stopped'}>{all.state === 'running' ? `Updating ${all.at ?? ''} (${all.done + 1} of ${all.total})` : all.message}</div>{/if}
+        </div>
+        {#if b.updatable > 1}<button class="btn sm" disabled={all?.state === 'running'} onclick={updateAll}><RefreshCw size={13} />Update all ({b.updatable})</button>{/if}
+      </div>
+    {/if}
     {#each data?.nodes ?? [] as n (n.id)}
-      {@const st = STATES[n.state] ?? STATES.new}
+      {@const st = stateOf(n)}
+      {@const up = updateLine(n)}
       <div class="row node row-hover">
         <span class="dot {st.cls}"></span>
         <div class="grow">
           <div class="ell">{n.name}</div>
-          <div class="tiny muted ell">{nodeLine(n, now)}</div>
+          {#if up}<div class="tiny ell" class:bad={up.bad} class:muted={!up.bad} title={up.text}>{up.text}</div>
+          {:else}<div class="tiny muted ell" title={nodeLine(n, now)}>{nodeLine(n, now)}</div>{/if}
         </div>
         <span class="chip state {st.cls}">{st.label}</span>
         <span class="chip" title="What this panel may do there">{ceilingLabel(n.ceiling)}</span>
+        {#if n.can_update}<button class="btn sm" onclick={() => update(n)}><RefreshCw size={13} />{updateLabel(n, data.version)}</button>{/if}
         <button class="btn sm ghost icon" title="Remove {n.name}" aria-label="Remove {n.name}" onclick={() => remove(n)}><Trash2 size={13} /></button>
       </div>
     {:else}
@@ -259,6 +304,8 @@
   .list { padding: 4px 6px; }
   .node { gap: 10px; padding: 10px 8px; border-radius: var(--radius); }
   .node + .node { border-top: 1px solid var(--line); border-radius: 0; }
+  .behind { padding: 8px; }
+  .bad { color: var(--red); }
   .mainrow { gap: 10px; }
   .msg { margin-top: 10px; }
   .msg.bad { color: var(--red); }

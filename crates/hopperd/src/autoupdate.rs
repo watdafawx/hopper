@@ -297,7 +297,7 @@ fn skip_after(skip: Option<&str>, from: &str, to: &str, newest: Option<&str>) ->
 
 /// This build's version; `HOPPERD_TEST_VERSION` pretends to be another
 /// (to try an update against the real releases).
-fn current() -> String {
+pub(crate) fn current() -> String {
     std::env::var("HOPPERD_TEST_VERSION").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| CURRENT.to_string())
 }
 
@@ -498,6 +498,37 @@ fn install_version(app: &Arc<App>, version: &str) -> anyhow::Result<()> {
         install_and_restart(&a, &r);
     });
     Ok(())
+}
+
+/// An update this node's main asked for (design/multi-panel.md, A3): only
+/// to a newer release, never back, through the same checks, download and
+/// restart as the panel's own update. The main names a version; the file
+/// comes from GitHub as always.
+pub(crate) fn install_for_main(app: &Arc<App>, version: &str) -> anyhow::Result<()> {
+    if let Some(w) = why_not() {
+        bail!(w);
+    }
+    let ok = !version.is_empty() && version.len() <= 40 && version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'));
+    if !ok {
+        bail!("The main asked for a version this node doesn't understand.");
+    }
+    if !hopper_core::selfupdate::is_newer(&current(), version) {
+        bail!("This node already runs {} (the main asked for {version}).", current());
+    }
+    // Shown at once, so the main never reads an earlier attempt's state.
+    let before = status();
+    set(|s| {
+        s.state = "downloading".into();
+        s.error = None;
+        s.target = version.to_string();
+    });
+    install_version(app, version).inspect_err(|_| {
+        set(|s| {
+            s.state = before.state.clone();
+            s.error = before.error.clone();
+            s.target = before.target.clone();
+        })
+    })
 }
 
 /// Downloads `r`, puts it in place, and restarts into it once no job runs.

@@ -20,7 +20,7 @@
   // state.
   import { tick } from 'svelte';
   import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy, Compass, ChevronRight, ChevronDown, Ellipsis, ExternalLink, LogOut, Trash2, ListChecks, Terminal, Pause } from '@lucide/svelte';
-  import { put } from './lib/api.js';
+  import { put, post } from './lib/api.js';
   import { bytes } from './lib/format.js';
   import { panels, retry, signOut, removePanel } from './lib/panels.svelte.js';
   import { tokenFor } from './lib/panelTokens.js';
@@ -65,8 +65,18 @@
   const nodes = $derived(live.nodes || []);
   const grouped = $derived(panels.list.length > 0 || nodes.length > 0);
   const nodeKey = (n) => `node:${n.id}`;
-  /** A node's light: green connected, amber reconnecting, new or under maintenance, red offline. */
-  const nodeLight = (n) => (n.state === 'offline' ? 'crashed' : n.state === 'connected' && !n.maintenance ? 'running' : 'starting');
+  /** A node's light: green connected, amber reconnecting, new, updating, under maintenance or needing an update, red offline. */
+  const nodeLight = (n) => (n.state === 'offline' ? 'crashed' : n.state === 'connected' && !n.maintenance && n.update?.state !== 'updating' ? 'running' : 'starting');
+  // Updating a node runs its own update (design/multi-panel.md, A3).
+  async function updateNode(n) {
+    if (!(await confirmIt(`Update ${n.name} to hopperd ${homeVersion}?`, { body: 'It downloads the new Hopper Server from GitHub and restarts into it, as its own update does. Its servers keep running.', ok: 'Update' }))) return;
+    try {
+      await post(`/nodes/${encodeURIComponent(n.id)}/update`, {}, { home: true });
+      say(`Updating ${n.name}`);
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
   const CEILING = { look: 'Look only', operate: 'Operate', manage: 'Manage' };
   const secsAgo = (t) => (t ? ago(t * 1000) : '');
   /** The node's health line: what it runs, its machine, and the RAM its servers may take. */
@@ -504,8 +514,14 @@
       {#if n.maintenance}
         <div class="health maint"><Pause size={11} /> Under maintenance{n.maintenance.by ? ` · by ${n.maintenance.by}` : ''}{n.maintenance.since ? ` ${secsAgo(n.maintenance.since)}` : ''} · nothing starts here{#if owner}{' · '}<button class="link" onclick={() => maintain(n, false)}>End maintenance</button>{/if}</div>
       {/if}
-      {#if n.state === 'connected' || n.state === 'reconnecting'}
-        <div class="health">{nodeHealth(n)}{n.state === 'reconnecting' ? ' · Reconnecting…' : ''}</div>
+      {#if n.update?.state === 'updating'}
+        <div class="health">Updating · {n.update.message}</div>
+      {:else if n.state === 'update_needed'}
+        <div class="health trouble" title={n.skew}>Update needed · update it on the node itself</div>
+      {:else if n.state === 'main_older'}
+        <div class="health trouble" title={n.skew}>Newer than this panel · update this panel first</div>
+      {:else if n.state === 'connected' || n.state === 'reconnecting'}
+        <div class="health">{nodeHealth(n)}{n.state === 'reconnecting' ? ' · Reconnecting…' : ''}{n.can_update ? ' · update available' : ''}</div>
       {:else if n.state === 'new'}
         <div class="health">Node · waiting for it to connect</div>
       {:else}
@@ -576,6 +592,7 @@
   <div class="popover menu rmenu" role="menu" tabindex="-1" bind:this={menuEl} style:left="{menu.x}px" style:top="{menu.y}px" onkeydown={menuKeys}>
     {#if n.maintenance}<button class="menu-item" role="menuitem" onclick={() => pick(() => maintain(n, false))}><Play size={14} />End maintenance</button>
     {:else}<button class="menu-item" role="menuitem" onclick={() => pick(() => maintain(n, true))}><Pause size={14} />Pause node (maintenance)</button>{/if}
+    {#if n.can_update}<button class="menu-item" role="menuitem" onclick={() => pick(() => updateNode(n))}><RefreshCw size={14} />Update to hopperd {homeVersion}</button>{/if}
     <div class="menu-sep"></div>
     <button class="menu-item" role="menuitem" onclick={() => pick(() => (location.hash = '/settings/nodes'))}><Server size={14} />Node settings</button>
   </div>

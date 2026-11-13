@@ -63,6 +63,9 @@ pub struct Config {
     pub hello_timeout: Duration,
     pub version: String,
     pub capabilities: Vec<String>,
+    /// The tunnel version this side speaks ([`TUNNEL_VERSION`]; tests set
+    /// another to act as an older or newer peer).
+    pub tunnel: u16,
 }
 
 impl Default for Config {
@@ -77,6 +80,7 @@ impl Default for Config {
             hello_timeout: Duration::from_secs(10),
             version: env!("CARGO_PKG_VERSION").into(),
             capabilities: Vec::new(),
+            tunnel: super::frame::speaks(),
         }
     }
 }
@@ -90,7 +94,9 @@ pub enum MuxError {
     Timeout,
     /// The peer said goodbye.
     GoAway(u16, String),
-    Version { ours: u16, theirs: u16 },
+    /// Tunnel versions two or more apart; `peer` is the hopperd version the
+    /// other side named in its hello (for "Update needed").
+    Version { ours: u16, theirs: u16, peer: String },
     /// The connection closed without a goodbye.
     Closed,
 }
@@ -102,7 +108,7 @@ impl std::fmt::Display for MuxError {
             MuxError::Protocol(m) => write!(f, "protocol error: {m}"),
             MuxError::Timeout => write!(f, "no answer for too long"),
             MuxError::GoAway(c, r) => write!(f, "closed by the other side ({c}{}{r})", if r.is_empty() { "" } else { ": " }),
-            MuxError::Version { ours, theirs } => write!(f, "tunnel versions too far apart (ours {ours}, theirs {theirs})"),
+            MuxError::Version { ours, theirs, .. } => write!(f, "tunnel versions too far apart (ours {ours}, theirs {theirs})"),
             MuxError::Closed => write!(f, "connection closed"),
         }
     }
@@ -496,7 +502,8 @@ impl RecvHalf {
 
 /// Says hello, checks the peer's, and starts the connection's task.
 pub async fn start<T: FrameTx, R: FrameRx>(side: Side, cfg: Config, mut tx: T, mut rx: R) -> Result<Tunnel, MuxError> {
-    let hello = Hello { tunnel: TUNNEL_VERSION, version: cfg.version.clone(), capabilities: cfg.capabilities.clone(), window: cfg.window };
+    let ours = cfg.tunnel;
+    let hello = Hello { tunnel: ours, version: cfg.version.clone(), capabilities: cfg.capabilities.clone(), window: cfg.window };
     let body = serde_json::to_vec(&hello).expect("hello");
     write_frame(&mut tx, &Frame::Hello(body), cfg.hello_timeout).await?;
     let first = match tokio::time::timeout(cfg.hello_timeout, rx.recv()).await {
@@ -511,10 +518,10 @@ pub async fn start<T: FrameTx, R: FrameRx>(side: Side, cfg: Config, mut tx: T, m
         Ok(f) => return Err(MuxError::Protocol(format!("expected hello, got {f:?}"))),
         Err(e) => return Err(MuxError::Protocol(format!("hello: {e}"))),
     };
-    if peer.tunnel.abs_diff(TUNNEL_VERSION) > 1 {
-        let reason = format!("tunnel {TUNNEL_VERSION} can't talk to tunnel {}", peer.tunnel);
+    if peer.tunnel.abs_diff(ours) > 1 {
+        let reason = format!("tunnel {ours} can't talk to tunnel {}", peer.tunnel);
         let _ = write_frame(&mut tx, &Frame::GoAway { code: code::VERSION, reason }, cfg.hello_timeout).await;
-        return Err(MuxError::Version { ours: TUNNEL_VERSION, theirs: peer.tunnel });
+        return Err(MuxError::Version { ours, theirs: peer.tunnel, peer: peer.version.chars().filter(|c| !c.is_control()).take(40).collect() });
     }
     if !(4096..=16 * 1024 * 1024).contains(&peer.window) {
         return Err(MuxError::Protocol(format!("window {} out of range", peer.window)));

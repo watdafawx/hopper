@@ -17,7 +17,7 @@ use tower::ServiceExt as _;
 const LISTED: &str = "http://fox:8790";
 const LISTED_2: &str = "http://tail.example.ts.net:8790";
 const UNLISTED: &str = "http://evil.example:8790";
-const HOST: &str = "rig:8791";
+pub(crate) const HOST: &str = "rig:8791";
 pub(crate) const OWN: &str = "http://rig:8791";
 pub(crate) const PASSWORD: &str = "password1";
 const TEST_CA: &str = "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n";

@@ -1049,6 +1049,17 @@ under axum) for the node's client side, and futures-util's `sink` feature.
 - **HELLO** first, each way, within 10 s: `{tunnel, version, capabilities,
   window}`. Tunnel versions equal or one apart talk; two apart get `GOAWAY
   VERSION` (the "Update needed" state in A3 starts here).
+- **Versions (A3)**: three numbers, kept apart. The *tunnel* version
+  (`frame::TUNNEL_VERSION`, now 1) is the framing in this section; it
+  changes only when frames change, and decides whether two sides talk at
+  all. The *hopperd* version (`version` in HELLO, the release number) is
+  what "Update" compares: a node behind the main's release can be updated
+  from it. The *capabilities* (HELLO's list, the same names as
+  `/api/v1/hello`) say what each side can do: the main keeps the ones both
+  sides name (`nodes::intersect`), per node, and hides what the node can't
+  do (A3: `nodes.update`, `relay.stream`). `HOPPERD_TEST_TUNNEL` and
+  `HOPPERD_TEST_VERSION` make a scratch panel speak another tunnel version
+  or claim another release, to try skew by hand.
 - **Streams**: the main opens even ids, the node odd (both may open, no
   coordination); ids only grow, reuse or the other side's parity is a
   protocol error. A stream's `OPEN` head says what it is (A2: method, path
@@ -1670,6 +1681,130 @@ infos never carry them, and the main drops them from an older node's
 answer too. The rule, who sees what and the review are in
 [server-secrets.md](server-secrets.md); the relay test is
 `relay_tests::a_look_node_sends_no_secret`.
+
+## A3 as built (2026-11-13)
+
+Streamed files through the main, version skew, and updating nodes from the
+main. Web UI done; Hopper desktop not yet (see "Left").
+
+### Files streamed through the main
+
+- **What streams.** The two routes whose body is raw file bytes:
+  `PUT /api/v1/fs/{id}/uploads/{up}` (an upload chunk, web UI and desktop)
+  and `POST /api/v1/servers/{id}/mods/upload` (a whole jar).
+  `relay::streams_body` names them; both sides use it. Everything else
+  still reads its body whole, capped at 32 MB (`relay::MAX_BODY`), so the
+  main's maintenance check and the node's path check on JSON bodies are
+  unchanged. Downloads (files, zips, backup downloads) already streamed
+  since A2: an answer that isn't JSON goes through as it comes.
+- **Main.** The browser's body goes to the node by a pump task, frame by
+  frame, waiting for the node's credit: the main holds at most one window
+  (512 KiB) plus its eight-frame send queue per stream, never the body, and
+  writes no temp file. A body that breaks off (the browser went away) resets
+  the stream (`RESET CANCEL`); the pump is aborted when the answer is
+  dropped.
+- **Node.** The handler reads the stream as its request body; credit goes
+  back only as it reads, so a slow disk slows the browser instead of
+  filling memory. Its own limits stay (32 MB per chunk, 512 MB per jar),
+  and so do the guard (`security::secret_refusal`, the per-server rule) and
+  the query path checks, which run before any body is read. A reset reaches
+  the handler as a read error: `mods/upload` deletes its `.name.upload`
+  file and keeps nothing.
+- **Older nodes** keep working: they read the streamed body whole, as
+  before, so a body over 32 MB is refused there with the old message.
+
+### Version skew
+
+- One tunnel version apart: talks, as in A0. Two apart: refused at HELLO;
+  the main now records it (`Nodes::too_far`) with the version the node
+  named. The node's row says **Update needed** ("vm (hopperd 0.40.0) is too
+  old for this panel. Update it on the node itself: its own update, or
+  install the new hopperd there.") or **Update this panel** when the node
+  is the newer one. Its servers stay listed from the last snapshot;
+  every request to them, reads too, is refused on the main with the same
+  sentence (503), since nothing reaches the node. It can't be updated from
+  here (there is no connection to ask over).
+- Per node, the main keeps the capabilities both sides have and sends them
+  with the node's head (`capabilities`), plus `outdated` (its release is
+  behind the main's) and `can_update`.
+
+### Updating nodes from the main
+
+- **Settings › Nodes**: an outlined "Update to 0.63.0" button on each node
+  that can be updated, "Update all (n)" over the list when more than one
+  can, and a line over the list ("This panel runs hopperd 0.63.0. 2 nodes
+  run an older one."). While it runs the row shows "Updating · Downloading
+  hopperd 0.63.0" and the chip says Updating; a failure shows in red under
+  the name with "Try again". The server list's node menu has the same
+  Update; its health line says "update available", "Updating · ...",
+  "Update needed · update it on the node itself".
+- **Who.** The main's owner, a manager, or a device that may manage
+  (`require_owner_who`), on a node joined at Manage. Look and Operate nodes
+  never get the button, and the node refuses anyway.
+- **How.** The main opens an `update` stream naming its own release. The
+  node checks: its ceiling is Manage, the asker is a lead with the Admin
+  role, the version is well formed and newer than its own (no rollback from
+  the main), and its own `why_not()` (Docker, no download for this machine,
+  a development build, a folder it can't write). Then it runs its own
+  update (`autoupdate::install_for_main` → `install_version`): the release
+  comes from GitHub with the same checks as always, never a file from the
+  main, and servers keep running as in the panel's own update (Windows
+  reattach, Linux re-exec keeps reattachable servers and waits for the
+  others as its own update does). It streams its update state as JSON lines
+  until it restarts, is ready, or fails; the main shows each step and
+  counts the update done when the node is back on that version (10 minutes
+  to come back, an hour in all). Both sides write it to their audit log.
+- **Update all** goes one node at a time and stops at the first failure:
+  "Stopped at vm: vm: the download failed. 1 more not updated."
+
+### Tests
+
+- `relay_tests::stream` (Part 1): a 40 MB jar (over the old 32 MB cap)
+  and an upload chunk reach the node whole; a node that stops reading after
+  1 MiB holds the main to that plus one window and its queue (measured:
+  the main took at most read + 512 KiB + 8 x 64 KiB + 2 x 64 KiB from the
+  browser); an upload cut off on its way leaves nothing in `mods`; a JSON
+  body over 32 MB is still refused on the main (413).
+- `relay_tests::skew` (Parts 2, 3): capability intersection; tunnel
+  versions one apart talk and two apart are refused with both versions
+  named; a node two behind shows `update_needed`, reads and writes to it get
+  the reason (503) and Update is refused; Update follows the node's lines
+  to done, and to done after a restart once it is back on the new version;
+  Update all stops at the first failure and never asks the next node;
+  no Update for a node without `nodes.update`, below Manage, or already
+  current; the node refuses an update without a lead or below Manage, and
+  with both runs its own checks (a test build refuses as a development
+  build, so nothing is downloaded).
+- Web UI: `tests/nodes.test.mjs` (the Update needed line, the update
+  line, Try again, the list head).
+- `cargo test -p hopperd`: 280 passed, 3 ignored. `pnpm test`: 32 passed.
+
+### A3 security review (2026-11-13)
+
+| # | Rank | Finding | Status |
+|---|---|---|---|
+| 1 | — | Streaming lifts the main's 32 MB cap on two routes. The node's own limits (32 MB per chunk, 512 MB per jar) and its guard still apply, and the main holds one window per stream (64 streams: 32 MiB at most per node), so a big or endless upload can't grow the main's memory. | Sound; tested (slow node, cancelled upload). |
+| 2 | — | Streamed bodies skip the main's body checks. Those checks are for JSON (paths in a body, maintenance starts); the two routes carry file bytes whose paths are in the URL, checked on both sides before any byte moves. | Sound. |
+| 3 | Low | "Update" lets the main make a node run a new program. Only at Manage (which already lets the main run code there), only for a lead, only to a newer GitHub release the node fetches and checks itself; no downgrade, no file from the main. A compromised main can at most update a node to a real newer release. | By design; listed. |
+| 4 | — | Text from the node (update lines, its version in HELLO) is shown on the main: control characters dropped, lengths capped (`clean_text` 500, version 40), lines at most 8 MB; Svelte escapes it. | Sound. |
+| 5 | Low | `HOPPERD_TEST_VERSION` / `HOPPERD_TEST_TUNNEL` change what a panel says it runs. Only the person who starts the process sets them; a node that lies about its version only changes what its own row shows. | Listed. |
+
+### Left (not done in A3)
+
+1. **Hopper desktop** (Part 4): a + on each node group (the create dialog
+   sending `?node=<id>` like the web UI; only a fresh server, like the web
+   UI), the node's own state for the group light, Update needed shown and
+   the node read-only, from a new main route with the node heads for a
+   signed-in device (`GET /api/v1/nodes/live`, the `live_view` heads).
+   Desktop uploads already use the two streamed routes (8 MB chunks and
+   `mods/upload`), so they stream through a main with no desktop change;
+   not yet checked by hand with a big file.
+2. **Measured on real panels**: a 2 GB upload to a node through a scratch
+   main, the main's working set sampled (target: under 64 MB growth, no
+   temp file). The tests prove the bound per stream; the live number is
+   not taken yet.
+3. Screenshots of the new states (both apps, dark and light, 375 px web)
+   and the change card.
 
 ## Open questions for the maintainer
 

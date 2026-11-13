@@ -12,7 +12,43 @@ export const STATES = {
   reconnecting: { label: 'Reconnecting', cls: 'warn' },
   offline: { label: 'Offline', cls: 'crashed' },
   new: { label: 'Not connected yet', cls: '' },
+  // Two tunnel versions apart (design/multi-panel.md, A3): it can't
+  // connect until one side is updated; its servers show read-only.
+  update_needed: { label: 'Update needed', cls: 'warn' },
+  main_older: { label: 'Update this panel', cls: 'warn' },
 };
+
+/** A node's state chip, with "Updating" over Connected while this panel
+ * updates it. */
+export const stateOf = (n) => (n.update?.state === 'updating' ? { label: 'Updating', cls: 'warn' } : (STATES[n.state] ?? STATES.new));
+
+/** The line about an update this panel asked of the node, if any:
+ * `{ text, bad }`. A finished one shows until the node is current. */
+export function updateLine(n) {
+  const u = n.update;
+  if (!u) return null;
+  if (u.state === 'updating') return { text: `Updating · ${u.message || 'Asking it to update'}`, bad: false };
+  if (u.state === 'failed') return { text: `Update failed: ${u.message}`, bad: true };
+  return n.outdated ? null : { text: u.message, bad: false };
+}
+
+/** What Update says on node `n`: its target version. */
+export const updateLabel = (n, version) => (n.update?.state === 'failed' ? 'Try again' : version ? `Update to ${version}` : 'Update');
+
+/** The list head: how many nodes are behind, and how many Update all
+ * would update. */
+export function behind(data) {
+  const nodes = data?.nodes ?? [];
+  return { older: nodes.filter((n) => n.outdated || n.state === 'update_needed').length, updatable: nodes.filter((n) => n.can_update).length };
+}
+
+/** The sentence over the node list while nodes run an older version. */
+export function behindLine(data) {
+  const { older } = behind(data);
+  if (!older) return '';
+  const v = data.version ? `hopperd ${data.version}` : 'a newer hopperd';
+  return `This panel runs ${v}. ${older === 1 ? '1 node runs' : `${older} nodes run`} an older one.`;
+}
 
 export const CEILINGS = [
   { id: 'look', label: 'Look', blurb: 'This panel can see the servers there and read their consoles.' },
@@ -62,6 +98,9 @@ export function nodeLine(n, now = Date.now() / 1000) {
   switch (n.state) {
     case 'connected':
       return [n.version && `hopperd ${n.version}`, n.rtt_ms != null && `${n.rtt_ms} ms`, n.since && `since ${clock(n.since, now)}`, n.ip].filter(Boolean).join(' · ');
+    case 'update_needed':
+    case 'main_older':
+      return n.skew || (n.state === 'update_needed' ? 'Too old for this panel. Update it on the node itself.' : 'Newer than this panel. Update this panel first.');
     case 'reconnecting':
       return n.quiet_secs != null ? `Last heard ${span(n.quiet_secs)} ago` : 'Reconnecting';
     case 'offline': {

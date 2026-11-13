@@ -9,6 +9,12 @@ use std::fmt;
 /// equal or one apart (see `design/multi-panel.md`, "Version skew").
 pub const TUNNEL_VERSION: u16 = 1;
 
+/// The tunnel version this build speaks: [`TUNNEL_VERSION`], or
+/// `HOPPERD_TEST_TUNNEL` to try version skew with two scratch panels.
+pub fn speaks() -> u16 {
+    std::env::var("HOPPERD_TEST_TUNNEL").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(TUNNEL_VERSION)
+}
+
 /// Biggest DATA payload. Small enough that one busy stream can't hold the
 /// socket for long (64 KiB is ~5 ms at 100 Mbit/s), big enough that the
 /// header and WebSocket overhead stay under 0.1%.

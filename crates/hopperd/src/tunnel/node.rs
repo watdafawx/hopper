@@ -170,7 +170,9 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// What the node's tunnel config says about itself.
 fn tunnel_config() -> Config {
-    Config { capabilities: crate::api::CAPABILITIES.iter().map(|c| c.to_string()).collect(), ..Config::default() }
+    // The version it says it runs: HOPPERD_TEST_VERSION makes a scratch
+    // node look older, to try "Update" from its main.
+    Config { capabilities: crate::api::CAPABILITIES.iter().map(|c| c.to_string()).collect(), version: crate::autoupdate::current(), ..Config::default() }
 }
 
 /// Connects, and reconnects with backoff, until the main refuses this node
