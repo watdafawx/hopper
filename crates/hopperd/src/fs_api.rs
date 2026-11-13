@@ -29,7 +29,8 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/fs/{id}/list", get(list).layer(CompressionLayer::new()))
         .route("/api/v1/fs/{id}/file", get(download))
         .route("/api/v1/fs/{id}/zip", get(zip))
-        .route("/api/v1/fs/{id}/link", post(link))
+        // A link keeps its paths in memory for a minute: its request stays small.
+        .route("/api/v1/fs/{id}/link", post(link).layer(DefaultBodyLimit::max(LINK_MAX_BODY)))
         .route("/api/v1/fs/{id}/text", get(read_text).put(write_text).layer(CompressionLayer::new()))
         .route("/api/v1/fs/{id}/ops", post(ops))
         .route("/api/v1/fs/{id}/walk", get(walk).layer(CompressionLayer::new()))
@@ -268,6 +269,8 @@ fn send_zip(e: &Entry, paths: &[String], name: Option<String>) -> ApiResult<Resp
 
 /// Most paths one zip link may name.
 const LINK_MAX_PATHS: usize = 1000;
+/// Largest link request: 1000 ordinary paths fit easily.
+const LINK_MAX_BODY: usize = 256 * 1024;
 
 #[derive(Deserialize)]
 struct LinkBody {
@@ -306,7 +309,9 @@ async fn link(
     if !b.zip && paths.len() != 1 {
         return Err(bad("Name one file, or ask for a zip."));
     }
-    for p in &paths {
+    // Kept as the tidy path inside the folder, so padding like `./././`
+    // that the folder check skips doesn't sit in memory with the link.
+    for p in paths.iter_mut() {
         let full = files::resolve(&e.root, p).map_err(bad)?;
         if !full.exists() {
             return Err(not_found("file"));
@@ -314,6 +319,7 @@ async fn link(
         if !b.zip && full.is_dir() {
             return Err(bad("That's a folder; download it as a zip."));
         }
+        *p = files::rel_of(&e.root, &full);
     }
     let name = b.name.map(|n| n.chars().filter(|c| !c.is_control() && !matches!(c, '/' | '\\')).take(200).collect::<String>()).filter(|n| !n.is_empty());
     let cred = crate::auth::hash_token(&crate::api::token(&headers).0);

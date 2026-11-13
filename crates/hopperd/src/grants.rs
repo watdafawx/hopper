@@ -23,6 +23,9 @@ pub const LINK_TTL: Duration = Duration::from_secs(60);
 /// fills its own share first ([`PER_SESSION`]).
 const MAX_WAITING: usize = 2048;
 const PER_SESSION: usize = 64;
+/// Bytes of paths all waiting links may hold together, so links naming
+/// many long paths can't add up to a lot of memory.
+const MAX_BYTES: usize = 16 * 1024 * 1024;
 /// The WebSocket subprotocol the panel answers with, and the prefix of the
 /// one that carries the ticket: `new WebSocket(url, ["hopperd", "hopperd-ticket.<t>"])`.
 pub const WS_PROTOCOL: &str = "hopperd";
@@ -34,6 +37,16 @@ pub enum Purpose {
     Live,
     /// Files of one server: one file, or a zip of several paths.
     File { server: String, paths: Vec<String>, zip: bool, inline: bool, name: Option<String> },
+}
+
+impl Purpose {
+    /// Roughly what it keeps in memory.
+    fn size(&self) -> usize {
+        match self {
+            Purpose::Live => 0,
+            Purpose::File { server, paths, name, .. } => server.len() + paths.iter().map(|p| p.len() + 24).sum::<usize>() + name.as_ref().map_or(0, String::len),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -61,7 +74,8 @@ impl Grants {
         let now = Instant::now();
         let mut m = self.waiting.lock().unwrap();
         m.retain(|_, g| g.until > now);
-        if m.len() >= MAX_WAITING || m.values().filter(|g| g.cred == cred).count() >= PER_SESSION {
+        let bytes: usize = m.values().map(|g| g.purpose.size()).sum();
+        if m.len() >= MAX_WAITING || m.values().filter(|g| g.cred == cred).count() >= PER_SESSION || bytes + purpose.size() > MAX_BYTES {
             return Err("Too many links waiting. Try again in a minute.");
         }
         let secret = random_hex(32);
@@ -144,6 +158,21 @@ mod tests {
         }
         assert!(g.issue(Purpose::Live, "busy", None).is_err());
         assert!(g.issue(Purpose::Live, "someone-else", None).is_ok());
+    }
+
+    #[test]
+    fn waiting_links_hold_little_memory() {
+        let g = Grants::default();
+        let big = Purpose::File { server: "s".into(), paths: vec!["a".repeat(1024 * 1024)], zip: true, inline: false, name: None };
+        let mut issued = 0;
+        for i in 0..64 {
+            if g.issue(big.clone(), &format!("session-{i}"), None).is_ok() {
+                issued += 1;
+            }
+        }
+        assert!(issued < 16, "{issued} one-megabyte links waiting");
+        // Tickets hold nothing and still go through.
+        assert!(g.issue(Purpose::Live, "someone", None).is_ok());
     }
 
     #[test]
