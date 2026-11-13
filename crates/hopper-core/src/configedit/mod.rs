@@ -240,6 +240,23 @@ pub fn same(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Keys whose values are passwords, tokens and the like: Hopper Server shows
+/// them masked and friends' shared settings never carry them. One list for
+/// both apps. `auth` only counts as its own word ("authToken", "oauth"),
+/// not inside "author".
+pub fn secret_key(key: &str) -> bool {
+    let k = crate::configowner::squash(key);
+    const WORDS: [&str; 9] = ["token", "secret", "password", "passwd", "apikey", "webhook", "privatekey", "session", "cookie"];
+    if WORDS.iter().any(|w| k.contains(w)) {
+        return true;
+    }
+    let low = key.to_ascii_lowercase();
+    let words: Vec<&str> = low.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    // camelCase splits too: "authKey" -> "auth", "Key".
+    let camel = key.split(|c: char| c.is_ascii_uppercase() || !c.is_ascii_alphanumeric()).next().unwrap_or("").to_ascii_lowercase();
+    words.iter().any(|w| matches!(*w, "auth" | "oauth" | "authkey" | "authcode")) || camel == "auth" || k.ends_with("oauth") || k.ends_with("auth")
+}
+
 pub(crate) fn num_text(x: f64) -> String {
     if x.fract() == 0.0 && x.abs() < 1e15 { format!("{}", x as i64) } else { x.to_string() }
 }

@@ -262,6 +262,11 @@ pub struct ConfigView {
     remote: HashMap<String, Result<String, String>>,
     /// A save to the panel is on its way.
     saving: bool,
+    /// The mod these settings are (its jar's file name), for sharing them
+    /// with a friend group; None for a loose file.
+    pub jar: Option<String>,
+    /// The share switch was clicked: its confirm line shows.
+    confirm_share: bool,
     _mark: Option<RangeDecorationCollection>,
     _subs: Vec<Subscription>,
 }
@@ -343,6 +348,8 @@ impl ConfigView {
             server: None,
             remote: HashMap::new(),
             saving: false,
+            jar: None,
+            confirm_share: false,
             _mark: None,
             _subs: subs,
         };
@@ -1246,13 +1253,17 @@ impl ConfigView {
                 let control = self.control(&e, &id, rem, window, cx);
                 let theme = cx.theme().clone();
                 let words = widgets::search_words(&self.query);
+                let shared = self.shared_note(&rel, &e, cx);
                 let name = h_flex()
                     .gap_1p5()
                     .min_w_0()
                     .when(not_default || edited, |d| d.child(div().size(px(6.)).flex_none().rounded_full().bg(theme.primary)))
                     .child(div().min_w_0().truncate().text_sm().font_semibold().child(widgets::marked(e.label(), &words, cx)))
                     .when_some(restart, |d, r| d.child(widgets::chip(theme.warning).child(r)))
-                    .when(e.guessed, |d| d.child(widgets::chip(theme.muted_foreground).child("guessed")));
+                    .when(e.guessed, |d| d.child(widgets::chip(theme.muted_foreground).child("guessed")))
+                    .when_some(shared, |d, (text, mine)| {
+                        d.child(if mine { widgets::chip(theme.primary).child(text).into_any_element() } else { widgets::caption(text, cx).text_xs().flex_none().into_any_element() })
+                    });
                 let info = v_flex()
                     .flex_1()
                     .min_w_0()
@@ -1398,6 +1409,164 @@ impl ConfigView {
                     .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
             )
             .into_any_element()
+    }
+
+    /// The mod's key in the group's shared settings, when these settings
+    /// can be shared: the instance is a group pack kept both ways and the
+    /// mailbox passes settings on.
+    fn share_key(&self, cx: &App) -> Option<String> {
+        let store = self.store.read(cx);
+        if self.on_panel().is_some() || self.server.is_some() || !store.settings_sharing() || store.group_copy(&self.root).is_none() {
+            return None;
+        }
+        let jar = self.jar.as_deref()?.trim_end_matches(".disabled");
+        let a = store.instance(&self.root)?.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(jar))?;
+        self.files.iter().any(|f| hopper::configsync::file_ok(f)).then(|| hopper::groupsync::addon_key(a))
+    }
+
+    /// The line beside a shared setting: (text, this player's own change
+    /// not sent yet), or why it never goes.
+    fn shared_note(&self, rel: &str, e: &Entry, cx: &App) -> Option<(String, bool)> {
+        let m = self.share_key(cx)?;
+        let store = self.store.read(cx);
+        let c = store.group_configs(&self.root)?.mods.get(&m).filter(|c| c.shared.on)?;
+        if let Some(why) = hopper::configsync::never(rel, &e.path, &e.key, &e.value.text()) {
+            return (why != hopper::configsync::Why::File).then(|| (why.says().to_string(), false));
+        }
+        let v = c.set.get(rel)?.get(&hopper::configsync::key_of(&e.path, &e.key))?;
+        let me = store.mailbox_id();
+        if v.by == me {
+            Some((if v.seq == 0 { "Changed, goes out".to_string() } else { "You changed this".to_string() }, v.seq == 0))
+        } else {
+            let who = if v.name.is_empty() { "a friend" } else { &v.name };
+            Some((format!("Changed by {who}"), false))
+        }
+    }
+
+    /// Sharing these settings with the group: the switch, its confirm line,
+    /// and what sharing means.
+    fn share_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let m = self.share_key(cx)?;
+        let theme = cx.theme().clone();
+        let root = self.root.clone();
+        let (group, on, kept, too_big, who) = {
+            let store = self.store.read(cx);
+            let c = store.group_configs(&root).and_then(|c| c.mods.get(&m));
+            let on = c.is_some_and(|c| c.shared.on);
+            let me = store.mailbox_id();
+            let who = c.filter(|c| c.shared.on && c.shared.by != me && !c.shared.name.is_empty()).map(|c| c.shared.name.clone());
+            (store.group_of(&root).unwrap_or_else(|| "the group".into()), on, store.settings_kept(&root, &m), store.settings_too_big(&root), who)
+        };
+        let usually = !on && hopper::configsync::usually_personal(&self.files);
+        // Settings shaped like a password stay on this PC; the sharer is told.
+        let secrets: Vec<String> = self
+            .cur()
+            .and_then(|s| s.sections.as_ref().ok())
+            .map(|ss| {
+                ss.iter()
+                    .flat_map(|s| &s.entries)
+                    .filter(|e| hopper::configsync::never(&self.rel, &e.path, &e.key, &e.value.text()) == Some(hopper::configsync::Why::Secret))
+                    .map(|e| if e.path.is_empty() { e.key.clone() } else { format!("{}.{}", e.path.join("."), e.key) })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let differs = if self.confirm_share { self.store.update(cx, |s, cx| s.settings_differ(&root, &m, cx)) } else { None };
+        let m2 = m.clone();
+        let switch = Switch::new("cfg-share").checked(on || self.confirm_share).on_click(cx.listener(move |this, v: &bool, _, cx| {
+            if *v {
+                this.confirm_share = true;
+            } else if this.confirm_share {
+                this.confirm_share = false;
+            } else {
+                let r = this.root.clone();
+                this.store.update(cx, |s, cx| s.set_settings_shared(&r, &m2, false, cx));
+            }
+            cx.notify();
+        }));
+        let head = h_flex()
+            .gap_2()
+            .child(div().flex_1().min_w_0().truncate().text_sm().child(format!("Share these settings with {group}")))
+            .when(usually, |d| d.child(widgets::chip(theme.muted_foreground).child("Usually personal")))
+            .child(switch);
+        let line = |text: String, cx: &App| widgets::caption(text, cx).text_xs().whitespace_normal();
+        let mut col = v_flex().gap_1p5().px_3().py_2().rounded(theme.radius).border_1().border_color(theme.border).child(head);
+        if self.confirm_share && !on {
+            let text = match differs {
+                None => "Counting the settings you changed…".to_string(),
+                Some(Some(0)) | Some(None) => "Sends the settings you change from now on.".to_string(),
+                Some(Some(1)) => "Sends the 1 setting you changed from the pack, and any you change later.".to_string(),
+                Some(Some(n)) => format!("Sends the {n} settings you changed from the pack, and any you change later."),
+            };
+            let m3 = m.clone();
+            col = col.child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().child(line(text, cx)))
+                    .child(Button::new("cfg-share-cancel").ghost().small().label("Cancel").on_click(cx.listener(|this, _, _, cx| {
+                        this.confirm_share = false;
+                        cx.notify();
+                    })))
+                    .child(Button::new("cfg-share-ok").primary().small().label("Share").disabled(differs.is_none()).on_click(cx.listener(move |this, _, _, cx| {
+                        this.confirm_share = false;
+                        let r = this.root.clone();
+                        this.store.update(cx, |s, cx| s.set_settings_shared(&r, &m3, true, cx));
+                        cx.notify();
+                    }))),
+            );
+        } else if on && kept {
+            let m3 = m.clone();
+            col = col.child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().child(line("You keep your own settings for this mod. Friends' changes wait until you sync again.".into(), cx)))
+                    .child(Button::new("cfg-share-sync").outline().small().label("Sync again").on_click(cx.listener(move |this, _, _, cx| {
+                        let r = this.root.clone();
+                        this.store.update(cx, |s, cx| s.keep_settings(&r, &m3, false, cx));
+                        cx.notify();
+                    }))),
+            );
+        } else if on {
+            let by = who.map(|w| format!(" {w} started sharing them.")).unwrap_or_default();
+            let m3 = m.clone();
+            col = col.child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().child(line(
+                        format!("Changes you make here go to everyone in {group}. Only the settings you change travel, so each friend keeps their other settings.{by}"),
+                        cx,
+                    )))
+                    .child(Button::new("cfg-share-keep").ghost().small().label("Keep mine").on_click(cx.listener(move |this, _, _, cx| {
+                        let r = this.root.clone();
+                        this.store.update(cx, |s, cx| s.keep_settings(&r, &m3, true, cx));
+                        cx.notify();
+                    }))),
+            );
+        }
+        if too_big && on {
+            col = col.child(div().text_xs().text_color(theme.warning).child("Too many changed settings to share. Share fewer mods."));
+        }
+        let waiting = if on { self.store.read(cx).settings_waiting(&root).iter().filter(|w| w.m == m).count() } else { 0 };
+        if waiting > 0 {
+            let what = if waiting == 1 { "1 setting from friends doesn't".to_string() } else { format!("{waiting} settings from friends don't") };
+            col = col.child(line(format!("{what} exist in your version of this mod. They go in once you have the same version."), cx));
+        }
+        if (on || self.confirm_share) && !secrets.is_empty() {
+            let names = secrets.iter().take(3).map(|s| format!("\"{s}\"")).collect::<Vec<_>>().join(", ");
+            let looks = if secrets.len() == 1 { "looks like a password" } else { "look like passwords" };
+            col = col.child(
+                h_flex()
+                    .gap_1p5()
+                    .items_start()
+                    .text_xs()
+                    .text_color(theme.warning)
+                    .child(Icon::new(IconName::TriangleAlert).xsmall().flex_none().mt_0p5())
+                    .child(div().flex_1().min_w_0().whitespace_normal().child(format!(
+                        "On {}, {names} {looks}. Hopper never shares settings like that, even when you share the mod.",
+                        self.title
+                    ))),
+            );
+        }
+        Some(col.into_any_element())
     }
 
     /// The panel's title: the mod's icon and name, its file count, close.
@@ -1574,6 +1743,7 @@ impl Render for ConfigView {
         let path = self.root.join(&self.rel);
         let narrow = self.host == Host::Panel;
         let search = (!self.text_view && readable).then(|| widgets::search_input(&self.search).small().cleanable(true));
+        let share = self.share_bar(cx);
         v_flex()
             .size_full()
             .min_h_0()
@@ -1612,6 +1782,7 @@ impl Render for ConfigView {
                                 }),
                         )
                     })
+                    .children(share)
                     .when(!files.is_empty(), |d| d.child(chips))
                     .child(h_flex().gap_3().child(tabs).child(div().flex_1()).when(!narrow, |d| d.children(search.map(|s| div().w(rems(if self.host == Host::Tab { 20. } else { 16. })).child(s))))),
             )

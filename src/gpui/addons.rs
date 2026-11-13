@@ -4424,7 +4424,12 @@ It stays disabled after updating: turn it on in the On column.")
         let reset_cfg = (!global && self.class == cf::CLASS_MODS)
             .then(|| self.root.clone())
             .flatten()
-            .map(|r| (self.store.clone(), r, a.project_id, a.file_name.clone()));
+            .map(|r| {
+                // A group pack kept both ways: its settings can be shared.
+                let st = self.store.read(cx);
+                let share = (st.settings_sharing() && !self.remote).then(|| st.group_of(&r)).flatten().map(|g| (st.settings_shared_jar(&r, &a.file_name), g));
+                (self.store.clone(), r, a.project_id, a.file_name.clone(), share)
+            });
         let (pid_menu, update_file) = (a.project_id, update.map(|u| u.file.clone()));
         let (page, locked, mr, has_project) = (
             a.page.clone(),
@@ -5167,7 +5172,7 @@ Change version", a.file_name).into()
         places: Vec<(String, PathBuf)>,
         page: String,
         update_file: Option<hopper::cf::File>,
-        reset_cfg: Option<(Entity<Store>, PathBuf, u64, String)>,
+        reset_cfg: Option<(Entity<Store>, PathBuf, u64, String, Option<(bool, String)>)>,
         (pid_menu, locked, mr, has_project, global, on): (u64, bool, bool, bool, bool, bool),
         // The offered update's (versions, file name, locked out).
         vlock: Option<((String, String), String, bool)>,
@@ -5221,7 +5226,26 @@ Change version", a.file_name).into()
                             v1.update(cx, |this, cx| this.show_in_folder(&f1, cx))
                         }),
                 )
-                .when_some(reset_cfg.clone(), |m, (store, root, pid, file)| {
+                .when_some(reset_cfg.clone().and_then(|(s, r, _, f, share)| share.map(|sh| (s, r, f, sh))), |m, (store, root, file, (shared, group))| {
+                    let v = view.clone();
+                    m.item(
+                        PopupMenuItem::new(if shared { "Stop sharing settings".to_string() } else { format!("Share settings with {group}") })
+                            .icon(IconName::Users)
+                            .on_click(move |_, _, cx| {
+                                if shared {
+                                    let key = store.read(cx).instance(&root).and_then(|i| i.addons.iter().find(|a| a.file_name == file)).map(hopper::groupsync::addon_key);
+                                    if let Some(k) = key {
+                                        store.update(cx, |s, cx| s.set_settings_shared(&root, &k, false, cx));
+                                    }
+                                } else {
+                                    // The switch and what it sends are in the mod's config panel.
+                                    let (root, file) = (root.clone(), file.clone());
+                                    v.update(cx, |_, cx| cx.emit(AddonsEvent::Config { root, file }));
+                                }
+                            }),
+                    )
+                })
+                .when_some(reset_cfg.clone(), |m, (store, root, pid, file, _)| {
                     let (s2, r2, f2) = (store.clone(), root.clone(), file.clone());
                     // On a Hopper Server the dialog reads and saves through its panel.
                     m.item(

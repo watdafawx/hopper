@@ -22,6 +22,7 @@ pub mod configcompare;
 pub mod configedit;
 pub mod configindex;
 pub mod configowner;
+pub mod configsync;
 pub mod configswitch;
 pub mod crashconfig;
 pub mod crashdetect;

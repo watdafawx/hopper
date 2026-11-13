@@ -453,6 +453,16 @@ impl BackupsView {
                 (pid, icon, f.name.clone())
             }
         };
+        // A friend's shared settings: named after the mod, with what changed.
+        let note = f
+            .who
+            .as_ref()
+            .filter(|w| !w.is_you() && f.change == hopper::backups::Change::Edited)
+            .and_then(|_| hopper::backups::settings_note(f.path.parent()?, &f.restore_to));
+        let name = match &note {
+            Some(n) if !n.mod_name.is_empty() => format!("{} settings", n.mod_name),
+            _ => name,
+        };
         let file = f.clone();
         let busy = self.busy.is_some();
         let picked = self.sel.contains(&key.to_string());
@@ -481,7 +491,20 @@ impl BackupsView {
                 .child(div().text_color(cx.theme().muted_foreground).child(f.change.verb())),
             None => h_flex().flex_none().child(div().text_color(change_color(f.change, true, cx)).child(f.change.label())),
         };
-        let mut detail = f.detail();
+        let mut detail = match &note {
+            Some(n) => n
+                .changes
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let label = hopper::configedit::label(&c.key);
+                    // The first says the values; the rest only their names, so the line fits.
+                    if i == 0 { format!("{label}: {} to {}", c.was, c.now) } else { label }
+                })
+                .collect::<Vec<_>>()
+                .join(" · "),
+            None => f.detail(),
+        };
         if let Some(g) = who.and_then(|w| self.group_name(w, cx)) {
             detail = if detail.is_empty() { format!("group {g}") } else { format!("{detail} · group {g}") };
         }

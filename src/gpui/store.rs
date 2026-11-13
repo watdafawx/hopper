@@ -17,6 +17,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod config_sync;
 mod disk_sync;
 mod friends;
 mod only_here;
@@ -83,6 +84,10 @@ pub enum Msg {
     /// pack (or that failed: the copy's local id, why, the task's id).
     GroupMerged(Box<friends::GroupMerged>),
     GroupMergeFailed(String, anyhow::Error, u64),
+    /// Shared mod settings were read and written in a group copy, or wait
+    /// for its game to close (`config_sync`).
+    ConfigTicked(Box<config_sync::CfgTicked>),
+    ConfigHeld(Box<config_sync::CfgHeld>),
     /// A new instance was made by following a friend's pack: remember the
     /// recipe for its root (known only once it was made).
     Followed(Box<hopper::settings::FollowedRecipe>),
@@ -214,6 +219,12 @@ pub enum StoreEvent {
     PanelChanged(PathBuf, Vec<String>),
     /// Something to tell the user in a notice: (text, is a problem).
     Notice(String, bool),
+    /// A friend's shared settings were written into a mod's files: the
+    /// notice offers Undo.
+    SettingsArrived { root: PathBuf, wrote: hopper::configsync::Wrote1, group: String },
+    /// A friend started sharing a mod's settings: the notice offers Keep
+    /// mine.
+    SettingsShared { root: PathBuf, m: String, mod_name: String, who: String },
     /// Open Browse on modpacks to host one (New server's Modpack tab):
     /// None on this PC, else on that paired Hopper Server.
     BrowsePacksFor(Option<String>),
@@ -575,6 +586,8 @@ pub struct Store {
     /// Members' copies that came before this PC's copy of the pack was
     /// set up, by sender and pack; the newest of each.
     group_strays: HashMap<(String, String), hopper::mailbox::Event>,
+    /// Shared mod settings in group copies.
+    cfg: config_sync::CfgState,
     /// Modpacks (project ids) whose server files were downloaded this run.
     server_files_got: std::collections::HashSet<u64>,
     /// Instance roots the game watcher looks for.
@@ -775,6 +788,7 @@ impl Store {
             group_retry: Default::default(),
             group_held: Default::default(),
             group_strays: Default::default(),
+            cfg: Default::default(),
             server_files_got: Default::default(),
             watched,
             disk: disk_sync::start(tx.clone(), wake.clone()),
@@ -1157,6 +1171,8 @@ impl Store {
             Msg::RecipeFailed(root, code, e, job) => self.on_recipe_failed(root, code, e, job, cx),
             Msg::GroupMerged(m) => self.on_group_merged(*m, cx),
             Msg::GroupMergeFailed(local, e, job) => self.on_group_merge_failed(local, e, job, cx),
+            Msg::ConfigTicked(t) => self.on_config_ticked(*t, cx),
+            Msg::ConfigHeld(h) => self.on_config_held(*h, cx),
             Msg::InstanceChanged(root) if server_mods::remote(&root).is_some() => self.refetch_server_mods(&root),
             Msg::InstanceChanged(root) => {
                 // Only Hopper's own instances get an id written; a folder

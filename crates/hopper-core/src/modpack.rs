@@ -740,6 +740,31 @@ pub fn cached_override_files(file_id: u64) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// The pack's own copy of one override file (`rel` relative to the
+/// instance, either slash), as text. `None` when the pack file isn't in
+/// Hopper's cache or doesn't ship it.
+pub fn cached_override_text(file_id: u64, rel: &str) -> Option<String> {
+    use std::io::Read as _;
+    let zip_path = cache_dir().join(format!("{file_id}.zip"));
+    let manifest = read_manifest(&zip_path).ok()?;
+    let mut z = zip::ZipArchive::new(fs::File::open(&zip_path).ok()?).ok()?;
+    let prefix = match manifest.overrides.trim_end_matches('/') {
+        "" => "overrides/".to_string(),
+        p => format!("{p}/"),
+    };
+    let want = format!("{prefix}{}", rel.replace('\\', "/"));
+    for i in 0..z.len() {
+        let mut e = z.by_index(i).ok()?;
+        if e.is_dir() || e.size() > 4 << 20 || !e.name().replace('\\', "/").eq_ignore_ascii_case(&want) {
+            continue;
+        }
+        let mut s = String::new();
+        e.read_to_string(&mut s).ok()?;
+        return Some(s);
+    }
+    None
+}
+
 /// Copies `overrides/` from the pack into the instance, except what
 /// `overrides` says to leave. Returns files written.
 fn extract_overrides(

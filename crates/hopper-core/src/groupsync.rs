@@ -230,10 +230,18 @@ pub enum Verdict {
 /// `here`: the mod in this copy (with the changes already decided);
 /// `unsent`: it was changed here since this copy last published.
 pub fn verdict(c: &Change, seq: u64, mark: Option<&Mark>, here: &State, unsent: bool) -> Verdict {
-    if *here == c.now {
+    decide(*here == c.now, seq, mark.map(|m| m.seq), unsent)
+}
+
+/// The rule behind [`verdict`] for anything kept latest-wins, a mod or one
+/// of its settings (`configsync`): `same`, it's already like that here;
+/// `seq`, the change's number; `known`, the number of the last change of
+/// it this PC knows; `unsent`, changed here and not sent yet.
+pub fn decide(same: bool, seq: u64, known: Option<u64>, unsent: bool) -> Verdict {
+    if same {
         return Verdict::Same;
     }
-    if mark.is_some_and(|m| m.seq > seq) {
+    if known.is_some_and(|k| k > seq) {
         return Verdict::Older;
     }
     if unsent {
@@ -333,6 +341,10 @@ pub struct PackCopy {
     pub sent_seq: u64,
     /// Who changed each mod last (by key).
     pub marks: BTreeMap<String, Mark>,
+    /// The mods whose settings the group shares, and the settings changed
+    /// (`configsync`).
+    #[serde(skip_serializing_if = "crate::configsync::Configs::is_empty")]
+    pub configs: crate::configsync::Configs,
 }
 
 impl PackCopy {
@@ -363,6 +375,7 @@ impl PackCopy {
         for m in self.marks.values_mut() {
             m.seq = 0;
         }
+        self.configs.relay_reset();
         self.sent_seq = 0;
     }
 }
