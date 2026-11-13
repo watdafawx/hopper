@@ -25,6 +25,9 @@ pub struct Comment {
     /// The name CurseForge shows.
     pub author: String,
     pub avatar: Option<String>,
+    /// The poster's CurseForge id and login name, for [`Comment::is_by`].
+    pub author_id: u64,
+    pub login: String,
     /// When it was posted, seconds since the epoch.
     pub posted: i64,
     /// Plain text: the site's own text form of the comment, never its HTML.
@@ -36,6 +39,24 @@ pub struct Comment {
     /// listed in order after the one they answer (each starts with the
     /// @name it answers), so a narrow panel never indents past one step.
     pub replies: Vec<Comment>,
+}
+
+impl Comment {
+    /// Whether one of the project's authors wrote it: by CurseForge id when
+    /// both sides have one, else by name (either the shown or the login
+    /// name, ignoring case). A removed comment names no one.
+    pub fn is_by(&self, authors: &[crate::cf::Author]) -> bool {
+        if self.removed {
+            return false;
+        }
+        authors.iter().any(|a| {
+            if a.id != 0 && a.id == self.author_id {
+                return true;
+            }
+            let name = a.name.trim();
+            !name.is_empty() && (name.eq_ignore_ascii_case(&self.author) || name.eq_ignore_ascii_case(&self.login))
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -99,6 +120,8 @@ struct RawComment {
 #[serde(rename_all = "camelCase")]
 struct RawAuthor {
     #[serde(default)]
+    id: u64,
+    #[serde(default)]
     username: String,
     #[serde(default)]
     display_name: String,
@@ -110,21 +133,25 @@ struct RawAuthor {
 const STATUS_LIVE: u32 = 1;
 
 fn comment(r: RawComment) -> Comment {
-    let (author, avatar) = match r.author {
+    let (author, avatar, author_id, login) = match r.author {
         Some(a) => {
+            let login = a.username.trim().to_string();
             let name = if a.display_name.trim().is_empty() { a.username } else { a.display_name };
-            (name.trim().to_string(), a.twitch_avatar_url.filter(|u| u.starts_with("https://")))
+            (name.trim().to_string(), a.twitch_avatar_url.filter(|u| u.starts_with("https://")), a.id, login)
         }
-        None => (String::new(), None),
+        None => (String::new(), None, 0, String::new()),
     };
     let text = tidy(&r.text);
     let removed = r.status != STATUS_LIVE || text.is_empty();
     // A removed comment shows no one's name or picture (the site's neither).
-    let (author, avatar) = if removed { (String::new(), None) } else { (author, avatar) };
+    let (author, avatar, author_id, login) =
+        if removed { (String::new(), None, 0, String::new()) } else { (author, avatar, author_id, login) };
     Comment {
         id: r.id,
         author,
         avatar,
+        author_id,
+        login,
         posted: r.date_posted / 1000,
         removed,
         text,
@@ -234,6 +261,33 @@ pub fn page(project: u64, page: u32) -> anyhow::Result<Arc<Page>> {
     }
 }
 
+/// Who made a project, to mark their comments, for a caller that doesn't
+/// have the project in hand (the panel's route). Kept for the session once
+/// asked; empty when the API won't say (no key, no answer), so nothing is
+/// marked then. Blocks: call it off the UI thread.
+pub fn authors(project: u64) -> Vec<crate::cf::Author> {
+    // For screenshots: `id:name` standing in for the project's author.
+    if let Ok(v) = std::env::var("HOPPER_TEST_COMMENT_AUTHOR") {
+        let (id, name) = v.split_once(':').unwrap_or(("0", &v));
+        return vec![crate::cf::Author { id: id.parse().unwrap_or(0), name: name.to_string(), url: String::new() }];
+    }
+    static KEPT: OnceLock<Mutex<HashMap<u64, Vec<crate::cf::Author>>>> = OnceLock::new();
+    let kept = KEPT.get_or_init(Default::default);
+    if let Some(a) = kept.lock().unwrap().get(&project) {
+        return a.clone();
+    }
+    match crate::cf::get_mod(project) {
+        Ok(m) => {
+            kept.lock().unwrap().insert(project, m.authors.clone());
+            m.authors
+        }
+        Err(e) => {
+            log::info!("authors of {project}: {e:#}");
+            Vec::new()
+        }
+    }
+}
+
 /// A page already loaded this session, without asking.
 pub fn cached(project: u64, page: u32) -> Option<Arc<Page>> {
     cache().lock().unwrap().get(&(project, page)).cloned()
@@ -319,12 +373,49 @@ mod tests {
 
     #[test]
     fn more_stops_at_the_total() {
-        let one = Comment { id: 1, author: String::new(), avatar: None, posted: 0, text: "x".into(), pinned: false, removed: false, replies: vec![] };
+        let one = Comment { id: 1, author: String::new(), avatar: None, author_id: 0, login: String::new(), posted: 0, text: "x".into(), pinned: false, removed: false, replies: vec![] };
         let p = |index, total| Page { comments: vec![one.clone()], index, total };
         assert!(p(0, 21).more());
         assert!(!p(0, 20).more());
         assert!(!p(67, 1357).more());
         assert!(p(66, 1357).more());
+    }
+
+    #[test]
+    fn project_author_matched_by_id_then_by_name() {
+        let by = |id, author: &str, login: &str| Comment {
+            id: 1,
+            author: author.into(),
+            avatar: None,
+            author_id: id,
+            login: login.into(),
+            posted: 0,
+            text: "x".into(),
+            pinned: false,
+            removed: false,
+            replies: vec![],
+        };
+        let who = |id, name: &str| crate::cf::Author { id, name: name.into(), url: String::new() };
+        // Same id, whatever the names say.
+        assert!(by(114142538, "Other", "other").is_by(&[who(114142538, "Maker")]));
+        // No usable id on the project side: the shown or the login name, any case.
+        assert!(by(5, "Maker", "x").is_by(&[who(0, "maker")]));
+        assert!(by(5, "Shown", "MAKER").is_by(&[who(0, "maker")]));
+        // Different id and name; an empty author name matches nothing.
+        assert!(!by(5, "Other", "other").is_by(&[who(6, "Maker")]));
+        assert!(!by(0, "", "").is_by(&[who(0, "")]));
+        // A removed comment names no one.
+        let mut gone = by(6, "Maker", "maker");
+        gone.removed = true;
+        assert!(!gone.is_by(&[who(6, "Maker")]));
+    }
+
+    #[test]
+    fn reads_the_posters_id_and_login() {
+        let p = parse(FIXTURE).unwrap();
+        let c = p.comments.iter().find(|c| c.author == "user_6suobi304g6cu60l").unwrap();
+        assert_eq!(c.author_id, 114142538);
+        assert_eq!(c.login, "user_6suobi304g6cu60l");
     }
 
     #[test]

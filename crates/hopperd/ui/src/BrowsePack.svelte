@@ -17,6 +17,7 @@
   import { say } from './lib/toast.svelte.js';
   import Changelog from './lib/Changelog.svelte';
   import Comments from './lib/Comments.svelte';
+  import { commentsLabel, prefetchComments } from './lib/comments.svelte.js';
   import Issues from './lib/Issues.svelte';
   import VersionCard from './lib/VersionCard.svelte';
   import BrowseMenu from './BrowseMenu.svelte';
@@ -107,6 +108,11 @@
   const canInstall = $derived(!!target && (!isMods || !!target.loader));
   // Only CurseForge has comments (its website's, desktop's Comments tab).
   const hasComments = $derived(p?.source === 'curseforge' && !!p?.num);
+  // The first page is asked for in the background, so the tab is ready and
+  // shows its count.
+  $effect(() => {
+    if (hasComments) prefetchComments(p.num);
+  });
   // Its GitHub issues (desktop's Issues tab), when its tracker is on GitHub.
   const issuesRepo = $derived(p?.num ? p?.issues_repo || '' : '');
   const otherSite = $derived(cur.source === 'modrinth' ? 'CurseForge' : 'Modrinth');
@@ -359,7 +365,7 @@
             <button class:tab-sel={tab === 'versions'} onclick={() => pickTab('versions')}>Versions{versions ? ` ${versions.length}` : ''}</button>
             {#if !packs}<button class:tab-sel={tab === 'deps'} onclick={() => pickTab('deps')}>Dependencies{Array.isArray(deps) ? ` ${deps.length}` : ''}</button>{/if}
             {#if p.gallery.length}<button class:tab-sel={tab === 'gallery'} onclick={() => pickTab('gallery')}>Gallery {p.gallery.length}</button>{/if}
-            {#if hasComments}<button class:tab-sel={tab === 'comments'} onclick={() => pickTab('comments')}>Comments</button>{/if}
+            {#if hasComments}<button class:tab-sel={tab === 'comments'} onclick={() => pickTab('comments')}>{commentsLabel(p.num)}</button>{/if}
             {#if issuesRepo}<button class:tab-sel={tab === 'issues'} onclick={() => pickTab('issues')}>Issues</button>{/if}
           </div>
         </div>
@@ -500,7 +506,7 @@
         <button class:tab-sel={tab === 'versions'} onclick={() => (tab = 'versions')}>Versions{versions ? ` ${versions.length}` : ''}</button>
         {#if !packs}<button class:tab-sel={tab === 'deps'} onclick={() => (tab = 'deps')}>Dependencies{Array.isArray(deps) ? ` ${deps.length}` : ''}</button>{/if}
         {#if p.gallery.length}<button class:tab-sel={tab === 'gallery'} onclick={() => (tab = 'gallery')}>Gallery {p.gallery.length}</button>{/if}
-        {#if hasComments}<button class:tab-sel={tab === 'comments'} onclick={() => (tab = 'comments')}>Comments</button>{/if}
+        {#if hasComments}<button class:tab-sel={tab === 'comments'} onclick={() => (tab = 'comments')}>{commentsLabel(p.num)}</button>{/if}
         {#if issuesRepo}<button class:tab-sel={tab === 'issues'} onclick={() => (tab = 'issues')}>Issues</button>{/if}
       </div>
 

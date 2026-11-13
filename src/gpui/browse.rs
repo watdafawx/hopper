@@ -1863,6 +1863,12 @@ impl BrowseView {
         });
         self.peek_images.extend(mine);
         self.want_plan(&m, cx);
+        // The first comments load behind the peek, so the tab is there when
+        // picked and shows its count. A failure stays quiet: the tab asks
+        // again when opened. Asked once per project, not on every reopen.
+        if has_comments(&m) && !self.comments.contains_key(&id) {
+            self.want_comments(id, false, cx);
+        }
         if m.modrinth.is_some()
             && m.class_id == Some(cf::CLASS_MODPACKS)
             && !matches!(self.server_files.get(&id), Some(Some(_)))
@@ -4283,7 +4289,7 @@ impl BrowseView {
                                     .child(Tab::new().label("Description"))
                                     .child(Tab::new().label(files_label.clone()))
                                     .child(Tab::new().label(format!("Dependencies {n_deps}")))
-                                    .when(has_comments(m), |t| t.child(Tab::new().label("Comments")))
+                                    .when(has_comments(m), |t| t.child(Tab::new().label(self.comments_label(m.id))))
                                     .when(wants.issues.is_some(), |t| t.child(Tab::new().label("Issues")))
                                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                                         this.detail_tab = *ix;
@@ -4400,6 +4406,15 @@ impl BrowseView {
 }
 
 impl BrowseView {
+    /// The Comments tab's label: the total once the first page is in, else
+    /// no number (not 0).
+    fn comments_label(&self, id: u64) -> String {
+        match self.comments.get(&id).and_then(|c| c.pages.first()) {
+            Some(p) => format!("Comments {}", p.total),
+            None => "Comments".to_string(),
+        }
+    }
+
     /// A tab of project `m`'s panel is showing: ask for what it lists.
     fn tab_opened(&mut self, m: &cf::Mod, ix: usize, cx: &mut Context<Self>) {
         self.tab_picked(&tab_wants(m), ix, cx);
@@ -4697,6 +4712,9 @@ impl BrowseView {
         }
         c.busy = true;
         c.failed = false;
+        // Asked ahead (the tab isn't showing): its pictures wait behind the
+        // ones the peek is drawing.
+        let lane = if self.detail_tab == COMMENTS_TAB { crate::store::Lane::Soon } else { crate::store::Lane::Later };
         cx.spawn(async move |this, cx| {
             let r = cx.background_spawn(async move { hopper::cfcomments::page(id, page) }).await;
             this.update(cx, |this, cx| {
@@ -4713,7 +4731,11 @@ impl BrowseView {
                         if c.pages.len() as u32 == page {
                             c.pages.push(p);
                         }
-                        this.store.update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
+                        this.store.update(cx, |s, _| {
+                            urls.iter().for_each(|u| {
+                                s.want_image_in(u, lane);
+                            })
+                        });
                     }
                     Err(_) => c.failed = true,
                 }
@@ -4772,6 +4794,7 @@ impl BrowseView {
                                 } else {
                                     c.author.clone()
                                 }))
+                                .when(c.is_by(&m.authors), |r| r.child(author_chip(cx)))
                                 .when(c.pinned, |r| {
                                     r.child(widgets::chip(theme.primary).child(
                                         h_flex().gap_1().child(Icon::new(IconName::Pin).xsmall()).child("Pinned"),
@@ -4786,12 +4809,16 @@ impl BrowseView {
                         } else {
                             div().text_sm().child(c.text.clone())
                         })
-                        .children(c.replies.iter().map(|r| div().pt_2().child(one_reply(r, store, cx)))),
+                        .children(c.replies.iter().map(|r| div().pt_2().child(one_reply(r, &m.authors, store, cx)))),
                 )
         };
         // Replies draw the same way, one level down (core lists a whole thread
         // at that one level).
-        fn one_reply(c: &Comment, store: &Store, cx: &App) -> Div {
+        // Marks what the project's own author wrote, in a reply too.
+        fn author_chip(cx: &App) -> impl IntoElement {
+            widgets::chip(cx.theme().info).child("Author")
+        }
+        fn one_reply(c: &Comment, authors: &[cf::Author], store: &Store, cx: &App) -> Div {
             let theme = cx.theme();
             let pic = c.avatar.as_deref().and_then(|u| store.image(u)).map(Path::to_path_buf);
             let avatar = Avatar::new().name(c.author.clone()).small().when_some(pic, |a, p| a.src(p));
@@ -4809,6 +4836,7 @@ impl BrowseView {
                                 .gap_2()
                                 .min_w_0()
                                 .child(div().text_sm().font_semibold().truncate().child(c.author.clone()))
+                                .when(c.is_by(authors), |r| r.child(author_chip(cx)))
                                 .when(c.posted > 0, |r| {
                                     r.child(
                                         div()
@@ -5159,7 +5187,7 @@ impl BrowseView {
                     .child(Tab::new().label("Description"))
                     .child(Tab::new().label(files_label))
                     .child(Tab::new().label(format!("Dependencies {n_deps}")))
-                    .when(has_comments(m), |t| t.child(Tab::new().label("Comments")))
+                    .when(has_comments(m), |t| t.child(Tab::new().label(self.comments_label(m.id))))
                     .when(wants.issues.is_some(), |t| t.child(Tab::new().label("Issues")))
                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                         this.detail_tab = *ix;
