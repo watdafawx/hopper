@@ -78,7 +78,12 @@ pub struct ConfigPanel {
 impl ConfigPanel {
     #[allow(clippy::too_many_arguments)]
     pub fn new(store: Entity<Store>, root: PathBuf, key: String, name: String, icon: Option<PathBuf>, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let view = cx.new(|cx| ConfigView::new(store.clone(), root, Host::Panel, name, icon, files, None, None, window, cx));
+        let jar = key.clone();
+        let view = cx.new(|cx| {
+            let mut v = ConfigView::new(store.clone(), root, Host::Panel, name, icon, files, None, None, window, cx);
+            v.jar = Some(jar);
+            v
+        });
         let k = key.clone();
         let sub = cx.subscribe(&view, move |_, _, e: &ConfigViewEvent, cx| match e {
             ConfigViewEvent::Close => cx.emit(ConfigPanelEvent::Close),
@@ -433,6 +438,9 @@ impl ConfigsTab {
             v.changed_only = changed;
             v.side = side;
             v.all_files = all_files;
+            if let Pick::Mod(k) = p {
+                v.jar = Some(k.clone());
+            }
             v
         });
         let sub = cx.subscribe(&view, |this, _, e: &ConfigViewEvent, cx| {
@@ -755,6 +763,7 @@ impl ConfigsTab {
             _ => format!("{} files", files.len()),
         };
         let selected = self.picked.as_ref() == Some(p);
+        let shared = matches!(p, Pick::Mod(k) if self.store.read(cx).settings_shared_jar(&root, k));
         let pick = p.clone();
         let row = h_flex()
             .id(SharedString::from(format!("cfg-mod:{}{p:?}", if other { "o:" } else { "" })))
@@ -772,6 +781,7 @@ impl ConfigsTab {
                 widgets::thumb(icon.as_deref(), rems(1.25), cx)
             })
             .child(div().flex_1().min_w_0().truncate().when(unmatched, |d| d.text_color(theme.muted_foreground)).child(if other { StyledText::new(name) } else { widgets::marked(name, &self.words(), cx) }))
+            .when(shared, |d| d.child(widgets::chip(theme.success).child("Shared")))
             .when(changed > 0 || unsaved > 0, |d| d.child(div().size(px(6.)).flex_none().rounded_full().bg(theme.primary)))
             .child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(right))
             .on_click(cx.listener(move |this, _, window, cx| this.open(pick.clone(), window, cx)));

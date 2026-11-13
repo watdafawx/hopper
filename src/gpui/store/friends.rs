@@ -984,7 +984,7 @@ impl Store {
     /// Update mods: the changes load on the game's next start, the Mods tab
     /// says so, and a jar the game holds open changes once it lets go
     /// (`hopper::locked`).
-    fn follow_busy(&self, root: &Path) -> bool {
+    pub(super) fn follow_busy(&self, root: &Path) -> bool {
         self.is_busy(root) || self.is_launching(root)
     }
 
@@ -1104,15 +1104,27 @@ impl Store {
                 .unwrap_or_default()
         });
         // Members' copies that came before this one was set up.
+        let mut late: Vec<Event> = Vec::new();
         for c in &mut copies {
             let strays: Vec<Event> = self.group_strays.iter().filter(|((_, i), _)| *i == c.inst).map(|(_, e)| e.clone()).collect();
             for e in strays {
                 self.group_strays.remove(&(e.from.clone(), e.inst.clone()));
+                late.push(e.clone());
                 c.arrive(&e.from, Got { code: e.code, seq: e.seq, at: e.at, name: e.from_name, stamps: e.marks });
             }
         }
+        // A copy set up only now (the follow went in after the sharer's
+        // recipe came) catches up on the sharer's shared settings as well.
+        for c in copies.iter().filter(|c| c.local != c.inst && !self.settings.group_copies.iter().any(|o| o.local == c.local && o.inst == c.inst)) {
+            late.extend(self.mailbox_recipes.iter().filter(|e| e.inst == c.inst && !e.configs.is_empty()).cloned());
+        }
         if copies != self.settings.group_copies {
             self.update_settings_quietly(|st| st.group_copies = copies);
+        }
+        // Their shared settings too: a copy set up now catches up on them.
+        for e in &late {
+            let taken = self.take_configs(e);
+            self.cfg.unsaid.extend(taken);
         }
         let back: Vec<PackCopy> = gone.into_iter().filter(|c| c.local != c.inst).collect();
         for c in &back {
@@ -1147,6 +1159,8 @@ impl Store {
                     c.arrive(&e.from, g.clone());
                 }
             });
+            let taken = self.take_configs(&e);
+            self.say_taken(taken, cx);
             self.follow_tick(cx);
         } else {
             let k = (e.from.clone(), e.inst.clone());
@@ -1386,6 +1400,8 @@ impl Store {
                     c.arrive(&e.from, g.clone());
                 }
             });
+            let taken = self.take_configs(&e);
+            self.say_taken(taken, cx);
         }
         // Applied by the tick, which also catches a code seen before but
         // never applied (Hopper closed first, or the apply failed).
@@ -1780,6 +1796,8 @@ impl Store {
             let got = this.update(cx, |s, cx| {
                 // Follows waiting on a game, a task or a retry's delay.
                 s.follow_tick(cx);
+                // Shared mod settings changed here, or waiting to go in.
+                s.config_tick(cx);
                 let mb = s.mailbox.clone()?;
                 if !read {
                     return Some((mb, None));
@@ -1863,6 +1881,11 @@ impl Store {
             }
             for c in &self.settings.group_copies {
                 (&c.inst, &c.local, &c.group).hash(&mut h);
+                // A shared setting changed or a mod's sharing turned; not
+                // the numbers a publish stamps on them afterwards.
+                let mut cfg = c.configs.clone();
+                cfg.relay_reset();
+                serde_json::to_string(&cfg).unwrap_or_default().hash(&mut h);
             }
             h.finish()
         };
@@ -1915,6 +1938,9 @@ impl Store {
         }
         if done.held {
             self.stale_held_at = Some(Instant::now());
+        }
+        for s in &done.copies {
+            self.configs_sent(&s.local, s.configs.clone(), s.too_big, s.seq);
         }
         self.update_settings_quietly(|st| {
             for (s, deleted) in &done.revoked {
@@ -1989,6 +2015,9 @@ struct CopySent {
     code: String,
     seq: u64,
     marks: Vec<(String, groupsync::Mark)>,
+    /// The shared settings it carried (None: none, or too many to send).
+    configs: Option<hopper::configsync::Configs>,
+    too_big: bool,
 }
 
 /// One publish: shares to take back and packs to send.
@@ -2084,14 +2113,17 @@ impl PublishWork {
             // A group copy says when each mod got the way it is, so a change
             // it only passes on keeps its own date (see `groupsync::Stamp`).
             let marks = copy.as_ref().map(|c| groupsync::stamps(&inst, &c.copy, &made.share)).unwrap_or_default();
-            match mb.publish_to(&plan.to, &plan.groups, &relay_inst, &key, &inst.name, &made.code, &made.left_out, &marks) {
+            // The group's shared mod settings ride along whole, so a member
+            // who was away catches up from this one recipe.
+            let (configs, carried, too_big) = copy.as_ref().map(|c| super::config_sync::payload(&c.copy.configs)).unwrap_or_default();
+            match mb.publish_with(&plan.to, &plan.groups, &relay_inst, &key, &inst.name, &made.code, &made.left_out, &marks, &configs) {
                 Ok(sent) => {
                     if let Some(c) = &copy
                         && !sent.skipped.contains(&c.copy.group)
                     {
                         let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
                         let marks = groupsync::sent_marks(&inst, &c.copy, &made.share, &self.me, sent.seq, at);
-                        out.copies.push(CopySent { local: c.copy.local.clone(), code: made.code.clone(), seq: sent.seq, marks });
+                        out.copies.push(CopySent { local: c.copy.local.clone(), code: made.code.clone(), seq: sent.seq, marks, configs: carried, too_big });
                     }
                     plan.groups.retain(|g| !sent.skipped.contains(g));
                     // A member's copy isn't a share of this PC's to take

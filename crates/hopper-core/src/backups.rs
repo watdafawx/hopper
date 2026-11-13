@@ -360,7 +360,59 @@ pub fn record(backup_dir: &Path, saved: &Path, original_rel: &str) {
 
 /// A History folder's own notes, not entries.
 fn is_bookkeeping(name: &str) -> bool {
-    matches!(name, ORIGINS | IDS | CHECKED | REASON | crate::actor::WHO_FILE)
+    matches!(name, ORIGINS | IDS | CHECKED | REASON | SETTINGS | crate::actor::WHO_FILE)
+}
+
+/// Beside a History folder's files: which settings a friend's shared
+/// settings changed in each file (`configsync`), so History can say
+/// "Item list on the left: false to true" rather than only the file.
+const SETTINGS: &str = ".settings.json";
+
+/// One setting a shared change wrote.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SettingNote {
+    pub key: String,
+    pub was: String,
+    pub now: String,
+}
+
+/// The settings a shared change wrote in one file, and the mod's name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SettingsNote {
+    pub mod_name: String,
+    pub changes: Vec<SettingNote>,
+}
+
+/// Notes the settings written in `rel` on the History folders made since
+/// `since` (unix seconds) that hold that file.
+pub fn note_settings(root: &Path, since: u64, rel: &str, mod_name: &str, changes: &[SettingNote]) {
+    let rel = rel.replace('\\', "/");
+    for d in fs::read_dir(root.join(crate::sync::BACKUP_DIR)).into_iter().flatten().flatten() {
+        let Some(stamp) = d.file_name().to_str().and_then(|s| s.parse::<u64>().ok()) else { continue };
+        if stamp < since {
+            continue;
+        }
+        let dir = d.path();
+        let origins: serde_json::Map<String, serde_json::Value> =
+            fs::read(dir.join(ORIGINS)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        if !origins.values().any(|v| v.as_str() == Some(rel.as_str())) {
+            continue;
+        }
+        let p = dir.join(SETTINGS);
+        let mut map: std::collections::BTreeMap<String, SettingsNote> =
+            fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        map.insert(rel.clone(), SettingsNote { mod_name: mod_name.to_string(), changes: changes.to_vec() });
+        let _ = fs::write(&p, serde_json::to_vec_pretty(&map).unwrap_or_default());
+    }
+}
+
+/// The settings a shared change wrote in an entry's file (`restore_to`),
+/// when it was one.
+pub fn settings_note(set_dir: &Path, restore_to: &str) -> Option<SettingsNote> {
+    let map: std::collections::BTreeMap<String, SettingsNote> = serde_json::from_slice(&fs::read(set_dir.join(SETTINGS)).ok()?).ok()?;
+    map.get(&restore_to.replace('\\', "/")).cloned()
 }
 
 #[derive(Clone, Debug, PartialEq)]

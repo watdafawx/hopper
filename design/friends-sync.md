@@ -80,7 +80,7 @@ Removing a friend also takes each out of the other's groups and queues an
 
 | Route | Body → answer |
 |---|---|
-| `POST /v1/recipes` | `{to: [ids], groups: [ids], inst, key, name, code, left_out, marks?}` → `{seq, sent, skipped}` |
+| `POST /v1/recipes` | `{to: [ids], groups: [ids], inst, key, name, code, left_out, marks?, configs?}` → `{seq, sent, skipped}` |
 | `POST /v1/revoke` | `{inst, to: [ids], groups: [ids], reason}` |
 | `GET /v1/recipes?after=N&wait=60&v=2` | `{seq, events}`, long-polls up to `wait` seconds |
 
@@ -168,7 +168,7 @@ Every event has `seq`, `kind`, `from`, `from_name`, `at`. Without `v=2` only
 
 | kind | fields | the desktop |
 |---|---|---|
-| `recipe` | `inst, key, name, code, left_out, direct, groups`, `marks` when sent | lists it; applies it to every local follow |
+| `recipe` | `inst, key, name, code, left_out, direct, groups`, `marks` and `configs` when sent | lists it; applies it to every local follow |
 | `revoke` | `inst, reason, direct, groups` | removes those ways in; once none is left the pack leaves the list and its follows end (`ended` = reason), keeping their last version |
 | `group` | `group` | reads the groups again |
 | `group_follow` | `group, pack_from, inst` | reads the groups again; keeping in step follows from there |

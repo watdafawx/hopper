@@ -1722,6 +1722,7 @@ impl FriendsPanel {
             })
             .collect();
         let n_packs = pack_rows.len() + my_rows.len();
+        let settings_rows = self.shared_settings_rows(g, cx);
         let gid = g.id.clone();
         // Only the group's maker adds people; say who, where it can't be done.
         let add = if g.me.joined {
@@ -1783,10 +1784,68 @@ impl FriendsPanel {
                     cx,
                 )))
             })
+            .when(!settings_rows.is_empty(), |c| c.child(cap("Shared settings", Some(settings_rows.len()), None, cx)).children(settings_rows))
             .child(cap("People", Some(member_rows.len()), add.map(|b| b.into_any_element()), cx))
             .children(member_rows)
             .into_any_element();
         (Some(top), body)
+    }
+
+    /// The mods whose settings the group shares, in this PC's copies of
+    /// its packs: who started sharing each, and Stop.
+    fn shared_settings_rows(&self, g: &Group, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let s = self.store.read(cx);
+        if !s.settings_sharing() {
+            return Vec::new();
+        }
+        let me = s.mailbox_id();
+        let mut out = Vec::new();
+        for c in s.settings().group_copies.iter().filter(|c| c.group == g.id) {
+            let Some(inst) = s.instances().iter().find(|i| i.id == c.local) else { continue };
+            for (m, mc) in c.configs.shared() {
+                let a = inst.addons.iter().find(|a| hopper::groupsync::addon_key(a) == *m);
+                let (name, icon, pid) = match a {
+                    Some(a) => (a.name.clone(), s.image(&a.icon).map(Path::to_path_buf), a.project_id),
+                    None => ("A mod you don't have".to_string(), None, 0),
+                };
+                let n = c.configs.count(m);
+                let who = if mc.shared.by == me { "you".to_string() } else { name_or(&mc.shared.name, "a friend") };
+                let what = match n {
+                    0 => format!("Shared by {who} · no settings changed yet"),
+                    1 => format!("Shared by {who} · 1 setting changed"),
+                    n => format!("Shared by {who} · {n} settings changed"),
+                };
+                let kept = s.settings_kept(&inst.root, m);
+                let ix = out.len();
+                let (root, key, store, view) = (inst.root.clone(), m.clone(), self.store.clone(), cx.entity());
+                out.push(
+                    h_flex()
+                        .id(SharedString::from(format!("gs:{ix}")))
+                        .gap_2()
+                        .px_3()
+                        .py_1()
+                        .hover(|s| widgets::row_hover(s, cx))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_sm().child(widgets::mod_link(("gs-name", ix), name, icon.as_deref(), pid, move |p, _, cx| view.update(cx, |_, cx| cx.emit(FriendsEvent::Project(p))), cx)))
+                                .child(widgets::caption(format!("{what} · {}", inst.name), cx).text_xs().truncate()),
+                        )
+                        .when(kept, |r| r.child(widgets::chip(cx.theme().muted_foreground).child("Keeping yours")))
+                        .child(
+                            Button::new(SharedString::from(format!("gs-stop:{ix}")))
+                                .xsmall()
+                                .outline()
+                                .label("Stop")
+                                .tooltip("Stop sharing this mod's settings. Everyone keeps theirs as they are now.")
+                                .on_click(move |_, _, cx| store.update(cx, |s, cx| s.set_settings_shared(&root, &key, false, cx))),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+        out
     }
 
     /// The live invite, while the + popover is shut: one line with the code

@@ -96,6 +96,10 @@ MAX_GROUP_PACKS = 100
 MAX_GROUPS_PER_POST = 20
 # Stamps one group copy's code may carry (one per mod changed from the pack).
 MAX_MARKS = 2000
+# A group copy's shared mod settings (base64 of deflated JSON, made by the
+# desktop): the whole shared state rides with every recipe, so a member back
+# after a month gets every setting the group changed.
+MAX_CONFIGS = 16384
 # Abuse limits.
 SOCKET_TIMEOUT = 30           # seconds a read or write may stall
 REQUEST_DEADLINE = 30         # seconds for a whole request's headers and body
@@ -691,12 +695,15 @@ def recipe_fields(body):
     marks = marks_of(body.get("marks"))
     if marks:
         fields["marks"] = marks
+    configs = body.get("configs")
+    if isinstance(configs, str) and configs:
+        fields["configs"] = text(configs, MAX_CONFIGS, MAX_CONFIGS)
     return fields
 
 
 def pack_bytes(p):
     return size_of([p.get("inst", ""), p.get("key", ""), p.get("name", ""), p.get("code", ""), p.get("left_out", []),
-                    p.get("marks", {})])
+                    p.get("marks", {}), p.get("configs", "")])
 
 
 def pack_usage(uid):
@@ -817,7 +824,7 @@ def group_pack_events(uid, after):
             if p["from"] != uid and p.get("seq", 0) <= since:
                 ev = {"seq": since, "kind": "recipe", "from": p["from"], "at": p.get("at", 0),
                       "direct": False, "groups": [gid]}
-                for f in ("inst", "key", "code", "name", "left_out", "marks"):
+                for f in ("inst", "key", "code", "name", "left_out", "marks", "configs"):
                     if f in p:
                         ev[f] = p[f]
                 out.append(ev)
@@ -1081,7 +1088,7 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         q = parse_qs(u.query)
         if u.path == "/v1/health":
-            return self.send(200, {"ok": True, "service": "hopper-mailbox", "v": 2})
+            return self.send(200, {"ok": True, "service": "hopper-mailbox", "v": 2, "configs": True})
         uid = self.auth()
         if not uid:
             return self.fail(401, "register or pair first")
@@ -1320,6 +1327,11 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(raw_code, str) and size_of(raw_code) > 20000:
             # Said out loud: a cut code would be a different, broken pack.
             return 413, {"error": "that share code is too large", "code": "too_large"}
+        raw_configs = body.get("configs")
+        if raw_configs is not None and (not isinstance(raw_configs, str) or size_of(raw_configs) > MAX_CONFIGS):
+            # Cut, it wouldn't read back; the desktop tells the sharer to
+            # share fewer mods instead.
+            return 413, {"error": "too many shared settings", "code": "too_large"}
         if not text(raw_code, 20000, 20000).startswith("HOP-"):
             return 400, {"error": "not a share code"}
         to = body.get("to")

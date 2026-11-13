@@ -98,6 +98,10 @@ pub struct Event {
     /// the code has it ([`crate::groupsync::Stamp`]). Empty from an older
     /// Hopper or mailbox.
     pub marks: std::collections::BTreeMap<String, crate::groupsync::Stamp>,
+    /// Recipe of a group pack: the group's shared mod settings
+    /// ([`crate::configsync::encode`]). Empty when none are shared, or from
+    /// an older Hopper or mailbox.
+    pub configs: String,
 }
 
 impl Default for Event {
@@ -120,6 +124,7 @@ impl Default for Event {
             group: String::new(),
             pack_from: String::new(),
             marks: Default::default(),
+            configs: String::new(),
         }
     }
 }
@@ -323,6 +328,8 @@ pub struct Mailbox {
     agent: ureq::Agent,
     /// The mailbox's protocol version, asked once.
     proto: OnceLock<u64>,
+    /// Whether the mailbox carries shared mod settings, asked with `proto`.
+    configs: OnceLock<bool>,
     /// This PC's saved account was unknown to the mailbox, so it signed up
     /// again (the service lost its data).
     reset: bool,
@@ -341,6 +348,7 @@ impl Mailbox {
             account,
             agent,
             proto: OnceLock::new(),
+            configs: OnceLock::new(),
             reset: false,
         }
     }
@@ -465,7 +473,15 @@ impl Mailbox {
         }
         let v = self.get("/v1/health", None)?;
         let p = v["v"].as_u64().unwrap_or(1);
+        let _ = self.configs.set(v["configs"].as_bool().unwrap_or(false));
         Ok(*self.proto.get_or_init(|| p))
+    }
+
+    /// Whether the mailbox passes on a group's shared mod settings (an
+    /// older one drops them, so the switch stays hidden). Asked once.
+    pub fn shares_settings(&self) -> anyhow::Result<bool> {
+        self.proto()?;
+        Ok(self.configs.get().copied().unwrap_or(false))
     }
 
     fn need_groups(&self) -> anyhow::Result<()> {
@@ -540,6 +556,24 @@ impl Mailbox {
         left_out: &[String],
         marks: &std::collections::BTreeMap<String, crate::groupsync::Stamp>,
     ) -> anyhow::Result<Sent> {
+        self.publish_with(to, groups, inst, key, name, code, left_out, marks, "")
+    }
+
+    /// [`Self::publish_to`] with a group pack's shared mod settings
+    /// (`configs`, empty for none).
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_with(
+        &self,
+        to: &[String],
+        groups: &[String],
+        inst: &str,
+        key: &str,
+        name: &str,
+        code: &str,
+        left_out: &[String],
+        marks: &std::collections::BTreeMap<String, crate::groupsync::Stamp>,
+        configs: &str,
+    ) -> anyhow::Result<Sent> {
         if !self.has_groups()? {
             // An old mailbox takes one friend per call and knows no groups.
             let mut out = Sent {
@@ -571,6 +605,9 @@ impl Mailbox {
         // them, and the copies then work as they did before.
         if !marks.is_empty() {
             body["marks"] = serde_json::to_value(marks)?;
+        }
+        if !configs.is_empty() && self.shares_settings()? {
+            body["configs"] = configs.into();
         }
         let v = self.call("/v1/recipes", body)?;
         Ok(Sent {

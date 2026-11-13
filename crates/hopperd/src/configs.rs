@@ -89,10 +89,10 @@ fn format_name(f: Option<Format>) -> &'static str {
 
 // ---- one setting as JSON --------------------------------------------------------------
 
-/// Keys whose values are passwords, tokens and the like: shown masked.
+/// Keys whose values are passwords, tokens and the like: shown masked. The
+/// list is hopper-core's, shared with the desktop and friends' settings sync.
 pub(crate) fn secret(key: &str) -> bool {
-    let k = configowner::squash(key);
-    ["token", "secret", "password", "passwd", "apikey", "webhook", "privatekey"].iter().any(|w| k.contains(w))
+    configedit::secret_key(key)
 }
 
 fn masked(e: &Entry) -> bool {
