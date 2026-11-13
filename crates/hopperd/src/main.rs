@@ -71,6 +71,9 @@ mod service;
 mod sftp;
 mod sources_api;
 mod tls;
+mod nodes;
+#[cfg(test)]
+mod nodes_tests;
 mod tunnel;
 
 #[cfg(windows)]
@@ -144,6 +147,8 @@ pub struct App {
     pub changes: changes::Changes,
     /// One-use WebSocket tickets and file links for pages on other origins.
     pub grants: grants::Grants,
+    /// Nodes of this panel (see [`nodes`]).
+    pub nodes: nodes::Nodes,
 }
 
 impl App {
@@ -248,10 +253,10 @@ fn main() -> anyhow::Result<()> {
         log.init();
         return service::command(&argv[1..]);
     }
-    // Hidden: phase A0's tunnel measurements (design/multi-panel.md).
-    if argv.first().map(String::as_str) == Some("tunnel-spike") {
-        log.init();
-        return tunnel::spike::command(&argv[1..]);
+    // Node mode: join a main panel, check or leave it (design/multi-panel.md, A1).
+    if argv.first().map(String::as_str) == Some("node") {
+        log.filter_level(log::LevelFilter::Warn).init();
+        return tunnel::node::command(&argv[1..]);
     }
     let Some(args) = parse_args()? else { return Ok(()) };
     if args.service {
@@ -384,6 +389,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         tls: tls_info,
         acme: acme::Acme::new(&data_dir),
         sftp_fingerprint: sftp::fingerprint(&data_dir),
+        nodes: nodes::Nodes::new(&data_dir),
     });
     app.rescan();
     autoupdate::start(app.clone());
@@ -524,7 +530,10 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: tls::OwnCert, shutdown: Shu
     }
     rules::start(app.clone());
     router::start(app.clone());
-    tunnel::spike::from_env();
+    // As a main: alerts for nodes that are gone. As a node: the
+    // connection to the main, while node.json is there.
+    nodes::start(app.clone());
+    tunnel::node::start(app.boot_dir.clone());
     if cfg.sftp_port != 0 {
         tokio::spawn(sftp::serve(app.clone(), cfg.bind.clone(), cfg.sftp_port));
     }

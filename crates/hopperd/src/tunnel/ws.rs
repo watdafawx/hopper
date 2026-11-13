@@ -3,7 +3,6 @@
 //! that pins the main's CA. One binary message is one frame.
 
 use std::io;
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -86,79 +85,18 @@ impl FrameRx for ClientRx {
     }
 }
 
-/// Which step of connecting failed, so the node can say it plainly
-/// (`design/multi-panel.md`, "Adjusted after research" point 7).
-#[derive(Debug)]
-pub enum ConnectError {
-    BadAddress(String),
-    /// The name didn't resolve.
-    Dns(String),
-    /// Nothing answered on that address and port.
-    Tcp(String),
-    /// The main's certificate isn't the one pinned at pairing.
-    Certificate(String),
-    /// The main refused the node key (revoked or wrong): stop, don't retry.
-    Refused(u16),
-    Other(String),
-}
+pub use super::dial::ConnectError;
 
-impl std::fmt::Display for ConnectError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConnectError::BadAddress(m) => write!(f, "address not usable: {m}"),
-            ConnectError::Dns(m) => write!(f, "address not found: {m}"),
-            ConnectError::Tcp(m) => write!(f, "can't connect: {m}"),
-            ConnectError::Certificate(m) => write!(f, "the main's certificate doesn't match the one this node trusts: {m}"),
-            ConnectError::Refused(s) => write!(f, "the main refused this node's key (HTTP {s})"),
-            ConnectError::Other(m) => write!(f, "{m}"),
-        }
-    }
-}
+/// Where nodes connect on the main.
+pub const PATH: &str = "/api/v1/node/connect";
 
-/// A TLS client that trusts only `ca` (the main's own CA, pinned when the
-/// node joined), never the system's roots: a certificate from a public CA
-/// for the same name is still refused.
-pub fn pinned_tls(ca: &rustls::pki_types::CertificateDer<'static>) -> anyhow::Result<Arc<rustls::ClientConfig>> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(ca.clone())?;
-    let mut c = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    c.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(Arc::new(c))
-}
-
-/// Opens the tunnel's WebSocket: `wss://` only, CA pinned, node key in
-/// `Authorization: Bearer` (no browser is involved, so no ticket in the URL
-/// or subprotocol: the key never lands in an access log).
-pub async fn connect(url: &str, tls: Arc<rustls::ClientConfig>, token: &str) -> Result<(ClientTx, ClientRx), ConnectError> {
-    let rest = url.strip_prefix("wss://").ok_or_else(|| ConnectError::BadAddress("must start with wss://".into()))?;
-    let (host, port) = host_port(rest.split('/').next().unwrap_or_default())?;
-    let addrs: Vec<_> = match tokio::net::lookup_host((host.as_str(), port)).await {
-        Ok(a) => a.collect(),
-        Err(e) => return Err(ConnectError::Dns(e.to_string())),
-    };
-    if addrs.is_empty() {
-        return Err(ConnectError::Dns(format!("{host} has no address")));
-    }
-    let tcp = match tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addrs[..])).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Err(ConnectError::Tcp(e.to_string())),
-        Err(_) => return Err(ConnectError::Tcp("timed out".into())),
-    };
-    let _ = tcp.set_nodelay(true);
-    let name = rustls::pki_types::ServerName::try_from(host.clone()).map_err(|e| ConnectError::BadAddress(e.to_string()))?;
-    let stream = match tokio::time::timeout(Duration::from_secs(15), tokio_rustls::TlsConnector::from(tls).connect(name, tcp)).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            let cert = e.get_ref().and_then(|i| i.downcast_ref::<rustls::Error>()).is_some_and(|r| matches!(r, rustls::Error::InvalidCertificate(_)));
-            return Err(if cert { ConnectError::Certificate(e.to_string()) } else { ConnectError::Other(format!("TLS: {e}")) });
-        }
-        Err(_) => return Err(ConnectError::Other("TLS handshake timed out".into())),
-    };
+/// Opens the tunnel's WebSocket to the main: TLS pinned (see [`super::dial`]),
+/// node key in `Authorization: Bearer` (no browser is involved, so no
+/// ticket in the URL or subprotocol: the key never lands in an access log).
+pub async fn connect(t: &super::dial::Target, pin: &super::dial::Pin, token: &str) -> Result<(ClientTx, ClientRx), ConnectError> {
+    let (stream, _) = super::dial::tls(t, pin).await?;
     use tungstenite::client::IntoClientRequest;
+    let url = format!("wss://{}{PATH}", t.authority());
     let mut req = url.into_client_request().map_err(|e| ConnectError::BadAddress(e.to_string()))?;
     let auth = format!("Bearer {token}").parse().map_err(|_| ConnectError::Other("bad token".into()))?;
     req.headers_mut().insert("authorization", auth);
@@ -173,47 +111,9 @@ pub async fn connect(url: &str, tls: Arc<rustls::ClientConfig>, token: &str) -> 
             Ok((ClientTx(tx), ClientRx(rx)))
         }
         Ok(Err(tungstenite::Error::Http(resp))) if matches!(resp.status().as_u16(), 401 | 403) => Err(ConnectError::Refused(resp.status().as_u16())),
+        Ok(Err(tungstenite::Error::Http(resp))) if resp.status().as_u16() == 429 => {
+            Err(ConnectError::Other("the main is refusing this address for a while (too many wrong keys)".into()))
+        }
         Ok(Err(e)) => Err(ConnectError::Other(e.to_string())),
-    }
-}
-
-/// `host`, `host:port`, `[v6]` or `[v6]:port`; 443 when no port is given.
-fn host_port(authority: &str) -> Result<(String, u16), ConnectError> {
-    let bad = |m: &str| ConnectError::BadAddress(m.into());
-    let port = |p: &str| p.parse::<u16>().map_err(|_| bad("bad port"));
-    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
-        let (h, after) = rest.split_once(']').ok_or_else(|| bad("missing ]"))?;
-        match after {
-            "" => (h, 443),
-            p => (h, port(p.strip_prefix(':').ok_or_else(|| bad("bad port"))?)?),
-        }
-    } else {
-        match authority.rsplit_once(':') {
-            Some((h, p)) => (h, port(p)?),
-            None => (authority, 443),
-        }
-    };
-    if host.is_empty() {
-        return Err(bad("no host"));
-    }
-    Ok((host.to_string(), port))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::host_port;
-
-    #[test]
-    fn addresses_with_and_without_ports() {
-        let ok = |a: &str| host_port(a).map_err(|e| e.to_string()).unwrap();
-        assert_eq!(ok("main.example"), ("main.example".into(), 443));
-        assert_eq!(ok("main.example:8790"), ("main.example".into(), 8790));
-        assert_eq!(ok("127.0.0.1:18790"), ("127.0.0.1".into(), 18790));
-        assert_eq!(ok("[::1]:8790"), ("::1".into(), 8790));
-        // Used to be read as host "[:" and port "1]".
-        assert_eq!(ok("[::1]"), ("::1".into(), 443));
-        for bad in ["", ":8790", "h:", "h:99999", "[::1", "[::1]x", "[::1]:"] {
-            assert!(host_port(bad).is_err(), "{bad}");
-        }
     }
 }

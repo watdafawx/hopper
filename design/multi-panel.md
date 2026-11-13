@@ -1283,6 +1283,132 @@ Left home-only, on purpose:
 - Zip-entry reads still buffer the entry in memory (up to 512 MB), as before
   B4. Uploads and every other download stream.
 
+## A1 as built (2026-11-13)
+
+Nodes join a main, stay connected and can be removed from either side. A
+node still serves nothing through the tunnel: the main's requests are A2,
+so a node refuses every stream the main opens. The ceiling (Look, Operate,
+Manage) is chosen and stored at join time; A2 enforces it.
+
+### Joining
+
+- **Join command** (Settings › Nodes › Make a join command, owner only).
+  The main makes a key `hn_` + 48 hex, kept only as a hash, good once for
+  30 minutes (listed for 24 h after). The command pins the main's CA by
+  fingerprint and installs the service:
+  - Linux: `curl … hopperd-<v>-linux-<arch>.tar.gz | sudo tar xz -C /usr/local/bin hopperd && sudo hopperd node join <url> --key … --ca <fp> --service`
+  - Windows (admin PowerShell): download the zip to `%TEMP%`, then
+    `hopperd.exe node join … --service` (`service install --copy`).
+  `nodes::commands` refuses to build a command from anything that isn't
+  shell-safe (unit tested); the dialog shows the key once.
+- **Code pairing** (`hopperd node join <url>` with no key). The node trusts
+  whatever certificate the main shows *for this request only*, sends a
+  request, and both sides show the same 6-digit code (`pair_code` over the
+  fingerprint, request id and a secret only the node knows). The owner
+  compares, picks the ceiling and allows or refuses. Requests last 5
+  minutes, at most 8 at once. Only after "Allow" does the node save the CA
+  it saw.
+- Either way the node gets a token `hnt_` + 64 hex; the main keeps its hash
+  (constant-time compare). `node.json` (0600) in the node's data folder
+  holds the main's URL, name, CA (PEM), fingerprint, node id, token and
+  ceiling. A running panel watches it every 2 s, so joining or leaving
+  doesn't need a restart.
+
+### Connecting
+
+- The node dials `wss://<main>/api/v1/node/connect` with the token. TLS
+  offers ALPN `hopperd-node` first, so the main always answers with its own
+  certificate (also when it has a Let's Encrypt one), then `http/1.1`.
+- Pinning is a custom rustls verifier: the chain must end at the pinned CA
+  (`Pin::Ca`), or contain a certificate with the fingerprint pinned at join
+  time (`Pin::Fingerprint`). A host-name mismatch under the pinned CA is
+  accepted, since nodes often reach the main by an address its certificate
+  doesn't list. Limitation: a TLS-terminating proxy in front of the main
+  breaks the pin (it shows its own certificate); the node then says the
+  certificate doesn't match.
+- `HTTPS_PROXY` / `https_proxy` (http:// proxies, optional basic auth) and
+  `NO_PROXY` are honoured through a CONNECT tunnel.
+- Keepalive is A0's: ping every 20 s, dead after 60 s of silence.
+- Reconnect: 1 s doubling to 60 s, plus up to 1 s of jitter, with a fresh
+  DNS lookup each try. The backoff resets only after a connection that
+  lasted 60 s. A certificate mismatch waits the full 60 s between tries; a
+  refused token or a "removed" goodbye stops trying.
+
+### On the main
+
+- States: Connected (heard from under 30 s ago), Reconnecting (30–60 s),
+  Offline (60 s or more), Not connected yet (never). A node gone 2 minutes
+  raises one alert (`alerts::node_state`, webhook event `node`), and one
+  "back online" when it returns. The alerts' 10-minute quiet time stops a
+  flapping node from repeating the alert.
+- Routes, all `require_owner` plus `is_owner` (the real owner; managers and
+  managing devices get 403, tested): `GET /api/v1/nodes`,
+  `POST /api/v1/nodes/keys`, `DELETE /api/v1/nodes/keys/{id}`,
+  `POST /api/v1/nodes/pending/{id}/answer`, `DELETE /api/v1/nodes/{id}`
+  (closes the tunnel with goodbye "removed").
+- What nodes call, no session: `/api/v1/node/join`, `/node/request`,
+  `/node/request/status`, `/node/check` (token; a one-off diagnostic),
+  `/node/leave`, `/node/connect`. Wrong keys, tokens and unknown requests
+  count per address: 10 in 10 minutes, then 429 for the rest of the
+  window. `join` and `request` are in `security.rs`'s guessable list.
+- Audit log: key made or removed, joined (key or code), allowed, refused,
+  wrong key with the reason (unknown, used, expired), connected,
+  disconnected, removed, left. The status polling route stays out of it.
+- `nodes.json` in the main's data folder: nodes (token hash, ceiling,
+  joined, last seen) and keys (hash, expiry, used by).
+
+### On the node
+
+- `hopperd node join <url> [--key K --ca FP] [--name N] [--data DIR] [--service]`
+- `hopperd node status`: the running panel's state when its status file is
+  fresh (under 75 s), else a one-off check that prints each step: address
+  found, port open, certificate matches, key accepted (point 7).
+- `hopperd node leave`: tells the main (8 s limit) and forgets it either
+  way; if the main couldn't be told, it says to remove the node there too.
+- Settings › Nodes on a node shows "This panel is a node": the main, the
+  state chip, the last message, the pinned fingerprint and Leave
+  (`/api/v1/this-node`, real owner only). The add and list cards stay
+  hidden there until the node has nodes or keys of its own.
+- The A0 spike (`tunnel-spike`, `HOPPERD_TUNNEL_SPIKE_NODE`) is deleted;
+  `api::ws_allowed` is test-only now (the spike was its last caller).
+
+### Web UI
+
+Mock option A (https://claude.ai/artifact/9YKfYfAzcgmLFd1VtMh8gF): it
+matches Access & devices, and the one-time key sits in a dialog instead of
+staying on the page. Settings › Nodes is for the real owner only
+(`catsFor(owner, trueOwner)`). Cards: Add a node (button, the code-join
+hint, unused keys with Cancel), Waiting for you (code tiles, ceiling
+segmented control, Refuse / Allow), then the node list (dot, name, line,
+state chip, ceiling chip, ghost remove with a confirmation). The command
+dialog shows the key once, with Linux / Windows underline tabs and Copy.
+Shared fixes it needed: `.dot.warn` (the Reconnecting dot was grey) and
+the neutral `.chip` fill, which was a dark-only colour and invisible in
+light themes (now `color-mix(var(--text) 8%)`, the same colour in dark).
+
+### Checked
+
+- Two scratch panels on loopback with a pausable forwarder between them.
+  The generated command joined and the node showed Connected 2.4 s later.
+  With traffic held: Reconnecting at 30 s of silence, Offline at 60 s, the
+  alert at 120 s, "back online" on release, reconnected at once. Main CA
+  reset: `node status` says the certificate doesn't match and to leave and
+  join again. A used key: refused, logged "join key already used". Expired
+  keys: unit test (not waited out). Code pairing allow and refuse through
+  the web UI.
+- Not checked: the VM run (optional; skipped), a real `--service` install
+  (the command is unit-tested, not run), `HTTPS_PROXY` against a real
+  proxy (parsing and `NO_PROXY` are unit-tested).
+
+### Deferred / open
+
+- Token rotation every 30 days; a node web UI on loopback only; a badge
+  for waiting requests in the settings list.
+- Light theme: the shared state chips (green 2.7:1, gold 2.4:1, red 3.8:1
+  text contrast) are under 4.5:1 everywhere they're used, not only here.
+- The segmented controls in CopyServer and BackupTargets fill the chosen
+  option orange; the rule (and Nodes) uses the selected tint.
+
 ## Open questions for the maintainer
 
 1. **Remote-session limits (B).** *Answered (maintainer, 2026-11-11): a

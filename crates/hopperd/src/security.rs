@@ -208,7 +208,10 @@ fn server_of(path: &str) -> Option<&str> {
 /// tight limit. (Pairing status needs the request's long secret, and a
 /// device asks every second while it waits.)
 fn is_guessable(path: &str) -> bool {
-    matches!(path, "/api/v1/auth/login" | "/api/v1/auth/setup" | "/api/v1/auth/2fa/enable" | "/api/v1/auth/2fa/disable" | "/api/v1/pair/request")
+    matches!(
+        path,
+        "/api/v1/auth/login" | "/api/v1/auth/setup" | "/api/v1/auth/2fa/enable" | "/api/v1/auth/2fa/disable" | "/api/v1/pair/request" | "/api/v1/node/join" | "/api/v1/node/request"
+    )
 }
 
 /// Asking for a one-use live ticket or a file link (design/multi-panel.md,
@@ -371,7 +374,8 @@ async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String],
     // Changes, sign-ins and pairing go in the audit log.
     // Reads aren't logged (the UI checks who's signed in all the time).
     let changes = method != Method::GET && method != Method::HEAD;
-    if api && changes && path != "/api/v1/pair/status" && !is_grant_request(&method, &path) {
+    // A waiting node asks every 2 s, like a waiting PC.
+    if api && changes && path != "/api/v1/pair/status" && path != "/api/v1/node/request/status" && !is_grant_request(&method, &path) {
         let status = res.status().as_u16();
         // A sign-in names who it became; a failed one stays anonymous.
         let (who_name, role) = who.as_ref().map(|w| (w.name(), w.role_name().to_string())).unwrap_or_else(|| {

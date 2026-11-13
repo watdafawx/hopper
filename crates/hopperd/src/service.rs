@@ -178,7 +178,7 @@ fn where_to_open(boot: &Path) -> String {
 }
 
 /// The data folder of whoever installs (on Linux, the user behind sudo).
-fn default_data() -> PathBuf {
+pub(crate) fn default_data() -> PathBuf {
     #[cfg(unix)]
     if let Some(home) = imp::sudo_home() {
         return home.join(".local/share/hopperd");

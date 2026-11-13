@@ -192,6 +192,8 @@ struct State {
     dead: bool,
     rtt: Option<Duration>,
     ping: Option<(u64, Instant)>,
+    /// When the last frame of any kind arrived.
+    heard: Instant,
 }
 
 struct Shared {
@@ -291,6 +293,12 @@ impl Handle {
     /// The last measured ping round trip.
     pub fn rtt(&self) -> Option<Duration> {
         self.0.lock().rtt
+    }
+
+    /// How long since anything arrived from the peer. Pings go both ways
+    /// every `ping_every`, so a quiet link past that has missed one.
+    pub fn quiet_for(&self) -> Duration {
+        self.0.lock().heard.elapsed()
     }
 
     pub fn open_streams(&self) -> usize {
@@ -530,6 +538,7 @@ pub async fn start<T: FrameTx, R: FrameRx>(side: Side, cfg: Config, mut tx: T, m
             dead: false,
             rtt: None,
             ping: None,
+            heard: Instant::now(),
         }),
         data_tx,
         ctl_tx,
@@ -629,6 +638,7 @@ async fn read_loop<R: FrameRx>(shared: &Arc<Shared>, cfg: &Config, mut rx: R, in
                     Some(Ok(b)) => b,
                 };
                 last_seen = Instant::now();
+                shared.lock().heard = last_seen;
                 let frame = match Frame::decode(&bytes) {
                     Ok(f) => f,
                     Err(e) => return protocol(shared, format!("bad frame: {e}")),

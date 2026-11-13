@@ -73,7 +73,7 @@ a.btn { color: var(--text); }
 /* Tinted, no border, the small radius: the same rule as Hopper desktop's chips. A set height, a line
    box no taller than the text, and 2px more padding below than above: centred as laid out, the UI
    font's tall ascent leaves capitals a pixel low (desktop's widgets::chip_pad). */
-.chip { display: inline-flex; align-items: center; gap: 5px; box-sizing: border-box; height: 20px; line-height: 1; font-size: 11.5px; padding: 0 8px 2px; border-radius: var(--radius-sm); border: 1px solid transparent; background: #ededef14; color: var(--subtle); white-space: nowrap; }
+.chip { display: inline-flex; align-items: center; gap: 5px; box-sizing: border-box; height: 20px; line-height: 1; font-size: 11.5px; padding: 0 8px 2px; border-radius: var(--radius-sm); border: 1px solid transparent; background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--subtle); white-space: nowrap; }
 .chip.running { color: var(--green); border-color: transparent; background: var(--green-dim); }
 .chip.starting, .chip.stopping, .chip.warn { color: var(--gold); border-color: transparent; background: var(--gold-dim); }
 .chip.crashed, .chip.wake_failed { color: var(--red); border-color: transparent; background: var(--red-dim); }
@@ -94,7 +94,7 @@ mark.hit { background: color-mix(in srgb, var(--acc) 30%, transparent); color: v
 /* A server's state light (widgets::status_dot). */
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted); }
 .dot.running { background: var(--green); }
-.dot.starting, .dot.stopping { background: var(--gold); }
+.dot.starting, .dot.stopping, .dot.warn { background: var(--gold); }
 .dot.crashed, .dot.wake_failed { background: var(--red); }
 .dot.sleeping { background: var(--gold); }
 /* Rows and nav items: quiet grey hover; selected is the accent wash with a 3px bar on the left. */
