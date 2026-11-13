@@ -4275,10 +4275,19 @@ impl Store {
         self.pinging.contains(root)
     }
 
+    /// Whether this PC knows where to ping the server. A server on a node
+    /// behind a paired panel runs on another machine than the panel, whose
+    /// address only the panel knows: without an address players join it
+    /// by, there's nothing to ping.
+    pub fn pingable(&self, s: &ServerInfo) -> bool {
+        let Some(r) = &s.remote else { return true };
+        hopper::hopperd::node_of(&r.id).is_none() || self.panel_stats(&s.root).is_some_and(|p| p.addresses.first().and_then(|a| hopper::server::join_target(a)).is_some())
+    }
+
     /// Pings the server (unless a ping is already on its way); its result
     /// lands in [`Self::status`].
     pub fn ping(&mut self, s: &ServerInfo) {
-        if !self.pinging.insert(s.root.clone()) {
+        if !self.pingable(s) || !self.pinging.insert(s.root.clone()) {
             return;
         }
         // Hosted servers answer on this PC.

@@ -114,6 +114,45 @@ pub fn panel_root(panel: &str, folder: &str) -> PathBuf {
     if panel.is_empty() { remote_root(folder) } else { PathBuf::from(format!("hopperd:\\@{panel}\\{folder}")) }
 }
 
+/// [`panel_root`] for a server on node `node` behind panel `panel`: the
+/// node's id in between, so a folder with the same name on the main or on
+/// another node is a different server.
+pub fn node_root(panel: &str, node: &str, folder: &str) -> PathBuf {
+    PathBuf::from(format!("hopperd:\\@{panel}\\@{node}\\{folder}"))
+}
+
+/// Between a node's id and its server's id on a main (hopperd's
+/// `relay::SEP`): a node's server is `<node>:<server>` there.
+pub const NODE_SEP: char = ':';
+
+/// The node a server id on a paired panel lives on (`"f94a:smp"` →
+/// `"f94a"`); `None` for the panel's own servers, whose ids never hold a
+/// `:`.
+pub fn node_of(id: &str) -> Option<&str> {
+    let (n, s) = id.split_once(NODE_SEP)?;
+    (!n.is_empty() && !s.is_empty() && !s.contains(NODE_SEP)).then_some(n)
+}
+
+/// Names of the nodes behind each paired panel, by (panel, node id), as
+/// the panel's server list last named them.
+static NODE_NAMES: std::sync::LazyLock<std::sync::Mutex<HashMap<(String, String), String>>> = std::sync::LazyLock::new(Default::default);
+
+/// What node `node` behind panel `panel` is called ("oracle"); its id when
+/// the panel hasn't named it.
+pub fn node_name(panel: &str, node: &str) -> String {
+    NODE_NAMES.lock().unwrap_or_else(|e| e.into_inner()).get(&(panel.to_string(), node.to_string())).cloned().unwrap_or_else(|| node.to_string())
+}
+
+/// The job a panel's answer started: a number for its own, `"<node>:7"`
+/// for one a node runs (the main passes the node's job on under that id).
+fn job_id(v: &Value) -> Option<String> {
+    match &v["job"] {
+        Value::Number(n) => n.as_u64().map(|n| n.to_string()),
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    }
+}
+
 /// "rig" from "https://rig:8790", for a panel's default name.
 pub fn host_name(base: &str) -> String {
     let host = base.split("://").nth(1).unwrap_or(base).split('/').next().unwrap_or("");
@@ -675,8 +714,8 @@ impl Client {
     /// Starts a job with a POST and follows it to the end (see [`Client::follow`]).
     pub fn run_job(&self, path: &str, body: Value, job: &crate::jobs::Job) -> anyhow::Result<Value> {
         let v = self.post(path, body)?;
-        let id = v["job"].as_u64().context("the panel didn't start a job")?;
-        self.follow(id, job)
+        let id = job_id(&v).context("the panel didn't start a job")?;
+        self.follow(&id, job)
     }
 
     /// `/servers/{id}` + `rest`, with the id encoded.
@@ -943,8 +982,9 @@ impl Client {
 
     /// Follows a job the panel runs until it ends, showing its detail and
     /// progress in `job`; cancelling `job` cancels it there. Returns its result.
-    pub fn follow(&self, remote_job: u64, job: &crate::jobs::Job) -> anyhow::Result<Value> {
+    pub fn follow(&self, remote_job: &str, job: &crate::jobs::Job) -> anyhow::Result<Value> {
         let mut cancelled = false;
+        let remote_job = enc(remote_job);
         loop {
             std::thread::sleep(Duration::from_millis(400));
             if job.is_cancelled() && !cancelled {
@@ -981,7 +1021,7 @@ impl Client {
             &format!("/servers/{}/pack/plan", enc(id)),
             json!({ "inst": inst, "pack": pack, "compare": compare, "cf_key": crate::cf::api_key().unwrap_or(""), "keep_days": keep_days() }),
         )?;
-        let result = self.follow(v["job"].as_u64().context("no job id")?, job)?;
+        let result = self.follow(&job_id(&v).context("no job id")?, job)?;
         Ok(serde_json::from_value(result)?)
     }
 
@@ -997,7 +1037,7 @@ impl Client {
             &format!("/servers/{}/pack/apply", enc(id)),
             json!({ "plan": plan, "take": take, "cf_key": crate::cf::api_key().unwrap_or(""), "keep_days": keep_days() }),
         )?;
-        let result = self.follow(v["job"].as_u64().context("no job id")?, job)?;
+        let result = self.follow(&job_id(&v).context("no job id")?, job)?;
         Ok(serde_json::from_value(result)?)
     }
 
@@ -1025,7 +1065,9 @@ impl Client {
     /// `Ok(false)` when the panel is older than that and the file has to be
     /// uploaded instead.
     pub fn fetch_file(&self, id: &str, rel: &str, link: &crate::modfetch::Link) -> anyhow::Result<bool> {
-        if !self.can("files.fetch") {
+        // A main never has a node download from a URL (it would fetch from
+        // the node's own network), so a node's server gets the upload.
+        if !self.can("files.fetch") || node_of(id).is_some() {
             return Ok(false);
         }
         let url = self.url(&Client::fs_path(id, "/fetch"));
@@ -1666,8 +1708,17 @@ fn info_from(v: &Value, base: &str, ca: &str, panel: &str) -> ServerInfo {
         .filter(|f| !f.is_empty())
         .unwrap_or_else(|| name.clone());
     let properties: BTreeMap<String, String> = serde_json::from_value(v["properties"].clone()).unwrap_or_default();
-    let root = panel_root(panel, &folder);
-    let remote = Remote { base: base.to_string(), id: s("id").unwrap_or_default(), ca: ca.to_string(), panel: panel.to_string() };
+    let id = s("id").unwrap_or_default();
+    let root = match node_of(&id) {
+        Some(node) => {
+            if let Some(n) = s("node_name").filter(|n| !n.trim().is_empty()) {
+                NODE_NAMES.lock().unwrap_or_else(|e| e.into_inner()).insert((panel.to_string(), node.to_string()), n);
+            }
+            node_root(panel, node, &folder)
+        }
+        None => panel_root(panel, &folder),
+    };
+    let remote = Remote { base: base.to_string(), id, ca: ca.to_string(), panel: panel.to_string() };
     register(&root, &remote);
     ServerInfo {
         name,
@@ -2476,6 +2527,43 @@ mod tests {
         assert_eq!(i.remote.as_ref().unwrap().id, "tnp-limitless-8");
         assert_eq!(i.max_memory.as_deref(), Some("12G"));
         assert_eq!(i.manager, Manager::Unknown);
+    }
+
+    /// A server on a node behind the paired panel: its own stand-in root
+    /// (a folder of the same name on the main is another server), its
+    /// node named, and every URL carries the `:` encoded.
+    #[test]
+    fn node_servers() {
+        assert_eq!(node_of("f94ab9d535da:smp"), Some("f94ab9d535da"));
+        assert_eq!(node_of("smp"), None);
+        assert_eq!(node_of(":smp"), None);
+        assert_eq!(node_of("a:b:c"), None);
+        assert_eq!(Client::server_path("f94a:smp", "/power"), "/servers/f94a%3Asmp/power");
+        assert_eq!(Client::fs_path("f94a:smp", "/list?path=mods"), "/fs/f94a%3Asmp/list?path=mods");
+        let v = json!({
+            "id": "f94a:smp", "name": "SMP", "path": "/srv/minecraft/SMP", "node": "f94a", "node_name": "oracle",
+            "properties": { "motd": "on a node" }
+        });
+        let i = info_from(&v, "https://rig:8790", "", "p2");
+        assert_eq!(i.root, node_root("p2", "f94a", "SMP"));
+        assert_ne!(i.root, panel_root("p2", "SMP"));
+        assert_eq!(i.root.file_name().unwrap(), "SMP");
+        assert!(is_remote_root(&i.root));
+        assert_eq!(i.remote.as_ref().unwrap().id, "f94a:smp");
+        assert_eq!(node_name("p2", "f94a"), "oracle");
+        assert_eq!(node_name("p2", "other"), "other");
+        assert_eq!(remote_of(&i.root.join("mods")).unwrap().1.id, "f94a:smp");
+        // Sentences name the machine it runs on, then the panel.
+        assert_eq!(i.place(&[]), "SMP on oracle via rig");
+        let own = info_from(&json!({ "id": "home", "name": "Home", "path": "/srv/home" }), "https://rig:8790", "", "p2");
+        assert_eq!(own.place(&[]), "Home on rig");
+        // A node's job comes back under its namespaced id, and is followed
+        // with the ':' encoded like a server id.
+        assert_eq!(job_id(&json!({ "job": 7 })).as_deref(), Some("7"));
+        assert_eq!(job_id(&json!({ "job": "f94a:7" })).as_deref(), Some("f94a:7"));
+        assert_eq!(job_id(&json!({ "job": "" })), None);
+        assert_eq!(job_id(&json!({})), None);
+        assert_eq!(format!("/jobs/{}", enc("f94a:7")), "/jobs/f94a%3A7");
     }
 }
 

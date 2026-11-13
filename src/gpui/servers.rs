@@ -477,7 +477,7 @@ fn server_list(
             .filter(|m| match &g.kind {
                 GroupKind::Local => m.place.is_none(),
                 GroupKind::Panel(id) => m.place.as_ref() == Some(id),
-                GroupKind::Folder | GroupKind::Site(_) => false,
+                GroupKind::Node(..) | GroupKind::Folder | GroupKind::Site(_) => false,
             })
             .collect();
         let mut members: Vec<&ServerInfo> = s.servers().iter().filter(|x| g.has(s, x)).collect();
@@ -548,6 +548,9 @@ fn server_list(
 enum GroupKind {
     /// A paired Hopper Server, by id.
     Panel(String),
+    /// A node behind a paired Hopper Server: (panel id, node id). Its own
+    /// group, as in the panel's web UI: a node is another machine.
+    Node(String, String),
     /// The servers folder (and the Crafty / MCSS panel that runs it).
     Folder,
     /// Servers over SFTP / FTP, by site id.
@@ -568,7 +571,8 @@ struct Group {
 impl Group {
     fn has(&self, s: &Store, x: &ServerInfo) -> bool {
         match &self.kind {
-            GroupKind::Panel(id) => x.remote.as_ref().is_some_and(|r| &r.panel == id),
+            GroupKind::Panel(id) => x.remote.as_ref().is_some_and(|r| &r.panel == id && hopper::hopperd::node_of(&r.id).is_none()),
+            GroupKind::Node(panel, node) => x.remote.as_ref().is_some_and(|r| &r.panel == panel && hopper::hopperd::node_of(&r.id) == Some(node.as_str())),
             GroupKind::Local => s.is_hosted(&x.root),
             GroupKind::Folder => x.remote.is_none() && !s.is_hosted(&x.root) && s.site_of(&x.root).is_none(),
             GroupKind::Site(id) => s.site_of(&x.root).as_ref() == Some(id),
@@ -576,20 +580,29 @@ impl Group {
     }
 }
 
-/// The list's groups: each paired Hopper Server, then the servers folder,
-/// then this PC.
+/// The list's groups: each paired Hopper Server followed by its nodes,
+/// then the servers folder, then this PC.
 fn groups(s: &Store) -> Vec<Group> {
     let st = s.settings();
-    let mut out: Vec<Group> = st
-        .hopper_panels
-        .iter()
-        .map(|p| Group {
-            kind: GroupKind::Panel(p.id.clone()),
-            key: format!("panel:{}", p.id),
-            name: p.name.clone(),
-            what: "Hopper Server".into(),
-        })
-        .collect();
+    let mut out: Vec<Group> = Vec::new();
+    for p in &st.hopper_panels {
+        out.push(Group { kind: GroupKind::Panel(p.id.clone()), key: format!("panel:{}", p.id), name: p.name.clone(), what: "Hopper Server".into() });
+        let mut nodes: Vec<String> = s
+            .servers()
+            .iter()
+            .filter_map(|x| x.remote.as_ref().filter(|r| r.panel == p.id).and_then(|r| hopper::hopperd::node_of(&r.id)).map(str::to_string))
+            .collect();
+        nodes.sort();
+        nodes.dedup();
+        let mut nodes: Vec<(String, String)> = nodes.into_iter().map(|n| (hopper::hopperd::node_name(&p.id, &n), n)).collect();
+        nodes.sort_by_key(|(name, _)| name.to_lowercase());
+        out.extend(nodes.into_iter().map(|(name, n)| Group {
+            key: format!("node:{}:{n}", p.id),
+            kind: GroupKind::Node(p.id.clone(), n),
+            name,
+            what: format!("node · via {}", p.name),
+        }));
+    }
     let folder = st.servers_root.trim();
     out.push(Group {
         kind: GroupKind::Folder,
@@ -625,7 +638,7 @@ fn group_head(
     let theme = cx.theme();
     let s = store.read(cx);
     let (light, error) = match &g.kind {
-        GroupKind::Panel(id) => match s.panel_error(id) {
+        GroupKind::Panel(id) | GroupKind::Node(id, _) => match s.panel_error(id) {
             Some(e) => (Some(theme.danger), Some(e.to_string())),
             None if s.panel_listed(id) => (Some(theme.success), None),
             None => (Some(theme.warning), None),
@@ -671,7 +684,7 @@ fn group_head(
                     .into_any_element(),
             )
         }
-        GroupKind::Folder | GroupKind::Site(_) => None,
+        GroupKind::Node(..) | GroupKind::Folder | GroupKind::Site(_) => None,
     };
     let add: Option<AnyElement> = match &g.kind {
         GroupKind::Panel(id) => {
@@ -702,10 +715,10 @@ fn group_head(
                 })
                 .into_any_element()
         }),
-        GroupKind::Folder | GroupKind::Site(_) => None,
+        GroupKind::Node(..) | GroupKind::Folder | GroupKind::Site(_) => None,
     };
     let web = match &g.kind {
-        GroupKind::Panel(id) => s.settings().hopper_panels.iter().find(|p| &p.id == id).map(|p| p.url.clone()),
+        GroupKind::Panel(id) | GroupKind::Node(id, _) => s.settings().hopper_panels.iter().find(|p| &p.id == id).map(|p| p.url.clone()),
         _ => None,
     };
     v_flex()
@@ -1975,7 +1988,7 @@ impl ServersView {
         }
         // A panel that says it is stopped won't answer a ping: no chip that
         // can only say so.
-        if !pstats.as_ref().is_some_and(|p| !p.running && !p.starting) {
+        if !pstats.as_ref().is_some_and(|p| !p.running && !p.starting) && self.store.read(cx).pingable(&server) {
             pills.push(ping_pill(&self.store, &server, cx));
         }
         let facts = crate::hero::facts_row(cx)

@@ -58,6 +58,10 @@ impl ServerInfo {
             .map(|p| p.name.clone())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| crate::hopperd::host_name(&r.base));
+        // A server on one of the panel's nodes runs on that machine.
+        if let Some(node) = crate::hopperd::node_of(&r.id) {
+            return format!("{} on {} via {panel}", self.name, crate::hopperd::node_name(&r.panel, node));
+        }
         format!("{} on {panel}", self.name)
     }
 }

@@ -517,6 +517,18 @@ nesting widget). The + creates a server on that node (Manage ceiling only);
 "Open in browser" opens the main's page on that server. The web UI uses the
 same flat grouping so both apps read the same.
 
+As built (2026-11-13): the main's `/servers/infos` lists its nodes' servers
+too (namespaced ids, `node`, `node_name`, and `server.properties` asked from
+the node as Look with a 2.5 s limit), and a node server gets the stand-in
+root `hopperd:\@<panel>\@<node>\<folder>`. Everything else goes through the
+relay unchanged, with the id's `:` sent as `%3A`. Where a node can't do
+something from the main the desktop works around it or stays quiet: no
+download-from-URL (sync uploads the jar), the desktop shares a node's log
+itself (`logs/share` isn't relayed), no ping without a join address, and the
+main marks a node server's off-site copies as not editable. Not built yet:
+the + on a node's group, and the node's own online light (the group uses
+the main's).
+
 ## Phased plan
 
 Superseded by the phase list in "Adjusted after research" below; kept for

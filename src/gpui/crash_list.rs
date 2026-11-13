@@ -877,6 +877,17 @@ pub fn older_pane<V: Host>(this: &mut V, none: &'static str, cx: &mut Context<V>
 fn share_file(root: &Path, rel: &str, keep: bool, player: Option<&str>) -> anyhow::Result<String> {
     if let Some(l) = hopper::hopperd::locate(root) {
         let (c, id, _) = l?;
+        // A main doesn't share a node's logs for it (the main would post
+        // the node's file to the web): this PC reads the file through the
+        // main and shares it itself, as for a server on this PC.
+        if hopper::hopperd::node_of(&id).is_some() {
+            anyhow::ensure!(!rel.split(['/', '\\']).any(|p| p == ".." || p.is_empty()), "That isn't one of this server's logs.");
+            // Same place under a temp folder, so it's read as a log there.
+            let tmp = std::env::temp_dir().join(format!("hopper-share-{}", std::process::id()));
+            let read = c.download(&id, rel, &tmp.join(rel)).and_then(|_| hopper::hosting::logshare::read(&tmp, rel));
+            let _ = std::fs::remove_dir_all(&tmp);
+            return hopper::mclogs::upload(&hopper::hosting::logshare::for_share(&read?, Some(root), keep, player));
+        }
         let v = c.post(&format!("/servers/{}/logs/share", hopper::hopperd::enc(&id)), serde_json::json!({ "path": rel, "keep_names": keep }))?;
         return v["url"].as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("Hopper Server didn't send a link."));
     }
