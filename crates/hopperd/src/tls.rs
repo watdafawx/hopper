@@ -124,6 +124,9 @@ pub struct Resolver {
     pub internet: bool,
 }
 
+/// What a node offers first in ALPN; the panel answers with `http/1.1`.
+pub const NODE_ALPN: &[u8] = b"hopperd-node";
+
 /// The panel's own certificate, re-issued when the machine's addresses
 /// change (a service starts before the network card has its address).
 pub type OwnCert = Arc<std::sync::RwLock<Arc<CertifiedKey>>>;
@@ -132,6 +135,12 @@ impl ResolvesServerCert for Resolver {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         if hello.alpn().is_some_and(|mut a| a.any(|p| p == crate::acme::ALPN)) {
             return self.acme.alpn_cert(hello.server_name());
+        }
+        // A node pins this panel's own CA (design/multi-panel.md, A), so it
+        // always gets the panel's own certificate, even on an address that
+        // has a Let's Encrypt one.
+        if hello.alpn().is_some_and(|mut a| a.any(|p| p == NODE_ALPN)) {
+            return Some(self.own.read().unwrap_or_else(|e| e.into_inner()).clone());
         }
         if let Some(c) = self.acme.cert_for(hello.server_name(), self.internet) {
             return Some(c);

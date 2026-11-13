@@ -37,6 +37,7 @@ pub const EVENTS: &[(&str, &str)] = &[
     ("disk", "Drive nearly full"),
     ("ram", "PC nearly out of memory"),
     ("copy_failed", "Off-site backup copy failed"),
+    ("node", "Node offline or back online"),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -27,7 +27,7 @@ pub const API_VERSION: u32 = 1;
 
 /// Features this panel has, so clients light up only what both sides know.
 pub const CAPABILITIES: &[&str] =
-    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "jvm.preview", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "rules", "users", "mcp", "sftp", "mods.profiles", "browse.install", "pack.check", "configs.batch", "configs.sync", "mods.records", "web.origins", "mods.staged", "files.fetch", "web.remote", "web.files"];
+    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "jvm.preview", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "rules", "users", "mcp", "sftp", "mods.profiles", "browse.install", "pack.check", "configs.batch", "configs.sync", "mods.records", "web.origins", "mods.staged", "files.fetch", "web.remote", "web.files", "nodes"];
 
 pub struct ApiError(pub StatusCode, pub String);
 
@@ -204,6 +204,8 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::parity_browse::routes())
         .merge(crate::acme::routes())
         .merge(crate::web_access::routes())
+        .merge(crate::nodes::routes())
+        .merge(crate::tunnel::node::routes())
         .fallback(crate::ui::serve)
         .layer(axum::middleware::from_fn_with_state(app.clone(), crate::security::guard))
         .merge(crate::acme::challenge_route())
@@ -1139,7 +1141,9 @@ async fn console(
 
 /// Browsers: the cookie, from a page on this panel (Origin matches Host).
 /// Devices: a bearer token. A page on another origin the owner listed: a
-/// one-use ticket in `Sec-WebSocket-Protocol` (see [`ws_ticket`]).
+/// one-use ticket in `Sec-WebSocket-Protocol` (see [`ws_ticket`]). The
+/// tests check access through it; the live socket uses [`ws_access`].
+#[cfg(test)]
 pub(crate) fn ws_allowed(app: &App, headers: &HeaderMap) -> Option<Who> {
     ws_access(app, headers).map(|(who, _)| who)
 }

@@ -136,7 +136,7 @@ pub fn listed_other<'a>(headers: &'a HeaderMap, list: &[String]) -> Option<&'a s
 }
 
 /// Changes that decide who can get in: users, devices and pairing, API
-/// tokens, passwords and two-factor, the certificate, and this list.
+/// tokens, passwords and two-factor, the certificate, nodes, and this list.
 fn manages_access(path: &str) -> bool {
     let under = |p: &str| path == p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/'));
     under("/api/v1/users")
@@ -147,6 +147,8 @@ fn manages_access(path: &str) -> bool {
         || path == "/api/v1/auth/password"
         || path == "/api/v1/settings/certificate"
         || under("/api/v1/auth/sessions")
+        || under("/api/v1/nodes")
+        || path == "/api/v1/this-node"
         || path == SETTINGS_PATH
 }
 

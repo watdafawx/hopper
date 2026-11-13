@@ -18,14 +18,14 @@ const LISTED: &str = "http://fox:8790";
 const LISTED_2: &str = "http://tail.example.ts.net:8790";
 const UNLISTED: &str = "http://evil.example:8790";
 const HOST: &str = "rig:8791";
-const OWN: &str = "http://rig:8791";
-const PASSWORD: &str = "password1";
+pub(crate) const OWN: &str = "http://rig:8791";
+pub(crate) const PASSWORD: &str = "password1";
 const TEST_CA: &str = "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n";
 
-struct T {
-    app: Arc<App>,
-    dir: PathBuf,
-    server: String,
+pub(crate) struct T {
+    pub(crate) app: Arc<App>,
+    pub(crate) dir: PathBuf,
+    pub(crate) server: String,
 }
 
 impl Drop for T {
@@ -35,6 +35,11 @@ impl Drop for T {
 }
 
 fn panel() -> T {
+    panel_with(crate::TlsInfo { fingerprint: "AA:BB".into(), ca_pem: TEST_CA.into() })
+}
+
+/// A test panel with this certificate (a real one for tests that connect).
+pub(crate) fn panel_with(tls: crate::TlsInfo) -> T {
     let dir = std::env::temp_dir().join(format!("hopperd-b1-{}-{}", std::process::id(), crate::auth::random_hex(4)));
     let srv = dir.join("servers").join("Test Server");
     std::fs::create_dir_all(srv.join("world")).unwrap();
@@ -70,16 +75,17 @@ fn panel() -> T {
         scheduler: Default::default(),
         limiter: Default::default(),
         audit: crate::security::Audit::new(&data),
-        tls: crate::TlsInfo { fingerprint: "AA:BB".into(), ca_pem: TEST_CA.into() },
+        tls,
         acme: crate::acme::Acme::new(&data),
         sftp_fingerprint: None,
+        nodes: crate::nodes::Nodes::new(&data),
     });
     app.rescan();
     let server = app.servers.list().first().expect("the test server").id.clone();
     T { app, dir, server }
 }
 
-struct Call<'a> {
+pub(crate) struct Call<'a> {
     method: &'a str,
     path: String,
     headers: Vec<(&'a str, String)>,
@@ -88,25 +94,25 @@ struct Call<'a> {
     ip: &'a str,
 }
 
-fn call<'a>(method: &'a str, path: impl Into<String>) -> Call<'a> {
+pub(crate) fn call<'a>(method: &'a str, path: impl Into<String>) -> Call<'a> {
     Call { method, path: path.into(), headers: vec![("host", HOST.into())], body: None, raw: None, ip: "192.168.50.21" }
 }
 
 impl<'a> Call<'a> {
-    fn h(mut self, k: &'a str, v: impl Into<String>) -> Self {
+    pub(crate) fn h(mut self, k: &'a str, v: impl Into<String>) -> Self {
         if k == "host" {
             self.headers.retain(|(n, _)| *n != "host");
         }
         self.headers.push((k, v.into()));
         self
     }
-    fn origin(self, o: &str) -> Self {
+    pub(crate) fn origin(self, o: &str) -> Self {
         self.h("origin", o)
     }
-    fn bearer(self, t: &str) -> Self {
+    pub(crate) fn bearer(self, t: &str) -> Self {
         self.h("authorization", format!("Bearer {t}"))
     }
-    fn json(mut self, v: Value) -> Self {
+    pub(crate) fn json(mut self, v: Value) -> Self {
         self.body = Some(v);
         self
     }
@@ -115,11 +121,11 @@ impl<'a> Call<'a> {
         self.raw = Some(v);
         self
     }
-    fn from(mut self, ip: &'a str) -> Self {
+    pub(crate) fn from(mut self, ip: &'a str) -> Self {
         self.ip = ip;
         self
     }
-    async fn send(self, t: &T) -> (StatusCode, HeaderMap, Vec<u8>) {
+    pub(crate) async fn send(self, t: &T) -> (StatusCode, HeaderMap, Vec<u8>) {
         let mut b = Request::builder().method(self.method).uri(&self.path);
         for (k, v) in &self.headers {
             b = b.header(*k, v);
@@ -147,7 +153,7 @@ impl<'a> Call<'a> {
     }
 }
 
-fn body(b: &[u8]) -> Value {
+pub(crate) fn body(b: &[u8]) -> Value {
     serde_json::from_slice(b).unwrap_or(Value::Null)
 }
 
@@ -163,7 +169,7 @@ async fn remote_login(t: &T, origin: &str) -> String {
     body(&b)["token"].as_str().unwrap().to_string()
 }
 
-async fn cookie_login(t: &T) -> String {
+pub(crate) async fn cookie_login(t: &T) -> String {
     let (s, h, _) = call("POST", "/api/v1/auth/login").origin(OWN).json(json!({ "password": PASSWORD })).send(t).await;
     assert_eq!(s, StatusCode::OK);
     let c = h["set-cookie"].to_str().unwrap();
@@ -825,7 +831,7 @@ async fn refused_bearer_sign_in_is_logged_with_its_origin() {
     assert!(ev.iter().all(|e| !e.path.contains("secret-pass-123")));
 }
 
-async fn user_cookie(t: &T, name: &str, password: &str) -> String {
+pub(crate) async fn user_cookie(t: &T, name: &str, password: &str) -> String {
     let (s, h, _) = call("POST", "/api/v1/auth/login").origin(OWN).json(json!({ "name": name, "password": password })).send(t).await;
     assert_eq!(s, StatusCode::OK);
     h["set-cookie"].to_str().unwrap().split(';').next().unwrap().strip_prefix("hopperd_session=").unwrap().to_string()

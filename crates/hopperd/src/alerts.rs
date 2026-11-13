@@ -134,12 +134,37 @@ fn update(st: &mut Tracker, key: (String, &'static str), server: &str, on: bool,
     let text = text();
     let kind = key.1;
     // Drives and the PC's memory are about the whole panel.
-    let sid = if key.0.starts_with("disk:") || key.0 == "host" { String::new() } else { key.0.clone() };
+    let sid = if key.0.starts_with("disk:") || key.0.starts_with("node:") || key.0 == "host" { String::new() } else { key.0.clone() };
     let a = Alert { server_id: sid.clone(), server: server.to_string(), kind, text: text.clone(), since: t, dismissed: false };
     st.active.insert(key, a);
     log::warn!("alert: {text}");
     // Crashes already go to webhooks as "crash" events.
     (kind != "crash").then(|| crate::webhooks::Event { event: kind, server_id: sid, server: server.to_string(), text, at: t })
+}
+
+/// A node of this main (design/multi-panel.md, A1). `Some(true)`: it has
+/// been gone long enough, raise the alert (once). `Some(false)`: it's
+/// connected; if an alert was up, clear it and say it's back (once).
+/// `None`: it was removed; clear quietly. Returns the webhook event to send.
+pub fn node_state(id: &str, name: &str, gone: Option<bool>) -> Option<crate::webhooks::Event> {
+    let mut st = state().lock().unwrap();
+    let key = (format!("node:{id}"), "node");
+    match gone {
+        Some(true) => update(&mut st, key, name, true, || format!("Node {name} is offline: it hasn't been heard from for 2 minutes.")),
+        Some(false) => {
+            let was_up = st.active.contains_key(&key);
+            update(&mut st, key, name, false, String::new);
+            was_up.then(|| {
+                let text = format!("Node {name} is back online.");
+                log::info!("alert cleared: {text}");
+                crate::webhooks::Event { event: "node", server_id: String::new(), server: name.to_string(), text, at: now() }
+            })
+        }
+        None => {
+            st.active.remove(&key);
+            None
+        }
+    }
 }
 
 /// How long a crash the server was restarted from stays up, undismissed.

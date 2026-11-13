@@ -232,7 +232,7 @@
     if (owner) v.push({ id: 'rescan', section: 'Actions', icon: RefreshCw, title: 'Look for new server folders', words: 'refresh reload rescan re-read', run: rescan });
     v.push({ id: 'signout', section: 'Actions', icon: LogOut, title: 'Sign out', words: 'log out logout leave', run: signOut });
     for (const n of NAV) v.push({ id: `nav:${n.id}`, section: 'Navigation', icon: n.icon, title: n.label, run: () => go(n.to) });
-    for (const c of catsFor(owner)) {
+    for (const c of catsFor(owner, session.trueOwner)) {
       v.push({ id: `set:${c.id}`, section: 'Navigation', icon: c.icon, title: `Settings › ${c.label}`, words: c.words, run: () => go(`/settings/${c.id}`) });
     }
     for (const s of live.servers) {
