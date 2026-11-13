@@ -835,4 +835,5 @@ New open questions from this section: 11 and 12 below.
     scripts and fresh VMs.
 12. **Moved server's old copy (A).** Keep the source stopped and marked until
     the user deletes it (my pick), or delete it automatically after a
-    successful move?
+    successful move? **Decided 2026-11-13: keep it stopped and marked until the
+    user deletes it.**
