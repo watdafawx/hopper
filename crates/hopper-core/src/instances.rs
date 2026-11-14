@@ -70,6 +70,13 @@ pub struct Instance {
     /// publishes them as friends last had them. Never put in a code.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub only_here: std::collections::BTreeMap<String, crate::onlyhere::Kept>,
+    /// The pack file (`PackRef::file_id`) whose list of shipped jars was
+    /// already checked against this instance's records (see
+    /// [`crate::modpack::claim_shipped_jars`]). Without it a player's own mod
+    /// next to the pack's would make every start read the pack's file list
+    /// again. A pack update has another file id, so it is checked once more.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub shipped_checked: u64,
 }
 
 /// The CurseForge app's values when they disagree with Hopper's record (see
@@ -1046,13 +1053,15 @@ pub fn load(root: &Path) -> Option<Instance> {
             inst.addons.remove(i);
         }
     }
+    let at = std::time::Instant::now();
     let gone = drop_gone_mods(&mut inst);
+    log::debug!("{}: dropping gone mods took {} ms", root.display(), at.elapsed().as_millis());
     if !gone.is_empty() {
         log::info!("{}: forgot {} mods whose jars are gone: {}", root.display(), gone.len(), gone.join(", "));
     }
     // Jars the pack ships in its overrides are the pack's (an older Hopper
     // recorded them as the player's, or as a stranger's re-upload).
-    let claimed = crate::modpack::claim_shipped_jars(&mut inst);
+    let claimed = crate::time::timed(&format!("{}: checking the pack's own jars", root.display()), || crate::modpack::claim_shipped_jars(&mut inst));
     if inst.addons.len() != before || claimed {
         let _ = inst.save();
     }
@@ -1065,7 +1074,7 @@ pub fn load(root: &Path) -> Option<Instance> {
         }
     }
     // Logos, authors and sides for mods no site describes, from their jars.
-    crate::sources::looks::fill(&mut inst);
+    crate::time::timed(&format!("{}: reading logos and authors", root.display()), || crate::sources::looks::fill(&mut inst));
     if let Some(p) = &inst.pack {
         crate::modrinth::num_id(&p.mr_project);
         crate::modrinth::num_id(&p.mr_version);
@@ -1479,6 +1488,7 @@ fn import_curseforge(root: &Path) -> Option<Imported> {
         unreadable: None,
         cf_change: None,
         only_here: Default::default(),
+        shipped_checked: 0,
     };
     Some(Imported { inst, cf_manifest, disk_manifest: manifest })
 }

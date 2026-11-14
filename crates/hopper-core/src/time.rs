@@ -161,6 +161,21 @@ pub fn log_stamp() -> String {
     stamp(d.as_secs() as i64, d.subsec_millis(), crate::hosting::schedule::utc_offset_secs())
 }
 
+/// Runs `f` and logs how long it took: at `debug` always, at `info` when it
+/// kept the caller for over half a second (so a slow start-up step shows in
+/// a player's log without a debug run).
+pub fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
+    let at = std::time::Instant::now();
+    let out = f();
+    let took = at.elapsed();
+    if took.as_millis() > 500 {
+        log::info!("{what} took {:.1} s", took.as_secs_f32());
+    } else {
+        log::debug!("{what} took {} ms", took.as_millis());
+    }
+    out
+}
+
 fn stamp(secs: i64, millis: u32, offset: i64) -> String {
     let local = secs + offset;
     let (y, m, d) = civil_from_days(local.div_euclid(86_400));

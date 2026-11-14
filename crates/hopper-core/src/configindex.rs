@@ -272,7 +272,13 @@ impl Summary {
 
 /// Every file's counts, kept on disk by path, size and time: the second
 /// open (even after a restart) parses only the files that changed.
-static SUMMARIES: LazyLock<Mutex<StampCache<Summary>>> = LazyLock::new(|| Mutex::new(StampCache::named("config-counts.json", 60_000)));
+static SUMMARIES: LazyLock<Mutex<StampCache<Summary>>> = LazyLock::new(|| Mutex::new(StampCache::named("config-counts.json", SUMMARY_FORMAT, 60_000)));
+
+/// The format of what `config-counts.json` holds. Bump it when the parsing
+/// of config files or the way [`Summary`] counts changes (so old counts are
+/// worked out again); not for a new Hopper version, or every update would
+/// parse every config again.
+const SUMMARY_FORMAT: u32 = 1;
 
 /// The [`Summary`] of each of `rels`, in order: from the cache when the
 /// file hasn't changed, else read (and kept for [`read`] and [`search`]).
@@ -511,7 +517,7 @@ mod tests {
         let rels: Vec<String> = list(&root).into_iter().map(|(r, _)| r).collect();
         assert!(rels.len() >= 10, "{rels:?}");
 
-        let cache = Mutex::new(StampCache::load(Some(root.join("cache/counts.json")), 100));
+        let cache = Mutex::new(StampCache::load(Some(root.join("cache/counts.json")), SUMMARY_FORMAT, 100));
         let check = |rels: &[String], why: &str| {
             assert_eq!(summaries_in(&cache, &root, rels), counts_before(&root, rels), "counts, {why}");
             for q in ["spawn rate", "max", "SPAWN", "particles", "rate 2", "a", "nothing-here", "  "] {
@@ -526,7 +532,7 @@ mod tests {
         check(&rels, "first open");
         assert!(root.join("cache/counts.json").is_file(), "the counts are kept on disk");
         // A fresh run reads the counts from the file.
-        let cache2 = Mutex::new(StampCache::<Summary>::load(Some(root.join("cache/counts.json")), 100));
+        let cache2 = Mutex::new(StampCache::<Summary>::load(Some(root.join("cache/counts.json")), SUMMARY_FORMAT, 100));
         assert_eq!(cache2.lock().unwrap().len(), rels.iter().filter(|r| root.join(r).is_file()).count());
         check(&rels, "second open");
         // A changed file (other size) and a removed one are read again.

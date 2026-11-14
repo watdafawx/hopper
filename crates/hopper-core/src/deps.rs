@@ -428,7 +428,13 @@ pub fn own_ids_at(path: &Path, stamp: crate::stampcache::Stamp) -> (Vec<String>,
 /// their mods.toml takes seconds; the Configs tab needs only these two
 /// things, so after the first time it reads them from this file instead.
 static OWN: LazyLock<Mutex<crate::stampcache::StampCache<(Vec<String>, String)>>> =
-    LazyLock::new(|| Mutex::new(crate::stampcache::StampCache::named("jar-ids.json", 20_000)));
+    LazyLock::new(|| Mutex::new(crate::stampcache::StampCache::named("jar-ids.json", OWN_FORMAT, 20_000)));
+
+/// The format of what `jar-ids.json` holds. Bump it when the reading of a
+/// jar's own mod ids or display name changes (so old answers are worked out
+/// again); not for a new Hopper version, or every update would open every
+/// jar again before the window shows.
+const OWN_FORMAT: u32 = 1;
 
 fn own_cache() -> std::sync::MutexGuard<'static, crate::stampcache::StampCache<(Vec<String>, String)>> {
     OWN.lock().unwrap_or_else(|e| e.into_inner())

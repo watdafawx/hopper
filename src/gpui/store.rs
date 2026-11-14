@@ -830,20 +830,23 @@ impl Store {
         };
         // Panels turned off are refused before anything asks them.
         hopper::panel::set_off(&store.settings);
-        store.refresh();
+        hopper::time::timed("start-up: refresh", || store.refresh());
         // Note which instances have old backups to clean up (nothing goes
         // by itself at start).
         hopper::retention::set_policy(store.settings.backup_retention);
         hopper::sources::set_enabled(store.settings.allow_sources);
         hopper::retention::check_all_later(store.instances.iter().map(|i| i.root.clone()).collect());
-        store.reload_accounts();
+        hopper::time::timed("start-up: accounts", || store.reload_accounts());
         store._panel_poll = Some(Self::panel_poll(cx));
         store._download_watch = Some(Self::download_watch(cx));
         store._update_watch = Some(Self::update_watch(cx));
         store._ping_watch = Some(Self::ping_watch(cx));
         // Hosted servers were found by refresh(): start their scheduler.
-        let scheduler = hopper::hosting::Scheduler::start(store.local.clone());
-        scheduler.start_autostart(&store.local);
+        let scheduler = hopper::time::timed("start-up: server scheduler", || {
+            let s = hopper::hosting::Scheduler::start(store.local.clone());
+            s.start_autostart(&store.local);
+            s
+        });
         store.scheduler = Some(scheduler);
         store.start_image_workers();
         hopper::selfupdate::clean_up();
@@ -1641,10 +1644,10 @@ impl Store {
     pub fn refresh(&mut self) {
         // Images that failed (a network blip) get another try.
         self.images.retain(|_, v| !matches!(v, Image::Failed));
-        self.instances = instances::discover(Path::new(&self.settings.instances_root));
+        self.instances = hopper::time::timed("start-up: reading the instances", || instances::discover(Path::new(&self.settings.instances_root)));
         // Other launchers' instances, managed where they are.
         let main: Vec<PathBuf> = self.instances.iter().map(|i| i.root.clone()).collect();
-        let mut foreign = hopper::launchers::instances(&self.settings.launcher_dirs);
+        let mut foreign = hopper::time::timed("start-up: other launchers' instances", || hopper::launchers::instances(&self.settings.launcher_dirs));
         foreign.retain(|f| !main.contains(&f.root));
         self.instances.extend(foreign);
         self.instances.sort_by_key(|i| i.name.to_lowercase());
@@ -1657,13 +1660,15 @@ impl Store {
             }
         }
         self.pending.clear();
-        for i in self.instances.clone() {
-            self.read_pending(&i);
-        }
+        hopper::time::timed("start-up: pending installs", || {
+            for i in self.instances.clone() {
+                self.read_pending(&i);
+            }
+        });
         self.sync_watched();
         self.disk.set_roots(vec![PathBuf::from(&self.settings.instances_root)]);
-        self.discover_servers();
-        self.check_pack_updates();
+        hopper::time::timed("start-up: finding servers", || self.discover_servers());
+        hopper::time::timed("start-up: pack update checks", || self.check_pack_updates());
         // Loader versions for the Minecraft versions in use, ready before
         // anyone opens a Loader dropdown.
         let mut mcs: Vec<String> = self.instances.iter().map(|i| i.game_version.clone()).collect();
@@ -1694,9 +1699,11 @@ impl Store {
         }
         // A refresh looks again, however recent the last look.
         self.updates_at.clear();
-        for root in roots {
-            self.check_updates(&root, false);
-        }
+        hopper::time::timed("start-up: mod update checks", || {
+            for root in roots {
+                self.check_updates(&root, false);
+            }
+        });
         let icons: Vec<String> = self
             .instances
             .iter()
