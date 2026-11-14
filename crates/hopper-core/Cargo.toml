@@ -43,6 +43,9 @@ russh = { version = "0.64", default-features = false, features = ["ring"] }
 russh-sftp = "3"
 tokio = { version = "1", features = ["rt", "net", "time", "io-util"] }
 suppaftp = { version = "12", default-features = false, features = ["rustls-ring"] }
+# The relay tunnel's stream compression (libzstd, built from source by
+# zstd-sys with cc; long windows and per-burst flushes need the real encoder).
+zstd = { version = "0.14", default-features = false }
 # Finding Hopper Servers on the LAN.
 mdns-sd.workspace = true
 # Offline translation of changelogs and descriptions (desktop only).
