@@ -101,6 +101,16 @@ number of its own, later event. A member's first code is taken in only for
 its stamped mods, since an unstamped difference may just be that member
 being behind. Without stamps it all works as before.
 
+The loader is one more thing a group copy keeps, under the key `~loader`
+(`groupsync::LOADER_KEY`), with the same rules as a mod: it is read from the
+code (a plain code's loader, else the code's own loader, else "the pack's
+own"), compared with the member's previous code, dated by the event number
+or a stamp, and waits behind an unsent change here. Only the version of the
+same kind of loader is followed (NeoForge to NeoForge); another kind is left
+as it is, with a note in the task that says to install the pack again from
+the sender's share code. The new loader is installed like a change in the
+instance's Settings, once the game has closed if it is running.
+
 `reason` is `unshared` (the share was turned off) or `deleted` (the pack is
 gone on the sender's PC); anything else becomes `unshared`. The desktop
 works out what to take back by comparing `mailbox_sent` (what reached the

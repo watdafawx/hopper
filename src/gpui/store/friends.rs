@@ -1254,6 +1254,16 @@ impl Store {
         } else {
             self.group_held.remove(&local);
         }
+        // The group moved this instance to another loader version (saved by
+        // the merge). Installed like a change in its Settings, but a running
+        // game is left alone until it closes.
+        if merged.loader.is_some() {
+            if self.running(&root).is_some() {
+                self.group_loader_waiting.insert(root.clone());
+            } else if let Some(inst) = hopper::instances::load(&root) {
+                self.install_loader(inst);
+            }
+        }
         if !merged.made.is_empty() {
             self.handle(Msg::InstanceChanged(root), cx);
         }

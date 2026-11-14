@@ -18,7 +18,7 @@ use crate::instances::{Addon, Instance};
 use crate::jobs::Job;
 use crate::modrinth::{is_mr, num_id};
 use crate::settings::{FollowedRecipe, Settings};
-use crate::sharecode::{Entry, Share, Target};
+use crate::sharecode::{Base, Entry, Share, Target};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -108,11 +108,49 @@ fn target_key(t: &Target) -> String {
     }
 }
 
-/// A code's mods by key. `project` says whose a file is (None: couldn't
-/// tell, and then `unsure` is set and the mod is left out).
+/// The key the loader goes by next to the mods: it is one more thing the
+/// group keeps the same, with the same rules (latest change wins, echoes
+/// change nothing). Not a mod's key in any form, so it never meets one.
+pub const LOADER_KEY: &str = "~loader";
+
+/// A code's loader as the loader's [`State`]: "loader:neoforge-21.1.256".
+/// A pack's own loader isn't listed (like a pack mod as the pack has it).
+fn loader_state(loader: Option<&String>) -> State {
+    loader.map(|l| State::File { file: format!("loader:{l}"), on: true }).unwrap_or_default()
+}
+
+/// The loader a code has set ("neoforge-21.1.256"): the code's own when it
+/// differs from the pack's, else the one a plain code names. None: the
+/// pack's own (a code of a pack lists no loader when it's the pack's, so a
+/// pack's default and the same loader named outright are never two
+/// states), or no loader at all.
+pub fn loader_of(share: &Share) -> Option<String> {
+    if let Some(l) = share.loader.as_ref().filter(|l| !l.is_empty()) {
+        return Some(l.clone());
+    }
+    match &share.base {
+        Base::Plain { loader, .. } if !loader.is_empty() => Some(loader.clone()),
+        _ => None,
+    }
+}
+
+/// A code's mods by key, and its loader. `project` says whose a file is
+/// (None: couldn't tell, and then `unsure` is set and the mod is left out).
 pub struct Mods {
     pub map: BTreeMap<String, (State, Entry)>,
     pub unsure: bool,
+    /// [`loader_of`] the code.
+    pub loader: Option<String>,
+}
+
+impl Mods {
+    /// What `key` is in this code: a mod's state, or the loader's.
+    pub fn state(&self, key: &str) -> State {
+        if key == LOADER_KEY {
+            return loader_state(self.loader.as_ref());
+        }
+        self.map.get(key).map(|(s, _)| s.clone()).unwrap_or_default()
+    }
 }
 
 pub fn mods(share: &Share, mut project: impl FnMut(&Entry) -> Option<u64>) -> Mods {
@@ -143,7 +181,7 @@ pub fn mods(share: &Share, mut project: impl FnMut(&Entry) -> Option<u64>) -> Mo
         };
         map.insert(key, (state, e.clone()));
     }
-    Mods { map, unsure }
+    Mods { map, unsure, loader: loader_of(share) }
 }
 
 /// One mod that differs between two codes.
@@ -158,6 +196,9 @@ pub struct Change {
 
 impl Change {
     pub fn kind(&self) -> Kind {
+        if self.key == LOADER_KEY {
+            return Kind::Updated;
+        }
         match (&self.was, &self.now) {
             (_, State::Off) => Kind::Off,
             (State::Off, State::Unlisted) => Kind::On,
@@ -194,6 +235,10 @@ pub fn changes(was: &Mods, now: &Mods) -> Vec<Change> {
                 out.push(Change { key: k.clone(), was: s.clone(), now: State::Unlisted, entry: None });
             }
         }
+    }
+    let (before, after) = (was.state(LOADER_KEY), now.state(LOADER_KEY));
+    if before != after {
+        out.push(Change { key: LOADER_KEY.to_string(), was: before, now: after, entry: None });
     }
     out
 }
@@ -294,7 +339,7 @@ pub struct Stamp {
 /// code has the way the mark says. A mod changed here since its mark has
 /// none; it's this publish's own change.
 pub fn stamps_of(marks: &BTreeMap<String, Mark>, now: &Mods) -> BTreeMap<String, Stamp> {
-    let state_of = |k: &str| now.map.get(k).map(|(s, _)| s.clone()).unwrap_or_default();
+    let state_of = |k: &str| now.state(k);
     marks
         .iter()
         .filter(|(k, m)| m.seq > 0 && state_of(k) == m.state && !(now.unsure && m.state == State::Unlisted))
@@ -391,6 +436,10 @@ pub struct Merged {
     pub made: Vec<(String, Kind, String)>,
     /// Some change waits for this copy's own unsent change.
     pub held: bool,
+    /// The loader the instance was moved to ("neoforge-21.1.256"). Saved
+    /// already; the new loader still has to be installed (not while the
+    /// game runs).
+    pub loader: Option<String>,
 }
 
 /// Decides each waiting code's changes against this copy (`here`: its
@@ -418,7 +467,7 @@ pub fn plan(
     let mut marks = copy.marks.clone();
     // What this copy will be once the changes so far are made.
     let mut will: HashMap<String, State> = HashMap::new();
-    let state_of = |m: &Mods, k: &str| m.map.get(k).map(|(s, _)| s.clone()).unwrap_or_default();
+    let state_of = |m: &Mods, k: &str| m.state(k);
     // A member's name by id, from what this copy got from them.
     let name_of = |id: &str| -> String {
         copy.got
@@ -592,6 +641,85 @@ fn switch(inst: &mut Instance, i: usize, on: bool, name: &str, job: &Job) -> any
     Ok(())
 }
 
+/// "NeoForge 21.1.256" from "neoforge-21.1.256"; "Vanilla" for none.
+pub fn loader_label(loader: &str) -> String {
+    if loader.is_empty() {
+        return "Vanilla".into();
+    }
+    let (kind, ver) = loader.split_once('-').unwrap_or((loader, ""));
+    format!("{} {ver}", loader_name(kind)).trim().to_string()
+}
+
+/// "NeoForge" from "neoforge" (or "neoforge-21.1.256").
+pub fn loader_name(kind: &str) -> String {
+    let kind = kind.split_once('-').map_or(kind, |(k, _)| k);
+    match kind.to_ascii_lowercase().as_str() {
+        "neoforge" => "NeoForge".into(),
+        "forge" => "Forge".into(),
+        "fabric" => "Fabric".into(),
+        "quilt" => "Quilt".into(),
+        _ => kind.to_string(),
+    }
+}
+
+fn loader_kind(loader: &str) -> String {
+    loader.split_once('-').map_or(loader, |(k, _)| k).to_ascii_lowercase()
+}
+
+/// What a loader change from the group does to this instance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoaderStep {
+    /// Already the loader here.
+    Nothing,
+    /// Move to this loader.
+    Set(String),
+    /// Another kind of loader (NeoForge to Fabric): its mods and settings
+    /// don't carry over, so it is left to the player. The new loader's
+    /// name, to say so.
+    OtherKind(String),
+}
+
+/// What to do with a loader change `c` here. `now`: this instance's loader;
+/// `pack`: its modpack's own loader (None: not a pack, or not known), to
+/// put back when the group went back to it. Only the version changes within
+/// one kind of loader.
+pub fn loader_step(now: &str, c: &Change, pack: Option<&str>) -> LoaderStep {
+    let want = match &c.now {
+        State::File { file, .. } => file.strip_prefix("loader:").unwrap_or(file).to_string(),
+        _ => match pack.filter(|p| !p.is_empty()) {
+            Some(p) => p.to_string(),
+            None => return LoaderStep::Nothing,
+        },
+    };
+    if want == now {
+        LoaderStep::Nothing
+    } else if loader_kind(&want) != loader_kind(now) {
+        LoaderStep::OtherKind(loader_name(&want))
+    } else {
+        LoaderStep::Set(want)
+    }
+}
+
+/// What a loader change says in the task and for the group's activity:
+/// "Sam updated NeoForge to 21.1.256".
+pub fn loader_says(who: &str, loader: &str, back_to_pack: bool) -> String {
+    let who = if who.is_empty() { "Someone" } else { who };
+    let (kind, ver) = loader.split_once('-').unwrap_or((loader, ""));
+    let kind = loader_name(kind);
+    match (back_to_pack, ver.is_empty()) {
+        (true, _) => format!("{who} put the loader back to the pack's own ({})", loader_label(loader)),
+        (false, true) => format!("{who} updated the loader to {kind}"),
+        (false, false) => format!("{who} updated {kind} to {ver}"),
+    }
+}
+
+/// The note for a loader the group moved to that this instance won't
+/// follow.
+pub fn loader_other_kind(who: &str, kind: &str) -> String {
+    let who = if who.is_empty() { "Someone" } else { who };
+    format!("{who} switched this pack to {kind}. Install it again from their share code to follow.")
+}
+
 /// Whether making `c` here would change anything: a switch, removal or
 /// put-back of a mod this instance doesn't have does nothing, and isn't
 /// told as a change.
@@ -616,6 +744,33 @@ fn claim_changes(inst: &Instance, todo: &[Change], merged: &Merged, group: &str)
     }
 }
 
+/// Moves the instance to the loader the group moved to (saved by the
+/// caller), and says so in the task. True when it was moved.
+fn move_loader(inst: &mut Instance, c: &Change, pack: Option<&str>, merged: &mut Merged, job: &Job) -> bool {
+    let who = merged.made.iter().find(|(k, _, _)| k == LOADER_KEY).map(|(_, _, n)| n.clone()).unwrap_or_default();
+    let step = loader_step(&inst.loader, c, pack);
+    if step != LoaderStep::Nothing {
+        job.show();
+    }
+    match step {
+        LoaderStep::Set(l) => {
+            job.note(loader_says(&who, &l, c.now == State::Unlisted));
+            inst.loader = l.clone();
+            merged.loader = Some(l);
+            true
+        }
+        LoaderStep::OtherKind(kind) => {
+            job.note(loader_other_kind(&who, &kind));
+            merged.made.retain(|(k, _, _)| k != LOADER_KEY);
+            false
+        }
+        LoaderStep::Nothing => {
+            merged.made.retain(|(k, _, _)| k != LOADER_KEY);
+            false
+        }
+    }
+}
+
 /// Takes the waiting codes into the instance at `root`: works out each
 /// member's changes and makes the ones that win here. Runs off the UI
 /// thread. `allow`: mods from other links may be put in by themselves.
@@ -632,7 +787,9 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, job
         }
         anyhow::bail!("{}'s settings file is damaged.", inst.name);
     }
-    let here = crate::sharecode::make(&inst, job)?.share;
+    let made_here = crate::sharecode::make(&inst, job)?;
+    let pack_loader = made_here.pack_loader;
+    let here = made_here.share;
     let read = |c: &str| (!c.is_empty()).then(|| crate::sharecode::decode(c).ok()).flatten();
     let sent = read(&copy.sent);
     let theirs: Vec<Share> = copy.got.values().chain(copy.waiting.values()).filter_map(|g| read(&g.code)).collect();
@@ -643,6 +800,9 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, job
     let here = mods(&here, lookup(&found));
     let sent = sent.map(|s| mods(&s, lookup(&found)));
     let (todo, mut merged) = plan(copy, &here, sent.as_ref(), ignore_unsent, |c| read(c).map(|s| mods(&s, lookup(&found))));
+    // The loader isn't a mod: it is moved here, not through `apply`.
+    let (loader_change, todo): (Vec<Change>, Vec<Change>) = todo.into_iter().partition(|c| c.key == LOADER_KEY);
+    let loader_set = loader_change.first().is_some_and(|c| move_loader(&mut inst, c, pack_loader.as_deref(), &mut merged, job));
     // Mods kept only on this PC only learn how the others have them.
     let (mut todo, kept) = crate::onlyhere::split(&mut inst, todo, &mut merged);
     // A change to a mod this copy doesn't have (an echo of a removal, a
@@ -656,7 +816,7 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, job
         }
         keep
     });
-    if kept && todo.is_empty() {
+    if (kept || loader_set) && todo.is_empty() {
         inst.save()?;
     }
     if !todo.is_empty() {
@@ -847,13 +1007,14 @@ mod tests {
     fn code(entries: Vec<Entry>) -> String {
         crate::sharecode::encode(&share(entries))
     }
+    fn project_of_file(e: &Entry) -> Option<u64> {
+        match e {
+            Entry::CurseFile { file, .. } => Some(file / 10),
+            _ => None,
+        }
+    }
     fn dec(c: &str) -> Option<Mods> {
-        crate::sharecode::decode(c).ok().map(|s| {
-            mods(&s, |e| match e {
-                Entry::CurseFile { file, .. } => Some(file / 10),
-                _ => None,
-            })
-        })
+        crate::sharecode::decode(c).ok().map(|s| mods(&s, project_of_file))
     }
     fn got(c: String, seq: u64, name: &str) -> Got {
         Got { code: c, seq, at: seq, name: name.into(), ..Default::default() }
@@ -1088,11 +1249,15 @@ mod tests {
     // set up again by `reconcile` before the feed is read).
 
     const PACK: &str = "pack";
+    /// What every PC of the sim starts with.
+    const LOADER: &str = "neoforge-21.1.200";
     const GROUP: &str = "g";
 
     struct Pc {
         id: String,
         mods: BTreeMap<u64, (u64, bool)>,
+        /// The instance's loader.
+        loader: String,
         copy: PackCopy,
         /// The follow's applied code (members only).
         follow_code: String,
@@ -1113,16 +1278,30 @@ mod tests {
             let local = if sharer { PACK.to_string() } else { format!("{id}-local") };
             let mods = start.iter().map(|(p, f, on)| (*p, (*f, *on))).collect();
             let copy = PackCopy { inst: PACK.into(), group: GROUP.into(), local, ..Default::default() };
-            Pc { id: id.into(), mods, copy, follow_code: String::new(), cursor: 0, merges: Vec::new() }
+            Pc { id: id.into(), mods, loader: LOADER.into(), copy, follow_code: String::new(), cursor: 0, merges: Vec::new() }
         }
         fn entries(&self) -> Vec<Entry> {
             self.mods.values().map(|(f, on)| cf(*f, *on)).collect()
         }
+        fn share(&self) -> Share {
+            Share {
+                base: Base::Plain { game_version: "1.21.1".into(), loader: self.loader.clone() },
+                name: None,
+                loader: None,
+                entries: self.entries(),
+            }
+        }
         fn code(&self) -> String {
-            code(self.entries())
+            crate::sharecode::encode(&self.share())
+        }
+        fn mods(&self) -> Mods {
+            mods(&self.share(), project_of_file)
         }
         fn set(&mut self, project: u64, file: u64, on: bool) {
             self.mods.insert(project, (file, on));
+        }
+        fn set_loader(&mut self, loader: &str) {
+            self.loader = loader.into();
         }
         /// Publishes this copy if its code changed since the last time.
         fn publish(&mut self, relay: &mut Relay, all: &[&str], stamped: bool) {
@@ -1130,7 +1309,7 @@ mod tests {
             if now == self.copy.sent {
                 return;
             }
-            let now_mods = m(self.entries());
+            let now_mods = self.mods();
             let stamps = if stamped { stamps_of(&self.copy.marks, &now_mods) } else { BTreeMap::new() };
             for to in all.iter().filter(|t| **t != self.id) {
                 relay.seq += 1;
@@ -1165,10 +1344,18 @@ mod tests {
             if self.copy.waiting.is_empty() {
                 return;
             }
-            let here = m(self.entries());
+            let here = self.mods();
             let sent = dec(&self.copy.sent);
             let (todo, merged) = plan(&self.copy, &here, sent.as_ref(), false, dec);
             for c in &todo {
+                if c.key == LOADER_KEY {
+                    // As `merge` does.
+                    match loader_step(&self.loader, c, None) {
+                        LoaderStep::Set(l) => self.loader = l,
+                        LoaderStep::Nothing | LoaderStep::OtherKind(_) => {}
+                    }
+                    continue;
+                }
                 let p: u64 = c.key.trim_start_matches("p:").parse().unwrap();
                 match &c.now {
                     State::File { file, on } => {
@@ -1556,6 +1743,257 @@ mod tests {
         assert!(jar.with_extension("jar.disabled").is_file());
         assert!(!crate::instances::load(&inst.root).unwrap().addons[0].enabled);
         let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    // ---- the loader goes the way the mods do ----
+
+    /// A plain code of `loader` (no mods).
+    fn plain(loader: &str) -> Share {
+        Share { base: Base::Plain { game_version: "1.21.1".into(), loader: loader.into() }, name: None, loader: None, entries: Vec::new() }
+    }
+    /// A code of a CurseForge pack, with a loader only when it isn't the pack's.
+    fn of_pack(loader: Option<&str>) -> Share {
+        Share { base: Base::Curse { project: 9, file: 90 }, name: None, loader: loader.map(String::from), entries: Vec::new() }
+    }
+    fn loader_mods(s: &Share) -> Mods {
+        mods(s, project_of_file)
+    }
+    fn loader_got(s: &Share, seq: u64, name: &str) -> Got {
+        got(crate::sharecode::encode(s), seq, name)
+    }
+    fn loader_file(l: &str) -> State {
+        State::File { file: format!("loader:{l}"), on: true }
+    }
+    fn loader_change(was: &str, now: &str) -> Change {
+        Change { key: LOADER_KEY.into(), was: loader_file(was), now: loader_file(now), entry: None }
+    }
+
+    #[test]
+    fn a_loader_version_change_is_one_updated_change() {
+        let (was, now) = (loader_mods(&plain("neoforge-21.1.200")), loader_mods(&plain("neoforge-21.1.256")));
+        let c = changes(&was, &now);
+        assert_eq!(c.len(), 1);
+        assert_eq!((c[0].key.as_str(), c[0].kind()), (LOADER_KEY, Kind::Updated));
+        assert_eq!(c[0], loader_change("neoforge-21.1.200", "neoforge-21.1.256"));
+        assert!(changes(&was, &was).is_empty());
+        // A pack's code lists the loader only when it isn't the pack's: the
+        // first override is still an update, not an addition.
+        let (pack, set) = (loader_mods(&of_pack(None)), loader_mods(&of_pack(Some("neoforge-21.1.256"))));
+        let c = changes(&pack, &set);
+        assert_eq!((c.len(), c[0].kind()), (1, Kind::Updated));
+        assert_eq!(set.state(LOADER_KEY), loader_file("neoforge-21.1.256"));
+        // And back to the pack's own.
+        let c = changes(&set, &pack);
+        assert_eq!((c.len(), c[0].now.clone()), (1, State::Unlisted));
+    }
+
+    #[test]
+    fn only_the_version_of_the_same_loader_is_followed() {
+        let c = loader_change("neoforge-21.1.200", "neoforge-21.1.256");
+        assert_eq!(loader_step("neoforge-21.1.200", &c, None), LoaderStep::Set("neoforge-21.1.256".into()));
+        // Already there: an echo.
+        assert_eq!(loader_step("neoforge-21.1.256", &c, None), LoaderStep::Nothing);
+        // NeoForge and Forge are two loaders.
+        let c = loader_change("neoforge-21.1.200", "forge-47.2.0");
+        assert_eq!(loader_step("neoforge-21.1.200", &c, None), LoaderStep::OtherKind("Forge".into()));
+        let c = loader_change("neoforge-21.1.200", "fabric-0.16.9");
+        assert_eq!(loader_step("neoforge-21.1.200", &c, None), LoaderStep::OtherKind("Fabric".into()));
+        // The group going back to the pack's own loader puts it back; with
+        // the pack's loader already here (or unknown) nothing happens.
+        let back = Change { key: LOADER_KEY.into(), was: c.now.clone(), now: State::Unlisted, entry: None };
+        assert_eq!(loader_step("neoforge-21.1.256", &back, Some("neoforge-21.1.200")), LoaderStep::Set("neoforge-21.1.200".into()));
+        assert_eq!(loader_step("neoforge-21.1.200", &back, Some("neoforge-21.1.200")), LoaderStep::Nothing);
+        assert_eq!(loader_step("neoforge-21.1.256", &back, None), LoaderStep::Nothing);
+    }
+
+    #[test]
+    fn the_packs_own_loader_named_outright_is_not_a_change_here() {
+        // A code that names the pack's own loader (an older or odd sender)
+        // differs from one that leaves it out, but changes nothing here.
+        let c = changes(&loader_mods(&of_pack(None)), &loader_mods(&of_pack(Some("neoforge-21.1.200"))));
+        assert_eq!(c.len(), 1);
+        assert_eq!(loader_step("neoforge-21.1.200", &c[0], Some("neoforge-21.1.200")), LoaderStep::Nothing);
+    }
+
+    #[test]
+    fn the_loader_says_who_and_what() {
+        assert_eq!(loader_says("Sam", "neoforge-21.1.256", false), "Sam updated NeoForge to 21.1.256");
+        assert_eq!(loader_says("", "fabric", false), "Someone updated the loader to Fabric");
+        assert_eq!(loader_says("Sam", "neoforge-21.1.200", true), "Sam put the loader back to the pack's own (NeoForge 21.1.200)");
+        assert_eq!(
+            loader_other_kind("Alex", "Fabric"),
+            "Alex switched this pack to Fabric. Install it again from their share code to follow."
+        );
+        assert_eq!(loader_label("neoforge-21.1.256"), "NeoForge 21.1.256");
+    }
+
+    #[test]
+    fn a_loader_change_is_decided_like_a_mods() {
+        let (was, now) = (plain("neoforge-21.1.200"), plain("neoforge-21.1.256"));
+        let mut copy = PackCopy::default();
+        copy.got.insert("mia".into(), loader_got(&was, 1, "Mia"));
+        copy.arrive("mia", loader_got(&now, 10, "Mia"));
+        let dec = |c: &str| crate::sharecode::decode(c).ok().map(|s| loader_mods(&s));
+        let here = loader_mods(&was);
+        let (todo, merged) = plan(&copy, &here, Some(&here), false, dec);
+        assert_eq!(todo, [loader_change("neoforge-21.1.200", "neoforge-21.1.256")]);
+        let (key, mark) = &merged.marks[0];
+        assert_eq!((key.as_str(), mark.by.as_str(), mark.name.as_str(), mark.kind, mark.seq), (LOADER_KEY, "mia", "Mia", Kind::Updated, 10));
+        assert_eq!(merged.made, [(LOADER_KEY.to_string(), Kind::Updated, "Mia".to_string())]);
+        // Already the new one here (an echo): nothing.
+        let here = loader_mods(&now);
+        let (todo, merged) = plan(&copy, &here, Some(&here), false, dec);
+        assert!(todo.is_empty() && merged.marks.is_empty());
+        // A later change of the loader is known: Mia's older one loses.
+        let mut copy2 = copy.clone();
+        copy2.marks.insert(LOADER_KEY.into(), Mark { state: loader_file("neoforge-21.1.300"), seq: 20, by: "sam".into(), ..Default::default() });
+        let here = loader_mods(&plain("neoforge-21.1.300"));
+        let (todo, merged) = plan(&copy2, &here, Some(&here), false, dec);
+        assert!(todo.is_empty());
+        assert_eq!(merged.taken.len(), 1, "Mia's code is done with, not kept waiting");
+        // Changed here and not sent yet: waits for the publish, like a mod.
+        let (here, sent) = (loader_mods(&plain("neoforge-21.1.300")), loader_mods(&was));
+        let (todo, merged) = plan(&copy, &here, Some(&sent), false, dec);
+        assert!(todo.is_empty() && merged.held && merged.taken.is_empty());
+        let (todo, merged) = plan(&copy, &here, Some(&sent), true, dec);
+        assert!(todo.is_empty() && !merged.held && merged.taken.len() == 1, "dropped, not undone");
+    }
+
+    #[test]
+    fn a_loader_bump_reaches_every_member_and_echoes_change_nothing() {
+        let (mut relay, mut a, mut b, mut c) = group();
+        a.set_loader("neoforge-21.1.256");
+        a.publish(&mut relay, &ALL, true);
+        online(&mut b, &mut relay);
+        online(&mut c, &mut relay);
+        assert_eq!((b.loader.as_str(), c.loader.as_str()), ("neoforge-21.1.256", "neoforge-21.1.256"));
+        let mark = &c.copy.marks[LOADER_KEY];
+        assert_eq!((mark.by.as_str(), mark.kind), ("A", Kind::Updated));
+        // Everyone publishes the new code (their loader changed) and reads
+        // the others' again: nothing more happens anywhere.
+        for _ in 0..3 {
+            for pc in [&mut a, &mut b, &mut c] {
+                online(pc, &mut relay);
+            }
+        }
+        assert_eq!((b.merges.len(), c.merges.len(), a.merges.len()), (1, 1, 0));
+        assert_eq!((a.loader.as_str(), b.loader.as_str(), c.loader.as_str()), ("neoforge-21.1.256", "neoforge-21.1.256", "neoforge-21.1.256"));
+        assert_eq!(a.mods, b.mods);
+        // A member who was away gets it after a start, and the mods with it.
+        let (mut relay, mut a, _b, mut c) = group();
+        a.set_loader("neoforge-21.1.256");
+        a.set(1, 11, false);
+        a.publish(&mut relay, &ALL, true);
+        c.restart();
+        c.read(&relay);
+        c.merge();
+        assert_eq!((c.loader.as_str(), c.mods[&1]), ("neoforge-21.1.256", (11, false)));
+    }
+
+    #[test]
+    fn two_members_changing_the_loader_end_on_the_later_one_everywhere() {
+        for b_first in [true, false] {
+            let (mut relay, mut a, mut b, mut c) = group();
+            // Neither has read the other's yet.
+            let (first, second) = if b_first { ("neoforge-21.1.256", "neoforge-21.1.300") } else { ("neoforge-21.1.300", "neoforge-21.1.256") };
+            b.set_loader(first);
+            b.publish(&mut relay, &ALL, true);
+            c.set_loader(second);
+            c.publish(&mut relay, &ALL, true);
+            for _ in 0..3 {
+                for pc in [&mut a, &mut b, &mut c] {
+                    online(pc, &mut relay);
+                }
+            }
+            assert_eq!((a.loader.as_str(), b.loader.as_str(), c.loader.as_str()), (second, second, second), "b first: {b_first}");
+        }
+    }
+
+    #[test]
+    fn a_member_whose_copy_is_behind_never_sets_the_loader_back() {
+        let (mut relay, mut a, mut b, mut c) = group();
+        a.set_loader("neoforge-21.1.256");
+        a.publish(&mut relay, &ALL, true);
+        online(&mut b, &mut relay);
+        // C hasn't read it, and changes a mod: its code still has the old loader.
+        c.set(2, 21, false);
+        c.publish(&mut relay, &ALL, true);
+        for _ in 0..3 {
+            for pc in [&mut a, &mut b, &mut c] {
+                online(pc, &mut relay);
+            }
+        }
+        assert_eq!((a.loader.as_str(), b.loader.as_str(), c.loader.as_str()), ("neoforge-21.1.256", "neoforge-21.1.256", "neoforge-21.1.256"));
+        assert_eq!((a.mods[&2], b.mods[&2]), ((21, false), (21, false)));
+    }
+
+    #[test]
+    fn another_loader_is_not_followed_and_sets_nobody_back() {
+        let (mut relay, mut a, mut b, mut c) = group();
+        a.set_loader("fabric-0.16.9");
+        a.publish(&mut relay, &ALL, true);
+        online(&mut b, &mut relay);
+        online(&mut c, &mut relay);
+        assert_eq!((b.loader.as_str(), c.loader.as_str()), (LOADER, LOADER), "left as they are");
+        // B changes a mod afterwards: its code still has its own loader,
+        // which is no change of the loader, so A stays on Fabric.
+        b.set(2, 21, false);
+        b.publish(&mut relay, &ALL, true);
+        for _ in 0..3 {
+            for pc in [&mut a, &mut b, &mut c] {
+                online(pc, &mut relay);
+            }
+        }
+        assert_eq!(a.loader, "fabric-0.16.9");
+        assert_eq!((b.loader.as_str(), c.loader.as_str()), (LOADER, LOADER));
+        assert_eq!(a.mods[&2], (21, false), "the mod change still goes round");
+    }
+
+    /// A plain instance on disk with `loader`.
+    fn loader_on_disk(tag: &str, loader: &str) -> Instance {
+        let root = std::env::temp_dir().join(format!("hopper-groupsync-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        let inst = Instance { root, name: "T".into(), game_version: "1.21.1".into(), loader: loader.into(), ..Default::default() };
+        inst.save().unwrap();
+        inst
+    }
+
+    fn merge_loader(tag: &str, here: &str, theirs: &str) -> (Merged, Instance, Vec<String>) {
+        let inst = loader_on_disk(tag, here);
+        let mut copy = PackCopy::default();
+        copy.got.insert("mia".into(), loader_got(&plain(here), 1, "Mia"));
+        copy.sent = crate::sharecode::encode(&plain(here));
+        copy.arrive("mia", loader_got(&plain(theirs), 10, "Mia"));
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        let merged = merge(&inst.root, &copy, false, false, &job).unwrap();
+        let notes = jobs.snapshot().into_iter().flat_map(|j| j.notes).collect();
+        let back = crate::instances::load(&inst.root).unwrap();
+        let _ = std::fs::remove_dir_all(&inst.root);
+        (merged, back, notes)
+    }
+
+    #[test]
+    fn a_merge_moves_the_instance_to_the_groups_loader_and_says_so() {
+        let (merged, inst, notes) = merge_loader("loader-up", "neoforge-21.1.200", "neoforge-21.1.256");
+        assert_eq!(inst.loader, "neoforge-21.1.256", "saved");
+        assert_eq!(merged.loader.as_deref(), Some("neoforge-21.1.256"));
+        assert_eq!(merged.taken.len(), 1);
+        assert!(notes.iter().any(|n| n == "Mia updated NeoForge to 21.1.256"), "{notes:?}");
+    }
+
+    #[test]
+    fn a_merge_leaves_another_kind_of_loader_and_says_what_to_do() {
+        let (merged, inst, notes) = merge_loader("loader-kind", "neoforge-21.1.200", "fabric-0.16.9");
+        assert_eq!(inst.loader, "neoforge-21.1.200");
+        assert_eq!(merged.loader, None);
+        assert!(merged.made.is_empty());
+        assert_eq!(merged.taken.len(), 1, "told once, not on every look");
+        assert!(
+            notes.iter().any(|n| n == "Mia switched this pack to Fabric. Install it again from their share code to follow."),
+            "{notes:?}"
+        );
     }
 
     // ---- which group packs keeping in step follows ----
