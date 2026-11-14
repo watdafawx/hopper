@@ -442,6 +442,9 @@ pub struct Made {
     pub code: String,
     pub share: Share,
     pub left_out: Vec<String>,
+    /// The modpack's own loader (None: not a pack instance), which a code
+    /// leaves out when the instance has that one.
+    pub pack_loader: Option<String>,
 }
 
 /// What the pack itself puts in an instance.
@@ -578,7 +581,8 @@ pub fn make(inst: &Instance, job: &Job) -> anyhow::Result<Made> {
     let pack_name = inst.pack.as_ref().map(|p| p.name.as_str()).unwrap_or("");
     let name = (inst.name != pack_name && !inst.name.is_empty()).then(|| inst.name.clone());
     let share = Share { base, name, loader, entries };
-    Ok(Made { code: encode(&share), share, left_out })
+    let pack_loader = pack.map(|pf| pf.loader);
+    Ok(Made { code: encode(&share), share, left_out, pack_loader })
 }
 
 /// The file entry for an addon, or `None` when it's on neither site.

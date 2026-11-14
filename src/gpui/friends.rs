@@ -3342,13 +3342,22 @@ fn alert_of<'a>(rows: impl Iterator<Item = &'a SyncRow>, cx: &App) -> Option<Til
 /// Who changed a group pack last, and how: "Mia turned off 2 mods · 3 h
 /// ago". Changes this PC made aren't news, so they're skipped.
 fn changed_by(s: &Store, root: &Path, me: &str) -> Option<String> {
+    use hopper::groupsync::{LOADER_KEY, State};
     let c = s.group_copy(root)?;
     // What others did to a mod kept only on this PC didn't happen here.
     let kept = s.instance(root).map(|i| &i.only_here);
-    let marks = || c.marks.iter().filter(|(k, _)| !kept.is_some_and(|o| o.contains_key(*k))).map(|(_, m)| m);
-    let last = marks().filter(|m| m.by != me).max_by_key(|m| (m.at, m.seq))?;
+    // The loader counts while this instance is on the one the group chose
+    // (it isn't when the group moved to another kind of loader).
+    let loader = s.instance(root).map(|i| State::File { file: format!("loader:{}", i.loader), on: true });
+    let marks = || {
+        c.marks
+            .iter()
+            .filter(|(k, m)| if k.as_str() == LOADER_KEY { Some(&m.state) == loader.as_ref() } else { !kept.is_some_and(|o| o.contains_key(*k)) })
+            .map(|(k, m)| (k.as_str() == LOADER_KEY, m))
+    };
+    let (is_loader, last) = marks().filter(|(_, m)| m.by != me).max_by_key(|(_, m)| (m.at, m.seq))?;
     // The mods that one change touched the same way.
-    let n = marks().filter(|m| m.by == last.by && m.seq == last.seq && m.kind == last.kind).count();
+    let n = marks().filter(|(l, m)| !l && m.by == last.by && m.seq == last.seq && m.kind == last.kind).count();
     let verb = match last.kind {
         Kind::Added => "added",
         Kind::Removed => "took out",
@@ -3356,7 +3365,13 @@ fn changed_by(s: &Store, root: &Path, me: &str) -> Option<String> {
         Kind::Off => "turned off",
         Kind::Updated => "updated",
     };
-    let what = if n == 1 { "a mod".to_string() } else { format!("{n} mods") };
+    let what = if is_loader {
+        "the loader".to_string()
+    } else if n == 1 {
+        "a mod".to_string()
+    } else {
+        format!("{n} mods")
+    };
     let when = if last.at > 0 { format!(" · {}", ago(last.at)) } else { String::new() };
     Some(format!("{} {verb} {what}{when}", name_or(&last.name, "Someone")))
 }

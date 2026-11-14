@@ -607,6 +607,9 @@ pub struct Store {
     /// each pack and retry it holds up doesn't say it again.
     github_limit_told: Option<Instant>,
     group_held: HashMap<String, (u64, Instant)>,
+    /// Instances moved to the group's loader while their game ran: the new
+    /// loader is installed when it closes.
+    group_loader_waiting: HashSet<PathBuf>,
     /// Members' copies that came before this PC's copy of the pack was
     /// set up, by sender and pack; the newest of each.
     group_strays: HashMap<(String, String), hopper::mailbox::Event>,
@@ -814,6 +817,7 @@ impl Store {
             group_retry: Default::default(),
             github_limit_told: None,
             group_held: Default::default(),
+            group_loader_waiting: Default::default(),
             group_strays: Default::default(),
             cfg: Default::default(),
             server_files_got: Default::default(),
@@ -1251,6 +1255,12 @@ impl Store {
                     // Files the game held open during an update can go now.
                     if hopper::locked::flush(&root) > 0 {
                         self.handle(Msg::InstanceChanged(root.clone()), cx);
+                    }
+                    // The loader the group moved this instance to.
+                    if self.group_loader_waiting.remove(&root)
+                        && let Some(inst) = instances::load(&root)
+                    {
+                        self.install_loader(inst);
                     }
                     // Did it crash, and which mods does the crash name? Read
                     // in the background: crash reports and logs run to MBs.
@@ -4834,18 +4844,7 @@ fn prepare_loader(
 }
 
 pub fn loader_label(loader: &str) -> String {
-    if loader.is_empty() {
-        return "Vanilla".into();
-    }
-    let (kind, ver) = loader.split_once('-').unwrap_or((loader, ""));
-    let kind = match kind.to_ascii_lowercase().as_str() {
-        "neoforge" => "NeoForge",
-        "forge" => "Forge",
-        "fabric" => "Fabric",
-        "quilt" => "Quilt",
-        _ => kind,
-    };
-    format!("{kind} {ver}").trim().to_string()
+    hopper::groupsync::loader_label(loader)
 }
 
 /// "12h 5m" or "40m".
