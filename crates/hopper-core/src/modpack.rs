@@ -757,11 +757,14 @@ pub fn claim_override_jars(inst: &mut Instance, shipped: &HashSet<String>, add: 
         mine.push((i, disk));
     }
     // The pack's own entries, by the mod ids their jars hold. Read only for
-    // an override jar that CurseForge or Modrinth matched to a project.
+    // an override jar that CurseForge or Modrinth matched to a project, or
+    // one an older Hopper already set to no project (it has no `shown_as` yet).
     let mut theirs: Option<Vec<(usize, Vec<String>)>> = None;
     for (i, disk) in &mine {
         let a = &inst.addons[*i];
-        if (a.project_id == 0 && a.mr_project.is_empty()) || a.source.is_some() {
+        let matched = a.project_id != 0 || !a.mr_project.is_empty();
+        let cleared = !matched && a.shown_as == 0 && !a.name.is_empty();
+        if !(matched || cleared) || a.source.is_some() {
             continue;
         }
         let own: Vec<String> = crate::deps::own_ids(&dir.join(disk)).0;
@@ -789,6 +792,15 @@ pub fn claim_override_jars(inst: &mut Instance, shipped: &HashSet<String>, add: 
         };
         let p = inst.addons[j].clone();
         let a = &mut inst.addons[*i];
+        // The row shows as the pack's entry (icon, mod page, filters) but
+        // keeps no project of its own, so nothing updates it from there.
+        a.shown_as = p.project_id;
+        if cleared {
+            // Already without a project (0.72.1 did that): only the display
+            // link is new.
+            changed = true;
+            continue;
+        }
         a.project_id = 0;
         a.file_id = 0;
         a.name = p.name;
@@ -813,8 +825,14 @@ pub fn claim_override_jars(inst: &mut Instance, shipped: &HashSet<String>, add: 
 pub fn claim_shipped_jars(inst: &mut Instance) -> bool {
     static DONE: Mutex<Option<HashSet<(PathBuf, u64)>>> = Mutex::new(None);
     let Some(pack) = inst.pack.as_ref() else { return false };
-    // Only worth a look when a jar of the pack's own could be wrong.
-    if inst.addons.iter().all(|a| a.from_pack || a.folder() != "mods") {
+    // Only worth a look when a jar of the pack's own could be wrong: one not
+    // marked yet, or one an older Hopper left with no project and no
+    // `shown_as` (it gets the pack entry's icon and page link now).
+    if inst.addons.iter().all(|a| {
+        a.folder() != "mods"
+            || (a.from_pack
+                && !(a.project_id == 0 && a.shown_as == 0 && !a.name.is_empty() && a.mr_project.is_empty() && a.source.is_none()))
+    }) {
         return false;
     }
     let key = (inst.root.clone(), pack.file_id);
@@ -3739,6 +3757,8 @@ mod override_jar_tests {
         // Not the stranger's project: no update or removal comes from it.
         assert_eq!((a.project_id, a.file_id), (0, 0));
         assert_eq!(a.name, "CC: Tweaked");
+        // Shown as the pack's entry for the icon and the mod page.
+        assert_eq!((a.shown_as, a.shown_project()), (282001, 282001));
         // The manifest's own entry is untouched.
         let m = inst.addon_by_file("cc-tweaked-1.113.1.jar").unwrap();
         assert_eq!((m.project_id, m.name.as_str(), m.from_pack), (282001, "CC: Tweaked", true));
@@ -3841,5 +3861,88 @@ mod override_jar_tests {
         let a = inst.addon_by_file("cc-tweaked-1.120.2.jar").expect("the override jar is recorded");
         assert!(a.from_pack);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// What 0.72.1 saved for ATM10: the override jar already named after the
+    /// pack's entry with no project, and no `shown_as` yet.
+    fn rewritten_by_0_72_1(name: &str) -> (Instance, PathBuf) {
+        let (mut inst, root) = atm10(name);
+        let a = &mut inst.addons[1];
+        a.from_pack = true;
+        a.project_id = 0;
+        a.file_id = 0;
+        a.name = "CC: Tweaked".into();
+        (inst, root)
+    }
+
+    #[test]
+    fn an_install_from_0_72_1_gets_the_display_link_on_the_next_load() {
+        let (mut inst, root) = rewritten_by_0_72_1("legacy");
+        fs::write(
+            root.join("minecraftinstance.json"),
+            r#"{"modpackOverrides":["mods\\cc-tweaked-1.120.2.jar"]}"#,
+        )
+        .unwrap();
+        inst.pack = Some(PackRef { project_id: 925200, file_id: 9431425, ..Default::default() });
+        assert!(claim_shipped_jars(&mut inst), "every jar is marked, yet this one still needs the link");
+        let a = inst.addon_by_file("cc-tweaked-1.120.2.jar").unwrap();
+        assert_eq!((a.project_id, a.shown_as, a.name.as_str()), (0, 282001, "CC: Tweaked"));
+        assert!(a.from_pack);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_override_jar_the_pack_does_not_list_keeps_no_project_and_no_display_link() {
+        let (root, mods) = scratch("unlisted");
+        jar(&mods.join("extra.jar"), "extra", "1", "Extra");
+        jar(&mods.join("jade.jar"), "jade", "1", "Jade");
+        let mut inst = Instance {
+            root: root.clone(),
+            addons: vec![entry("extra.jar", "Extra", 0, true), entry("jade.jar", "Jade", 324717, true)],
+            ..Default::default()
+        };
+        claim_override_jars(&mut inst, &shipped(&["mods/extra.jar"]), false);
+        let a = inst.addon_by_file("extra.jar").unwrap();
+        assert_eq!((a.project_id, a.shown_as, a.shown_project()), (0, 0, 0));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The row shows as CC: Tweaked, but nothing that reads `project_id` sees a
+    /// project: no update lookup, no share-code key shared with the pack's
+    /// entry, no extra "in twice" row.
+    #[test]
+    fn a_shown_as_row_is_never_updated_shared_or_counted_as_the_packs_mod() {
+        let (mut inst, root) = atm10("consumers");
+        claim_override_jars(&mut inst, &shipped(&["mods/cc-tweaked-1.120.2.jar"]), false);
+        let o = inst.addon_by_file("cc-tweaked-1.120.2.jar").unwrap().clone();
+        let m = inst.addon_by_file("cc-tweaked-1.113.1.jar").unwrap().clone();
+        assert_eq!(o.shown_project(), 282001);
+
+        // Update checks: only the manifest's entry (and Jade) are looked up, and
+        // there is no Modrinth hash or link to follow for the override jar.
+        assert_eq!(crate::install::update_projects(&inst.addons), [282001, 324717]);
+        assert!(o.mr_sha1.is_empty() && o.mr_project.is_empty() && o.source.is_none());
+
+        // Group sync and share codes: its own key, not the pack entry's, and no
+        // file entry (a code would otherwise publish it as a change).
+        assert_eq!(crate::groupsync::addon_key(&m), "p:282001");
+        assert_eq!(crate::groupsync::addon_key(&o), "n:cc-tweaked-1.120.2.jar");
+        assert!(crate::sharecode::file_entry(&o).is_none());
+        let plain = Addon { shown_as: 0, ..o.clone() };
+        assert_eq!(crate::groupsync::addon_key(&plain), crate::groupsync::addon_key(&o));
+        assert_eq!(crate::sharecode::file_entry(&plain), crate::sharecode::file_entry(&o));
+
+        // The rows still serialize without the field when it is 0, and with it
+        // otherwise (so a saved instance keeps it).
+        assert!(!serde_json::to_string(&plain).unwrap().contains("shown_as"));
+        let back: Addon = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+        assert_eq!(back.shown_as, 282001);
+
+        // Duplicate detection reads the same rows either way.
+        let before = crate::install::duplicates(&inst).iter().map(|d| (d.name.clone(), d.files.clone(), d.all_from_pack)).collect::<Vec<_>>();
+        inst.addons[1].shown_as = 0;
+        let after = crate::install::duplicates(&inst).iter().map(|d| (d.name.clone(), d.files.clone(), d.all_from_pack)).collect::<Vec<_>>();
+        assert_eq!(before, after);
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -17,6 +17,7 @@ pub fn loader_of(inst: &Instance) -> Loader {
 pub fn addon_from(m: &cf::Mod, f: &cf::File, from_pack: bool) -> Addon {
     Addon {
         project_id: m.id,
+        shown_as: 0,
         file_id: f.id,
         file_name: f.file_name.clone(),
         name: m.name.clone(),
@@ -903,15 +904,22 @@ pub fn version_change(from: &str, to: &str) -> (String, String) {
     (x.to_string(), y.to_string())
 }
 
+/// The CurseForge projects whose updates are looked up. Reads `project_id`
+/// only: a row that merely shows as a project (`Addon::shown_as`, a pack's
+/// own override jar) has none, so no update comes from it.
+pub(crate) fn update_projects(addons: &[Addon]) -> Vec<u64> {
+    addons
+        .iter()
+        .filter(|a| a.project_id != 0 && !crate::modrinth::is_mr(a.project_id) && !crate::sources::is_src(a.project_id))
+        .map(|a| a.project_id)
+        .collect()
+}
+
 /// Newer files for installed projects that fit the instance.
 pub fn check_updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
     // Without a CurseForge key only Modrinth's mods can be checked.
     let ids: Vec<u64> = if cf::api_key().is_some() {
-        inst.addons
-            .iter()
-            .filter(|a| a.project_id != 0 && !crate::modrinth::is_mr(a.project_id) && !crate::sources::is_src(a.project_id))
-            .map(|a| a.project_id)
-            .collect()
+        update_projects(&inst.addons)
     } else {
         Vec::new()
     };

@@ -127,6 +127,14 @@ pub struct PackRef {
 pub struct Addon {
     pub project_id: u64,
     pub file_id: u64,
+    /// For showing only: the project whose icon and mod page a row opens when
+    /// it has no project of its own (`project_id` 0). A jar the modpack ships
+    /// in its overrides is the pack's own copy of a mod the pack also lists,
+    /// so it shows as that mod, but never gets updates from it. Nothing that
+    /// updates, shares, compares or counts mods reads this; see
+    /// [`Addon::shown_project`].
+    #[serde(skip_serializing_if = "is_zero")]
+    pub shown_as: u64,
     /// Name on disk without `.disabled`.
     pub file_name: String,
     pub name: String,
@@ -167,9 +175,20 @@ pub struct Addon {
     pub source: Option<crate::sources::ModSource>,
 }
 
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 impl Addon {
     pub fn folder(&self) -> &'static str {
         folder_for_class(self.class_id)
+    }
+
+    /// The project to show for this row (its icon, its mod page): its own, or
+    /// the one it shows as ([`Addon::shown_as`]). 0 when neither. Display
+    /// only: updates, share codes and duplicate checks read `project_id`.
+    pub fn shown_project(&self) -> u64 {
+        if self.project_id != 0 { self.project_id } else { self.shown_as }
     }
 }
 
@@ -1376,6 +1395,7 @@ fn import_curseforge(root: &Path) -> Option<Imported> {
             let f = a.installed_file.as_ref();
             Addon {
                 project_id: a.addon_id,
+                shown_as: 0,
                 file_id: f.map_or(0, |f| f.id),
                 file_name: a
                     .file_name_on_disk

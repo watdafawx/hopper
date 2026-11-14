@@ -424,7 +424,7 @@ fn fingerprint(store: &Store, root: &Path, class: u32) -> Option<u64> {
     inst.pack.as_ref().map(|p| (p.project_id, p.file_id)).hash(&mut h);
     inst.mod_profiles.len().hash(&mut h);
     for a in &inst.addons {
-        (a.project_id, a.file_id, &a.file_name, &a.name, &a.author, &a.icon).hash(&mut h);
+        (a.project_id, a.shown_as, a.file_id, &a.file_name, &a.name, &a.author, &a.icon).hash(&mut h);
         (a.enabled, a.from_pack, a.locked, a.class_id, &a.env, &a.date_added).hash(&mut h);
         (&a.mr_project, &a.page, &a.locked_version).hash(&mut h);
     }
@@ -1641,7 +1641,7 @@ impl AddonsView {
                 Show::AlwaysOn => matches!(self.where_group(&a.file_name), hopper::pack_where::Group::Global(_)),
                 Show::Archived => self.table.archived.contains(&a.project_id),
                 Show::ClientOnly => a.env == "client",
-                Show::Unknown => a.project_id == 0 && a.source.is_none(),
+                Show::Unknown => a.shown_project() == 0 && a.source.is_none(),
                 Show::All => true,
             })
             .filter(|(_, a)| {
@@ -1756,7 +1756,7 @@ impl AddonsView {
                     .addons
                     .iter()
                     .filter(|b| b.enabled && b.requires.contains(&a.project_id) && !files.contains(&b.file_name))
-                    .map(|b| (b.name.clone(), b.project_id))
+                    .map(|b| (b.name.clone(), b.shown_project()))
                     .collect();
                 (!by.is_empty()).then(|| Dependent { name: a.name.clone(), by })
             })
@@ -1953,8 +1953,8 @@ impl AddonsView {
             .map(|i| {
                 i.addons
                     .iter()
-                    .filter(|a| a.project_id != 0)
-                    .filter_map(|a| Some((a.project_id, store.image(&a.icon)?.to_path_buf())))
+                    .filter(|a| a.shown_project() != 0)
+                    .filter_map(|a| Some((a.shown_project(), store.image(&a.icon)?.to_path_buf())))
                     .collect()
             })
             .unwrap_or_default();
@@ -2871,7 +2871,7 @@ impl AddonsView {
         // Mods: Unknown, when there are any (or it is being viewed); Client-only
         // on server pages, where it says what a server can leave out.
         if self.class == cf::CLASS_MODS && !packs {
-            let n_unknown = of_class().filter(|a| a.project_id == 0 && a.source.is_none()).count();
+            let n_unknown = of_class().filter(|a| a.shown_project() == 0 && a.source.is_none()).count();
             if n_unknown > 0 || self.show == Show::Unknown {
                 rail.push(RailItem::show(Show::Unknown, "Unknown", IconName::Info, Some(n_unknown)));
             }
@@ -3040,7 +3040,7 @@ impl AddonsView {
                 (self.class == cf::CLASS_MODS && self.links_menu(cx))
                     .then(|| {
                         let inst = self.store.read(cx).instance(&inst.root)?;
-                        let n = inst.addons.iter().filter(|a| a.project_id == 0 && a.source.is_none() && a.folder() == "mods").count()
+                        let n = inst.addons.iter().filter(|a| a.shown_project() == 0 && a.source.is_none() && a.folder() == "mods").count()
                             + self.loose_count();
                         (n > 0).then_some(n)
                     })
@@ -4126,7 +4126,9 @@ impl AddonsView {
         let name_line = h_flex()
             .gap_1p5()
             .child({
-                let pid = a.project_id;
+                // A pack's own override jar has no project but shows as the
+                // pack's entry for the mod: same icon, same peek.
+                let pid = a.shown_project();
                 let tip: Option<SharedString> = match (by, pid != 0) {
                     (Some(by), true) => Some(format!("{by}
 Details").into()),
@@ -4188,7 +4190,8 @@ Details").into()),
         let src_prompt: Option<(SharedString, Option<hopper::sources::ModSource>)> =
             if self.class != cf::CLASS_MODS || global || !store.settings().allow_sources {
                 None
-            } else if a.project_id == 0 && a.source.is_none() {
+            } else if a.project_id == 0 && a.source.is_none() && a.shown_as == 0 {
+                // Not for the pack's own override jar: the pack updates it.
                 Some(("Add a source to get updates".into(), None))
             } else {
                 a.source
@@ -4494,7 +4497,7 @@ It stays disabled after updating: turn it on in the On column.")
             )
             .children(order_cell)
             .child({
-                let pid = a.project_id;
+                let pid = a.shown_project();
                 div()
                     .id(id("thumb"))
                     // Dimmed logos stay still: the layer paints at full strength.
@@ -5054,7 +5057,7 @@ Change version", a.file_name).into()
             // "breaks X": the first mod with its icon (its page on click), and
             // how many more in the tooltip.
             let (first, range) = (breaks[0].0.clone(), breaks[0].1.clone());
-            let found = inst.as_ref().and_then(|i| i.addons.iter().find(|x| x.name == first)).map(|x| (x.project_id, x.icon.clone()));
+            let found = inst.as_ref().and_then(|i| i.addons.iter().find(|x| x.name == first)).map(|x| (x.shown_project(), x.icon.clone()));
             let icon = found.as_ref().and_then(|(_, i)| self.store.read(cx).image(i)).map(std::path::Path::to_path_buf);
             let tip: SharedString = breaks
                 .iter()

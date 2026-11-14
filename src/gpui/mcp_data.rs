@@ -172,6 +172,7 @@ fn list_mods(store: &Store, args: &Value) -> Reply {
                 "enabled": a.enabled,
                 "side": a.env,
                 "id": a.project_id,
+                "shown_as": a.shown_as,
                 "site": if a.source.is_some() { "source" } else if a.project_id == 0 { "none" } else if a.mr_project.is_empty() { "curseforge" } else { "modrinth" },
                 "author": a.author,
                 "from_modpack": a.from_pack,
