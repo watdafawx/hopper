@@ -4,14 +4,15 @@
   // first, then whether the tunnel is up, the upload it saved against
   // vanilla, the upload now and the cache hits. Shown only for a server set
   // to use the relay.
-  import { Globe, Copy } from '@lucide/svelte';
+  import { Globe, Copy, Settings2 } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { bytes } from './lib/format.js';
   import { copyText } from './lib/browse.js';
   import { say } from './lib/toast.svelte.js';
   import { session } from './lib/me.svelte.js';
 
-  let { server } = $props();
+  // `onSetup`: opens the setup dialog (repair, remove), for the owner.
+  let { server, onSetup = null } = $props();
   let r = $state(null);
   let busy = $state(false);
   // The live feed replaces `server` every second; the id doesn't change.
@@ -96,6 +97,7 @@
       <span class="sp"></span>
       {#if up}<span class="tiny muted">since {clock(r.since)}{#if r.rtt_ms != null} · {r.rtt_ms < 1 ? 'under 1' : r.rtt_ms} ms to the relay{/if}</span>
       {:else if r.state === 'down' && r.retry_in != null}<span class="tiny muted">{r.retry_in > 0 ? `trying again in ${r.retry_in} s` : 'trying again now'}</span>{/if}
+      {#if onSetup}<button class="btn ghost sm icon" title="Relay setup: check, repair or remove it" aria-label="Relay setup" onclick={onSetup}><Settings2 size={14} /></button>{/if}
     </h3>
     {#if r.address}
       <div class="lbl">Players join</div>

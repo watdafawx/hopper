@@ -14,7 +14,8 @@
 //!   nothing is passed anywhere else.
 //!
 //! ```text
-//! hopperd relay init [--data <dir>]    make the relay key (shown once) and CA
+//! hopperd relay init [--data <dir>] [--key-stdin]   make the relay key (shown once) and CA
+//! hopperd relay status [--data <dir>]   the certificate fingerprint and settings, as JSON
 //! hopperd relay [run] [--data <dir>] [--bind <addr>] [--game-port <n>] [--tunnel-port <n>]
 //! ```
 //!
@@ -441,7 +442,8 @@ async fn take_packet(sock: &mut TcpStream, buf: &mut Vec<u8>, parse: impl Fn(&[u
 
 // ---- command line ------------------------------------------------------------------------
 
-const USAGE: &str = "hopperd relay init [--data <dir>]    make the relay key (shown once) and CA
+const USAGE: &str = "hopperd relay init [--data <dir>] [--key-stdin]   make the relay key (shown once) and CA
+hopperd relay status [--data <dir>]   the certificate fingerprint and settings, as JSON
 hopperd relay [run] [--data <dir>] [--bind <addr>] [--game-port <n>] [--tunnel-port <n>]";
 
 struct Args {
@@ -449,16 +451,20 @@ struct Args {
     bind: Option<String>,
     game_port: Option<u16>,
     tunnel_port: Option<u16>,
+    /// `init` takes the key from stdin instead of making one: the home
+    /// panel's ssh setup makes it, so it never shows on a console.
+    key_stdin: bool,
 }
 
 fn parse(args: &[String]) -> anyhow::Result<(String, Args)> {
-    let mut a = Args { data: crate::config::data_dir().join("relay"), bind: None, game_port: None, tunnel_port: None };
+    let mut a = Args { data: crate::config::data_dir().join("relay"), bind: None, game_port: None, tunnel_port: None, key_stdin: false };
     let mut cmd = String::from("run");
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let mut val = || it.next().cloned().with_context(|| format!("{arg} needs a value"));
         match arg.as_str() {
-            "init" | "run" => cmd = arg.clone(),
+            "init" | "run" | "status" => cmd = arg.clone(),
+            "--key-stdin" => a.key_stdin = true,
             "--data" => a.data = val()?.into(),
             "--bind" => a.bind = Some(val()?),
             "--game-port" => a.game_port = Some(val()?.parse().context("--game-port takes a number")?),
@@ -488,11 +494,35 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
     if let Some(p) = a.tunnel_port {
         cfg.tunnel_port = p;
     }
+    if cmd == "status" {
+        // Read by the home panel's setup over ssh to check what is there;
+        // the key itself isn't kept here, only its hash.
+        let (_, fingerprint) = tls_config(&a.data)?;
+        let out = json!({
+            "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint, "key_sha256": cfg.key_sha256,
+            "bind": cfg.bind, "game_port": cfg.game_port, "tunnel_port": cfg.tunnel_port,
+        });
+        println!("{out}");
+        return Ok(());
+    }
     if cmd == "init" {
-        let key = link::new_key();
+        let key = if a.key_stdin {
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).context("reading the key")?;
+            let k = line.trim().to_string();
+            anyhow::ensure!(k.strip_prefix(link::KEY_PREFIX).is_some_and(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())), "the key on stdin isn't a relay key");
+            k
+        } else {
+            link::new_key()
+        };
         cfg.key_sha256 = link::hash_hex(&link::key_hash(&key));
         cfg.save(&a.data)?;
         let (_, fingerprint) = tls_config(&a.data)?;
+        if a.key_stdin {
+            // The panel that sent the key has it; only the fingerprint goes back.
+            println!("{}", json!({ "fingerprint": fingerprint, "key_sha256": cfg.key_sha256 }));
+            return Ok(());
+        }
         // To the person at the console only: the key is never logged and
         // the relay keeps only its hash, so this is the one time it shows.
         println!("Relay key (shown once): {key}");

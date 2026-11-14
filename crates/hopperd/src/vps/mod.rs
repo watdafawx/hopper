@@ -19,6 +19,7 @@
 pub mod home;
 pub mod link;
 pub mod relay_end;
+pub mod setup;
 pub mod wire;
 
 #[cfg(test)]

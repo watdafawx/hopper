@@ -17,6 +17,7 @@
   import { askPower, askKickOrBan, playerAct, head } from './lib/consoleKit.js';
   import ConsoleView from './ConsoleView.svelte';
   import RelayCard from './RelayCard.svelte';
+  import VpsRelaySetup from './VpsRelaySetup.svelte';
   import CrashStrip from './CrashStrip.svelte';
   import StuckStrip from './StuckStrip.svelte';
   import { unseen, markSeen } from './lib/crashseen.svelte.js';
@@ -112,6 +113,8 @@
   let peek = $state(null);
   /** The header's "…" menu, and a player's menu in the Players card. */
   let more = $state(false);
+  // The relay setup dialog (this panel's own servers, owner only).
+  let relaySetup = $state(false);
   let playerMenu = $state(null);
   async function copyOf(text, what) {
     say((await copyText(text)) ? `Copied ${what}` : `Couldn't copy ${what}`, false);
@@ -301,6 +304,7 @@
             <button class="menu-item" role="menuitem" onclick={backUpNow}><Archive size={13} />Back up now</button>
             <button class="menu-item" role="menuitem" title={s.path} onclick={() => copyOf(s.path, 'the folder path')}><Folder size={13} />Copy folder path</button>
             {#if !panel && session.owner}<button class="menu-item" role="menuitem" onclick={() => ((more = false), openMove(s))}><ArrowRightLeft size={13} />Move or copy to…</button>{/if}
+            {#if !panel && session.owner}<button class="menu-item" role="menuitem" onclick={() => ((more = false), (relaySetup = true))}><Globe size={13} />Relay through a VPS…</button>{/if}
             <div class="menu-sep"></div>
             <button class="menu-item bad" role="menuitem" disabled={!alive} onclick={kill}><Skull size={13} />Kill (no save)</button>
           </div>
@@ -349,7 +353,7 @@
   {:else}
   <div class="split">
     <div class="main">
-      <RelayCard server={s} />
+      <RelayCard server={s} onSetup={!panel && session.owner ? () => (relaySetup = true) : null} />
       <ConsoleView server={s} onShare={(p) => (sharing = { path: p })} />
     </div>
 
@@ -404,6 +408,7 @@
 <svelte:window onclick={() => { more = false; playerMenu = null; }} onkeydown={(e) => { if (e.key === 'Escape') { more = false; playerMenu = null; } }} />
 
 
+{#if relaySetup && s}<VpsRelaySetup server={s} onClose={() => (relaySetup = false)} />{/if}
 {#if sharing && s}<ShareLog server={s} path={sharing.path} onClose={() => (sharing = null)} />{/if}
 {#if packOpen && s}{#key packFile}<PackUpdate server={s} check={packOpen} file={packFile} compareFirst={packCompare} onClose={() => (packOpen = null)} onDone={() => checkPack(true)} openFiles={(p) => nav('files', p)} onOtherVersion={openVersions} />{/key}{/if}
 {#if versionsOpen && s}<PackVersions server={s} check={versionsOpen} onPick={openUpdate} onClose={() => (versionsOpen = null)} />{/if}

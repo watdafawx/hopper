@@ -601,6 +601,78 @@ the card's sparkline.
 4. The server's Overview shows the card; `GET /api/v1/vps-relay` shows the
    settings without the key.
 
+## B3 as built
+
+Code: `crates/hopperd/src/vps/setup/` (`mod.rs` steps, jobs and routes;
+`plan.rs` the fixed commands and the pure checks, tested; `ssh.rs` the
+russh client) and `crates/hopperd/ui/src/VpsRelaySetup.svelte`, opened from
+the server page's More menu ("Relay through a VPS…") or the relay card's
+setup button. Owner only (`require_owner` on every route).
+
+Flow (option A of the mock): **Connect** (address, ssh port, user; a saved
+key, a key file, a password used once to put a new key on the VPS, or a new
+key made here whose public half the player pastes into the cloud page),
+**Check** (OS, arch, RAM → `CodecConfig::for_memory`, disk, sudo, tools,
+both ports free), **Install** (steps below, each checks before it acts, so
+"Run again" is the repair and reports "Nothing changed" when nothing was),
+and **Remove the relay**, from the done screen or from Check.
+
+| Step | Runs as | Check | Act |
+|---|---|---|---|
+| User | root (sudo) | `id hopper-relay` | `useradd --system --no-create-home --shell /usr/sbin/nologin` |
+| Program | root | sha256 of `/opt/hopper-relay/hopperd` against `installed.json` and the source | download (curl/wget) into a 0700 temp folder, `sha256sum -c`, `install -o root -m 0755` |
+| Relay key | `hopper-relay` (`runuser`) for `relay status` / `relay init --key-stdin` | key hash, fingerprint, bind and ports match this panel | new key on stdin; data files 0600, folder 0700; saved here at once |
+| Service | root | the unit text and `is-active` / `is-enabled` | write the unit (hardened: `NoNewPrivileges`, `ProtectSystem=strict`, no capabilities, `ReadWritePaths=/var/lib/hopper-relay`, `UMask=0077`), `enable --now` |
+| Firewall | root | ufw active? iptables INPUT rules for the two ports | `ufw allow <port>/tcp comment hopper-relay`, or `iptables -I` ACCEPTs above the first REJECT/DROP; nothing when nothing blocks them |
+| Reach | home panel | TCP connect from home to both ports | warns with the ports to open in the cloud page |
+| Pair | home panel | | relay address, fingerprint and key into the panel's relay settings, this server added |
+
+### What differs from the plan above, and why
+
+- **No Velocity, Java, PCF or voice yet.** B3 installs the B2 relay
+  (ports 25565 game and 25566 tunnel by default, both changeable). Velocity
+  and the server-side changes are B4; voice (24454/udp) is B6.
+- `installed.json` lives in `/opt/hopper-relay` (root, 0600), not in the
+  relay's data folder: the relay user must not be able to edit the list of
+  what Remove takes out. There is no `/etc/hopper-relay` (nothing to put
+  there before B4).
+- The relay key goes in with `hopperd relay init --key-stdin` (home makes
+  it, so it's never printed on the VPS), and `hopperd relay status` prints
+  the key's hash, fingerprint, bind and ports so the check can compare
+  without reading files.
+- The program is checked by the SHA-256 GitHub lists for the release asset
+  (`updswap::expected_sha256`), not a signature: releases aren't signed yet.
+  Tests upload a local Linux build instead (`HOPPERD_VPS_TEST_BINARY`).
+- iptables rules Hopper adds aren't saved across a reboot unless
+  `netfilter-persistent` is installed; the step warns and says so. Checks
+  read the INPUT chain only (they don't follow jumps into other chains).
+- The relay binds IPv4 `0.0.0.0` (tests: `HOPPERD_VPS_TEST_BIND=127.0.0.1`).
+- The ssh login is kept in panel data `vps-ssh.json` (0600 / owner-only
+  ACL): host, user, the pinned host key, the private key. A typed password
+  is used once and never kept; a key Hopper added with it is removed again
+  by Remove. The host key is trusted on first use, shown, then must match;
+  a changed one needs the "trust the new host key" tick.
+
+### Limits found while testing
+
+- The release Linux binary is built on Ubuntu 24.04; its glibc may be too
+  new for Ubuntu 22.04 or Debian 12. The Program step runs `--version`
+  after install and fails with that message rather than leaving a broken
+  service. A static (musl) build would fix it.
+- The release download path is untested end to end: published releases
+  don't have `relay init --key-stdin` / `relay status` yet. It works once a
+  release with B3 is out.
+
+### Desktop parity (B8)
+
+- Desktop needs a "Relay through a VPS…" entry on a paired Hopper Server's
+  server page that drives the same `/api/v1/vps-relay/setup*` routes (the
+  setup runs on the panel), with the same three stages, wording and
+  confirmations; and the relay card with Connected / disconnected.
+- The connect form's key file and password fields send secrets to the
+  panel; desktop must send them only over the paired TLS connection and
+  never keep them.
+
 ## Open questions for the maintainer (answered: see Decisions)
 
 1. **Voice: built-in UDP relay instead of AmneziaWG?** AmneziaWG needs a

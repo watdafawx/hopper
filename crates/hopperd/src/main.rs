@@ -169,6 +169,8 @@ pub struct App {
     pub moves: moves::Moves,
     /// The connection to a relay on a VPS, when one is set up (see [`vps`]).
     pub vps: vps::home::Home,
+    /// Setting that relay up over ssh (see [`vps::setup`]).
+    pub vps_setup: vps::setup::Setup,
 }
 
 impl App {
@@ -468,6 +470,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         nodes: nodes::Nodes::new(&data_dir),
         moves: moves::Moves::new(&data_dir),
         vps: vps::home::Home::new(&data_dir),
+        vps_setup: vps::setup::Setup::new(&data_dir),
     });
     app.rescan();
     autoupdate::start(app.clone());
