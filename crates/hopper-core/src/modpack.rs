@@ -859,6 +859,96 @@ pub fn claim_shipped_jars(inst: &mut Instance) -> bool {
     true
 }
 
+/// Puts back the jars a CurseForge pack ships in its own `overrides/mods`
+/// that are gone from the instance, from the pack's file (downloaded again
+/// when Hopper doesn't keep it), and records each as the pack's. A file
+/// that is there, on or off, is never written over. Saves the instance;
+/// returns how many jars it put back.
+pub fn restore_shipped_jars(root: &Path, job: &Job) -> anyhow::Result<usize> {
+    let _edit = crate::instances::edit_lock(root);
+    let Some(mut inst) = crate::instances::load(root).filter(|i| i.unreadable.is_none()) else { return Ok(0) };
+    let Some(pack) = inst.pack.clone().filter(|p| p.project_id != 0 && !crate::modrinth::is_mr(p.project_id) && p.file_id != 0) else {
+        return Ok(0);
+    };
+    let Some(shipped) = crate::pack_where::shipped(&inst) else { return Ok(0) };
+    if missing_shipped_jars(&inst, &shipped).is_empty() {
+        return Ok(0);
+    }
+    let mut zip_path = cache_dir().join(format!("{}.zip", pack.file_id));
+    if !cache_hit(&zip_path) {
+        let f = cf::get_files(&[pack.file_id])?
+            .into_iter()
+            .find(|f| f.id == pack.file_id)
+            .context("CurseForge doesn't have this pack version any more")?;
+        zip_path = fetch_pack_zip(&f, job)?;
+    }
+    let n = restore_jars_from(&mut inst, &zip_path, &shipped)?;
+    if n > 0 {
+        inst.save()?;
+    }
+    Ok(n)
+}
+
+/// The jars `shipped` puts straight in `mods/` (lower case, "mods/x.jar")
+/// that the instance has neither on nor off.
+fn missing_shipped_jars(inst: &Instance, shipped: &HashSet<String>) -> HashSet<String> {
+    let on_disk: HashSet<String> = fs::read_dir(inst.mods_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_lowercase())
+        .map(|n| n.strip_suffix(".disabled").map(str::to_string).unwrap_or(n))
+        .collect();
+    shipped
+        .iter()
+        .filter(|p| p.strip_prefix("mods/").is_some_and(|n| !n.contains('/') && n.ends_with(".jar") && !on_disk.contains(n)))
+        .cloned()
+        .collect()
+}
+
+/// [`restore_shipped_jars`] from a pack zip on disk; the caller saves.
+pub(crate) fn restore_jars_from(inst: &mut Instance, zip_path: &Path, shipped: &HashSet<String>) -> anyhow::Result<usize> {
+    let want = missing_shipped_jars(inst, shipped);
+    if want.is_empty() {
+        return Ok(0);
+    }
+    let manifest = read_manifest(zip_path)?;
+    let prefix = match manifest.overrides.trim_end_matches('/') {
+        "" => "overrides/".to_string(),
+        p => format!("{p}/"),
+    };
+    let mut z = zip::ZipArchive::new(fs::File::open(zip_path)?)?;
+    let dir = inst.mods_dir();
+    fs::create_dir_all(&dir)?;
+    let mut n = 0;
+    for i in 0..z.len() {
+        let mut e = z.by_index(i)?;
+        let name = e.name().replace('\\', "/");
+        let Some(rel) = name.strip_prefix(&prefix) else { continue };
+        if e.is_dir() || !safe_pack_path(rel) || !want.contains(&rel.to_lowercase()) {
+            continue;
+        }
+        let file = &rel["mods/".len()..];
+        // A jar the player turned off comes back off.
+        let off = inst.addons.iter().any(|a| a.folder() == "mods" && a.file_name.eq_ignore_ascii_case(file) && !a.enabled);
+        let out = dir.join(if off { format!("{file}.disabled") } else { file.to_string() });
+        let mut f = match fs::OpenOptions::new().write(true).create_new(true).open(&out) {
+            Ok(f) => f,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err).with_context(|| format!("writing {}", out.display())),
+        };
+        if let Err(err) = std::io::copy(&mut e, &mut f) {
+            drop(f);
+            let _ = fs::remove_file(&out);
+            return Err(err).with_context(|| format!("writing {}", out.display()));
+        }
+        n += 1;
+    }
+    // Each one put back is the pack's again, its record made if it was gone.
+    claim_override_jars(inst, shipped, true);
+    Ok(n)
+}
+
 /// The files under a downloaded pack's overrides folder, in zip order with
 /// backslashes, as CurseForge lists them in `modpackOverrides`. `None` when
 /// the pack file isn't in Hopper's cache.
@@ -3902,6 +3992,40 @@ mod override_jar_tests {
         let a = inst.addon_by_file("cc-tweaked-1.120.2.jar").expect("the override jar is recorded");
         assert!(a.from_pack);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repair_puts_back_a_missing_override_jar_and_writes_over_nothing() {
+        // Group sync took ATM10's CC: Tweaked 1.120.2 away (and its record);
+        // 1.113.1 is still there. Jade is in the overrides too and is there
+        // with the player's own bytes.
+        let (mut inst, root) = atm10("repair");
+        fs::remove_file(root.join("mods/cc-tweaked-1.120.2.jar")).unwrap();
+        inst.addons.retain(|a| a.file_name != "cc-tweaked-1.120.2.jar");
+        let mine = fs::read(root.join("mods/jade.jar")).unwrap();
+        let zip_path = root.join("pack.zip");
+        let mut z = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        z.start_file::<_, ()>("manifest.json", Default::default()).unwrap();
+        z.write_all(br#"{"minecraft":{"version":"1.21.1","modLoaders":[]},"name":"P","files":[],"overrides":"overrides"}"#).unwrap();
+        for (name, bytes) in [("overrides/mods/cc-tweaked-1.120.2.jar", &b"pack's cc"[..]), ("overrides/mods/jade.jar", b"pack's jade")] {
+            z.start_file::<_, ()>(name, Default::default()).unwrap();
+            z.write_all(bytes).unwrap();
+        }
+        z.finish().unwrap();
+        let set = shipped(&["mods/cc-tweaked-1.120.2.jar", "mods/jade.jar", "config/a.toml"]);
+        assert_eq!(restore_jars_from(&mut inst, &zip_path, &set).unwrap(), 1);
+        assert_eq!(fs::read(root.join("mods/cc-tweaked-1.120.2.jar")).unwrap(), b"pack's cc");
+        assert_eq!(fs::read(root.join("mods/jade.jar")).unwrap(), mine, "a file that is there stays as it is");
+        let a = inst.addon_by_file("cc-tweaked-1.120.2.jar").expect("recorded again");
+        assert!(a.from_pack && a.enabled);
+        // Nothing missing: nothing to do, the zip isn't even read.
+        assert_eq!(restore_jars_from(&mut inst, &root.join("nope.zip"), &set).unwrap(), 0);
+        // One turned off stays off when it comes back.
+        fs::remove_file(root.join("mods/cc-tweaked-1.120.2.jar")).unwrap();
+        inst.addons.iter_mut().filter(|a| a.file_name == "cc-tweaked-1.120.2.jar").for_each(|a| a.enabled = false);
+        assert_eq!(restore_jars_from(&mut inst, &zip_path, &set).unwrap(), 1);
+        assert!(root.join("mods/cc-tweaked-1.120.2.jar.disabled").is_file());
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// What 0.72.1 saved for ATM10: the override jar already named after the

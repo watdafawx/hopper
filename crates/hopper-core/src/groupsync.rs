@@ -318,9 +318,83 @@ pub fn sent_marks(inst: &Instance, copy: &PackCopy, now: &Share, me: &str, seq: 
         return Vec::new();
     };
     let found = projects_of(inst, &[&prev, now]);
-    let mut marks = copy.marks.clone();
-    mark_own(&mut marks, Some(&mods(&prev, lookup(&found))), &mods(now, lookup(&found)), me, seq, at);
-    marks.into_iter().filter(|(k, m)| copy.marks.get(k) != Some(m)).collect()
+    let (prev, now) = (mods(&prev, lookup(&found)), mods(now, lookup(&found)));
+    new_marks(inst, &copy.marks, &prev, &now, &pack_ships(inst), (me, seq, at), remote_file_name)
+}
+
+/// [`sent_marks`] once the codes are read: the marks [`mark_own`] gives
+/// that differ from `marks`, except a mod that only left the code because
+/// its jar is the pack's own now ([`became_packs`]): that's no removal.
+pub fn new_marks(
+    inst: &Instance,
+    marks: &BTreeMap<String, Mark>,
+    prev: &Mods,
+    now: &Mods,
+    shipped: &std::collections::HashSet<String>,
+    (me, seq, at): (&str, u64, u64),
+    name_of: impl Fn(&Entry) -> Option<String>,
+) -> Vec<(String, Mark)> {
+    let mut out = marks.clone();
+    mark_own(&mut out, Some(prev), now, me, seq, at);
+    out.into_iter()
+        .filter(|(k, m)| marks.get(k) != Some(m))
+        .filter(|(k, m)| m.state != State::Unlisted || !became_packs(inst, shipped, k, prev.map.get(k).map(|(_, e)| e), &name_of))
+        .collect()
+}
+
+/// The files the modpack itself put in the instance (see
+/// [`crate::pack_where::shipped`]); empty when it isn't a pack or nothing
+/// says.
+pub fn pack_ships(inst: &Instance) -> std::collections::HashSet<String> {
+    inst.pack.as_ref().and_then(|_| crate::pack_where::shipped(inst)).unwrap_or_default()
+}
+
+/// Whether `a` is a jar the modpack ships in its own overrides.
+pub fn ships_jar(shipped: &std::collections::HashSet<String>, a: &Addon) -> bool {
+    a.folder() == "mods" && shipped.contains(&format!("mods/{}", a.file_name.trim_end_matches(".disabled").to_lowercase()))
+}
+
+/// Whether a mod that left this copy's code (`key`, listed in the last code
+/// sent as `was`) only left it because its jar turned out to be the pack's
+/// own: an override jar that CurseForge had matched to some other project
+/// (a stranger's re-upload) is the pack's since 0.72.1, so the code stops
+/// listing it while the jar stays. Telling the group it was removed makes
+/// the other members delete a jar their pack needs. `name_of`: a code
+/// entry's file name, asked from CurseForge or Modrinth.
+pub fn became_packs(
+    inst: &Instance,
+    shipped: &std::collections::HashSet<String>,
+    key: &str,
+    was: Option<&Entry>,
+    name_of: impl Fn(&Entry) -> Option<String>,
+) -> bool {
+    if shipped.is_empty() {
+        return false;
+    }
+    if let Some(i) = find_addon(inst, key) {
+        return inst.addons[i].from_pack && ships_jar(shipped, &inst.addons[i]);
+    }
+    // The record no longer has the other project, so only the file's name
+    // ties the two together.
+    let name = match was {
+        Some(Entry::Source { pin, .. }) => Some(pin.file.clone()),
+        Some(e @ (Entry::CurseFile { .. } | Entry::ModrinthFile { .. })) => name_of(e),
+        _ => None,
+    };
+    let Some(name) = name else { return false };
+    inst.addons.iter().any(|a| a.from_pack && a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(&name) && ships_jar(shipped, a))
+}
+
+/// A code entry's file name from CurseForge or Modrinth (None: couldn't
+/// ask).
+fn remote_file_name(e: &Entry) -> Option<String> {
+    match e {
+        Entry::CurseFile { file, .. } => crate::cf::get_files(&[*file]).ok()?.into_iter().find(|f| f.id == *file).map(|f| f.file_name),
+        Entry::ModrinthFile { version, .. } => {
+            crate::modrinth::version(version).ok().map(|v| crate::modrinth::version_to_file(&v).file_name)
+        }
+        _ => None,
+    }
 }
 
 /// When a mod got the way a code has it: the relay's number for that
@@ -593,11 +667,21 @@ pub fn lookup(found: &HashMap<String, u64>) -> impl FnMut(&Entry) -> Option<u64>
 /// but fails the whole: tried again, the ones made are already there.
 pub fn apply(inst: &mut Instance, todo: &[Change], skip_sources: &[crate::sources::carry::Pin], job: &Job) -> anyhow::Result<()> {
     let mut failed: Vec<(String, anyhow::Error)> = Vec::new();
+    let shipped = if todo.iter().any(|c| matches!(c.now, State::Removed | State::Unlisted)) { pack_ships(inst) } else { Default::default() };
     for (n, c) in todo.iter().enumerate() {
         job.check_cancelled()?;
         job.progress(n, todo.len());
         let at = find_addon(inst, &c.key);
         let name = at.map(|i| inst.addons[i].name.clone()).unwrap_or_else(|| c.key.clone());
+        // A jar the pack itself ships stays, whatever the member's code
+        // says: their copy may only have stopped listing it because it is
+        // the pack's own file there (see `became_packs`), and without it the
+        // game may not start. Turning it off still works.
+        if let Some(i) = at.filter(|&i| removes(c) && ships_jar(&shipped, &inst.addons[i])) {
+            inst.addons[i].from_pack = true;
+            job.note(keeps_pack_jar_note(&name));
+            continue;
+        }
         let r: anyhow::Result<()> = match (&c.now, &c.entry) {
             (State::Off, _) => match at {
                 Some(i) => switch(inst, i, false, &name, job),
@@ -628,6 +712,23 @@ pub fn apply(inst: &mut Instance, todo: &[Change], skip_sources: &[crate::source
         None => Ok(()),
         Some((name, e)) => Err(e.context(format!("Couldn't change {name}"))),
     }
+}
+
+/// Whether making `c` here would take a mod's file away: a removal, or a
+/// file of the member's no longer listed.
+fn removes(c: &Change) -> bool {
+    matches!((&c.was, &c.now), (_, State::Removed) | (State::File { .. }, State::Unlisted))
+}
+
+/// Whether `c` would take away a jar the pack itself ships (`shipped`:
+/// [`pack_ships`]). Sync leaves those alone.
+pub fn keeps_pack_jar(inst: &Instance, c: &Change, shipped: &std::collections::HashSet<String>) -> bool {
+    removes(c) && find_addon(inst, &c.key).is_some_and(|i| ships_jar(shipped, &inst.addons[i]))
+}
+
+/// The task's note for a jar sync kept because the pack ships it.
+fn keeps_pack_jar_note(name: &str) -> String {
+    format!("{name}: kept, the modpack itself comes with this file")
 }
 
 /// Turns a mod on or off. A jar the running game holds open is switched
@@ -787,6 +888,14 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, job
         }
         anyhow::bail!("{}'s settings file is damaged.", inst.name);
     }
+    // The jars the pack ships are the pack's before this copy is compared:
+    // an older record (or one from before the pack's list was known) can
+    // still have one as a mod of the player's, and a member whose copy
+    // already knows it's the pack's no longer lists it.
+    let shipped = pack_ships(&inst);
+    if !shipped.is_empty() && crate::modpack::claim_override_jars(&mut inst, &shipped, false) {
+        inst.save()?;
+    }
     let made_here = crate::sharecode::make(&inst, job)?;
     let pack_loader = made_here.pack_loader;
     let here = made_here.share;
@@ -815,6 +924,22 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, job
             merged.made.retain(|(k, _, _)| *k != c.key);
         }
         keep
+    });
+    // A jar the pack ships isn't taken away (see `apply`); the task says
+    // so, but it isn't told as the member's change.
+    todo.retain(|c| {
+        if !keeps_pack_jar(&inst, c, &shipped) {
+            return true;
+        }
+        merged.made.retain(|(k, _, _)| *k != c.key);
+        // Nor marked as theirs: the jar is still here, "Removed by" on it
+        // would be wrong.
+        merged.marks.retain(|(k, _)| *k != c.key);
+        if let Some(i) = find_addon(&inst, &c.key) {
+            job.show();
+            job.note(keeps_pack_jar_note(&inst.addons[i].name));
+        }
+        false
     });
     if (kept || loader_set) && todo.is_empty() {
         inst.save()?;
@@ -2087,5 +2212,132 @@ mod tests {
         let mut copies = Vec::new();
         reconcile(&mut copies, &back, |_| vec!["g".into()]);
         assert!(copies.is_empty());
+    }
+
+    /// ATM10 ships CC: Tweaked 1.120.2 in its overrides; CurseForge matched
+    /// that jar to a stranger's re-upload (project 1676502, file 16765020).
+    const CC: &str = "cc-tweaked-1.21.1-forge-1.120.2.jar";
+    const STRANGER: u64 = 1676502;
+    const STRANGER_FILE: u64 = 16765020;
+
+    /// A member's ATM10 on disk with the override jar recorded as the
+    /// stranger's project (`from_pack` as an older Hopper left it).
+    fn atm10_on_disk(tag: &str, from_pack: bool) -> Instance {
+        let root = std::env::temp_dir().join(format!("hopper-groupsync-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        std::fs::write(root.join("mods").join(CC), b"jar").unwrap();
+        std::fs::write(root.join("minecraftinstance.json"), format!(r#"{{"modpackOverrides":["mods\\{CC}","config\\a.toml"]}}"#)).unwrap();
+        let a = Addon {
+            project_id: STRANGER,
+            file_id: STRANGER_FILE,
+            name: "CC Tweaked Compat".into(),
+            file_name: CC.into(),
+            enabled: true,
+            from_pack,
+            ..Default::default()
+        };
+        let pack = crate::instances::PackRef { project_id: 925200, file_id: 9431424, ..Default::default() };
+        let inst = Instance { root, name: "ATM10".into(), pack: Some(pack), addons: vec![a], ..Default::default() };
+        inst.save().unwrap();
+        inst
+    }
+
+    fn atm10_mods(entries: Vec<Entry>) -> Mods {
+        mods(&share(entries), |e| match e {
+            Entry::CurseFile { file, .. } if *file == STRANGER_FILE => Some(STRANGER),
+            Entry::CurseFile { file, .. } => Some(file / 10),
+            _ => None,
+        })
+    }
+
+    /// The leader's code before 0.72.1 listed the jar as a mod of theirs;
+    /// the next one doesn't (the jar is the pack's there now). What a
+    /// follower makes of that, run through the real plan.
+    fn leader_stopped_listing_the_jar() -> Vec<Change> {
+        let old = crate::sharecode::encode(&share(vec![cf(STRANGER_FILE, true)]));
+        let new = crate::sharecode::encode(&share(vec![]));
+        let mut copy = PackCopy::default();
+        copy.got.insert("lead".into(), Got { code: old.clone(), seq: 5, name: "Lead".into(), ..Default::default() });
+        copy.sent = old.clone();
+        copy.arrive("lead", Got { code: new, seq: 10, name: "Lead".into(), ..Default::default() });
+        let here = atm10_mods(vec![cf(STRANGER_FILE, true)]);
+        let (todo, merged) = plan(&copy, &here, Some(&here), false, |c| crate::sharecode::decode(c).ok().map(|s| {
+            atm10_mods(s.entries)
+        }));
+        assert_eq!(merged.made, [(format!("p:{STRANGER}"), Kind::Removed, "Lead".to_string())], "the bug's change");
+        todo
+    }
+
+    fn apply_notes(inst: &mut Instance, todo: &[Change]) -> Vec<String> {
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        apply(inst, todo, &[], &job).unwrap();
+        jobs.snapshot().into_iter().flat_map(|j| j.notes).collect()
+    }
+
+    #[test]
+    fn sync_keeps_a_jar_the_pack_ships_when_the_leader_stops_listing_it() {
+        for from_pack in [false, true] {
+            let todo = leader_stopped_listing_the_jar();
+            let mut inst = atm10_on_disk(&format!("keep-{from_pack}"), from_pack);
+            let notes = apply_notes(&mut inst, &todo);
+            assert!(inst.root.join("mods").join(CC).is_file(), "from_pack {from_pack}: the jar stays");
+            let a = inst.addon_by_file(CC).expect("still recorded");
+            assert!(a.from_pack, "and is the pack's now");
+            assert!(notes.iter().any(|n| n == "CC Tweaked Compat: kept, the modpack itself comes with this file"), "{notes:?}");
+            assert!(keeps_pack_jar(&inst, &todo[0], &pack_ships(&inst)));
+            let _ = std::fs::remove_dir_all(&inst.root);
+        }
+    }
+
+    #[test]
+    fn sync_never_removes_a_jar_the_pack_ships_but_turns_it_off() {
+        let key = format!("p:{STRANGER}");
+        let mut inst = atm10_on_disk("keep-removed", false);
+        let removed = Change { key: key.clone(), was: State::Unlisted, now: State::Removed, entry: None };
+        apply_notes(&mut inst, &[removed]);
+        assert!(inst.root.join("mods").join(CC).is_file(), "an outright removal keeps it too");
+        let off = Change { key, was: State::Unlisted, now: State::Off, entry: None };
+        apply_notes(&mut inst, &[off]);
+        assert!(inst.root.join("mods").join(format!("{CC}.disabled")).is_file(), "turning it off still works");
+        assert!(!inst.addon_by_file(CC).unwrap().enabled);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn a_mod_the_pack_doesnt_ship_is_still_removed() {
+        let todo = leader_stopped_listing_the_jar();
+        let mut inst = atm10_on_disk("not-shipped", false);
+        std::fs::write(inst.root.join("minecraftinstance.json"), r#"{"modpackOverrides":["config\\a.toml"]}"#).unwrap();
+        apply_notes(&mut inst, &todo);
+        assert!(!inst.root.join("mods").join(CC).exists(), "the leader's own mod, taken out");
+        assert!(inst.addon_by_file(CC).is_none());
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn the_leader_sends_no_removal_for_a_jar_that_became_the_packs() {
+        let inst = atm10_on_disk("sender", true);
+        let shipped = pack_ships(&inst);
+        // As claim_override_jars leaves it: named after the pack's entry,
+        // with no project of its own.
+        let mut claimed = inst.clone();
+        let a = &mut claimed.addons[0];
+        (a.project_id, a.file_id, a.shown_as, a.name) = (0, 0, 282001, "CC: Tweaked".into());
+        let prev = atm10_mods(vec![cf(STRANGER_FILE, true), cf(30, true)]);
+        let now = atm10_mods(vec![]);
+        let name_of = |e: &Entry| matches!(e, Entry::CurseFile { file, .. } if *file == STRANGER_FILE).then(|| CC.to_string());
+        let key = format!("p:{STRANGER}");
+        for here in [&inst, &claimed] {
+            let marks = new_marks(here, &BTreeMap::new(), &prev, &now, &shipped, ("lead", 10, 10), name_of);
+            assert!(!marks.iter().any(|(k, _)| *k == key), "no Removed for the pack's jar: {marks:?}");
+            // A mod really taken out is still told.
+            assert!(marks.iter().any(|(k, m)| k == "p:3" && m.kind == Kind::Removed), "{marks:?}");
+        }
+        // Not one of the pack's files: a removal like any other.
+        let marks = new_marks(&claimed, &BTreeMap::new(), &prev, &now, &Default::default(), ("lead", 10, 10), name_of);
+        assert!(marks.iter().any(|(k, m)| *k == key && m.kind == Kind::Removed));
+        let _ = std::fs::remove_dir_all(&inst.root);
     }
 }

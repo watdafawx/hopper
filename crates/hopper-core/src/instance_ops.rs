@@ -193,14 +193,20 @@ pub fn is_remote_drive(_path: &Path) -> bool {
     false
 }
 
-/// Re-downloads tracked files that are missing from disk.
+/// Re-downloads tracked files that are missing from disk, and puts back
+/// the jars the modpack itself ships that are gone.
 pub fn repair(inst: &Instance, job: &Job) -> anyhow::Result<usize> {
+    // First, so a jar put back from the pack isn't also looked for on
+    // CurseForge (an override jar can be matched to someone else's upload).
+    let mut fixed = crate::modpack::restore_shipped_jars(&inst.root, job).unwrap_or_else(|e| {
+        job.note(format!("Couldn't put back the modpack's own mods: {e:#}"));
+        0
+    });
     let missing: Vec<&crate::instances::Addon> = inst
         .addons
         .iter()
         .filter(|a| a.project_id != 0 && !inst.addon_path(a).exists())
         .collect();
-    let mut fixed = 0;
     // Modrinth files come straight from their version.
     for a in missing.iter().filter(|a| !a.mr_version.is_empty()) {
         job.detail(format!("Downloading {}", a.file_name));
