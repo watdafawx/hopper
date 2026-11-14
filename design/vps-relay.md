@@ -3,7 +3,9 @@
 Status: design only (phase 1 of an L feature). Mock:
 `design/mocks/vps-relay.html` (2 or 3 options per screen, picks marked,
 light and dark), also published as a Design Artifact (one artboard per
-screen). Nothing here is built yet.
+screen). B1 (the codec) is built; the rest is design. Decisions from
+2026-11-14 are in "Decisions" below and override the text where they
+differ.
 
 Noticed while mocking, not fixed here: Hopper Light's status colours on
 their own tints miss 4.5:1 (green `#16a34a` on its tint 2.7:1, red 3.6:1,
@@ -22,7 +24,11 @@ A home line's upload is the limit for a big modpack: a player costs about
 1.1 Mbit/s of upload at view distance 8, and a home line gives 4 to 5.
 Players also need a port forward and a home address they can reach.
 
-A hand-built setup outside Hopper (2026-11-14) proved the idea with ATM10:
+A hand-built setup outside Hopper (2026-11-14) proved the idea with one
+big pack (ATM10). It is the source of the reference measurements below,
+not something this feature is built around: the feature is for any
+Hopper Server user, any pack size, any loader and any Debian or Ubuntu
+VPS provider.
 
 - Players join a VPS running Velocity 3.5.1 (modern forwarding). The home
   server runs Proxy Compatible Forge (PCF) 1.3.1.
@@ -64,8 +70,8 @@ setup instead of following notes.
   checks them from outside afterwards. Cloud APIs are a later idea.
 - Running game servers on the VPS (that is a node, `design/multi-panel.md`).
 - Proxies other than Velocity, plugins on Velocity, BungeeCord.
-- Fabric and old Forge backends in the first version (PCF covers NeoForge
-  1.20.2+ and Forge; Fabric needs FabricProxy-Lite, open question 7).
+- Old Forge backends without a modern-forwarding mod in the first
+  version. (Fabric is in scope: see Decisions.)
 - Wire compatibility with the existing `mctunnel` Go tool (not needed: both
   ends are Hopper).
 - Load balancing, several VPSes for one server.
@@ -166,10 +172,12 @@ be a node (show its CPU and memory); not in this plan.
 
 Crate choices:
 
-- zstd: **`zstd` 0.13** (libzstd via `zstd-sys`, builds with `cc` on MSVC
-  and Linux; `long_distance_matching`, `window_log` up to 28 for 256 MB,
-  `ZSTD_e_flush` per burst). `ruzstd` (pure Rust) has no strong encoder;
-  rejected.
+- zstd: **`zstd` 0.14** (BSD-3-Clause; `zstd-safe` BSD-3, `zstd-sys` and
+  libzstd 1.5.7 BSD-3/BSD-2, all MIT-compatible). `zstd-sys` builds
+  libzstd from its bundled source with `cc` (MSVC on Windows, gcc on the
+  native Linux x64 and arm64 runners), so no system library or new CI step;
+  default features off. `window_log` up to 28 for 256 MB, `ZSTD_e_flush`
+  per burst. `ruzstd` (pure Rust) has no strong encoder; rejected.
 - Mux: our own (`tunnel/mux.rs`). `yamux` crate rejected (a second mux).
 - Encryption: **TLS 1.3 with rustls/ring** (already used), not a custom
   AES-GCM handshake. A custom HMAC handshake is something to review forever.
@@ -194,7 +202,7 @@ it again (repair) only does what is missing:
 | Step | Check | Act |
 |---|---|---|
 | Connect | ssh login works; the host key fingerprint is shown and must match what the cloud page says (or "trust on first use", saved) | |
-| System | `/etc/os-release`, `uname -m`, free memory (≥ 2 GB, warn under 4 GB with the default cache), disk (≥ 2 GB), `sudo -n true` | |
+| System | `/etc/os-release`, `uname -m`, free memory (≥ 2 GB; under 4 GB of RAM the relay uses the 512 MB cache), disk (≥ 2 GB), `sudo -n true` | |
 | Ports | 25565/tcp, 25566/tcp, 24454/udp not in use (`ss -lntu`) | Offer another port |
 | User and folders | `hopper-relay` exists | `useradd --system --no-create-home --shell /usr/sbin/nologin hopper-relay`; `/opt/hopper-relay` (root, 0755), `/var/lib/hopper-relay` (hopper-relay, 0700), `/etc/hopper-relay` (root:hopper-relay, 0750) |
 | Java 21 | `java -version` under `/opt/hopper-relay/java` or the system's 21 | Download Temurin 21 JRE (same source and sha256 check as `javadl.rs`) into `/opt/hopper-relay/java`; no apt change |
@@ -262,7 +270,7 @@ through a VPS", so it undoes as one (and each part on its own):
 | Relay token (home → VPS) | VPS on join, `hrt_` + 64 hex | home: panel data `relays.json` (0600); VPS keeps only its SHA-256 | |
 | Relay CA | VPS hopperd (its own CA, `tls.rs`) | VPS `/var/lib/hopper-relay`; home pins the fingerprint | |
 | Voice key | from the TLS exporter of the current connection | memory only | |
-| ssh login | the player | **not kept** by default: used for setup, asked again for repair or removal | Open question 4 |
+| ssh login | the player | **kept** (Decisions): panel data, like other panel secrets; used for setup, repair and removal | 0600 / owner-only ACL |
 
 Rules (AGENTS.md security, `design/server-secrets.md`):
 
@@ -273,10 +281,10 @@ Rules (AGENTS.md security, `design/server-secrets.md`):
   its `secret` key is masked by `configedit::secret_key` already (named
   "secret"): Viewers and Operators can't read it, it stays out of shared
   logs, zips and backups for those who can't see secrets.
-- The ssh key or password, when typed, lives in memory for the setup only;
-  the dialog can also make a new ed25519 key and show the public half to
-  paste into the cloud page (then the private half is kept, 0600, in the
-  panel's data folder, because the player chose it).
+- The ssh key is kept (Decisions): in the panel's data folder, owner-only
+  (0600, or an owner-only ACL on Windows), never logged or sent back by the
+  API. A typed password is never stored; the dialog makes a new ed25519
+  key instead and shows the public half to paste into the cloud page.
 - Only the **owner** (or Manager) may set up or remove a relay: it runs
   commands on another machine and turns off account checks on the server.
 
@@ -299,7 +307,7 @@ through play.example.com"). Opening it at home again means turning account
 checks back on, which needs a restart. So the relay card offers **"Play at
 home until the relay is back"**: one click, it undoes the properties and
 PCF config (History), restarts, and reverses when the relay returns and the
-player clicks again. Never automatic (open question 2).
+player clicks again. Never automatic (Decisions).
 
 ## Several servers behind one VPS
 
@@ -396,7 +404,7 @@ token and pin, the VPS unit's hardening.
 
 | Phase | Size | What | Checked on screen |
 |---|---|---|---|
-| B1 | M | Codec in hopper-core: dedupe port, zstd stream with flush, counters (raw, sent, vanilla, cache hits), limits. Replay tool (`hopperd relay-replay rec.bin`) | No screen. Tests (round trip, cache desync impossible, bad references refused, fuzz). Replay numbers vs the Go tool on the same recording. |
+| B1 | M | **Done.** Codec in hopper-core (`hosting/relay_codec/`): dedupe port, zstd stream with flush, counters (raw, sent, vanilla, cache hits), limits. Replay tool as a hopper-core example (`relay_replay`), not a hopperd subcommand (see "B1 results") | No screen. Tests (round trip, cache desync impossible, bad references refused, fuzz). Replay numbers (synthetic; replay real recordings before B2 fixes the defaults). |
 | B2 | L | Relay role (`hopperd relay`) + home client: TLS, mux, server-id streams into the router, control stream, reconnect, status answer while home is down. Relay card (picked option) with live numbers | Two scratch hopperd on loopback, scratch server, a real client joining through scratch Velocity. Card measured in light and dark. |
 | B3 | L | Setup over ssh: dialog, checks, steps (idempotent), cloud port check from home, "Remove the relay", repair | Against a throwaway VM or a local Ubuntu container with sshd. Never the live relay. Screenshots of every step state. |
 | B4 | M | Server changes: PCF install + config, properties, voice host, History group, Stop using the relay, Play at home, router relay-only refusal, Settings lock and wording | Scratch server: History shows each entry, undo restores, direct login refused. |
@@ -404,12 +412,95 @@ token and pin, the VPS unit's hardening.
 | B6 | M | Voice relay (UDP, home dials out, kept open by keepalives, AEAD) | Voice works through a test VM; if UDP is blocked, the card says so. |
 | B7 | M | Several servers: forced hosts, per-server loopback ports, relay list in Settings › Relays | Two scratch servers behind one test relay. |
 | B8 | M | Desktop parity: relay card, ping column, wording, setup through the API | Desktop test build paired with a scratch panel. |
-| B9 | M | Security review + fixes; moving the hand-built setup over (a checklist for the maintainer, run by them) | Review table filled in. |
+| B9 | M | Security review + fixes. At most a generic note: "switch an existing hand-made Velocity setup over to Hopper's relay" (not the migration of any one server) | Review table filled in. |
 
 B1 to B4 are the useful core (one server, no voice); B5 to B9 can be
 reordered.
 
-## Open questions for the maintainer (ranked)
+## Decisions (2026-11-14)
+
+The maintainer's answers to the open questions below, plus the scope:
+
+- **Generic, for any Hopper Server user.** No assumptions about one pack,
+  one cloud or one server: any pack size, any loader Hopper hosts, any
+  Debian or Ubuntu VPS provider. The ATM10 / Frankfurt numbers stay only as
+  reference measurements.
+- **Voice**: a built-in UDP relay in hopperd (no AmneziaWG, no kernel
+  module, no Windows service). If UDP is blocked, voice falls back to the
+  TCP tunnel (works, more jitter), and the relay card says so.
+- **Relay down**: red alert, plus a one-click **Play at home** (undo the
+  proxy changes and restart). Never automatic.
+- **Existing hand-made setups**: moving one over is optional, not a goal.
+  Build and test on a fresh throwaway VM. B9 carries at most a generic
+  "switch an existing hand-made Velocity setup over" note. A server already
+  running behind a hand-made relay stays as it is.
+- **Distros**: Ubuntu 22.04 / 24.04 and Debian 12 / 13 only at first.
+- **ssh login**: keep the key after setup (for repair and removal), stored
+  like the panel's other secrets: owner-only permissions, never logged,
+  never in an API answer. Passwords are not stored.
+- **Cache**: 512 MB on VPSes under 4 GB of RAM, the full settings (1 GB)
+  otherwise (`CodecConfig::for_memory`).
+- **Fabric servers**: in scope. They need a Velocity modern-forwarding mod
+  on the server instead of PCF: **FabricProxy-Lite** (Modrinth; B4 checks its licence and
+  config keys), its config `config/FabricProxy-Lite.toml` holding the
+  forwarding secret. B4 installs and records it like PCF; that file joins
+  `is_secret_file`.
+
+## B1 results (codec)
+
+What's built, in `crates/hopper-core/src/hosting/relay_codec/`:
+
+- `dedupe.rs`: port of `dedupe.go` (same tokens and sizes: content-defined
+  pieces of 1 to 64 KB, about 4 KB on average, references for pieces of 256
+  bytes or more, mirrored cache with a byte cap). Changes: ids live in an
+  ordered map, so hot pieces don't leave a growing list of stale ids; a big
+  write is cut without moving the rest after each piece; each piece counts
+  its bytes plus 64 for bookkeeping against the cap, the same on both ends.
+- `mod.rs`: `CodecConfig` (`full()`, `small()`, `for_memory()`,
+  `validate()` for values from the other end), `Encoder` (`write`, `flush`,
+  `take_output`, `stats`, `memory`, `cache_digest`) and `Decoder` (`push`,
+  `read`, `decode`, `at_boundary`, the same counters). The decoder caps
+  zstd's window at the agreed size, checks every length before allocating,
+  and stays failed after the first error.
+- `vanilla.rs`: `VanillaEstimate`, one per game connection (vanilla's
+  per-packet zlib at threshold 256, like `mc_zlib256`).
+- Long distance matching is **off** by default: klauspost has none, and on
+  the replay it sent about 15% more.
+
+Replay (`cargo run --profile fast -p hopper-core --example relay_replay --
+rec-*.bin`, or `--synthetic P,M,G`) reads `mctunnel -record` files. No
+recordings were available to this phase, so the numbers below are
+**synthetic** (Minecraft-shaped packets: a 2 MB modded login push, chunks,
+a big base of machines, mobs; about 40 MB raw a minute per player, close to
+the reference recordings). They show the codec works and how the settings
+compare, not what a real pack saves:
+
+| Stream | Settings | Sent | vs vanilla zlib | Cache hits | Encode / decode | Memory (both ends) |
+|---|---|---|---|---|---|---|
+| 2 players, 20 min, 5 min apart, raw 1.03 GB, vanilla 374 MB | level 11, 256 MB window, no cache | 27.7 MB | 7.4% (13.5x less) | | 186 / 2880 MB/s | 0.53 GB |
+| same | + 512 MB cache | 26.6 MB | 7.1% (14.0x less) | 27% of raw | 167 / 1407 MB/s | 1.52 GB |
+| same | + 1 GB cache | 26.6 MB | 7.1% (14.0x less) | 27% of raw | 163 / 1238 MB/s | 2.03 GB |
+| same | 1 GB cache + long distance matching | 31.5 MB | 8.4% | 27% of raw | 155 / 1200 MB/s | 2.06 GB |
+| same, each player in its own stream | 1 GB cache | 31.2 MB | 8.4% | | | |
+
+Reference (Go `mctunnel`, real ATM10 recording, 2 players, 19.7 min):
+raw 1589 MB, vanilla 415.7 MB, tunnel 30.4 MB (7.3% of vanilla, about 14x
+less); replay of 2 players 5 min apart: 132.5 MB without the cache, 67.6 MB
+with it. The synthetic stream lands on the same ratio, but its repeats are
+easier: the 256 MB window alone already reaches the second player, so the
+cache adds little there, while on the real recording it halved the upload.
+**Before B2 fixes the defaults, replay real recordings** with this tool
+(`--caches 0,512,1024`, `--level 9`/`11`/`15`, `--ldm`).
+
+Memory: about 1 GB on each end of the busy direction with the full
+settings (256 MB window, 1 GB cache counted with bookkeeping, zstd's
+tables), about 0.76 GB with the 512 MB cache. The return direction (player
+to server) is small, so its cache stays nearly empty; B2 may agree a
+smaller cache for it. Level 11 encodes at 160+ MB/s on the dev PC, far
+above any home upload; level 19 sent about 10% less on a short run but encodes
+at 10 MB/s, too slow for a login burst.
+
+## Open questions for the maintainer (answered: see Decisions)
 
 1. **Voice: built-in UDP relay instead of AmneziaWG?** AmneziaWG needs a
    kernel module (DKMS) on the VPS and a Windows service at home; a UDP

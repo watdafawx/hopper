@@ -27,6 +27,7 @@ pub mod process;
 pub mod progress;
 pub mod properties;
 pub mod rcon;
+pub mod relay_codec;
 pub mod limbo;
 pub mod router;
 pub mod schedule;
