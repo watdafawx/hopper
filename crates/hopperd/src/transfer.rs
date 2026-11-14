@@ -39,13 +39,17 @@ use std::sync::{Arc, Mutex};
 pub const STAGING: &str = ".hopper-incoming";
 /// Written into a server's folder once it has been moved elsewhere: where
 /// to, when, by whom. Never copied along.
-pub const MOVED_FILE: &str = ".hopper-moved.json";
+pub const MOVED_FILE: &str = hopper_core::hosting::process::MOVED_MARK;
 /// A staging folder nobody came back for in this long is removed.
 const STALE_SECS: u64 = 7 * 24 * 3600;
 /// The most hashes one chunk request may ask for.
 const MAX_ASK: usize = 4096;
-/// A file list bigger than this is refused (about four million files).
-const MAX_PLAN: usize = 512 * 1024 * 1024;
+/// A file list bigger than this is refused: about a million files, or a
+/// few hundred GB in chunks. The target reads it whole, so it stays well
+/// below what a panel can hold in memory.
+const MAX_PLAN: usize = 128 * 1024 * 1024;
+/// The most folders, files and links one move may list.
+const MAX_ITEMS: usize = 1_000_000;
 /// The frame a source sends instead of a chunk it couldn't read.
 const ERR_HASH: &[u8; 64] = b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 
@@ -55,6 +59,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/transfer/{tid}/prepare", post(prepare))
         .route("/api/v1/servers/{id}/transfer/{tid}/manifest", get(manifest))
         .route("/api/v1/servers/{id}/transfer/{tid}/chunks", post(chunks))
+        .route("/api/v1/servers/{id}/transfer/{tid}/verify", post(verify))
         .route("/api/v1/servers/{id}/transfer/{tid}/finish", post(finish))
         .route("/api/v1/servers/{id}/moved", delete(clear_moved))
         .route("/api/v1/receive/precheck", post(precheck))
@@ -123,28 +128,57 @@ pub fn link_ok(rel: &str, target: &str) -> bool {
     }
     let mut depth: Vec<&str> = rel.split('/').collect();
     depth.pop();
+    // `..` only at the start. The folders it climbs are real folders (the
+    // link's own parents), so counting them is exact; a `..` after a name
+    // climbs from wherever that name leads, and a name that is itself a
+    // link (to ".", say) makes a path that looks inside end up outside.
+    let mut named = false;
     for part in target.split(['/', '\\']) {
         match part {
             "" | "." => {}
             ".." => {
-                if depth.pop().is_none() {
+                if named || depth.pop().is_none() {
                     return false;
                 }
             }
-            p => depth.push(p),
+            p => {
+                named = true;
+                depth.push(p);
+            }
         }
     }
     true
 }
 
+/// A name Windows can't hold as written: a device name (`CON`, `NUL`,
+/// `COM1`..., with or without an extension), or one ending in a dot or a
+/// space, which Windows drops, so two listed paths could become one.
+pub fn windows_unsafe(name: &str) -> bool {
+    if name.ends_with(['.', ' ']) || name.chars().any(|c| (c as u32) < 32 || r#"<>:"|?*"#.contains(c)) {
+        return true;
+    }
+    let stem = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let numbered = |p: &str| stem.strip_prefix(p).is_some_and(|n| n.chars().count() == 1 && n.chars().all(|c| c.is_ascii_digit() || "\u{b9}\u{b2}\u{b3}".contains(c)));
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") || numbered("COM") || numbered("LPT")
+}
+
 /// Checks a list a target got: every path plain and unique, every link
 /// inside, sizes adding up, chunk hashes well formed.
 pub fn plan_ok(p: &Plan) -> Result<(), String> {
+    if p.items.len() > MAX_ITEMS {
+        return Err(format!("The server has more than {MAX_ITEMS} files and folders."));
+    }
     let mut seen = HashSet::new();
     let mut kinds: HashMap<&str, &str> = HashMap::new();
     for i in &p.items {
         if !rel_ok(&i.p) {
             return Err(format!("\"{}\" isn't a path inside the server folder.", crate::relay::clean_text(&i.p)));
+        }
+        // Windows names are refused on every panel: the server may move on
+        // to a Windows one later, and two names Windows folds into one
+        // would overwrite each other.
+        if i.p.split('/').any(windows_unsafe) {
+            return Err(format!("\"{}\" has a name Windows can't hold. Rename it first.", crate::relay::clean_text(&i.p)));
         }
         if !seen.insert(i.p.to_lowercase()) {
             return Err(format!("\"{}\" is listed twice.", crate::relay::clean_text(&i.p)));
@@ -165,7 +199,7 @@ pub fn plan_ok(p: &Plan) -> Result<(), String> {
                 }
             }
             "l" => {
-                if !link_ok(&i.p, &i.l) {
+                if !link_ok(&i.p, &i.l) || i.l.split(['/', '\\']).any(|n| !matches!(n, "" | "." | "..") && windows_unsafe(n)) {
                     return Err(format!("The link \"{}\" points outside the server folder.", crate::relay::clean_text(&i.p)));
                 }
             }
@@ -201,6 +235,8 @@ struct Walk {
     backups: u64,
     /// Links that point outside the folder, or that can't be read.
     bad_links: Vec<String>,
+    /// Names a Windows panel can't hold (`CON`, `a.`), which a target refuses.
+    bad_names: Vec<String>,
 }
 
 /// Lists a server folder without following links. Leaves out the moved
@@ -226,6 +262,10 @@ fn walk(root: &FsPath, backups: bool) -> anyhow::Result<Walk> {
             }
             if !rel_ok(&r) {
                 w.bad_links.push(r);
+                continue;
+            }
+            if windows_unsafe(&name) {
+                w.bad_names.push(r);
                 continue;
             }
             let ft = m.file_type();
@@ -355,15 +395,38 @@ fn out_plan(app: &App, tid: &str) -> PathBuf {
 
 // ---- the source end --------------------------------------------------------
 
-/// Servers being sent right now (their folder), so nothing starts them.
-static SENDING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+/// Servers being sent right now (their folder) and by which move, so
+/// nothing starts them and no second move takes them.
+static SENDING: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
 
-fn sending(root: &FsPath, on: bool) {
+/// Marks `root` as being sent by move `tid`. False when another move is
+/// sending it already.
+fn claim(root: &FsPath, tid: &str) -> bool {
+    // Every start, however asked for (the schedule, a player joining, a
+    // crash restart), asks this before it goes.
+    static GUARD: std::sync::Once = std::sync::Once::new();
+    GUARD.call_once(|| {
+        hopper_core::hosting::process::on_start_guard(|root| {
+            is_sending(root).then(|| "Its files are being sent to another panel. Start it once that's done.".to_string())
+        })
+    });
     let mut s = SENDING.lock().unwrap_or_else(|e| e.into_inner());
-    s.retain(|r| r != root);
-    if on {
-        s.push(root.to_path_buf());
+    if s.iter().any(|(r, t)| r == root && t != tid) {
+        return false;
     }
+    if !s.iter().any(|(r, _)| r == root) {
+        s.push((root.to_path_buf(), tid.to_string()));
+    }
+    true
+}
+
+/// Lets `root` start again, if move `tid` was the one sending it.
+fn release(root: &FsPath, tid: &str) {
+    SENDING.lock().unwrap_or_else(|e| e.into_inner()).retain(|(r, t)| !(r == root && t == tid));
+}
+
+fn claim_or_busy(e: &crate::servers::Entry, tid: &str) -> ApiResult<()> {
+    if claim(&e.root, tid) { Ok(()) } else { Err(ApiError(StatusCode::CONFLICT, format!("{} is being moved or copied already.", e.name))) }
 }
 
 /// Where a moved server went, from its folder's mark.
@@ -387,15 +450,16 @@ pub fn moved_mark(root: &FsPath) -> Option<MovedMark> {
 }
 
 pub fn is_sending(root: &FsPath) -> bool {
-    SENDING.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|r| r == root)
+    SENDING.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(r, _)| r == root)
 }
 
-/// Why `e` can't start now: it's being sent, or it was moved away.
+/// Why `e` can't start now: it's being sent, or it was moved away (the
+/// same words the start itself refuses with, in hopper-core).
 pub fn start_blocked(e: &crate::servers::Entry) -> Option<String> {
     if is_sending(&e.root) {
         return Some(format!("{} is being moved or copied. Start it once that's done.", e.name));
     }
-    moved_mark(&e.root).map(|m| format!("{} was moved to {}. Start it there, or choose Keep using this copy first.", e.name, m.to))
+    hopper_core::hosting::process::start_blocked(&e.root)
 }
 
 #[derive(Deserialize, Default)]
@@ -423,6 +487,7 @@ async fn check(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Jso
         "files": w.files,
         "backups_size": w.backups,
         "bad_links": w.bad_links.iter().take(20).collect::<Vec<_>>(),
+        "bad_names": w.bad_names.iter().take(20).collect::<Vec<_>>(),
         "loader": s.loader,
         "minecraft": s.version,
         "port": s.port,
@@ -452,10 +517,21 @@ async fn prepare(State(app): State<Arc<App>>, Path((id, tid)): Path<(String, Str
     engine()?;
     tid_ok(&tid)?;
     let e = entry(&app, &id)?;
+    // Claimed before the checks, so nothing starts it in between.
+    claim_or_busy(&e, &tid)?;
+    let refuse = |why: String| {
+        release(&e.root, &tid);
+        Err(ApiError(StatusCode::CONFLICT, why))
+    };
     if e.server.state().is_alive() {
-        return Err(bad(format!("Stop {} first.", e.name)));
+        return refuse(format!("Stop {} first.", e.name));
     }
-    sending(&e.root, true);
+    if let Some(to) = hopper_core::hosting::process::moved_to(&e.root) {
+        return refuse(format!("{} was moved to {to} already. Choose Keep using this copy first.", e.name));
+    }
+    if crate::backups_api::is_restoring(&id) {
+        return refuse(format!("{} is being restored from a backup. Move it once that's done.", e.name));
+    }
     let (tx, rx) = tokio::sync::mpsc::channel(8);
     let app2 = app.clone();
     tokio::task::spawn_blocking(move || {
@@ -463,6 +539,9 @@ async fn prepare(State(app): State<Arc<App>>, Path((id, tid)): Path<(String, Str
             let mut w = walk(&e.root, b.backups)?;
             if let Some(l) = w.bad_links.first() {
                 anyhow::bail!("\"{l}\" is a link to somewhere outside the server folder. Remove it or replace it with the real files first.");
+            }
+            if let Some(n) = w.bad_names.first() {
+                anyhow::bail!("\"{n}\" has a name Windows can't hold. Rename it first.");
             }
             let total = w.size;
             let mut last = std::time::Instant::now();
@@ -485,7 +564,7 @@ async fn prepare(State(app): State<Arc<App>>, Path((id, tid)): Path<(String, Str
         let _ = match r {
             Ok(p) => tx.blocking_send(json!({ "ok": true, "size": p.size, "unique": p.unique, "chunks": p.chunks, "items": p.items.len() })),
             Err(err) => {
-                sending(&e.root, false);
+                release(&e.root, &tid);
                 tx.blocking_send(json!({ "error": format!("{err:#}") }))
             }
         };
@@ -504,7 +583,7 @@ async fn manifest(State(app): State<Arc<App>>, Path((id, tid)): Path<(String, St
     tid_ok(&tid)?;
     let e = entry(&app, &id)?;
     let bytes = std::fs::read(out_plan(&app, &tid)).map_err(|_| not_found("move"))?;
-    sending(&e.root, true);
+    claim_or_busy(&e, &tid)?;
     Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response())
 }
 
@@ -540,6 +619,30 @@ fn read_chunk(root: &FsPath, croot: &FsPath, rel: &str, off: u64, len: u32, hash
     Ok(buf)
 }
 
+/// Free bytes on the servers folder's drive (0: unknown).
+fn free_here(root: &FsPath) -> u64 {
+    #[cfg(test)]
+    if let Some((_, n)) = FREE.lock().unwrap().iter().find(|(r, _)| r == root) {
+        return *n;
+    }
+    hopper_core::hosting::create::disk_free(root)
+}
+
+/// Tests: a servers folder's free space, as if its drive were that full.
+#[cfg(test)]
+pub static FREE: Mutex<Vec<(PathBuf, u64)>> = Mutex::new(Vec::new());
+
+/// Tests: marks a server as being sent by move `tid`.
+#[cfg(test)]
+pub fn claim_for_test(root: &FsPath, tid: &str) -> bool {
+    claim(root, tid)
+}
+
+#[cfg(test)]
+pub fn release_for_test(root: &FsPath, tid: &str) {
+    release(root, tid)
+}
+
 /// Tests: server folders (canonical) whose chunks read as changed.
 #[cfg(test)]
 pub static TAMPER: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
@@ -562,10 +665,10 @@ async fn chunks(State(app): State<Arc<App>>, Path((id, tid)): Path<(String, Stri
         return Err(bad("Bad chunk list."));
     }
     let e = entry(&app, &id)?;
+    claim_or_busy(&e, &tid)?;
     if e.server.state().is_alive() {
         return Err(bad(format!("{} was started. Stop it to go on.", e.name)));
     }
-    sending(&e.root, true);
     let plan = load_out(&app, &tid)?;
     let want: HashSet<&str> = b.hashes.iter().map(String::as_str).collect();
     let mut at: HashMap<String, (String, u64, u32)> = HashMap::new();
@@ -603,6 +706,43 @@ async fn chunks(State(app): State<Arc<App>>, Path((id, tid)): Path<(String, Stri
     Ok(([(header::CONTENT_TYPE, "application/octet-stream")], Body::from_stream(s)).into_response())
 }
 
+/// The first thing in `now` that differs from what the list says (path,
+/// kind, size, time or link target), or `None` when the folder still
+/// holds exactly what was sent.
+fn changed_since(plan: &[Item], now: &[Item]) -> Option<String> {
+    let key = |i: &Item| (i.k.clone(), if i.k == "f" { i.s } else { 0 }, if i.k == "f" { i.t } else { 0 }, i.l.clone());
+    let was: HashMap<&str, _> = plan.iter().map(|i| (i.p.as_str(), key(i))).collect();
+    for i in now {
+        if was.get(i.p.as_str()) != Some(&key(i)) {
+            return Some(i.p.clone());
+        }
+    }
+    (now.len() != plan.len()).then(|| plan.iter().find(|i| !now.iter().any(|n| n.p == i.p)).map_or_else(String::new, |i| i.p.clone()))
+}
+
+/// Checks, just before the target makes the server, that nothing changed
+/// in the source folder since its files were listed: a restore, an update
+/// or a file edit in between would leave the new copy without it while
+/// this one is marked as moved.
+async fn verify(State(app): State<Arc<App>>, Path((id, tid)): Path<(String, String)>) -> ApiResult<Json<Value>> {
+    engine()?;
+    tid_ok(&tid)?;
+    let e = entry(&app, &id)?;
+    claim_or_busy(&e, &tid)?;
+    if e.server.state().is_alive() {
+        return Err(ApiError(StatusCode::CONFLICT, format!("{} was started while it was being sent.", e.name)));
+    }
+    let plan = load_out(&app, &tid)?;
+    let root = e.root.clone();
+    let w = tokio::task::spawn_blocking(move || walk(&root, plan.backups).map(|w| (w, plan))).await.map_err(bad)?.map_err(|err| bad(format!("Couldn't read the server's files: {err:#}")))?;
+    let (w, plan) = w;
+    if let Some(p) = changed_since(&plan.items, &w.items) {
+        let what = if p.is_empty() { String::new() } else { format!(" ({})", crate::relay::clean_text(&p)) };
+        return Err(ApiError(StatusCode::CONFLICT, format!("{} changed while it was being sent{what}. Start the move again.", e.name)));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
 #[derive(Deserialize)]
 struct FinishBody {
     /// moved, copied or cancelled.
@@ -618,12 +758,11 @@ struct FinishBody {
 
 /// Ends the source's part: lets the server start again (or marks it moved
 /// and writes its History), and drops the saved list.
-async fn finish(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path((id, tid)): Path<(String, String)>, Json(b): Json<FinishBody>) -> ApiResult<Json<Value>> {
+async fn finish(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path((id, tid)): Path<(String, String)>, Json(b): Json<FinishBody>) -> ApiResult<Response> {
     let who = engine()?;
     tid_ok(&tid)?;
     let e = entry(&app, &id)?;
     let _ = std::fs::remove_file(out_plan(&app, &tid));
-    sending(&e.root, false);
     let dest = crate::relay::clean(&b.dest_name);
     if b.outcome == "moved" {
         let by = match &who {
@@ -631,17 +770,35 @@ async fn finish(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
             _ => String::new(),
         };
         let mark = MovedMark { to: dest.clone(), to_node: crate::relay::clean(&b.dest_node), to_id: crate::relay::clean(&b.dest_id), at: crate::security::now(), by };
-        std::fs::write(e.root.join(MOVED_FILE), serde_json::to_vec_pretty(&mark).map_err(bad)?).map_err(|err| bad(format!("Couldn't mark {} as moved: {err}", e.name)))?;
+        // The mark goes on before the server is let go: no moment where
+        // the old copy could start.
+        let wrote = serde_json::to_vec_pretty(&mark).map_err(bad).and_then(|j| std::fs::write(e.root.join(MOVED_FILE), j).map_err(|err| bad(format!("Couldn't mark {} as moved: {err}", e.name))));
+        release(&e.root, &tid);
+        wrote?;
         let note = format!("To {dest}. This copy is stopped and kept.");
         if let Err(err) = hopper_core::actor::note_move(&e.root, hopper_core::actor::Did::Moved, &e.name, &note, &crate::mods_api::changer(&app, &headers, &method)) {
             log::warn!("{}: couldn't write the move to its History: {err}", e.name);
         }
         log::info!("{} moved to {dest}; this copy is kept, stopped", e.name);
         crate::changes::emit(&app, Some(&e.id), &["history"]);
+    } else {
+        release(&e.root, &tid);
     }
     crate::changes::emit(&app, None, &["list"]);
     app.refresh.notify_one();
-    Ok(Json(json!({ "ok": true })))
+    let note = match b.outcome.as_str() {
+        "moved" => format!("{} moved to {dest}", e.name),
+        "copied" => format!("{} copied to {dest}", e.name),
+        _ => format!("{}: move or copy cancelled", e.name),
+    };
+    Ok(noted(Json(json!({ "ok": true })), note))
+}
+
+/// An answer with a note for the audit log (which server, where to).
+fn noted(r: impl IntoResponse, note: String) -> Response {
+    let mut res = r.into_response();
+    res.extensions_mut().insert(crate::security::AuditNote(crate::relay::clean_text(&note)));
+    res
 }
 
 /// "Keep using this copy": drops the moved mark so it starts again.
@@ -680,6 +837,17 @@ pub fn purge_stale(root: Option<&FsPath>) {
         if old {
             log::info!("removing an unfinished incoming server ({})", e.path().display());
             let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+/// Removes the source's saved file lists of moves nobody came back for in
+/// a week (the main that ran them is gone, or lost them).
+pub fn purge_old_plans(data_dir: &FsPath) {
+    for e in std::fs::read_dir(data_dir.join("transfers")).into_iter().flatten().flatten() {
+        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a.as_secs() > STALE_SECS);
+        if old {
+            let _ = std::fs::remove_file(e.path());
         }
     }
 }
@@ -795,6 +963,15 @@ async fn receive_manifest(State(app): State<Arc<App>>, Path(tid): Path<String>, 
     let bytes = axum::body::to_bytes(body, MAX_PLAN).await.map_err(|_| bad("The file list didn't arrive whole."))?;
     let plan: Plan = serde_json::from_slice(&bytes).map_err(|_| bad("The file list can't be read."))?;
     plan_ok(&plan).map_err(bad)?;
+    // The sizes the list claims must fit: one chunk listed again and again
+    // would otherwise fill the disk from a few bytes sent.
+    // (A resumed move's files are in place already.)
+    let size: u64 = plan.items.iter().map(|i| i.s).fold(0, u64::saturating_add);
+    let free = free_here(&servers_root(&app)?);
+    let resumed = std::fs::read(dir.join("plan.json")).is_ok_and(|old| old == bytes);
+    if !resumed && free > 0 && size.saturating_add(512 * 1024 * 1024) > free {
+        return Err(bad(format!("Not enough space here: it needs {}, and {} is free.", hopper_core::instance_ops::human_bytes(size), hopper_core::instance_ops::human_bytes(free))));
+    }
     let mode = if q.mode == "copy" { "copy" } else { "move" };
     let meta = Meta { mode: mode.into(), from: crate::relay::clean(&q.from), at: crate::security::now() };
     let got = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
@@ -897,6 +1074,11 @@ async fn receive_chunks(State(app): State<Arc<App>>, Path(tid): Path<String>, bo
                 let msg = String::from_utf8_lossy(&buf[68..68 + len]).into_owned();
                 return Err(ApiError(StatusCode::CONFLICT, crate::relay::clean_text(&msg)));
             }
+            // One answer holds at most what one request may ask for: a
+            // source can't keep a target writing forever.
+            if got >= MAX_ASK {
+                return Err(bad("Too many chunks in one go."));
+            }
             let chunk: Vec<u8> = buf.drain(..68 + len).skip(68).collect();
             let (tree, plan, at) = (tree.clone(), plan.clone(), at.clone());
             let mut h2 = have.try_clone().map_err(bad)?;
@@ -980,11 +1162,30 @@ fn commit_tree(app: &App, dir: &FsPath, plan: &Plan, port: u16) -> anyhow::Resul
     for i in plan.items.iter().rev().filter(|i| i.k != "l") {
         set_mode(&tree.join(&i.p), i.m);
     }
-    if port > 0 {
-        let props = tree.join("server.properties");
+    // The port again, now: another server may have taken it since the
+    // check before the move.
+    let props = tree.join("server.properties");
+    if props.is_file() || port > 0 {
         let mut p = hopper_core::hosting::Properties::load(&props).unwrap_or_default();
-        p.set("server-port", port.to_string());
-        p.save(&props)?;
+        let mut want = if port > 0 { port } else { p.port() };
+        let mut used: Vec<(String, u16)> = app.servers.list().iter().map(|e| (e.name.clone(), crate::router::port_of(e))).collect();
+        {
+            let c = app.cfg.read().unwrap();
+            if c.router.enabled {
+                used.push(("The address router".into(), c.router.port));
+            }
+        }
+        let c = hopper_core::hosting::ports::check_here(want, &used);
+        if (!c.taken_by.is_empty() || c.in_use)
+            && let Some(s) = c.suggest
+        {
+            log::info!("{}: port {want} was taken here by the time it arrived; it gets {s}", plan.name);
+            want = s;
+        }
+        if want != p.port() {
+            p.set("server-port", want.to_string());
+            p.save(&props)?;
+        }
     }
     // A Java path from the other machine: this machine's own instead.
     if let Ok((launch, _)) = hopper_core::hosting::script::read_launch(&tree)
@@ -1003,14 +1204,21 @@ fn commit_tree(app: &App, dir: &FsPath, plan: &Plan, port: u16) -> anyhow::Resul
         }
     }
     let root = servers_root(app).map_err(|e| anyhow::anyhow!(e.1))?;
-    let name = hopper_core::hosting::create::free_server_name(&root, &plan.name);
+    // The name comes from the other panel: a plain folder name, never a
+    // hidden one (the staging folder's own) or one Windows can't hold.
+    let mut base = hopper_core::instances::Instance::folder_name(&crate::relay::clean(&plan.name));
+    if base.is_empty() || base.starts_with('.') || windows_unsafe(&base) {
+        base = "Server".into();
+    }
+    let name = hopper_core::hosting::create::free_server_name(&root, &base);
     let dest = root.join(hopper_core::instances::Instance::folder_name(&name));
+    anyhow::ensure!(dest.parent() == Some(root.as_path()) && !dest.exists(), "there's already a folder called {name} here");
     std::fs::rename(&tree, &dest)?;
     Ok(dest)
 }
 
 /// Makes the server once every chunk is in.
-async fn commit(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(tid): Path<String>, Json(b): Json<CommitBody>) -> ApiResult<Json<Value>> {
+async fn commit(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(tid): Path<String>, Json(b): Json<CommitBody>) -> ApiResult<Response> {
     engine()?;
     let dir = staging(&app, &tid)?;
     let plan = read_plan(&dir)?;
@@ -1037,7 +1245,8 @@ async fn commit(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
     app.refresh.notify_one();
     let id = app.servers.list().into_iter().find(|e| e.root == dest).map(|e| e.id.clone());
     log::info!("{} arrived from {from} ({})", plan.name, dest.display());
-    Ok(Json(json!({ "id": id, "name": dest.file_name().map(|n| n.to_string_lossy().into_owned()) })))
+    let note = format!("{} arrived from {from}", plan.name);
+    Ok(noted(Json(json!({ "id": id, "name": dest.file_name().map(|n| n.to_string_lossy().into_owned()) })), note))
 }
 
 /// Drops an incoming server: nothing of it stays.
@@ -1066,6 +1275,46 @@ mod tests {
         assert!(!link_ok("a", "/etc/passwd"));
         assert!(!link_ok("a", "C:\\Windows"));
         assert!(!link_ok("a", "..\\..\\x"));
+        // `..` after a name climbs from wherever the name leads (a link to
+        // "." or "../.." makes it climb out): refused.
+        assert!(!link_ok("p", "a/b/c/../../.."));
+        assert!(!link_ok("p", "a/../b"));
+        assert!(!link_ok("d/p", "x/.."));
+        assert!(link_ok("d/e/p", "../../a/b"));
+        assert!(link_ok("d/p", "./x/y"));
+    }
+
+    #[test]
+    fn windows_names() {
+        for bad in ["CON", "con.txt", "Nul", "aux.json", "COM1", "lpt9.log", "COM\u{b9}", "a.", "a ", "a?b", "x\u{1}"] {
+            assert!(windows_unsafe(bad), "{bad:?}");
+        }
+        for ok in ["config", "console.log", "COM", "COM10", "nullable.txt", ".hidden", "a.b"] {
+            assert!(!windows_unsafe(ok), "{ok:?}");
+        }
+        let h = "a".repeat(64);
+        let plan = |items: Vec<Item>| Plan { items, ..Default::default() };
+        let f = |p: &str| Item { p: p.into(), k: "f".into(), s: 1, c: vec![(h.clone(), 1)], ..Default::default() };
+        let d = |p: &str| Item { p: p.into(), k: "d".into(), ..Default::default() };
+        assert!(plan_ok(&plan(vec![f("CON")])).is_err());
+        assert!(plan_ok(&plan(vec![d("w"), f("w/x.")])).is_err(), "Windows would write w/x");
+        assert!(plan_ok(&plan(vec![f("a"), f("A")])).is_err(), "the same name in another case");
+        assert!(plan_ok(&plan(vec![f("a"), d("a")])).is_err(), "a file and a folder at one path");
+        assert!(plan_ok(&plan(vec![f("a"), f("a")])).is_err(), "the same path twice");
+        assert!(plan_ok(&plan(vec![f("a:stream")])).is_err(), "an alternate data stream");
+        let link = Item { p: "l".into(), k: "l".into(), l: "sub/NUL".into(), ..Default::default() };
+        assert!(plan_ok(&plan(vec![link])).is_err());
+    }
+
+    #[test]
+    fn changes_after_listing_are_found() {
+        let f = |p: &str, s: u64, t: i64| Item { p: p.into(), k: "f".into(), s, t, ..Default::default() };
+        let was = vec![f("a", 1, 10), f("b", 2, 10)];
+        assert_eq!(changed_since(&was, &was.clone()), None);
+        assert_eq!(changed_since(&was, &[f("a", 1, 10), f("b", 3, 10)]).as_deref(), Some("b"));
+        assert_eq!(changed_since(&was, &[f("a", 1, 11), f("b", 2, 10)]).as_deref(), Some("a"));
+        assert_eq!(changed_since(&was, &[f("a", 1, 10)]).as_deref(), Some("b"), "a file gone");
+        assert_eq!(changed_since(&was, &[f("a", 1, 10), f("b", 2, 10), f("c", 0, 0)]).as_deref(), Some("c"), "a file added");
     }
 
     #[test]

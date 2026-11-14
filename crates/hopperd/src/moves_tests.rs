@@ -142,6 +142,9 @@ async fn a_move_survives_a_cut_link_and_sends_only_whats_missing() {
     let (_, h) = send(&p.main, &p.main_cookie, "GET", &format!("/api/v1/servers/{}/mod-backups", p.main.server), None).await;
     let text = h.to_string();
     assert!(text.contains("\"Moved\"") && text.contains("\"undo\":false"), "{text}");
+    // It names the server, never "1 file moved".
+    assert!(text.contains("\"summary\":\"Test Server moved\""), "{text}");
+    assert!(!text.contains("1 file"), "{text}");
     // The old copy: marked, and it won't start until kept.
     let mark = crate::transfer::moved_mark(&src).expect("marked");
     assert_eq!(mark.to, "vm");
@@ -322,4 +325,134 @@ async fn the_node_refuses_lists_that_climb_out() {
     // And a move's step from a browser through the main never reaches it.
     let (s, _, _) = call("PUT", format!("/api/v1/servers/{}/transfer/x/manifest", p.ns())).origin(OWN).h("cookie", format!("hopperd_session={}", p.main_cookie)).h("x-hopperd", "1").send(&p.main).await;
     assert_ne!(s, StatusCode::OK);
+}
+
+/// Calls a move's step on one end as the main's move engine does, and
+/// reads the whole answer.
+async fn step(p: &Pair, node: Option<&str>, method: Method, path: &str, body: Value) -> (StatusCode, String) {
+    let r = crate::api::router(p.main.app.clone());
+    let body = if body.is_null() { axum::body::Body::empty() } else { axum::body::Body::from(body.to_string()) };
+    let (st, b) = crate::relay::engine_call(&p.main.app, &r, node, "owner", method, path, body).await.unwrap();
+    (st, String::from_utf8_lossy(&axum::body::to_bytes(b, 64 << 20).await.unwrap()).into_owned())
+}
+
+/// A copy marked as moved, or one being sent, refuses every start with
+/// the same plain words: the Start route, and the panel's own start that
+/// the router's wake, the schedule, MCP and the rules go through.
+#[tokio::test]
+async fn a_moved_or_sending_copy_refuses_every_start() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let src = main_srv(&p);
+    std::fs::write(src.join(crate::transfer::MOVED_FILE), r#"{"to":"vm","at":1}"#).unwrap();
+    let why = "This copy was moved to vm. Choose Keep using this copy to start it here.";
+    for action in ["start", "restart"] {
+        let (s, b) = send(&p.main, &p.main_cookie, "POST", &format!("/api/v1/servers/{}/power", p.main.server), Some(json!({ "action": action }))).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert_eq!(b["error"], why, "{b}");
+    }
+    let e = p.main.app.servers.get(&p.main.server).unwrap();
+    let err = p.main.app.servers.act(&e, hopper_core::panel::PanelAction::Start).unwrap_err().to_string();
+    assert!(err.contains(why), "{err}");
+    // The page gets the mark, so Start shows as off.
+    assert_eq!(p.main.app.servers.summary(&e).moved.map(|m| m.to).as_deref(), Some("vm"));
+    // Kept: it may start again (here it fails later, with no start files).
+    std::fs::remove_file(src.join(crate::transfer::MOVED_FILE)).unwrap();
+    // Being sent: the same, until the move lets it go.
+    assert!(crate::transfer::claim_for_test(&src, "t-start"));
+    let (s, b) = send(&p.main, &p.main_cookie, "POST", &format!("/api/v1/servers/{}/power", p.main.server), Some(json!({ "action": "start" }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{b}");
+    assert!(b["error"].as_str().unwrap().contains("being moved or copied"), "{b}");
+    let err = p.main.app.servers.act(&e, hopper_core::panel::PanelAction::Start).unwrap_err().to_string();
+    assert!(err.contains("being sent to another panel"), "{err}");
+    crate::transfer::release_for_test(&src, "t-start");
+    let err = p.main.app.servers.act(&e, hopper_core::panel::PanelAction::Start).map_err(|e| e.to_string()).err().unwrap_or_default();
+    assert!(!err.contains("being sent") && !err.contains("was moved"), "{err}");
+}
+
+/// The source end: a second move of the same server is refused while one
+/// runs; a server changed after its files were listed (a restore, an
+/// update, a file edit) fails the check before the target makes it; a
+/// copy already marked as moved isn't sent again.
+#[tokio::test]
+async fn the_source_refuses_a_second_move_and_changes_after_listing() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let src = main_srv(&p);
+    fill(&src);
+    let base = |t: &str| format!("/api/v1/servers/{}/transfer/{t}", p.main.server);
+    let (s, b) = step(&p, None, Method::POST, &format!("{}/prepare", base("t1")), json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert!(b.contains("\"ok\":true"), "{b}");
+    let (s, b) = step(&p, None, Method::POST, &format!("{}/prepare", base("t2")), json!({})).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{b}");
+    let (s, b) = step(&p, None, Method::POST, &format!("{}/verify", base("t1")), Value::Null).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    std::fs::write(src.join("mods-a.jar"), b"restored from a backup").unwrap();
+    let (s, b) = step(&p, None, Method::POST, &format!("{}/verify", base("t1")), Value::Null).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{b}");
+    assert!(b.contains("changed while it was being sent") && b.contains("mods-a.jar"), "{b}");
+    let (s, _) = step(&p, None, Method::POST, &format!("{}/finish", base("t1")), json!({ "outcome": "cancelled" })).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!crate::transfer::is_sending(&src));
+    std::fs::write(src.join(crate::transfer::MOVED_FILE), r#"{"to":"vm","at":1}"#).unwrap();
+    let (s, b) = step(&p, None, Method::POST, &format!("{}/prepare", base("t3")), json!({})).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{b}");
+    assert!(b.contains("Keep using this copy"), "{b}");
+    assert!(!crate::transfer::is_sending(&src), "a refused prepare lets it go");
+    let (_, c) = send(&p.main, &p.main_cookie, "POST", "/api/v1/moves/precheck", Some(json!({ "server": p.main.server, "to": p.id }))).await;
+    assert_eq!(c["ok"], false, "{c}");
+    assert!(c["rows"].as_array().unwrap().iter().any(|r| r["key"] == "moved" && r["level"] == "fail"), "{c}");
+}
+
+/// The target end caps what a source may make it do: a list claiming more
+/// than the disk holds, more chunk frames than one request asks for, link
+/// chains that climb out, and names Windows folds together.
+#[tokio::test]
+async fn the_target_caps_what_a_source_may_send() {
+    use sha2::Digest as _;
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let node = Some(p.id.as_str());
+    let root = p.node.app.cfg.read().unwrap().servers_root.clone().unwrap();
+    let data = b"x";
+    let h = hopper_core::hosting::chunkstore::hex(&sha2::Sha256::digest(data));
+    // One 1-byte chunk listed a thousand times claims 1000 bytes; the disk
+    // "has" 100 MB, less than that plus room to run.
+    crate::transfer::FREE.lock().unwrap().push((root.clone(), 100 * 1024 * 1024));
+    let many: Vec<Value> = (0..1000).map(|_| json!([h, 1])).collect();
+    let big = json!({ "name": "x", "size": 1000, "unique": 1, "chunks": 1, "items": [{ "p": "f", "k": "f", "s": 1000, "c": many }] });
+    let (s, b) = step(&p, node, Method::PUT, "/api/v1/receive/cap1/manifest?mode=copy&from=x", big).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+    assert!(b.contains("Not enough space"), "{b}");
+    assert!(!root.join(crate::transfer::STAGING).join("cap1").exists());
+    crate::transfer::FREE.lock().unwrap().retain(|(r, _)| *r != root);
+    // A real list, then an answer with more frames than asked for.
+    let one = json!({ "name": "x", "size": 1, "unique": 1, "chunks": 1, "items": [{ "p": "f", "k": "f", "s": 1, "c": [[h, 1]] }] });
+    let (s, b) = step(&p, node, Method::PUT, "/api/v1/receive/cap2/manifest?mode=copy&from=x", one).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let mut frames = Vec::new();
+    for _ in 0..4097 {
+        frames.extend_from_slice(h.as_bytes());
+        frames.extend_from_slice(&1u32.to_be_bytes());
+        frames.extend_from_slice(data);
+    }
+    let r = crate::api::router(p.main.app.clone());
+    let (s, body) = crate::relay::engine_call(&p.main.app, &r, node, "owner", Method::PUT, "/api/v1/receive/cap2/chunks", axum::body::Body::from(frames)).await.unwrap();
+    let b = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&b));
+    let have = std::fs::read_to_string(root.join(crate::transfer::STAGING).join("cap2").join("have")).unwrap();
+    assert!(have.lines().count() <= 4096, "{}", have.lines().count());
+    let (s, _) = step(&p, node, Method::DELETE, "/api/v1/receive/cap2", Value::Null).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!root.join(crate::transfer::STAGING).join("cap2").exists());
+    // A chain of links that each look inside but climb out together, a
+    // device name, and two names Windows makes one.
+    let bad = [
+        json!({ "name": "x", "size": 0, "unique": 0, "chunks": 0, "items": [{ "p": "a", "k": "d" }, { "p": "a/b", "k": "d" }, { "p": "a/b/c", "k": "l", "l": "../.." }, { "p": "p", "k": "l", "l": "a/b/c/../../.." }] }),
+        json!({ "name": "x", "size": 0, "unique": 0, "chunks": 0, "items": [{ "p": "CON", "k": "d" }] }),
+        json!({ "name": "x", "size": 0, "unique": 0, "chunks": 0, "items": [{ "p": "w", "k": "d" }, { "p": "W ", "k": "d" }] }),
+    ];
+    for (i, plan) in bad.iter().enumerate() {
+        let (s, b) = step(&p, node, Method::PUT, &format!("/api/v1/receive/cap-bad{i}/manifest?mode=copy&from=x"), plan.clone()).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{i}: {b}");
+        assert!(!root.join(crate::transfer::STAGING).join(format!("cap-bad{i}")).exists(), "{i}");
+    }
 }

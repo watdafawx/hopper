@@ -43,6 +43,7 @@
   import SelectionBar from './lib/SelectionBar.svelte';
   import BulkAction from './BulkAction.svelte';
   import { openMove } from './lib/moveDialog.svelte.js';
+  import { startBlocked } from './lib/moves.js';
 
   let { selected = null, selectedPanel = null, owner = false, canPower = true, homeName = '', homeVersion = '', homeRole = '', onNew, onRescan } = $props();
 
@@ -650,7 +651,7 @@
       {#if !up && s.state !== 'stopping' && nd?.maintenance}
         <button class="menu-item" role="menuitem" disabled title="{nd.name} is under maintenance"><Play size={14} />Start (node paused)</button>
       {:else if !up && s.state !== 'stopping'}
-        <button class="menu-item" role="menuitem" onclick={() => pick((v, p) => power(v, 'start', p))}><Play size={14} />Start</button>
+        <button class="menu-item" role="menuitem" disabled={!!startBlocked(s)} title={startBlocked(s)} onclick={() => pick((v, p) => power(v, 'start', p))}><Play size={14} />Start</button>
       {:else if up}
         <button class="menu-item" role="menuitem" onclick={() => pick((v, p) => power(v, 'restart', p))}><RotateCw size={14} />Restart</button>
         <button class="menu-item" role="menuitem" onclick={() => pick((v, p) => power(v, 'stop', p))}><Square size={14} />Stop</button>

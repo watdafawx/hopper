@@ -19,6 +19,7 @@
   import { toast, say, hush } from './lib/toast.svelte.js';
   import { noteFinished } from './lib/finished.js';
   import { power } from './lib/power.js';
+  import { startBlocked } from './lib/moves.js';
   import Overview from './Overview.svelte';
   import Browse from './Browse.svelte';
   import ServerPage from './ServerPage.svelte';
@@ -224,7 +225,7 @@
       if (!canPower) {
         // A viewer can't start or stop it.
       } else if (!up) {
-        if (here.state !== 'stopping') v.push({ id: 'start', section: 'Actions', icon: Play, title: `Start ${here.name}`, words: 'run launch power', run: () => power(here, 'start') });
+        if (here.state !== 'stopping' && !startBlocked(here)) v.push({ id: 'start', section: 'Actions', icon: Play, title: `Start ${here.name}`, words: 'run launch power', run: () => power(here, 'start') });
       } else {
         v.push({ id: 'restart', section: 'Actions', icon: RotateCw, title: `Restart ${here.name}`, words: 'reboot power', run: () => power(here, 'restart') });
         v.push({ id: 'stop', section: 'Actions', icon: Square, title: `Stop ${here.name}`, words: 'shut down power', run: () => power(here, 'stop') });

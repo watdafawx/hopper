@@ -323,6 +323,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     mods_api::keep_updates_in(&data_dir);
     servers_admin::purge_old(cfg.servers_root.as_deref());
     transfer::purge_stale(cfg.servers_root.as_deref());
+    transfer::purge_old_plans(&data_dir);
     let mut changed = false;
     if let Some(p) = args.port {
         cfg.port = p;

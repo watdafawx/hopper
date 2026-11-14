@@ -106,3 +106,17 @@ test("a node's servers are their own group: its ceiling, pause and state decide"
   assert.match(planBulk([g(n({ state: 'update_needed' }), [up])], 'stop')[0].skip[0].reason, /needs an update/);
   assert.equal(planBulk([g(n(), [up], 'viewer')], 'stop')[0].skip[0].reason, 'Your account can only look.');
 });
+
+test('a moved copy, or one being sent, is skipped by a bulk start', () => {
+  const moved = { ...srv('m', 'stopped'), moved: { to: 'vm' } };
+  const sending = { ...srv('s', 'stopped'), sending: true };
+  for (const action of ['start', 'restart']) {
+    const plan = planBulk([home([moved, sending, srv('a', 'stopped')])], action);
+    assert.deepEqual(plan[0].send.map((x) => x.server.id), ['a']);
+    assert.match(plan[0].skip[0].reason, /^This copy was moved to vm\. Choose Keep using this copy/);
+    assert.match(plan[0].skip[1].reason, /being sent/);
+  }
+  // Stopping one that is somehow running still goes.
+  const up = { ...srv('u', 'running'), moved: { to: 'vm' } };
+  assert.equal(planBulk([home([up])], 'stop')[0].send.length, 1);
+});

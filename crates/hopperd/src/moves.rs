@@ -20,6 +20,7 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::routing::{get, post};
+use axum::response::IntoResponse as _;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -331,6 +332,12 @@ async fn check_rows(app: &Arc<App>, who: &Who, b: &MoveBody) -> ApiResult<Value>
     if let Some(l) = src["bad_links"].as_array().and_then(|a| a.first()).and_then(Value::as_str) {
         row("links", "fail", format!("\"{l}\" links to somewhere outside the server folder. Replace it with the real files first."));
     }
+    if let Some(n) = src["bad_names"].as_array().and_then(|a| a.first()).and_then(Value::as_str) {
+        row("names", "fail", format!("\"{}\" has a name Windows can't hold. Rename it first.", crate::relay::clean_text(n)));
+    }
+    if let Some(to) = src["moved"]["to"].as_str() {
+        row("moved", "fail", format!("{name} was moved to {} already. Choose Keep using this copy first.", crate::relay::clean_text(to)));
+    }
     let (free, need) = (tgt["free"].as_u64().unwrap_or(0), tgt["need"].as_u64().unwrap_or(0));
     if tgt["disk_ok"].as_bool() == Some(false) {
         row("disk", "fail", format!("Not enough space on {}: it needs {}, and {} is free.", to.name, human(need), human(free)));
@@ -388,16 +395,12 @@ fn new_id() -> String {
     format!("m{}", hopper_core::hosting::chunkstore::hex(&b))
 }
 
-async fn start(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<MoveBody>) -> ApiResult<Json<Value>> {
+async fn start(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<MoveBody>) -> ApiResult<axum::response::Response> {
     let who = require_owner_who(&app, &headers, &method)?;
     let c = check_rows(&app, &who, &b).await?;
     if c["ok"] != true {
         let why = c["rows"].as_array().and_then(|r| r.iter().find(|r| r["level"] == "fail")).and_then(|r| r["text"].as_str()).unwrap_or("It can't go yet.").to_string();
         return Err(bad(why));
-    }
-    let busy = app.moves.list.lock().unwrap().iter().any(|m| m.server == b.server && (m.active() || m.state == "paused"));
-    if busy {
-        return Err(bad("That server has a move under way. Resume or cancel it first."));
     }
     let now = crate::security::now();
     let m = Move {
@@ -422,6 +425,11 @@ async fn start(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, 
     log::info!("{} {} {} from {} to {}", m.by, if m.mode == "copy" { "copies" } else { "moves" }, m.name, m.from_name, m.to_name);
     {
         let mut list = app.moves.list.lock().unwrap();
+        // Checked under the same lock as the push: two clicks at once make
+        // one move, never two of the same server.
+        if list.iter().any(|x| x.server == m.server && (x.active() || x.state == "paused")) {
+            return Err(bad("That server has a move under way. Resume or cancel it first."));
+        }
         list.push(m.clone());
         let done: Vec<usize> = list.iter().enumerate().filter(|(_, m)| !m.active() && m.state != "paused").map(|(i, _)| i).collect();
         if done.len() > KEEP_DONE {
@@ -432,7 +440,11 @@ async fn start(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, 
         app.moves.save(&list);
     }
     spawn(app.clone(), m.id.clone());
-    Ok(Json(json!(m)))
+    // The audit log names the server and both ends, not just the route.
+    let note = format!("{} {} from {} to {}", if m.mode == "copy" { "copies" } else { "moves" }, crate::relay::clean_text(&m.name), m.from_name, m.to_name);
+    let mut res = Json(json!(m)).into_response();
+    res.extensions_mut().insert(crate::security::AuditNote(note));
+    Ok(res)
 }
 
 fn spawn(app: Arc<App>, id: String) {
@@ -705,6 +717,12 @@ async fn steps(app: &Arc<App>, m: &Move, counter: &Arc<AtomicU64>) -> Result<(),
             }
         }
         check()?;
+        // Nothing may have changed on the source since it was listed:
+        // otherwise the new copy misses it while the old one is marked.
+        let (st, v) = call_json(app, &from, &user, Method::POST, &format!("{base}/verify"), Value::Null).await.map_err(Stop::Link)?;
+        if !st.is_success() {
+            return Err(hard_or_link(st, &v));
+        }
         app.moves.update(&m.id, |x| {
             x.state = "finishing".into();
             x.step = format!("Making the server on {}", to.name);

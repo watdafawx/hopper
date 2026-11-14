@@ -5,6 +5,7 @@
   import { live, history } from './lib/live.svelte.js';
   import { bytes, uptime, xmx, stateText, stateKey, stateTip, bootText, memTitle, loaderText } from './lib/format.js';
   import { power } from './lib/power.js';
+  import { startBlocked } from './lib/moves.js';
   import { packUpdates } from './lib/packs.svelte.js';
   import Spark from './Spark.svelte';
   import Addr from './Addr.svelte';
@@ -118,7 +119,7 @@
             <span class="small subtle ell" title={s.players.join(', ')}>{names(s.players) || (on ? 'Nobody online' : '')}</span>
           </span>
           {#if !on}
-            <button class="btn sm go" onclick={() => power(s, 'start')}><Play size={13} />Start</button>
+            <button class="btn sm go" disabled={!!startBlocked(s)} title={startBlocked(s)} onclick={() => power(s, 'start')}><Play size={13} />Start</button>
           {:else}
             <button class="btn sm icon ghost" title="Restart" onclick={() => power(s, 'restart')}><RotateCw size={14} /></button>
             <button class="btn sm icon ghost bad" title="Stop" onclick={() => power(s, 'stop')}><Square size={14} /></button>

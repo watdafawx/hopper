@@ -667,6 +667,9 @@ impl Set {
 
     /// What its entries did, counted: "3 mods updated, 1 added".
     pub fn summary(&self) -> String {
+        if let Some((name, c)) = self.whole_server() {
+            return format!("{name} {}", c.verb());
+        }
         const ORDER: [Change; 9] = [
             Change::Updated,
             Change::Added,
@@ -704,6 +707,11 @@ impl Set {
     /// the Mods 10", "Mia turned off 3 mods", "You changed 20 mods". None
     /// when nobody is known (entries from before Hopper noted it).
     pub fn headline(&self) -> Option<String> {
+        // A move or copy of the whole server names the server, never "1 file".
+        if let Some((name, c)) = self.whole_server() {
+            let w = self.who()?;
+            return Some(format!("{} {} {name}", w.label(), c.verb()));
+        }
         let n = self.files.len();
         let mods = self.files.iter().all(|f| f.src.is_some() || is_jar(&f.name));
         let what = match (mods, n) {
@@ -726,6 +734,13 @@ impl Set {
             [a, b] => Some(format!("{} and {} {verb} {what}", a.label(), b.label())),
             [a, ..] => Some(format!("{} and others {verb} {what}", a.label())),
         }
+    }
+
+    /// The server's name and what happened, when this set is a move or copy
+    /// of the whole server between panels rather than files changing.
+    fn whole_server(&self) -> Option<(&str, Change)> {
+        let f = self.files.first()?;
+        (self.files.iter().all(|f| matches!(f.change, Change::Moved | Change::Copied)) && !f.name.is_empty()).then_some((f.name.as_str(), f.change))
     }
 
     /// The set as Hopper Server sends it (`GET /servers/{id}/mod-backups`),

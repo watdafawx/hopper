@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { active, resumable, percent, amount, title, resumedLine, goLabel, movedLine } from '../src/lib/moves.js';
+import { active, resumable, percent, amount, title, resumedLine, goLabel, movedLine, startBlocked } from '../src/lib/moves.js';
 
 const m = { name: 'Test SMP', to_name: 'vm-a', mode: 'move', state: 'sending', done: 512 * 1024 * 1024, total: 1024 * 1024 * 1024, resumed: 0 };
 
@@ -40,4 +40,11 @@ test('button and banner wording', () => {
   assert.equal(goLabel('move', null), 'Move to …');
   assert.equal(movedLine({ to: 'vm-a', at: 1 }, () => '14 Nov'), 'Moved to vm-a on 14 Nov. This copy is stopped and kept.');
   assert.equal(movedLine(null), '');
+});
+
+test('a moved copy or one being sent says why it cannot start', () => {
+  assert.equal(startBlocked({ state: 'stopped' }), '');
+  assert.equal(startBlocked({ moved: { to: 'vm-a' } }), 'This copy was moved to vm-a. Choose Keep using this copy to start it here.');
+  assert.match(startBlocked({ sending: true }), /being sent to another panel/);
+  assert.equal(startBlocked(null), '');
 });

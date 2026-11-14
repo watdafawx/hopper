@@ -47,3 +47,11 @@ export function movedLine(mark, when = (t) => new Date(t * 1000).toLocaleDateStr
   if (!mark) return '';
   return `Moved to ${mark.to}${mark.at ? ` on ${when(mark.at)}` : ''}. This copy is stopped and kept.`;
 }
+
+/** Why Start is off for this server, or '' (the panel refuses it too, in
+ *  the same words): its files are being sent, or it was moved away. */
+export function startBlocked(s) {
+  if (s?.sending) return 'Its files are being sent to another panel. Start it once that\'s done.';
+  if (s?.moved) return `This copy was moved to ${s.moved.to || 'another panel'}. Choose Keep using this copy to start it here.`;
+  return '';
+}

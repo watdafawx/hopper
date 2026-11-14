@@ -8,7 +8,7 @@
   import { say } from './lib/toast.svelte.js';
   import { movedLine } from './lib/moves.js';
 
-  let { server } = $props();
+  let { server, owner = false } = $props();
   const mark = $derived(server.moved);
   const there = $derived(mark ? (mark.to_node ? `${mark.to_node}:${mark.to_id}` : mark.to_id) : '');
   let dlg = $state(null); // { ticked, busy }
@@ -45,8 +45,11 @@
     <span class="txt">{movedLine(mark)}</span>
     <span class="acts">
       {#if there}<a class="btn sm" href="#/server/{encodeURIComponent(there)}/console">Open it on {mark.to}</a>{/if}
-      <button class="btn sm" onclick={keep}>Keep using this copy</button>
-      <button class="btn sm bad" onclick={() => (dlg = { ticked: false, busy: false })}><Trash2 size={12} />Delete the old copy…</button>
+      <!-- Only the owner or a manager decides what happens to the old copy. -->
+      {#if owner}
+        <button class="btn sm" onclick={keep}>Keep using this copy</button>
+        <button class="btn sm bad" onclick={() => (dlg = { ticked: false, busy: false })}><Trash2 size={12} />Delete the old copy…</button>
+      {/if}
     </span>
   </div>
 {/if}

@@ -44,6 +44,7 @@
   import PackUpdate from './PackUpdate.svelte';
   import MovedBanner from './MovedBanner.svelte';
   import { openMove } from './lib/moveDialog.svelte.js';
+  import { startBlocked } from './lib/moves.js';
   import PackVersions from './PackVersions.svelte';
   import LoaderVersions from './LoaderVersions.svelte';
   import { notePackCheck, shortVersions } from './lib/packs.svelte.js';
@@ -68,6 +69,7 @@
   // The header backdrop's icon, read with the panel's token on another panel.
   const hero = panelSrc(() => (s?.icon ? `/api/v1/servers/${encodeURIComponent(s.id)}/icon?v=${s.icon}` : ''), () => panel);
   const alive = $derived(s && ['running', 'starting', 'stopping'].includes(s.state));
+  const startWhy = $derived(startBlocked(s));
   const cap = $derived(xmx(s?.max_memory));
   const online = $derived(s?.state === 'running' ? s.players.length : null);
 
@@ -284,7 +286,8 @@
       <!-- A viewer can't start or stop servers: no buttons (each panel's own role). -->
       {#if session.role === 'viewer'}<span class="chip">View only</span>
       {:else if !alive}
-        <button class="btn go" onclick={() => power('start')}><Play size={14} />Start</button>
+        <!-- A moved copy (or one being sent) can't start: off, saying why. -->
+        <button class="btn go" disabled={!!startWhy} title={startWhy} onclick={() => power('start')}><Play size={14} />Start</button>
       {:else}
         <button class="btn" disabled={s.state === 'stopping'} onclick={() => power('stop')}><Square size={14} />Stop</button>
         <button class="btn" disabled={s.state === 'stopping'} onclick={() => power('restart')}><RotateCw size={14} />Restart</button>
@@ -306,7 +309,7 @@
   </div>
 
   <ServerAlerts server={s} part="banner" />
-  {#if !panel && session.owner}<MovedBanner server={s} />{/if}
+  {#if !panel}<MovedBanner server={s} owner={session.owner} />{/if}
 
   <nav class="tabs">
     {#each TABS as [t, label, Icon] (t)}

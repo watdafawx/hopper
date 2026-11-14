@@ -240,6 +240,19 @@ fn is_guessable(path: &str) -> bool {
 /// Asking for a one-use live ticket or a file link (design/multi-panel.md,
 /// B1). These POSTs change nothing, so roles treat them as reads and the
 /// audit log leaves them out like other reads.
+/// A move's chunk batches (`crate::transfer`): thousands of calls for one
+/// server, which would push everything else out of the audit log. The
+/// move's start, its finish on each end and its record in History say
+/// who moved what where.
+pub(crate) fn is_move_chunks(method: &Method, path: &str) -> bool {
+    let p: Vec<&str> = path.split('/').collect();
+    match p.as_slice() {
+        ["", "api", "v1", "servers", _, "transfer", _, "chunks"] => *method == Method::POST,
+        ["", "api", "v1", "receive", _, "chunks"] => *method == Method::PUT,
+        _ => false,
+    }
+}
+
 pub(crate) fn is_grant_request(method: &Method, path: &str) -> bool {
     *method == Method::POST
         && (path == "/api/v1/ws/ticket"
@@ -500,7 +513,9 @@ async fn relayed_checks(app: Arc<App>, who: crate::auth::Who, req: Request, next
         }
         app.changes.emit(server.as_deref(), &areas, client);
     }
-    if method != Method::GET && method != Method::HEAD && !is_grant_request(&method, &path) {
+    // A chunk batch that failed is still logged.
+    let quiet = is_move_chunks(&method, &path) && res.status().is_success();
+    if method != Method::GET && method != Method::HEAD && !is_grant_request(&method, &path) && !quiet {
         let path = match res.extensions().get::<AuditNote>() {
             Some(n) => format!("{path} ({})", n.0),
             None => path,

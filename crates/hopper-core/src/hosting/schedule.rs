@@ -379,6 +379,12 @@ fn tick_server(
     if crate::bisect::path(&root).is_file() {
         return;
     }
+    // Moved to another panel, or being sent there: nothing here starts it,
+    // not a restart, not a crash restart.
+    if super::process::start_blocked(&root).is_some() {
+        t.pending_start = None;
+        return;
+    }
     let state = s.state();
 
     // A scheduled restart in progress: start once the server is down.
@@ -498,7 +504,7 @@ fn local_offset() -> i64 {
 fn autostart(servers: &[(&dyn ScheduledServer, Schedule)]) -> Vec<ScheduleEvent> {
     let mut events = Vec::new();
     for (s, schedule) in servers {
-        if !schedule.start_with_hopper || s.state().is_alive() || crate::bisect::path(s.root()).is_file() {
+        if !schedule.start_with_hopper || s.state().is_alive() || crate::bisect::path(s.root()).is_file() || super::process::start_blocked(s.root()).is_some() {
             continue;
         }
         let root = s.root().to_path_buf();
@@ -984,6 +990,56 @@ mod tests {
         assert_eq!(seen(), 3, "autostart");
         assert!(ScheduledServer::start(&s).is_err());
         assert_eq!(seen(), 4, "scheduled restart / crash restart");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A copy that was moved to another panel never starts by itself: not
+    /// with Hopper, not after a crash, not for a scheduled restart, not
+    /// from Start or Restart; and a player joining hears where it went.
+    #[test]
+    fn a_moved_copy_never_starts_by_itself() {
+        use crate::panel::{PanelAction, ServerPanel};
+        let base = std::env::temp_dir().join(format!("hopper-moved-start-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("Moved");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("server.properties"), "server-port=25598\n").unwrap();
+        super::super::write_eula(&dir, true).unwrap();
+        std::fs::write(dir.join(super::super::process::MOVED_MARK), r#"{"to":"vm-a","at":1}"#).unwrap();
+        let why = "This copy was moved to vm-a. Choose Keep using this copy to start it here.";
+        assert_eq!(super::super::process::start_blocked(&dir).as_deref(), Some(why));
+
+        // Start, Restart and the schedule's own start refuse it, first thing.
+        let panel = LocalPanel::discover(&base);
+        let id = panel.servers().unwrap()[0].id.clone();
+        for a in [PanelAction::Start, PanelAction::Restart] {
+            let e = panel.act(&id, a).unwrap_err().to_string();
+            assert!(e.contains(why), "{e}");
+        }
+        let real = LocalServer::new(&dir);
+        assert!(ScheduledServer::start(&real).unwrap_err().to_string().contains(why));
+
+        // Autostart, a crash restart and a pending scheduled restart skip it
+        // without even trying.
+        let mut s = Fake::new("x", ServerState::Stopped);
+        s.root = dir.clone();
+        let on = Schedule { start_with_hopper: true, ..Schedule::default() };
+        assert!(autostart(&[(&s as &dyn ScheduledServer, on)]).is_empty());
+        s.set(ServerState::Crashed(Some(1)));
+        let mut core = Core::default();
+        assert!(core.tick(at("2026-10-12T10:00"), &[(&s as &dyn ScheduledServer, Schedule::default())]).is_empty());
+        s.set(ServerState::Stopped);
+        core.tracks.entry(dir.clone()).or_default().pending_start = Some("daily restart at 04:00".into());
+        assert!(core.tick(at("2026-10-12T04:01"), &[(&s as &dyn ScheduledServer, restart_at("04:00"))]).is_empty());
+        assert!(s.log().is_empty(), "nothing tried to start it");
+
+        // Joining it through the address router: told where it went.
+        let kick = super::super::router::blocked_kick("Moved", Some("vm-a")).to_string();
+        assert!(kick.contains("moved to vm-a"), "{kick}");
+
+        // Keep using this copy (the mark gone): it starts again.
+        std::fs::remove_file(dir.join(super::super::process::MOVED_MARK)).unwrap();
+        assert!(autostart(&[(&s as &dyn ScheduledServer, Schedule { start_with_hopper: true, ..Schedule::default() })]) == [ScheduleEvent::AutoStarted { root: dir.clone() }]);
         let _ = std::fs::remove_dir_all(&base);
     }
 
