@@ -79,6 +79,7 @@ async fn as_instance(
                 json!({ "file": f, "icon": crate::mods_api::icon_url(&looks.icon), "author": looks.authors })
             })
             .collect();
+        hopper_core::sources::looks::save();
         Ok(json!({
             "instance": inst,
             "loose": loose,

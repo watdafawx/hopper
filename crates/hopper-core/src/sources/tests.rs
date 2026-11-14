@@ -727,6 +727,114 @@ fn source_mod_authors_follow_the_jar() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// An instance with one jar per name (the bytes are the name), each a mod
+/// no site describes, and a cache file of its own in the instance's folder
+/// (never the real cache folder).
+fn looks_setup(tag: &str, names: &[&str]) -> std::path::PathBuf {
+    let root = scratch(tag);
+    for n in names {
+        std::fs::write(root.join("mods").join(n), n.as_bytes()).unwrap();
+    }
+    root
+}
+
+fn looks_instance(root: &std::path::Path, names: &[&str]) -> Instance {
+    Instance {
+        root: root.to_path_buf(),
+        addons: names
+            .iter()
+            .map(|n| Addon { file_name: n.to_string(), enabled: true, class_id: crate::cf::CLASS_MODS, ..Default::default() })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// One fill against the cache file in `root`, loaded fresh (a restart) under
+/// `format`. Returns the jars opened and the authors filled in.
+fn looks_run(root: &std::path::Path, names: &[&str], format: u32, logo: Option<&std::path::Path>) -> (Vec<String>, Vec<String>) {
+    use crate::stampcache::StampCache;
+    let cache = std::sync::Mutex::new(StampCache::<looks::Looks>::load(Some(root.join("jar-looks.json")), format, 100));
+    let opened = std::sync::Mutex::new(Vec::new());
+    let mut inst = looks_instance(root, names);
+    looks::fill_with(&mut inst, &cache, &|p: &std::path::Path| {
+        opened.lock().unwrap().push(p.file_name().unwrap().to_string_lossy().into_owned());
+        if let Some(l) = logo {
+            std::fs::write(l, b"png").unwrap();
+        }
+        looks::Looks {
+            icon: logo.map(|l| l.to_string_lossy().into_owned()).unwrap_or_default(),
+            authors: "Fox".into(),
+            ..Default::default()
+        }
+    });
+    let authors = inst.addons.iter().map(|a| a.author.clone()).collect();
+    (opened.into_inner().unwrap(), authors)
+}
+
+#[test]
+fn looks_survive_a_restart() {
+    let names = ["a-1.jar", "b-1.jar", "c-1.jar"];
+    let root = looks_setup("looks-restart", &names);
+    let (opened, authors) = looks_run(&root, &names, looks::LOOKS_FORMAT, None);
+    assert_eq!(opened.len(), 3, "the first run opens every jar");
+    assert_eq!(authors, ["Fox", "Fox", "Fox"]);
+    assert!(root.join("jar-looks.json").is_file(), "fill saves the cache itself");
+
+    // A restart (the cache loaded from its file): nothing is opened, and the
+    // same looks come back.
+    let (opened, authors) = looks_run(&root, &names, looks::LOOKS_FORMAT, None);
+    assert!(opened.is_empty(), "opened again: {opened:?}");
+    assert_eq!(authors, ["Fox", "Fox", "Fox"]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_changed_jar_is_read_again_and_the_rest_are_not() {
+    let names = ["a-1.jar", "b-1.jar", "c-1.jar"];
+    let root = looks_setup("looks-changed", &names);
+    looks_run(&root, &names, looks::LOOKS_FORMAT, None);
+    // A rebuilt jar: another size.
+    std::fs::write(root.join("mods/b-1.jar"), b"a longer rebuilt jar").unwrap();
+    let (opened, _) = looks_run(&root, &names, looks::LOOKS_FORMAT, None);
+    assert_eq!(opened, ["b-1.jar"]);
+    // And now it's kept too.
+    let (opened, _) = looks_run(&root, &names, looks::LOOKS_FORMAT, None);
+    assert!(opened.is_empty(), "{opened:?}");
+    // A jar switched off is the same file under another name: the .disabled one is found and kept.
+    std::fs::rename(root.join("mods/c-1.jar"), root.join("mods/c-1.jar.disabled")).unwrap();
+    let (opened, authors) = looks_run(&root, &names, looks::LOOKS_FORMAT, None);
+    assert_eq!(opened, ["c-1.jar.disabled"]);
+    assert_eq!(authors, ["Fox", "Fox", "Fox"]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn another_looks_format_starts_over() {
+    let names = ["a-1.jar", "b-1.jar"];
+    let root = looks_setup("looks-format", &names);
+    looks_run(&root, &names, looks::LOOKS_FORMAT, None);
+    let (opened, _) = looks_run(&root, &names, looks::LOOKS_FORMAT + 1, None);
+    assert_eq!(opened.len(), 2, "answers kept under the old format are worked out again");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_deleted_logo_file_is_read_again() {
+    let names = ["a-1.jar", "b-1.jar"];
+    let root = looks_setup("looks-logo", &names);
+    let logo = root.join("logo.png");
+    looks_run(&root, &names, looks::LOOKS_FORMAT, Some(&logo));
+    // Both jars name the logo while it's there.
+    std::fs::write(&logo, b"png").unwrap();
+    let (opened, _) = looks_run(&root, &names, looks::LOOKS_FORMAT, None);
+    assert!(opened.is_empty(), "{opened:?}");
+    // The image cache was cleaned: every jar that pointed at it is opened again.
+    std::fs::remove_file(&logo).unwrap();
+    let (opened, _) = looks_run(&root, &names, looks::LOOKS_FORMAT, Some(&logo));
+    assert_eq!(opened.len(), 2);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn logo_is_saved_small() {
     let saved = looks::save_logo(&png(512, 256)).unwrap();

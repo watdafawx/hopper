@@ -78,6 +78,12 @@ impl<V: Clone + Serialize + DeserializeOwned> StampCache<V> {
         Some(v)
     }
 
+    /// What's kept for `key`, whatever the file looks like now: for a quick
+    /// look from a screen that draws every frame and can't ask the disk.
+    pub fn peek(&self, key: &str) -> Option<&V> {
+        self.files.get(key).map(|(_, _, v)| v)
+    }
+
     pub fn put(&mut self, key: String, stamp: Stamp, v: V) {
         self.seen.insert(key.clone());
         self.files.insert(key, (stamp.0, stamp.1, v));

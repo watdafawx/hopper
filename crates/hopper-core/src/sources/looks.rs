@@ -5,13 +5,13 @@
 //! Only read as a zip; nothing in the jar runs.
 
 use crate::instances::Instance;
-use std::collections::HashMap;
+use crate::stampcache::{self, Stamp, StampCache};
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex, MutexGuard};
 
 /// What a jar says about how it looks.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Looks {
     /// The logo, saved in the image cache (a local path); empty when the
     /// jar has none.
@@ -192,26 +192,44 @@ pub fn save_logo(bytes: &[u8]) -> anyhow::Result<PathBuf> {
     Ok(out)
 }
 
-/// Looks read this run, by jar path, with the size and time they were
-/// read at.
-static SEEN: Mutex<Option<HashMap<PathBuf, (u64, u64, Looks)>>> = Mutex::new(None);
+/// Each jar's looks, kept on disk by the jar's path, size and modified
+/// time. Opening 400 jars for their logos takes seconds on a cold disk, so
+/// after the first time a restart reads them from this file instead.
+static CACHE: LazyLock<Mutex<StampCache<Looks>>> =
+    LazyLock::new(|| Mutex::new(StampCache::named("jar-looks.json", LOOKS_FORMAT, 20_000)));
 
-fn stamp(path: &Path) -> Option<(u64, u64)> {
-    let m = std::fs::metadata(path).ok()?;
-    let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-    Some((m.len(), t))
+/// The format of what `jar-looks.json` holds. Bump it when what [`read`]
+/// works out of a jar changes (a new field, another place to find the logo
+/// or the authors), so old answers are worked out again; not for a new
+/// Hopper version, or every update would open every jar again before the
+/// window shows.
+pub const LOOKS_FORMAT: u32 = 1;
+
+fn cache() -> MutexGuard<'static, StampCache<Looks>> {
+    CACHE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The jar's looks, read once per file version.
-pub fn read(path: &Path) -> Looks {
-    let Some((len, t)) = stamp(path) else { return Looks::default() };
-    if let Some((l, tt, looks)) = SEEN.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(path))
-        && *l == len
-        && *tt == t
-        && (looks.icon.is_empty() || looks.icon.starts_with("http") || Path::new(&looks.icon).is_file())
-    {
-        return looks.clone();
-    }
+/// Saves what was read new since the last save (a no-op when nothing was).
+/// [`fill`] does it itself; whoever calls [`loose`] in a loop does it after.
+pub fn save() {
+    cache().save();
+}
+
+fn stamp_of(path: &Path) -> Option<Stamp> {
+    std::fs::metadata(path).ok().map(|m| stampcache::stamp(&m))
+}
+
+/// What the cache holds for the jar, when that's still good: the stamp
+/// matches and a logo it names is still in the image cache (a deleted one
+/// is read again).
+fn kept(cache: &mut StampCache<Looks>, path: &Path, stamp: Stamp) -> Option<Looks> {
+    cache
+        .get(&stampcache::key(path), stamp)
+        .filter(|l| l.icon.is_empty() || l.icon.starts_with("http") || Path::new(&l.icon).is_file())
+}
+
+/// Opens the jar and works its looks out (no cache involved).
+fn open(path: &Path) -> Looks {
     let jar = std::fs::File::open(path).map_err(anyhow::Error::from).and_then(read_from).unwrap_or_default();
     let icon = jar
         .logo
@@ -222,17 +240,27 @@ pub fn read(path: &Path) -> Looks {
         })
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let looks = Looks { icon, authors: jar.authors.join(", "), version: jar.version, side: jar.side };
-    SEEN.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_or_insert_with(HashMap::new)
-        .insert(path.to_path_buf(), (len, t, looks.clone()));
+    Looks { icon, authors: jar.authors.join(", "), version: jar.version, side: jar.side }
+}
+
+/// The jar's looks, read once per file version (and kept across restarts:
+/// call [`save`] after a run of these).
+pub fn read(path: &Path) -> Looks {
+    let Some(stamp) = stamp_of(path) else { return Looks::default() };
+    if let Some(l) = kept(&mut cache(), path, stamp) {
+        return l;
+    }
+    // Not under the lock: opening a jar takes a while and `known` is asked
+    // from the screen.
+    let looks = open(path);
+    cache().put(stampcache::key(path), stamp, looks.clone());
     looks
 }
 
-/// The looks [`read`] found for `path` this run, without opening it.
+/// The looks kept for `path` (read this run or an earlier one), without
+/// opening it or asking the disk about it.
 pub fn known(path: &Path) -> Option<Looks> {
-    SEEN.lock().unwrap_or_else(|e| e.into_inner()).as_ref()?.get(path).map(|(_, _, l)| l.clone())
+    cache().peek(&stampcache::key(path)).cloned()
 }
 
 /// The GitHub owner's picture for a mod from a repo ("owner/repo").
@@ -262,10 +290,21 @@ pub fn version_for(inst: &Instance, file_name: &str) -> String {
 
 /// Fills in what the lists show for mods no site describes (no icon, or
 /// from a source): the jar's logo (else the GitHub owner's picture), its
-/// authors and side. In memory only; reads each jar once per run.
+/// authors and side. A jar is opened only when it's new or changed since
+/// the last run (see [`LOOKS_FORMAT`]); the rest come from the cache file.
 pub fn fill(inst: &mut Instance) {
+    fill_with(inst, &CACHE, &open);
+}
+
+/// [`fill`] with its cache and the opening of a jar given, so a test can
+/// count the jars opened.
+pub(super) fn fill_with(inst: &mut Instance, cache: &Mutex<StampCache<Looks>>, open: &dyn Fn(&Path) -> Looks) {
+    let lock = || cache.lock().unwrap_or_else(|e| e.into_inner());
     let mods = inst.mods_dir();
-    for a in inst.addons.iter_mut().filter(|a| a.folder() == "mods") {
+    // The mods that need a look, and where their jar would be (on, then off).
+    let mut wants: Vec<(usize, bool, bool)> = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for (i, a) in inst.addons.iter().enumerate().filter(|(_, a)| a.folder() == "mods") {
         let ours = a.project_id == 0 || a.source.is_some();
         // A logo that came from a jar (or the owner's picture standing in for
         // one) is re-read from the jar there now: an update may bring a new one.
@@ -273,13 +312,46 @@ pub fn fill(inst: &mut Instance) {
         if !ours && !needs_icon {
             continue;
         }
-        let Some(jar) = [mods.join(&a.file_name), mods.join(format!("{}.disabled", a.file_name))]
-            .into_iter()
-            .find(|p| p.is_file())
-        else {
-            continue;
-        };
-        let looks = read(&jar);
+        wants.push((i, needs_icon, ours));
+        paths.push(mods.join(&a.file_name));
+        paths.push(mods.join(format!("{}.disabled", a.file_name)));
+    }
+    // One listing of the folder gives every jar's stamp; asking about each
+    // on its own is far slower on Windows.
+    let listed = stampcache::by_folder(&paths);
+    let jars: Vec<Option<(PathBuf, Stamp)>> = (0..wants.len())
+        .map(|n| {
+            let (on, off) = (2 * n, 2 * n + 1);
+            if let Some(st) = listed[on] {
+                return Some((paths[on].clone(), st));
+            }
+            if let Some(st) = listed[off] {
+                return Some((paths[off].clone(), st));
+            }
+            // Neither is in the listing (a name that differs only in case
+            // still opens on Windows): ask about them directly.
+            [on, off].into_iter().find_map(|k| Some((paths[k].clone(), stamp_of(&paths[k])?)))
+        })
+        .collect();
+    let mut looks: Vec<Option<Looks>> = {
+        let mut c = lock();
+        jars.iter().map(|j| j.as_ref().and_then(|(p, st)| kept(&mut c, p, *st))).collect()
+    };
+    // Only the jars the cache couldn't answer for are opened (not under the
+    // lock: `known` is asked from the screen meanwhile).
+    for (n, jar) in jars.iter().enumerate() {
+        if let Some((p, st)) = jar
+            && looks[n].is_none()
+        {
+            let l = open(p);
+            lock().put(stampcache::key(p), *st, l.clone());
+            looks[n] = Some(l);
+        }
+    }
+    lock().save();
+    for ((i, needs_icon, ours), looks) in wants.into_iter().zip(looks) {
+        let Some(looks) = looks else { continue };
+        let a = &mut inst.addons[i];
         if needs_icon {
             a.icon = if !looks.icon.is_empty() {
                 looks.icon.clone()
@@ -292,9 +364,9 @@ pub fn fill(inst: &mut Instance) {
             };
         }
         if ours {
-            // The repo stays on the source; the people who made it show. The
-            // jar is read again every run, so a rebuilt file whose authors
-            // changed (a rename) replaces the name saved when it was installed.
+            // The repo stays on the source; the people who made it show. A
+            // rebuilt jar has a new size or time and is read again, so its
+            // authors (a rename) replace the name saved when it was installed.
             if !looks.authors.is_empty() {
                 a.author = looks.authors.clone();
             }
@@ -309,7 +381,8 @@ pub fn fill(inst: &mut Instance) {
 }
 
 /// Looks for a jar no list knows (a loose file): its logo, else the
-/// picture of the GitHub owner its own links point to.
+/// picture of the GitHub owner its own links point to. Call [`save`] after
+/// a run of these.
 pub fn loose(path: &Path) -> Looks {
     let mut looks = read(path);
     if looks.icon.is_empty()
@@ -318,8 +391,8 @@ pub fn loose(path: &Path) -> Looks {
     {
         looks.icon = avatar(&repo).unwrap_or_default();
         // Kept, so [`known`] and the next read have it.
-        if let Some(e) = SEEN.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|m| m.get_mut(path)) {
-            e.2.icon = looks.icon.clone();
+        if let Some(st) = stamp_of(path) {
+            cache().put(stampcache::key(path), st, looks.clone());
         }
     }
     looks

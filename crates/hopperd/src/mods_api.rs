@@ -419,6 +419,7 @@ async fn list(
                 "short_version": hopper_core::scan::short_version(&base),
             }));
         }
+        hopper_core::sources::looks::save();
         rows.sort_by_key(|r| r["name"].as_str().unwrap_or("").to_lowercase());
         Ok(json!({
             "game_version": inst.game_version, "loader": inst.loader,

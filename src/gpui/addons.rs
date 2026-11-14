@@ -1596,6 +1596,7 @@ impl AddonsView {
                         for jar in &jars {
                             hopper::sources::looks::loose(jar);
                         }
+                        hopper::sources::looks::save();
                     })
                     .await;
                     this.update(cx, |this, cx| {
