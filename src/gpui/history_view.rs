@@ -230,7 +230,7 @@ impl BackupsView {
         for (i, set) in self.sets.iter().enumerate() {
             for (j, f) in set.files.iter().enumerate() {
                 let key = if set.files.len() == 1 { i * 10_000 } else { i * 10_000 + j + 1 };
-                if self.sel.contains(&key.to_string()) {
+                if self.sel.contains(&key.to_string()) && f.change.undoable() {
                     out.push(f.clone());
                 }
             }
@@ -333,7 +333,9 @@ impl BackupsView {
         }
         let open = self.open.contains(&set.dir);
         let dir = set.dir.clone();
-        let all = set.files.clone();
+        // A whole server moved or copied can't be undone from here.
+        let all: Vec<Saved> = set.files.iter().filter(|f| f.change.undoable()).cloned().collect();
+        let undoable = !all.is_empty();
         let n = set.files.len();
         let mods = set.files.iter().filter(|f| f.src.is_some()).count();
         let what = if mods == n { format!("{n} mods") } else { format!("{n} files") };
@@ -421,14 +423,16 @@ impl BackupsView {
                     .child(v_flex().flex_1().min_w_0().child(title).child(widgets::caption(caption, cx).text_xs().truncate()))
                     .child(widgets::caption(hm(set.when), cx).text_xs())
                     .child(
-                        widgets::row_actions(("hist-set-actions", i)).child(
-                            Button::new(("hist-undo-all", i))
-                                .xsmall()
-                                .outline()
-                                .label("Undo all")
-                                .disabled(busy)
-                                .on_click(cx.listener(move |this, _, window, cx| this.undo(all.clone(), window, cx))),
-                        ),
+                        widgets::row_actions(("hist-set-actions", i)).when(undoable, |r| {
+                            r.child(
+                                Button::new(("hist-undo-all", i))
+                                    .xsmall()
+                                    .outline()
+                                    .label("Undo all")
+                                    .disabled(busy)
+                                    .on_click(cx.listener(move |this, _, window, cx| this.undo(all.clone(), window, cx))),
+                            )
+                        }),
                     ),
             )
             .when(open, |c| {
@@ -527,14 +531,16 @@ impl BackupsView {
                     .child(widgets::caption(detail, cx).text_xs().truncate()),
             )
             .when(!nested, |r| r.child(widgets::caption(hm(when), cx).text_xs()))
-            .child(
-                Button::new(("hist-undo", key))
-                    .xsmall()
-                    .outline()
-                    .label("Undo")
-                    .disabled(busy)
-                    .on_click(cx.listener(move |this, _, window, cx| this.undo(vec![file.clone()], window, cx))),
-            )
+            .when(file.change.undoable(), |r| {
+                r.child(
+                    Button::new(("hist-undo", key))
+                        .xsmall()
+                        .outline()
+                        .label("Undo")
+                        .disabled(busy)
+                        .on_click(cx.listener(move |this, _, window, cx| this.undo(vec![file.clone()], window, cx))),
+                )
+            })
     }
 
     /// Undoes entries, newest set first. A mod whose version its site no
@@ -918,5 +924,6 @@ fn change_color(c: Change, same: bool, cx: &App) -> Hsla {
         Change::Edited | Change::Switched | Change::Replaced => t.primary,
         Change::TurnedOn | Change::Added => t.success,
         Change::TurnedOff => t.muted_foreground,
+        Change::Moved | Change::Copied => t.info,
     }
 }

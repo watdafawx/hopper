@@ -214,6 +214,9 @@ pub fn undo(inst: &mut Instance, f: &Saved) -> anyhow::Result<PathBuf> {
 /// only drops the entry.
 fn undo_record(inst: &mut Instance, f: &Saved, did: crate::actor::Did, key: &str) -> anyhow::Result<PathBuf> {
     use crate::actor::Did;
+    if matches!(did, Did::Moved | Did::Copied) {
+        anyhow::bail!("A move or copy of the whole server can't be undone from History.");
+    }
     let _quiet = crate::actor::quiet(&inst.root);
     let at = inst
         .addons
@@ -224,7 +227,7 @@ fn undo_record(inst: &mut Instance, f: &Saved, did: crate::actor::Did, key: &str
         (Did::Added, Some(i)) => crate::install::remove(inst, i)?,
         (Did::On, Some(i)) => crate::install::set_enabled(inst, i, false)?,
         (Did::Off, Some(i)) => crate::install::set_enabled(inst, i, true)?,
-        (_, None) => {}
+        (Did::Moved | Did::Copied, _) | (_, None) => {}
     }
     if let Some(dir) = f.path.parent() {
         crate::actor::forget_record(dir, key, did);

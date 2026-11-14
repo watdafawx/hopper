@@ -34,6 +34,7 @@
   import { leave } from './lib/leave.js';
   import { NAV_EVENT, closeTopOverlay } from './lib/nav.js';
   import Dialog from './Dialog.svelte';
+  import MoveServer from './MoveServer.svelte';
   import Transfers from './Transfers.svelte';
   import StatusBar from './StatusBar.svelte';
   import { refreshPackUpdates } from './lib/packs.svelte.js';
@@ -451,6 +452,7 @@
 {#if upd.open}<PanelVersions />{/if}
 {#if palette}<Palette items={palette.items} context={palette.context} onClose={() => (palette = null)} />{/if}
 <Transfers />
+<MoveServer />
 <Dialog />
 <!-- Always there, so screen readers hear each message; a click puts it away. -->
 <div role="status" aria-live="polite" aria-atomic="true">

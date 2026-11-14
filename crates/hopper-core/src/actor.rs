@@ -78,6 +78,12 @@ pub enum Did {
     Added,
     On,
     Off,
+    /// A Hopper Server server moved or copied between machines
+    /// (design/multi-panel.md, A5). Not about a mod: the record's `addon`
+    /// holds only the server's name, and `note` says where from or to.
+    /// History shows it; it can't be undone from there.
+    Moved,
+    Copied,
 }
 
 /// A change that set nothing aside, kept in a History folder's
@@ -93,6 +99,21 @@ pub struct Record {
     pub who: Who,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub batch: String,
+    /// What a move or copy did ("To vm-a. This copy is stopped and kept.").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+/// Notes in History that the server at `root` was moved or copied
+/// (`did` is [`Did::Moved`] or [`Did::Copied`]): `name` is the server's,
+/// `note` the sentence shown under it.
+pub fn note_move(root: &Path, did: Did, name: &str, note: &str, who: &Who) -> std::io::Result<()> {
+    let dir = root.join(crate::sync::BACKUP_DIR).join(crate::time::now().to_string());
+    fs::create_dir_all(&dir)?;
+    let mut all = read_records(&dir);
+    let addon = Addon { name: name.to_string(), ..Default::default() };
+    all.push(Record { did, key: format!("move:{}", crate::time::now()), addon, who: who.clone(), batch: String::new(), note: note.to_string() });
+    fs::write(dir.join(RECORDS_FILE), serde_json::to_vec_pretty(&all).unwrap_or_default())
 }
 
 /// Beside a History folder's files: who set each aside, and its batch.
@@ -327,7 +348,7 @@ pub(crate) fn note_save(old: Option<&Instance>, new: &Instance) {
         .into_iter()
         .filter_map(|(did, a)| {
             let t = tag_for_addon(&new.root, &a)?;
-            Some(Record { did, key: crate::groupsync::addon_key(&a), addon: a, who: t.who, batch: t.batch })
+            Some(Record { did, key: crate::groupsync::addon_key(&a), addon: a, who: t.who, batch: t.batch, note: String::new() })
         })
         .collect();
     if recs.is_empty() {
@@ -550,6 +571,7 @@ mod tests {
             addon: Addon { file_name: file.into(), name: file.into(), project_id: 1, ..Default::default() },
             who: robin.clone(),
             batch: "b1".into(),
+            note: String::new(),
         };
         for (when, r) in [(1000, rec("x.jar", Did::Added)), (1004, rec("y.jar", Did::Off)), (1009, rec("z.jar", Did::Off))] {
             let d = root.join(crate::sync::BACKUP_DIR).join(when.to_string());

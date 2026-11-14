@@ -59,6 +59,17 @@ static GEAR: LazyLock<[u64; 256]> = LazyLock::new(|| {
     t
 });
 
+/// The largest chunk [`next_cut`] makes.
+pub const MAX_CHUNK: usize = MAX;
+
+/// Where the next chunk of `buf` ends, cut exactly as backups cut files, so
+/// a server moved between panels (design/multi-panel.md, A5) splits into
+/// the same chunks its backups use. `buf` must hold at least
+/// [`MAX_CHUNK`] bytes unless `eof` (nothing follows it).
+pub fn next_cut(buf: &[u8], eof: bool) -> usize {
+    if eof && buf.len() <= MIN { buf.len() } else { cut(buf) }
+}
+
 /// Where the first chunk of `data` ends.
 fn cut(data: &[u8]) -> usize {
     let n = data.len().min(MAX);

@@ -264,6 +264,20 @@ fn current_script(root: &Path) -> Option<(PathBuf, String)> {
         .map(|p| (p, text))
 }
 
+/// Points the server's start script at `java`, keeping the rest of its
+/// launch line (a server moved from another machine, whose Java path is
+/// that machine's). False when there's no script line to change.
+pub fn repoint_java(root: &Path, java: &Path) -> anyhow::Result<bool> {
+    let Some((path, text)) = current_script(root) else { return Ok(false) };
+    match script::rewrite_java(&text, java) {
+        Some(new) if new != text => {
+            fs::write(&path, new).with_context(|| format!("writing {}", path.display()))?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 /// `text` with the loader token on its java line swapped for `target`'s:
 /// an `@libraries/.../win_args.txt` (or unix_args) for another, or the
 /// `-jar` file for another. None when the line has neither.

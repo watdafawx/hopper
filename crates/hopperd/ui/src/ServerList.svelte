@@ -19,7 +19,7 @@
   // (BulkAction.svelte). Filters above the rows narrow to one panel or one
   // state.
   import { tick } from 'svelte';
-  import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy, Compass, ChevronRight, ChevronDown, Ellipsis, ExternalLink, LogOut, Trash2, ListChecks, Terminal, Pause, Power } from '@lucide/svelte';
+  import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy, Compass, ChevronRight, ChevronDown, Ellipsis, ExternalLink, LogOut, Trash2, ListChecks, Terminal, Pause, Power, ArrowRightLeft } from '@lucide/svelte';
   import { put, post } from './lib/api.js';
   import { bytes } from './lib/format.js';
   import { panels, retry, signOut, removePanel, setOff, retryStuck } from './lib/panels.svelte.js';
@@ -42,6 +42,7 @@
   import { passes, nodeGroup } from './lib/bulk.js';
   import SelectionBar from './lib/SelectionBar.svelte';
   import BulkAction from './BulkAction.svelte';
+  import { openMove } from './lib/moveDialog.svelte.js';
 
   let { selected = null, selectedPanel = null, owner = false, canPower = true, homeName = '', homeVersion = '', homeRole = '', onNew, onRescan } = $props();
 
@@ -659,6 +660,10 @@
     <button class="menu-item" role="menuitem" onclick={() => pick((v, p) => (location.hash = serverHref(p, v, '/files').slice(1)))}><FolderOpen size={14} />Open folder</button>
     {#if s.addresses?.length}
       <button class="menu-item" role="menuitem" onclick={() => pick(copyAddress)}><Copy size={14} />Copy address</button>
+    {/if}
+    {#if owner && !menu.p && !s.stale}
+      <div class="menu-sep"></div>
+      <button class="menu-item" role="menuitem" onclick={() => pick((v) => openMove(v))}><ArrowRightLeft size={14} />Move or copy to…</button>
     {/if}
   </div>
 {/if}

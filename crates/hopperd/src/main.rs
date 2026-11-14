@@ -48,11 +48,14 @@ mod mods_more;
 mod mods_upload;
 mod mods_table;
 mod motd_live;
+mod moves;
 mod secrets;
 mod security;
 mod relay;
 #[cfg(test)]
 mod relay_tests;
+#[cfg(test)]
+mod moves_tests;
 mod net;
 mod offsite;
 mod pack_api;
@@ -75,6 +78,7 @@ mod service;
 mod sftp;
 mod sources_api;
 mod tls;
+mod transfer;
 mod nodes;
 #[cfg(test)]
 mod nodes_tests;
@@ -157,6 +161,8 @@ pub struct App {
     pub grants: grants::Grants,
     /// Nodes of this panel (see [`nodes`]).
     pub nodes: nodes::Nodes,
+    /// Servers being moved or copied between this panel and its nodes.
+    pub moves: moves::Moves,
 }
 
 impl App {
@@ -316,6 +322,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     let mut cfg = loaded;
     mods_api::keep_updates_in(&data_dir);
     servers_admin::purge_old(cfg.servers_root.as_deref());
+    transfer::purge_stale(cfg.servers_root.as_deref());
     let mut changed = false;
     if let Some(p) = args.port {
         cfg.port = p;
@@ -398,6 +405,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         acme: acme::Acme::new(&data_dir),
         sftp_fingerprint: sftp::fingerprint(&data_dir),
         nodes: nodes::Nodes::new(&data_dir),
+        moves: moves::Moves::new(&data_dir),
     });
     app.rescan();
     autoupdate::start(app.clone());
