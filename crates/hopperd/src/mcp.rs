@@ -258,15 +258,16 @@ async fn node_call(app: &Arc<App>, who: &Who, headers: &HeaderMap, name: &str, s
     let (status, v) = ask_node(app, headers, m.clone(), &path_q, body).await;
     if m != Method::GET {
         let (node, node_name) = crate::security::node_named(app, &path, None);
+        let c = crate::security::caller();
         app.audit.record(&crate::security::Event {
             at: crate::security::now(),
             who: who.name(),
             role: who.role_name().into(),
-            ip: "mcp".into(),
-            proxy: String::new(),
-            net: crate::net::Net::Local,
+            ip: c.ip,
+            proxy: c.proxy,
+            net: c.net,
             method: m.to_string(),
-            path,
+            path: format!("{path} (MCP)"),
             status: status.as_u16(),
             node,
             node_name,
@@ -306,18 +307,20 @@ fn arg<'a>(args: &'a Value, key: &str) -> &'a str {
 /// Checks a tool call like the API request it stands for.
 fn allowed(app: &App, who: &Who, method: Method, path: String) -> Result<(), String> {
     if let Some(msg) = crate::security::refusal(who, &method, &path) {
+        let (node, node_name) = crate::security::node_named(app, &path, None);
+        let c = crate::security::caller();
         app.audit.record(&crate::security::Event {
             at: crate::security::now(),
             who: who.name(),
             role: who.role_name().into(),
-            ip: "mcp".into(),
-            proxy: String::new(),
-            net: crate::net::Net::Local,
+            ip: c.ip,
+            proxy: c.proxy,
+            net: c.net,
             method: method.to_string(),
-            path,
+            path: format!("{path} (MCP)"),
             status: 403,
-            node: String::new(),
-            node_name: String::new(),
+            node,
+            node_name,
         });
         return Err(msg.to_string());
     }

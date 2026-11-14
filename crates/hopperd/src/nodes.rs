@@ -829,6 +829,13 @@ impl Nodes {
 
     // ---- A2: relaying, the merged list, maintenance ----
 
+    /// Whether node `id`'s live connection can do `cap` (both sides named
+    /// it at hello). An offline node can't; a reconnect after an update or a
+    /// downgrade sets it afresh.
+    pub fn live_can(&self, id: &str, cap: &str) -> bool {
+        self.lock().live.get(id).is_some_and(|l| l.caps.iter().any(|c| c == cap))
+    }
+
     pub fn relay_info(&self, id: &str) -> Option<RelayInfo> {
         let g = self.lock();
         let n = g.stored.nodes.iter().find(|n| n.id == id)?;
@@ -1051,6 +1058,9 @@ const UPDATE_WITHIN: Duration = if cfg!(test) { Duration::from_secs(10) } else {
 /// Done when the node is back on that version.
 pub async fn update_node(app: &Arc<App>, id: &str, who: &crate::auth::Who) -> Result<String, String> {
     let target = main_version();
+    if let Some(server) = crate::moves::busy_on(app, id) {
+        return Err(format!("{server} is being moved to or from it. Wait for that to finish, or cancel it, then update."));
+    }
     let (name, handle) = {
         let mut g = app.nodes.lock();
         let n = g.stored.nodes.iter().find(|n| n.id == id).cloned().ok_or("No node with that id.")?;
@@ -1171,6 +1181,10 @@ async fn node_update(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
             return Err(ApiError(StatusCode::CONFLICT, "Update all is running. Wait for it to finish.".into()));
         }
         let n = g.stored.nodes.iter().find(|n| n.id == id).ok_or_else(|| not_found("node"))?;
+        // A move to or from it first: a restart mid-move would only make it wait.
+        if let Some(server) = crate::moves::busy_on(&app, &id) {
+            return Err(ApiError(StatusCode::CONFLICT, format!("{server} is being moved to or from {}. Wait for that to finish, or cancel it, then update.", n.name)));
+        }
         app.nodes.can_update(&g, n).map_err(|e| ApiError(StatusCode::CONFLICT, e))?;
         n.name.clone()
     };
@@ -1313,6 +1327,7 @@ async fn node_remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     // "All servers on this node" and its servers leave every user's and
     // token's list; a list left empty matches nothing, never "all".
     app.auth.drop_node_scope(&node.id);
+    crate::moves::node_gone(&app, &node.id);
     if let Some(h) = live {
         // The node stops when it reads this; its next try would get a 401 anyway.
         h.close("removed").await;
@@ -1462,6 +1477,7 @@ async fn leave(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Socke
         // Same as the owner removing it: its scope entries go, or a user
         // still listing it could never be saved again.
         app.auth.drop_node_scope(&node.id);
+        crate::moves::node_gone(&app, &node.id);
         if let Some(h) = live {
             h.close("left").await;
         }
@@ -1598,6 +1614,14 @@ pub(crate) fn attach_for_test(app: &Arc<App>, node: &Node, handle: Handle) -> Fo
 #[cfg(test)]
 pub(crate) fn detach_for_test(app: &Arc<App>, id: &str) {
     app.nodes.lock().live.remove(id);
+}
+
+/// The node's connection now names only `caps` (A6 skew tests).
+#[cfg(test)]
+pub(crate) fn caps_for_test(app: &App, id: &str, caps: &[&str]) {
+    if let Some(l) = app.nodes.lock().live.get_mut(id) {
+        l.caps = caps.iter().map(|c| c.to_string()).collect();
+    }
 }
 
 /// The node's live feed sent this server list (relay tests).

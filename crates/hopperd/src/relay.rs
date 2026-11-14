@@ -515,6 +515,14 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
             }
         }
         let all = namespace_answer(&t.node, &t.route, all);
+        // A job the node started for one of its servers is that server's
+        // job on the main too (`security::job_refusal`).
+        if let Some(server) = crate::security::server_of(&t.route)
+            && let Ok(v) = serde_json::from_slice::<Value>(&all)
+            && let Some(job) = v.get("job").and_then(Value::as_str)
+        {
+            app.job_servers.note(job.to_string(), join(&t.node, &server));
+        }
         let mut r = b.header(header::CONTENT_LENGTH, all.len()).body(Body::from(all)).unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response());
         r.headers_mut().remove(header::CONTENT_ENCODING);
         return r;
@@ -563,6 +571,12 @@ pub async fn engine_call(app: &Arc<App>, router: &axum::Router, node: Option<&st
         return Ok((StatusCode::FORBIDDEN, Body::from(json!({ "error": "Not something a move does." }).to_string())));
     }
     let info = app.nodes.relay_info(node).ok_or("That node is gone.")?;
+    // The ceiling is read on every call, not only when the move started:
+    // lowering it on this panel stops a move under way at its next step.
+    if info.ceiling != Role::Admin {
+        let msg = format!("{} now lets this panel {}. Moving servers needs Manage there.", info.name, ceiling_text(info.ceiling));
+        return Ok((StatusCode::FORBIDDEN, Body::from(json!({ "error": msg }).to_string())));
+    }
     let handle = info.handle.ok_or_else(|| format!("{} is offline.", info.name))?;
     let head = Head {
         k: "req".into(),

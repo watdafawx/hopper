@@ -75,7 +75,7 @@ fn init_log() {
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 20 << 20) {
         let _ = std::fs::rename(&path, dir.join("hopperd.log.old"));
     }
-    let mut log = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    let mut log = crate::logger("info");
     if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         log.target(env_logger::Target::Pipe(Box::new(f)));
     }

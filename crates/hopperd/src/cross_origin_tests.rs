@@ -69,6 +69,7 @@ pub(crate) fn panel_with(tls: crate::TlsInfo) -> T {
         refresh: tokio::sync::Notify::new(),
         jobs: Default::default(),
         results: Default::default(),
+        job_servers: Default::default(),
         changes: Default::default(),
         grants: Default::default(),
         router: Default::default(),

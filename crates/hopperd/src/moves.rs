@@ -228,6 +228,11 @@ fn resolve(app: &App, who: &Who, server: &str, to: &str) -> ApiResult<(End, Stri
                     format!("{} lets this panel {}. Moving servers needs Manage there.", info.name, crate::relay::ceiling_text(info.ceiling)),
                 ));
             }
+            // An older node has no receive or transfer steps: say so
+            // before anything starts, not halfway through.
+            if info.handle.is_some() && !app.nodes.live_can(n, MOVE_CAP) {
+                return Err(ApiError(StatusCode::CONFLICT, format!("{} runs an older Hopper Server that can't move servers. Update it first.", info.name)));
+            }
             e.name = info.name;
         }
         ends.push(e);
@@ -236,6 +241,9 @@ fn resolve(app: &App, who: &Who, server: &str, to: &str) -> ApiResult<(End, Stri
     let from_end = ends.pop().unwrap();
     Ok((from_end, sid, to_end))
 }
+
+/// What a node names at hello when it has the move steps.
+const MOVE_CAP: &str = "servers.move";
 
 fn who_label(who: &Who) -> String {
     match who {
@@ -264,6 +272,8 @@ async fn places(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
             format!("Lets this panel {}; moving needs Manage.", crate::relay::ceiling_text(info.ceiling))
         } else if info.handle.is_none() {
             "Offline.".to_string()
+        } else if !app.nodes.live_can(&id, MOVE_CAP) {
+            "Needs a newer Hopper Server.".to_string()
         } else if info.maintenance.is_some() {
             "Under maintenance.".to_string()
         } else {
@@ -460,6 +470,39 @@ enum Stop {
     Link(String),
     Hard(String),
     Cancelled,
+}
+
+/// A running move to or from node `node`, by its server's name: an update
+/// restarts the node in the middle of it, so updates wait for it.
+pub(crate) fn busy_on(app: &App, node: &str) -> Option<String> {
+    app.moves.list.lock().unwrap().iter().find(|m| m.active() && (m.from == node || m.to == node)).map(|m| m.name.clone())
+}
+
+/// Node `node` was removed or left: its moves can't finish. Running ones
+/// stop (the engine cleans up what it can reach), paused ones end now.
+pub(crate) fn node_gone(app: &Arc<App>, node: &str) {
+    let mine: Vec<Move> = app.moves.list.lock().unwrap().iter().filter(|m| m.from == node || m.to == node).cloned().collect();
+    for m in mine {
+        if m.active() {
+            app.moves.stop.lock().unwrap().push(m.id.clone());
+        } else if m.state == "paused" {
+            let a = app.clone();
+            tokio::spawn(async move { undo(&a, &m, "cancelled", "Cancelled: the node was removed.").await });
+        }
+    }
+}
+
+/// A move in `state` between `from` and `to`, with nothing running it (tests).
+#[cfg(test)]
+pub(crate) fn fake_for_test(app: &App, id: &str, from: &str, to: &str, state: &str) {
+    let m = Move { id: id.into(), server: "s".into(), name: "Big Server".into(), from: from.into(), to: to.into(), mode: "move".into(), state: state.into(), by: "owner".into(), ..Default::default() };
+    app.moves.list.lock().unwrap().push(m);
+}
+
+/// Whether the engine was told to stop that move (tests).
+#[cfg(test)]
+pub(crate) fn stopping_for_test(app: &App, id: &str) -> bool {
+    app.moves.stopping(id)
 }
 
 fn sees_move(who: &Who, m: &Move) -> bool {

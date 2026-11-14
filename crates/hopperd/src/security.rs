@@ -191,40 +191,96 @@ impl Audit {
     /// The newest `limit` events about node `node`, newest first. Lines from
     /// before A4 have no `node`: their path still names it.
     pub fn recent_for_node(&self, node: &str, limit: usize) -> Vec<Event> {
-        let mut all = self.recent(usize::MAX);
-        all.retain(|e| e.node == node || (e.node.is_empty() && node_of(e.path.split(' ').next().unwrap_or(""), None).as_deref() == Some(node)));
-        all.truncate(limit);
-        all
+        // A line that doesn't name the node anywhere can't be about it, so
+        // most lines are skipped without being parsed.
+        self.recent_where(limit, |l| l.contains(node), |e| e.node == node || (e.node.is_empty() && node_of(e.path.split(' ').next().unwrap_or(""), None).as_deref() == Some(node)))
     }
 
     /// The newest `limit` events, newest first.
     pub fn recent(&self, limit: usize) -> Vec<Event> {
+        self.recent_where(limit, |_| true, |_| true)
+    }
+
+    /// The newest `limit` events that pass `line` (on the raw line) and
+    /// `keep`, newest first. Reads the two log files once, holding at most
+    /// `limit` events (the files are up to 10 MB together).
+    fn recent_where(&self, limit: usize, line: impl Fn(&str) -> bool, keep: impl Fn(&Event) -> bool) -> Vec<Event> {
         let _g = self.file.lock().unwrap();
-        let mut out: Vec<Event> = Vec::new();
+        let mut out: std::collections::VecDeque<Event> = std::collections::VecDeque::new();
+        if limit == 0 {
+            return Vec::new();
+        }
         for p in [self.path.with_extension("1.log"), self.path.clone()] {
             if let Ok(f) = std::fs::File::open(&p) {
-                out.extend(std::io::BufReader::new(f).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str(&l).ok()));
+                for l in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+                    if !line(&l) {
+                        continue;
+                    }
+                    let Ok(e) = serde_json::from_str::<Event>(&l) else { continue };
+                    if keep(&e) {
+                        if out.len() == limit {
+                            out.pop_front();
+                        }
+                        out.push_back(e);
+                    }
+                }
             }
         }
-        out.reverse();
-        out.truncate(limit);
-        out
+        out.into_iter().rev().collect()
     }
 }
 
 /// The server id a path is about (`/api/v1/servers/{id}/…`, `/api/v1/fs/{id}/…`);
 /// a node's server keeps its namespaced id (`node:id`, `:` maybe encoded).
-fn server_of(path: &str) -> Option<String> {
+pub(crate) fn server_of(path: &str) -> Option<String> {
     let rest = path.strip_prefix("/api/v1/servers/").or_else(|| path.strip_prefix("/api/v1/fs/"))?;
     let id = rest.split('/').next()?;
     (!id.is_empty() && !matches!(id, "infos" | "rescan" | "create")).then(|| crate::relay::decode_seg(id))
 }
 
-/// The node a job's path is about (`/api/v1/jobs/{node}:{n}/...`): someone
-/// limited to some servers reaches only the nodes they have something on.
-fn job_node(path: &str) -> Option<String> {
+/// The job a path is about (`/api/v1/jobs/{id}/...`, `{node}:{n}` for a
+/// node's job).
+fn job_of(path: &str) -> Option<String> {
     let id = crate::relay::decode_seg(path.strip_prefix("/api/v1/jobs/")?.split('/').next()?);
-    crate::relay::split(&id).map(|(n, _)| n.to_string())
+    (!id.is_empty()).then_some(id)
+}
+
+/// Someone limited to some servers follows or cancels only the jobs of
+/// those servers: a job's title, steps and result name its server, and
+/// cancelling one stops someone else's update. A job started by no
+/// server's request (a new server, the panel's own work) is for people
+/// with every server only.
+pub(crate) fn job_refusal(app: &App, who: &crate::auth::Who, path: &str) -> Option<&'static str> {
+    use crate::auth::Who;
+    let limited = match who {
+        Who::Token { servers, .. } | Who::User { servers, .. } => !servers.is_empty(),
+        _ => false,
+    };
+    let hidden = limited && job_of(path).is_some_and(|j| !app.job_servers.of(&j).is_some_and(|s| who.sees(&s)));
+    hidden.then_some("You don't have access to that job's server.")
+}
+
+tokio::task_local! {
+    /// The server the request being handled is about, so a job it starts
+    /// remembers whose it is (`crate::pack_api::spawn`).
+    pub(crate) static REQUEST_SERVER: Option<String>;
+    /// Where the request being handled came from, as its audit line says
+    /// it, for audit lines a handler writes itself (MCP tool calls).
+    static CALLER: Caller;
+}
+
+/// Where a request came from, for the audit log.
+#[derive(Clone)]
+pub(crate) struct Caller {
+    pub ip: String,
+    pub proxy: String,
+    pub net: Net,
+}
+
+/// The request's own address and network. Outside a request (never for
+/// a route) it says so plainly instead of claiming this PC.
+pub(crate) fn caller() -> Caller {
+    CALLER.try_with(Clone::clone).unwrap_or_else(|_| Caller { ip: "unknown".into(), proxy: String::new(), net: Net::Internet })
 }
 
 /// What someone could guess at: passwords, codes, setup. These get the
@@ -272,8 +328,6 @@ pub(crate) fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Op
                 Some("This token can only read.")
             } else if !servers.is_empty() && server_of(path).is_some_and(|id| !who.sees(&id)) {
                 Some("This token isn't for that server.")
-            } else if job_node(path).is_some_and(|n| !who.sees_node(&n)) {
-                Some("This token isn't for that node.")
             } else {
                 None
             }
@@ -281,9 +335,6 @@ pub(crate) fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Op
         Who::User { role, servers, .. } => {
             if server_of(path).is_some_and(|id| !who.sees(&id)) {
                 return Some("You don't have access to that server.");
-            }
-            if job_node(path).is_some_and(|n| !who.sees_node(&n)) {
-                return Some("You don't have access to that node.");
             }
             // MCP checks each tool call itself.
             if path == "/api/v1/mcp" {
@@ -432,7 +483,7 @@ async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String],
         return deny(StatusCode::FORBIDDEN, msg);
     }
     if let Some(w) = &who {
-        if let Some(msg) = refusal(w, &method, &path).or_else(|| secret_refusal(&app, w, &method, &path, req.uri().query())) {
+        if let Some(msg) = refusal(w, &method, &path).or_else(|| job_refusal(&app, w, &path)).or_else(|| secret_refusal(&app, w, &method, &path, req.uri().query())) {
             let (node, node_name) = node_named(&app, &path, req.uri().query());
             app.audit.record(&Event { at: now(), who: w.name(), role: w.role_name().into(), ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status: 403, node, node_name });
             return deny(StatusCode::FORBIDDEN, msg);
@@ -447,7 +498,10 @@ async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String],
     let (node_id, node_name) = if api { node_named(&app, &path, req.uri().query()) } else { (String::new(), String::new()) };
     let res = match node {
         Some(t) => crate::relay::forward(app.clone(), t, req).await,
-        None => next.run(req).await,
+        None => {
+            let caller = Caller { ip: log_ip.clone(), proxy: proxy.clone(), net: log_net };
+            REQUEST_SERVER.scope(server_of(&path), CALLER.scope(caller, next.run(req))).await
+        }
     };
 
     // A change went through: tell every open client what to show again.
@@ -504,7 +558,7 @@ async fn relayed_checks(app: Arc<App>, who: crate::auth::Who, req: Request, next
         return deny(StatusCode::FORBIDDEN, msg);
     }
     let client = req.headers().get("x-hopperd-client").and_then(|v| v.to_str().ok()).map(|v| v.chars().take(64).collect::<String>());
-    let res = next.run(req).await;
+    let res = REQUEST_SERVER.scope(server_of(&path), next.run(req)).await;
     if res.status().is_success()
         && let Some((server, areas)) = crate::changes::from_request(&method, &path)
     {
@@ -637,5 +691,37 @@ mod tests {
         let r = a.recent(2);
         assert_eq!(r.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["/p2", "/p1"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reading one node's history keeps only the newest it asked for, from
+    /// both log files, newest first; other nodes' lines don't count.
+    #[test]
+    fn audit_for_a_node_is_bounded_and_newest_first() {
+        let dir = std::env::temp_dir().join(format!("hopperd-audit-node-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = Audit::new(&dir);
+        let ev = |i: u64, node: &str| Event { at: i, who: "owner".into(), role: "owner".into(), ip: "1.2.3.4".into(), proxy: String::new(), net: Net::Local, method: "GET".into(), path: format!("/p{i}"), status: 200, node: node.into(), node_name: String::new() };
+        for i in 0..50 {
+            a.record(&ev(i, if i % 2 == 0 { "aaaa" } else { "bbbb" }));
+        }
+        // The older half in the rotated file.
+        std::fs::rename(dir.join("audit.log"), dir.join("audit.1.log")).unwrap();
+        for i in 50..60 {
+            a.record(&ev(i, "aaaa"));
+        }
+        let r = a.recent_for_node("aaaa", 12);
+        assert_eq!(r.iter().map(|e| e.at).collect::<Vec<_>>(), [59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 48, 46]);
+        assert!(a.recent_for_node("cccc", 5).is_empty());
+        assert!(a.recent_for_node("aaaa", 0).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn job_ids_in_paths() {
+        assert_eq!(job_of("/api/v1/jobs/7").as_deref(), Some("7"));
+        assert_eq!(job_of("/api/v1/jobs/ab12%3A7/cancel").as_deref(), Some("ab12:7"));
+        assert_eq!(job_of("/api/v1/jobs"), None);
+        assert_eq!(job_of("/api/v1/jobs/"), None);
     }
 }

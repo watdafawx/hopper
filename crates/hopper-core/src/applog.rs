@@ -184,6 +184,12 @@ static SECRETS: LazyLock<(RegexSet, Vec<(Regex, &'static str)>)> = LazyLock::new
         // CurseForge's key is a bcrypt-style string; GitHub's start with gh*_.
         (r"\$2[aby]\$\d\d\$[./A-Za-z0-9]{20,}", "<hidden>"),
         (r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})", "<hidden>"),
+        // Hopper Server's own secrets: API tokens (`hst_`), node join keys
+        // (`hn_`) and node tokens (`hnt_`), backup receive keys (`hbr_`), the
+        // session cookie, and "setup code ABCD2345" written as a sentence.
+        (r"\bh(?:st|nt|n|br)_[0-9a-fA-F]{16,}", "<hidden>"),
+        (r#"(?i)\b(hopperd_session)(\s*=\s*)[^\s;,"']+"#, "${1}${2}<hidden>"),
+        (r"(?i)\b(setup code)(\s+)[A-Z2-9]{8}\b", "${1}${2}<hidden>"),
         // A share code (`HOP-` + base64).
         (r"\bHOP-[A-Za-z0-9_-]{12,}", "HOP-<hidden>"),
         // The Windows user name in a folder path.
@@ -358,6 +364,12 @@ mod tests {
             ("https://discord.com/api/webhooks/123/secretpart", "secretpart"),
             (r"reading C:\Users\Alice Smith\AppData\x.json", "Alice"),
             ("reading c:/users/Bob/x", "Bob"),
+            ("made hst_0123456789abcdef0123456789abcdef", "0123456789abcdef"),
+            ("join with --key hn_0123456789abcdef01234567", "0123456789abcdef"),
+            ("node hnt_00112233445566778899aabbccddeeff ok", "00112233445566"),
+            ("receive key hbr_aabbccddeeff00112233 used", "aabbccddeeff"),
+            ("cookie hopperd_session=AbCdEf0123456789; Path=/", "AbCdEf0123456789"),
+            ("Open the panel and use setup code K7MQ2ZXA (also in x)", "K7MQ2ZXA"),
         ];
         for (input, secret) in cases {
             let out = redact(input);

@@ -842,3 +842,74 @@ async fn a_failed_update_survives_a_restart_of_the_main() {
     let (_, heads) = again.live_view(&Who::Owner);
     assert!(heads[0]["update"].is_null(), "{}", heads[0]);
 }
+
+/// Starts a backup of `server` as the owner and gives its job id as the
+/// browser gets it ("7" here, "vm:7" for a node's server).
+async fn backup_job(p: &Pair, server: &str) -> String {
+    let (s, b) = send(&p.main, &p.main_cookie, "POST", &format!("/api/v1/servers/{server}/backups"), Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    match &b["job"] {
+        Value::String(j) => j.clone(),
+        j => j.to_string(),
+    }
+}
+
+/// Someone limited to some servers follows, cancels and dismisses only
+/// those servers' jobs: another server's here, a node server out of
+/// scope and a job no server started are refused; their own work, and
+/// the owner still sees every job.
+#[tokio::test]
+async fn jobs_are_scoped_per_server() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let other = p.main.dir.join("servers").join("Other Server");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("server.properties"), "motd=other\n").unwrap();
+    p.main.app.rescan();
+    let other_id = p.main.app.servers.list().into_iter().find(|e| e.root == other).expect("listed").id.clone();
+    let mine = backup_job(&p, &p.main.server).await;
+    let theirs = backup_job(&p, &other_id).await;
+    let on_node = backup_job(&p, &p.ns()).await;
+    assert!(on_node.starts_with(&format!("{}:", p.id)), "{on_node}");
+    let (_, b) = send(&p.main, &p.main_cookie, "POST", "/api/v1/tokens", Some(json!({ "name": "one", "servers": [p.main.server] }))).await;
+    let token = b["token"].as_str().unwrap().to_string();
+    let as_token = |method: &'static str, path: String| {
+        let token = token.clone();
+        let main = &p.main;
+        async move { call(method, path).bearer(&token).send(main).await.0 }
+    };
+    assert_eq!(as_token("GET", format!("/api/v1/jobs/{mine}")).await, StatusCode::OK);
+    for j in [&theirs, &on_node, &"424242".to_string()] {
+        assert_eq!(as_token("GET", format!("/api/v1/jobs/{j}")).await, StatusCode::FORBIDDEN, "{j}");
+        assert_eq!(as_token("POST", format!("/api/v1/jobs/{j}/cancel")).await, StatusCode::FORBIDDEN, "{j}");
+        assert_eq!(as_token("POST", format!("/api/v1/jobs/{j}/dismiss")).await, StatusCode::FORBIDDEN, "{j}");
+    }
+    // A user given only the node's server: its job, not the main's.
+    let (s, u) = send(&p.main, &p.main_cookie, "POST", "/api/v1/users", Some(json!({ "name": "lia", "password": "liapass123", "role": "operator", "servers": [p.ns()] }))).await;
+    assert_eq!(s, StatusCode::OK, "{u}");
+    let lia = crate::cross_origin_tests::user_cookie(&p.main, "lia", "liapass123").await;
+    let (s, b) = send(&p.main, &lia, "GET", &format!("/api/v1/jobs/{on_node}"), None).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let (s, _) = send(&p.main, &lia, "GET", &format!("/api/v1/jobs/{theirs}"), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    // The owner: every job.
+    let (s, b) = send(&p.main, &p.main_cookie, "GET", &format!("/api/v1/jobs/{theirs}"), None).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+}
+
+/// An MCP change on a node server is audited on the main with the
+/// caller's own address and network, and marked as MCP, like the web
+/// UI's requests (it said "local" before A6).
+#[tokio::test]
+async fn mcp_node_calls_are_audited_with_the_callers_address() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let (_, b) = send(&p.main, &p.main_cookie, "POST", "/api/v1/tokens", Some(json!({ "name": "agent" }))).await;
+    let token = b["token"].as_str().unwrap().to_string();
+    let rpc = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "write_file", "arguments": { "server": p.ns(), "path": "hello.txt", "content": "from mcp" } } });
+    let (s, _, _) = call("POST", "/api/v1/mcp").bearer(&token).from("192.168.50.77").json(rpc).send(&p.main).await;
+    assert_eq!(s, StatusCode::OK);
+    let rows = p.main.app.audit.recent_for_node(&p.id, 50);
+    let row = rows.iter().find(|e| e.path.ends_with("(MCP)")).unwrap_or_else(|| panic!("an MCP row: {rows:?}"));
+    assert_eq!(row.ip, "192.168.50.77");
+    assert_eq!(row.net, crate::net::Net::Lan);
+    assert_eq!(row.node_name, "vm");
+}

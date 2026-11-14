@@ -155,6 +155,8 @@ pub struct App {
     pub router: router::Router,
     /// Finished jobs' results, until fetched.
     pub results: std::sync::Mutex<std::collections::HashMap<u64, serde_json::Value>>,
+    /// Which server each job is for (`pack_api::JobServers`).
+    pub job_servers: pack_api::JobServers,
     /// What changed, for every open client (see [`changes`]).
     pub changes: changes::Changes,
     /// One-use WebSocket tickets and file links for pages on other origins.
@@ -247,6 +249,60 @@ fn data_dir_from_args() -> PathBuf {
     config::data_dir()
 }
 
+/// The panel's logger: env_logger's usual line, with secrets hidden the
+/// same way Hopper desktop's log hides them (`hopper_core::applog::redact`).
+/// A log ends up in bug reports, the systemd journal and `docker logs`, so a
+/// token, join key, cookie or URL with a key in it must never be in one.
+pub(crate) fn logger(default: &str) -> env_logger::Builder {
+    use std::io::Write as _;
+    let mut b = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default));
+    b.format(|buf, r| {
+        let msg = r.args().to_string();
+        writeln!(buf, "[{} {:<5} {}] {}", buf.timestamp(), r.level(), r.target(), hopper_core::applog::redact(&msg))
+    });
+    b
+}
+
+/// The setup code goes to a person at the console (a terminal, or `docker
+/// logs`, which is how a Docker install is set up), never into a log file
+/// or the systemd journal: there the line points at `setup-code.txt`, which
+/// only the panel's user can read. `JOURNAL_STREAM` is how systemd says
+/// stderr is the journal.
+fn tell_setup_code(code: &str, port: u16, local_ok: bool, file: &std::path::Path) {
+    use std::io::IsTerminal as _;
+    let to_console = !autoupdate::AS_SERVICE.load(std::sync::atomic::Ordering::SeqCst)
+        && std::env::var_os("JOURNAL_STREAM").is_none()
+        && (std::io::stderr().is_terminal() || auth::in_docker());
+    let local = if local_ok { format!(" On this PC, open http://localhost:{port} to set the owner password without it.") } else { String::new() };
+    if to_console {
+        eprintln!("No owner yet. Open the panel and use setup code {code}.{local} (Also in {}.)", file.display());
+    }
+    log::warn!("No owner yet. Open the panel and use the setup code in {}.{local}", file.display());
+}
+
+/// The data folder holds the accounts (password hashes, two-factor
+/// secrets), the setup code, API and node token hashes and the config's
+/// keys, so on Linux and macOS only the panel's own user may open it. Each
+/// file is written with the default mode (readable by everyone under the
+/// usual umask); closing the folder covers all of them at once, including
+/// files from older versions. Windows folders under the user's profile are
+/// already the user's only.
+fn private_dir(dir: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let Ok(m) = std::fs::metadata(dir) else { return };
+        if m.permissions().mode() & 0o077 != 0 {
+            match std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
+                Ok(()) => log::info!("{} is now readable by this user only", dir.display()),
+                Err(e) => log::warn!("couldn't make {} private: {e}", dir.display()),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
 fn main() -> anyhow::Result<()> {
     // Before anything else, so a panic leaves a crash log beside hopperd.log.
     hopper_core::panic_log::install("Hopper Server", env!("CARGO_PKG_VERSION"), &data_dir_from_args());
@@ -262,7 +318,7 @@ fn main() -> anyhow::Result<()> {
     if argv.first().map(String::as_str) == Some("--tray") {
         return launcher::tray_only();
     }
-    let mut log = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,mdns_sd=warn"));
+    let mut log = logger("info,mdns_sd=warn");
     if argv.first().map(String::as_str) == Some("service") {
         log.init();
         return service::command(&argv[1..]);
@@ -320,6 +376,8 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     // first time); the start-up folder only points there.
     let (data_dir, loaded) = home::settle(&boot_dir, cfg)?;
     let mut cfg = loaded;
+    private_dir(&boot_dir);
+    private_dir(&data_dir);
     mods_api::keep_updates_in(&data_dir);
     servers_admin::purge_old(cfg.servers_root.as_deref());
     transfer::purge_stale(cfg.servers_root.as_deref());
@@ -364,15 +422,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     if let Some(code) = auth.setup_code() {
         let _ = std::fs::write(data_dir.join(SETUP_FILE), &code);
         let file = data_dir.join(SETUP_FILE);
-        if auth::local_setup_possible(cfg.trust_local_setup) {
-            log::warn!(
-                "No owner yet. On this PC, open http://localhost:{} to set the owner password. From another device use setup code {code} (also in {}).",
-                cfg.port,
-                file.display()
-            );
-        } else {
-            log::warn!("No owner yet. Open the panel and use setup code {code} (also in {}).", file.display());
-        }
+        tell_setup_code(&code, cfg.port, auth::local_setup_possible(cfg.trust_local_setup), &file);
     }
 
     let ca = tls::load_or_create_ca(&data_dir, &cfg.name)?;
@@ -396,6 +446,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         refresh: Notify::new(),
         jobs: Default::default(),
         results: Default::default(),
+        job_servers: Default::default(),
         changes: Default::default(),
         grants: Default::default(),
         router: Default::default(),
@@ -573,4 +624,18 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: tls::OwnCert, shutdown: Shu
     })
     .await;
     Ok(())
+}
+
+/// The data folder holds password hashes, sign-in secrets and keys: on
+/// Linux it ends up readable by its own user only.
+#[cfg(all(test, unix))]
+#[test]
+fn the_data_folder_is_made_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = std::env::temp_dir().join(format!("hopperd-private-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    private_dir(&dir);
+    assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+    let _ = std::fs::remove_dir_all(&dir);
 }

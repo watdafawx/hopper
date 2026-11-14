@@ -131,7 +131,7 @@ pub fn local_setup_possible(enabled: bool) -> bool {
     enabled && !in_docker()
 }
 
-fn in_docker() -> bool {
+pub(crate) fn in_docker() -> bool {
     Path::new("/.dockerenv").exists() || std::env::var_os("HOPPERD_DOCKER").is_some()
 }
 
@@ -623,7 +623,7 @@ impl Auth {
         if !(local && code.trim().is_empty()) && !code.trim().eq_ignore_ascii_case(expected) {
             drop(sc);
             self.failed(ip);
-            bail!("That setup code isn't right. It's in hopperd's log and in setup-code.txt.");
+            bail!("That setup code isn't right. It's in setup-code.txt in Hopper Server's data folder, and on its console when it started.");
         }
         let hash = hash_password(password)?;
         *sc = None;

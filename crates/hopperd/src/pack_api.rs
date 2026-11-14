@@ -61,6 +61,9 @@ pub(crate) fn spawn<T: serde::Serialize>(
 ) -> u64 {
     let job = app.jobs.start(title);
     let id = job.id();
+    if let Some(server) = crate::security::REQUEST_SERVER.try_with(|s| s.clone()).ok().flatten() {
+        app.job_servers.note(id.to_string(), server);
+    }
     let a = app.clone();
     std::thread::spawn(move || {
         let r = work(&job);
@@ -73,6 +76,34 @@ pub(crate) fn spawn<T: serde::Serialize>(
         job.finish(&r);
     });
     id
+}
+
+/// Which server each job was started for: the server of the request that
+/// started it, or for a node's job the server the main relayed it to. Read
+/// by `security::job_refusal`, so someone limited to some servers follows
+/// only their servers' jobs. The newest `MAX_NOTED` are kept (a job lives
+/// minutes).
+#[derive(Default)]
+pub struct JobServers(Mutex<(HashMap<String, String>, std::collections::VecDeque<String>)>);
+const MAX_NOTED: usize = 4096;
+
+impl JobServers {
+    pub(crate) fn note(&self, job: String, server: String) {
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let (map, order) = &mut *g;
+        if map.insert(job.clone(), server).is_none() {
+            order.push_back(job);
+        }
+        while order.len() > MAX_NOTED {
+            if let Some(old) = order.pop_front() {
+                map.remove(&old);
+            }
+        }
+    }
+
+    pub(crate) fn of(&self, job: &str) -> Option<String> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).0.get(job).cloned()
+    }
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {

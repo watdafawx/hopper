@@ -183,6 +183,12 @@ pub(crate) fn is_restoring(id: &str) -> bool {
     Restoring::set().lock().unwrap_or_else(|e| e.into_inner()).contains(id)
 }
 
+/// Marks a server as being restored until the guard drops (tests).
+#[cfg(test)]
+pub(crate) fn restoring_for_test(id: &str) -> impl Drop {
+    Restoring::start(id).expect("not already restoring")
+}
+
 impl Drop for Restoring {
     fn drop(&mut self) {
         Self::set().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);

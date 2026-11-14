@@ -456,3 +456,116 @@ async fn the_target_caps_what_a_source_may_send() {
         assert!(!root.join(crate::transfer::STAGING).join(format!("cap-bad{i}")).exists(), "{i}");
     }
 }
+
+/// A server being restored from a backup isn't sent: the source refuses
+/// to list it, lets it go, and lists it once the restore is over.
+#[tokio::test]
+async fn a_move_is_refused_during_a_restore() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let src = main_srv(&p);
+    let base = |t: &str| format!("/api/v1/servers/{}/transfer/{t}", p.main.server);
+    let guard = crate::backups_api::restoring_for_test(&p.main.server);
+    let (s, b) = step(&p, None, Method::POST, &format!("{}/prepare", base("r1")), json!({})).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{b}");
+    assert!(b.contains("is being restored from a backup"), "{b}");
+    assert!(!crate::transfer::is_sending(&src), "a refused prepare lets it go");
+    drop(guard);
+    let (s, b) = step(&p, None, Method::POST, &format!("{}/prepare", base("r2")), json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let (s, _) = step(&p, None, Method::POST, &format!("{}/finish", base("r2")), json!({ "outcome": "cancelled" })).await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+/// The port is checked again when the server is made: one taken since the
+/// check before the move (here the node's own test server's) gets another.
+#[tokio::test]
+async fn a_port_taken_by_commit_time_gets_another() {
+    use sha2::Digest as _;
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let node = Some(p.id.as_str());
+    p.node.app.rescan();
+    let taken = p.node.app.servers.list().iter().map(|e| crate::router::port_of(e)).next().expect("the node's test server");
+    let data = format!("motd=moving\nserver-port={taken}\n").into_bytes();
+    let h = hopper_core::hosting::chunkstore::hex(&sha2::Sha256::digest(&data));
+    let n = data.len() as u64;
+    let plan = json!({ "name": "Ported", "size": n, "unique": n, "chunks": 1, "items": [{ "p": "server.properties", "k": "f", "s": n, "c": [[h, n]] }] });
+    let (s, b) = step(&p, node, Method::PUT, "/api/v1/receive/port1/manifest?mode=copy&from=x", plan).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let mut frames = Vec::new();
+    frames.extend_from_slice(h.as_bytes());
+    frames.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    frames.extend_from_slice(&data);
+    let r = crate::api::router(p.main.app.clone());
+    let (s, body) = crate::relay::engine_call(&p.main.app, &r, node, "owner", Method::PUT, "/api/v1/receive/port1/chunks", axum::body::Body::from(frames)).await.unwrap();
+    let b = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    // The precheck said this port was free; by now the node uses it.
+    let (s, b) = step(&p, node, Method::POST, "/api/v1/receive/port1/commit", json!({ "port": taken })).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let dest = node_servers(&p).join("Ported");
+    let got = hopper_core::hosting::Properties::load(&dest.join("server.properties")).unwrap().port();
+    assert_ne!(got, taken, "it got another port");
+    assert!(got > 0);
+}
+
+/// A ceiling lowered under Manage while a move runs stops its next step:
+/// the engine reads the main's stored level on every call, not only at
+/// the start.
+#[tokio::test]
+async fn a_ceiling_lowered_mid_move_stops_the_next_step() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let node = Some(p.id.as_str());
+    let plan = json!({ "name": "x", "size": 0, "unique": 0, "chunks": 0, "items": [{ "p": "world", "k": "d" }] });
+    let (s, b) = step(&p, node, Method::PUT, "/api/v1/receive/c1/manifest?mode=copy&from=x", plan.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let (s, b) = send(&p.main, &p.main_cookie, "PUT", &format!("/api/v1/nodes/{}/ceiling", p.id), Some(json!({ "ceiling": "operate" }))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let (s, b) = step(&p, node, Method::PUT, "/api/v1/receive/c2/manifest?mode=copy&from=x", plan).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+    assert!(b.contains("Moving servers needs Manage there"), "{b}");
+    assert!(!node_servers(&p).join(crate::transfer::STAGING).join("c2").exists());
+}
+
+/// While a server is being moved to or from a node, that node can't be
+/// updated (a restart mid-move only makes the move wait); removing the
+/// node stops its running moves and ends its paused ones.
+#[tokio::test]
+async fn a_node_in_a_move_is_not_updated_and_removing_it_ends_the_move() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    crate::moves::fake_for_test(&p.main.app, "m-run", "", &p.id, "sending");
+    crate::moves::fake_for_test(&p.main.app, "m-paused", &p.id, "", "paused");
+    let (s, b) = send(&p.main, &p.main_cookie, "POST", &format!("/api/v1/nodes/{}/update", p.id), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{b}");
+    assert!(b["error"].as_str().unwrap().contains("Big Server is being moved to or from vm"), "{b}");
+    let (s, b) = send(&p.main, &p.main_cookie, "DELETE", &format!("/api/v1/nodes/{}", p.id), None).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert!(crate::moves::stopping_for_test(&p.main.app, "m-run"));
+    let mut state = Value::Null;
+    for _ in 0..100 {
+        let (_, m) = send(&p.main, &p.main_cookie, "GET", "/api/v1/moves/m-paused", None).await;
+        state = m["state"].clone();
+        if state == "cancelled" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(state, "cancelled");
+}
+
+/// A node whose connection doesn't name the move steps (an older Hopper
+/// Server, or one downgraded and reconnected) is refused before anything
+/// starts, and the dialog's list says why.
+#[tokio::test]
+async fn a_node_without_the_move_steps_is_refused_up_front() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    crate::nodes::caps_for_test(&p.main.app, &p.id, &["servers", "files"]);
+    let (s, b) = send(&p.main, &p.main_cookie, "POST", "/api/v1/moves/precheck", Some(json!({ "server": p.main.server, "to": p.id }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{b}");
+    assert!(b["error"].as_str().unwrap().contains("older Hopper Server"), "{b}");
+    let (s, b) = send(&p.main, &p.main_cookie, "POST", "/api/v1/moves", Some(json!({ "server": p.main.server, "to": p.id, "mode": "move" }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{b}");
+    let (_, places) = send(&p.main, &p.main_cookie, "GET", &format!("/api/v1/moves/places?server={}", p.main.server), None).await;
+    let row = places.as_array().unwrap().iter().find(|x| x["id"] == p.id.as_str()).expect("listed");
+    assert_eq!(row["ok"], false, "{places}");
+    assert_eq!(row["why"], "Needs a newer Hopper Server.");
+}
