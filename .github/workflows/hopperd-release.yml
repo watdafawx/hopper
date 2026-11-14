@@ -19,11 +19,14 @@ jobs:
           - os: windows-latest
             exe: hopperd.exe
             asset: windows-x64.zip
-          - os: ubuntu-latest
+          # Built on the oldest Ubuntu we support: the binary needs the
+          # glibc it was built against or newer, and the relay setup installs
+          # it on Ubuntu 22.04 and Debian 12 VPSes too.
+          - os: ubuntu-22.04
             exe: hopperd
             asset: linux-x64.tar.gz
             docker: amd64
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             exe: hopperd
             asset: linux-arm64.tar.gz
             docker: arm64
