@@ -127,6 +127,11 @@ pub fn target(path: &str, query: Option<&str>) -> Option<Target> {
 const SERVER_PARTS: &[&str] = &[
     "power", "command", "console", "players", "crash", "crashes", "stuck", "icon", "mods", "mod-backups", "neoforge", "logs", "properties", "jvm", "schedule",
     "backups", "worlds", "datapacks", "configs", "version", "pack", "packs", "address", "rcon", "remove",
+    // Moving a server to another panel (`crate::transfer`): only the
+    // main's move engine sends these (`forward` refuses them from people),
+    // and the node's handlers take them only from an owner-level caller
+    // under a Manage ceiling. `moved` drops the "Moved to" mark.
+    "transfer", "moved",
 ];
 
 /// File routes (`/api/v1/fs/{id}/<part>`) a main may use. Not `link` (the
@@ -161,6 +166,11 @@ pub fn allowed(method: &Method, route: &str) -> bool {
             "config" => matches!(rest, ["parse"] | ["set"]),
             _ => rest.is_empty(),
         },
+        // The receiving end of a move (`crate::transfer`), engine only.
+        ("receive", ["precheck"]) => *method == Method::POST,
+        ("receive", [_]) => matches!(*method, Method::GET | Method::DELETE),
+        ("receive", [_, "manifest" | "chunks"]) => *method == Method::PUT,
+        ("receive", [_, "commit"]) => *method == Method::POST,
         ("jobs", [_]) => *method == Method::GET,
         ("jobs", [_, "cancel" | "dismiss"]) => *method == Method::POST,
         // The node's TPS readings and alerts, which the main asks for itself
@@ -182,6 +192,10 @@ pub fn streams_body(method: &Method, route: &str) -> bool {
     match parts.as_slice() {
         ["", "api", "v1", "fs", _, "uploads", _] => *method == Method::PUT,
         ["", "api", "v1", "servers", _, "mods", "upload"] => *method == Method::POST,
+        // A move's file list and chunks (`crate::transfer`): checked whole
+        // by the target's handler, which writes only inside its staging
+        // folder.
+        ["", "api", "v1", "receive", _, "manifest" | "chunks"] => *method == Method::PUT,
         _ => false,
     }
 }
@@ -401,6 +415,10 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
     if !allowed(&method, &t.route) {
         return refuse(StatusCode::FORBIDDEN, format!("That can't be done on {} from this panel. Open its own page for it.", info.name));
     }
+    // A move's steps come from the move engine only (`crate::moves`).
+    if engine_only(&t.route) {
+        return refuse(StatusCode::FORBIDDEN, "Use Move or copy toâ€¦ for that.");
+    }
     // Making or removing a server on a node: owners and managers only.
     let making = t.route == "/api/v1/servers/create";
     let removing = t.route.ends_with("/remove") && t.route.starts_with("/api/v1/servers/");
@@ -512,6 +530,70 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
         }
     });
     b.body(Body::from_stream(stream)).unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+/// Routes only the move engine sends to a node, never a person's request.
+fn engine_only(route: &str) -> bool {
+    let parts: Vec<&str> = route.split('/').collect();
+    matches!(parts.as_slice(), ["", "api", "v1", "servers", _, "transfer", ..] | ["", "api", "v1", "receive", ..])
+}
+
+/// A request the main's move engine makes on one end of a move: a node
+/// (through its tunnel, as `user` with the Manage role and owner-level, which
+/// the node honours only under its own Manage ceiling) or this panel itself
+/// (`node` None: straight into its own router, as the same relayed caller,
+/// so both ends run the same checks). The body streams; so does the
+/// answer. `Err` is a broken link (offline, stopped answering): the move
+/// waits and resumes. A status that isn't 2xx is the end's own answer.
+pub async fn engine_call(app: &Arc<App>, router: &axum::Router, node: Option<&str>, user: &str, method: Method, path: &str, body: Body) -> Result<(StatusCode, Body), String> {
+    use tower::ServiceExt as _;
+    let route = path.split('?').next().unwrap_or("");
+    let Some(node) = node else {
+        let mut req = Request::builder().method(method).uri(path).header(header::HOST, "local").header(header::CONTENT_TYPE, "application/json").body(body).map_err(|e| e.to_string())?;
+        req.extensions_mut().insert(ConnectInfo(SocketAddr::from(RELAY_ADDR)));
+        let who = Who::Main { main: crate::config::hostname(), user: clean(user), role: Role::Admin, lead: true };
+        let res = match RELAYED.scope(who, router.clone().oneshot(req)).await {
+            Ok(r) => r,
+            Err(e) => match e {},
+        };
+        let (parts, body) = res.into_parts();
+        return Ok((parts.status, body));
+    };
+    if !allowed(&method, route) || !query_paths_ok(path) {
+        return Ok((StatusCode::FORBIDDEN, Body::from(json!({ "error": "Not something a move does." }).to_string())));
+    }
+    let info = app.nodes.relay_info(node).ok_or("That node is gone.")?;
+    let handle = info.handle.ok_or_else(|| format!("{} is offline.", info.name))?;
+    let head = Head {
+        k: "req".into(),
+        m: method.to_string(),
+        p: path.into(),
+        h: vec![("content-type".into(), "application/json".into())],
+        user: clean(user),
+        role: Role::Admin.id().into(),
+        lead: true,
+        ..Default::default()
+    };
+    let s = handle.open(serde_json::to_vec(&head).unwrap_or_default()).await.map_err(|_| format!("{} is busy or just went offline.", info.name))?;
+    let pump = Pump(tokio::spawn(pump_body(body, s.tx)));
+    let mut rx = s.rx;
+    let (answer, first) = match tokio::time::timeout(ANSWER_WAIT, read_answer(&mut rx)).await {
+        Ok(Ok(a)) => a,
+        Ok(Err(e)) => return Err(format!("{} stopped answering ({e}).", info.name)),
+        Err(_) => return Err(format!("{} didn't answer in time.", info.name)),
+    };
+    let status = StatusCode::from_u16(answer.s).unwrap_or(StatusCode::BAD_GATEWAY);
+    let stream = futures_util::stream::unfold((Some(first), rx, Some(pump)), |(first, mut rx, pump)| async move {
+        if let Some(f) = first.filter(|f| !f.is_empty()) {
+            return Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(f)), (None, rx, pump)));
+        }
+        match rx.recv().await {
+            Ok(Some(d)) => Some((Ok(axum::body::Bytes::from(d)), (None, rx, pump))),
+            Ok(None) => None,
+            Err(_) => Some((Err(std::io::Error::other("the node stopped answering")), (None, rx, pump))),
+        }
+    });
+    Ok((status, Body::from_stream(stream)))
 }
 
 /// The task sending a streamed request body; stopped when dropped.

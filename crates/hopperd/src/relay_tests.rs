@@ -16,13 +16,13 @@ use crate::tunnel::mux::{self, Config, Side};
 
 const TLS: fn() -> crate::TlsInfo = || crate::TlsInfo { fingerprint: "AA:BB".into(), ca_pem: "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n".into() };
 
-struct Pair {
-    main: T,
-    node: T,
+pub(crate) struct Pair {
+    pub(crate) main: T,
+    pub(crate) node: T,
     /// The node's id on the main.
-    id: String,
-    main_cookie: String,
-    node_cookie: String,
+    pub(crate) id: String,
+    pub(crate) main_cookie: String,
+    pub(crate) node_cookie: String,
     /// What the node's node.json says, as the node reads it per stream.
     ceiling: Arc<std::sync::Mutex<Option<Role>>>,
     _feed: Follow,
@@ -32,14 +32,14 @@ struct Pair {
 
 impl Pair {
     /// The node's test server as the main names it.
-    fn ns(&self) -> String {
+    pub(crate) fn ns(&self) -> String {
         crate::relay::join(&self.id, &self.node.server)
     }
 }
 
 /// `main_copy`: the ceiling the main stored; `node_has`: what the node's
 /// node.json says (None: unreadable).
-async fn pair(main_copy: Ceiling, node_has: Option<Role>) -> Pair {
+pub(crate) async fn pair(main_copy: Ceiling, node_has: Option<Role>) -> Pair {
     let main = panel_with(TLS());
     let node = panel_with(TLS());
     let (_, key, _) = main.app.nodes.make_key(main_copy, "owner");
@@ -72,7 +72,7 @@ async fn pair(main_copy: Ceiling, node_has: Option<Role>) -> Pair {
     p
 }
 
-async fn send(t: &T, cookie: &str, method: &'static str, path: &str, b: Option<Value>) -> (StatusCode, Value) {
+pub(crate) async fn send(t: &T, cookie: &str, method: &'static str, path: &str, b: Option<Value>) -> (StatusCode, Value) {
     let mut c = call(method, path).origin(OWN).h("cookie", format!("hopperd_session={cookie}")).h("x-hopperd", "1");
     if let Some(b) = b {
         c = c.json(b);
@@ -585,7 +585,7 @@ mod skew;
 
 /// A second node joined to the main but never connected: another node's id
 /// to aim at.
-fn other_node(p: &Pair) -> String {
+pub(crate) fn other_node(p: &Pair) -> String {
     let (_, key, _) = p.main.app.nodes.make_key(Ceiling::Manage, "owner");
     p.main.app.nodes.use_key(&key, "vm2", "10.0.0.8".parse().unwrap(), "").unwrap().0.id
 }

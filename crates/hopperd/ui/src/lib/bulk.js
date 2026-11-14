@@ -14,6 +14,8 @@
 // the node named. A node's group carries what the node allows (its
 // ceiling), whether it's paused, and whether it can be reached.
 
+import { startBlocked } from './moves.js';
+
 export const ACTIONS = ['start', 'stop', 'restart', 'command'];
 export const VERB = { start: 'Start', stop: 'Stop', restart: 'Restart', command: 'Send command' };
 const DOING = { start: 'Starting', stop: 'Stopping', restart: 'Restarting', command: 'Sent' };
@@ -44,6 +46,9 @@ export function groupBlock(group) {
  * power action, or 'command'), or { skip } with the reason. */
 export function forServer(s, action) {
   if (s.state === 'stopping') return { skip: 'Still stopping.' };
+  // A copy that was moved (or is being sent) never starts from here.
+  const blocked = !up(s) && (action === 'start' || action === 'restart') ? startBlocked(s) : '';
+  if (blocked) return { skip: blocked };
   if (action === 'start') return up(s) ? { skip: 'Already running.' } : { act: 'start', note: '' };
   if (action === 'stop') return up(s) ? { act: 'stop', note: '' } : { skip: 'Not running.' };
   if (action === 'command') return up(s) ? { act: 'command', note: '' } : { skip: 'Not running.' };

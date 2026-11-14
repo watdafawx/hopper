@@ -455,6 +455,8 @@ mod tests {
             icon: None,
             mods_stamp: None,
             rcon: true,
+            moved: None,
+            sending: false,
         }
     }
 

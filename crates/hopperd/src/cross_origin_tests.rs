@@ -79,6 +79,7 @@ pub(crate) fn panel_with(tls: crate::TlsInfo) -> T {
         acme: crate::acme::Acme::new(&data),
         sftp_fingerprint: None,
         nodes: crate::nodes::Nodes::new(&data),
+        moves: crate::moves::Moves::new(&data),
     });
     app.rescan();
     let server = app.servers.list().first().expect("the test server").id.clone();

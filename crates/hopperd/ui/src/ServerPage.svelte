@@ -4,7 +4,7 @@
   import { session, outside, roleLabel } from './lib/me.svelte.js';
   import Avatar from './Avatar.svelte';
   import { onMount, onDestroy, untrack } from 'svelte';
-  import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown, Box, Blocks, Tag, Copy, Folder, SlidersHorizontal, Stethoscope, Database } from '@lucide/svelte';
+  import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown, Box, Blocks, Tag, Copy, Folder, ArrowRightLeft, SlidersHorizontal, Stethoscope, Database } from '@lucide/svelte';
   import { live, history, follow, unfollow } from './lib/live.svelte.js';
   import { enter, leave, followOn, unfollowOn } from './lib/panels.svelte.js';
   import { api, post, here } from './lib/api.js';
@@ -42,6 +42,9 @@
   import { kick, jobStarted, jobEnded } from './lib/heroDrift.js';
   import ShareLog from './ShareLog.svelte';
   import PackUpdate from './PackUpdate.svelte';
+  import MovedBanner from './MovedBanner.svelte';
+  import { openMove } from './lib/moveDialog.svelte.js';
+  import { startBlocked } from './lib/moves.js';
   import PackVersions from './PackVersions.svelte';
   import LoaderVersions from './LoaderVersions.svelte';
   import { notePackCheck, shortVersions } from './lib/packs.svelte.js';
@@ -66,6 +69,7 @@
   // The header backdrop's icon, read with the panel's token on another panel.
   const hero = panelSrc(() => (s?.icon ? `/api/v1/servers/${encodeURIComponent(s.id)}/icon?v=${s.icon}` : ''), () => panel);
   const alive = $derived(s && ['running', 'starting', 'stopping'].includes(s.state));
+  const startWhy = $derived(startBlocked(s));
   const cap = $derived(xmx(s?.max_memory));
   const online = $derived(s?.state === 'running' ? s.players.length : null);
 
@@ -253,7 +257,7 @@
       <div class="row wrap">
         <h2 title={s.path}>{s.name}</h2>
         <span class="chip {stateKey(s)}" title={stateTip(s)}><span class="dot {stateKey(s)}"></span>{stateText(s)}{s.boot && !s.progress ? ` · ${s.boot.label}` : ''}{alive && !s.progress ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
-        {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}{#if outside(s)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}<ServerAlerts server={s} part="chip" />
+        {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}{#if outside(s)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}<ServerAlerts server={s} part="chip" />{#if s.sending}<button class="chip warn" title="Its files are being sent to another panel. It can't start until that's done. Click to see how far it got." onclick={() => openMove(s)}>Sending</button>{/if}
         {#if panel}<span class="chip lan" title="This server is on {panel.name} ({panel.url})">On {panel.name}</span>{#if panel.role}<span class="chip">{roleLabel(panel.role)}</span>{/if}{/if}
         {#if packShort}<button class="chip acc packup" title="{packCheck.pack.name}: {packNewer.length} newer version{packNewer.length === 1 ? '' : 's'}. Review the changelog and update." onclick={() => openUpdate()}><PackagePlus size={12} />Pack update {packShort[0]} → {packShort[1]}</button>{/if}
       </div>
@@ -282,7 +286,8 @@
       <!-- A viewer can't start or stop servers: no buttons (each panel's own role). -->
       {#if session.role === 'viewer'}<span class="chip">View only</span>
       {:else if !alive}
-        <button class="btn go" onclick={() => power('start')}><Play size={14} />Start</button>
+        <!-- A moved copy (or one being sent) can't start: off, saying why. -->
+        <button class="btn go" disabled={!!startWhy} title={startWhy} onclick={() => power('start')}><Play size={14} />Start</button>
       {:else}
         <button class="btn" disabled={s.state === 'stopping'} onclick={() => power('stop')}><Square size={14} />Stop</button>
         <button class="btn" disabled={s.state === 'stopping'} onclick={() => power('restart')}><RotateCw size={14} />Restart</button>
@@ -294,6 +299,7 @@
           <div class="popover menu drop" role="menu">
             <button class="menu-item" role="menuitem" onclick={backUpNow}><Archive size={13} />Back up now</button>
             <button class="menu-item" role="menuitem" title={s.path} onclick={() => copyOf(s.path, 'the folder path')}><Folder size={13} />Copy folder path</button>
+            {#if !panel && session.owner}<button class="menu-item" role="menuitem" onclick={() => ((more = false), openMove(s))}><ArrowRightLeft size={13} />Move or copy to…</button>{/if}
             <div class="menu-sep"></div>
             <button class="menu-item bad" role="menuitem" disabled={!alive} onclick={kill}><Skull size={13} />Kill (no save)</button>
           </div>
@@ -303,6 +309,7 @@
   </div>
 
   <ServerAlerts server={s} part="banner" />
+  {#if !panel}<MovedBanner server={s} owner={session.owner} />{/if}
 
   <nav class="tabs">
     {#each TABS as [t, label, Icon] (t)}

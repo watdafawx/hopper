@@ -470,6 +470,8 @@ impl Saved {
     pub fn detail(&self) -> String {
         let base = self.name.trim_end_matches(".disabled");
         let line = match (self.change, &self.now, &self.src) {
+            // A move or copy keeps its sentence where a file's place would be.
+            (Change::Moved | Change::Copied, _, _) => self.restore_to.clone(),
             // A record of a mod from a link: no site to name, no copy kept.
             (_, _, None) if self.record.is_some() => crate::undo::version_of(base),
             // Only turned on or off: the same file, so no "X → X".
@@ -520,6 +522,10 @@ pub enum Change {
     Replaced,
     /// Put in (a record: nothing set aside).
     Added,
+    /// The whole server moved between machines (a record; no Undo).
+    Moved,
+    /// The whole server copied between machines (a record; no Undo).
+    Copied,
 }
 
 impl Change {
@@ -534,7 +540,14 @@ impl Change {
             Change::Edited => "Changed",
             Change::Replaced => "Replaced",
             Change::Added => "Added",
+            Change::Moved => "Moved",
+            Change::Copied => "Copied",
         }
+    }
+
+    /// Whether Undo can put it back: not a whole server's move or copy.
+    pub fn undoable(self) -> bool {
+        !matches!(self, Change::Moved | Change::Copied)
     }
 
     /// The label as a verb after a name: "Mia turned off Sodium".
@@ -549,6 +562,8 @@ impl Change {
             Change::Edited => "changed",
             Change::Replaced => "replaced",
             Change::Added => "added",
+            Change::Moved => "moved",
+            Change::Copied => "copied",
         }
     }
 
@@ -563,6 +578,8 @@ impl Change {
             "Changed" => Change::Edited,
             "Replaced" => Change::Replaced,
             "Added" => Change::Added,
+            "Moved" => Change::Moved,
+            "Copied" => Change::Copied,
             _ => Change::Removed,
         }
     }
@@ -650,6 +667,9 @@ impl Set {
 
     /// What its entries did, counted: "3 mods updated, 1 added".
     pub fn summary(&self) -> String {
+        if let Some((name, c)) = self.whole_server() {
+            return format!("{name} {}", c.verb());
+        }
         const ORDER: [Change; 9] = [
             Change::Updated,
             Change::Added,
@@ -687,6 +707,11 @@ impl Set {
     /// the Mods 10", "Mia turned off 3 mods", "You changed 20 mods". None
     /// when nobody is known (entries from before Hopper noted it).
     pub fn headline(&self) -> Option<String> {
+        // A move or copy of the whole server names the server, never "1 file".
+        if let Some((name, c)) = self.whole_server() {
+            let w = self.who()?;
+            return Some(format!("{} {} {name}", w.label(), c.verb()));
+        }
         let n = self.files.len();
         let mods = self.files.iter().all(|f| f.src.is_some() || is_jar(&f.name));
         let what = match (mods, n) {
@@ -711,6 +736,13 @@ impl Set {
         }
     }
 
+    /// The server's name and what happened, when this set is a move or copy
+    /// of the whole server between panels rather than files changing.
+    fn whole_server(&self) -> Option<(&str, Change)> {
+        let f = self.files.first()?;
+        (self.files.iter().all(|f| matches!(f.change, Change::Moved | Change::Copied)) && !f.name.is_empty()).then_some((f.name.as_str(), f.change))
+    }
+
     /// The set as Hopper Server sends it (`GET /servers/{id}/mod-backups`),
     /// so Hopper desktop shows a panel server's History with the same rows
     /// as an instance's.
@@ -728,6 +760,7 @@ impl Set {
                 // Who did it ("" name: you), and for a record what Undo switches back.
                 "who": f.who, "verb": f.change.verb(), "batch": f.batch,
                 "record": f.record.as_ref().map(|(d, k)| serde_json::json!({ "did": d, "key": k })),
+                "undo": f.change.undoable(),
             })).collect::<Vec<_>>(),
             "head": self.headline(), "summary": self.summary(),
         })
@@ -882,6 +915,24 @@ pub fn history(root: &Path) -> Vec<Set> {
 /// A record as a History entry.
 fn record_entry(dir: &Path, r: &crate::actor::Record) -> Saved {
     let a = &r.addon;
+    if matches!(r.did, crate::actor::Did::Moved | crate::actor::Did::Copied) {
+        return Saved {
+            path: dir.join(crate::actor::RECORDS_FILE),
+            name: a.name.clone(),
+            size: 0,
+            // Shown under the name ([`Saved::detail`]); nothing goes back there.
+            restore_to: r.note.clone(),
+            download: false,
+            src: None,
+            change: if r.did == crate::actor::Did::Moved { Change::Moved } else { Change::Copied },
+            now: None,
+            now_site: "",
+            reason: String::new(),
+            who: Some(r.who.clone()),
+            batch: r.batch.clone(),
+            record: Some((r.did, r.key.clone())),
+        };
+    }
     let file = a.file_name.trim_end_matches(".disabled").to_string();
     let src = (a.project_id != 0).then(|| Ref {
         project_id: a.project_id,
@@ -898,6 +949,8 @@ fn record_entry(dir: &Path, r: &crate::actor::Record) -> Saved {
         crate::actor::Did::Added => Change::Added,
         crate::actor::Did::On => Change::TurnedOn,
         crate::actor::Did::Off => Change::TurnedOff,
+        crate::actor::Did::Moved => Change::Moved,
+        crate::actor::Did::Copied => Change::Copied,
     };
     Saved {
         path: dir.join(crate::actor::RECORDS_FILE),

@@ -27,7 +27,7 @@ pub const API_VERSION: u32 = 1;
 
 /// Features this panel has, so clients light up only what both sides know.
 pub const CAPABILITIES: &[&str] =
-    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "jvm.preview", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "rules", "users", "mcp", "sftp", "mods.profiles", "browse.install", "pack.check", "configs.batch", "configs.sync", "mods.records", "web.origins", "mods.staged", "files.fetch", "web.remote", "web.files", "nodes", "nodes.update", "relay.stream", hopper_core::hopperd::PAIR_COMMIT];
+    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "jvm.preview", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "rules", "users", "mcp", "sftp", "mods.profiles", "browse.install", "pack.check", "configs.batch", "configs.sync", "mods.records", "web.origins", "mods.staged", "files.fetch", "web.remote", "web.files", "nodes", "nodes.update", "relay.stream", "servers.move", hopper_core::hopperd::PAIR_COMMIT];
 
 pub struct ApiError(pub StatusCode, pub String);
 
@@ -210,6 +210,8 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::acme::routes())
         .merge(crate::web_access::routes())
         .merge(crate::nodes::routes())
+        .merge(crate::transfer::routes())
+        .merge(crate::moves::routes())
         .merge(crate::tunnel::node::routes())
         .fallback(crate::ui::serve)
         .layer(axum::middleware::from_fn_with_state(app.clone(), crate::security::guard))
@@ -1160,6 +1162,13 @@ async fn power(
     // A restore is writing the server's files: starting now would load a half-written world.
     if matches!(action, PanelAction::Start | PanelAction::Restart) && crate::backups_api::is_restoring(&id) {
         return Err(ApiError(StatusCode::CONFLICT, format!("{} is being restored from a backup. Start it once that's done.", e.name)));
+    }
+    // Being sent to another panel, or moved there already: starting this
+    // copy would make two servers of one world.
+    if matches!(action, PanelAction::Start | PanelAction::Restart)
+        && let Some(why) = crate::transfer::start_blocked(&e)
+    {
+        return Err(ApiError(StatusCode::CONFLICT, why));
     }
     log::info!("{} {} by {}", b.action, e.name, who_name(&who));
     if matches!(action, PanelAction::Start | PanelAction::Restart) {

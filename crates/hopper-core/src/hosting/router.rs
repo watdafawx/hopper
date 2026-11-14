@@ -728,6 +728,19 @@ pub fn refused_kick(name: &str, who: WakeWho) -> Value {
     ] })
 }
 
+/// What a player joining a server that can't start here is told: it was
+/// moved to another panel, or is being sent there. Joining never wakes it.
+pub fn blocked_kick(name: &str, moved_to: Option<&str>) -> Value {
+    let rest = match moved_to {
+        Some(to) => format!("It was moved to {to}. Ask an admin for its new address."),
+        None => "It's being moved to another panel. Try again later.".into(),
+    };
+    json!({ "text": "", "extra": [
+        { "text": format!("{name} isn't here any more."), "color": "yellow" },
+        { "text": format!("\n\n{rest}"), "color": "gray" },
+    ] })
+}
+
 /// What a player joining after a failed wake is told.
 pub fn wake_failed_kick(name: &str, retry_in_minutes: Option<u32>) -> Value {
     let rest = match retry_in_minutes {

@@ -148,7 +148,7 @@
   // Undoes the picked rows, newest first, one after the other.
   async function undoPicked() {
     const rows = [];
-    for (const s of data?.sets ?? []) for (const f of s.files) if (sel.has(keyOf(s, f))) rows.push([s, f]);
+    for (const s of data?.sets ?? []) for (const f of s.files) if (sel.has(keyOf(s, f)) && f.undo !== false) rows.push([s, f]);
     sel.clear();
     busy = true;
     const restored = [];
@@ -240,7 +240,7 @@
     return days <= 0 ? 'Today' : days === 1 ? 'Yesterday' : dateOf(iso(t));
   }
   const hm = (t) => new Date(t * 1000).toTimeString().slice(0, 5);
-  const tone = (c) => ({ Removed: 'red', Updated: 'blue', 'Rolled back': 'warn', 'Turned on': 'green', Added: 'green', 'Turned off': 'muted' })[c] ?? 'pri';
+  const tone = (c) => ({ Removed: 'red', Updated: 'blue', 'Rolled back': 'warn', 'Turned on': 'green', Added: 'green', 'Turned off': 'muted', Moved: 'blue', Copied: 'blue' })[c] ?? 'pri';
   // Sets grouped under their day.
   const days = $derived.by(() => {
     const out = [];
@@ -282,7 +282,8 @@
       <span class="tiny muted ell">{f.detail}</span>
     </div>
     {#if !nested}<span class="tiny muted" title={`${dateOf(iso(s.when))} · ${ago(iso(s.when))}`}>{hm(s.when)}</span>{/if}
-    <button class="btn sm" disabled={busy} onclick={() => undo(s, nested ? f : null)}>Undo</button>
+    <!-- A move or copy between panels can't be undone from here: no Undo. -->
+    {#if f.undo !== false}<button class="btn sm" disabled={busy} onclick={() => undo(s, nested ? f : null)}>Undo</button>{/if}
   </div>
 {/snippet}
 
@@ -332,7 +333,7 @@
                 </span>
               </button>
               <span class="tiny muted">{hm(s.when)}</span>
-              <button class="btn sm" disabled={busy} onclick={() => undo(s)}>Undo all</button>
+              {#if s.files.some((f) => f.undo !== false)}<button class="btn sm" disabled={busy} onclick={() => undo(s)}>Undo all</button>{/if}
             </div>
             {#if open.has(setKey(s))}
               {#each s.files as f, j (j)}{@render entry(s, f, true)}{/each}

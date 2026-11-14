@@ -2048,6 +2048,160 @@ Still open, written down:
 - **`/audit?node=` reads the whole history** per request (owner only; cost,
   not risk).
 
+## A5 as built (2026-11-14)
+
+Move or copy a server between this panel and its nodes (main to node,
+node to main, node to node), all through one engine on the main.
+
+### How a move runs
+
+1. **Precheck** (`POST /moves/precheck`): the source lists its files
+   (`transfer/check`), the target answers for disk, port, Java and
+   loader (`receive/precheck`). The dialog shows one row per check: ok,
+   warn (a taken port gets the next free one; a missing Java is downloaded
+   when the server arrives) or fail (running, a link out of the folder,
+   not enough disk). Move is only allowed with no fail row.
+2. **Prepare**: the source cuts every file into content-defined chunks
+   (`chunkstore::next_cut`, 64 KiB to 1 MiB) and hashes them (SHA-256),
+   with progress as NDJSON. The list is kept in `transfers/out-<id>.json`
+   on the source, so nothing is read twice.
+3. **Send**: the main pipes the list to the target
+   (`PUT receive/<id>/manifest`), asks which chunks are missing, and moves
+   them in batches of 64 straight from source to target. Nothing is
+   buffered on the main past one batch's body stream; no temp file.
+4. **Commit**: the target checks every size and hash, makes links, sets
+   modes and times, sets the new port, repoints Java, and renames the
+   staging folder (`<servers>/.hopper-incoming/<id>`) to a free server
+   name. Then the source is finished: a move marks it `.hopper-moved.json`
+   (stopped, can't start, banner "Moved to vm-a…"); a copy leaves it as it
+   was.
+5. **Link breaks**: the move polls the node for up to 2 minutes and goes on
+   as soon as it is back, asking the target what it is missing. After 2
+   minutes it is paused; Resume does the same. A restart of the main shows unfinished
+   moves as paused.
+6. **Hard failures** (a changed file, a refused list, a failed commit):
+   the target's staging is deleted and the source unmarked. Nothing is left
+   on the target.
+
+Both ends get a History entry ("Here from fox." / "To vm-a. This copy is
+stopped and kept."), with no Undo (`Change::undoable`). Backups go only
+with "Bring backups".
+
+### Web UI
+
+- "Move or copy to…" in the server page's "…" menu and the server row
+  menu (owner-level people, this panel's servers and its nodes' servers).
+- One dialog, picked from two mocks
+  (https://claude.ai/artifact/WJ4MifK6AbiAT3fcHLmCJt): where to, Move |
+  Copy, Bring backups and the checks on one screen, then progress in the
+  same box with Cancel, Resume (paused) or Try again (failed), and "Open it
+  on vm-a" when done. Closing it lets the move go on; the server shows a
+  "Sending" chip that opens it again.
+- The moved copy shows a banner: Open it on vm-a, Keep using this copy
+  (`DELETE /servers/{id}/moved`), Delete the old copy… (a tick box, and the
+  button says "Delete the old copy" only once ticked; the usual delete to
+  the bin for 30 days).
+- Mods › History shows Moved / Copied without Undo.
+
+### Hopper desktop
+
+History shows Moved / Copied (info colour) without Undo; Undo all skips
+them. The Move or copy action itself is not built on desktop (see Left).
+
+### Measured (2026-11-14, FOX, scratch main :8921 + scratch node :8922 on loopback)
+
+| Run | Size | Cut | Result | Over the wire | Main memory growth |
+|---|---|---|---|---|---|
+| main to node | 912 MB (374 entries, a symlink, a duplicate 8 MB file) | node killed at 40 % | done in 13 s, resumed once | 913 MB | WS +5.2 MB, private +5.1 MB |
+| node to main | 912 MB | node killed at 51 % | done in 12 s, resumed once | 912 MB | WS +4.7 MB, private +4.6 MB |
+| main to node and back, from the dialog | 891 MB | node killed while sending, left 2 min (paused), Resume | done | 891 MB | — |
+
+Both copies byte-identical to the source (SHA-256 of every file, mtimes,
+the link `cfg-link -> config/deep` kept); staging empty after each run; no
+new files in `%TEMP%`. A source file changed mid-send ended as "failed"
+with nothing left on the node.
+
+### Tests
+
+`moves_tests.rs` (6): a cut link resumes and sends only what's missing;
+links and modes survive and links out are refused; a failed move leaves
+nothing on the target; only people allowed at both ends can move (scoped
+user, operator, token, browser calls to the engine routes); a Look ceiling
+refuses; the node refuses lists that climb out (`../`, `w/../../`, a link
+to `../../etc`, a file under a link, `C:/Windows`). `transfer.rs` units:
+path and link rules, list checks. `ui/tests/moves.test.mjs`: dialog
+wording.
+
+### A5 security review (2026-11-14)
+
+| # | Rank | Finding | Status |
+|---|---|---|---|
+| 1 | — | **Engine routes.** `transfer/*` and `receive/*` read and write whole server folders. They answer only to the main's own engine (`Who::Main` with lead and Admin, set by `relay::engine_call`); a browser, token or paired PC is refused, and `relay::forward` refuses to pass them through ("Use Move or copy to… for that"). | Sound; tested (`only_people_allowed_both_ends_can_move`). |
+| 2 | — | **Who may move.** The `moves` routes need owner level (owner, manager, a paired PC that may manage); tokens never. The person must see the server, and this panel (not limited) or the target node (`sees_node`). Scoped people can't be owner level (managers are never limited), so A4 scopes can't widen. | Sound; tested. |
+| 3 | — | **Ceilings.** Each node involved must let this panel Manage; Look or Operate is refused before anything is read. | Sound; tested (`a_look_ceiling_refuses_moves`). |
+| 4 | — | **Paths on the target.** The file list is checked before staging: relative paths only, no `..`, no drive or root, unique, every parent a listed folder, no file under a link, chunk sizes adding up, hashes well formed. Links must be relative and stay inside the folder. Everything is written under the staging folder, then renamed. | Sound; tested (`the_node_refuses_lists_that_climb_out`). |
+| 5 | — | **Paths on the source.** The walk never follows links or junctions; a link out of the folder fails the precheck and the prepare. Every chunk read canonicalizes the file, checks it is inside the server folder, and hashes it again. | Sound; tested (unit + real run with a link out). |
+| 6 | — | **Integrity.** Each chunk is hashed on read (source) and on write (target); a mismatch fails the move and cleans up. | Sound; tested on a real run (file changed mid-send). |
+| 7 | Low | **Disk on the target.** A main allowed to Manage can fill a node's disk with a large move, as it can with uploads. The precheck refuses when free space is short; staging older than 7 days is removed at start. | Accepted. |
+| 8 | Low | **Moved copy starting.** Start and Restart (API, web, desktop through the API) are refused while sending or once moved. The router's wake-on-join and scheduled starts don't read the mark yet. | Accepted, listed in Left. |
+| 9 | — | **Audit.** Engine calls go over the tunnel with the person's name in the request head; the node logs them as the main's. | Sound. |
+
+**Second review (A5) (separate reviewer, 2026-11-14).** Rows 8 and 9 above
+didn't hold: a moved copy still started by itself, and the audit log named
+neither the server nor the ends. Fixed before merge:
+
+| # | Rank | Finding | Fix | Test |
+|---|---|---|---|---|
+| 10 | High | **A moved copy started by itself.** Wake-on-join, schedules, auto-start at panel boot and crash restart never read the moved mark, so two copies of one world could run. | Every start goes through `LocalServer::start`, which now refuses a moved copy ("This copy was moved to vm. Choose Keep using this copy to start it here.") and one being sent (a start guard `transfer` registers). Schedules, auto-start and crash restart skip it without trying; the router's wake kicks the player with "It was moved to vm. Ask an admin for its new address." Every Start in the web UI (server page, list menu, Overview card) is disabled with the reason as its tooltip, like "Start (node paused)"; the command palette leaves Start out and a bulk start skips it with the reason. Measured at 375 px: the disabled button is the app's usual `.btn:disabled` (label on fill 5.18 to 1.88 light, 7.50 to 2.78 dark). | `a_moved_copy_never_starts_by_itself` (core), `a_moved_or_sending_copy_refuses_every_start`, `moves.test.mjs`, `bulk.test.mjs` |
+| 11 | High | **A link chain climbed out of the folder.** `link_ok` checked each link's target only by its text: `a/b/c → ../..` stays inside, but `p → a/b/c/../../..` passes too and, once `a/b/c` is a link, points above the server folder on the target. | A `..` after a named part is refused (where it lands depends on what the name turns out to be). | `paths_and_links`, `the_target_caps_what_a_source_may_send` |
+| 12 | Medium | **Windows names folded paths together.** `CON`, `NUL`, `COM1`…, a trailing dot or space (`w/x.` is written as `w/x`), and `<>:"|?*` passed the list check; on Windows they hit devices or land on another listed path. | `windows_unsafe` on every part of every path and link target; the source's walk lists such names and the precheck and prepare refuse them. The incoming server name is cleaned the same way. | `windows_names`, `the_target_caps_what_a_source_may_send` |
+| 13 | Medium | **What a source may make the target hold.** A 512 MB file list read whole into memory; one chunk listed many times claims little in staging but writes the full size at commit; endless frames in one chunk request grew the `have` file. | List cap 128 MB and 1,000,000 items; the target refuses a list whose total (plus 512 MB) is more than its free space, unless it's the same list resumed; at most 4096 frames per chunk request. | `the_target_caps_what_a_source_may_send` |
+| 14 | Medium | **Two moves of one server.** The main's busy check and the push were under different locks, and the source's "sending" mark wasn't tied to one move, so a second move (or the first one's cancel) could release the other's. | One lock for check and push; the source claims per move id and answers 409 to a second one. | `the_source_refuses_a_second_move_and_changes_after_listing` |
+| 15 | Medium | **Source changed after listing.** A restore, update or file edit after the list was made left the target with a stale copy while the original was marked moved. | A `verify` step walks the folder again before commit and stops with "Test Server changed while it was being sent (path). Start the move again."; prepare refuses a server being restored. | `the_source_refuses_a_second_move_and_changes_after_listing`, `changes_after_listing_are_found` (restore refusal: not tested) |
+| 16 | Medium | **Chunk calls flooded the audit log.** Every chunk batch of a big move wrote an audit line, enough to push real entries out of the 5 MB log. | Successful chunk batches aren't logged (failures are). Start, finish and commit write one line naming the server and both ends ("moves/copies Big SMP from FOX to vm", "Big SMP arrived from FOX"), with the person from the request. | — (not run live) |
+| 17 | Low | **Small races.** A start between release and the mark write, or between prepare's alive check and the claim; the target's port taken after the precheck. | The mark is written before release; prepare and chunks claim first; commit checks the port again and takes the suggested one if it's taken. | port retake: not tested |
+| 18 | Low | **Leftovers.** The source's saved file lists were never removed; a copy already marked moved could be moved again. | Lists older than 7 days removed at start (`purge_old_plans`); prepare and the precheck refuse a marked copy. | `the_source_refuses_a_second_move_and_changes_after_listing` |
+| 19 | Low | **History said "moved 1 file".** | A set where every file moved or copied reads "Test Server moved" (head: "Owner moved Test Server"). | `a_move_survives_a_cut_link_and_sends_only_whats_missing` (assert) |
+| 20 | Low | **Keep and Delete on the banner** showed to people who aren't owner level (the routes refused them). | Only owner level sees the buttons; everyone sees the banner. | — |
+
+Checked and sound: B1 grants carry only the live socket, file and backup
+downloads, never a move; MCP has no move or transfer tools; tokens and
+operators are refused (`require_owner_who`); a scoped manager can't target
+this panel; a Look or Operate ceiling refuses before anything is read;
+hashes are checked on both ends, so a malicious main or node can only send
+bad bytes that fail the move.
+
+Accepted, written down:
+
+- A source stays claimed until its panel restarts if the main disappears
+  mid-move (Start says it's being sent). Low.
+- Staging is purged only at start, after 7 days. Low.
+- Hard links inside a server folder are copied as plain files. Making one
+  needs shell access on that machine. Low.
+- Case folding uses Rust's `to_lowercase`, a little different from NTFS's
+  table for rare letters. Low.
+- `read_chunk` canonicalizes then opens (a short TOCTOU window), only
+  exploitable by someone who can already write the server folder. Low.
+- A main allowed to Manage a node is trusted with its servers; the node's
+  own checks (ceiling, paths, sizes) are what limit it.
+
+### Left (not done in A5)
+
+1. **Desktop Move or copy** for servers on a paired panel: History is
+   done, the action is not (it would take A5 past L). Desktop-local servers
+   onto a node are out of scope.
+2. **MCP tools and CLI** for moves (the API is there: `POST /moves`,
+   `GET /moves/{id}`, `POST /moves/{id}/resume|cancel`).
+3. ~~Wake-on-join and schedules should skip a moved or sending server.~~
+   Done in the second review (row 10).
+4. **Node to node** runs through the same engine but wasn't run live (only
+   main to node and back).
+5. ~~History head reads "moved 1 file".~~ Done in the second review
+   (row 19); it doesn't name the other end yet ("moved Big SMP to vm-a").
+6. The dialog stays open if you go to another server while it's open.
+7. At 375 px the server page's "…" menu opens partly off the left edge
+   (as before A5).
+
 ## Open questions for the maintainer
 
 1. **Remote-session limits (B).** *Answered (maintainer, 2026-11-11): a

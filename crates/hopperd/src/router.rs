@@ -537,6 +537,13 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
         if kind == Standin::Sleeping
             && let Some(e) = e
         {
+            // Moved to another panel (or being sent there): joining never
+            // starts this copy, so one world never runs twice.
+            if hopper_core::hosting::process::start_blocked(&e.root).is_some() {
+                log::info!("router: {player:?} joined {}, which was moved or is being moved; not waking it", e.name);
+                let to = hopper_core::hosting::process::moved_to(&e.root);
+                return kick(sock, &core::blocked_kick(&name, to.as_deref())).await;
+            }
             if !core::may_wake(&e.root, s.wake_who, &player) {
                 log::info!("router: {player:?} may not wake {}", e.name);
                 return kick(sock, &core::refused_kick(&name, s.wake_who)).await;

@@ -474,6 +474,41 @@ pub fn on_before_start(f: impl Fn(&Path) + Send + Sync + 'static) {
     *BEFORE_START.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(f));
 }
 
+/// Written into a server's folder once it has been moved to another panel
+/// (Hopper Server's Move or copy to…): where to, when, by whom.
+pub const MOVED_MARK: &str = ".hopper-moved.json";
+
+/// The panel a server was moved to, from its folder's mark ("another
+/// panel" when the mark can't be read).
+pub fn moved_to(root: &Path) -> Option<String> {
+    let bytes = std::fs::read(root.join(MOVED_MARK)).ok()?;
+    let to = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| v["to"].as_str().map(str::to_string)).unwrap_or_default();
+    Some(if to.trim().is_empty() { "another panel".into() } else { to })
+}
+
+type StartGuard = Arc<dyn Fn(&Path) -> Option<String> + Send + Sync>;
+
+static START_GUARD: std::sync::RwLock<Option<StartGuard>> = std::sync::RwLock::new(None);
+
+/// Asks `f` before every start, whatever asked for it, whether the server
+/// may start; `Some(why)` refuses it. The panel refuses a server while its
+/// files are being sent to another panel. One guard; setting it again
+/// replaces it.
+pub fn on_start_guard(f: impl Fn(&Path) -> Option<String> + Send + Sync + 'static) {
+    *START_GUARD.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(f));
+}
+
+/// Why the server in `root` can't start at all now, or `None`. A copy that
+/// was moved elsewhere never starts here until the mark is dropped: two
+/// copies of one world running would split it in two.
+pub fn start_blocked(root: &Path) -> Option<String> {
+    if let Some(to) = moved_to(root) {
+        return Some(format!("This copy was moved to {to}. Choose Keep using this copy to start it here."));
+    }
+    let guard = START_GUARD.read().unwrap_or_else(|e| e.into_inner()).clone();
+    guard.and_then(|g| g(root))
+}
+
 pub struct LocalServer {
     root: PathBuf,
     shared: Arc<Mutex<Shared>>,
@@ -706,6 +741,10 @@ impl LocalServer {
     pub fn start(&self) -> anyhow::Result<()> {
         if self.state().is_alive() {
             bail!("{} is already running", self.name());
+        }
+        // Before anything else: every way a server starts comes through here.
+        if let Some(why) = start_blocked(&self.root) {
+            bail!("{why}");
         }
         // Jars the last run held open while mods were removed, updated or
         // switched: stopped now, so they change before Java loads them.

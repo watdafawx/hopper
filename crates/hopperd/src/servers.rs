@@ -80,6 +80,11 @@ pub struct Summary {
     /// RCON is on (with a password): console commands and live player
     /// info work. Off: the server page offers to turn it on.
     pub rcon: bool,
+    /// Moved to another panel: this copy is kept, stopped (its folder's
+    /// `.hopper-moved.json`, see `crate::transfer`).
+    pub moved: Option<crate::transfer::MovedMark>,
+    /// Being sent to another panel right now.
+    pub sending: bool,
 }
 
 fn now_secs() -> i64 {
@@ -279,6 +284,8 @@ impl Servers {
                 .map(|d| d.as_secs()),
             mods_stamp: hopper_core::server::mods_stamp(&e.root),
             rcon: hopper_core::hosting::rcon::settings(&e.root).is_some(),
+            moved: crate::transfer::moved_mark(&e.root),
+            sending: crate::transfer::is_sending(&e.root),
         }
     }
 
