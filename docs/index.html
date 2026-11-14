@@ -432,6 +432,7 @@ html:not(.js) .ppane{display:block}
         <li>Make a join command in Settings › Nodes and paste it on the other machine. It connects by itself</li>
         <li>A node's servers sit in the same list and open the same pages: console, files, backups and the rest. New server asks which machine to make it on</li>
         <li>Choose what the panel may do on each node: Look, Operate or Manage. The node refuses anything above it</li>
+        <li>Move or copy a stopped server to another machine. A broken connection carries on where it stopped, and the old copy stays, stopped, until you delete it</li>
         <li>Each node shows its CPU, memory and disk. Maintenance mode holds off new starts and the offline alert, and one button updates every node</li>
         <li>Tick servers across panels and nodes, or "Select all on" a node, then start, stop, restart or send a command to all at once. One question lists what each one gets, and servers you can only look at are skipped</li>
         <li>Have more than one Hopper Server? Each gets its own group. One that's down or frozen says so, and the rest keep working</li>
@@ -569,7 +570,7 @@ cargo run --bin hopper</pre></div>
         </ol>
 <pre>tar xzf hopperd-*-linux-x64.tar.gz
 sudo ./hopperd service install</pre>
-        <ol start="3"><li>Open <code>http://&lt;this machine&gt;:8790</code> and enter the setup code from the log.</li></ol>
+        <ol start="3"><li>Open <code>http://&lt;this machine&gt;:8790</code> and enter the setup code. The install prints where it's saved (<code>setup-code.txt</code> in the data folder).</li></ol>
       </div>
       <div class="ppane" data-p="docker">
         <p style="margin-top:14px;font-size:14.5px;color:var(--mut)">The image (amd64 and arm64) has Java 8, 17 and 21, so it runs servers for every Minecraft version. Servers and the panel's data live in one volume.</p>
@@ -578,7 +579,7 @@ sudo ./hopperd service install</pre>
   -p 8790:8790 -p 8022:8022 -p 25565:25565 \
   -v hopperd:/hopper ghcr.io/watdafawx/hopperd:latest
 docker logs hopperd</pre>
-        <p style="margin-top:10px;font-size:14.5px;color:var(--mut)">Open <code>http://&lt;host&gt;:8790</code> and use the setup code from the log. More in the <a href="https://github.com/watdafawx/hopper/tree/main/crates/hopperd#docker">Docker guide</a>.</p>
+        <p style="margin-top:10px;font-size:14.5px;color:var(--mut)">Open <code>http://&lt;host&gt;:8790</code> and use the setup code from <code>docker logs hopperd</code>. More in the <a href="https://github.com/watdafawx/hopper/tree/main/crates/hopperd#docker">Docker guide</a>.</p>
       </div>
     </div>
   </div>

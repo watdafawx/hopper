@@ -31,8 +31,9 @@ hopperd
 
 - First start: on the server PC itself, open `http://localhost:8790` and
   set the owner password; no code needed. From another device you need the
-  one-time **setup code** from the log (also in `setup-code.txt` in the data
-  folder). Then pick the **panel folder**: servers go in its
+  one-time **setup code**. It shows in the window you started `hopperd` in
+  (or in `docker logs`) and is saved in `setup-code.txt` in the data
+  folder; the log file and the system journal only say where it is. Then pick the **panel folder**: servers go in its
   `servers` folder and the panel's own data in `.hopper-server`, and the
   panel never shows anything outside it. `--home <folder>` sets it from the
   command line.
@@ -263,6 +264,58 @@ audit log. Things about a panel itself (making a new server, its users,
 addresses and certificate) are on its own page: "Open in browser" in its
 group's menu.
 
+## Nodes: servers on other machines
+
+A node is another machine (a PC, a VPS, a spare box) running Hopper Server
+that your main panel controls. Its servers appear in the main's list, in
+their own group, and open the same pages: console, files, mods, backups and
+the rest.
+
+**Join.** On the main, Settings › Nodes › Make a join command. Paste the
+command on the other machine. The key in it works once and for 30 minutes;
+an unused one can be removed from the same page. The node checks the main's
+certificate against the fingerprint in the command, then connects out to
+the main by itself. The node needs no open port and no router setup.
+Without a key, `hopperd node join https://main:8790` shows a 6-digit code:
+check the main shows the same one in Settings › Nodes and allow it there.
+
+**What the main may do there.** You choose a level per node:
+
+| Level | The main may |
+|---|---|
+| Look | only look at its servers; nothing changes |
+| Operate | also start and stop them and use their consoles |
+| Manage | manage them: settings, mods, files, backups, new servers, moves |
+
+The node keeps its own copy of the level and refuses anything above it,
+whatever the main asks. Either side can lower it (Settings › Nodes on the
+main, `hopperd node ceiling look` or `operate` on the node). Raising it means
+joining again at the higher level, so a main can never give itself more.
+
+**Who on the main can use a node.** The same roles as for this panel's own
+servers. A user or API token limited to some servers reaches only those,
+and a user can be given "everything on one node". Each panel keeps its own
+audit log; the main's log names the node for every request it passed on.
+
+**Moving a server.** "Move or copy to…" in a server's menu, for the owner
+and managers, when both machines allow Manage. The server must be stopped.
+A move that loses its connection carries on from where it stopped once the
+link is back, and the files are checked on arrival. After a move, the old
+copy stays where it was, stopped and marked, until you delete it or choose
+"Keep using this copy".
+
+**Leave or remove.** Remove a node in Settings › Nodes, or run
+`hopperd node leave` on the node. Either way the connection ends, and any
+move to or from that node stops. Servers on the node keep running, and
+its files stay there. They just leave the main's list; a user or token
+limited to that node then reaches nothing. To add it again, make a new
+join command. If a node is only switched off, its servers show as offline
+and come back when it does.
+
+**Trust.** A main allowed to Manage a node can do everything to that node's
+servers, so only give Manage to a main you run. A node never gets to act on
+the main or on other nodes.
+
 ## Servers other panels know (0.4.0)
 
 Any server folder runs here in place, also ones Crafty or MCSS know: their
@@ -340,7 +393,7 @@ docker run -d --name hopperd --hostname hopper --restart unless-stopped --stop-t
 docker logs hopperd
 ```
 
-Open `http://<host>:8790` and use the setup code from the log. Ports:
+Open `http://<host>:8790` and use the setup code from `docker logs hopperd`. Ports:
 
 | Port | |
 |---|---|

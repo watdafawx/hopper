@@ -2157,9 +2157,9 @@ neither the server nor the ends. Fixed before merge:
 | 12 | Medium | **Windows names folded paths together.** `CON`, `NUL`, `COM1`…, a trailing dot or space (`w/x.` is written as `w/x`), and `<>:"|?*` passed the list check; on Windows they hit devices or land on another listed path. | `windows_unsafe` on every part of every path and link target; the source's walk lists such names and the precheck and prepare refuse them. The incoming server name is cleaned the same way. | `windows_names`, `the_target_caps_what_a_source_may_send` |
 | 13 | Medium | **What a source may make the target hold.** A 512 MB file list read whole into memory; one chunk listed many times claims little in staging but writes the full size at commit; endless frames in one chunk request grew the `have` file. | List cap 128 MB and 1,000,000 items; the target refuses a list whose total (plus 512 MB) is more than its free space, unless it's the same list resumed; at most 4096 frames per chunk request. | `the_target_caps_what_a_source_may_send` |
 | 14 | Medium | **Two moves of one server.** The main's busy check and the push were under different locks, and the source's "sending" mark wasn't tied to one move, so a second move (or the first one's cancel) could release the other's. | One lock for check and push; the source claims per move id and answers 409 to a second one. | `the_source_refuses_a_second_move_and_changes_after_listing` |
-| 15 | Medium | **Source changed after listing.** A restore, update or file edit after the list was made left the target with a stale copy while the original was marked moved. | A `verify` step walks the folder again before commit and stops with "Test Server changed while it was being sent (path). Start the move again."; prepare refuses a server being restored. | `the_source_refuses_a_second_move_and_changes_after_listing`, `changes_after_listing_are_found` (restore refusal: not tested) |
+| 15 | Medium | **Source changed after listing.** A restore, update or file edit after the list was made left the target with a stale copy while the original was marked moved. | A `verify` step walks the folder again before commit and stops with "Test Server changed while it was being sent (path). Start the move again."; prepare refuses a server being restored. | `the_source_refuses_a_second_move_and_changes_after_listing`, `changes_after_listing_are_found`, `a_move_is_refused_during_a_restore` (A6) |
 | 16 | Medium | **Chunk calls flooded the audit log.** Every chunk batch of a big move wrote an audit line, enough to push real entries out of the 5 MB log. | Successful chunk batches aren't logged (failures are). Start, finish and commit write one line naming the server and both ends ("moves/copies Big SMP from FOX to vm", "Big SMP arrived from FOX"), with the person from the request. | — (not run live) |
-| 17 | Low | **Small races.** A start between release and the mark write, or between prepare's alive check and the claim; the target's port taken after the precheck. | The mark is written before release; prepare and chunks claim first; commit checks the port again and takes the suggested one if it's taken. | port retake: not tested |
+| 17 | Low | **Small races.** A start between release and the mark write, or between prepare's alive check and the claim; the target's port taken after the precheck. | The mark is written before release; prepare and chunks claim first; commit checks the port again and takes the suggested one if it's taken. | `a_port_taken_by_commit_time_gets_another` (A6) |
 | 18 | Low | **Leftovers.** The source's saved file lists were never removed; a copy already marked moved could be moved again. | Lists older than 7 days removed at start (`purge_old_plans`); prepare and the precheck refuse a marked copy. | `the_source_refuses_a_second_move_and_changes_after_listing` |
 | 19 | Low | **History said "moved 1 file".** | A set where every file moved or copied reads "Test Server moved" (head: "Owner moved Test Server"). | `a_move_survives_a_cut_link_and_sends_only_whats_missing` (assert) |
 | 20 | Low | **Keep and Delete on the banner** showed to people who aren't owner level (the routes refused them). | Only owner level sees the buttons; everyone sees the banner. | — |
@@ -2201,6 +2201,105 @@ Accepted, written down:
 6. The dialog stays open if you go to another server while it's open.
 7. At 375 px the server page's "…" menu opens partly off the left edge
    (as before A5).
+
+## A6 as built (2026-11-14): hardening
+
+A whole-feature review of B and A0 to A5, looking hardest at the seams
+between phases, then the open items from A1 to A5. No new screens.
+
+### Final review (A6)
+
+| # | Finding | Severity | Fixed or accepted | Test |
+|---|---|---|---|---|
+| 1 | **Jobs across servers.** `/jobs/{id}` (follow, cancel, dismiss) checked only the node prefix, and only for tokens and users with a node scope. A user or token limited to one server could read any other local server's job (title, steps, result) and cancel it; reading a finished job also took its result away from the person who started it. | Medium | Fixed: every job started by a request about a server remembers that server (`App::job_servers`, also a node's job as the main sees it, `node:7`). A limited person reaches only jobs of servers they see; a job no server started is for people with every server. Decided: jobs are scoped **per server**, not per node. | `jobs_are_scoped_per_server`, `job_ids_in_paths`; live 403 on GET and cancel, local and node |
+| 2 | **Ceiling lowered mid-move.** The engine checked the main's stored level when a move started or resumed, but `engine_call` didn't read it again, so a move went on after the owner lowered the node to Operate or Look. | Medium | Fixed: every engine call to a node reads the level again and stops under Manage ("vm now lets this panel …. Moving servers needs Manage there."). The cleanup call is refused too; staging is left for the node's 7-day purge, and the move's text says so. | `a_ceiling_lowered_mid_move_stops_the_next_step`; live: a 300 MB move failed clean, nothing on the node |
+| 3 | **Data folder open to every user on Linux.** `auth.json` (password hashes, two-factor secrets, token hashes), `setup-code.txt`, `node.json` and `nodes.json` sat in a folder made with the default umask (0755). | Medium | Fixed: the start-up and data folders are set to 0700 at start when others can read them (logged once). | `the_data_folder_is_made_private` (unix only; runs in CI on Linux) |
+| 4 | **Setup code in the logs.** It was logged at warn level, so it went into `hopperd.log`, the systemd journal and anything that collects them. | Low | Fixed: printed on the console only (a terminal, or Docker, where `docker logs` is the console) and kept in `setup-code.txt`; the log says where the file is. Every hopperd log line now goes through the shared redaction (`applog::redact`), which also hides `hst_`, `hn_`, `hnt_` and `hbr_` keys, the session cookie, `Authorization` and `Bearer` values and "setup code XXXXXXXX". | `hides_keys_tokens_codes_and_the_user_name`; live: code in no log, a node join logs no key |
+| 5 | **Node update mid-move.** Update restarted a node while a server was moving to or from it. | Low | Fixed: 409 "Big SMP is being moved to or from vm. Wait for that to finish, or cancel it, then update." (single and update-all). | `a_node_in_a_move_is_not_updated_and_removing_it_ends_the_move`; live 409 |
+| 6 | **Removed node with live moves.** Removing a node, or `hopperd node leave`, left its moves running or paused against a node that no longer existed. | Low | Fixed: running moves stop, paused ones end as cancelled. Its scope entries were already dropped (A4); its `node:` jobs can't be reached any more; job ids are kept for at most 4096 jobs. | same test |
+| 7 | **Stale capability after skew.** `servers.move` was announced but never checked: a move to an older (or downgraded and reconnected) node failed halfway on unknown routes. | Low | Fixed: precheck and start refuse with "vm runs an older Hopper Server that can't move servers. Update it first."; the place list says "Needs a newer Hopper Server." Capabilities are worked out on every connection, so an update or downgrade shows at once. | `a_node_without_the_move_steps_is_refused_up_front` |
+| 8 | **MCP audit rows said "local".** A node tool call through MCP was logged with `net: Local` and no address. | Low | Fixed: the caller's address, proxy and network, the node's name, and the path marked "(MCP)"; refusals too. | `mcp_node_calls_are_audited_with_the_callers_address` |
+| 9 | **`/audit?node=` read the whole history** into memory before filtering. | Low | Fixed: both files are streamed once, lines that don't name the node are skipped before parsing, and only the newest `limit` are kept. | `audit_for_a_node_is_bounded_and_newest_first` |
+| 10 | **A B grant reaching a node route.** | — | Sound: one-use links (`fs/link`) are made and redeemed only for this panel's own servers, and `fs/link` isn't relayed. | B1 tests |
+| 11 | **A node-scoped token through the move engine.** | — | Sound: moves need owner level (`require_owner_who`); a limited person is never owner level, and engine routes answer only to `Who::Main` with lead and Admin. | `only_people_allowed_both_ends_can_move` |
+| 12 | **A ceiling change during a bulk action.** | — | Sound: each server in a bulk action is its own relayed request, and the node reads its `node.json` per stream, so a lowered level refuses the rest. | `an_unknown_ceiling_refuses_everything`, A4 bulk tests |
+| 13 | **Join keys and node tokens.** | — | Sound, checked again: keys last 30 minutes, work once (live: a second join with the same key is refused), can be removed before use and are stored hashed; wrong keys and tokens are rate limited per address (10 per 10 minutes, bounded memory). Node tokens are stored hashed, compared in constant time, and stop working when the node is removed. | `wrong_guesses_from_many_addresses_use_bounded_memory`, nodes tests |
+| 14 | **Node tokens never rotate.** | Low | Accepted: the token lives only in the node's `node.json` (now private on Linux) and the main keeps its hash; leaving and joining again replaces it. Rotation needs both ends online at once. | — |
+| 15 | **Demoted mid-move.** Someone whose role is lowered keeps their running move (rights are checked at start and resume). | Low | Accepted: they had the right when it started; the owner can cancel it. | — |
+
+### Open items closed
+
+1. **Setup code logged unredacted.** Fixed (row 4). It still reaches the
+   person setting up: the console, `docker logs`, and `setup-code.txt`
+   (the service install and the log both name the file).
+2. **Jobs per node, not per server.** Decided per server; fixed (row 1).
+3. **MCP audit rows `net: Local`.** Fixed (row 8).
+4. **`/audit?node=` reads the whole history.** Bounded (row 9).
+5. **A5 tests.** "Move refused during a restore"
+   (`a_move_is_refused_during_a_restore`) and "target port taken at commit
+   gets a new port" (`a_port_taken_by_commit_time_gets_another`) now exist.
+6. **A5 MCP and CLI for moves.** Accepted, not built: the neighbours (node
+   update, maintenance, ceiling, join keys) have no MCP tools, and
+   main-side actions have no CLI. Scripts can use the API. Letting an agent
+   move whole servers is also a bigger step than anything MCP does today;
+   that's the maintainer's call.
+7. **Accepted Lows from A5, checked again:**
+   - *Source stays claimed if the main disappears mid-move.* Still Low and
+     accepted: Start says it's being sent, and restarting that panel frees
+     it. Removing the node now ends the move on the main too.
+   - *Staging purged only at start (7 days).* Still accepted. Row 2 adds one
+     more way to leave staging behind (cleanup refused after a lowered
+     level); the move's text says so and the purge still removes it.
+   - *Hard links copied as files.* Still accepted: making one needs shell
+     access on that machine, and the copy is only bigger, never outside the
+     folder.
+8. **Join keys and node access** (expiry, single use, revocation, rate
+   limits): checked again, sound (row 13); token rotation accepted (row 14).
+
+### Docs
+
+- `crates/hopperd/README.md`: "Nodes: servers on other machines" (what a
+  node is, the levels, who can use it, moving, leave and remove, trust),
+  and where the setup code is now.
+- `docs/index.html`: the setup-code lines, and one line about moving.
+
+### A6 VM run checklist (a1-atm10, for the maintainer)
+
+Use a throwaway server only (about 1 GB: a small Fabric pack plus a world
+padded with a 1 GB file). Leave the real `dg` server alone. Main: a scratch
+or test panel on FOX; node: the VM.
+
+| # | Step | Look at | Pass |
+|---|---|---|---|
+| 1 | Update hopperd on the VM to this build and restart its service. | `journalctl -u hopperd -n 100` and `hopperd.log` in the data folder | No setup code, `hn_` or `hnt_` key or session cookie in either; secrets show as `<hidden>`. |
+| 2 | `ls -ld` the data folder; `stat -c %a` on `auth.json` and `node.json`. | Modes | Folder `700` (the log said once that it was made private). The service still starts and reads its files. |
+| 3 | On the main, Settings › Nodes: make a join key, use it once with `--data /tmp/a6join`, then run the same command again. | The second run | Refused: "used already, expired … or was removed". Remove `/tmp/a6join` and that extra node afterwards. |
+| 4 | Make a user limited to one main server. The owner starts a backup of the VM's throwaway server; as the user, open `/api/v1/jobs/<node>:<n>`. | Answer | 403 "You don't have access to that job's server." The owner sees the job. |
+| 5 | Move the throwaway server to the VM. At about 40 %, cut the link for about 60 s (on the VM: `sudo iptables -I OUTPUT -p tcp --dport <main port> -j DROP`, then `-D` the same rule), then let it back. | The move dialog | It shows waiting, then carries on by itself; it resumed at least once and finishes. The 1 GB file has the same `sha256sum` on both ends. FOX's copy is stopped and marked as moved. |
+| 6 | During step 5 (before it ends), press Update on the VM's node. | Answer | 409 "… is being moved to or from …". Nothing restarts. |
+| 7 | Copy it back to FOX (copy, not move). Then delete the VM's copy and FOX's marked copy. | Both Histories, `.hopper-incoming` | "Moved Here from …" on the VM, "Copied here from …" on FOX; `.hopper-incoming` empty on both. |
+| 8 | Start another move of a throwaway server and lower the VM to Operate while it sends. | The move's text | Fails with "… now lets this panel …. Moving servers needs Manage there."; FOX's copy is unmarked and starts. Getting Manage back means leaving and joining again. |
+| 9 | Audit on the main filtered to the VM, after one MCP change on a VM server with a token from another PC. | The row | That PC's address and network, the node's name, "(MCP)". |
+| 10 | Remove the VM node while nothing moves, then join again with a new command. | The VM's servers | Kept running on the VM the whole time; back in the list after the join. |
+
+### Hopper desktop parity
+
+Nothing in A6 changed desktop. Known gaps, none built here:
+
+1. **Move or copy** for servers on a paired panel (A5 Left 1).
+2. A node's level, maintenance, join keys and updates are web-only;
+   desktop shows a node's servers and their state.
+3. Bulk actions across nodes are web-only.
+4. Users, tokens and the audit log (with the per-server job scope and the
+   MCP rows) are web-only.
+
+### Left (not done in A6)
+
+1. MCP tools and a CLI for moves (open item 6).
+2. Node token rotation (row 14).
+3. The start-up line "hopperd 0.66.0 on https://192.168.50.2:8831" names the
+   LAN address even under `HOPPER_LOOPBACK=1`, where only 127.0.0.1
+   answers. Cosmetic; not changed.
 
 ## Open questions for the maintainer
 
