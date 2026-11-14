@@ -10,6 +10,7 @@
 //! hopperd --data <dir>            keep config and accounts in <dir>
 //! hopperd service install         run in the background with the machine
 //! hopperd service uninstall|status
+//! hopperd relay init|run          the VPS end of "Relay through a VPS" (vps::relay_end)
 //! hopperd --version
 //! ```
 //!
@@ -85,6 +86,7 @@ mod nodes_tests;
 #[cfg(test)]
 mod pair_tests;
 mod tunnel;
+mod vps;
 
 #[cfg(windows)]
 mod tray;
@@ -165,6 +167,8 @@ pub struct App {
     pub nodes: nodes::Nodes,
     /// Servers being moved or copied between this panel and its nodes.
     pub moves: moves::Moves,
+    /// The connection to a relay on a VPS, when one is set up (see [`vps`]).
+    pub vps: vps::home::Home,
 }
 
 impl App {
@@ -287,7 +291,7 @@ fn tell_setup_code(code: &str, port: u16, local_ok: bool, file: &std::path::Path
 /// usual umask); closing the folder covers all of them at once, including
 /// files from older versions. Windows folders under the user's profile are
 /// already the user's only.
-fn private_dir(dir: &std::path::Path) {
+pub(crate) fn private_dir(dir: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -327,6 +331,11 @@ fn main() -> anyhow::Result<()> {
     if argv.first().map(String::as_str) == Some("node") {
         log.filter_level(log::LevelFilter::Warn).init();
         return tunnel::node::command(&argv[1..]);
+    }
+    // The VPS end of "Relay through a VPS" (design/vps-relay.md, B2).
+    if argv.first().map(String::as_str) == Some("relay") {
+        log.init();
+        return vps::relay_end::command(&argv[1..]);
     }
     let Some(args) = parse_args()? else { return Ok(()) };
     if args.service {
@@ -458,6 +467,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         sftp_fingerprint: sftp::fingerprint(&data_dir),
         nodes: nodes::Nodes::new(&data_dir),
         moves: moves::Moves::new(&data_dir),
+        vps: vps::home::Home::new(&data_dir),
     });
     app.rescan();
     autoupdate::start(app.clone());
@@ -602,6 +612,7 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: tls::OwnCert, shutdown: Shu
     // connection to the main, while node.json is there.
     nodes::start(app.clone());
     tunnel::node::start(app.clone());
+    vps::home::start(app.clone());
     if cfg.sftp_port != 0 {
         tokio::spawn(sftp::serve(app.clone(), cfg.bind.clone(), cfg.sftp_port));
     }

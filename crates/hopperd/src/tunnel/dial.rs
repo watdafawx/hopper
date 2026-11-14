@@ -200,6 +200,14 @@ pub fn same_fingerprint(a: &str, b: &str) -> bool {
 }
 
 fn client_config(pin: &Pin) -> (Arc<rustls::ClientConfig>, Arc<Mutex<Option<CertificateDer<'static>>>>) {
+    // Offered first so the main answers with its own certificate, never a
+    // Let's Encrypt one (see `tls::Resolver`); it then picks http/1.1.
+    pinned_config(pin, vec![crate::tls::NODE_ALPN.to_vec(), b"http/1.1".to_vec()])
+}
+
+/// TLS that trusts only `pin`, offering `alpn`; with the CA it chained to.
+/// The VPS relay's home end uses it too (`crate::vps::home`).
+pub fn pinned_config(pin: &Pin, alpn: Vec<Vec<u8>>) -> (Arc<rustls::ClientConfig>, Arc<Mutex<Option<CertificateDer<'static>>>>) {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let seen = Arc::new(Mutex::new(None));
     let verifier = Arc::new(Verifier { pin: pin.clone(), provider: provider.clone(), seen: seen.clone() });
@@ -209,9 +217,7 @@ fn client_config(pin: &Pin) -> (Arc<rustls::ClientConfig>, Arc<Mutex<Option<Cert
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
-    // Offered first so the main answers with its own certificate, never a
-    // Let's Encrypt one (see `tls::Resolver`); it then picks http/1.1.
-    c.alpn_protocols = vec![crate::tls::NODE_ALPN.to_vec(), b"http/1.1".to_vec()];
+    c.alpn_protocols = alpn;
     (Arc::new(c), seen)
 }
 

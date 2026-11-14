@@ -16,6 +16,7 @@
   import { followJob } from './lib/jobs.js';
   import { askPower, askKickOrBan, playerAct, head } from './lib/consoleKit.js';
   import ConsoleView from './ConsoleView.svelte';
+  import RelayCard from './RelayCard.svelte';
   import CrashStrip from './CrashStrip.svelte';
   import StuckStrip from './StuckStrip.svelte';
   import { unseen, markSeen } from './lib/crashseen.svelte.js';
@@ -348,6 +349,7 @@
   {:else}
   <div class="split">
     <div class="main">
+      <RelayCard server={s} />
       <ConsoleView server={s} onShare={(p) => (sharing = { path: p })} />
     </div>
 

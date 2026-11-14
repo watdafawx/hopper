@@ -11,7 +11,7 @@ use hopper_core::hosting::{Properties, ServerState};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 
 /// How a stay on the island ended.
@@ -39,7 +39,7 @@ struct Packets {
 }
 
 impl Packets {
-    async fn next(&mut self, sock: &mut TcpStream, wait: Duration) -> anyhow::Result<(i32, Vec<u8>)> {
+    async fn next<S: AsyncRead + Unpin>(&mut self, sock: &mut S, wait: Duration) -> anyhow::Result<(i32, Vec<u8>)> {
         let mut chunk = [0u8; 4096];
         loop {
             if let Read::Done((id, body), used) = core::read_packet(&self.buf, 1 << 20)? {
@@ -56,7 +56,7 @@ impl Packets {
     }
 
     /// Reads until packet `want`, passing others to `seen`.
-    async fn until(&mut self, sock: &mut TcpStream, want: i32, mut seen: impl FnMut(i32, &[u8])) -> anyhow::Result<Vec<u8>> {
+    async fn until<S: AsyncRead + Unpin>(&mut self, sock: &mut S, want: i32, mut seen: impl FnMut(i32, &[u8])) -> anyhow::Result<Vec<u8>> {
         let start = Instant::now();
         loop {
             let left = Duration::from_secs(20).saturating_sub(start.elapsed());
@@ -113,9 +113,9 @@ fn bar_title(name: &str, e: &Entry) -> (Value, f32) {
 /// until the server is up (then a transfer to `host:port`), the start
 /// fails, or the player leaves.
 #[allow(clippy::too_many_arguments)]
-pub async fn run(
+pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
     app: &Arc<App>,
-    sock: &mut TcpStream,
+    sock: &mut S,
     leftover: Vec<u8>,
     e: &Arc<Entry>,
     player: &str,
