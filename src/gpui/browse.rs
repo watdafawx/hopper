@@ -2383,10 +2383,10 @@ impl BrowseView {
             // Website-only files (the project or a dependency) land on the
             // instance's pending list; the download window gets their pages.
             // A new pack's instance is read once it exists.
-            let before = place.target.as_ref().map(|i| hopper::modpack::pending_urls_at(&i.root)).unwrap_or_default();
+            let before = place.target.as_ref().map(|i| crate::store::Before::at(&i.root)).unwrap_or_default();
             let (changed, line) = hopper::browse::install_project(&m, file, browsing, place, job)?;
             job.detail(line);
-            Ok(Msg::installed(changed, &before, Some(project)))
+            Ok(Msg::added(changed, &before, Some(project)))
         };
         type Work = Box<dyn FnOnce(&hopper::jobs::Job) -> anyhow::Result<Msg> + Send>;
         let work: Work = match remote {

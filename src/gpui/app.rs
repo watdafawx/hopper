@@ -269,6 +269,39 @@ impl AppView {
                     });
                     window.push_notification(n, cx);
                 }
+                StoreEvent::ServerOffer(offer) => {
+                    // One offer per server: a later install's replaces it and
+                    // names these mods too (the store keeps them).
+                    struct ServerOfferNote;
+                    let offer = (**offer).clone();
+                    let name = offer.server.name.clone();
+                    let running = crate::rigsync::server_online(this.store.read(cx), None, &offer.server.root);
+                    let body = if running {
+                        format!("{name} is running: restart it after adding to load them.")
+                    } else {
+                        "Copies just these mods there. Nothing is removed.".to_string()
+                    };
+                    let key = offer.server.root.to_string_lossy().into_owned();
+                    let store = this.store.clone();
+                    let n = gpui_kit::component::notification::Notification::info(body)
+                        .title(offer.title())
+                        .id1::<ServerOfferNote>(key)
+                        .action(move |_, _, cx| {
+                            let (store, offer) = (store.clone(), offer.clone());
+                            Button::new("server-offer-add")
+                                .label(format!("Add to {}", offer.server.name))
+                                .small()
+                                .primary()
+                                .on_click(cx.listener(move |note, _, window, cx| {
+                                    store.update(cx, |s, cx| {
+                                        s.add_to_server(&offer);
+                                        cx.notify();
+                                    });
+                                    note.dismiss(window, cx);
+                                }))
+                        });
+                    window.push_notification(n, cx);
+                }
                 StoreEvent::Schedule(msg, bad) | StoreEvent::Notice(msg, bad) => {
                     let n = if *bad {
                         gpui_kit::component::notification::Notification::warning(msg.clone())

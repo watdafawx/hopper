@@ -940,6 +940,24 @@ pub fn push(rows: &[DiffEntry], inst: &Instance, server: &ServerInfo) -> Vec<Syn
     crate::sync::plan(&rows, &inst.mods_dir(), &server.mods_dir())
 }
 
+/// The mods just added to the pack that a sync would copy to the server and
+/// that it lacks, so the player can be offered to put them there right away.
+/// `added` holds their jar names in lower case. Mods that belong on the
+/// client only (by side, the built-in list or a flag), turned-off copies and
+/// the "Never sync" list are left out, as a sync leaves them out.
+pub fn to_offer(diff: &[DiffEntry], added: &HashSet<String>, blacklist: &HashSet<String>) -> Vec<DiffEntry> {
+    diff.iter()
+        .filter(|d| {
+            d.status == DiffStatus::OnlyClient
+                && d.action == DiffAction::CopyToServer
+                && !is_wont(d)
+                && !is_hidden(d, blacklist)
+                && d.client.as_ref().is_some_and(|c| !c.off && added.contains(&c.file_name.to_lowercase()))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Copies server files down to the client: server-only jars, and the
 /// server's build of a mod both sides have in another version (the
 /// client's old file is removed when its name differs).
@@ -1200,6 +1218,49 @@ mod tests {
         diff.retain(|d| !is_hidden(d, &hidden));
         let names: Vec<_> = diff.iter().filter_map(|d| d.client.as_ref().or(d.server.as_ref())).map(|m| m.mod_id.as_str()).collect();
         assert_eq!(names, ["jei"]);
+    }
+
+    #[test]
+    fn to_offer_keeps_just_added_mods_the_server_needs() {
+        use crate::model::ModInfo;
+        let m = |id: &str, file: &str, side: &str| ModInfo {
+            mod_id: id.into(),
+            mod_name: id.into(),
+            file_name: file.into(),
+            side: side.into(),
+            ..Default::default()
+        };
+        let mut off = m("offmod", "OffMod-1.jar", "both");
+        off.off = true;
+        let mut flagged = m("flagged", "flagged-1.jar", "both");
+        flagged.wont_sync = Some("Marked client-side".into());
+        let client = vec![
+            m("handsondelight", "HandsOnDelight-1.2.jar", "both"),
+            m("diegesis", "diegesis-0.4.jar", ""),
+            m("sodium", "sodium-0.6.jar", "client"),
+            m("iris", "iris-1.8.jar", ""),
+            m("hidden", "hidden-1.jar", "both"),
+            m("old", "old-1.jar", "both"),
+            m("onserver", "onserver-2.jar", "both"),
+            off,
+            flagged,
+        ];
+        let server = vec![m("onserver", "onserver-1.jar", "both")];
+        let diff = crate::diff::compute_diff(&client, &server);
+        let added: HashSet<String> = [
+            "handsondelight-1.2.jar", "diegesis-0.4.jar", "sodium-0.6.jar", "iris-1.8.jar",
+            "hidden-1.jar", "onserver-2.jar", "offmod-1.jar", "flagged-1.jar",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let hidden: HashSet<String> = ["hidden".to_string()].into();
+        let mut ids: Vec<String> = to_offer(&diff, &added, &hidden).iter().map(|d| d.client.as_ref().unwrap().mod_id.clone()).collect();
+        ids.sort();
+        // Client-only (side or built-in list), Never sync, flagged, off,
+        // already there in another build, and mods added earlier: left out.
+        assert_eq!(ids, ["diegesis", "handsondelight"]);
+        assert!(to_offer(&diff, &HashSet::new(), &hidden).is_empty());
     }
     use super::*;
 

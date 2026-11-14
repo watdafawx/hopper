@@ -24,10 +24,12 @@ mod only_here;
 mod node_heads;
 mod panel_events;
 mod server_mods;
+mod server_offer;
 // Invite and SyncStatus are for the Friends screen being rebuilt on top.
 #[allow(unused_imports)]
 pub use friends::{FollowReq, FollowTarget, GroupMerged, Invite, RecipeApplied, SyncStatus, follow_pack, redeem};
 pub use only_here::{LockedChange, and_list};
+pub use server_offer::{Before, ServerOffer};
 pub use server_mods::{RemoteLoose, remote as on_hopper_server, remote_config_files, remote_config_reset, remote_remove, remote_undo_remove};
 
 /// Results from worker threads.
@@ -65,6 +67,12 @@ pub enum Msg {
     PanelEvents(String, Vec<hopper::hopperd::PanelChange>),
     /// An instance changed on disk; reload it.
     InstanceChanged(PathBuf),
+    /// An install put new jars (lower case) into the instance: handled as
+    /// the message inside, then its paired servers are checked for them.
+    /// The project that asked, when known, is named first.
+    Added(PathBuf, HashSet<String>, Option<u64>, Box<Msg>),
+    /// A paired server lacks mods just added to its pack.
+    ServerOffer(Box<ServerOffer>),
     /// A server's mods were synced while it ran (when it had started):
     /// its pages offer a restart. Then as [`Msg::ServersChanged`].
     SyncedLive(PathBuf, String),
@@ -225,6 +233,8 @@ pub enum StoreEvent {
     /// Something about a server on a Hopper Server changed elsewhere: its
     /// open tab loads again. The areas are hopperd's (`mods`, `files`…).
     PanelChanged(PathBuf, Vec<String>),
+    /// A paired server lacks mods just added to its pack: offer to add them.
+    ServerOffer(Box<ServerOffer>),
     /// Something to tell the user in a notice: (text, is a problem).
     Notice(String, bool),
     /// GitHub's rate limit for this PC is used up: one notice for every
@@ -519,6 +529,9 @@ pub struct Store {
     /// started then (the panel's word; empty when unknown). Gone once it
     /// stops or restarts.
     live_syncs: HashMap<PathBuf, String>,
+    /// Mods offered for a server and not added yet, by (instance, server):
+    /// a later install's offer names them too.
+    server_offers: HashMap<(PathBuf, PathBuf), HashSet<String>>,
     /// Instances jobs are changing, with how many jobs.
     busy: Arc<std::sync::Mutex<HashMap<PathBuf, u32>>>,
     /// Instances whose game is being launched (the Play button says so).
@@ -759,6 +772,7 @@ impl Store {
             site_servers: HashMap::new(),
             started_with: HashMap::new(),
             live_syncs: HashMap::new(),
+            server_offers: HashMap::new(),
             busy: Default::default(),
             launching: Default::default(),
             update_queue: Default::default(),
@@ -1193,6 +1207,11 @@ impl Store {
                 // names and sizes are known.
                 self.fetch_pages(&root, pages, by);
             }
+            Msg::Added(root, jars, by, inner) => {
+                self.handle(*inner, cx);
+                self.check_added(&root, jars, by);
+            }
+            Msg::ServerOffer(o) => self.on_server_offer(*o, cx),
             Msg::Reidentified(root) => {
                 self.handle(Msg::InstanceChanged(root.clone()), cx);
                 self.check_updates(&root, true);
