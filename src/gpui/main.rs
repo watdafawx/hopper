@@ -124,7 +124,7 @@ fn main() {
             logged(info);
         }));
     }
-    env_logger::init();
+    init_logging();
     // Windows' Installed apps → Uninstall runs this.
     if std::env::args().any(|a| a == "--uninstall") {
         uninstall();
@@ -172,6 +172,9 @@ fn main() {
     {
         return;
     }
+    // Every early return above is a helper run (a link, a download window);
+    // only the real app keeps a log, so those can't rotate its file away.
+    hopper::applog::attach(env!("CARGO_PKG_VERSION"));
     gpui_kit::application()
         .with_assets(brand::Assets)
         .run(move |cx| {
@@ -277,6 +280,35 @@ pub(crate) fn dev_size() -> Option<Size<Pixels>> {
 
 /// CF_API_KEY and friends: `.env` next to the exe, the working dir, then
 /// the repo's (for dev builds started from elsewhere).
+/// Hopper's own log: info from Hopper's code, warnings from everything it
+/// uses (`RUST_LOG` still overrides), to stderr and, once the app really
+/// starts (`hopper::applog::attach`), to `logs\hopper.log`.
+fn init_logging() {
+    use std::io::Write as _;
+    let mut b = env_logger::Builder::new();
+    b.filter_level(log::LevelFilter::Warn);
+    for own in ["hopper", "hopper_core"] {
+        b.filter_module(own, log::LevelFilter::Info);
+    }
+    if let Ok(spec) = std::env::var("RUST_LOG") {
+        b.parse_filters(&spec);
+    }
+    b.format(|buf, r| {
+        let text = hopper::applog::line(&hopper::time::log_stamp(), r.level(), r.target(), &r.args().to_string());
+        buf.write_all(text.as_bytes())
+    });
+    b.target(env_logger::Target::Pipe(Box::new(hopper::applog::Pipe)));
+    b.init();
+    // A panic belongs in the log next to what led up to it (the crash log
+    // and stderr keep theirs).
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let at = info.location().map_or_else(|| "unknown".to_string(), |l| format!("{}:{}", l.file(), l.line()));
+        log::error!("panic at {at}: {}", info.payload_as_str().unwrap_or("no message"));
+        previous(info);
+    }));
+}
+
 fn load_env() {
     if let Some(dir) = std::env::current_exe()
         .ok()

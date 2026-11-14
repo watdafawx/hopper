@@ -309,6 +309,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Advanced, "pack-cache", "Downloaded packs", "Kept so comparing and installing an update doesn't download the pack again.", "cache disk space clear delete zip modpack server pack keep days"),
     e(C::Advanced, "image-cache", "Image cache size", "Mod icons and pictures from mod pages, kept so they show at once. When it's full, the pictures used longest ago go; icons of installed mods always stay.", "cache disk space clear delete images icons logos pictures gallery size"),
     e(C::Advanced, "data-folder", "Hopper's folder", "Settings, accounts, downloads and caches Hopper keeps. New copies of Hopper keep them in a Hopper Data folder next to hopper.exe.", "appdata settings.json files data folder portable move drive"),
+    e(C::Advanced, "hopper-log", "Hopper's log", "What Hopper did while it ran. Send it with a bug report. The last 5 runs are kept.", "log logs bug report error crash debug support copy"),
 ];
 
 fn entry(id: &str) -> &'static Entry {
@@ -2801,6 +2802,44 @@ impl SettingsPage {
                                 }
                             }),
                       )),
+                Row::new("hopper-log").control(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("log-folder")
+                                .small()
+                                .outline()
+                                .icon(IconName::FolderOpen)
+                                .label("Open logs folder")
+                                .on_click(|_, window, cx| match hopper::applog::dir() {
+                                    Some(d) => crate::store::open_folder(&d),
+                                    None => window.push_notification(Notification::error("Couldn't find Hopper's folder"), cx),
+                                }),
+                        )
+                        .child(
+                            Button::new("log-copy")
+                                .small()
+                                .outline()
+                                .icon(IconName::Copy)
+                                .label("Copy log")
+                                .tooltip("Copies this run's log, to paste into a bug report. Long logs copy their last 2,000 lines.")
+                                .on_click(|_, window, cx| {
+                                    let text = hopper::applog::path()
+                                        .ok_or_else(|| "Couldn't find Hopper's folder".to_string())
+                                        .and_then(|p| {
+                                            hopper::applog::tail_text(&p, hopper::applog::COPY_BYTES, hopper::applog::COPY_LINES)
+                                                .map_err(|e| format!("Couldn't read the log: {e}"))
+                                        });
+                                    match text {
+                                        Ok(t) => {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(t));
+                                            window.push_notification(Notification::success("Log copied"), cx);
+                                        }
+                                        Err(e) => window.push_notification(Notification::error(e), cx),
+                                    }
+                                }),
+                        ),
+                ),
                 self.pack_cache_row(s, rem, cx),
                 self.image_cache_row(s, rem, cx),
             ],

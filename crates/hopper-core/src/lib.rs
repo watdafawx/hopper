@@ -3,6 +3,7 @@
 //! Server (crates/hopperd).
 
 pub mod account;
+pub mod applog;
 pub mod actor;
 pub mod accounts;
 pub mod backupmods;

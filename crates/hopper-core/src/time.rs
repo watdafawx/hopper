@@ -154,9 +154,32 @@ pub fn now() -> i64 {
     now_secs()
 }
 
+/// This PC's local date and time with milliseconds, for a log line:
+/// "2026-11-14 15:04:05.123".
+pub fn log_stamp() -> String {
+    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    stamp(d.as_secs() as i64, d.subsec_millis(), crate::hosting::schedule::utc_offset_secs())
+}
+
+fn stamp(secs: i64, millis: u32, offset: i64) -> String {
+    let local = secs + offset;
+    let (y, m, d) = civil_from_days(local.div_euclid(86_400));
+    let s = local.rem_euclid(86_400);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}.{millis:03}", s / 3600, s % 3600 / 60, s % 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_stamp_is_local_with_milliseconds() {
+        // 2026-11-14 23:30:00 UTC is already the 15th at UTC+2.
+        let utc = days_from_civil(2026, 11, 14) * 86_400 + 23 * 3600 + 30 * 60;
+        assert_eq!(stamp(utc, 7, 0), "2026-11-14 23:30:00.007");
+        assert_eq!(stamp(utc, 123, 2 * 3600), "2026-11-15 01:30:00.123");
+        assert_eq!(log_stamp().len(), "2026-11-14 23:30:00.007".len());
+    }
 
     #[test]
     fn round_trips() {
