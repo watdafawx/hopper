@@ -28,7 +28,6 @@ use hopper::serverpack::Annotation;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 const ROW_H: f32 = 3.5;
 /// The mod name's least width in rem: other cells give way first.
@@ -362,25 +361,46 @@ impl SyncPanel {
     fn pair_picker(&self, server: &Path, label: String, current: Option<&Path>, cx: &App) -> AnyElement {
         let store = self.store.read(cx);
         let roots: Vec<PathBuf> = store.instances().iter().map(|i| i.root.clone()).collect();
-        let items = store
+        let items: Vec<(String, bool)> = store
             .instances()
             .iter()
             .map(|i| (i.name.clone(), current == Some(i.root.as_path())))
             .collect();
         let (store, server) = (self.store.clone(), server.to_path_buf());
-        widgets::picker(
-            "sync-pair",
-            label,
-            items,
-            cx.theme().font_size,
-            Rc::new(move |ix, _, cx| {
-                if let Some(r) = roots.get(ix) {
-                    let r = r.clone();
-                    store.update(cx, |s, cx| s.set_pairing(&server, &r, cx));
+        // Paired: the last entry takes the server off its pack, as the
+        // pack's own server menu does.
+        let unpair = current.map(|_| label.clone());
+        let rem = cx.theme().font_size;
+        Button::new("sync-pair")
+            .outline()
+            .small()
+            .w_full()
+            .child(div().min_w_0().truncate().child(label))
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu: PopupMenu, _, _| {
+                let mut menu = menu
+                    .min_w(rems(13.).to_pixels(rem))
+                    .max_h(rems(26.).to_pixels(rem))
+                    .scrollable(true);
+                for (ix, (l, checked)) in items.iter().enumerate() {
+                    let (store, server, r) = (store.clone(), server.clone(), roots.get(ix).cloned());
+                    menu = menu.item(PopupMenuItem::new(l.clone()).checked(*checked).on_click(move |_, _, cx| {
+                        if let Some(r) = &r {
+                            store.update(cx, |s, cx| s.set_pairing(&server, r, cx));
+                        }
+                    }));
                 }
-            }),
-        )
-        .into_any_element()
+                if let Some(name) = &unpair {
+                    let (store, server) = (store.clone(), server.clone());
+                    menu = menu.separator().item(
+                        PopupMenuItem::new(format!("Unpair {name}"))
+                            .icon(IconName::Unlink)
+                            .on_click(move |_, _, cx| store.update(cx, |s, cx| s.unpair(&server, cx))),
+                    );
+                }
+                menu
+            })
+            .into_any_element()
     }
 
     pub fn set_peek(&mut self, peek: Entity<crate::browse::BrowseView>) {
