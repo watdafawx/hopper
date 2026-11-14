@@ -666,9 +666,12 @@ async fn a_node_token_is_refused_elsewhere() {
     assert_eq!(get(format!("/api/v1/servers/{}/console", p.main.server)).await, StatusCode::FORBIDDEN);
     assert_eq!(get(format!("/api/v1/servers/{y}:x/console")).await, StatusCode::FORBIDDEN);
     assert_eq!(get(format!("/api/v1/jobs/{y}:1")).await, StatusCode::FORBIDDEN);
-    // A scope for a node that isn't joined is refused when it's given.
+    // A scope for a node that isn't joined is dropped when it's given; a
+    // list left empty that way reaches nothing, never everything.
     let (s, b) = send(&p.main, &p.main_cookie, "POST", "/api/v1/tokens", Some(json!({ "name": "gone", "servers": ["node:abcdefabcdef"] }))).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let gone = p.main.app.auth.tokens().into_iter().find(|t| t.name == "gone").unwrap();
+    assert_eq!(gone.servers, vec![crate::auth::NO_SERVERS.to_string()]);
     let (s, _) = send(&p.main, &p.main_cookie, "POST", "/api/v1/tokens", Some(json!({ "name": "bare", "servers": ["node:"] }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
@@ -696,6 +699,39 @@ async fn removing_a_node_drops_its_scope() {
     assert!(!nobody.sees(&p.main.server) && !nobody.sees(&p.ns()));
     let (servers, heads) = p.main.app.nodes.live_view(&nobody);
     assert!(servers.is_empty() && heads.is_empty());
+}
+
+/// A node leaving on its own (`hopperd node leave`) drops its scope the
+/// same way, so a user who listed it can still be edited and saved.
+#[tokio::test]
+async fn a_node_that_leaves_drops_its_scope() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let (_, key, _) = p.main.app.nodes.make_key(Ceiling::Manage, "owner");
+    let (y, token) = p.main.app.nodes.use_key(&key, "vm2", "10.0.0.8".parse().unwrap(), "").unwrap();
+    p.main.app.auth.user_create("onlyy", "onlyypass1", Role::Operator, vec![format!("node:{}", y.id)]).unwrap();
+    let (s, _, _) = call("POST", "/api/v1/node/leave").bearer(&token).send(&p.main).await;
+    assert_eq!(s, StatusCode::OK);
+    let u = p.main.app.auth.users().into_iter().find(|u| u.name == "onlyy").unwrap();
+    assert_eq!(u.servers, vec![crate::auth::NO_SERVERS.to_string()]);
+    // Saving that user again works and keeps it reaching nothing.
+    let (s, b) = send(&p.main, &p.main_cookie, "PUT", &format!("/api/v1/users/{}", u.id), Some(json!({ "name": "onlyy", "role": "operator", "servers": [format!("node:{}", y.id)] }))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let u = p.main.app.auth.users().into_iter().find(|u| u.name == "onlyy").unwrap();
+    assert_eq!(u.servers, vec![crate::auth::NO_SERVERS.to_string()]);
+}
+
+/// A machine alert hides for everyone, so someone limited to node X can't
+/// dismiss node Y's.
+#[tokio::test]
+async fn only_who_sees_a_node_dismisses_its_alerts() {
+    let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
+    let y = other_node(&p);
+    p.main.app.auth.user_create("nia", "niapass12", Role::Admin, vec![format!("node:{}", p.id)]).unwrap();
+    let nia = crate::cross_origin_tests::user_cookie(&p.main, "nia", "niapass12").await;
+    let (s, _) = send(&p.main, &nia, "POST", "/api/v1/alerts/dismiss", Some(json!({ "server_id": "", "node": y, "kind": "disk" }))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, b) = send(&p.main, &nia, "POST", "/api/v1/alerts/dismiss", Some(json!({ "server_id": "", "node": p.id, "kind": "disk" }))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
 }
 
 /// A bulk restart across the main and a node (one request per server, as

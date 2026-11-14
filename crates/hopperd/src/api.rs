@@ -516,17 +516,23 @@ struct UserBody {
     servers: Vec<String>,
 }
 
-/// A user's or token's server list as saved: "all servers on node X"
-/// entries must name a node this panel has (design/multi-panel.md, A4).
-fn server_list(app: &App, list: Vec<String>) -> ApiResult<Vec<String>> {
+/// A user's or token's server list as saved (design/multi-panel.md, A4).
+/// "All servers on node X" for a node that is gone is dropped, not
+/// refused: the picker can't show it, so refusing would leave the user
+/// impossible to edit. A list emptied that way matches nothing, never all.
+fn server_list(app: &App, mut list: Vec<String>) -> ApiResult<Vec<String>> {
+    let mut gone = Vec::new();
     for e in &list {
         if let Some(n) = crate::auth::scope_node(e) {
             if app.nodes.name_of(n).is_none() {
-                return Err(bad("That node isn't joined to this panel any more. Pick its servers again."));
+                gone.push(n.to_string());
             }
         } else if e.starts_with(crate::auth::NODE_SCOPE) || e.is_empty() {
             return Err(bad("A server in the list has no name."));
         }
+    }
+    for n in gone {
+        crate::auth::drop_node(&mut list, &n);
     }
     Ok(list)
 }

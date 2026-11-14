@@ -335,11 +335,10 @@ pub(crate) fn node_of(path: &str, query: Option<&str>) -> Option<String> {
 /// [`node_of`] and the node's name now (kept in the log line, so it still
 /// reads after the node is removed).
 pub(crate) fn node_named(app: &App, path: &str, query: Option<&str>) -> (String, String) {
-    match node_of(path, query) {
-        Some(id) => {
-            let name = app.nodes.name_of(&id).unwrap_or_default();
-            (id, name)
-        }
+    // Only a node this panel has: the id comes from the URL, and anyone
+    // signed in could otherwise put any text in a log row's node.
+    match node_of(path, query).and_then(|id| app.nodes.name_of(&id).map(|name| (id, name))) {
+        Some(found) => found,
         None => (String::new(), String::new()),
     }
 }

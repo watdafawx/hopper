@@ -92,7 +92,7 @@
       <h3 id="ba-title">{phase === 'ask' ? title(action, n.send) : phase === 'sending' ? 'Sending…' : summary || 'Done'}</h3>
       {#if phase === 'ask'}
         <p class="small subtle">
-          {#if !n.send}None of the picked servers can take this.{:else if plan.some((g) => g.node)}Each panel gets its own request and writes it in its own audit log; this panel writes its nodes' with the node named.{:else}Each panel gets its own request and writes it in its own audit log.{/if}
+          {#if !n.send}None of the picked servers can take this.{:else if plan.some((g) => g.node)}Each server is done with your sign-in on its panel and written in that panel's audit log, a node's with the node named.{:else}Each server is done with your sign-in on its panel and written in that panel's audit log.{/if}
         </p>
       {/if}
 

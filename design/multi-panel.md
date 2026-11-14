@@ -2026,6 +2026,28 @@ the ceiling route only lowers, a failed update survives a restart);
 | 6 | — | **MCP.** Node tools build the same API request the web UI sends and run it through `security::refusal` (`allowed`) and the relay, so there is no second permission path; unknown tools and actions are refused before anything is sent. | Sound; tested (`mcp_works_on_node_servers_in_scope_only`). |
 | 7 | Low | **Bulk.** Each row is its own request with the person's own session, so a bulk action can't do more than clicking each server; skipped rows are decided in the browser only to explain, the server refuses the same rows anyway. | Sound. |
 
+**Second review (separate reviewer, 2026-11-14).** No high or medium
+findings. Fixed before merge:
+
+| # | Rank | Finding | Fix |
+|---|---|---|---|
+| 8 | Low-Med | Row 4 held only for the owner removing a node: `hopperd node leave` (`nodes::leave`) didn't drop its scope entries, and `server_list` then refused every later save of a user still listing it (the picker can't show a gone node), so the owner couldn't edit that user and the easy way out, an empty list, means every server. | `leave` drops scope like `node_remove`; `server_list` drops entries for nodes that are gone instead of refusing (empty becomes `none:`). Tests `a_node_that_leaves_drops_its_scope`, `a_node_token_is_refused_elsewhere`. |
+| 9 | Low | Anyone limited could dismiss any node's machine alert (`alerts::dismiss` with only `node`), which hides it for everyone. | Needs `sees_node`. Test `only_who_sees_a_node_dismisses_its_alerts`. |
+| 10 | Low | `hopperd node leave|ceiling` read `node.json` only from the panel folder, so with it still left in `--data` they said "isn't a node" and changed nothing; a cross-drive rename failure left the node unjoined. | The CLI adopts the left-behind file first, as the panel does; a failed rename writes it anew (owner-only mode) and removes the old one. |
+| 11 | Low | The audit row's node id came straight from the URL, so any signed-in user could put text in it on a refused request. | Recorded only for a node this panel has. |
+
+Still open, written down:
+
+- **Jobs are scoped per node, not per server.** Someone limited to one
+  server on node X can see and cancel node X's other jobs (job details can
+  name other servers). Better than before A4 (node jobs weren't scoped at
+  all). Fix later: keep a job-to-server map on the main when it rewrites job
+  ids, and check `sees` on that.
+- **MCP audit rows say `net: Local`** whatever the caller's network, as
+  they did before A4; the caller's address isn't passed into the tool call.
+- **`/audit?node=` reads the whole history** per request (owner only; cost,
+  not risk).
+
 ## Open questions for the maintainer
 
 1. **Remote-session limits (B).** *Answered (maintainer, 2026-11-11): a

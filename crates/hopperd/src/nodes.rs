@@ -1459,6 +1459,9 @@ async fn leave(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Socke
         return refused(StatusCode::UNAUTHORIZED, "Unknown node key.", "refused: unknown node key".into());
     };
     if let Some((node, live)) = app.nodes.remove(&n.id) {
+        // Same as the owner removing it: its scope entries go, or a user
+        // still listing it could never be saved again.
+        app.auth.drop_node_scope(&node.id);
         if let Some(h) = live {
             h.close("left").await;
         }

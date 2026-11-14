@@ -407,6 +407,9 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
     // node.json lives with the rest of the panel's data: in its panel
     // folder once it has one (`--home`), else in the data folder itself.
     let dir = crate::service::real_data(&boot).0;
+    // As the running panel does, so `leave` and `ceiling` act on the file
+    // the panel will read, not report "isn't a node" and change nothing.
+    adopt_left_behind(&boot, &dir);
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     match what {
         "join" => rt.block_on(join(&boot, &dir, o)),
@@ -469,12 +472,18 @@ pub fn adopt_left_behind(boot: &Path, data: &Path) {
         return;
     }
     if boot.join(FILE).is_file() && !data.join(FILE).is_file() {
-        match std::fs::rename(boot.join(FILE), data.join(FILE)) {
+        // A rename fails across drives; then write it anew (keeping the
+        // owner-only mode `save` gives it) and remove the old one.
+        let moved = std::fs::rename(boot.join(FILE), data.join(FILE)).or_else(|e| match load(boot) {
+            Some(j) => save(data, &j).and_then(|()| Ok(std::fs::remove_file(boot.join(FILE))?)),
+            None => Err(e.into()),
+        });
+        match moved {
             Ok(()) => {
                 let _ = std::fs::remove_file(boot.join(STATUS_FILE));
                 log::info!("node: moved node.json into {}", data.display());
             }
-            Err(e) => log::warn!("node: couldn't move node.json into {}: {e}", data.display()),
+            Err(e) => log::warn!("node: couldn't move node.json into {}: {e:#}", data.display()),
         }
     }
 }

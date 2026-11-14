@@ -862,6 +862,11 @@ async fn dismiss(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
         if !local.is_empty() && !who.sees(&b.server_id) {
             return Err(not_found("server"));
         }
+        // A machine alert hides for everyone, so only someone who sees
+        // that node (the same check `/alerts` shows it by) may dismiss it.
+        if local.is_empty() && !who.sees_node(&node) {
+            return Err(not_found("node"));
+        }
         // The alert as this main last heard it from the node, so a newer
         // one (raised again after it cleared) shows.
         let c = node_answers().lock().unwrap();
