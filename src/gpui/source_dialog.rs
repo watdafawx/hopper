@@ -356,12 +356,13 @@ impl SourceForm {
             let root = inst.root.clone();
             s.spawn_instance_job(&root, what, move |job| {
                 let mut inst = inst;
+                let before = crate::store::Before::at(&inst.root);
                 let done = match &follow {
                     Some((f, _)) => sources::follow(&mut inst, f, &r, i, job)?,
                     None => sources::install(&mut inst, &r, i, job)?,
                 };
                 job.detail(format!("{done} is in. Updates come from {}.", r.source.publisher));
-                Ok(Msg::InstanceChanged(inst.root.clone()))
+                Ok(Msg::added(inst.root.clone(), &before, None))
             });
         });
         true

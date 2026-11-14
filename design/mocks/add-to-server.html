@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Add to server</title>
+<style>
+:root { --bg:#16181d; --panel:#1f2229; --card:#262a33; --line:#343a46; --fg:#e6e8ec; --mute:#9aa1ad; --orange:#f08a24; --green:#3fb950; --warn:#d29922; --info:#4ea1ff; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 "Segoe UI", system-ui, sans-serif; padding:24px 16px; }
+h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:16px; margin:0 0 6px; }
+p { color:var(--mute); margin:0 0 12px; max-width:70ch; }
+.grid { display:grid; gap:20px; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); }
+.board { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+.board.pick { outline:2px solid var(--orange); }
+.tag { display:inline-block; font-size:11px; padding:1px 8px; border-radius:99px; background:#3a2a14; color:var(--orange); margin-left:6px; }
+.win { background:#121419; border-radius:8px; padding:12px; min-height:220px; position:relative; }
+.row { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:6px; }
+.row + .row { margin-top:2px; }
+.ico { width:20px; height:20px; border-radius:4px; background:#5b7; flex:none; }
+.ico.b { background:#a7c; }
+.chip { font-size:11px; padding:1px 8px; border-radius:99px; background:#3b3115; color:var(--warn); margin-left:auto; }
+.note { position:absolute; right:12px; bottom:12px; width:300px; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; box-shadow:0 6px 20px #0008; }
+.note b { display:block; margin-bottom:2px; }
+.note small { color:var(--mute); display:block; margin-bottom:8px; }
+.btn { display:inline-block; font-size:12px; padding:4px 10px; border-radius:6px; border:1px solid var(--line); color:var(--fg); }
+.btn.fill { background:var(--orange); border-color:var(--orange); color:#1b1206; }
+.dialog { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; }
+.check { display:flex; gap:8px; align-items:center; margin-top:10px; }
+.box { width:14px; height:14px; border-radius:3px; background:var(--orange); }
+.sw { width:30px; height:16px; border-radius:99px; background:var(--orange); position:relative; flex:none; }
+.sw::after { content:""; position:absolute; right:2px; top:2px; width:12px; height:12px; border-radius:50%; background:#fff; }
+ul { margin:8px 0 0; padding-left:18px; color:var(--mute); }
+</style>
+</head>
+<body>
+<h1>Adding mods to a paired instance: put them on the server too</h1>
+<p>Today adding a mod only writes into the instance. The paired server gets it only on "Update dg", Server sync or an auto pack update, so a mod can be missing there for days without a word.</p>
+<div class="grid">
+
+<section class="board pick">
+<h2>A. Offer right after the install <span class="tag">Pick</span></h2>
+<p>A notice that stays until answered: names the new mods that would sync and copies just those (no removals) as a task, recorded in dg's History.</p>
+<div class="win">
+  <div class="row"><span class="ico"></span>Hands-On Delight<span class="chip">Not on the server</span></div>
+  <div class="row"><span class="ico b"></span>Diegesis<span class="chip">Not on the server</span></div>
+  <div class="note"><b>Hands-On Delight and 1 more aren't on dg</b><small>dg is running: they load after its next restart.</small><span class="btn fill">Add to dg</span></div>
+</div>
+<ul><li>Works for every way of adding (Browse, missing dependencies, crash help, MCP).</li><li>One notice per paired server.</li><li>Client-only, "Never sync" and flagged mods are left out; none left, no notice.</li></ul>
+</section>
+
+<section class="board">
+<h2>B. "Also add to dg" in the add flow</h2>
+<p>A tick box beside Install, remembered per instance.</p>
+<div class="win"><div class="dialog"><b>Install Hands-On Delight</b><div style="color:var(--mute);font-size:12px">+ 1 required dependency (Diegesis)</div>
+<div class="check"><span class="box"></span>Also add to dg</div><div style="margin-top:12px"><span class="btn fill">Install</span></div></div></div>
+<ul><li>Browse installs are one click with no dialog today: adds a step or a hidden control.</li><li>Missing-dependency and crash-help installs need their own copy.</li></ul>
+</section>
+
+<section class="board">
+<h2>C. Setting: add new mods to the server too</h2>
+<p>Automatic, like "Update servers with the pack".</p>
+<div class="win"><div class="dialog"><div class="check" style="margin:0"><span class="sw"></span>Add mods I add to the paired server too</div>
+<div style="color:var(--mute);font-size:12px;margin-top:6px">Running servers load them after their next restart.</div></div></div>
+<ul><li>Off by default (no surprises on a shared server), so the default stays silent: the problem stays for most players.</li><li>Changes a server's files without asking.</li></ul>
+</section>
+</div>
+<p style="margin-top:20px"><b style="color:var(--fg)">Why A:</b> it reaches every add path from one place, asks once with the facts (which mods, which server), never changes a server unasked, and can't be missed: it stays until clicked or closed. A running server still gets the jars (harmless until restart) and the server page shows the existing "Synced while running: restart the server" line.</p>
+</body>
+</html>

@@ -376,11 +376,11 @@ fn install(store: &Entity<Store>, args: &Value, cx: &mut App) -> Reply {
         let class = m.class_id.unwrap_or(cf::CLASS_MODS);
         // Website-only files (the project or a dependency) go to the
         // download window, as from Browse; the task ends when they're in.
-        let before = hopper::modpack::pending_urls_at(&inst.root);
+        let before = crate::store::Before::at(&inst.root);
         let place = hopper::browse::Placement { instances_root: &instances_root, target: Some(inst), dest: None };
         let (changed, line) = hopper::browse::install_project(&m, None, class, place, job)?;
         job.detail(line);
-        Ok(Msg::installed(changed, &before, Some(id)))
+        Ok(Msg::added(changed, &before, Some(id)))
     });
     Ok(vec![text("Installing in Hopper (a task, with required dependencies). list_mods shows it once done.")])
 }

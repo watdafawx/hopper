@@ -157,10 +157,10 @@ impl CrashHelp {
         let store = self.store.read(cx);
         let Some(mut inst) = store.instance(&root).cloned() else { return };
         store.spawn_instance_job(&root, "Installing Crash Assistant", move |job| {
-            let before = hopper::modpack::pending_urls_at(&inst.root);
+            let before = crate::store::Before::at(&inst.root);
             let added = hopper::install::install_mod_id(&mut inst, "crash_assistant", job)?;
             job.note(format!("Installed {}", added.join(", ")));
-            Ok(crate::store::Msg::installed(inst.root.clone(), &before, None))
+            Ok(crate::store::Msg::added(inst.root.clone(), &before, None))
         });
     }
 }
