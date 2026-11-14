@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relay through a VPS</title>
+<!-- Mock for design/vps-relay.md. Colours and pieces follow crates/hopperd/ui/src/app.css
+     (Hopper Dark / Hopper Light from lib/themes.json). Self-contained: no scripts from outside. -->
+<style>
+:root {
+  --bg: #121214; --base: #17171a; --surface: #1f1f23; --raise: #28282d; --line: #26262b; --line2: #3a3a42;
+  --text: #ededef; --subtle: #a8a8b0; --muted: #9a9aa3; --input-line: #64646e;
+  --acc: #f97316; --acc-t: #fb923c; --acc-dim: #f973161f; --on-acc: #1c0d02;
+  --green: #22c55e; --green-dim: #22c55e1a; --gold: #facc15; --gold-dim: #facc151a;
+  --blue: #38bdf8; --blue-dim: #38bdf81a; --red: #ef4444; --red-dim: #ef44441a;
+  --hover: #ededef0f; --sel: #f973161f; --popover: #17171a; --overlay: #0000008c;
+  --radius-sm: 4px; --radius: 6px; --radius-lg: 10px;
+  --mono: ui-monospace, 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) {
+  --bg: #fafafa; --base: #ffffff; --surface: #f4f4f5; --raise: #e7e7ea; --line: #e4e4e7; --line2: #d4d4d8;
+  --text: #18181b; --subtle: #3f3f46; --muted: #5f5f69; --input-line: #a1a1aa;
+  --acc: #ea580c; --acc-t: #9a3412; --acc-dim: #ea580c1f; --on-acc: #141414;
+  --green: #166534; --green-dim: #16a34a1a; --gold: #854d0e; --gold-dim: #ca8a041f;
+  --blue: #0369a1; --blue-dim: #0284c71a; --red: #b91c1c; --red-dim: #dc26261a;
+  --hover: #18181b0d; --sel: #ea580c1f; --popover: #ffffff; --overlay: #0000004d; color-scheme: light; } }
+:root[data-theme="light"] {
+  --bg: #fafafa; --base: #ffffff; --surface: #f4f4f5; --raise: #e7e7ea; --line: #e4e4e7; --line2: #d4d4d8;
+  --text: #18181b; --subtle: #3f3f46; --muted: #5f5f69; --input-line: #a1a1aa;
+  --acc: #ea580c; --acc-t: #9a3412; --acc-dim: #ea580c1f; --on-acc: #141414;
+  --green: #166534; --green-dim: #16a34a1a; --gold: #854d0e; --gold-dim: #ca8a041f;
+  --blue: #0369a1; --blue-dim: #0284c71a; --red: #b91c1c; --red-dim: #dc26261a;
+  --hover: #18181b0d; --sel: #ea580c1f; --popover: #ffffff; --overlay: #0000004d; color-scheme: light; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font: 13px/1.45 Inter, system-ui, -apple-system, 'Segoe UI', sans-serif; padding: 24px 16px 60px; }
+.wrap { max-width: 1180px; margin: 0 auto; }
+h1 { font-size: 20px; font-weight: 650; }
+h2.screen { font-size: 15px; font-weight: 650; margin: 40px 0 4px; padding-top: 18px; border-top: 1px solid var(--line); }
+p.lead { color: var(--subtle); max-width: 60rem; margin-top: 6px; }
+.opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 18px; margin-top: 14px; align-items: start; }
+.opt { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.opt > header { display: flex; align-items: center; gap: 8px; }
+.opt > header b { font-size: 13px; }
+.opt > p.why { font-size: 12px; color: var(--muted); }
+.pick { font-size: 11px; font-weight: 700; color: var(--on-acc); background: var(--acc); border-radius: var(--radius-sm); padding: 2px 7px; }
+.pickwhy { font-size: 12px; color: var(--text); background: var(--acc-dim); border-radius: var(--radius); padding: 6px 9px; }
+.frame { background: var(--base); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 14px; min-width: 0; overflow: hidden; }
+.themebar { display: flex; gap: 6px; margin-top: 12px; }
+/* app.css pieces */
+.row { display: flex; align-items: center; gap: 8px; } .col { display: flex; flex-direction: column; gap: 8px; } .sp { flex: 1; } .wrapr { flex-wrap: wrap; }
+.muted { color: var(--muted); } .subtle { color: var(--subtle); } .small { font-size: 12px; } .tiny { font-size: 11px; } .mono { font-family: var(--mono); }
+.lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 14px; }
+.card h3 { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 7px; margin-bottom: 10px; }
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: var(--radius); border: 1px solid var(--line2); font: inherit; font-size: 12.5px; font-weight: 500; white-space: nowrap; background: var(--surface); color: var(--text); cursor: pointer; }
+.btn:hover { background: var(--raise); }
+.btn.pri { background: var(--acc); border-color: var(--acc); color: var(--on-acc); font-weight: 600; }
+.btn.ghost { background: none; border-color: transparent; color: var(--subtle); }
+.btn.ghost:hover { background: var(--hover); color: var(--text); }
+.btn.sm { padding: 3px 8px; font-size: 12px; }
+.btn:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--acc); }
+.chip { display: inline-flex; align-items: center; gap: 5px; height: 20px; line-height: 1; font-size: 11.5px; padding: 0 8px 2px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--subtle); white-space: nowrap; }
+.chip.running { color: var(--green); background: var(--green-dim); } .chip.warn { color: var(--gold); background: var(--gold-dim); }
+.chip.bad { color: var(--red); background: var(--red-dim); } .chip.lan { color: var(--blue); background: var(--blue-dim); } .chip.acc { color: var(--acc-t); background: var(--acc-dim); }
+.pill { display: inline-flex; align-items: center; gap: 6px; height: 20px; line-height: 1; padding: 0 9px 2px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.pill.running { color: var(--green); background: var(--green-dim); } .pill.bad { color: var(--red); background: var(--red-dim); } .pill.warn { color: var(--gold); background: var(--gold-dim); }
+.pill .glow { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; }
+.input { display: flex; align-items: center; gap: 7px; background: var(--base); border: 1px solid var(--input-line); border-radius: var(--radius); padding: 6px 10px; color: var(--subtle); min-width: 0; }
+.input span { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.input.ph span { color: var(--muted); }
+.seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: var(--radius); background: var(--hover); }
+.seg button { font: inherit; font-size: 12.5px; color: var(--muted); background: none; border: 0; padding: 3px 10px; border-radius: var(--radius-sm); cursor: pointer; }
+.seg button[aria-pressed=true] { background: var(--sel); color: var(--text); font-weight: 500; }
+.utabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); }
+.utabs span { padding: 6px 9px; color: var(--subtle); font-size: 12.5px; font-weight: 500; }
+.utabs span.on { color: var(--text); box-shadow: inset 0 -2px 0 var(--acc); }
+.bar { height: 5px; border-radius: 9px; background: var(--raise); overflow: hidden; } .bar i { display: block; height: 100%; background: var(--acc); border-radius: 9px; }
+.bar.g i { background: var(--green); }
+.switch { position: relative; display: inline-block; width: 32px; height: 18px; flex: none; }
+.switch span { position: absolute; inset: 0; background: #64646e; border-radius: var(--radius); }
+.switch span::after { content: ''; position: absolute; width: 14px; height: 14px; border-radius: var(--radius-sm); background: #fff; top: 2px; left: 2px; }
+.switch.on span { background: var(--acc); } .switch.on span::after { left: 16px; }
+.switch.locked { opacity: .55; }
+.dialog { background: var(--popover); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: 0 20px 50px #0006; width: 100%; }
+.dialog .hd { padding: 14px 16px 10px; display: flex; align-items: center; gap: 8px; }
+.dialog .hd b { font-size: 14px; }
+.dialog .bd { padding: 0 16px 14px; display: flex; flex-direction: column; gap: 10px; }
+.dialog .ft { padding: 10px 16px; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: flex-end; }
+/* label column form (settings_form) */
+.form { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px 12px; align-items: center; }
+.form > .l { color: var(--subtle); font-size: 12.5px; }
+.steps { display: flex; flex-direction: column; gap: 2px; }
+.step { display: flex; align-items: center; gap: 9px; padding: 5px 8px; border-radius: var(--radius); font-size: 12.5px; }
+.step:hover { background: var(--hover); }
+.step .st { width: 16px; height: 16px; display: grid; place-items: center; flex: none; font-size: 12px; font-weight: 700; }
+.st.ok { color: var(--green); } .st.run { color: var(--acc-t); } .st.wait { color: var(--muted); } .st.fail { color: var(--red); }
+.step .d { margin-left: auto; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.spinner { width: 12px; height: 12px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; display: inline-block; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.note { font-size: 12px; color: var(--subtle); background: var(--hover); border-radius: var(--radius); padding: 8px 10px; }
+.note.warn { background: var(--gold-dim); color: var(--text); }
+.stepper { display: flex; gap: 6px; font-size: 11.5px; color: var(--muted); }
+.stepper span { display: inline-flex; align-items: center; gap: 5px; }
+.stepper span i { width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; font-style: normal; font-size: 10px; font-weight: 700; background: var(--raise); color: var(--muted); }
+.stepper span.on { color: var(--text); } .stepper span.on i { background: var(--acc); color: var(--on-acc); }
+.stepper span.done i { background: var(--green-dim); color: var(--green); }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.stat .v { font-size: 18px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.stat .v .u { font-size: 12px; color: var(--muted); font-weight: 500; }
+.stat .s { font-size: 11.5px; color: var(--muted); }
+.addr { display: flex; align-items: center; gap: 8px; background: var(--base); border: 1px solid var(--line2); border-radius: var(--radius); padding: 6px 6px 6px 10px; }
+.addr .mono { font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.spark { width: 100%; height: 34px; display: block; }
+.pl { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: var(--radius); }
+.pl:hover { background: var(--hover); }
+.face { width: 22px; height: 22px; border-radius: var(--radius-sm); flex: none; }
+.ping { width: 4.5rem; text-align: right; font-variant-numeric: tabular-nums; flex: none; }
+.ping.good { color: var(--green); } .ping.warn { color: var(--gold); } .ping.bad { color: var(--red); }
+.on { width: 3.5rem; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+.split { display: inline-flex; flex-direction: column; align-items: flex-end; line-height: 1.2; }
+.split small { font-size: 10.5px; color: var(--muted); }
+.tip { position: relative; background: var(--popover); border: 1px solid var(--line2); border-radius: var(--radius); padding: 6px 9px; font-size: 12px; box-shadow: 0 8px 24px #0005; width: max-content; margin: 4px 0 0 auto; }
+.fl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 4px; border-bottom: 1px solid var(--line); }
+.fl:last-child { border-bottom: 0; }
+.fl .key { font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+.relaychip { display: inline-flex; align-items: center; gap: 5px; }
+a { color: var(--acc-t); text-decoration: none; }
+svg.i { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: var(--radius-lg); background: var(--green-dim); border: 1px solid transparent; }
+.banner.bad { background: var(--red-dim); }
+.pagehd { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.ic { width: 30px; height: 30px; border-radius: var(--radius); background: #a3e635; display: grid; place-items: center; font-weight: 800; color: #1a1a1f; flex: none; }
+@media (max-width: 520px) { .stats { grid-template-columns: 1fr 1fr; } .form { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20"/></symbol>
+  <symbol id="copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol id="shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+  <symbol id="users" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+  <symbol id="more" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+  <symbol id="term" viewBox="0 0 24 24"><path d="M4 17l6-6-6-6M12 19h8"/></symbol>
+  <symbol id="mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></symbol>
+  <symbol id="x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+</svg>
+<div class="wrap">
+  <h1>Relay through a VPS</h1>
+  <p class="lead">Mock for <span class="mono">design/vps-relay.md</span>. Hopper Server's look (app.css). Four screens, two or three options each; the pick is marked with why. Numbers are from the ATM10 test (2 players, 20 min: 415.7 MB vanilla, 30.4 MB through the relay).</p>
+  <div class="themebar">
+    <button class="btn sm" onclick="document.documentElement.dataset.theme='dark'">Dark</button>
+    <button class="btn sm" onclick="document.documentElement.dataset.theme='light'">Light</button>
+    <button class="btn sm ghost" onclick="delete document.documentElement.dataset.theme">System</button>
+  </div>
+
+  <!-- ===================================================== 1. SETUP -->
+  <h2 class="screen">1 · Setup: ssh details → checks → install</h2>
+  <p class="lead">Opened from the server page (Addresses card, "Relay through a VPS…"). Owner or Manager only. The server is stopped for the last step.</p>
+  <div class="opts">
+
+    <div class="opt">
+      <header><b>A · One dialog, three steps</b><span class="pick">Pick</span></header>
+      <div class="pickwhy">Same dialog height all the way (DIALOG_TOP), steps in one list that is also the repair view later; each step checks before it acts, so "Run again" is the same screen.</div>
+      <div class="frame col">
+        <div class="dialog">
+          <div class="hd"><b>Relay through a VPS</b><span class="sp"></span><button class="btn ghost sm" aria-label="Close"><svg class="i"><use href="#x"/></svg></button></div>
+          <div class="bd">
+            <div class="stepper"><span class="done"><i>✓</i>Connect</span><span class="done"><i>✓</i>Check</span><span class="on"><i>3</i>Install</span></div>
+            <div class="steps">
+              <div class="step"><span class="st ok">✓</span>Ubuntu 24.04 · arm64 · 12 GB<span class="d">checked</span></div>
+              <div class="step"><span class="st ok">✓</span>Relay user and folders<span class="d">made</span></div>
+              <div class="step"><span class="st ok">✓</span>Java 21<span class="d">downloaded, 48 MB</span></div>
+              <div class="step"><span class="st ok">✓</span>Hopper relay 0.72.6<span class="d">signature ok</span></div>
+              <div class="step"><span class="st run"><span class="spinner"></span></span>Velocity 3.5.1<span class="d">9 of 18 MB</span></div>
+              <div class="step"><span class="st wait">○</span>Firewall on the VPS: 25565, 25566, 24454</div>
+              <div class="step"><span class="st wait">○</span>Ports open from the internet</div>
+              <div class="step"><span class="st wait">○</span>Change the server: Proxy Compatible Forge, 4 settings</div>
+              <div class="step"><span class="st wait">○</span>Direct joins refused (account check)</div>
+            </div>
+            <div class="bar"><i style="width:52%"></i></div>
+            <div class="tiny muted">Every change to the server goes in its History. <a href="#">Show the commands</a></div>
+          </div>
+          <div class="ft"><button class="btn">Cancel</button><button class="btn pri" disabled style="opacity:.5">Done</button></div>
+        </div>
+        <div class="dialog">
+          <div class="hd"><b>Relay through a VPS</b></div>
+          <div class="bd">
+            <div class="stepper"><span class="on"><i>1</i>Connect</span><span><i>2</i>Check</span><span><i>3</i>Install</span></div>
+            <p class="small subtle">Players join the VPS; your PC sends the game to it over one connection it opens itself. No port forward at home.</p>
+            <div class="form">
+              <span class="l">VPS address</span><div class="input"><span>203.0.113.10</span></div>
+              <span class="l">ssh user</span><div class="input"><span>ubuntu</span></div>
+              <span class="l">Sign in with</span><div class="seg"><button aria-pressed="true">Key file</button><button>Password</button><button>New key</button></div>
+              <span class="l">Key file</span><div class="row"><div class="input" style="flex:1"><span>my_vps_key</span></div><button class="btn">Choose…</button></div>
+            </div>
+            <div class="note">The login is used for setup only and isn't kept. It needs sudo.</div>
+          </div>
+          <div class="ft"><button class="btn">Cancel</button><button class="btn pri">Connect</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="opt">
+      <header><b>B · Wizard, one page per step</b></header>
+      <p class="why">Clearer for a first-timer, but the install list hides behind Next, and repair needs a second screen.</p>
+      <div class="frame">
+        <div class="dialog">
+          <div class="hd"><b>Relay through a VPS</b><span class="sp"></span><span class="tiny muted">Step 2 of 4</span></div>
+          <div class="bd">
+            <div class="bar g"><i style="width:50%"></i></div>
+            <b style="font-size:13px">Check the VPS</b>
+            <div class="steps">
+              <div class="step"><span class="st ok">✓</span>Signed in as ubuntu, sudo works</div>
+              <div class="step"><span class="st ok">✓</span>Ubuntu 24.04, arm64</div>
+              <div class="step"><span class="st ok">✓</span>12 GB memory, 88 GB free</div>
+              <div class="step"><span class="st fail">✕</span>Port 25565 is in use (velocity.service)</div>
+            </div>
+            <div class="note warn">Something already uses port 25565. Use 25570 for players, or stop it first.</div>
+            <div class="row"><button class="btn">Use 25570</button><button class="btn ghost">Check again</button></div>
+          </div>
+          <div class="ft"><button class="btn">Back</button><button class="btn pri" disabled style="opacity:.5">Next</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="opt">
+      <header><b>C · Copy a command, run it on the VPS</b></header>
+      <p class="why">No ssh login in Hopper (like a node's join command), but the player has to open a terminal, and Hopper can't check or fix ports or change the firewall itself.</p>
+      <div class="frame">
+        <div class="dialog">
+          <div class="hd"><b>Relay through a VPS</b></div>
+          <div class="bd">
+            <p class="small subtle">Run this on the VPS (as a user with sudo). It installs the relay and connects back here.</p>
+            <div class="addr"><span class="mono tiny">curl -fsSL …/hopperd-0.72.6-linux-arm64.tar.gz | sudo tar xz … && sudo hopperd relay join https://… --key hrk_9f2c…</span><button class="btn sm"><svg class="i"><use href="#copy"/></svg>Copy</button></div>
+            <div class="row small"><span class="spinner" style="color:var(--acc)"></span>Waiting for the VPS… <span class="muted">(key good for 30 minutes)</span></div>
+            <div class="note">Then open these ports in your cloud's firewall page: 25565/tcp, 25566/tcp, 24454/udp.</div>
+          </div>
+          <div class="ft"><button class="btn">Cancel</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================================================== 2. STATUS CARD -->
+  <h2 class="screen">2 · Relay status on the server page</h2>
+  <p class="lead">Tunnel up or down, upload saved against vanilla, cache hits, the address to give players. One per relayed server, on Overview next to Addresses.</p>
+  <div class="opts">
+
+    <div class="opt">
+      <header><b>A · Card with three numbers + address</b><span class="pick">Pick</span></header>
+      <div class="pickwhy">The address players need is first and copyable; three numbers in the Overview stat style (CPU / Memory cards) with a sparkline; actions in a ghost menu so the page's one orange button stays Start.</div>
+      <div class="frame col">
+        <div class="card">
+          <h3><svg class="i"><use href="#globe"/></svg>Relay through a VPS<span class="pill running"><span class="glow"></span>Connected</span><span class="sp"></span><span class="tiny muted">since 18:36 · 62 ms to home</span><button class="btn ghost sm" aria-label="More"><svg class="i"><use href="#more"/></svg></button></h3>
+          <div class="lbl" style="margin-bottom:4px">Players join</div>
+          <div class="addr"><span class="mono">play.example.com</span><span class="chip">VPS · Frankfurt</span><button class="btn sm"><svg class="i"><use href="#copy"/></svg>Copy</button></div>
+          <div class="stats" style="margin-top:12px">
+            <div class="stat"><div class="lbl">Upload saved</div><div class="v">93 <span class="u">%</span></div><div class="s">30.4 MB sent · 415.7 MB vanilla</div></div>
+            <div class="stat"><div class="lbl">Upload now</div><div class="v">59 <span class="u">kbit/s</span></div><div class="s">vanilla 2.9 Mbit/s</div></div>
+            <div class="stat"><div class="lbl">Cache hits</div><div class="v">1.02 <span class="u">GB</span></div><div class="s">64% of what was sent</div></div>
+          </div>
+          <svg class="spark" viewBox="0 0 300 34" preserveAspectRatio="none"><polyline fill="none" stroke="var(--muted)" stroke-opacity=".5" stroke-width="1.5" points="0,8 20,10 40,6 60,9 80,7 100,11 120,6 140,8 160,5 180,9 200,7 220,8 240,6 260,9 280,7 300,8"/><polyline fill="none" stroke="var(--acc)" stroke-width="1.5" points="0,31 20,30 40,26 60,31 80,32 100,24 120,31 140,32 160,29 180,31 200,32 220,27 240,31 260,32 280,30 300,31"/></svg>
+          <div class="row tiny muted"><span style="color:var(--acc-t)">━ sent</span><span>━ vanilla would send</span><span class="sp"></span><span class="row"><svg class="i"><use href="#mic"/></svg>Voice chat relayed</span></div>
+        </div>
+        <div class="card">
+          <h3><svg class="i"><use href="#globe"/></svg>Relay through a VPS<span class="pill bad"><span class="glow"></span>Not connected</span><span class="sp"></span><span class="tiny muted">trying again in 8 s</span></h3>
+          <div class="note">Can't reach the VPS (203.0.113.10:25566): no answer. The server keeps running here; players on the VPS see "Home server is offline".</div>
+          <div class="row" style="margin-top:10px"><button class="btn">Try now</button><button class="btn">Play at home until it's back</button><span class="sp"></span><a class="small" href="#">Relay log</a></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="opt">
+      <header><b>B · Banner strip above the tabs</b></header>
+      <p class="why">Always in sight on every tab, but too little room for the numbers; the saved-upload story gets lost.</p>
+      <div class="frame col">
+        <div class="pagehd"><div class="ic">D</div><b>DrunkGamblers</b><span class="chip running">running</span><span class="sp"></span><button class="btn">Stop</button></div>
+        <div class="banner"><span class="pill running"><span class="glow"></span>Relay</span><span class="mono small">play.example.com</span><button class="btn ghost sm"><svg class="i"><use href="#copy"/></svg></button><span class="sp"></span><span class="small">93% less upload</span><span class="small muted">· 62 ms</span></div>
+        <div class="utabs"><span class="on">Overview</span><span>Console</span><span>Players 2</span><span>Mods</span><span>Settings</span></div>
+        <div class="banner bad"><span class="pill bad"><span class="glow"></span>Relay down</span><span class="small">Can't reach the VPS. Trying again in 8 s.</span><span class="sp"></span><button class="btn sm">Try now</button></div>
+      </div>
+    </div>
+
+    <div class="opt">
+      <header><b>C · Its own "Relay" tab</b></header>
+      <p class="why">Room for charts, Velocity's log and per-player traffic, but one more tab for one card's worth of news; Overview would still need a chip.</p>
+      <div class="frame col">
+        <div class="utabs"><span>Overview</span><span>Console</span><span>Players 2</span><span class="on">Relay</span><span>Settings</span></div>
+        <div class="row wrapr"><span class="pill running"><span class="glow"></span>Connected</span><span class="mono small">play.example.com</span><span class="sp"></span><button class="btn sm">Velocity log</button><button class="btn sm">Update</button></div>
+        <div class="stats">
+          <div class="card stat"><div class="lbl">Saved</div><div class="v">93 <span class="u">%</span></div></div>
+          <div class="card stat"><div class="lbl">Now</div><div class="v">59 <span class="u">kb/s</span></div></div>
+          <div class="card stat"><div class="lbl">Cache</div><div class="v">1.0 <span class="u">GB</span></div></div>
+        </div>
+        <div class="card"><div class="lbl">VPS</div><div class="small">Ubuntu 24.04 · arm64 · Velocity 3.5.1 · Hopper relay 0.72.6</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================================================== 3. PLAYERS PING -->
+  <h2 class="screen">3 · Players tab: ping behind the relay</h2>
+  <p class="lead">Today the ping is the router's TCP round trip, which reads ~0 ms through the tunnel. Behind the relay the VPS measures each player's own connection.</p>
+  <div class="opts">
+
+    <div class="opt">
+      <header><b>A · One number: total, hover splits it</b><span class="pick">Pick</span></header>
+      <div class="pickwhy">The number is what the player feels (player → VPS → home), the row stays the width it is today (4 rem column), and the split is one hover away for whoever is debugging.</div>
+      <div class="frame">
+        <div class="card">
+          <h3><svg class="i"><use href="#users"/></svg>Online now <span class="muted" style="font-weight:400">2</span><span class="sp"></span><span class="chip lan relaychip"><svg class="i" style="width:12px;height:12px"><use href="#globe"/></svg>through the relay</span></h3>
+          <div class="pl"><span class="face" style="background:#7c5d3f"></span><b style="font-weight:500">Steve</b><span class="chip acc">op</span><span class="sp"></span><span class="ping warn">88 ms</span><span class="on">41m</span><button class="btn sm ghost">Kick</button></div>
+          <div class="tip">You → VPS 26 ms · VPS → home 62 ms</div>
+          <div class="pl"><span class="face" style="background:#3f6d7c"></span><b style="font-weight:500">Alex</b><span class="sp"></span><span class="ping warn">75 ms</span><span class="on">38m</span><button class="btn sm ghost">Kick</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="opt">
+      <header><b>B · Two small numbers</b></header>
+      <p class="why">Shows both parts at once, but every row is taller and readers must add them up; the "home" half is the same for everyone.</p>
+      <div class="frame">
+        <div class="card">
+          <h3><svg class="i"><use href="#users"/></svg>Online now <span class="muted" style="font-weight:400">2</span></h3>
+          <div class="pl"><span class="face" style="background:#7c5d3f"></span><b style="font-weight:500">Steve</b><span class="sp"></span><span class="ping"><span class="split"><span class="good">26 ms</span><small>+ 62 to home</small></span></span><span class="on">41m</span></div>
+          <div class="pl"><span class="face" style="background:#3f6d7c"></span><b style="font-weight:500">Alex</b><span class="sp"></span><span class="ping"><span class="split"><span class="good">13 ms</span><small>+ 62 to home</small></span></span><span class="on">38m</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="opt">
+      <header><b>C · Player → VPS only, home leg in the header</b></header>
+      <p class="why">Honest per player and compact, but the coloured number looks better than what they feel (26 ms reads green; it's really 88).</p>
+      <div class="frame">
+        <div class="card">
+          <h3><svg class="i"><use href="#users"/></svg>Online now <span class="muted" style="font-weight:400">2</span><span class="sp"></span><span class="tiny muted">VPS → home 62 ms</span></h3>
+          <div class="pl"><span class="face" style="background:#7c5d3f"></span><b style="font-weight:500">Steve</b><span class="sp"></span><span class="ping good">26 ms</span><span class="on">41m</span></div>
+          <div class="pl"><span class="face" style="background:#3f6d7c"></span><b style="font-weight:500">Alex</b><span class="sp"></span><span class="ping good">13 ms</span><span class="on">38m</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================================================== 4. ONLINE MODE -->
+  <h2 class="screen">4 · Settings › Players &amp; access: Online mode behind a proxy</h2>
+  <p class="lead">Today: "Check players against Microsoft accounts. Turn off only for LAN testing; anyone could join as anyone." That's wrong and alarming behind the relay, where the relay checks accounts.</p>
+  <div class="opts">
+
+    <div class="opt">
+      <header><b>A · Locked switch, new line, link to the relay</b><span class="pick">Pick</span></header>
+      <div class="pickwhy">The setting stays where people look for it; the line says who checks accounts and why it can't be turned on here (it would lock everyone out). Same treatment for the other three keys the relay sets.</div>
+      <div class="frame">
+        <div class="card" style="padding:6px 12px">
+          <div class="fl"><div><div>Online mode</div><div class="tiny muted">Accounts are checked by the relay (play.example.com). Players can't join this server directly. <a href="#">Relay settings</a> <span class="key">online-mode</span></div></div><span class="switch locked" title="Off · set by the relay"><span></span></span></div>
+          <div class="fl"><div><div>Secure chat profiles</div><div class="tiny muted">Set by the relay. <span class="key">enforce-secure-profile</span></div></div><span class="switch locked"><span></span></span></div>
+          <div class="fl"><div><div>Whitelist</div><div class="tiny muted">Only listed players can join. <span class="key">white-list</span></div></div><span class="switch on"><span></span></span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="opt">
+      <header><b>B · Grouped "Set by the relay" box</b></header>
+      <p class="why">All four keys in one place with one explanation, but they move out of their usual sections, so search and the desktop's layout differ.</p>
+      <div class="frame">
+        <div class="card">
+          <h3><svg class="i"><use href="#shield"/></svg>Set by the relay</h3>
+          <p class="small subtle" style="margin-bottom:8px">The relay checks accounts, so these stay as the relay needs them. <a href="#">Stop using the relay</a> to change them.</p>
+          <div class="row wrapr"><span class="chip">Online mode: Off</span><span class="chip">Secure chat profiles: Off</span><span class="chip">Compression: off</span><span class="chip">Address: 127.0.0.1</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="opt">
+      <header><b>C · Editable, with a warning</b></header>
+      <p class="why">Keeps full control, but flipping it on breaks every join with an odd error; a lock is kinder and "Play at home" covers the real need.</p>
+      <div class="frame">
+        <div class="card" style="padding:6px 12px">
+          <div class="fl"><div><div>Online mode <span class="chip warn">relay</span></div><div class="tiny muted">Off because the relay checks accounts. Turning it on stops everyone joining through the relay. <span class="key">online-mode</span></div></div><span class="switch"><span></span></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2 class="screen">Picks</h2>
+  <ul class="small" style="margin:8px 0 0 18px; display:flex; flex-direction:column; gap:4px">
+    <li><b>Setup: A</b> one dialog with a step list: also the repair screen, same height, checks-then-acts per step.</li>
+    <li><b>Status: A</b> card on Overview: copyable address first, three stat numbers in the Overview style, red state with "Play at home".</li>
+    <li><b>Ping: A</b> one total number (what players feel), split on hover.</li>
+    <li><b>Online mode: A</b> locked switch in place with "Accounts are checked by the relay".</li>
+  </ul>
+</div>
+</body>
+</html>
