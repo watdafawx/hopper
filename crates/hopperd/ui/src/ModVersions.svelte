@@ -11,6 +11,7 @@
   import FilesChanges from './lib/FilesChanges.svelte';
   import { dialog as question } from './lib/dialog.svelte.js';
   import { installVersion, resetConfig, setLocked } from './lib/modops.js';
+  import { isShown } from './lib/shown.js';
 
   let { server, mod, dialog = false, onChanged = () => {}, onClose = () => {} } = $props();
   let info = $state(null);
@@ -102,7 +103,9 @@
     <div class="locknote row small"><Lock size={14} /><span class="grow">Locked: Hopper keeps this version. Unlock it to update or switch.</span><button class="btn sm" onclick={unlock}><LockOpen size={13} />Unlock</button></div>
   {/if}
   {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
-  {#if !mod.source}
+  {#if !mod.source && isShown(mod)}
+    <div class="small muted">This jar comes with the modpack, so the pack updates it. There are no versions to pick here.</div>
+  {:else if !mod.source}
     <div class="small muted">Hopper doesn't know where this jar is from yet, so there are no versions or changelogs. Identify looks it up on CurseForge and Modrinth.</div>
   {:else if error}
     <div class="err small">{error}</div>
