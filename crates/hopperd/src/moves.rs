@@ -585,6 +585,8 @@ async fn undo(app: &Arc<App>, m: &Move, state: &str, text: &str) {
     let mut left = String::new();
     match call_json(app, &to, &m.by, Method::DELETE, &format!("/api/v1/receive/{}", m.id), Value::Null).await {
         Ok((st, _)) if st.is_success() => {}
+        // Its level was lowered: this panel may no longer clean up there.
+        Ok((StatusCode::FORBIDDEN, _)) => left = format!(" {} no longer lets this panel remove any part it got; it removes it within a week.", to.name),
         _ => left = format!(" {} couldn't be reached to remove the part it got; it removes it within a week.", to.name),
     }
     let path = format!("/api/v1/servers/{sid}/transfer/{}/finish", m.id);
