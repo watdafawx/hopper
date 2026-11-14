@@ -386,6 +386,12 @@ async fn list(
                 "short_version": hopper_core::scan::short_version(&a.file_name),
                 "mr_project": if !a.mr_project.is_empty() { a.mr_project.clone() } else if modrinth::is_mr(a.project_id) { modrinth::real_id(a.project_id).unwrap_or_default() } else { String::new() },
                 "locked_version": a.locked_version,
+                // A pack's own override jar has no project (so nothing updates
+                // or syncs it) but shows as the pack's entry for the mod: its
+                // page and Browse link. Display only; "project_id" stays "0".
+                "shown_as": id_str(a.shown_as),
+                "shown_source": if a.shown_as == 0 { "" } else if modrinth::is_mr(a.shown_as) { "modrinth" } else { "curseforge" },
+                "shown_mr": if modrinth::is_mr(a.shown_as) { modrinth::real_id(a.shown_as).unwrap_or_default() } else { String::new() },
                 "extra_files": extra.get(&a.file_name).cloned().unwrap_or_default(),
             }));
         }

@@ -4,6 +4,7 @@
   // view the dialog shows.
   import { X, TriangleAlert, Download, Lock, LockOpen, Settings2, Trash2, ExternalLink, Shuffle, Search, Link, SlidersHorizontal } from '@lucide/svelte';
   import { browseHash } from './lib/browse.js';
+  import { isShown, shownBrowse } from './lib/shown.js';
   import ModVersions from './ModVersions.svelte';
   import Comments from './lib/Comments.svelte';
   import { commentsLabel, prefetchComments } from './lib/comments.svelte.js';
@@ -19,11 +20,15 @@
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
   // From GitHub or a link: its own page; CurseForge and Modrinth never asked.
   const linked = $derived(mod.source === 'link');
-  const site = $derived(linked ? (mod.src_label === 'GitHub' ? 'GitHub' : '') : mod.source === 'modrinth' ? 'Modrinth' : 'CurseForge');
+  // A pack's own override jar: no project of its own (the pack updates it),
+  // but it shows as the pack's mod: its page and Browse link, no Follow.
+  const shown = $derived(isShown(mod));
+  const shownAt = $derived(shownBrowse(mod));
+  const site = $derived(linked ? (mod.src_label === 'GitHub' ? 'GitHub' : '') : (mod.source || mod.shown_source) === 'modrinth' ? 'Modrinth' : 'CurseForge');
   const sitePage = $derived(linked ? mod.src_page : mod.page);
   const sideText = { client: 'Client only', server: 'Server only', both: 'Client + server' };
   // Its page in Browse (description, gallery, every file).
-  const browse = $derived(mod.source && !linked ? `#${browseHash('mods', server.id)}/${mod.source}/${encodeURIComponent(mod.source === 'modrinth' ? mod.mr_project || '' : mod.project_id)}` : '');
+  const browse = $derived(shownAt ? `#${browseHash('mods', server.id)}/${shownAt.source}/${encodeURIComponent(shownAt.id)}` : mod.source && !linked ? `#${browseHash('mods', server.id)}/${mod.source}/${encodeURIComponent(mod.source === 'modrinth' ? mod.mr_project || '' : mod.project_id)}` : '');
   const vl = $derived(versionLocked(mod));
   // CurseForge's comments (desktop's Comments tab): the first page is asked
   // for in the background, so the tab is ready (and shows its count).
@@ -48,7 +53,7 @@
 <aside class="peek card col">
   <div class="row top">
     {#if mod.icon}<img src={mod.icon} alt="" width="40" height="40" />{:else}<span class="ph"></span>{/if}
-    <div class="grow"><div class="nm">{mod.name}</div><div class="tiny muted">{mod.author ? `by ${mod.author}` : mod.source || 'unknown source'}{linked && mod.src_publisher && mod.src_publisher !== mod.author ? ` · ${mod.src_publisher}` : ''}{mod.side ? ` · ${sideText[mod.side] || mod.side}` : ''}</div></div>
+    <div class="grow"><div class="nm">{mod.name}</div><div class="tiny muted">{mod.author ? `by ${mod.author}` : mod.source || (shown ? 'from the pack' : 'unknown source')}{shown && mod.author ? ' · from the pack' : ''}{linked && mod.src_publisher && mod.src_publisher !== mod.author ? ` · ${mod.src_publisher}` : ''}{mod.side ? ` · ${sideText[mod.side] || mod.side}` : ''}</div></div>
     <button class="btn sm ghost icon" title="Close" onclick={onClose}><X size={14} /></button>
   </div>
   <div class="row wrap">
@@ -57,10 +62,10 @@
     {#if onConfig}<button class="btn sm" title="This mod's settings" onclick={onConfig}><SlidersHorizontal size={13} />Config</button>{/if}
     {#if mod.source}<button class="btn sm ghost" onclick={() => resetConfig(base, mod)}><Settings2 size={13} />Reset config…</button>{/if}
     <span class="sp"></span>
-    {#if browse && (mod.source !== 'modrinth' || mod.mr_project)}<a class="btn sm ghost icon" href={browse} title="Open in Browse"><Search size={13} /></a>{/if}
+    {#if browse && (shown || mod.source !== 'modrinth' || mod.mr_project)}<a class="btn sm ghost icon" href={browse} title="Open in Browse"><Search size={13} /></a>{/if}
     {#if sitePage}<a class="btn sm ghost icon" href={sitePage} target="_blank" rel="noreferrer" title={site ? `Open on ${site}` : 'Open link'}><ExternalLink size={13} /></a>{/if}
     {#if mod.source && !linked}<button class="btn sm ghost icon" title="Switch to {mod.source === 'modrinth' ? 'CurseForge' : 'Modrinth'}" disabled={!!busy} onclick={async () => (await switchSource(base, mod, alive, (s) => (busy = s))) && onChanged(true)}><Shuffle size={13} /></button>{/if}
-    {#if onFollow}<button class="btn sm ghost icon" title={mod.source === 'link' ? 'Change source…' : 'Follow a source…'} onclick={() => onFollow(mod)}><Link size={13} /></button>{/if}
+    {#if onFollow && !shown}<button class="btn sm ghost icon" title={mod.source === 'link' ? 'Change source…' : 'Follow a source…'} onclick={() => onFollow(mod)}><Link size={13} /></button>{/if}
     <button class="btn sm ghost icon bad" title="Remove (kept in Backups)" onclick={async () => { if (await removeMods(base, [mod], alive, { onUndo: () => onChanged(true) })) { onChanged(true); onClose(); } }}><Trash2 size={13} /></button>
   </div>
   {#if mod.update && !mod.locked && problems(mod.update).length}

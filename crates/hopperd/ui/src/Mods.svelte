@@ -11,6 +11,7 @@
   // background and updates are checked on CurseForge and Modrinth.
   import { untrack } from 'svelte';
   import { browseHash } from './lib/browse.js';
+  import { isShown, isUnknown, shownBrowse } from './lib/shown.js';
   import CfKey from './CfKey.svelte';
   import DropJars from './DropJars.svelte';
   import ModPeek from './ModPeek.svelte';
@@ -199,7 +200,7 @@
     off: base0.filter((m) => !m.enabled).length,
     archived: base0.filter(isArchived).length,
     client: base0.filter((m) => m.side === 'client').length,
-    unknown: base0.filter((m) => !m.source).length,
+    unknown: base0.filter(isUnknown).length,
     config: base0.filter(cfgChanged).length,
     yours: mods.filter(yours).length,
   });
@@ -227,7 +228,7 @@
   }
   const fits = {
     all: () => true, updates: pending, off: (m) => !m.enabled, archived: isArchived,
-    client: (m) => m.side === 'client', unknown: (m) => !m.source,
+    client: (m) => m.side === 'client', unknown: isUnknown,
   };
   // The orders the list can take, named as their column headers are.
   const SORTS = $derived([['name', 'Name'], ['author', 'Author'], ...(hasSide ? [['side', 'Side']] : []), ['on', 'Enabled'], ['added', 'Added']]);
@@ -779,7 +780,7 @@
   const ON_HEAD = "Disabled keeps the file but the server doesn't load it (renamed to .disabled). Click to sort.";
   const SIDE_HEAD = 'Where the mod runs:\nClient only: players need it\nServer only\nClient and server: both need it\nHover a row\'s icon for more. Click to sort.';
   const HEADS = { author: ['Author', ''], side: ['Side', SIDE_HEAD], on: ['Enabled', ON_HEAD], added: ['Added', ''] };
-  const site = (m) => (m.source === 'modrinth' ? 'Modrinth' : m.source === 'link' ? m.src_label : 'CurseForge');
+  const site = (m) => ((m.source || m.shown_source) === 'modrinth' ? 'Modrinth' : m.source === 'link' ? m.src_label : 'CurseForge');
   // On CurseForge or Modrinth (a mod from GitHub or a link is neither).
   const onSite = (m) => m.source === 'curseforge' || m.source === 'modrinth';
   const isNew = (m) => !!m.date_added && Date.now() - new Date(m.date_added).getTime() < 3 * 86400000;
@@ -907,7 +908,7 @@
               <div class="tags">
                 {#if isNew(m) && !yours(m)}<span class="chip tag okc">New</span>{/if}
                 {#if yours(m)}<span class="chip tag gold">Added by you</span>{/if}
-                {#if !m.source}<span class="chip tag">Unknown</span>{/if}
+                {#if isUnknown(m)}<span class="chip tag">Unknown</span>{/if}
                 {#if SIDE_TAG[m.side]}<span class="chip tag {SIDE_TAG[m.side][1]}">{SIDE_TAG[m.side][0]}</span>{/if}
                 {#if !(up && (vl || breaking))}
                   {#each cats.slice(0, 2) as c (c)}<span class="chip tag">{c}</span>{/each}
@@ -917,7 +918,7 @@
                 {#if m.src_label}<span class="chip tag info">{m.src_label}</span>{/if}
                 <!-- An older copy kept turned off beside this one: the mod used to list twice. -->
                 {#if m.extra_files?.length}<button class="chip tag warnc" title={`Also here, turned off: ${m.extra_files.join(', ')}. It's an older copy of this mod, so the list showed the mod twice. Click to remove ${m.extra_files.length === 1 ? 'it' : 'them'}.`} onclick={async (e) => { e.stopPropagation(); if (await drop(m.extra_files.map((f) => ({ file: f, name: `${m.name} (old copy)` })))) changed(true); }}>{m.extra_files.length === 1 ? 'Old copy' : `${m.extra_files.length} old copies`}</button>{/if}
-                {#if srcOn && !m.source && !m.from_pack}<button class="srcp" onclick={(e) => { e.stopPropagation(); sourceFor = { follow: m }; }}>Add a source to get updates</button>{/if}
+                {#if srcOn && isUnknown(m) && !m.from_pack}<button class="srcp" onclick={(e) => { e.stopPropagation(); sourceFor = { follow: m }; }}>Add a source to get updates</button>{/if}
                 {#if srcOn && m.src_trusted === false}<button class="srcp" onclick={(e) => { e.stopPropagation(); trustSource(m); }}>Turn on updates from {m.src_publisher}</button>{/if}
                 {#if up?.changed}<span class="chip tag bad" title="The file of the installed release was replaced at its source without a new release. Hopper won't install it on its own; install it from Versions if you trust the change.">Changed at source</span>{/if}
                 {#if up}
@@ -993,7 +994,8 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   {@const mup = pending(m) ? m.update : null}
   {@const mvl = versionLocked(m)}
   <div class="ctx popover menu" style:left="{menu.x}px" style:top="{menu.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
-    {#if m.source && browseOf(m)}<a class="menu-item" href="#{browseHash('mods', server.id)}/{m.source}/{encodeURIComponent(browseOf(m))}" onclick={() => (menu = null)}><Search size={13} />Open in Browse</a>{/if}
+    {#if m.source && browseOf(m)}<a class="menu-item" href="#{browseHash('mods', server.id)}/{m.source}/{encodeURIComponent(browseOf(m))}" onclick={() => (menu = null)}><Search size={13} />Open in Browse</a>
+    {:else if shownBrowse(m)}{@const sb = shownBrowse(m)}<a class="menu-item" href="#{browseHash('mods', server.id)}/{sb.source}/{encodeURIComponent(sb.id)}" onclick={() => (menu = null)}><Search size={13} />Open in Browse</a>{/if}
     {#if m.source}<button class="menu-item" onclick={() => act((m) => (versionsFor = m))}><Clock size={13} />Versions and changelogs</button>{/if}
     <button class="menu-item" onclick={() => act(() => (location.hash = `${here()}/server/${encodeURIComponent(server.id)}/files/mods`))}><FolderOpen size={13} />Show in Files</button>
     {#if m.source}<button class="menu-item" onclick={() => act(editConfig)}><Pencil size={13} />Edit config…</button>{/if}
@@ -1005,7 +1007,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
       {#if m.src_page}<a class="menu-item" href={m.src_page} target="_blank" rel="noreferrer" onclick={() => (menu = null)}><ExternalLink size={13} />Open on {m.src_label}</a>{/if}
       <button class="menu-item" onclick={() => act((m) => (sourceFor = { follow: m }))}><Link size={13} />Change source…</button>
       <button class="menu-item" onclick={() => act(unfollow)}><Unlink size={13} />Stop following</button>
-    {:else}
+    {:else if !isShown(m)}
       <button class="menu-item" onclick={() => act((m) => (sourceFor = { follow: m }))}><Link size={13} />Follow a source…</button>
     {/if}
     {#if mup}<button class="menu-item" onclick={() => act((m) => lockVersion(m, !mvl))}>{#if mvl}<LockOpen size={13} /><span class="ell">Unlock {mup.to}</span>{:else}<Lock size={13} /><span class="ell">Lock {mup.to} (keep {mup.from})</span>{/if}</button>{/if}
