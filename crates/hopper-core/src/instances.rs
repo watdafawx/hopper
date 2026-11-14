@@ -1031,7 +1031,10 @@ pub fn load(root: &Path) -> Option<Instance> {
     if !gone.is_empty() {
         log::info!("{}: forgot {} mods whose jars are gone: {}", root.display(), gone.len(), gone.join(", "));
     }
-    if inst.addons.len() != before {
+    // Jars the pack ships in its overrides are the pack's (an older Hopper
+    // recorded them as the player's, or as a stranger's re-upload).
+    let claimed = crate::modpack::claim_shipped_jars(&mut inst);
+    if inst.addons.len() != before || claimed {
         let _ = inst.save();
     }
     // Teach the id registry this instance's Modrinth projects and versions.

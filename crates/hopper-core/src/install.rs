@@ -1212,13 +1212,93 @@ pub(crate) fn addon_as_mod(a: &crate::instances::Addon) -> cf::Mod {
     }
 }
 
+/// What the game does when a mod is in `mods/` twice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TwiceFate {
+    /// It won't start (Fabric and Quilt refuse a mod id they see twice).
+    #[default]
+    Refuses,
+    /// It loads the copy with the highest version and ignores the others
+    /// (NeoForge, and Forge since 1.17: FML's `UniqueModListBuilder`).
+    NewestLoads,
+}
+
+/// Whether this loader keeps the highest version when a mod id is in twice,
+/// instead of refusing to start. NeoForge's log says it plainly ("Found 2
+/// mods for first modid computercraft, selecting most recent based on
+/// version data"); FancyModLoader's `UniqueModListBuilder.selectNewestModInfo`
+/// does the sorting, and Forge's FML has had the same builder since 1.17.
+/// Any other loader counts as refusing, the safe warning.
+pub fn loader_keeps_newest(loader: &str, game_version: &str) -> bool {
+    match Loader::from_loader_id(loader) {
+        Loader::NeoForge => true,
+        Loader::Forge => game_version.split('.').nth(1).and_then(|m| m.parse::<u32>().ok()).is_some_and(|m| m >= 17),
+        _ => false,
+    }
+}
+
 /// Two or more enabled jars in `mods/` that are one mod, whatever their
-/// versions. The game refuses to start with both.
+/// versions. Fabric and Quilt refuse to start with both; NeoForge and Forge
+/// load the highest version ([`TwiceFate`]).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Duplicate {
     pub name: String,
-    /// Newest file first (the one to keep).
+    /// The copy to keep first: for [`TwiceFate::NewestLoads`] the one the
+    /// game loads (highest version), otherwise the newest file.
     pub files: Vec<String>,
+    /// Old Hopper Servers don't send these: they mean "refuses".
+    #[serde(default)]
+    pub fate: TwiceFate,
+    /// The version that loads (`NewestLoads` only; empty when unknown).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub loads: String,
+    /// Every copy came with the modpack: nothing the player did, and the
+    /// pack ships it that way on purpose.
+    #[serde(default)]
+    pub all_from_pack: bool,
+}
+
+impl Duplicate {
+    /// The game won't start: the Mods tab's warning.
+    pub fn is_problem(&self) -> bool {
+        self.fate == TwiceFate::Refuses
+    }
+
+    /// A copy the player added beside the pack's: a quiet note, not a
+    /// warning, saying which one loads.
+    pub fn is_note(&self) -> bool {
+        self.fate == TwiceFate::NewestLoads && !self.all_from_pack
+    }
+
+    /// Whether it shows at all: a pack that ships a mod twice on purpose
+    /// (two pack mods need the newer one) says nothing.
+    pub fn is_shown(&self) -> bool {
+        self.is_problem() || self.is_note()
+    }
+
+    /// "CC: Tweaked is in twice. Only 1.120.2 loads; the other copy does
+    /// nothing."
+    pub fn note(&self) -> String {
+        let others = self.files.len().saturating_sub(1);
+        let which = if self.loads.is_empty() { "The newest one".to_string() } else { format!("Only {}", self.loads) };
+        format!(
+            "{} is in twice. {which} loads; the other cop{} does nothing.",
+            self.name,
+            if others == 1 { "y" } else { "ies" }
+        )
+    }
+}
+
+/// Whether the copies of one mod are all the same mod to the loader: each
+/// declares a first mod id and it is the same one. That is what FML groups by,
+/// so only then does it pick the highest version; two jars that meet on a
+/// second id or on a project only make it refuse.
+fn same_first_id(first_ids: &[Option<&str>]) -> bool {
+    match first_ids.first() {
+        Some(Some(first)) => first_ids.iter().all(|i| *i == Some(*first)),
+        _ => false,
+    }
 }
 
 /// Enabled jars that are the same CurseForge/Modrinth project or declare
@@ -1243,6 +1323,10 @@ pub fn duplicates(inst: &Instance) -> Vec<Duplicate> {
     // Key ("p:<project>" or "m:<mod id>") -> jars, in newest-first order.
     let mut by_key: HashMap<String, Vec<usize>> = HashMap::new();
     let mut names: Vec<String> = Vec::with_capacity(jars.len());
+    // What the loader sees of each jar: its first mod id (FML groups copies
+    // by it) and whether the modpack put it there.
+    let mut firsts: Vec<Option<String>> = Vec::with_capacity(jars.len());
+    let mut packed: Vec<bool> = Vec::with_capacity(jars.len());
     for (i, (file, _)) in jars.iter().enumerate() {
         let tracked = inst.addon_by_file(file);
         if let Some(a) = tracked.filter(|a| a.project_id != 0) {
@@ -1254,6 +1338,8 @@ pub fn duplicates(inst: &Instance) -> Vec<Duplicate> {
             None if !shown.is_empty() => shown,
             None => file.clone(),
         });
+        firsts.push(ids.first().cloned());
+        packed.push(tracked.is_some_and(|a| a.from_pack));
         ids.sort();
         ids.dedup();
         for id in ids {
@@ -1277,22 +1363,48 @@ pub fn duplicates(inst: &Instance) -> Vec<Duplicate> {
             }
         }
     }
-    let mut out: Vec<Duplicate> = Vec::new();
+    let mut members: Vec<Vec<usize>> = Vec::new();
     let mut at: HashMap<usize, usize> = HashMap::new();
     for i in 0..jars.len() {
         let g = top(&mut group, i);
         match at.get(&g) {
-            Some(&k) => out[k].files.push(jars[i].0.clone()),
+            Some(&k) => members[k].push(i),
             None => {
-                at.insert(g, out.len());
-                out.push(Duplicate {
-                    name: names[i].clone(),
-                    files: vec![jars[i].0.clone()],
-                });
+                at.insert(g, members.len());
+                members.push(vec![i]);
             }
         }
     }
-    out.retain(|d| d.files.len() > 1);
+    let keeps_newest = loader_keeps_newest(&inst.loader, &inst.game_version);
+    let mut out: Vec<Duplicate> = Vec::new();
+    for mut m in members.into_iter().filter(|m| m.len() > 1) {
+        let ids: Vec<Option<&str>> = m.iter().map(|&i| firsts[i].as_deref()).collect();
+        let fate = if keeps_newest && same_first_id(&ids) { TwiceFate::NewestLoads } else { TwiceFate::Refuses };
+        let version = |i: usize| {
+            let v = crate::deps::own_version(&dir.join(&jars[i].0));
+            if v.is_empty() { crate::deps::versions_in(&jars[i].0).pop().unwrap_or_default() } else { v }
+        };
+        let mut loads = String::new();
+        if fate == TwiceFate::NewestLoads {
+            // The loader keeps the highest version, not the newest file.
+            let v: HashMap<usize, String> = m.iter().map(|&i| (i, version(i))).collect();
+            m.sort_by(|a, b| crate::scan::compare_versions(&v[b], &v[a]));
+            loads = v[&m[0]].clone();
+        }
+        // Named after the pack's own entry when it has one: a stranger's
+        // re-upload of the mod matched an override jar by fingerprint.
+        let name = m
+            .iter()
+            .find_map(|&i| inst.addon_by_file(&jars[i].0).filter(|a| a.from_pack && a.project_id != 0).map(|a| a.name.clone()))
+            .unwrap_or_else(|| names[m[0]].clone());
+        out.push(Duplicate {
+            name,
+            files: m.iter().map(|&i| jars[i].0.clone()).collect(),
+            fate,
+            loads,
+            all_from_pack: m.iter().all(|&i| packed[i]),
+        });
+    }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     out
 }
@@ -1355,6 +1467,12 @@ pub fn unnamed_jars(inst: &Instance) -> Vec<String> {
     let mut out = loose_jars(inst);
     let dir = inst.mods_dir();
     for a in inst.addons.iter().filter(|a| is_bare(a)) {
+        // The pack's own jar that Hopper already named (after the pack's entry
+        // or the jar's title) has nothing left to look up: a lookup would
+        // only match the stranger's re-upload again.
+        if a.from_pack && !a.name.is_empty() {
+            continue;
+        }
         let on = a.file_name.trim_end_matches(".disabled").to_string();
         let off = format!("{on}.disabled");
         let Some(name) = [on, off].into_iter().find(|n| dir.join(n).is_file()) else { continue };
@@ -1411,11 +1529,27 @@ pub fn identify_jars(inst: &mut Instance, names: &[String], job: &Job) -> anyhow
     if let Some(c) = cf_failed {
         job.note(format!("CurseForge lookup failed, so these were looked up on Modrinth only: {c}"));
     }
+    // Jars from the pack's own overrides are the pack's, and a match for one
+    // is never a stranger's re-upload of a mod the pack already lists.
+    if let Some(shipped) = crate::pack_where::shipped(inst) {
+        crate::modpack::claim_override_jars(inst, &shipped, false);
+    }
+    // A pack jar nothing knows is named after its own title.
+    let dir = inst.mods_dir();
+    for a in inst.addons.iter_mut().filter(|a| a.from_pack && a.name.is_empty() && is_bare(a)) {
+        let on = dir.join(&a.file_name);
+        let path = if on.is_file() { on } else { dir.join(format!("{}.disabled", a.file_name)) };
+        let title = crate::deps::own_ids(&path).1;
+        if !title.is_empty() {
+            a.name = title;
+        }
+    }
     let missing: Vec<&str> = loose
         .iter()
         .filter(|l| {
             !inst.addons.iter().any(|a| {
-                !is_bare(a) && a.file_name.eq_ignore_ascii_case(l.trim_end_matches(".disabled"))
+                (!is_bare(a) || (a.from_pack && !a.name.is_empty()))
+                    && a.file_name.eq_ignore_ascii_case(l.trim_end_matches(".disabled"))
             })
         })
         .map(String::as_str)
@@ -2136,6 +2270,125 @@ mod duplicate_tests {
         inst.addons.clear();
         assert!(super::duplicates(&inst).is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn jar_v(path: &std::path::Path, mod_id: &str, version: &str) {
+        let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        z.start_file::<_, ()>("META-INF/neoforge.mods.toml", Default::default()).unwrap();
+        write!(z, "[[mods]]\nmodId=\"{mod_id}\"\nversion=\"{version}\"\n").unwrap();
+        z.finish().unwrap();
+    }
+
+    /// ATM10: CC: Tweaked 1.113.1 from the manifest and 1.120.2 from the pack's
+    /// overrides, both mod id `computercraft`. The file's mtime says 1.113.1 is
+    /// the newer one, to show the loader goes by version.
+    fn cc_tweaked(name: &str, loader: &str, game: &str, override_from_pack: bool) -> (crate::instances::Instance, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("hopper-twice-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mods = root.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        jar_v(&mods.join("cc-tweaked-1.120.2.jar"), "computercraft", "1.120.2");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        jar_v(&mods.join("cc-tweaked-1.113.1.jar"), "computercraft", "1.113.1");
+        let addon = |file: &str, name: &str, project, from_pack| crate::instances::Addon {
+            file_name: file.into(),
+            name: name.into(),
+            project_id: project,
+            enabled: true,
+            from_pack,
+            ..Default::default()
+        };
+        let inst = crate::instances::Instance {
+            root: root.clone(),
+            loader: loader.into(),
+            game_version: game.into(),
+            addons: vec![
+                addon("cc-tweaked-1.113.1.jar", "CC: Tweaked", 282001, true),
+                // The override jar: as the pack's (named after the pack's entry,
+                // no project of its own), or as an older Hopper recorded it
+                // (a stranger's project, not the pack's).
+                if override_from_pack {
+                    addon("cc-tweaked-1.120.2.jar", "CC: Tweaked", 0, true)
+                } else {
+                    addon("cc-tweaked-1.120.2.jar", "CC Tweaked Compat", 1676502, false)
+                },
+            ],
+            ..Default::default()
+        };
+        (inst, root)
+    }
+
+    #[test]
+    fn fabric_and_quilt_refuse_a_mod_in_twice() {
+        for loader in ["fabric-0.16.0", "quilt-0.26.0"] {
+            let (inst, root) = cc_tweaked(&format!("refuse-{loader}"), loader, "1.21.1", true);
+            let d = super::duplicates(&inst);
+            assert_eq!(d.len(), 1, "{d:?}");
+            assert!(d[0].is_problem() && d[0].is_shown(), "{loader}: the game won't start");
+            assert!(!d[0].is_note());
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn neoforge_with_both_from_the_pack_says_nothing() {
+        let (inst, root) = cc_tweaked("pack-only", "neoforge-21.1.200", "1.21.1", true);
+        let d = super::duplicates(&inst);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].fate, super::TwiceFate::NewestLoads);
+        assert!(d[0].all_from_pack);
+        assert!(!d[0].is_shown(), "the pack ships it on purpose: no warning, no note");
+        // Named after the pack's own entry, not the stranger's project.
+        assert_eq!(d[0].name, "CC: Tweaked");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn neoforge_with_a_copy_the_player_added_gets_a_note_with_the_version_that_loads() {
+        let (inst, root) = cc_tweaked("added", "neoforge-21.1.200", "1.21.1", false);
+        let d = super::duplicates(&inst);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(d[0].is_note() && !d[0].is_problem());
+        // The highest version first (what loads), though the other file is newer.
+        assert_eq!(d[0].files, ["cc-tweaked-1.120.2.jar", "cc-tweaked-1.113.1.jar"]);
+        assert_eq!(d[0].loads, "1.120.2");
+        assert_eq!(d[0].note(), "CC: Tweaked is in twice. Only 1.120.2 loads; the other copy does nothing.");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn forge_keeps_the_newest_from_1_17_and_refuses_before() {
+        assert!(super::loader_keeps_newest("forge-47.3.0", "1.20.1"));
+        assert!(super::loader_keeps_newest("forge-37.1.1", "1.17.1"));
+        assert!(!super::loader_keeps_newest("forge-36.2.39", "1.16.5"));
+        assert!(!super::loader_keeps_newest("forge-47.3.0", ""), "no game version: keep the warning");
+        assert!(super::loader_keeps_newest("neoforge-21.1.200", "1.21.1"));
+        assert!(!super::loader_keeps_newest("fabric-0.16.0", "1.21.1"));
+        assert!(!super::loader_keeps_newest("quilt-0.26.0", "1.21.1"));
+        assert!(!super::loader_keeps_newest("", "1.21.1"), "an unknown loader keeps the warning");
+        let (inst, root) = cc_tweaked("forge16", "forge-36.2.39", "1.16.5", false);
+        assert!(super::duplicates(&inst)[0].is_problem());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copies_that_are_not_the_same_first_mod_id_still_refuse() {
+        // FML groups by a file's first mod id: jars that only meet on a
+        // project (or a second id) aren't one mod to it, and it refuses.
+        let (mut inst, root) = cc_tweaked("ids", "neoforge-21.1.200", "1.21.1", false);
+        jar_v(&root.join("mods").join("cc-tweaked-1.113.1.jar"), "other_id", "1.113.1");
+        inst.addons[0].project_id = 7;
+        inst.addons[1].project_id = 7;
+        let d = super::duplicates(&inst);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert!(d[0].is_problem(), "{d:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_old_panel_that_sends_no_verdict_means_the_warning() {
+        let d: super::Duplicate = serde_json::from_str(r#"{"name":"A","files":["a-2.jar","a-1.jar"]}"#).unwrap();
+        assert!(d.is_problem() && d.is_shown());
     }
 }
 

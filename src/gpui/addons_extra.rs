@@ -457,15 +457,24 @@ impl AddonsView {
         if self.class != cf::CLASS_MODS || self.missing.root.as_ref() != Some(&inst.root) {
             return None;
         }
-        let dups = &self.missing.dups;
+        // Fabric and Quilt refuse to start with a mod in twice: the warning.
+        // NeoForge and Forge load the highest version: a copy the player
+        // added gets a quiet note, and a pack that ships it so says nothing.
+        let dups: Vec<&hopper::install::Duplicate> = self.missing.dups.iter().filter(|d| d.is_problem()).collect();
+        let notes: Vec<&hopper::install::Duplicate> = self.missing.dups.iter().filter(|d| d.is_note()).collect();
         let queued = self.missing.queued;
         let (off, on) = (self.missing.switch_off, self.missing.switch_on);
-        if dups.is_empty() && queued + off + on == 0 {
+        if dups.is_empty() && notes.is_empty() && queued + off + on == 0 {
             return None;
         }
-        let theme = cx.theme();
         let place = inst.root.to_string_lossy();
+        let note = (!notes.is_empty()).then(|| self.dup_note(inst, &notes, &place, cx)).flatten();
+        let rows = self.dup_rows(inst, &dups, false, cx);
+        let theme = cx.theme();
         if dups.is_empty() {
+            if queued + off + on == 0 {
+                return note.map(|n| div().px_6().child(n).into_any_element());
+            }
             let s = |n: usize| if n == 1 { "" } else { "s" };
             let mut said = Vec::new();
             if queued > 0 {
@@ -481,7 +490,7 @@ impl AddonsView {
             let key = hopper::settings::notice_key(&place, "queued", &text);
             let body = callout(theme.info, cx).child(div().text_sm().child(text));
             let notice = widgets::closable_notice(body, key, widgets::Closed::Gone, "", theme.info, &self.store, cx)?;
-            return Some(div().px_6().child(notice).into_any_element());
+            return Some(div().px_6().flex().flex_col().gap_2().children(note).child(notice).into_any_element());
         }
         let dup_key = hopper::settings::notice_key(
             &place,
@@ -489,49 +498,6 @@ impl AddonsView {
             &dups.iter().map(|d| d.files.join(",")).collect::<Vec<_>>().join(";"),
         );
         let extra: Vec<String> = dups.iter().flat_map(|d| d.files[1..].to_vec()).collect();
-        let rows = dups.iter().map(|d| {
-            let older = d.files[1..].to_vec();
-            let what = d.name.clone();
-            let addon = inst.addons.iter().find(|a| a.file_name == d.files[0]);
-            let (pid, icon) = (
-                addon.map_or(0, |a| a.project_id),
-                addon.and_then(|a| self.store.read(cx).image(&a.icon)).map(std::path::Path::to_path_buf),
-            );
-            let view = cx.entity();
-            h_flex()
-                .gap_3()
-                .text_sm()
-                .child(
-                    widgets::mod_link(
-                        SharedString::from(format!("dup:{}", d.files[0])),
-                        d.name.clone(),
-                        icon.as_deref(),
-                        pid,
-                        move |p, _, cx| view.update(cx, |this, cx| this.open_peek(p, cx)),
-                        cx,
-                    )
-                    .font_semibold(),
-                )
-                .child(
-                    widgets::caption(
-                        format!("keep {}  ·  remove {}", d.files[0], older.join(", ")),
-                        cx,
-                    )
-                    .flex_1()
-                    .text_xs(),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("keep-newest:{}", d.files[0])))
-                        .xsmall()
-                        .outline()
-                        .label("Keep newest")
-                        .tooltip("Remove the older jars (undo from History)")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.remove(older.clone(), what.clone(), window, cx)
-                        })),
-                )
-                .into_any_element()
-        });
         let n = dups.len();
         let title = format!("{n} mod{} in twice: the game won't start with both", if n == 1 { " is" } else { "s are" });
         let warning = theme.warning;
@@ -564,9 +530,82 @@ impl AddonsView {
                                 cx,
                             ))
                         })
-                        .child(self.folded_rows("dup-rows", dups.iter().map(|d| d.name.clone()).collect(), rows.collect(), cx));
+                        .child(self.folded_rows("dup-rows", dups.iter().map(|d| d.name.clone()).collect(), rows, cx));
         let notice = widgets::closable_notice(body, dup_key, widgets::Closed::Chip, title, warning, &self.store, cx)?;
-        Some(div().px_6().child(notice).into_any_element())
+        Some(div().px_6().flex().flex_col().gap_2().child(notice).children(note).into_any_element())
+    }
+
+    /// One row per mod in twice: its icon and name, which file stays, and the
+    /// button that removes the other copies. `loads`: the copy kept is the
+    /// one the game loads (NeoForge, Forge), not just the newest file.
+    fn dup_rows(&self, inst: &Instance, list: &[&hopper::install::Duplicate], loads: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        list.iter()
+            .map(|d| {
+                let older = d.files[1..].to_vec();
+                let what = d.name.clone();
+                let addon = inst.addons.iter().find(|a| a.file_name == d.files[0]);
+                let (pid, icon) = (
+                    addon.map_or(0, |a| a.project_id),
+                    addon.and_then(|a| self.store.read(cx).image(&a.icon)).map(std::path::Path::to_path_buf),
+                );
+                let view = cx.entity();
+                h_flex()
+                    .gap_3()
+                    .text_sm()
+                    .child(
+                        widgets::mod_link(
+                            SharedString::from(format!("dup:{}", d.files[0])),
+                            d.name.clone(),
+                            icon.as_deref(),
+                            pid,
+                            move |p, _, cx| view.update(cx, |this, cx| this.open_peek(p, cx)),
+                            cx,
+                        )
+                        .font_semibold(),
+                    )
+                    .child(
+                        widgets::caption(
+                            format!("{} {}  ·  remove {}", if loads { "loads" } else { "keep" }, d.files[0], older.join(", ")),
+                            cx,
+                        )
+                        .flex_1()
+                        .text_xs(),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("keep-newest:{}", d.files[0])))
+                            .xsmall()
+                            .outline()
+                            .label(if loads { "Remove other copy" } else { "Keep newest" })
+                            .tooltip(if loads {
+                                "Remove the copy that doesn't load (undo from History)"
+                            } else {
+                                "Remove the older jars (undo from History)"
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.remove(older.clone(), what.clone(), window, cx)
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    }
+
+    /// NeoForge and Forge load the highest version of a mod that is in
+    /// twice, so a copy the player added beside the pack's isn't a problem:
+    /// a quiet note says which one loads, with the remove button.
+    fn dup_note(&self, inst: &Instance, notes: &[&hopper::install::Duplicate], place: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let info = cx.theme().info;
+        let n = notes.len();
+        let text = if n == 1 {
+            notes[0].note()
+        } else {
+            format!("{n} mods are in twice. Only the highest version of each loads; the other copies do nothing.")
+        };
+        let key = hopper::settings::notice_key(place, "dups-note", &notes.iter().map(|d| d.files.join(",")).collect::<Vec<_>>().join(";"));
+        let rows = self.dup_rows(inst, notes, true, cx);
+        let folded = self.folded_rows("dup-note-rows", notes.iter().map(|d| d.name.clone()).collect(), rows, cx);
+        let body = callout(info, cx).child(div().text_sm().child(text)).child(folded);
+        widgets::closable_notice(body, key, widgets::Closed::Gone, "", info, &self.store, cx)
     }
 
     /// "N required mods are missing", with Enable or Find for each.
@@ -1069,7 +1108,8 @@ impl AddonsView {
         if self.missing.root.as_deref() != Some(root) {
             return 0;
         }
-        self.missing.list.len() + self.missing.dups.len() + self.missing.blockers.len()
+        // A mod in twice that NeoForge or Forge loads the newest of isn't one.
+        self.missing.list.len() + self.missing.dups.iter().filter(|d| d.is_problem()).count() + self.missing.blockers.len()
     }
 
     /// "N problems will stop the game at loading": what the loader refuses

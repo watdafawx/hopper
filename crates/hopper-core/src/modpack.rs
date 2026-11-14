@@ -699,11 +699,185 @@ fn apply_pack_marks(inst: &mut Instance, found: Option<PackMods>) {
     }
 }
 
+/// The jars a pack ships in its own `overrides/mods` are the pack's, like
+/// the files its manifest lists (`from_pack`). `shipped` is the pack's
+/// override files (lower case, forward slashes: [`crate::pack_where::shipped`]).
+/// Returns whether anything in `inst` changed; the caller saves.
+///
+/// - A jar already recorded is marked as the pack's; with `add`, one that
+///   isn't recorded yet is added as the pack's (a bare entry: identify fills
+///   in the rest).
+/// - CurseForge matches a jar by fingerprint, and a stranger's re-upload of a
+///   mod the pack lists can match (CC: Tweaked's copy in ATM10's overrides
+///   matched "CC Tweaked Compat"). When the manifest already has an entry
+///   whose jar is the same mod id, the override jar is named after that
+///   entry and keeps no project, so no update comes from the other project.
+pub fn claim_override_jars(inst: &mut Instance, shipped: &HashSet<String>, add: bool) -> bool {
+    let dir = inst.mods_dir();
+    let Ok(rd) = fs::read_dir(&dir) else { return false };
+    // (name on disk, name without ".disabled", turned on)
+    let jars: Vec<(String, String, bool)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let disk = e.file_name().to_string_lossy().into_owned();
+            let off = disk.to_lowercase().ends_with(".disabled");
+            let base = if off { disk[..disk.len() - ".disabled".len()].to_string() } else { disk.clone() };
+            let l = base.to_lowercase();
+            (l.ends_with(".jar") && shipped.contains(&format!("mods/{l}"))).then_some((disk, base, !off))
+        })
+        .collect();
+    if jars.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    // Entry index -> the jar's name on disk, for each override jar.
+    let mut mine: Vec<(usize, String)> = Vec::new();
+    for (disk, base, on) in jars {
+        let at = inst.addons.iter().position(|a| a.folder() == "mods" && a.file_name.eq_ignore_ascii_case(&base));
+        let i = match at {
+            Some(i) => i,
+            None if add => {
+                inst.addons.push(Addon {
+                    file_name: base,
+                    enabled: on,
+                    from_pack: true,
+                    class_id: cf::CLASS_MODS,
+                    date_added: crate::time::now_iso(),
+                    ..Default::default()
+                });
+                changed = true;
+                inst.addons.len() - 1
+            }
+            None => continue,
+        };
+        if !inst.addons[i].from_pack {
+            inst.addons[i].from_pack = true;
+            changed = true;
+        }
+        mine.push((i, disk));
+    }
+    // The pack's own entries, by the mod ids their jars hold. Read only for
+    // an override jar that CurseForge or Modrinth matched to a project.
+    let mut theirs: Option<Vec<(usize, Vec<String>)>> = None;
+    for (i, disk) in &mine {
+        let a = &inst.addons[*i];
+        if (a.project_id == 0 && a.mr_project.is_empty()) || a.source.is_some() {
+            continue;
+        }
+        let own: Vec<String> = crate::deps::own_ids(&dir.join(disk)).0;
+        if own.is_empty() {
+            continue;
+        }
+        let theirs = theirs.get_or_insert_with(|| {
+            inst.addons
+                .iter()
+                .enumerate()
+                .filter(|(j, p)| {
+                    p.from_pack && p.project_id != 0 && p.folder() == "mods" && !mine.iter().any(|(m, _)| m == j)
+                })
+                .map(|(j, p)| {
+                    let on = dir.join(&p.file_name);
+                    let path = if on.is_file() { on } else { dir.join(format!("{}.disabled", p.file_name)) };
+                    (j, crate::deps::own_ids(&path).0)
+                })
+                .collect()
+        });
+        let Some(&(j, _)) = theirs.iter().find(|(j, ids)| {
+            inst.addons[*j].project_id != a.project_id && ids.iter().any(|id| own.contains(id))
+        }) else {
+            continue;
+        };
+        let p = inst.addons[j].clone();
+        let a = &mut inst.addons[*i];
+        a.project_id = 0;
+        a.file_id = 0;
+        a.name = p.name;
+        a.icon = p.icon;
+        a.page = p.page;
+        a.author = p.author;
+        a.mr_project.clear();
+        a.mr_version.clear();
+        a.mr_sha1.clear();
+        a.requires.clear();
+        a.release_type = 0;
+        a.file_date.clear();
+        changed = true;
+    }
+    changed
+}
+
+/// [`claim_override_jars`] for an instance made from a pack whose override
+/// list is known (CurseForge's record or the cached pack file), once per run:
+/// puts right what an older Hopper recorded. Returns whether it changed
+/// anything; the caller saves.
+pub fn claim_shipped_jars(inst: &mut Instance) -> bool {
+    static DONE: Mutex<Option<HashSet<(PathBuf, u64)>>> = Mutex::new(None);
+    let Some(pack) = inst.pack.as_ref() else { return false };
+    // Only worth a look when a jar of the pack's own could be wrong.
+    if inst.addons.iter().all(|a| a.from_pack || a.folder() != "mods") {
+        return false;
+    }
+    let key = (inst.root.clone(), pack.file_id);
+    {
+        let mut g = DONE.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.get_or_insert_with(HashSet::new).insert(key) {
+            return false;
+        }
+    }
+    let Some(shipped) = crate::pack_where::shipped(inst) else { return false };
+    let changed = claim_override_jars(inst, &shipped, false);
+    if changed {
+        crate::deps::save_own_ids();
+    }
+    changed
+}
+
 /// The files under a downloaded pack's overrides folder, in zip order with
 /// backslashes, as CurseForge lists them in `modpackOverrides`. `None` when
 /// the pack file isn't in Hopper's cache.
 pub fn cached_override_files(file_id: u64) -> Option<Vec<String>> {
-    let zip_path = cache_dir().join(format!("{file_id}.zip"));
+    override_files_in(&cache_dir().join(format!("{file_id}.zip")))
+}
+
+/// What a pack zip's overrides put in the instance (lower case, forward
+/// slashes), minus the files `overrides` says to skip. Empty when the zip
+/// can't be read.
+fn shipped_set(zip_path: &Path, overrides: Option<&Overrides>) -> HashSet<String> {
+    override_files_in(zip_path)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.replace('\\', "/").to_lowercase())
+        .filter(|p| !overrides.is_some_and(|o| o.skip.iter().any(|s| s.eq_ignore_ascii_case(p))))
+        .collect()
+}
+
+/// [`shipped_set`] for a Modrinth pack: what its `overrides` and
+/// `client-overrides` folders hold.
+fn mr_shipped_set(zip_path: &Path, overrides: Option<&Overrides>) -> HashSet<String> {
+    let Ok(mut z) = fs::File::open(zip_path).map_err(anyhow::Error::from).and_then(|f| Ok(zip::ZipArchive::new(f)?)) else {
+        return HashSet::new();
+    };
+    let mut out = HashSet::new();
+    for i in 0..z.len() {
+        let Ok(e) = z.by_index_raw(i) else { continue };
+        let name = e.name().replace('\\', "/");
+        for prefix in MR_OVERRIDES {
+            if let Some(rel) = name.strip_prefix(&format!("{prefix}/"))
+                && !e.is_dir()
+                && !rel.is_empty()
+                && safe_pack_path(rel)
+            {
+                out.insert(rel.to_lowercase());
+            }
+        }
+    }
+    out.retain(|p| !overrides.is_some_and(|o| o.skip.iter().any(|s| s.eq_ignore_ascii_case(p))));
+    out
+}
+
+/// [`cached_override_files`] for a pack zip anywhere on disk.
+pub fn override_files_in(zip_path: &Path) -> Option<Vec<String>> {
+    let zip_path = zip_path.to_path_buf();
     let manifest = read_manifest(&zip_path).ok()?;
     let mut z = zip::ZipArchive::new(fs::File::open(&zip_path).ok()?).ok()?;
     let prefix = match manifest.overrides.trim_end_matches('/') {
@@ -1199,8 +1373,14 @@ fn apply_pack(
     // A fresh install settles any disagreement with the CurseForge app.
     inst.cf_change = None;
     adopt_kept(inst, overrides);
+    // The jars this pack ships in its overrides, written below: the pack's
+    // own, so an update keeps their records and the files are replaced.
+    let shipped = shipped_set(zip_path, overrides);
     commit(inst, staged, |a| {
-        a.from_pack && !wanted.contains_key(&a.project_id) && !leaves(overrides, a)
+        a.from_pack
+            && !wanted.contains_key(&a.project_id)
+            && !leaves(overrides, a)
+            && !shipped.contains(&format!("mods/{}", a.file_name.to_lowercase()))
     })?;
     drop(staging);
     note_pending(job, &pending, true);
@@ -1222,6 +1402,8 @@ fn apply_pack(
     )?;
     log::info!("{} overrides written", n);
     write_merged(&inst.root, overrides)?;
+    // Override jars are the pack's files, like the ones its manifest lists.
+    claim_override_jars(inst, &shipped, true);
 
     inst.pack = match pack {
         Some((pack, pack_file)) => Some(PackRef {
@@ -2778,8 +2960,13 @@ fn apply_mrpack_with(
     inst.loader = index.loader();
     inst.cf_change = None;
     adopt_kept(inst, overrides);
+    // The jars its overrides ship are the pack's own, as in a CurseForge pack.
+    let shipped = mr_shipped_set(zip_path, overrides);
     commit(inst, staged, |a| {
-        a.from_pack && !keep.contains(&a.file_name.to_lowercase()) && !leaves(overrides, a)
+        a.from_pack
+            && !keep.contains(&a.file_name.to_lowercase())
+            && !leaves(overrides, a)
+            && !shipped.contains(&format!("mods/{}", a.file_name.to_lowercase()))
     })?;
     drop(staging);
     note_pending(job, &pending, false);
@@ -2792,6 +2979,7 @@ fn apply_mrpack_with(
         extract_overrides(zip_path, prefix, &root, overrides)?;
     }
     write_merged(&root, overrides)?;
+    claim_override_jars(inst, &shipped, true);
 
     inst.pack = Some(PackRef {
         project_id: pack.id,
@@ -3491,5 +3679,167 @@ mod pack_marks_tests {
         i.pack = None;
         mark_pack_mods(&mut i);
         assert_eq!(marks(&i), [false; 3]);
+    }
+}
+
+#[cfg(test)]
+mod override_jar_tests {
+    use super::*;
+
+    /// A jar of one mod, as a NeoForge mod file.
+    fn jar(path: &Path, mod_id: &str, version: &str, title: &str) {
+        let mut z = zip::ZipWriter::new(fs::File::create(path).unwrap());
+        z.start_file::<_, ()>("META-INF/neoforge.mods.toml", Default::default()).unwrap();
+        write!(z, "[[mods]]\nmodId=\"{mod_id}\"\nversion=\"{version}\"\ndisplayName=\"{title}\"\n").unwrap();
+        z.finish().unwrap();
+    }
+
+    fn scratch(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("hopper-claim-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mods = root.join("mods");
+        fs::create_dir_all(&mods).unwrap();
+        (root, mods)
+    }
+
+    fn entry(file: &str, name: &str, project: u64, from_pack: bool) -> Addon {
+        Addon { file_name: file.into(), name: name.into(), project_id: project, file_id: project * 10, enabled: true, from_pack, ..Default::default() }
+    }
+
+    fn shipped(files: &[&str]) -> HashSet<String> {
+        files.iter().map(|f| f.to_lowercase()).collect()
+    }
+
+    /// ATM10: the pack lists CC: Tweaked 1.113.1 on CurseForge and ships 1.120.2
+    /// in its overrides, which CurseForge matched to a stranger's re-upload.
+    fn atm10(name: &str) -> (Instance, PathBuf) {
+        let (root, mods) = scratch(name);
+        jar(&mods.join("cc-tweaked-1.113.1.jar"), "computercraft", "1.113.1", "CC: Tweaked");
+        jar(&mods.join("cc-tweaked-1.120.2.jar"), "computercraft", "1.120.2", "CC: Tweaked");
+        jar(&mods.join("jade.jar"), "jade", "1", "Jade");
+        let inst = Instance {
+            root: root.clone(),
+            addons: vec![
+                entry("cc-tweaked-1.113.1.jar", "CC: Tweaked", 282001, true),
+                entry("cc-tweaked-1.120.2.jar", "CC Tweaked Compat", 1676502, false),
+                entry("jade.jar", "Jade", 324717, true),
+            ],
+            ..Default::default()
+        };
+        (inst, root)
+    }
+
+    #[test]
+    fn an_override_jar_is_the_packs_and_named_after_the_packs_entry() {
+        let (mut inst, root) = atm10("named");
+        let changed = claim_override_jars(&mut inst, &shipped(&["mods/cc-tweaked-1.120.2.jar", "config/x.toml"]), false);
+        assert!(changed);
+        let a = inst.addon_by_file("cc-tweaked-1.120.2.jar").unwrap();
+        assert!(a.from_pack, "a pack file, not the player's");
+        // Not the stranger's project: no update or removal comes from it.
+        assert_eq!((a.project_id, a.file_id), (0, 0));
+        assert_eq!(a.name, "CC: Tweaked");
+        // The manifest's own entry is untouched.
+        let m = inst.addon_by_file("cc-tweaked-1.113.1.jar").unwrap();
+        assert_eq!((m.project_id, m.name.as_str(), m.from_pack), (282001, "CC: Tweaked", true));
+        // Run again: nothing more to do.
+        assert!(!claim_override_jars(&mut inst, &shipped(&["mods/cc-tweaked-1.120.2.jar"]), false));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_match_that_is_a_different_mod_keeps_its_project() {
+        let (root, mods) = scratch("other");
+        jar(&mods.join("zoomify.jar"), "zoomify", "1", "Zoomify");
+        jar(&mods.join("jade.jar"), "jade", "1", "Jade");
+        let mut inst = Instance {
+            root: root.clone(),
+            addons: vec![entry("zoomify.jar", "Zoomify", 99, false), entry("jade.jar", "Jade", 324717, true)],
+            ..Default::default()
+        };
+        assert!(claim_override_jars(&mut inst, &shipped(&["mods/zoomify.jar"]), false));
+        let a = inst.addon_by_file("zoomify.jar").unwrap();
+        assert!(a.from_pack);
+        assert_eq!((a.project_id, a.name.as_str()), (99, "Zoomify"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_what_the_pack_ships_changes() {
+        let (mut inst, root) = atm10("only");
+        // The pack ships a different file: the player's copy stays theirs.
+        assert!(!claim_override_jars(&mut inst, &shipped(&["mods/other.jar"]), true));
+        let a = inst.addon_by_file("cc-tweaked-1.120.2.jar").unwrap();
+        assert!(!a.from_pack);
+        assert_eq!(a.project_id, 1676502);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_new_install_records_unknown_override_jars_as_the_packs() {
+        let (root, mods) = scratch("add");
+        jar(&mods.join("shipped.jar"), "shipped", "1", "Shipped");
+        jar(&mods.join("mine.jar"), "mine", "1", "Mine");
+        fs::rename(mods.join("shipped.jar"), mods.join("shipped.jar.disabled")).unwrap();
+        let mut inst = Instance { root: root.clone(), ..Default::default() };
+        let set = shipped(&["mods/shipped.jar"]);
+        // A scan of an existing instance only fixes records, never invents them.
+        assert!(!claim_override_jars(&mut inst, &set, false));
+        assert!(inst.addons.is_empty());
+        // An install records them, turned off as the pack's player left them.
+        assert!(claim_override_jars(&mut inst, &set, true));
+        assert_eq!(inst.addons.len(), 1, "{:?}", inst.addons);
+        let a = &inst.addons[0];
+        assert_eq!((a.file_name.as_str(), a.from_pack, a.enabled), ("shipped.jar", true, false));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_older_record_is_put_right_when_the_pack_is_known() {
+        // The pack's own list (CurseForge's record) names the override jar.
+        let (mut inst, root) = atm10("scan");
+        fs::write(
+            root.join("minecraftinstance.json"),
+            r#"{"modpackOverrides":["mods\\cc-tweaked-1.120.2.jar","config\\a.toml"]}"#,
+        )
+        .unwrap();
+        inst.pack = Some(PackRef { project_id: 925200, file_id: 9431424, ..Default::default() });
+        assert!(claim_shipped_jars(&mut inst));
+        let a = inst.addon_by_file("cc-tweaked-1.120.2.jar").unwrap();
+        assert_eq!((a.from_pack, a.project_id, a.name.as_str()), (true, 0, "CC: Tweaked"));
+        // It looks once per run: the second load costs nothing.
+        assert!(!claim_shipped_jars(&mut inst));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nothing_changes_without_a_list_of_what_the_pack_ships() {
+        let (mut inst, root) = atm10("nolist");
+        inst.pack = Some(PackRef { project_id: 925200, file_id: 424242, ..Default::default() });
+        assert!(!claim_shipped_jars(&mut inst));
+        assert!(!inst.addon_by_file("cc-tweaked-1.120.2.jar").unwrap().from_pack);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_pack_install_marks_its_override_jars() {
+        let dir = std::env::temp_dir().join(format!("hopper-claim-install-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("pack.zip");
+        let tmp = dir.join("j.jar");
+        jar(&tmp, "computercraft", "1.120.2", "CC: Tweaked");
+        let jar_bytes = fs::read(&tmp).unwrap();
+        let mut z = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        z.start_file::<_, ()>("manifest.json", Default::default()).unwrap();
+        z.write_all(br#"{"minecraft":{"version":"1.21.1","modLoaders":[{"id":"neoforge-21.1.1","primary":true}]},"name":"P","files":[],"overrides":"overrides"}"#).unwrap();
+        z.start_file::<_, ()>("overrides/mods/cc-tweaked-1.120.2.jar", Default::default()).unwrap();
+        z.write_all(&jar_bytes).unwrap();
+        z.finish().unwrap();
+        let jobs = crate::jobs::Jobs::default();
+        let inst = import_zip(&dir.join("instances"), &zip_path, &jobs.start("t")).unwrap();
+        let a = inst.addon_by_file("cc-tweaked-1.120.2.jar").expect("the override jar is recorded");
+        assert!(a.from_pack);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
