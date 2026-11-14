@@ -19,6 +19,7 @@
 
   let cols = 0, rows = 0, dpr = 1, cellW = 9;
   let grid = new Uint8Array(0); // which letter sits in each cell
+  let base = new Float32Array(0); // each cell's patch brightness from the last full frame
   const ripples = [];
   let px = -1e4, py = -1e4, pAmp = 0;
 
@@ -82,18 +83,22 @@
     cols = Math.ceil(w / cellW) + 1;
     rows = Math.ceil(h / CELL_H) + 1;
     grid = new Uint8Array(cols * rows);
+    base = new Float32Array(cols * rows);
     for (let i = 0; i < grid.length; i++) grid[i] = (Math.random() * CHARS.length) | 0;
     if (still) frame(4000);
   }
 
-  function frame(ms) {
+  // `cheap` is a frame drawn while the page scrolls: the patches and the
+  // shimmer keep the last full frame's look (the noise is the expensive part)
+  // and only the ripples and the pointer move.
+  function frame(ms, cheap) {
     const t = ms / 1000;
     const scroll = scrollY * 0.25; // slow parallax, in px
     for (let i = ripples.length - 1; i >= 0; i--) if (t - ripples[i].t > 3.4) ripples.splice(i, 1);
     pAmp *= 0.93;
 
     // A few letters change every frame: the shimmer.
-    if (!still) for (let k = (grid.length * 0.015) | 0; k > 0; k--) {
+    if (!still && !cheap) for (let k = (grid.length * 0.015) | 0; k > 0; k--) {
       grid[(Math.random() * grid.length) | 0] = (Math.random() * CHARS.length) | 0;
     }
 
@@ -106,8 +111,13 @@
       for (let c = 0; c < cols; c++) {
         const cx = c * cellW;
         // Patches: noise in page space, drifting slowly, cut with a soft edge.
-        const n = fbm(cx * 0.0056 + drift, (cy + scroll) * 0.0074 - drift * 0.6);
-        let lit = smooth(0.48, 0.78, n);
+        const i = r * cols + c;
+        let lit;
+        if (cheap) lit = base[i];
+        else {
+          const n = fbm(cx * 0.0056 + drift, (cy + scroll) * 0.0074 - drift * 0.6);
+          base[i] = lit = smooth(0.48, 0.78, n);
+        }
 
         let glow = 0;
         for (const rp of ripples) {
@@ -128,7 +138,7 @@
           if (lit < 0.06) continue;
           band = Math.min(INK.length - 1, (lit * INK.length) | 0);
         }
-        buf[band][c] = CHARS[grid[r * cols + c]];
+        buf[band][c] = CHARS[grid[i]];
       }
       for (let b = 0; b < bands; b++) {
         const s = buf[b].join('');
@@ -142,16 +152,22 @@
 
   // The field holds still while the page scrolls (and a moment after), so
   // redrawing never competes with scrolling; it's a fixed backdrop anyway.
+  // The exception is a ripple still travelling: it keeps moving, on cheap
+  // frames at ~20 fps, so a click's wave doesn't freeze mid-way. On a slow
+  // machine the gap grows with what a frame costs, so scrolling stays smooth.
   let calmUntil = 0;
   addEventListener('scroll', () => { calmUntil = performance.now() + 200; }, { passive: true });
 
-  let last = 0, raf = 0;
+  let last = 0, raf = 0, cost = 0;
   function loop(ms) {
     raf = requestAnimationFrame(loop);
-    if (ms < calmUntil) return;
-    if (ms - last < 33) return; // ~30 fps
+    const scrolling = ms < calmUntil;
+    if (scrolling && !ripples.length) return;
+    if (ms - last < (scrolling ? Math.max(50, cost * 5) : 33)) return; // ~20 fps while scrolling, else ~30
     last = ms;
-    frame(ms);
+    const began = performance.now();
+    frame(ms, scrolling);
+    cost = performance.now() - began;
   }
 
   function splash(x, y) {
