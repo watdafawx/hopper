@@ -278,8 +278,6 @@ pub(crate) fn dev_size() -> Option<Size<Pixels>> {
     Some(size(px(w.trim().parse().ok()?), px(h.trim().parse().ok()?)))
 }
 
-/// CF_API_KEY and friends: `.env` next to the exe, the working dir, then
-/// the repo's (for dev builds started from elsewhere).
 /// Hopper's own log: info from Hopper's code, warnings from everything it
 /// uses (`RUST_LOG` still overrides), to stderr and, once the app really
 /// starts (`hopper::applog::attach`), to `logs\hopper.log`.
@@ -309,6 +307,8 @@ fn init_logging() {
     }));
 }
 
+/// CF_API_KEY and friends: `.env` next to the exe, the working dir, then
+/// the repo's (for dev builds started from elsewhere).
 fn load_env() {
     if let Some(dir) = std::env::current_exe()
         .ok()
