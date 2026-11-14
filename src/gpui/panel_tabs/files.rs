@@ -791,6 +791,61 @@ impl FilesTab {
         );
     }
 
+    /// Asks where to save `rels` (folders and files in the server folder) as
+    /// one zip, `suggest` being the file name offered, then saves it as a
+    /// job in Tasks. Hopper Server and a server on this PC both answer
+    /// `/fs/{id}/zip`.
+    fn download_zip(&mut self, rels: Vec<String>, suggest: String, window: &mut Window, cx: &mut Context<Self>) {
+        if rels.is_empty() {
+            return;
+        }
+        let dir = directories::UserDirs::new().and_then(|u| u.download_dir().map(|d| d.to_path_buf())).unwrap_or_default();
+        let rx = cx.prompt_for_new_path(&dir, Some(format!("{suggest}.zip").as_str()));
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(local))) = rx.await else { return };
+            this.update(cx, |this, cx| this.start_zip(rels, suggest, local, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn start_zip(&mut self, rels: Vec<String>, name: String, local: PathBuf, cx: &mut Context<Self>) {
+        let Some(t) = self.target.clone() else { return };
+        let job = self.store.read(cx).start_job(format!("Downloading {name}"));
+        let query: Vec<String> = rels.iter().map(|r| format!("path={}", q(r))).collect();
+        let path = t.fp(&format!("/zip?{}", query.join("&")));
+        let shown = local.display().to_string();
+        super::call(
+            cx,
+            &t,
+            move |c| {
+                let r = c.save(&path, &local);
+                job.finish(&r);
+                r
+            },
+            move |this, r, _| this.note = Some(r.map(|_| format!("Saved {name} to {shown}"))),
+        );
+    }
+
+    /// The zip's suggested name for several picked rows: the open folder's
+    /// name, or the server's name at the top (as the web UI's default).
+    fn zip_name(&self, cx: &App) -> String {
+        if !self.path.is_empty() {
+            return name_of(&self.path);
+        }
+        let store = self.store.read(cx);
+        self.target
+            .as_ref()
+            .and_then(|t| {
+                store.servers().iter().find(|s| match (&s.remote, &t.local) {
+                    (Some(r), _) => r.id == t.id() && r.base == t.remote.base,
+                    (None, Some(root)) => &s.root == root,
+                    _ => false,
+                })
+            })
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "files".to_string())
+    }
+
     // ---- trash -------------------------------------------------------------
 
     fn open_trash(&mut self, cx: &mut Context<Self>) {
@@ -1012,12 +1067,13 @@ impl FilesTab {
         let order: Vec<String> = shown.iter().map(|e| e.name.clone()).collect();
         let picked = self.sel.in_order(&order);
         let view = cx.entity();
+        let zip_name = self.zip_name(cx);
         range
             .filter_map(|i| shown.get(i).cloned().map(|e| (i, e)))
             .map(|(i, e)| {
                 let theme = cx.theme();
                 let selected = self.sel.contains(&e.name);
-                let (e1, v) = (e.clone(), view.clone());
+                let (e1, v, zip_name) = (e.clone(), view.clone(), zip_name.clone());
                 // Right-clicking one of several picked rows acts on them all.
                 let group = (picked.len() > 1 && selected).then(|| picked.clone());
                 h_flex()
@@ -1062,16 +1118,30 @@ impl FilesTab {
                     }))
                     .context_menu(move |menu, _, _| {
                         if let Some(names) = group.clone() {
-                            let v = v.clone();
+                            let (v, v_zip) = (v.clone(), v.clone());
                             let n = names.len();
-                            return menu.item(
-                                PopupMenuItem::new(format!("Move {n} to trash"))
-                                    .icon(IconName::Trash)
-                                    .on_click(move |_, w, cx| {
-                                        let names = names.clone();
-                                        v.update(cx, |this, cx| this.trash_entries(names, w, cx))
-                                    }),
-                            );
+                            let (zip_names, zip_name) = (names.clone(), zip_name.clone());
+                            return menu
+                                .item(
+                                    PopupMenuItem::new(format!("Download {n} as zip"))
+                                        .icon(IconName::Download)
+                                        .on_click(move |_, w, cx| {
+                                            let (names, zip_name) = (zip_names.clone(), zip_name.clone());
+                                            v_zip.update(cx, |this, cx| {
+                                                let rels = names.iter().map(|n| this.join(n)).collect();
+                                                this.download_zip(rels, zip_name, w, cx)
+                                            })
+                                        }),
+                                )
+                                .separator()
+                                .item(
+                                    PopupMenuItem::new(format!("Move {n} to trash"))
+                                        .icon(IconName::Trash)
+                                        .on_click(move |_, w, cx| {
+                                            let names = names.clone();
+                                            v.update(cx, |this, cx| this.trash_entries(names, w, cx))
+                                        }),
+                                );
                         }
                         let e = e.clone();
                         let (v1, v2, v3, v4) = (v.clone(), v.clone(), v.clone(), v.clone());
@@ -1082,13 +1152,16 @@ impl FilesTab {
                                 .on_click(move |_, w, cx| v1.update(cx, |this, cx| this.open_entry(&e1, w, cx))),
                         )
                         .item(
-                            PopupMenuItem::new("Download")
+                            PopupMenuItem::new(if e.dir { "Download as zip" } else { "Download" })
                                 .icon(IconName::Download)
-                                .disabled(e.dir)
                                 .on_click(move |_, w, cx| {
                                     v2.update(cx, |this, cx| {
                                         let p = this.join(&e2.name);
-                                        this.download(p, w, cx)
+                                        if e2.dir {
+                                            this.download_zip(vec![p], e2.name.clone(), w, cx)
+                                        } else {
+                                            this.download(p, w, cx)
+                                        }
                                     })
                                 }),
                         )
@@ -1187,7 +1260,20 @@ impl FilesTab {
             selection::bar(
                 "files-bar",
                 self.sel.len(),
-                Vec::new(),
+                vec![
+                    Button::new("files-bar-zip")
+                        .small()
+                        .ghost()
+                        .icon(IconName::Download)
+                        .label("Download as zip")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let order = this.order();
+                            let rels = this.sel.in_order(&order).iter().map(|n| this.join(n)).collect();
+                            let name = this.zip_name(cx);
+                            this.download_zip(rels, name, window, cx)
+                        }))
+                        .into_any_element(),
+                ],
                 Some((
                     "Move to trash".into(),
                     Box::new(move |_, window, cx| {
