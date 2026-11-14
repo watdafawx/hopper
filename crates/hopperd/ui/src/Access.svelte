@@ -13,6 +13,8 @@
   import { api, post, put, del } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { session, ownerLike, roleLabel } from './lib/me.svelte.js';
+  import { live } from './lib/live.svelte.js';
+  import { scopeCount } from './lib/scope.js';
 
   let { hello, me, pending = $bindable([]) } = $props();
   const owner = $derived(ownerLike(me));
@@ -67,7 +69,7 @@
 <div class="pad">
   {#if !owner}
   <div class="grid">
-    <div class="card"><h3>{me?.name}</h3><p class="small subtle">Role: <b class="txt">{roleLabel(me?.role)}</b> · {me?.servers?.length ? `${me.servers.length} server${me.servers.length === 1 ? '' : 's'}` : 'all servers'}. The owner manages what you can do.</p></div>
+    <div class="card"><h3>{me?.name}</h3><p class="small subtle">Role: <b class="txt">{roleLabel(me?.role)}</b> · {scopeCount(me?.servers, live.nodes)}. The owner manages what you can do.</p></div>
     <Security own />
   </div>
   {:else}

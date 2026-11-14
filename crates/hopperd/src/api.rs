@@ -516,6 +516,21 @@ struct UserBody {
     servers: Vec<String>,
 }
 
+/// A user's or token's server list as saved: "all servers on node X"
+/// entries must name a node this panel has (design/multi-panel.md, A4).
+fn server_list(app: &App, list: Vec<String>) -> ApiResult<Vec<String>> {
+    for e in &list {
+        if let Some(n) = crate::auth::scope_node(e) {
+            if app.nodes.name_of(n).is_none() {
+                return Err(bad("That node isn't joined to this panel any more. Pick its servers again."));
+            }
+        } else if e.starts_with(crate::auth::NODE_SCOPE) || e.is_empty() {
+            return Err(bad("A server in the list has no name."));
+        }
+    }
+    Ok(list)
+}
+
 fn role_of(s: &str) -> ApiResult<crate::auth::Role> {
     crate::auth::Role::parse(s).ok_or_else(|| bad("The role is manager, admin, operator or viewer."))
 }
@@ -536,7 +551,8 @@ async fn user_create(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     if !who.may_manage_user(None, Some(role)) {
         return Err(only_owner("Only the owner can add managers."));
     }
-    let u = app.auth.user_create(&b.name, &b.password, role, b.servers).map_err(bad)?;
+    let servers = server_list(&app, b.servers)?;
+    let u = app.auth.user_create(&b.name, &b.password, role, servers).map_err(bad)?;
     Ok(Json(user_json(&u)))
 }
 
@@ -550,7 +566,8 @@ async fn user_update(
     let who = require_owner_who(&app, &headers, &method)?;
     let role = role_of(&b.role)?;
     check_manage(&app, &who, &id, Some(role))?;
-    app.auth.user_update(&id, &b.name, role, b.servers, Some(b.password.as_str())).map_err(bad)?;
+    let servers = server_list(&app, b.servers)?;
+    app.auth.user_update(&id, &b.name, role, servers, Some(b.password.as_str())).map_err(bad)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -590,7 +607,8 @@ struct TokenBody {
 
 async fn token_create(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<TokenBody>) -> ApiResult<Json<Value>> {
     require_owner(&app, &headers, &method)?;
-    let (token, rec) = app.auth.token_create(&b.name, b.read_only, b.servers, b.days).map_err(bad)?;
+    let servers = server_list(&app, b.servers)?;
+    let (token, rec) = app.auth.token_create(&b.name, b.read_only, servers, b.days).map_err(bad)?;
     Ok(Json(json!({ "token": token, "info": rec })))
 }
 
@@ -610,7 +628,11 @@ async fn audit(
 ) -> ApiResult<Json<Value>> {
     require_owner(&app, &headers, &method)?;
     let limit = q.get("limit").and_then(|l| l.parse().ok()).unwrap_or(200).min(2000);
-    Ok(Json(json!(app.audit.recent(limit))))
+    // `?node=<id>`: only what went to that node, or was about it.
+    match q.get("node").filter(|n| !n.is_empty()) {
+        Some(n) => Ok(Json(json!(app.audit.recent_for_node(n, limit)))),
+        None => Ok(Json(json!(app.audit.recent(limit)))),
+    }
 }
 
 async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {

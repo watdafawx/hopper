@@ -130,7 +130,8 @@ pub fn status_now() -> Option<Status> {
 /// Keeps this panel connected to its main while `node.json` is there:
 /// starts when a join writes it, stops when `leave` removes it.
 pub fn start(app: Arc<App>) {
-    let dir: PathBuf = app.boot_dir.clone();
+    adopt_left_behind(&app.boot_dir, &app.data_dir);
+    let dir: PathBuf = app.data_dir.clone();
     tokio::spawn(async move {
         loop {
             match load(&dir) {
@@ -365,6 +366,9 @@ const USAGE: &str = "Usage:
   hopperd node join https://main:8790 [--key <join key> --ca <fingerprint>] [--name <name>] [--data <folder>] [--service]
   hopperd node status [--data <folder>]
   hopperd node leave [--data <folder>]
+  hopperd node ceiling [look|operate] [--data <folder>]
+
+ceiling shows what the main may do on this node's servers; with a level, it lowers it (raising it means joining again at the higher level).
 
 Without --key, join shows a 6-digit code: check the main shows the same one in Settings › Nodes and allow it there.";
 
@@ -399,12 +403,16 @@ fn opts(args: &[String]) -> anyhow::Result<Opts> {
 pub fn command(args: &[String]) -> anyhow::Result<()> {
     let (what, rest) = args.split_first().map(|(w, r)| (w.as_str(), r)).unwrap_or(("", &[]));
     let o = opts(rest)?;
-    let dir = crate::absolute(&o.data.clone().unwrap_or_else(crate::service::default_data));
+    let boot = crate::absolute(&o.data.clone().unwrap_or_else(crate::service::default_data));
+    // node.json lives with the rest of the panel's data: in its panel
+    // folder once it has one (`--home`), else in the data folder itself.
+    let dir = crate::service::real_data(&boot).0;
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     match what {
-        "join" => rt.block_on(join(&dir, o)),
+        "join" => rt.block_on(join(&boot, &dir, o)),
         "status" => rt.block_on(status(&dir)),
         "leave" => rt.block_on(leave(&dir)).map(|m| println!("{m}")),
+        "ceiling" => ceiling(&dir, o.url.as_deref()).map(|m| println!("{m}")),
         _ => bail!("{USAGE}"),
     }
 }
@@ -425,7 +433,53 @@ fn print_failure(e: &ConnectError) {
     say(names.get(at).copied().unwrap_or("Connection"), false, &e.to_string());
 }
 
-async fn join(dir: &Path, o: Opts) -> anyhow::Result<()> {
+/// What this node lets its main do, or (with a level) lowers it. Only
+/// lowers: a higher level is the main's and the node's agreement at join
+/// time, so it takes joining again. A running panel reads the new level
+/// for the next request (`ceiling_now`).
+pub fn ceiling(dir: &Path, to: Option<&str>) -> anyhow::Result<String> {
+    let Some(mut j) = load(dir) else { return Ok("This server isn't a node of any main panel.".into()) };
+    let main = if j.main_name.is_empty() { j.main_url.clone() } else { j.main_name.clone() };
+    let Some(now_role) = crate::relay::ceiling_role(&j.ceiling) else {
+        bail!("node.json has a level this version doesn't know ({}). Leave and join again.", plain(&j.ceiling));
+    };
+    let Some(to) = to else {
+        return Ok(format!(
+            "{main} may {} here ({}).\nLower it with: hopperd node ceiling look   (or operate). To allow more, leave and join again at the higher level.",
+            crate::relay::ceiling_text(now_role),
+            j.ceiling
+        ));
+    };
+    let Some(to_role) = crate::relay::ceiling_role(to).filter(|_| matches!(to, "look" | "operate" | "manage")) else {
+        bail!("The level is look, operate or manage.");
+    };
+    if crate::relay::cap(to_role, now_role) != to_role {
+        bail!("{main} may {} here now. A higher level means joining again: hopperd node leave, then the main's join command at that level.", crate::relay::ceiling_text(now_role));
+    }
+    j.ceiling = to.to_string();
+    save(dir, &j)?;
+    Ok(format!("{main} may {} here now ({to}). The main still shows its own level until you lower it there too (Settings › Nodes).", crate::relay::ceiling_text(to_role)))
+}
+
+/// A `node.json` left in the start-up folder (`--data`) when the panel's
+/// data lives in its panel folder (`--home`): joined with an older
+/// version, or before the panel folder was set. It moves in with the rest.
+pub fn adopt_left_behind(boot: &Path, data: &Path) {
+    if crate::home::inside(boot, data) && crate::home::inside(data, boot) {
+        return;
+    }
+    if boot.join(FILE).is_file() && !data.join(FILE).is_file() {
+        match std::fs::rename(boot.join(FILE), data.join(FILE)) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(boot.join(STATUS_FILE));
+                log::info!("node: moved node.json into {}", data.display());
+            }
+            Err(e) => log::warn!("node: couldn't move node.json into {}: {e}", data.display()),
+        }
+    }
+}
+
+async fn join(boot: &Path, dir: &Path, o: Opts) -> anyhow::Result<()> {
     let url = o.url.clone().with_context(|| format!("Which main? {USAGE}"))?;
     let target = Target::parse(&url).map_err(|e| anyhow::anyhow!("{e}"))?;
     if o.key.is_some() && o.ca.is_none() {
@@ -530,7 +584,7 @@ async fn join(dir: &Path, o: Opts) -> anyhow::Result<()> {
     println!("Joined {} as node \"{name}\" (it may: {}).", if joined.main_name.is_empty() { &joined.main_url } else { &joined.main_name }, joined.ceiling);
     println!("Saved in {}", dir.join(FILE).display());
     if o.service {
-        let mut args = vec!["install".to_string(), "--data".into(), dir.display().to_string()];
+        let mut args = vec!["install".to_string(), "--data".into(), boot.display().to_string()];
         if cfg!(windows) {
             args.push("--copy".into());
         }
@@ -677,7 +731,7 @@ fn only_owner(app: &App, headers: &HeaderMap, method: &Method) -> crate::api::Ap
 
 async fn this_node(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> crate::api::ApiResult<Json<Value>> {
     only_owner(&app, &headers, &method)?;
-    let Some(j) = load(&app.boot_dir) else { return Ok(Json(json!({ "joined": false }))) };
+    let Some(j) = load(&app.data_dir) else { return Ok(Json(json!({ "joined": false }))) };
     Ok(Json(json!({
         "joined": true,
         "main_url": j.main_url,
@@ -691,7 +745,7 @@ async fn this_node(State(app): State<Arc<App>>, headers: HeaderMap, method: Meth
 
 async fn this_node_leave(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> crate::api::ApiResult<axum::response::Response> {
     only_owner(&app, &headers, &method)?;
-    let msg = leave(&app.boot_dir).await.map_err(crate::api::bad)?;
+    let msg = leave(&app.data_dir).await.map_err(crate::api::bad)?;
     use axum::response::IntoResponse as _;
     let mut res = Json(json!({ "ok": true, "message": msg })).into_response();
     res.extensions_mut().insert(crate::security::AuditNote("left the main panel".into()));
@@ -744,5 +798,47 @@ mod tests {
         assert_eq!(ceiling_now(&dir, &first)(), None, "another join");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(now(), None, "left");
+    }
+
+    /// A3 leftover: with `--home`, the data moves into the panel folder but
+    /// a node.json written before (in the `--data` folder) is moved along,
+    /// so the node keeps its join.
+    #[test]
+    fn a_node_json_left_in_the_start_folder_moves_into_the_data() {
+        let root = std::env::temp_dir().join(format!("hopperd-adopt-{}", crate::auth::random_hex(4)));
+        let (boot, data) = (root.join("boot"), root.join("home").join(".hopper-server"));
+        let ca = rustls::pki_types::CertificateDer::from(vec![1u8, 2, 3]);
+        let j = joined_from("https://rig:8790", &ca, &json!({ "node_id": "ab12", "token": "hnt_00ff", "ceiling": "operate" }), "key").unwrap();
+        save(&boot, &j).unwrap();
+        std::fs::write(boot.join(STATUS_FILE), "{}").unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        adopt_left_behind(&boot, &data);
+        assert!(!boot.join(FILE).exists() && !boot.join(STATUS_FILE).exists());
+        assert_eq!(load(&data).unwrap().token, "hnt_00ff");
+        // One already in the data folder wins; the same folder is left alone.
+        save(&boot, &joined_from("https://other:8790", &ca, &json!({ "node_id": "cd34", "token": "hnt_11ee", "ceiling": "look" }), "key").unwrap()).unwrap();
+        adopt_left_behind(&boot, &data);
+        assert_eq!(load(&data).unwrap().token, "hnt_00ff");
+        assert!(boot.join(FILE).exists());
+        adopt_left_behind(&data, &data);
+        assert!(data.join(FILE).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `hopperd node ceiling` shows the level and only ever lowers it.
+    #[test]
+    fn the_ceiling_command_only_lowers() {
+        let dir = std::env::temp_dir().join(format!("hopperd-ceilcmd-{}", crate::auth::random_hex(4)));
+        assert!(ceiling(&dir, None).unwrap().contains("isn't a node"));
+        let ca = rustls::pki_types::CertificateDer::from(vec![1u8, 2, 3]);
+        save(&dir, &joined_from("https://rig:8790", &ca, &json!({ "node_id": "ab12", "token": "hnt_00ff", "ceiling": "operate", "main_name": "rig" }), "key").unwrap()).unwrap();
+        assert!(ceiling(&dir, None).unwrap().contains("(operate)"));
+        assert!(ceiling(&dir, Some("manage")).is_err());
+        assert!(ceiling(&dir, Some("admin")).is_err());
+        assert_eq!(load(&dir).unwrap().ceiling, "operate");
+        ceiling(&dir, Some("look")).unwrap();
+        assert_eq!(load(&dir).unwrap().ceiling, "look");
+        assert!(ceiling(&dir, Some("operate")).is_err(), "back up means joining again");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

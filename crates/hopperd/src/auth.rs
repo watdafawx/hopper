@@ -36,6 +36,54 @@ const PAIR_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_PENDING: usize = 8;
 pub const MIN_PASSWORD: usize = 8;
 
+// ---- server lists ---------------------------------------------------------------
+//
+// A user's or token's server list holds server ids and (design/multi-panel.md,
+// A4) "all servers on node X" as `node:<node id>`, which also covers servers
+// made there later. An empty list means every server, so a list that loses
+// its last entry (its node removed) gets [`NO_SERVERS`] instead of becoming
+// "everything". Local ids are slugs without `:`, and node ids are 12 hex
+// characters, so neither entry can be read as a server id.
+
+/// The start of a "whole node" entry.
+pub const NODE_SCOPE: &str = "node:";
+/// An entry that matches no server: what a list keeps when its node was
+/// removed, so it never widens to every server.
+pub const NO_SERVERS: &str = "none:";
+
+/// The node a list entry names as a whole (`node:<id>` → `<id>`).
+pub fn scope_node(entry: &str) -> Option<&str> {
+    entry.strip_prefix(NODE_SCOPE).filter(|n| !n.is_empty())
+}
+
+/// Whether a list covers server `id`: named itself, or its node named as a
+/// whole.
+fn list_covers(list: &[String], id: &str) -> bool {
+    let node = crate::relay::split(id).map(|(n, _)| n);
+    list.iter().any(|e| e == id || (node.is_some() && scope_node(e) == node))
+}
+
+/// Whether a list reaches node `node` at all: the whole node, or one of
+/// its servers.
+fn list_reaches(list: &[String], node: &str) -> bool {
+    list.iter().any(|e| scope_node(e) == Some(node) || crate::relay::split(e).is_some_and(|(n, _)| n == node))
+}
+
+/// Takes node `node` (removed) out of a list: its whole-node entry and its
+/// servers. A list that had entries and has none left gets [`NO_SERVERS`],
+/// so it stays as narrow as it was. Returns whether it changed.
+pub fn drop_node(list: &mut Vec<String>, node: &str) -> bool {
+    if list.is_empty() {
+        return false;
+    }
+    let before = list.clone();
+    list.retain(|e| !(scope_node(e) == Some(node) || crate::relay::split(e).is_some_and(|(n, _)| n == node)));
+    if list.is_empty() {
+        list.push(NO_SERVERS.into());
+    }
+    *list != before
+}
+
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
@@ -430,9 +478,23 @@ impl Who {
     /// Whether this one may see the server with `id` at all.
     pub fn sees(&self, id: &str) -> bool {
         match self {
-            Who::Token { servers, .. } | Who::User { servers, .. } => servers.is_empty() || servers.iter().any(|s| s == id),
+            Who::Token { servers, .. } | Who::User { servers, .. } => servers.is_empty() || list_covers(servers, id),
             _ => true,
         }
+    }
+
+    /// Whether this one may see anything on node `node`: everything when
+    /// not limited, else the whole node or one of its servers.
+    pub fn sees_node(&self, node: &str) -> bool {
+        match self {
+            Who::Token { servers, .. } | Who::User { servers, .. } => servers.is_empty() || list_reaches(servers, node),
+            _ => true,
+        }
+    }
+
+    /// Limited to some servers (or nodes) rather than all of them.
+    pub fn limited(&self) -> bool {
+        matches!(self, Who::Token { servers, .. } | Who::User { servers, .. } if !servers.is_empty())
     }
 
     /// Whether this one may see passwords in a server's files (RCON's, in
@@ -1103,6 +1165,22 @@ impl Auth {
             self.save(&s);
         }
         gone
+    }
+
+    /// A node was removed: it leaves every user's and token's server list
+    /// (see [`drop_node`]).
+    pub fn drop_node_scope(&self, node: &str) {
+        let mut s = self.stored.lock().unwrap();
+        let mut changed = false;
+        for u in &mut s.users {
+            changed |= drop_node(&mut u.servers, node);
+        }
+        for t in &mut s.tokens {
+            changed |= drop_node(&mut t.servers, node);
+        }
+        if changed {
+            self.save(&s);
+        }
     }
 
     pub fn devices(&self) -> Vec<Device> {

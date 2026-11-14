@@ -22,6 +22,8 @@
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
   import { roleLabel } from './lib/me.svelte.js';
+  import ServerScope from './lib/ServerScope.svelte';
+  import { scopeText } from './lib/scope.js';
 
   let twofa = $state(null);
   let setup = $state(null);
@@ -33,15 +35,30 @@
   let tName = $state('');
   let tRead = $state(true);
   let tDays = $state('');
-  let tServers = $state(new Set());
+  let tServers = $state([]);
   let audit = $state([]);
+  // The audit log's node filter ('' is everything).
+  let auditNode = $state('');
 
   async function load() {
     try {
       twofa = await api('/auth/2fa');
       if (own) return;
       tokens = await api('/tokens');
-      audit = await api('/audit?limit=60');
+      await loadAudit();
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
+
+  async function loadAudit() {
+    audit = await api(auditNode ? `/audit?limit=60&node=${encodeURIComponent(auditNode)}` : '/audit?limit=60');
+  }
+
+  async function pickAuditNode(id) {
+    auditNode = id;
+    try {
+      await loadAudit();
     } catch (e) {
       say(e.message, true);
     }
@@ -81,10 +98,10 @@
   async function makeToken() {
     try {
       made = await post('/tokens', {
-        name: tName, read_only: tRead, servers: [...tServers], days: tDays ? Number(tDays) : null,
+        name: tName, read_only: tRead, servers: tServers, days: tDays ? Number(tDays) : null,
       });
       tName = '';
-      tServers = new Set();
+      tServers = [];
       load();
     } catch (e) {
       say(e.message, true);
@@ -108,12 +125,6 @@
     } catch {
       say("Can't copy here: select it and copy it by hand.", true);
     }
-  }
-
-  function toggleServer(id) {
-    const s = new Set(tServers);
-    s.has(id) ? s.delete(id) : s.add(id);
-    tServers = s;
   }
 
   const when = (t) => (t ? new Date(t * 1000).toLocaleString() : 'never');
@@ -173,7 +184,7 @@
   {#each tokens as t (t.id)}
     <div class="row tk">
       <div class="grow">
-        <div>{t.name} <span class="chip">{t.read_only ? 'read only' : 'full'}</span>{#if t.servers.length}<span class="chip">{t.servers.map((id) => live.servers.find((s) => s.id === id)?.name || id).join(', ')}</span>{/if}</div>
+        <div>{t.name} <span class="chip">{t.read_only ? 'read only' : 'full'}</span>{#if t.servers.length}<span class="chip">{scopeText(t.servers, live.servers, live.nodes)}</span>{/if}</div>
         <div class="tiny muted">made {when(t.created)} · used {when(t.last_used)}{t.expires ? ` · expires ${when(t.expires)}` : ''}</div>
       </div>
       <button class="btn sm icon ghost" title="Revoke" onclick={() => revoke(t)}><Trash2 size={13} /></button>
@@ -184,13 +195,9 @@
       <div class="input grow"><input bind:value={tName} placeholder="Name, e.g. Grafana" /></div>
       <div class="input w"><input type="number" min="1" bind:value={tDays} placeholder="Days" /></div>
     </div>
+    <ServerScope bind:value={tServers} />
     <div class="row wrap">
       <label class="small chk"><input type="checkbox" bind:checked={tRead} />Read only</label>
-      <span class="tiny muted">Servers:</span>
-      {#each live.servers as s (s.id)}
-        <button class="chip" class:on={tServers.has(s.id)} onclick={() => toggleServer(s.id)}>{s.name}</button>
-      {/each}
-      <span class="tiny muted">{tServers.size ? '' : '(all)'}</span>
       <span class="sp"></span>
       <button class="btn sm pri" disabled={!tName.trim()} onclick={makeToken}><Plus size={13} />Make token</button>
     </div>
@@ -198,7 +205,14 @@
 </div>
 
 <div class="card wide">
-  <h3><ScrollText size={14} />Audit log<span class="sp"></span><button class="btn sm ghost" onclick={load}>Refresh</button></h3>
+  <h3 class="ah"><ScrollText size={14} />Audit log<span class="sp"></span>
+    {#if live.nodes.length}
+      <div class="utabs" role="tablist" aria-label="Audit log for">
+        <button role="tab" class:tab-sel={!auditNode} aria-selected={!auditNode} onclick={() => pickAuditNode('')}>Everything</button>
+        {#each live.nodes as n (n.id)}<button role="tab" class:tab-sel={auditNode === n.id} aria-selected={auditNode === n.id} onclick={() => pickAuditNode(n.id)}>{n.name}</button>{/each}
+      </div>
+    {/if}
+    <button class="btn sm ghost" onclick={load}>Refresh</button></h3>
   <div class="audit">
     <table>
       <tbody>
@@ -206,10 +220,10 @@
           <tr class:bad={e.status >= 400}>
             <td class="muted nw">{when(e.at)}</td><td>{e.who}{#if e.role && e.role !== 'owner' && e.role !== 'device' && e.role !== 'token'} <span class="tiny muted">{roleLabel(e.role)}</span>{/if}</td>
             <td><span class="chip" class:acc={e.net === 'internet'} class:ts={e.net === 'tailscale'}>{netLabel[e.net]}</span></td>
-            <td class="mono tiny">{e.method} {e.path}</td><td class="muted">{e.status}</td><td class="muted tiny">{e.ip}{#if e.proxy}{' '}<span title="Came in through the proxy at {e.proxy}">via {e.proxy}</span>{/if}</td>
+            <td class="mono tiny">{e.method} {e.path}{#if e.node}{' '}<span class="chip" title="On node {e.node_name || e.node}">{e.node_name || e.node}</span>{/if}</td><td class="muted">{e.status}</td><td class="muted tiny">{e.ip}{#if e.proxy}{' '}<span title="Came in through the proxy at {e.proxy}">via {e.proxy}</span>{/if}</td>
           </tr>
         {:else}
-          <tr><td class="muted small">Nothing yet.</td></tr>
+          <tr><td class="muted small">{auditNode ? 'Nothing on this node yet.' : 'Nothing yet.'}</td></tr>
         {/each}
       </tbody>
     </table>
@@ -237,4 +251,7 @@
   td { padding: 5px 8px; border-bottom: 1px solid #26262c; }
   tr.bad td { color: var(--red); }
   .nw { white-space: nowrap; }
+  /* On a phone the node tabs get their own line, so Refresh stays in view. */
+  .ah { flex-wrap: wrap; row-gap: 4px; }
+  @media (max-width: 600px) { .ah .utabs { order: 3; flex: 1 0 100%; } }
 </style>

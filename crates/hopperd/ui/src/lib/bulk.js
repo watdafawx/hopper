@@ -8,6 +8,11 @@
 // will be sent and what is skipped (and why) before anything is sent, so
 // the single confirmation can show all of it; a server the person's role
 // on its panel can't touch is skipped here and never sent.
+//
+// This panel's nodes (A4) are groups of their own: their servers' calls go
+// to this panel, which relays them and writes them in its audit log with
+// the node named. A node's group carries what the node allows (its
+// ceiling), whether it's paused, and whether it can be reached.
 
 export const ACTIONS = ['start', 'stop', 'restart', 'command'];
 export const VERB = { start: 'Start', stop: 'Stop', restart: 'Restart', command: 'Send command' };
@@ -20,6 +25,13 @@ const players = (s) => (Array.isArray(s.players) ? s.players.filter((p) => p && 
  * state } where state is the panel's ('ok' when usable; this panel is
  * always 'ok'). */
 export function groupBlock(group) {
+  if (group.node) {
+    if (group.state === 'update_needed' || group.state === 'main_older') return `${group.name} needs an update before it takes actions.`;
+    if (group.state !== 'connected' && group.state !== 'reconnecting') return `Can't reach ${group.name} right now.`;
+    if (group.ceiling === 'look') return `${group.name} lets this panel only look.`;
+    if (group.role === 'viewer') return `Your account can only look.`;
+    return '';
+  }
   if (group.state && group.state !== 'ok') {
     if (group.state === 'signin') return `Sign in to ${group.name} again first.`;
     return `Can't reach ${group.name} right now.`;
@@ -40,6 +52,10 @@ export function forServer(s, action) {
   return { skip: 'Not something servers can do.' };
 }
 
+/** The bulk group of node `n` (the live feed's head) for someone whose
+ * role on this panel is `role`. */
+export const nodeGroup = (n, role) => ({ key: `node:${n.id}`, name: n.name, panel: null, node: n.id, role, state: n.state, ceiling: n.ceiling, maintenance: !!n.maintenance, servers: [] });
+
 /**
  * The plan: one entry per group that has picked servers, in the order the
  * groups were given. Each: { key, name, panel, send: [{ server, act, note,
@@ -52,14 +68,16 @@ export function planBulk(groups, action) {
   for (const g of groups) {
     if (!g.servers.length) continue;
     const block = groupBlock(g);
-    const entry = { key: g.key, name: g.name, panel: g.panel ?? null, send: [], skip: [] };
+    const entry = { key: g.key, name: g.name, panel: g.panel ?? null, node: g.node ?? '', send: [], skip: [] };
     for (const s of g.servers) {
       if (block) {
         entry.skip.push({ server: s, reason: block });
         continue;
       }
       const r = forServer(s, action);
-      if (r.skip) entry.skip.push({ server: s, reason: r.skip });
+      // A paused node takes stops and commands, never a start.
+      if (!r.skip && r.act === 'start' && g.maintenance) entry.skip.push({ server: s, reason: `${g.name} is under maintenance.` });
+      else if (r.skip) entry.skip.push({ server: s, reason: r.skip });
       else entry.send.push({ server: s, act: r.act, note: r.note, online: r.act === 'stop' || r.act === 'restart' ? players(s) : [] });
     }
     out.push(entry);

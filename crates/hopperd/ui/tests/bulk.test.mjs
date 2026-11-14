@@ -86,3 +86,23 @@ test('state filter', () => {
   assert.ok(passes(srv('a', 'crashed'), 'all'));
   assert.ok(!passes(srv('a', 'crashed'), 'running'));
 });
+
+test("a node's servers are their own group: its ceiling, pause and state decide", async () => {
+  const { nodeGroup } = await import('../src/lib/bulk.js');
+  const n = (over) => ({ id: 'ab12cd34ef56', name: 'vm', state: 'connected', ceiling: 'operate', maintenance: null, ...over });
+  const g = (node, servers, role = 'owner') => ({ ...nodeGroup(node, role), servers });
+  const up = srv('ab12cd34ef56:a', 'running');
+  const off = srv('ab12cd34ef56:b', 'stopped');
+  let plan = planBulk([home([srv('h', 'running')]), g(n(), [up, off])], 'restart');
+  assert.deepEqual(counts(plan), { send: 3, skip: 0, online: 0, panels: 2 });
+  assert.equal(plan[1].node, 'ab12cd34ef56');
+  plan = planBulk([g(n({ ceiling: 'look' }), [up])], 'restart');
+  assert.equal(plan[0].skip[0].reason, 'vm lets this panel only look.');
+  plan = planBulk([g(n({ maintenance: { by: 'owner' } }), [up, off])], 'restart');
+  // Paused: a running one restarts, a stopped one doesn't start.
+  assert.deepEqual(plan[0].send.map((x) => x.server.id), ['ab12cd34ef56:a']);
+  assert.equal(plan[0].skip[0].reason, 'vm is under maintenance.');
+  assert.equal(planBulk([g(n({ state: 'offline' }), [up])], 'stop')[0].skip[0].reason, "Can't reach vm right now.");
+  assert.match(planBulk([g(n({ state: 'update_needed' }), [up])], 'stop')[0].skip[0].reason, /needs an update/);
+  assert.equal(planBulk([g(n(), [up], 'viewer')], 'stop')[0].skip[0].reason, 'Your account can only look.');
+});

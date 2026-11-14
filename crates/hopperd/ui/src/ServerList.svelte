@@ -39,7 +39,7 @@
   import { making, cancel, forget } from './lib/making.svelte.js';
   import { startPick, clickSwallowed, tickLabel } from './lib/dragpick.svelte.js';
   import { Selection } from './lib/selection.svelte.js';
-  import { passes } from './lib/bulk.js';
+  import { passes, nodeGroup } from './lib/bulk.js';
   import SelectionBar from './lib/SelectionBar.svelte';
   import BulkAction from './BulkAction.svelte';
 
@@ -241,15 +241,26 @@
 
   let bulk = $state(null); // { action, groups } while its question is open
 
-  /** Opens the one question for `action` on the picked servers, grouped by panel. */
+  /** Opens the one question for `action` on the picked servers, grouped by
+   * panel and by node. */
   function openBulk(action) {
+    const role = canPower ? homeRole || 'owner' : 'viewer';
     const groups = [
-      { key: 'home', name: homeName || 'This panel', panel: null, role: canPower ? homeRole || 'owner' : 'viewer', state: 'ok', servers: [] },
+      { key: 'home', name: homeName || 'This panel', panel: null, role, state: 'ok', servers: [] },
+      ...nodes.map((n) => nodeGroup($state.snapshot(n), role)),
       ...livePanels.map((p) => ({ key: p.id, name: p.name, panel: p, role: p.role, state: p.state, servers: [] })),
     ];
     const at = new Map(groups.map((g) => [g.key, g]));
-    for (const r of pickedRows) at.get(r.p ? r.p.id : 'home')?.servers.push($state.snapshot(r.s));
+    for (const r of pickedRows) at.get(r.p ? r.p.id : r.s.node ? `node:${r.s.node}` : 'home')?.servers.push($state.snapshot(r.s));
     bulk = { action, groups };
+  }
+
+  /** "Select all on <node>": picks that node's servers (shown ones) for a
+   * bulk action, with the selection bar open. */
+  function pickNode(n) {
+    if (fold[nodeKey(n)]) flip(nodeKey(n));
+    selecting = true;
+    picked = new Set(nodeRows(n).map((s) => keyOf(null, s)));
   }
 
   /** The pill: players while it runs, else its state; none when stopped. */
@@ -514,7 +525,7 @@
     {#each nodes.filter((n) => showGroup(nodeKey(n))) as n, i (n.id)}
       {@const k = nodeKey(n)}
       {#if showGroup('home') || i > 0}<div class="gsep"></div>{/if}
-      {@render head(k, n.name, CEILING[n.ceiling] || '', nodeLight(n), owner ? { node: n } : null)}
+      {@render head(k, n.name, CEILING[n.ceiling] || '', nodeLight(n), { node: n })}
       {#if n.maintenance}
         <div class="health maint"><Pause size={11} /> Under maintenance{n.maintenance.by ? ` · by ${n.maintenance.by}` : ''}{n.maintenance.since ? ` ${secsAgo(n.maintenance.since)}` : ''} · nothing starts here{#if owner}{' · '}<button class="link" onclick={() => maintain(n, false)}>End maintenance</button>{/if}</div>
       {/if}
@@ -605,11 +616,15 @@
   {@const n = menu.g.node}
   <!-- svelte-ignore a11y_interactive_supports_focus -->
   <div class="popover menu rmenu" role="menu" tabindex="-1" bind:this={menuEl} style:left="{menu.x}px" style:top="{menu.y}px" onkeydown={menuKeys}>
-    {#if n.maintenance}<button class="menu-item" role="menuitem" onclick={() => pick(() => maintain(n, false))}><Play size={14} />End maintenance</button>
-    {:else}<button class="menu-item" role="menuitem" onclick={() => pick(() => maintain(n, true))}><Pause size={14} />Pause node (maintenance)</button>{/if}
-    {#if n.can_update}<button class="menu-item" role="menuitem" onclick={() => pick(() => updateNode(n))}><RefreshCw size={14} />Update to hopperd {homeVersion}</button>{/if}
-    <div class="menu-sep"></div>
-    <button class="menu-item" role="menuitem" onclick={() => pick(() => (location.hash = '/settings/nodes'))}><Server size={14} />Node settings</button>
+    <button class="menu-item" role="menuitem" disabled={!nodeRows(n).length} onclick={() => pick((g) => pickNode(g.node))}><ListChecks size={14} />Select all on {n.name}</button>
+    {#if owner}
+      <div class="menu-sep"></div>
+      {#if n.maintenance}<button class="menu-item" role="menuitem" onclick={() => pick((g) => maintain(g.node, false))}><Play size={14} />End maintenance</button>
+      {:else}<button class="menu-item" role="menuitem" onclick={() => pick((g) => maintain(g.node, true))}><Pause size={14} />Pause node (maintenance)</button>{/if}
+      {#if n.can_update}<button class="menu-item" role="menuitem" onclick={() => pick((g) => updateNode(g.node))}><RefreshCw size={14} />Update to hopperd {homeVersion}</button>{/if}
+      <div class="menu-sep"></div>
+      <button class="menu-item" role="menuitem" onclick={() => pick(() => (location.hash = '/settings/nodes'))}><Server size={14} />Node settings</button>
+    {/if}
   </div>
 {:else if menu?.g}
   {@const g = menu.g}

@@ -156,6 +156,12 @@ pub struct Event {
     pub method: String,
     pub path: String,
     pub status: u16,
+    /// The node a relayed request went to (design/multi-panel.md, A4), so
+    /// the main's log names it and can be read for one node.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub node: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub node_name: String,
 }
 
 pub struct Audit {
@@ -182,6 +188,15 @@ impl Audit {
         }
     }
 
+    /// The newest `limit` events about node `node`, newest first. Lines from
+    /// before A4 have no `node`: their path still names it.
+    pub fn recent_for_node(&self, node: &str, limit: usize) -> Vec<Event> {
+        let mut all = self.recent(usize::MAX);
+        all.retain(|e| e.node == node || (e.node.is_empty() && node_of(e.path.split(' ').next().unwrap_or(""), None).as_deref() == Some(node)));
+        all.truncate(limit);
+        all
+    }
+
     /// The newest `limit` events, newest first.
     pub fn recent(&self, limit: usize) -> Vec<Event> {
         let _g = self.file.lock().unwrap();
@@ -203,6 +218,13 @@ fn server_of(path: &str) -> Option<String> {
     let rest = path.strip_prefix("/api/v1/servers/").or_else(|| path.strip_prefix("/api/v1/fs/"))?;
     let id = rest.split('/').next()?;
     (!id.is_empty() && !matches!(id, "infos" | "rescan" | "create")).then(|| crate::relay::decode_seg(id))
+}
+
+/// The node a job's path is about (`/api/v1/jobs/{node}:{n}/...`): someone
+/// limited to some servers reaches only the nodes they have something on.
+fn job_node(path: &str) -> Option<String> {
+    let id = crate::relay::decode_seg(path.strip_prefix("/api/v1/jobs/")?.split('/').next()?);
+    crate::relay::split(&id).map(|(n, _)| n.to_string())
 }
 
 /// What someone could guess at: passwords, codes, setup. These get the
@@ -235,8 +257,10 @@ pub(crate) fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Op
         Who::Token { read_only, servers, .. } => {
             if *read_only && !reading && path != "/api/v1/mcp" {
                 Some("This token can only read.")
-            } else if !servers.is_empty() && server_of(path).is_some_and(|id| !servers.iter().any(|s| *s == id)) {
+            } else if !servers.is_empty() && server_of(path).is_some_and(|id| !who.sees(&id)) {
                 Some("This token isn't for that server.")
+            } else if job_node(path).is_some_and(|n| !who.sees_node(&n)) {
+                Some("This token isn't for that node.")
             } else {
                 None
             }
@@ -244,6 +268,9 @@ pub(crate) fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Op
         Who::User { role, servers, .. } => {
             if server_of(path).is_some_and(|id| !who.sees(&id)) {
                 return Some("You don't have access to that server.");
+            }
+            if job_node(path).is_some_and(|n| !who.sees_node(&n)) {
+                return Some("You don't have access to that node.");
             }
             // MCP checks each tool call itself.
             if path == "/api/v1/mcp" {
@@ -292,6 +319,29 @@ pub(crate) fn secret_refusal(app: &App, who: &crate::auth::Who, method: &Method,
 
 fn deny(status: StatusCode, msg: &str) -> Response {
     (status, axum::Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+/// The node a request on this panel is about, for the log: one relayed to
+/// it (a node's server or job, a server made there), or one of its own
+/// routes here (`/api/v1/nodes/{id}/...`: maintenance, update, removal).
+pub(crate) fn node_of(path: &str, query: Option<&str>) -> Option<String> {
+    if let Some(t) = crate::relay::target(path, query) {
+        return Some(t.node);
+    }
+    let id = path.strip_prefix("/api/v1/nodes/")?.split('/').next()?;
+    (!id.is_empty() && !matches!(id, "keys" | "pending" | "live" | "update-all") && id.chars().all(|c| c.is_ascii_alphanumeric())).then(|| id.to_string())
+}
+
+/// [`node_of`] and the node's name now (kept in the log line, so it still
+/// reads after the node is removed).
+pub(crate) fn node_named(app: &App, path: &str, query: Option<&str>) -> (String, String) {
+    match node_of(path, query) {
+        Some(id) => {
+            let name = app.nodes.name_of(&id).unwrap_or_default();
+            (id, name)
+        }
+        None => (String::new(), String::new()),
+    }
 }
 
 pub(crate) fn now() -> u64 {
@@ -366,12 +416,13 @@ async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String],
     // lets listed pages do it too).
     if api && let Some(msg) = crate::web_access::access_refusal(req.headers(), origins, manage_from_others, remote, &method, &path) {
         let (name, role) = who.as_ref().map_or_else(|| ("-".to_string(), String::new()), |w| (w.name(), w.role_name().to_string()));
-        app.audit.record(&Event { at: now(), who: name, role, ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status: 403 });
+        app.audit.record(&Event { at: now(), who: name, role, ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status: 403, node: String::new(), node_name: String::new() });
         return deny(StatusCode::FORBIDDEN, msg);
     }
     if let Some(w) = &who {
         if let Some(msg) = refusal(w, &method, &path).or_else(|| secret_refusal(&app, w, &method, &path, req.uri().query())) {
-            app.audit.record(&Event { at: now(), who: w.name(), role: w.role_name().into(), ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status: 403 });
+            let (node, node_name) = node_named(&app, &path, req.uri().query());
+            app.audit.record(&Event { at: now(), who: w.name(), role: w.role_name().into(), ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status: 403, node, node_name });
             return deny(StatusCode::FORBIDDEN, msg);
         }
     }
@@ -381,6 +432,7 @@ async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String],
     // changes come back on the node's live feed, so none is sent here.
     let node = if api { crate::relay::target(&path, req.uri().query()) } else { None };
     let relayed_to_node = node.is_some();
+    let (node_id, node_name) = if api { node_named(&app, &path, req.uri().query()) } else { (String::new(), String::new()) };
     let res = match node {
         Some(t) => crate::relay::forward(app.clone(), t, req).await,
         None => next.run(req).await,
@@ -411,7 +463,7 @@ async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String],
             Some(n) => format!("{path} ({})", n.0),
             None => path,
         };
-        app.audit.record(&Event { at: now(), who: who_name, role, ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status });
+        app.audit.record(&Event { at: now(), who: who_name, role, ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status, node: node_id, node_name });
     }
     res
 }
@@ -432,6 +484,8 @@ async fn relayed_checks(app: Arc<App>, who: crate::auth::Who, req: Request, next
         method: method.to_string(),
         path,
         status,
+        node: String::new(),
+        node_name: String::new(),
     };
     if let Some(msg) = refusal(&who, &method, &path).or_else(|| secret_refusal(&app, &who, &method, &path, req.uri().query())) {
         app.audit.record(&log(403, path));
@@ -564,7 +618,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let a = Audit::new(&dir);
         for i in 0..3 {
-            a.record(&Event { at: i, who: "owner".into(), role: "owner".into(), ip: "1.2.3.4".into(), proxy: String::new(), net: Net::Internet, method: "POST".into(), path: format!("/p{i}"), status: 200 });
+            a.record(&Event { at: i, who: "owner".into(), role: "owner".into(), ip: "1.2.3.4".into(), proxy: String::new(), net: Net::Internet, method: "POST".into(), path: format!("/p{i}"), status: 200, node: String::new(), node_name: String::new() });
         }
         let r = a.recent(2);
         assert_eq!(r.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["/p2", "/p1"]);

@@ -29,6 +29,7 @@
   import Palette from './Palette.svelte';
   import NewServer from './NewServer.svelte';
   import { session, ownerLike, roleLabel } from './lib/me.svelte.js';
+  import { scopeCount } from './lib/scope.js';
   import { dialog } from './lib/dialog.svelte.js';
   import { leave } from './lib/leave.js';
   import { NAV_EVENT, closeTopOverlay } from './lib/nav.js';
@@ -404,7 +405,7 @@
         </button>
         {#if menu}
           <div class="popover menu dd">
-            <div class="mh"><b>{me?.name || 'owner'}</b><span class="tiny muted">{roleLabel(me?.role)}{owner ? '' : me?.servers?.length ? ` · ${me.servers.length} server${me.servers.length === 1 ? '' : 's'}` : ''}</span></div>
+            <div class="mh"><b>{me?.name || 'owner'}</b><span class="tiny muted">{roleLabel(me?.role)}{owner || !me?.servers?.length ? '' : ` · ${scopeCount(me.servers, live.nodes)}`}</span></div>
             <a class="menu-item" href="#/settings" onclick={() => (menu = false)}><Gear size={14} />{owner ? 'Settings' : 'Account'}</a>
             <div class="menu-sep"></div>
             <button class="menu-item" onclick={signOut}><LogOut size={14} />Sign out</button>

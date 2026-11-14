@@ -92,7 +92,7 @@
       <h3 id="ba-title">{phase === 'ask' ? title(action, n.send) : phase === 'sending' ? 'Sending…' : summary || 'Done'}</h3>
       {#if phase === 'ask'}
         <p class="small subtle">
-          {#if !n.send}None of the picked servers can take this.{:else}Each panel gets its own request and writes it in its own audit log.{/if}
+          {#if !n.send}None of the picked servers can take this.{:else if plan.some((g) => g.node)}Each panel gets its own request and writes it in its own audit log; this panel writes its nodes' with the node named.{:else}Each panel gets its own request and writes it in its own audit log.{/if}
         </p>
       {/if}
 
@@ -100,7 +100,7 @@
         {#each plan as g (g.key)}
           <section class="pg" aria-label={g.name}>
             <div class="pgh">
-              <span class="pgn">{g.name}</span>
+              <span class="pgn">{g.name}{#if g.node}<span class="tiny muted">{' · node'}</span>{/if}</span>
               <span class="pgc">{g.send.length ? `${g.send.length} to ${action === 'command' ? 'send' : action}` : ''}{g.send.length && g.skip.length ? ' · ' : ''}{g.skip.length ? `${g.skip.length} skipped` : ''}</span>
             </div>
             {#each g.send as x (x.server.id)}
