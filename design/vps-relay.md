@@ -405,7 +405,7 @@ token and pin, the VPS unit's hardening.
 | Phase | Size | What | Checked on screen |
 |---|---|---|---|
 | B1 | M | **Done.** Codec in hopper-core (`hosting/relay_codec/`): dedupe port, zstd stream with flush, counters (raw, sent, vanilla, cache hits), limits. Replay tool as a hopper-core example (`relay_replay`), not a hopperd subcommand (see "B1 results") | No screen. Tests (round trip, cache desync impossible, bad references refused, fuzz). Replay numbers (synthetic; replay real recordings before B2 fixes the defaults). |
-| B2 | L | Relay role (`hopperd relay`) + home client: TLS, mux, server-id streams into the router, control stream, reconnect, status answer while home is down. Relay card (picked option) with live numbers | Two scratch hopperd on loopback, scratch server, a real client joining through scratch Velocity. Card measured in light and dark. |
+| B2 | L | **Done** (see "B2 as built": no Velocity yet, raw TCP to the router). Relay role (`hopperd relay`) + home client: TLS, mux, server-id streams into the router, control stream, reconnect, status answer while home is down. Relay card (picked option) with live numbers | Two scratch hopperd on loopback, scratch server, a real client joining through scratch Velocity. Card measured in light and dark. |
 | B3 | L | Setup over ssh: dialog, checks, steps (idempotent), cloud port check from home, "Remove the relay", repair | Against a throwaway VM or a local Ubuntu container with sshd. Never the live relay. Screenshots of every step state. |
 | B4 | M | Server changes: PCF install + config, properties, voice host, History group, Stop using the relay, Play at home, router relay-only refusal, Settings lock and wording | Scratch server: History shows each entry, undo restores, direct login refused. |
 | B5 | M | Players tab ping from the VPS front, PROXY v2 to Velocity | Ping column vs a known latency (tc netem on the test VM). |
@@ -499,6 +499,107 @@ to server) is small, so its cache stays nearly empty; B2 may agree a
 smaller cache for it. Level 11 encodes at 160+ MB/s on the dev PC, far
 above any home upload; level 19 sent about 10% less on a short run but encodes
 at 10 MB/s, too slow for a login burst.
+
+## B2 as built
+
+Code: `crates/hopperd/src/vps/` (`relay_end.rs` the VPS end, `home.rs` the
+home client, counters and API, `link.rs` the key check, `wire.rs` frames
+through the codec, `tests.rs`), the router's new entry
+`router::relayed`, and the card `crates/hopperd/ui/src/RelayCard.svelte`.
+
+### What differs from the plan above, and why
+
+- **No Velocity in B2.** The relay passes each player's raw TCP to home's
+  router, which hands it to the server's own port as it does for a LAN
+  player. That already works with online-mode servers and needs no proxy
+  mod, so B2 can be checked end to end without B4. Velocity, PCF and the
+  PROXY v2 header come with B4/B5 (until then the server sees every
+  relayed player as 127.0.0.1).
+- **Module `vps`, subcommand `hopperd relay`.** `relay.rs` is already the
+  node request relay (multi-panel), so the module has another name.
+- **Each direction's receiver picks its codec.** The relay asks for the
+  busy direction (home to players) by its own memory
+  (`CodecConfig::for_memory`, overridable in `relay.json`); home asks for
+  the quiet direction `level 3, window 2^22, no cache` (a few MB). Each
+  end checks the other's ask against a cap before it allocates anything
+  (home: the B1 full settings; relay: window ≤ 2^24, cache ≤ 64 MB).
+- **The key is checked before the codec and the mux exist.** After TLS
+  (ALPN `hopper-relay`, home pins the relay CA's SHA-256), home sends one
+  length-prefixed JSON hello with the key; the relay compares SHA-256s in
+  constant time, answers once and closes on a wrong key. A broken hello
+  gets no answer. Failed tries count per address: 10 in 10 minutes and
+  that address is dropped unread.
+- **Which server: one control stream from home.** Home opens a `control`
+  stream and sends `{routes: [{server, name}]}` (again when its settings
+  change). The relay tags every player stream with the first route's
+  server id (one server per relay until B7). Home re-checks the tag
+  against its own list of relayed servers and drops anything else, so the
+  relay can't reach a server that isn't set to use it.
+- **Players per address**: at most 8 at once from one IP on the game port;
+  the tunnel carries at most 256 streams (window 256 KiB each).
+- **The card sits at the top of the Overview's main column**, above the
+  console, not in the 290 px rail: three numbers side by side don't fit
+  there. "Play at home until it's back" is shown disabled until B4.
+- **Desktop card: not in B2.** Desktop shows a remote server's Overview
+  (`src/gpui/server_control.rs`, the Overview cards); the same card there
+  is B8, from `GET /api/v1/servers/{id}/vps-relay`.
+
+### Stream protocol
+
+- Home → relay, once, before anything else: `u32 length` + JSON
+  `{key, tunnel, version, recv: {level, window_log, long_distance,
+  cache_bytes}}`. Relay → home: `{ok, error, tunnel, version, recv,
+  game_port}`.
+- Then both directions: mux frames (the node tunnel's `tunnel/mux.rs`,
+  version check N/N-1), each with a 4-byte length, through one relay codec
+  per direction, flushed once per burst. Home is `Side::Node`, the relay
+  `Side::Main` (it opens the player streams).
+- Stream heads: `{kind: "game", server, peer}` (relay → home, one per
+  player connection, server list pings too) and `{kind: "control"}`
+  (home → relay). Each side half-closes on its own; a reset or a dropped
+  connection ends every stream on both sides.
+- While home is away the relay answers by itself: the server list says
+  "Home server is offline"; a join is told "The home server is offline.
+  Try again in a little while." Nothing is passed anywhere else.
+
+### Listeners and routes
+
+| What | Where | Access |
+|---|---|---|
+| Relay tunnel port (25566) | VPS | TLS with the relay's own CA, ALPN `hopper-relay`, then the relay key; per-IP failure limit |
+| Relay game port (25565) | VPS | Players; bytes only ever go to the paired home's router, or the relay's own "offline" answer; 8 at once per IP |
+| `GET/PUT /api/v1/vps-relay` | home panel | `require_owner`; the key is write-only (`has_key`), fingerprint and key format checked, servers must exist |
+| `POST /api/v1/vps-relay/retry` | home panel | `require_owner` |
+| `GET /api/v1/servers/{id}/vps-relay` | home panel | `require`, plus the per-server access check every `/servers/{id}/` route gets |
+
+Home opens no new listener: it dials out.
+
+### Counters
+
+Per connection and in rolling totals (`vps-relay-stats.json`, owner-only,
+saved every minute and when a connection ends), per server: raw bytes to
+players, what vanilla would have sent them (`VanillaEstimate`), the
+server's share of what the tunnel sent and of the cache hits (by its share
+of the raw bytes, since one compressed stream carries every server), bytes
+from players and streams. An hour of 10-second samples per server feeds
+the card's sparkline.
+
+### Pairing by hand (B3 does this over ssh)
+
+1. On the VPS: `hopperd relay init --data <dir>`. It prints the relay key
+   once (only its SHA-256 is kept, in `relay.json`), the certificate
+   fingerprint and the ports.
+2. Run it: `hopperd relay run --data <dir>` (`--bind`, `--game-port`,
+   `--tunnel-port` to change them). Open the game and tunnel ports in the
+   VPS firewall.
+3. On the home panel, as the owner:
+   `PUT /api/v1/vps-relay` with
+   `{"enabled": true, "address": "<vps>:25566", "fingerprint": "<printed>",
+   "key": "hrt_…", "servers": ["<server id>"], "public_address":
+   "<what players type>"}`. The panel connects within a second and keeps
+   reconnecting (1 s doubling to 60 s, with jitter) while it runs.
+4. The server's Overview shows the card; `GET /api/v1/vps-relay` shows the
+   settings without the key.
 
 ## Open questions for the maintainer (answered: see Decisions)
 

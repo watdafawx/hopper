@@ -81,6 +81,7 @@ pub(crate) fn panel_with(tls: crate::TlsInfo) -> T {
         sftp_fingerprint: None,
         nodes: crate::nodes::Nodes::new(&data),
         moves: crate::moves::Moves::new(&data),
+        vps: crate::vps::home::Home::new(&data),
     });
     app.rescan();
     let server = app.servers.list().first().expect("the test server").id.clone();

@@ -177,6 +177,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/servers/{id}/icon", get(icon))
         .route("/api/v1/ws", get(ws))
         .merge(crate::changes::routes())
+        .merge(crate::vps::home::routes_api())
         .merge(crate::fs_api::routes())
         .merge(crate::pack_api::routes())
         .merge(crate::manage_api::routes())

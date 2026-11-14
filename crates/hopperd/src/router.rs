@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
 /// The router's part of hopperd.toml (`[router]`).
@@ -398,8 +398,8 @@ async fn accept(app: Arc<App>, l: TcpListener) {
 }
 
 /// Reads from `sock` into `buf` until `parse` has a whole packet.
-async fn read_until<T>(
-    sock: &mut TcpStream,
+async fn read_until<T, S: AsyncRead + Unpin>(
+    sock: &mut S,
     buf: &mut Vec<u8>,
     from: usize,
     parse: impl Fn(&[u8]) -> anyhow::Result<Read<T>>,
@@ -420,10 +420,50 @@ async fn read_until<T>(
     }
 }
 
+/// A player's connection as the router sees it: a socket on this machine,
+/// or a stream that came in through the VPS relay (`crate::vps`).
+pub(crate) trait PlayerConn: AsyncRead + AsyncWrite + Unpin + Send {
+    /// Lists the player for the Players tab's ping, when this end can
+    /// measure it. Behind the relay the socket here is loopback (about
+    /// 0 ms), so relayed connections aren't listed (the VPS end measures
+    /// them in a later phase).
+    fn listed(&self, _server: &str, _name: &str) -> Option<crate::player_ping::Listed> {
+        None
+    }
+}
+
+impl PlayerConn for TcpStream {
+    fn listed(&self, server: &str, name: &str) -> Option<crate::player_ping::Listed> {
+        Some(crate::player_ping::listen(server, name, self))
+    }
+}
+
+impl PlayerConn for tokio::io::DuplexStream {}
+
+/// How the router finds the server for a connection.
+enum Pick {
+    /// From the address the player typed (connections on the router's port).
+    Address,
+    /// Already known: a relayed stream names its server, so no address is
+    /// read (design/vps-relay.md, "Server tag").
+    Server(String),
+}
+
 async fn handle(app: &Arc<App>, mut sock: TcpStream, peer: SocketAddr) -> anyhow::Result<()> {
     let _ = sock.set_nodelay(true);
+    route(app, &mut sock, peer, Pick::Address).await
+}
+
+/// A connection that came through the VPS relay for server `id`: the same
+/// path as a join on the router's port (wake on join, "starting" answers,
+/// the lobby island), with the server already chosen.
+pub(crate) async fn relayed<S: PlayerConn>(app: &Arc<App>, sock: &mut S, peer: SocketAddr, id: &str) -> anyhow::Result<()> {
+    route(app, sock, peer, Pick::Server(id.to_string())).await
+}
+
+async fn route<S: PlayerConn>(app: &Arc<App>, sock: &mut S, peer: SocketAddr, pick: Pick) -> anyhow::Result<()> {
     let mut buf = Vec::new();
-    let (hs, used) = read_until(&mut sock, &mut buf, 0, |b| {
+    let (hs, used) = read_until(sock, &mut buf, 0, |b| {
         if core::is_legacy_ping(b) {
             anyhow::bail!("pre-1.7 ping");
         }
@@ -431,20 +471,25 @@ async fn handle(app: &Arc<App>, mut sock: TcpStream, peer: SocketAddr) -> anyhow
     })
     .await?;
 
-    // The setup check's own address: always answered here.
-    if hs.host == CHECK_HOST {
-        return standin(app, &mut sock, &buf, used, &hs, Standin::Unknown, None).await;
-    }
-    let entry = {
-        let routes = app.router.routes.read().unwrap();
-        core::pick(&hs.host, &routes).cloned()
-    }
-    .or_else(|| Some(app.cfg.read().unwrap().router.unknown_server.clone()).filter(|s| !s.is_empty()))
-    .and_then(|id| app.servers.get(&id));
+    let entry = match pick {
+        Pick::Address => {
+            // The setup check's own address: always answered here.
+            if hs.host == CHECK_HOST {
+                return standin(app, sock, &buf, used, &hs, Standin::Unknown, None).await;
+            }
+            {
+                let routes = app.router.routes.read().unwrap();
+                core::pick(&hs.host, &routes).cloned()
+            }
+            .or_else(|| Some(app.cfg.read().unwrap().router.unknown_server.clone()).filter(|s| !s.is_empty()))
+            .and_then(|id| app.servers.get(&id))
+        }
+        Pick::Server(id) => app.servers.get(&id),
+    };
 
     let Some(e) = entry else {
         log::debug!("router: {peer} asked for {:?}, which no server has", hs.host);
-        return standin(app, &mut sock, &buf, used, &hs, Standin::Unknown, None).await;
+        return standin(app, sock, &buf, used, &hs, Standin::Unknown, None).await;
     };
     let state = e.server.state();
     if state == ServerState::Running {
@@ -456,21 +501,21 @@ async fn handle(app: &Arc<App>, mut sock: TcpStream, peer: SocketAddr) -> anyhow
                 if !hs.is_login()
                     && let Some(msg) = crate::motd_live::message(&e).await
                 {
-                    return status_through(&mut sock, &mut up, buf, used, &msg, &e).await;
+                    return status_through(sock, &mut up, buf, used, &msg, &e).await;
                 }
                 // A joining player: list their connection so the Players tab
                 // can show its ping. Their name comes in the next packet.
                 let mut _listed = None;
                 if hs.is_login()
-                    && let Ok((name, _)) = read_until(&mut sock, &mut buf, used, core::read_login_name).await
+                    && let Ok((name, _)) = read_until(sock, &mut buf, used, core::read_login_name).await
                 {
-                    _listed = Some(crate::player_ping::listen(&e.id, &name, &sock));
+                    _listed = sock.listed(&e.id, &name);
                 }
                 up.write_all(&buf).await?;
-                tokio::io::copy_bidirectional(&mut sock, &mut up).await?;
+                tokio::io::copy_bidirectional(sock, &mut up).await?;
                 return Ok(());
             }
-            _ => return standin(app, &mut sock, &buf, used, &hs, Standin::Starting, Some(&e)).await,
+            _ => return standin(app, sock, &buf, used, &hs, Standin::Starting, Some(&e)).await,
         }
     }
     let s = settings(&e);
@@ -483,13 +528,13 @@ async fn handle(app: &Arc<App>, mut sock: TcpStream, peer: SocketAddr) -> anyhow
         _ if s.wakes(now) => Standin::Sleeping,
         _ => Standin::Stopped,
     };
-    standin(app, &mut sock, &buf, used, &hs, kind, Some(&e)).await
+    standin(app, sock, &buf, used, &hs, kind, Some(&e)).await
 }
 
 /// Answers for a server that isn't up (or an address no server has):
 /// its server list entry, or the message a joining player sees. Joining a
 /// sleeping server starts it.
-async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, hs: &core::Handshake, kind: Standin, e: Option<&Arc<Entry>>) -> anyhow::Result<()> {
+async fn standin<S: PlayerConn>(app: &Arc<App>, sock: &mut S, buf: &[u8], used: usize, hs: &core::Handshake, kind: Standin, e: Option<&Arc<Entry>>) -> anyhow::Result<()> {
     let mut buf = buf.to_vec();
     let s = e.map(|e| settings(e)).unwrap_or_default();
     let name = e.map(|e| e.name.clone()).unwrap_or_default();
@@ -645,7 +690,7 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
 }
 
 /// A player's stay on the lobby island while `e` starts (see crate::limbo).
-async fn island(app: &Arc<App>, sock: &mut TcpStream, leftover: Vec<u8>, hs: &core::Handshake, e: &Arc<Entry>, player: &str, uuid: Option<[u8; 16]>) -> anyhow::Result<()> {
+async fn island<S: PlayerConn>(app: &Arc<App>, sock: &mut S, leftover: Vec<u8>, hs: &core::Handshake, e: &Arc<Entry>, player: &str, uuid: Option<[u8; 16]>) -> anyhow::Result<()> {
     // No saved ping (the server never ran under the router) counts as modded:
     // only a Forge / NeoForge client is turned away on that, and a modded
     // client on a vanilla island dies with "server is not running NeoForge".
@@ -685,7 +730,7 @@ async fn progress(app: &Arc<App>, e: &Arc<Entry>) -> crate::hold::Progress {
 /// Holds a modded player at login until `e` is up, then hands their
 /// connection to it: their handshake and login (`buf[..end]`) are replayed
 /// to the server as if they had just come in.
-async fn wait_for(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], end: usize, hs: &core::Handshake, e: &Arc<Entry>, player: &str) -> anyhow::Result<()> {
+async fn wait_for<S: PlayerConn>(app: &Arc<App>, sock: &mut S, buf: &[u8], end: usize, hs: &core::Handshake, e: &Arc<Entry>, player: &str) -> anyhow::Result<()> {
     let name = e.name.clone();
     let join_again = || core::standin_kick(Standin::Starting, &name, e.server.usual_start_secs(), e.server.boot_status().as_ref());
     // One held connection per name and server, and not too many.
@@ -702,7 +747,7 @@ async fn wait_for(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], end: usize, 
                 Ok(Ok(mut up)) => {
                     let _ = up.set_nodelay(true);
                     log::info!("router: handing {player} to {name} after {} s", began.elapsed().as_secs());
-                    let _listed = crate::player_ping::listen(&e.id, player, sock);
+                    let _listed = sock.listed(&e.id, player);
                     up.write_all(&buf[..end]).await?;
                     up.write_all(&rest).await?;
                     tokio::io::copy_bidirectional(sock, &mut up).await?;
@@ -727,7 +772,7 @@ async fn wait_for(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], end: usize, 
 /// Passes a server list request to a running server and its answer back
 /// with `msg` as the message (the rest, mods and players included, as the
 /// server said), then the ping through as is.
-async fn status_through(sock: &mut TcpStream, up: &mut TcpStream, mut buf: Vec<u8>, used: usize, msg: &str, e: &Arc<Entry>) -> anyhow::Result<()> {
+async fn status_through<S: PlayerConn>(sock: &mut S, up: &mut TcpStream, mut buf: Vec<u8>, used: usize, msg: &str, e: &Arc<Entry>) -> anyhow::Result<()> {
     let (_, after) = read_until(sock, &mut buf, used, |b| packet(b, 16)).await?;
     up.write_all(&buf[..after]).await?;
     let mut answer = Vec::new();
@@ -769,7 +814,7 @@ fn packet(b: &[u8], max: usize) -> anyhow::Result<Read<(i32, Vec<u8>)>> {
     })
 }
 
-async fn kick(sock: &mut TcpStream, text: &Value) -> anyhow::Result<()> {
+async fn kick<S: PlayerConn>(sock: &mut S, text: &Value) -> anyhow::Result<()> {
     sock.write_all(&core::login_disconnect_packet(text)).await?;
     sock.flush().await?;
     Ok(())
