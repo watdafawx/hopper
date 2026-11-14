@@ -104,6 +104,22 @@ const KNOWN_CLIENT_ONLY: &[&str] = &[
     "asynclogger",
 ];
 
+/// Mods only a server behind a proxy (Velocity, BungeeCord) has: they let
+/// the proxy's players in and the pack never has them. Matched like
+/// `KNOWN_CLIENT_ONLY`, but ahead of what the jar says about its side: some
+/// of them (Proxy Compatible Forge) call themselves "both".
+const KNOWN_SERVER_ONLY: &[&str] = &[
+    // Mod ids and jar names from the jars on Modrinth.
+    "pcf",
+    "proxy_compatible_forge",
+    "proxycompatibleforge",
+    "fabricproxy",
+    "fabricproxy-lite",
+    "fabricproxyplus",
+    "neovelocity",
+    "forgepluginmessage",
+];
+
 /// Why a client mod should not go to the server, most trusted signal first.
 fn skip_reason(m: &ModInfo) -> Option<String> {
     if let Some(r) = &m.wont_sync {
@@ -128,12 +144,22 @@ fn words(s: &str) -> Vec<String> {
 /// A list entry matches whole words of the file name (so "emi" matches
 /// "emi-1.1.jar" but not "alchemistry"), or the mod id exactly.
 fn known_client_only(m: &ModInfo) -> bool {
+    on_list(KNOWN_CLIENT_ONLY, m)
+}
+
+fn on_list(list: &[&str], m: &ModInfo) -> bool {
     let file = words(&m.file_name);
     let id: String = words(&m.mod_id).concat();
-    KNOWN_CLIENT_ONLY.iter().any(|p| {
+    list.iter().any(|p| {
         let p = words(p);
         (!id.is_empty() && id == p.concat()) || file.windows(p.len()).any(|w| w == p.as_slice())
     })
+}
+
+/// A proxy-forwarding mod that belongs on the server alone (see
+/// `KNOWN_SERVER_ONLY`). A jar that says it is client-only isn't one.
+pub fn known_server_only(m: &ModInfo) -> bool {
+    m.side != "client" && on_list(KNOWN_SERVER_ONLY, m)
 }
 
 /// Whether a jar named `file_name` is on the built-in client-only list.

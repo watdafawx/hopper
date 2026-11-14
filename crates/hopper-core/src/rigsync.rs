@@ -271,6 +271,13 @@ pub fn turns_on(d: &DiffEntry) -> bool {
         && d.server.as_ref().is_some_and(|s| s.off)
 }
 
+/// A mod only the server has, on purpose: a proxy-forwarding mod
+/// ([`crate::diff::known_server_only`]). The pack never has it, so it is
+/// neither "missing" nor in the way of joining, and syncing leaves it be.
+pub fn is_server_side(d: &DiffEntry) -> bool {
+    d.status == DiffStatus::OnlyServer && !is_off_here(d) && d.server.as_ref().is_some_and(crate::diff::known_server_only)
+}
+
 /// The row's state in a few words: [`status_label`], or what differs in
 /// whether the mod is on.
 pub fn row_label(d: &DiffEntry) -> &'static str {
@@ -278,6 +285,8 @@ pub fn row_label(d: &DiffEntry) -> &'static str {
         "Off on server"
     } else if is_off_here(d) {
         "Off in pack"
+    } else if is_server_side(d) {
+        "Server only"
     } else {
         status_label(d.status)
     }
@@ -303,7 +312,7 @@ pub fn row_change(d: &DiffEntry) -> Option<String> {
         Group::Update => format!("Update {name} on the server"),
         Group::Add => format!("Add {name} to the server"),
         Group::ServerOnly => format!("Remove {name} from the server"),
-        Group::KeptOff | Group::InSync => return None,
+        Group::ServerSide | Group::KeptOff | Group::InSync => return None,
     })
 }
 
@@ -391,6 +400,7 @@ pub fn explain(d: &DiffEntry) -> String {
             v(&d.server)
         ),
         DiffStatus::OnlyServer if is_off_here(d) => "Turned off in this pack but still on on the server. Turn it off there too, so both match.".into(),
+        DiffStatus::OnlyServer if is_server_side(d) => "Only the server needs this: it lets players join through a proxy.".into(),
         DiffStatus::OnlyServer => "On the server but not in the pack. Click to copy it down to the pack, or select it and Remove.".into(),
         DiffStatus::ServerStale => "An older copy left on the server; the client has this mod under a newer file. Click the chip to remove the leftover.".into(),
         DiffStatus::ClientNewer | DiffStatus::ServerNewer => format!(
@@ -421,6 +431,8 @@ pub enum Group {
     TurnOff,
     /// Only the server has it (or an old copy left behind).
     ServerOnly,
+    /// Only the server has it, and should: a proxy mod. Nothing to do.
+    ServerSide,
     /// Missing on the server on purpose: client-only or left out.
     KeptOff,
     /// Same on both.
@@ -428,12 +440,13 @@ pub enum Group {
 }
 
 impl Group {
-    pub const ALL: [Group; 7] = [
+    pub const ALL: [Group; 8] = [
         Group::Add,
         Group::Update,
         Group::TurnOn,
         Group::TurnOff,
         Group::ServerOnly,
+        Group::ServerSide,
         Group::KeptOff,
         Group::InSync,
     ];
@@ -445,6 +458,7 @@ impl Group {
             DiffStatus::OnlyClient => Group::Add,
             DiffStatus::ClientNewer | DiffStatus::ServerNewer => Group::Update,
             DiffStatus::OnlyServer if is_off_here(d) => Group::TurnOff,
+            DiffStatus::OnlyServer if is_server_side(d) => Group::ServerSide,
             DiffStatus::OnlyServer | DiffStatus::ServerStale => Group::ServerOnly,
             DiffStatus::Same => Group::InSync,
         }
@@ -457,6 +471,7 @@ impl Group {
             Group::TurnOn => "Turned off on the server",
             Group::TurnOff => "Turned off in the pack",
             Group::ServerOnly => "Only on the server",
+            Group::ServerSide => "Server only",
             Group::KeptOff => "Kept off the server",
             Group::InSync => "In sync",
         }
@@ -470,6 +485,7 @@ impl Group {
             Group::TurnOn => "to turn on",
             Group::TurnOff => "to turn off",
             Group::ServerOnly => "only on server",
+            Group::ServerSide => "server only",
             Group::KeptOff => "kept off",
             Group::InSync => "in sync",
         }
@@ -482,6 +498,7 @@ impl Group {
             Group::TurnOn => "On in the pack",
             Group::TurnOff => "Still on on the server",
             Group::ServerOnly => "Not in the pack",
+            Group::ServerSide => "Only the server needs these, so they stay",
             Group::KeptOff => "Client-only, turned off in the pack, or left out by its author",
             Group::InSync => "Same file on both",
         }
@@ -753,10 +770,12 @@ pub fn join_check(diff: &[DiffEntry], blacklist: &HashSet<String>, pack_nf: Opti
 }
 
 /// A server-only mod that keeps the pack from joining (what the banner calls
-/// "only on the server"): not tagged server-only, not on "Never sync".
+/// "only on the server"): not tagged server-only, not a proxy mod, not on
+/// "Never sync".
 pub fn blocks_join(d: &DiffEntry, blacklist: &HashSet<String>) -> bool {
     d.status == DiffStatus::OnlyServer
         && !is_off_here(d)
+        && !is_server_side(d)
         && !is_hidden(d, blacklist)
         && d.server.as_ref().is_some_and(|m| m.side != "server")
 }
@@ -933,7 +952,7 @@ pub fn pull(rows: &[DiffEntry], inst: &Instance, server: &ServerInfo) -> Vec<Syn
             continue;
         }
         match d.status {
-            DiffStatus::OnlyServer if is_off_here(d) => continue,
+            DiffStatus::OnlyServer if is_off_here(d) || is_server_side(d) => continue,
             DiffStatus::OnlyServer => {}
             DiffStatus::ServerNewer | DiffStatus::ClientNewer => {
                 if let Some(c) = &d.client
@@ -960,10 +979,10 @@ fn server_file(server: &ServerInfo, m: &ModInfo) -> std::path::PathBuf {
     if m.off { crate::sync::disabled_path(&p) } else { p }
 }
 
-/// Deletes server-only and leftover files from the server.
+/// Deletes server-only and leftover files from the server (a proxy mod stays).
 pub fn remove(rows: &[DiffEntry], server: &ServerInfo) -> Vec<SyncOp> {
     rows.iter()
-        .filter(|d| matches!(d.status, DiffStatus::OnlyServer | DiffStatus::ServerStale))
+        .filter(|d| matches!(d.status, DiffStatus::OnlyServer | DiffStatus::ServerStale) && !is_server_side(d))
         .filter_map(|d| Some((d, d.server.as_ref()?)))
         .map(|(d, m)| {
             let path = server_file(server, m);
@@ -1183,6 +1202,85 @@ mod tests {
         assert_eq!(names, ["jei"]);
     }
     use super::*;
+
+    /// A proxy mod only on the server isn't in the way of joining, isn't
+    /// removed by Update or Sync, and sits in its own quiet group; a plain
+    /// server-only mod next to it still blocks, and still goes.
+    #[test]
+    fn proxy_mod_only_on_the_server_stays_and_never_blocks_joining() {
+        use crate::model::ModInfo;
+        let m = |id: &str, file: &str, side: &str| ModInfo {
+            mod_id: id.into(),
+            mod_name: id.into(),
+            file_name: file.into(),
+            version: "1".into(),
+            side: side.into(),
+            ..Default::default()
+        };
+        let client = vec![m("jei", "jei-19.jar", "both")];
+        let server = vec![
+            m("jei", "jei-19.jar", "both"),
+            // Proxy Compatible Forge calls itself "both" and has the id "pcf".
+            m("pcf", "proxy-compatible-forge-1.3.1.jar", "both"),
+            m("fabricproxy-lite", "FabricProxy-Lite-2.12.0.jar", ""),
+            m("waystones", "waystones-21.jar", "both"),
+        ];
+        let diff = diff_mods(&client, &server);
+        let none = HashSet::new();
+
+        let c = join_check(&diff, &none, None, None);
+        assert_eq!(c.only_server, ["waystones"], "{c:?}");
+
+        // What Update does (see server_update): rows that block joining go.
+        let mut plan_rows = diff.clone();
+        for d in &mut plan_rows {
+            if blocks_join(d, &none) {
+                d.action = DiffAction::DeleteFromServer;
+            }
+        }
+        let ops = crate::sync::plan(&plan_rows, Path::new("pack/mods"), Path::new("srv/mods"));
+        let deleted: Vec<String> = ops
+            .iter()
+            .filter_map(|op| match op {
+                SyncOp::Delete { path } => path.file_name().map(|f| f.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deleted, ["waystones-21.jar"]);
+
+        // Sync all / a picked Remove: the proxy mods are rows nobody can pick, and
+        // `remove` leaves them if one is handed over anyway.
+        let removed = remove(&diff, &srv("S", "srv"));
+        assert_eq!(removed.len(), 1, "{removed:?}");
+        let proxies: Vec<&DiffEntry> = diff.iter().filter(|d| d.mod_name.starts_with("pcf") || d.mod_name.starts_with("fabricproxy")).collect();
+        assert_eq!(proxies.len(), 2);
+        for d in proxies {
+            assert_eq!(Group::of(d), Group::ServerSide);
+            assert!(!Group::of(d).pickable());
+            assert_eq!(row_label(d), "Server only");
+            assert_eq!(explain(d), "Only the server needs this: it lets players join through a proxy.");
+        }
+        let way = diff.iter().find(|d| d.mod_name == "waystones").unwrap();
+        assert_eq!(Group::of(way), Group::ServerOnly);
+        assert_eq!(row_label(way), "Not in pack");
+    }
+
+    #[test]
+    fn proxy_mod_list_matches_ids_and_jar_names_only_as_whole_words() {
+        use crate::diff::known_server_only;
+        use crate::model::ModInfo;
+        let on = |file: &str, id: &str, side: &str| known_server_only(&ModInfo { file_name: file.into(), mod_id: id.into(), side: side.into(), ..Default::default() });
+        assert!(on("proxy-compatible-forge-1.3.1.jar", "pcf", "both"));
+        assert!(on("ProxyCompatibleForge-1.2.0.jar", "", ""));
+        assert!(on("FabricProxy-Lite-2.12.0.jar", "fabricproxy-lite", "server"));
+        assert!(on("FabricProxy-1.4.10.jar", "fabricproxy", ""));
+        assert!(on("neovelocity-1.2.6+1.21.1-1.21.5.jar", "neovelocity", ""));
+        assert!(on("forgepluginmessage-1.0.1.jar", "forgepluginmessage", ""));
+        assert!(!on("waystones-21.jar", "waystones", "both"));
+        assert!(!on("pcfx-1.0.jar", "pcfx", ""));
+        // A jar that says it's client-only isn't a proxy mod.
+        assert!(!on("fabricproxy-1.0.jar", "fabricproxy", "client"));
+    }
 
     #[test]
     fn join_check_leaves_out_one_sided_and_never_sync_mods() {

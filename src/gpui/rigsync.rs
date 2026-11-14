@@ -107,7 +107,8 @@ impl Show {
         match self {
             Show::Needs => matches!(g, Group::Add | Group::Update | Group::TurnOn | Group::TurnOff | Group::ServerOnly),
             Show::Kept => g == Group::KeptOff,
-            Show::InSync => g == Group::InSync,
+            // Proxy mods the server keeps on purpose: nothing to do, like in sync.
+            Show::InSync => matches!(g, Group::InSync | Group::ServerSide),
             Show::All => true,
         }
     }
@@ -320,7 +321,7 @@ impl SyncPanel {
             pick_anchor: None,
             list_focus: cx.focus_handle(),
             swept: HashSet::new(),
-            open: [Group::Add, Group::Update, Group::TurnOn, Group::TurnOff, Group::ServerOnly, Group::KeptOff].into(),
+            open: [Group::Add, Group::Update, Group::TurnOn, Group::TurnOff, Group::ServerOnly, Group::ServerSide, Group::KeptOff].into(),
             show_kept: false,
             items: Vec::new(),
             running: false,
@@ -1942,6 +1943,7 @@ impl SyncPanel {
             Group::TurnOn => theme.primary,
             Group::TurnOff => theme.warning,
             Group::ServerOnly => theme.danger,
+            Group::ServerSide => theme.muted_foreground,
             Group::KeptOff => theme.warning,
             Group::InSync => theme.success,
         }
@@ -2487,6 +2489,7 @@ impl SyncPanel {
             Group::ServerOnly if d.status == DiffStatus::ServerStale => {
                 Some("An older copy left behind; the pack has this mod under a newer file".into())
             }
+            Group::ServerSide => Some("Only the server needs this: it lets players join through a proxy".into()),
             Group::TurnOff => Some("Turned off in this pack; the server still loads it".into()),
             Group::TurnOn => Some("On in this pack; turned off on the server".into()),
             Group::Update if d.status == DiffStatus::ServerNewer => {
@@ -2683,6 +2686,7 @@ impl SyncPanel {
                     )
                 })
                 .into_any_element(),
+            Group::ServerSide => widgets::caption("Server only", cx).text_xs().into_any_element(),
             Group::InSync => widgets::caption(
                 if d.client.as_ref().zip(d.server.as_ref()).is_some_and(|(c, s)| {
                     c.file_name.eq_ignore_ascii_case(&s.file_name)
