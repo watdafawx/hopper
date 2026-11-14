@@ -819,12 +819,18 @@ pub fn claim_override_jars(inst: &mut Instance, shipped: &HashSet<String>, add: 
 }
 
 /// [`claim_override_jars`] for an instance made from a pack whose override
-/// list is known (CurseForge's record or the cached pack file), once per run:
-/// puts right what an older Hopper recorded. Returns whether it changed
-/// anything; the caller saves.
+/// list is known (CurseForge's record or the cached pack file), once per
+/// pack file: puts right what an older Hopper recorded, then notes in the
+/// instance ([`Instance::shipped_checked`]) that it did, so later starts
+/// don't read the pack's file list again. Returns whether it changed
+/// anything (the note included); the caller saves.
 pub fn claim_shipped_jars(inst: &mut Instance) -> bool {
     static DONE: Mutex<Option<HashSet<(PathBuf, u64)>>> = Mutex::new(None);
     let Some(pack) = inst.pack.as_ref() else { return false };
+    if inst.shipped_checked == pack.file_id {
+        return false;
+    }
+    let file_id = pack.file_id;
     // Only worth a look when a jar of the pack's own could be wrong: one not
     // marked yet, or one an older Hopper left with no project and no
     // `shown_as` (it gets the pack entry's icon and page link now).
@@ -842,12 +848,15 @@ pub fn claim_shipped_jars(inst: &mut Instance) -> bool {
             return false;
         }
     }
+    // No list yet (the pack file isn't kept and CurseForge's record has none):
+    // not noted, the file can turn up later.
     let Some(shipped) = crate::pack_where::shipped(inst) else { return false };
-    let changed = claim_override_jars(inst, &shipped, false);
-    if changed {
-        crate::deps::save_own_ids();
-    }
-    changed
+    claim_override_jars(inst, &shipped, false);
+    // Whatever jars it read are kept, changed records or not: otherwise a
+    // start that finds nothing to change reads them all again next time.
+    crate::deps::save_own_ids();
+    inst.shipped_checked = file_id;
+    true
 }
 
 /// The files under a downloaded pack's overrides folder, in zip order with
@@ -3829,6 +3838,38 @@ mod override_jar_tests {
         assert_eq!((a.from_pack, a.project_id, a.name.as_str()), (true, 0, "CC: Tweaked"));
         // It looks once per run: the second load costs nothing.
         assert!(!claim_shipped_jars(&mut inst));
+        assert_eq!(inst.shipped_checked, 9431424, "the instance notes which pack file it checked");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_pack_file_checked_once_is_not_read_again_on_later_starts() {
+        let (mut inst, root) = rewritten_by_0_72_1("marker");
+        fs::write(
+            root.join("minecraftinstance.json"),
+            r#"{"modpackOverrides":["mods\\cc-tweaked-1.120.2.jar"]}"#,
+        )
+        .unwrap();
+        inst.pack = Some(PackRef { project_id: 925200, file_id: 9431426, ..Default::default() });
+        // A later start (a new process: the per-run memory is empty) of an
+        // instance that already carries the note leaves everything alone,
+        // although this jar would still be given its link.
+        inst.shipped_checked = 9431426;
+        assert!(!claim_shipped_jars(&mut inst));
+        assert_eq!(inst.addon_by_file("cc-tweaked-1.120.2.jar").unwrap().shown_as, 0);
+        // A pack update is another file: looked at again.
+        inst.pack = Some(PackRef { project_id: 925200, file_id: 9431427, ..Default::default() });
+        assert!(claim_shipped_jars(&mut inst));
+        assert_eq!(inst.shipped_checked, 9431427);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_pack_without_a_known_list_is_looked_at_again_later() {
+        let (mut inst, root) = atm10("nolist-note");
+        inst.pack = Some(PackRef { project_id: 925200, file_id: 424243, ..Default::default() });
+        assert!(!claim_shipped_jars(&mut inst));
+        assert_eq!(inst.shipped_checked, 0, "no list yet: nothing is noted");
         let _ = fs::remove_dir_all(&root);
     }
 
