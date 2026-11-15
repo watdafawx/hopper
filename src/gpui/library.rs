@@ -280,6 +280,11 @@ pub struct LibraryView {
     drag_width: Option<f32>,
     /// The list is folded to its rail while a docked panel needs the room.
     squeezed: bool,
+    /// The last fold or unfold was that one, not the player's: it snaps
+    /// instead of sliding, so the page beside it has the width it was
+    /// laid out for in the same frame (a slide while the window's edge is
+    /// dragged left the header and toolbars fitted to the wrong width).
+    fold_snap: bool,
     /// Instance groups folded shut.
     folded: std::collections::HashSet<String>,
     store: Entity<Store>,
@@ -548,6 +553,7 @@ impl LibraryView {
         let mut view = Self {
             drag_width: None,
             squeezed: false,
+            fold_snap: false,
             folded: Default::default(),
             store,
             pack_desc,
@@ -1073,6 +1079,7 @@ impl LibraryView {
     // ---- instance list -------------------------------------------------
 
     fn set_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        self.fold_snap = false;
         self.store.update(cx, |s, cx| {
             s.update_settings(|st| st.sidebar_collapsed = collapsed, cx)
         });
@@ -1082,6 +1089,7 @@ impl LibraryView {
     /// the new width.
     fn end_resize(&mut self, cx: &mut Context<Self>) {
         let Some(w) = self.drag_width.take() else { return };
+        self.fold_snap = false;
         self.store.update(cx, |s, cx| {
             s.update_settings(
                 |st| {
@@ -1109,7 +1117,14 @@ impl LibraryView {
             None if settings.sidebar_collapsed || self.squeezed => (true, RAIL),
             None => (false, saved),
         };
-        (collapsed, width, if collapsed { saved } else { RAIL })
+        let from = if self.fold_snap {
+            width
+        } else if collapsed {
+            saved
+        } else {
+            RAIL
+        };
+        (collapsed, width, from)
     }
 
     /// The instance list or the rail, drawn in a part of its own.
@@ -3190,6 +3205,7 @@ impl Render for LibraryView {
         let squeeze = self.drag_width.is_none() && side > RAIL && dock_min > 0. && win - side - dock_min < PAGE_MIN;
         if squeeze != self.squeezed {
             self.squeezed = squeeze;
+            self.fold_snap = true;
             cx.notify();
         }
         let side = if squeeze { RAIL } else { side };
@@ -3208,6 +3224,10 @@ impl Render for LibraryView {
         });
         let peek_w = peek_w + config_w;
         self.detail_w = win - side - peek_w - friends_w;
+        // The page's header, tabs and toolbars fit themselves to this in
+        // the same frame, so they keep up with a dragged edge. After the
+        // dock cap and the list fold: that's the room the page really gets.
+        widgets::set_page_room(f32::from(window.rem_size()) * self.detail_w);
         // The table fits its columns to this; it is re-laid out whenever
         // the room changes (its bounds change), so no notify is needed.
         let (room, list_open) = (self.detail_w, side > RAIL);

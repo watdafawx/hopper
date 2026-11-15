@@ -127,6 +127,9 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
         Some(f) => {
             let n = h.pills.len();
             let max = n.saturating_sub(1);
+            // The pills' room is what the actions and the art leave the
+            // name, both picked above.
+            f.pills.context(f.actions.level() as u64 * 2 + no_art as u64);
             let hidden = f.pills.level().min(max);
             let rest: Vec<SharedString> = f.pill_names.iter().skip(n - hidden).cloned().collect();
             let key = widgets::fit_key(f.pill_names.iter().map(|s| s.as_ref()));
