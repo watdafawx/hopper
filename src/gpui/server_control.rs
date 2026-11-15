@@ -669,7 +669,17 @@ impl ServerControl {
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(ControlEvent::SetUp)))
                 .into_any_element();
         }
-        let note = |t: String| widgets::caption(t, &*cx).text_xs().into_any_element();
+        // One line, cut short in a narrow header (beside a mod's page); the
+        // whole of it on hover.
+        let note = |t: String| {
+            let tip: SharedString = t.clone().into();
+            div()
+                .id("server-note")
+                .min_w_0()
+                .child(widgets::caption(t, &*cx).text_xs().truncate())
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                .into_any_element()
+        };
         match (&self.listed, &self.id) {
             (None, _) => return note(format!("Asking {pname}…")),
             (Some(Err(e)), _) => return self.unreachable(e, compact, cx),

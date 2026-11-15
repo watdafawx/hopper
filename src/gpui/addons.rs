@@ -183,9 +183,14 @@ impl AddonsView {
 pub(crate) fn col_date() -> Div {
     div().w_24().flex_none()
 }
-/// The row's ⋯ menu and Remove.
-pub(crate) fn col_trash() -> Div {
-    h_flex().w(rems(5.5)).flex_none().justify_end()
+/// The row's ⋯ menu and Remove. With `rm` off (no room, see
+/// `fit_columns`) Remove is only in the ⋯ menu and the column narrows.
+pub(crate) fn col_trash(rm: bool) -> Div {
+    h_flex().w(rems(trash_w(rm))).flex_none().justify_end()
+}
+/// The ⋯ / Remove column's width in rem.
+pub(crate) fn trash_w(rm: bool) -> f32 {
+    if rm { 5.5 } else { 3.75 }
 }
 
 /// The table's movable columns, in their default order. The user can drag
@@ -339,6 +344,9 @@ impl Render for ColDrag {
 /// (on wide windows the actions follow the name instead of the far edge).
 const NAME_MIN: f32 = 16.0;
 const NAME_MAX: f32 = 40.0;
+/// Below this the name shows only a few letters, so the Update column goes
+/// too (about 12 characters of a name plus its end padding).
+const NAME_READ: f32 = 8.0;
 
 /// The toolbar's levels for a narrow page (`widgets::Fit`): 1 Profiles and
 /// Find sources as icons, 2 Sort as its icon and no "Up to date" or
@@ -359,11 +367,19 @@ pub(crate) struct Cols {
     pub(crate) side_inline: bool,
     /// The name stops at NAME_MAX and a spacer takes the rest.
     pub(crate) cap: bool,
+    /// The row's Remove button. Off when the name would get too little
+    /// room: Remove is in the row's ⋯ menu too, and the name matters more.
+    pub(crate) rm: bool,
+    /// The Update / What changed column. Off only when even without
+    /// Remove the name would be cut to a few letters (the widest mod peek
+    /// beside a 960 px window): Update moves into the row's ⋯ menu, where
+    /// Versions and changelogs already is.
+    pub(crate) action: bool,
 }
 
 impl Default for Cols {
     fn default() -> Self {
-        Self { date: true, author: true, side: true, side_inline: false, cap: false }
+        Self { date: true, author: true, side: true, side_inline: false, cap: false, rm: true, action: true }
     }
 }
 
@@ -3362,7 +3378,7 @@ impl AddonsView {
             .when(self.order_mode() || self.where_mode(), |r| r.child(crate::datapacks::col_order()))
             .child(div().w_10().flex_none())
             .child(head(SortCol::Name, "Name", self.name_cell()))
-            .when(self.action_fits(), |r| r.child(col_action(self.compact)))
+            .when(self.show_action(), |r| r.child(col_action(self.compact)))
             .children(self.spacer())
             .children(in_col_order(&self.col_order, {
                 let mut cells = Vec::new();
@@ -3409,7 +3425,7 @@ impl AddonsView {
             }
             cells
             }))
-            .child(col_trash().child({
+            .child(col_trash(self.cols.rm).child({
                 let v = cx.entity();
                 Button::new("columns")
                     .ghost()
@@ -3676,6 +3692,7 @@ impl AddonsView {
                 Row::Loose(name) => {
                     let file = name.clone();
                     let menu = self.loose_menu(name, cx);
+                    let menu2 = menu.clone();
                     h_flex()
                         .id(ElementId::Name(format!("loose:{name}").into()))
                         .h(rems(ROW_H))
@@ -3718,18 +3735,27 @@ impl AddonsView {
                                     })),
                             )
                         })
-                        .child(
-                            col_trash().child(
-                                Button::new(ElementId::Name(format!("rm-loose:{name}").into()))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Trash)
-                                    .tooltip("Remove (undo from History)")
-                                    .on_click(cx.listener(move |this, _, w, cx| {
-                                        this.ask_remove(vec![file.clone()], w, cx)
-                                    })),
-                            ),
-                        )
+                        .child(col_trash(self.cols.rm).child(if self.cols.rm {
+                            Button::new(ElementId::Name(format!("rm-loose:{name}").into()))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Trash)
+                                .tooltip("Remove (undo from History)")
+                                .on_click(cx.listener(move |this, _, w, cx| {
+                                    this.ask_remove(vec![file.clone()], w, cx)
+                                }))
+                                .into_any_element()
+                        } else {
+                            // No room for Remove: the ⋯ menu has it, as
+                            // on the other rows.
+                            Button::new(ElementId::Name(format!("more-loose:{name}").into()))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Ellipsis)
+                                .tooltip("More")
+                                .dropdown_menu_with_anchor(Anchor::TopRight, move |m, w, cx| menu2(m, w, cx))
+                                .into_any_element()
+                        }))
                         .into_any_element()
                 }
             }
@@ -4482,6 +4508,11 @@ It stays disabled after updating: turn it on in the On column.")
             update.map(|u| (u.versions(), u.file.file_name.clone(), vlocked)),
             src_menu,
             keep_menu,
+            // Only a plain update: locked, breaking, held or website-only
+            // ones need the column's tooltip and its extra steps.
+            update
+                .filter(|_| !self.cols.action && !vlocked && !breaking && hold.is_none() && updating.is_none() && !from_web && !done)
+                .cloned(),
         );
         h_flex()
             .id(id("row"))
@@ -4556,8 +4587,10 @@ It stays disabled after updating: turn it on in the On column.")
                         } else {
                             theme.primary
                         };
+                        // It narrows with a squeezed name cell (beside a
+                        // mod's page) instead of being cut at its edge.
                         let chip = h_flex()
-                            .flex_none()
+                            .flex_shrink(1.)
                             .max_w(rems(16.))
                             .min_w_0()
                             .overflow_hidden()
@@ -4659,7 +4692,7 @@ Change version", a.file_name).into()
                     }).children(self.lock_tags(a, update, &breaks, needs.as_deref(), vlocked, cx))
                     .children(old_copy)),
             )
-            .when(self.action_fits(), |r| r.child(action))
+            .when(self.show_action(), |r| r.child(action))
             .children(self.spacer())
             .children(in_col_order(&self.col_order, {
             let mut cells: Vec<(Col, AnyElement)> = Vec::new();
@@ -4739,7 +4772,7 @@ Change version", a.file_name).into()
             cells
             }))
             .child(
-                col_trash()
+                col_trash(self.cols.rm)
                     .children(self.config_button(a, shown, cx))
                     .child(
                         // The right-click menu, for those who don't right-click.
@@ -4766,16 +4799,18 @@ Change version", a.file_name).into()
                                     })
                             }),
                     )
-                    .child(
-                        Button::new(id("rm"))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Trash)
-                            .tooltip("Remove (undo from History)")
-                            .on_click(cx.listener(move |this, _, w, cx| {
-                                this.ask_remove(vec![f_rm.clone()], w, cx)
-                            })),
-                    ),
+                    .when(self.cols.rm, |c| {
+                        c.child(
+                            Button::new(id("rm"))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Trash)
+                                .tooltip("Remove (undo from History)")
+                                .on_click(cx.listener(move |this, _, w, cx| {
+                                    this.ask_remove(vec![f_rm.clone()], w, cx)
+                                })),
+                        )
+                    }),
             )
             .map(|r| if self.where_mode() { self.where_drop(r, &file, cx) } else { self.order_drop(r, &file, flags.rank, cx) })
             .context_menu(move |menu, w, cx| menu_fn(menu, w, cx))
@@ -5209,6 +5244,9 @@ Change version", a.file_name).into()
         // In a pack friends keep the same: whether this mod is kept only
         // on this PC.
         keep: Option<bool>,
+        // The update to offer here while the Update column is folded away
+        // (`Cols::action`).
+        update_now: Option<Update>,
     ) -> Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu> {
             // A source-tracked mod isn't on either site.
             let followed = src_menu.as_ref().is_some_and(|s| s.source.is_some());
@@ -5226,6 +5264,21 @@ Change version", a.file_name).into()
                 let page = page.clone();
                 let (v6, v7) = (view.clone(), view.clone());
                 let upd = update_file.clone();
+                let menu = menu.when_some(update_now.clone(), |m, u| {
+                    let v = view.clone();
+                    m.item(
+                        PopupMenuItem::new(format!("Update to {}", u.versions().1))
+                            .icon(IconName::Download)
+                            .on_click(move |_, _, cx| {
+                                v.update(cx, |this, cx| {
+                                    this.settle.clicked();
+                                    this.run_updates(vec![u.clone()], cx);
+                                    this.pull_recent(cx);
+                                })
+                            }),
+                    )
+                    .separator()
+                });
                 let menu = menu.when(has_site, |m| {
                     m.item(
                         PopupMenuItem::new("Open in Browse")
@@ -5398,7 +5451,7 @@ Change version", a.file_name).into()
             (col_hidden(settings, Col::Author), col_hidden(settings, Col::Side), col_hidden(settings, Col::Added));
         self.col_order = col_order(settings);
         let has_side = self.class != cf::CLASS_DATAPACKS && self.table.has_side && !no_side;
-        let mut c = Cols { date: !self.tight && !no_date, author: !no_author, side: has_side, side_inline: false, cap: false };
+        let mut c = Cols { date: !self.tight && !no_date, author: !no_author, side: has_side, side_inline: false, cap: false, rm: true, action: true };
         let mut compact = self.compact;
         if self.name_room(room, &c, compact) < NAME_MIN {
             c.date = false;
@@ -5413,6 +5466,13 @@ Change version", a.file_name).into()
         if self.name_room(room, &c, compact) < NAME_MIN {
             compact = true;
         }
+        // Remove goes before the name gives way: it's in the ⋯ menu too.
+        if self.name_room(room, &c, compact) < NAME_MIN {
+            c.rm = false;
+        }
+        if self.name_room(room, &c, compact) < NAME_READ {
+            c.action = false;
+        }
         c.cap = self.name_room(room, &c, compact) > NAME_MAX;
         self.name_w = self.name_room(room, &c, compact).min(NAME_MAX);
         self.cols = c;
@@ -5423,13 +5483,13 @@ Change version", a.file_name).into()
     /// widths in `col_*` and the row's padding and gaps.
     fn name_room(&self, room: f32, c: &Cols, compact: bool) -> f32 {
         // List padding, row padding and border, tick, icon, On, ⋯ and Remove.
-        let mut fixed = 3.0 + 1.4 + 1.5 + 2.5 + 4.0 + 4.0;
+        let mut fixed = 3.0 + 1.4 + 1.5 + 2.5 + 4.0 + 4.0 - (trash_w(true) - trash_w(c.rm));
         // In-flow cells, the name included.
         let mut cells = 5;
         for (on, w) in [
             (self.order_mode() || self.where_mode(), 5.75),
             (self.where_mode(), crate::pack_where::PILL_W - 4.75),
-            (self.action_fits(), if compact { widgets::SPLIT_W_COMPACT + 0.25 } else { 9.5 }),
+            (self.action_fits() && c.action, if compact { widgets::SPLIT_W_COMPACT + 0.25 } else { 9.5 }),
             (c.author, 10.0),
             (c.side, 3.0),
             (c.date, 6.0),
@@ -5458,6 +5518,11 @@ Change version", a.file_name).into()
 
     pub(crate) fn action_fits(&self) -> bool {
         !self.tight || !self.table.updates.is_empty()
+    }
+
+    /// Whether the rows draw the Update / Changelog column this frame.
+    pub(crate) fn show_action(&self) -> bool {
+        self.action_fits() && self.cols.action
     }
 
     fn versions(
