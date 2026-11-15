@@ -593,6 +593,18 @@ pub struct Store {
     mailbox_sig: u64,
     /// A publish failed then; waits a minute before trying again.
     publish_failed_at: Option<Instant>,
+    /// Each shared pack's look (by instance id) when it last went out, or
+    /// when this run first saw it; a pack that differs has changes waiting.
+    sent_sigs: HashMap<String, u64>,
+    /// Whether `sent_sigs` has its first look at every shared pack.
+    sent_seeded: bool,
+    /// Names of the shared packs whose changes haven't gone out yet.
+    unsent: Vec<String>,
+    /// A publish is on its way to the mailbox.
+    publishing: bool,
+    /// The last failed send the player was told about, so a retry that
+    /// fails the same way doesn't say it again.
+    publish_said: Option<String>,
     /// Where each instance (by id) was last seen, to check a shared pack
     /// missing from the list is really gone before taking it back.
     instance_homes: HashMap<String, PathBuf>,
@@ -822,6 +834,11 @@ impl Store {
             mailbox_invites: Vec::new(),
             mailbox_sig: 0,
             publish_failed_at: None,
+            sent_sigs: HashMap::new(),
+            sent_seeded: false,
+            unsent: Vec::new(),
+            publishing: false,
+            publish_said: None,
             instance_homes: HashMap::new(),
             stale_held_at: None,
             auto_following: HashSet::new(),
