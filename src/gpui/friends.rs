@@ -953,32 +953,18 @@ impl FriendsPanel {
             .into_any_element()
     }
 
-    /// Everyone in the list: friends (online first, then the most recently
-    /// seen), then anyone who shares a pack outside a group without being a
-    /// friend, so their pack doesn't vanish.
+    /// Everyone in the list ([`hopper::mailbox::everyone`]): friends, then
+    /// people who aren't: members of your groups and anyone sharing a pack
+    /// outside them.
     fn people(&self, recipes: &[Event], groups: &[Group], down: bool, cx: &App) -> Vec<Person> {
         let s = self.store.read(cx);
-        // A pack that came only through groups shown in the list is on the
-        // group's page.
-        let in_groups = |e: &Event| {
-            !e.direct && !e.groups.is_empty() && e.groups.iter().all(|g| groups.iter().any(|x| &x.id == g && x.me.joined))
-        };
-        let theirs: Vec<&Event> = recipes.iter().filter(|e| !in_groups(e)).collect();
-        let mut friends: Vec<Friend> = s.mailbox_friends().to_vec();
-        friends.sort_by_key(|f| (std::cmp::Reverse(f.online && !down), std::cmp::Reverse(f.last_seen)));
-        let mut people: Vec<Person> = friends
+        hopper::mailbox::everyone(&s.mailbox_id(), s.mailbox_friends(), recipes, groups, down)
             .into_iter()
-            .map(|f| Person { id: f.id.clone(), name: name_or(&f.name, "A friend"), friend: Some(f), packs: Vec::new() })
-            .collect();
-        for e in &theirs {
-            if !people.iter().any(|p| p.id == e.from) {
-                people.push(Person { friend: None, id: e.from.clone(), name: name_or(&e.from_name, "A friend"), packs: Vec::new() });
-            }
-        }
-        for p in &mut people {
-            p.packs = theirs.iter().filter(|e| e.from == p.id).map(|e| (*e).clone()).collect();
-        }
-        people
+            .map(|p| {
+                let or = if p.friend.is_some() { "A friend" } else { "A group member" };
+                Person { name: name_or(&p.name, or), id: p.id, friend: p.friend, packs: p.packs }
+            })
+            .collect()
     }
 
     /// How many of this PC's packs `id` gets.
