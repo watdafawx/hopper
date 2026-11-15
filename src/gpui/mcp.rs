@@ -113,6 +113,10 @@ pub fn start(window: &mut Window, cx: &mut Context<AppView>) {
                     Command::State | Command::Navigate(_) => {
                         this.update_in(cx, |this, window, cx| answer(this, cmd, window, cx))
                     }
+                    Command::Screenshot => match screenshot(cx) {
+                        Some(r) => Ok(r),
+                        None => return,
+                    },
                     cmd => cx.update(|window, cx| input(cmd, window, cx)),
                 };
                 let Ok(r) = r else { return };
@@ -153,15 +157,9 @@ fn input(cmd: Command, window: &mut Window, cx: &mut App) -> Reply {
     let at = |x: f32, y: f32| point(px(x / scale), px(y / scale));
     let done = || Ok(vec![text("done")]);
     match cmd {
-        Command::Screenshot => {
-            let (w, h, rgba) = capture(window)?;
-            let png = encode_png(w, h, rgba)?;
-            Ok(vec![
-                mcp::image_png(png),
-                text(format!("{w}x{h} px, {scale} px per point")),
-            ])
+        Command::Screenshot | Command::State | Command::Navigate(_) | Command::Data(..) => {
+            Err("not an input command".into())
         }
-        Command::State | Command::Navigate(_) | Command::Data(..) => Err("not an input command".into()),
         Command::Hover { x, y } => {
             move_to(at(x, y), window, cx);
             done()
@@ -514,6 +512,17 @@ fn theme_state(_: &Window, cx: &App) -> Value {
     })
 }
 
+/// A screenshot is taken between updates, never inside one: Windows'
+/// PrintWindow makes the window paint itself on the spot, and that paint
+/// calls back into GPUI, which can't draw while an update holds the app (the
+/// frame was lost and the log said "RefCell already borrowed"). `None` when
+/// the window is gone.
+fn screenshot(cx: &mut AsyncWindowContext) -> Option<Reply> {
+    let (target, scale) = cx.update(|window, _| (capture_target(window), window.scale_factor())).ok()?;
+    let shot = target.and_then(capture).and_then(|(w, h, rgba)| Ok((w, h, encode_png(w, h, rgba)?)));
+    Some(shot.map(|(w, h, png)| vec![mcp::image_png(png), text(format!("{w}x{h} px, {scale} px per point"))]))
+}
+
 fn encode_png(w: u32, h: u32, rgba: Vec<u8>) -> Result<String, String> {
     use base64::Engine;
     let img = image::RgbaImage::from_raw(w, h, rgba).ok_or("bad screenshot size")?;
@@ -523,20 +532,26 @@ fn encode_png(w: u32, h: u32, rgba: Vec<u8>) -> Result<String, String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(png.into_inner()))
 }
 
-/// The window's client area as RGBA, drawn by the window itself (so it
-/// works behind other windows).
+/// The window's HWND, for `capture` after the update ends.
 #[cfg(windows)]
-fn capture(window: &Window) -> Result<(u32, u32, Vec<u8>), String> {
+fn capture_target(window: &Window) -> Result<isize, String> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::{HWND, RECT};
-    use windows::Win32::Graphics::Gdi::*;
-    use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
-
     let handle = HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?;
     let RawWindowHandle::Win32(h) = handle.as_raw() else {
         return Err("not a Win32 window".into());
     };
-    let hwnd = HWND(h.hwnd.get() as *mut _);
+    Ok(h.hwnd.get())
+}
+
+/// The window's client area as RGBA, drawn by the window itself (so it
+/// works behind other windows).
+#[cfg(windows)]
+fn capture(hwnd: isize) -> Result<(u32, u32, Vec<u8>), String> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
+
+    let hwnd = HWND(hwnd as *mut _);
     // SAFETY: plain GDI calls on our own live window; every object made here
     // is released before returning.
     unsafe {
@@ -593,20 +608,20 @@ fn capture(window: &Window) -> Result<(u32, u32, Vec<u8>), String> {
 /// The window's pixels on X11 (also XWayland), read with GetImage. A
 /// Wayland window can't be read from outside, so screenshots need X11 there.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn capture(window: &Window) -> Result<(u32, u32, Vec<u8>), String> {
+fn capture_target(window: &Window) -> Result<u32, String> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?;
+    match handle.as_raw() {
+        RawWindowHandle::Xcb(h) => Ok(h.window.get()),
+        RawWindowHandle::Xlib(h) => Ok(h.window as u32),
+        _ => Err("screenshots need X11: start Hopper with WAYLAND_DISPLAY unset (it then uses XWayland)".into()),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn capture(id: u32) -> Result<(u32, u32, Vec<u8>), String> {
     use x11rb::protocol::xproto::{ConnectionExt, ImageFormat};
 
-    let handle = HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?;
-    let id = match handle.as_raw() {
-        RawWindowHandle::Xcb(h) => h.window.get(),
-        RawWindowHandle::Xlib(h) => h.window as u32,
-        _ => {
-            return Err(
-                "screenshots need X11: start Hopper with WAYLAND_DISPLAY unset (it then uses XWayland)".into(),
-            );
-        }
-    };
     let err = |e: &dyn std::fmt::Display| format!("could not capture the window: {e}");
     let (conn, _) = x11rb::connect(None).map_err(|e| err(&e))?;
     let g = conn.get_geometry(id).map_err(|e| err(&e))?.reply().map_err(|e| err(&e))?;
@@ -632,6 +647,11 @@ fn capture(window: &Window) -> Result<(u32, u32, Vec<u8>), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn capture(_: &Window) -> Result<(u32, u32, Vec<u8>), String> {
+fn capture_target(_: &Window) -> Result<(), String> {
+    Err("screenshots are not available on macOS yet".into())
+}
+
+#[cfg(target_os = "macos")]
+fn capture(_: ()) -> Result<(u32, u32, Vec<u8>), String> {
     Err("screenshots are not available on macOS yet".into())
 }
