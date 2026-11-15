@@ -271,9 +271,16 @@ in `relay/hopper_mailbox.py` (constants at the top) and listed in
   poll_superseded` so the desktop backs off), `wait` up to 90 s.
 - **Tokens** are stored as sha256; lookups go through a hash index.
 - **Presence** (online, last seen, Minecraft id) is shown to friends only.
-- Saving is a dirty flag plus one writer thread (about every 1.5 s, and on
-  SIGTERM): a crash loses the last second or two. If saving fails it is
-  logged and retried; requests still answer from memory. A state file that
+- Saving: a request that changes anything (every POST that answers 2xx) is
+  written to the state file before it is answered (temp file, fsync, atomic
+  rename; requests arriving together share one write), because the desktop
+  counts a change as sent once it is answered. Events are hidden from the
+  long-poll feed until they are in the file, and the poll's `seq` is the
+  newest saved one, so a desktop can never hold a number the mailbox forgot
+  in a crash. One writer thread still saves about every 1.5 s and on SIGTERM
+  for what no request covers (idle clean-up). If saving fails it is logged
+  and retried; the request is answered `503 save_failed` (nothing leaves the
+  mailbox until it is saved, the desktop sends again). A state file that
   is invalid is renamed `state.json.corrupt-<time>`, one that can't be read
   is left untouched, and either way the service exits (status 78, which the
   unit does not restart; an ordinary crash exits 1 and does restart) instead of starting empty. While stopping, new
