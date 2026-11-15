@@ -831,8 +831,7 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
     let (prefixes, mut mods, mut removed) = if mr {
         let index = modpack::read_mr_index(&new_zip)?;
         let old_index = old_zip.as_ref().and_then(|z| modpack::read_mr_index(z).ok());
-        let mods = mr_mod_changes(inst, &index);
-        let removed = old_index.map(|o| mr_removed(&index, &o, &mods)).unwrap_or_default();
+        let (mods, removed) = mr_changes(inst, &index, old_index.as_ref());
         (modpack::MR_OVERRIDES.iter().map(|s| s.to_string()).collect(), mods, removed)
     } else {
         let manifest = modpack::read_manifest(&new_zip)?;
@@ -1306,14 +1305,42 @@ fn removed_files(
     out
 }
 
-/// Modrinth pack mods you removed: the new version lists them, they aren't
-/// in your folder, and the installed version had the same project.
-fn mr_removed(new: &modpack::MrIndex, old: &modpack::MrIndex, mods: &[ModChange]) -> Vec<OffMod> {
+/// A Modrinth pack's mod changes against the instance, and (given the
+/// installed version's index) the pack mods you removed.
+pub(crate) fn mr_changes(
+    inst: &Instance,
+    new: &modpack::MrIndex,
+    old: Option<&modpack::MrIndex>,
+) -> (Vec<ModChange>, Vec<OffMod>) {
+    let mods = mr_mod_changes(inst, new);
+    let removed = old.map(|o| mr_removed(inst, new, o, &mods)).unwrap_or_default();
+    (mods, removed)
+}
+
+/// Modrinth pack mods you removed: the new version lists them, the
+/// installed version had the same project, and no copy of that project is
+/// left in your folder, on or off. A new version of a mod comes with a new
+/// file name, so a new name alone doesn't mean you removed it: the old
+/// file still there means the pack just moved it on.
+fn mr_removed(inst: &Instance, new: &modpack::MrIndex, old: &modpack::MrIndex, mods: &[ModChange]) -> Vec<OffMod> {
     let had: HashSet<&str> = old.files.iter().filter_map(|f| f.project()).collect();
     let adds: HashSet<&str> = mods.iter().filter(|m| m.action == ModAction::Add).map(|m| m.to.as_str()).collect();
+    // Only files really on disk count: a list entry whose jar you deleted
+    // outside Hopper is still removed.
+    let on_disk: Vec<&crate::instances::Addon> =
+        inst.addons.iter().filter(|a| inst.addon_path(a).exists()).collect();
+    let still_have = |project: &str| {
+        on_disk.iter().any(|a| a.mr_project == project)
+            || old.files.iter().filter(|f| f.project() == Some(project)).any(|f| {
+                let sha1 = f.hashes.get("sha1").map(|h| h.to_ascii_lowercase()).unwrap_or_default();
+                inst.root.join(&f.path).exists()
+                    || inst.root.join(format!("{}.disabled", f.path)).exists()
+                    || (!sha1.is_empty() && on_disk.iter().any(|a| a.mr_sha1.eq_ignore_ascii_case(&sha1)))
+            })
+    };
     new.files
         .iter()
-        .filter(|f| adds.contains(f.file_name()) && f.project().is_some_and(|p| had.contains(p)))
+        .filter(|f| adds.contains(f.file_name()) && f.project().is_some_and(|p| had.contains(p) && !still_have(p)))
         .map(|f| OffMod {
             name: f.file_name().to_string(),
             from: String::new(),

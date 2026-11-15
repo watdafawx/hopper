@@ -3238,6 +3238,62 @@ mod mrpack_import_tests {
         assert!(b.root != a.root);
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// The jar names in `dir`, sorted.
+    fn jars_in(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".jar") || n.ends_with(".jar.disabled"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// A real pack update where most jars get new names: Remarkably
+    /// Optimized 1.15.66 -> 1.15.70 (Minecraft 26.3). The instance ends up
+    /// with exactly the new version's mods.
+    #[test]
+    #[ignore = "network: downloads Remarkably Optimized"]
+    fn real_mrpack_update_keeps_renamed_mods() {
+        let root = std::env::temp_dir().join(format!("hopper-mrrename-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let jobs = crate::jobs::Jobs::new(crate::waker::noop());
+        let pack = crate::modrinth::project_to_mod(&crate::modrinth::project("MNW3LUwK").unwrap(), "");
+        let file_of = |id: &str| crate::modrinth::version_to_file(&crate::modrinth::version(id).unwrap());
+        let (old, new) = (file_of("rqRBAQlg"), file_of("Ui7Bar17"));
+        let mut inst = install_mrpack(&root.join("instances"), &pack, &old, &jobs.start("install")).unwrap();
+        let before = jars_in(&inst.mods_dir());
+        println!("{} jars before: {before:?}", before.len());
+
+        let plan = crate::packdiff::plan(&inst, &new, true, &jobs.start("plan")).unwrap();
+        println!("plan: {} removed by you {:?}", plan.removed.len(), plan.removed.iter().map(|m| &m.to).collect::<Vec<_>>());
+        assert!(plan.removed.is_empty(), "nothing was removed by the player");
+
+        update_any(&mut inst, pack.id, &new, None, &jobs.start("update")).unwrap();
+        let after = jars_in(&inst.mods_dir());
+        println!("{} jars after: {after:?}", after.len());
+
+        // What the new version ships: its client mods plus jars in its overrides.
+        let zip = fetch_mrpack(&new, &jobs.start("fetch")).unwrap();
+        let idx = read_mr_index(&zip).unwrap();
+        let mut want: Vec<String> = idx
+            .files
+            .iter()
+            .filter(|f| f.env.as_ref().and_then(|e| e.get("client")).is_none_or(|c| c != "unsupported"))
+            .filter_map(|f| f.path.strip_prefix("mods/").filter(|n| !n.contains('/')).map(str::to_string))
+            .chain(mr_shipped_set(&zip, None).into_iter().filter_map(|p| p.strip_prefix("mods/").map(str::to_string)))
+            .collect();
+        want.sort();
+        want.dedup();
+        let after_low: Vec<String> = after.iter().map(|n| n.to_lowercase()).collect();
+        let want_low: Vec<String> = want.iter().map(|n| n.to_lowercase()).collect();
+        assert_eq!(after_low, want_low);
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]
@@ -3407,6 +3463,112 @@ mod pack_fix_tests {
             &fake_download,
             &nobody_knows,
         )
+    }
+
+    /// A Modrinth download URL for `project`'s `file`, as packs list them.
+    fn cdn(project: &str, file: &str) -> String {
+        format!("https://cdn.modrinth.com/data/{project}/versions/v/{file}")
+    }
+
+    /// The player's choices for an update from `old` to `new`, as the
+    /// update dialog makes them by default: mods you removed stay out.
+    fn default_choices(inst: &Instance, new: &MrIndex, old: &MrIndex) -> (Vec<String>, Overrides) {
+        let (_, removed) = crate::packdiff::mr_changes(inst, new, Some(old));
+        let keys: Vec<String> = removed.iter().map(|m| m.key.clone()).collect();
+        let o = Overrides { leave_out: keys.iter().cloned().collect(), ..Default::default() };
+        (keys, o)
+    }
+
+    /// A new pack version renames most jars (a version bump). Every mod
+    /// the new version lists arrives, except the one you removed; the one
+    /// the pack dropped leaves; yours stays; the one you turned off stays
+    /// off under its new name. Once with Modrinth knowing every file, once
+    /// with it knowing none (plain pack files).
+    #[test]
+    fn mrpack_update_keeps_renamed_mods() {
+        let urls = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+            list.iter().map(|(p, f)| (format!("mods/{f}"), cdn(p, f))).collect()
+        };
+        let v1_files = urls(&[
+            ("KEEP", "keep-1.0.jar"),
+            ("DROP", "drop-1.0.jar"),
+            ("GONE", "gone-1.0.jar"),
+            ("OFF", "off-1.0.jar"),
+            ("SAME", "same-1.0.jar"),
+        ]);
+        let v2_files = urls(&[
+            ("KEEP", "keep-1.1.jar"),
+            ("GONE", "gone-1.1.jar"),
+            ("OFF", "off-1.1.jar"),
+            ("SAME", "same-1.0.jar"),
+        ]);
+        let idx = |v: &[(String, String)]| {
+            let pairs: Vec<(&str, &str)> = v.iter().map(|(p, u)| (p.as_str(), u.as_str())).collect();
+            index(&pairs, "")
+        };
+        let (v1, v2) = (idx(&v1_files), idx(&v2_files));
+        // Modrinth's answer for every file: its project, read from the URL.
+        let by_sha: HashMap<String, String> = v1_files
+            .iter()
+            .chain(&v2_files)
+            .map(|(_, u)| (sha(u.as_bytes()), u.split("/data/").nth(1).unwrap().split('/').next().unwrap().to_string()))
+            .collect();
+        let knows_all = |hashes: &[String]| -> MrLookup {
+            let mut versions = HashMap::new();
+            let mut projects = Vec::new();
+            for h in hashes {
+                let Some(p) = by_sha.get(h) else { continue };
+                versions.insert(h.clone(), crate::modrinth::Version { id: format!("{p}-v"), project_id: p.clone(), ..Default::default() });
+                projects.push(crate::modrinth::Project { id: p.clone(), title: p.clone(), ..Default::default() });
+            }
+            (versions, projects)
+        };
+
+        for known in [true, false] {
+            let dir = temp(if known { "rename-known" } else { "rename-plain" });
+            let zip = dir.join("pack.mrpack");
+            zip_with(&zip, &[("modrinth.index.json", b"{}")]);
+            let jobs = crate::jobs::Jobs::default();
+            let job = jobs.start("t");
+            let mut inst = Instance { name: "T".into(), root: dir.join("inst"), ..Default::default() };
+            fs::create_dir_all(&inst.root).unwrap();
+            let run = |inst: &mut Instance, idx: &MrIndex, o: Option<&Overrides>| {
+                let lookup: &dyn Fn(&[String]) -> MrLookup = if known { &knows_all } else { &nobody_knows };
+                apply_mrpack_with(inst, &cf::Mod::default(), &cf::File::default(), &zip, idx, o, &job, &fake_download, lookup)
+            };
+            run(&mut inst, &v1, None).unwrap();
+            assert_eq!(mods(&inst), ["drop-1.0.jar", "gone-1.0.jar", "keep-1.0.jar", "off-1.0.jar", "same-1.0.jar"]);
+            if known {
+                assert!(inst.addons.iter().all(|a| !a.mr_project.is_empty()), "Modrinth named the pack's files");
+            }
+
+            // You remove gone, turn off off, and add a mod of your own.
+            let at = |inst: &Instance, f: &str| inst.addons.iter().position(|a| a.file_name == f).unwrap();
+            let i = at(&inst, "gone-1.0.jar");
+            crate::install::remove(&mut inst, i).unwrap();
+            let i = at(&inst, "off-1.0.jar");
+            crate::install::set_enabled(&mut inst, i, false).unwrap();
+            fs::write(inst.mods_dir().join("mine.jar"), b"mine").unwrap();
+            inst.addons.push(Addon { file_name: "mine.jar".into(), name: "mine".into(), enabled: true, class_id: cf::CLASS_MODS, ..Default::default() });
+            inst.save().unwrap();
+
+            // Only the mod you removed counts as removed: the renamed ones
+            // are the pack moving on.
+            let (removed, o) = default_choices(&inst, &v2, &v1);
+            assert_eq!(removed, ["rp:mods/gone-1.1.jar"], "known: {known}");
+
+            run(&mut inst, &v2, Some(&o)).unwrap();
+            assert_eq!(
+                mods(&inst),
+                ["keep-1.1.jar", "mine.jar", "off-1.1.jar.disabled", "same-1.0.jar"],
+                "known: {known}"
+            );
+            assert_eq!(fs::read(inst.mods_dir().join("keep-1.1.jar")).unwrap(), cdn("KEEP", "keep-1.1.jar").as_bytes());
+            let off = &inst.addons[at(&inst, "off-1.1.jar")];
+            assert!(!off.enabled && off.from_pack, "the turned-off mod stays off and the pack's");
+            assert!(inst.addons.iter().any(|a| a.file_name == "mine.jar" && !a.from_pack));
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
