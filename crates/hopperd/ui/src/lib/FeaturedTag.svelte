@@ -15,6 +15,6 @@
 
 <style>
   .feat { height: 18px; font-size: 11px; padding: 0 6px 1px; gap: 4px; vertical-align: middle; flex: none; }
-  .gem { color: var(--blue); background: var(--blue-dim); }
-  .hot { color: var(--gold); background: var(--gold-dim); }
+  .gem { color: var(--ink-blue); background: var(--blue-dim); }
+  .hot { color: var(--ink-gold); background: var(--gold-dim); }
 </style>

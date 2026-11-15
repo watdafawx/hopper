@@ -392,8 +392,8 @@
                     {#if faces}<span class="chev">{#if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}</span>{/if}
                   </span>
                   <span class="row cnts">
-                    {#each s.counts ?? [] as c (c.change)}<span class="chip cnt {tone(c.change)}">{c.n} {c.verb}</span>{/each}
-                    {#if rest.length}<span class="chip cnt pri">{s.parts.rest_label}</span>{/if}
+                    {#each s.counts ?? [] as c (c.change)}<span class="chip cnt ink {tone(c.change)}">{c.n} {c.verb}</span>{/each}
+                    {#if rest.length}<span class="chip cnt ink pri">{s.parts.rest_label}</span>{/if}
                   </span>
                 </span>
               </button>
@@ -514,7 +514,7 @@
   .cnts { gap: 4px; min-width: 0; flex-wrap: wrap; }
   /* A pack update's counts, tinted like the change they count. The text leans
      toward the page's text colour: raw yellow or red on a pale tint is too faint to read. */
-  .cnt { flex: none; --k: var(--subtle); color: color-mix(in srgb, var(--k) 60%, var(--text)); }
+  .cnt { flex: none; --k: var(--subtle); }
   .cnt.red { --k: var(--red); background: var(--red-dim); }
   .cnt.blue { --k: var(--blue); background: var(--blue-dim); }
   .cnt.warn { --k: var(--gold); background: var(--gold-dim); }
@@ -525,7 +525,7 @@
   .wchip:first-child { padding-left: 10px; }
   /* Who made a change: a panel user's initial (desktop shows a friend's head). */
   .face { flex: none; width: 24px; height: 24px; border-radius: var(--radius-sm); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: var(--muted); background: #9a9aa333; }
-  .face.you { color: var(--acc); background: var(--acc-dim); }
+  .face.you { color: var(--ink-acc); background: var(--acc-dim); }
   .face.blank { background: none; }
   .face.small { width: 16px; height: 16px; font-size: 10px; border-radius: 4px; }
   /* Several people: their faces side by side at full size. Overlapped,

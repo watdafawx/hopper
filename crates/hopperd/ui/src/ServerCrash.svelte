@@ -566,16 +566,16 @@
   .warnline { color: var(--gold); white-space: normal; }
   .diff { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: var(--radius); border: 1px solid var(--line, #27272a); background: var(--bg, #0a0a0b); font-family: var(--mono, Consolas, monospace); font-size: 12px; }
   .dl { padding: 1px 4px; border-radius: var(--radius-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
-  .dl.add { color: var(--green); background: #22c55e14; }
-  .dl.del { color: var(--red); background: #ef444414; }
+  .dl.add { color: var(--ink-green); background: #22c55e14; }
+  .dl.del { color: var(--ink-red); background: #ef444414; }
   code { font-family: var(--mono, Consolas, monospace); font-size: 12px; color: var(--gold); }
   .mod { display: inline-flex; align-items: center; gap: 7px; flex: none; color: var(--text); padding: 0; max-width: 100%; }
   button.mod:hover b { color: var(--acc); }
   .mod img, .ph { width: 18px; height: 18px; border-radius: var(--radius-sm); background: var(--raise); flex: none; display: inline-block; }
   .mod b { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tag { font-size: 11px; padding: 0 6px; }
-  .tag.certain { color: var(--red); background: var(--red-dim); }
-  .tag.likely { color: var(--gold); background: var(--gold-dim); }
+  .tag.certain { color: var(--ink-red); background: var(--red-dim); }
+  .tag.likely { color: var(--ink-gold); background: var(--gold-dim); }
   .tag.possible { color: var(--subtle); }
   .tag.knockon { color: var(--muted); }
   .dim { opacity: .7; }
