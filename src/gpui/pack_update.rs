@@ -2040,6 +2040,7 @@ impl UpdatePreview {
             .iter()
             .map(|m| m.icon.clone())
             .chain(p.off.iter().chain(&p.removed).chain(&p.updated).map(|m| m.icon.clone()))
+            .chain(p.owners.values().map(|o| o.icon.clone()))
             .filter(|u| !u.is_empty())
             .collect();
         self.store.update(cx, |s, _| {
@@ -2286,12 +2287,14 @@ impl UpdatePreview {
                 let mine_n = settings.iter().filter(|d| d.changed_by_you).count();
                 let open_set = self.settings_open.contains(&rel);
                 let theme = cx.theme().clone();
+                let owner = plan.as_ref().and_then(|p| p.owners.get(&rel).cloned());
                 v_flex()
                     .child(
                         crate::drag_pick::paint_row(h_flex().id(SharedString::from(format!("crow:{rel}"))), paint, "conflicts", move |v, w, cx| row_set(v, w, cx))
                             .hover(|s| widgets::row_hover(s, cx))
                             .gap_2()
                             .py_0p5()
+                            .child(self.owner_icon(&rel, owner, cx))
                             .child(
                                 div()
                                     .flex_1()
@@ -2359,6 +2362,44 @@ impl UpdatePreview {
                     })
                     .when_some(diff, |c, d| c.child(Self::diff_block(d, cx)))
             }))
+            .into_any_element()
+    }
+
+    /// The icon of the mod a conflicting file belongs to, in front of its
+    /// path; a click opens the mod's page beside the lists. A file no mod
+    /// owns gets a plain file icon in a slot of the same size, so every
+    /// path starts at the same place and doesn't look like a mod whose
+    /// picture is missing.
+    fn owner_icon(&self, rel: &str, owner: Option<hopper::configowner::FileOwner>, cx: &mut Context<Self>) -> AnyElement {
+        let size = rems(1.25);
+        let Some(o) = owner else {
+            let muted = cx.theme().muted_foreground;
+            return div()
+                .size(size)
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(muted)
+                .child(Icon::new(IconName::File).small())
+                .into_any_element();
+        };
+        let path = self.store.read(cx).image(&o.icon).map(|p| p.to_path_buf());
+        let project = o.project;
+        // The handlers sit on the fixed-size box itself (a wrapper squeezed
+        // below it would only click at its start).
+        div()
+            .id(SharedString::from(format!("owner:{rel}")))
+            .size(size)
+            .flex_none()
+            .child(widgets::thumb(path.as_deref(), size, cx))
+            .tooltip({
+                let name = SharedString::from(o.name.clone());
+                move |w, cx| gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(w, cx)
+            })
+            .when(project != 0, |d| {
+                d.clickable(cx).on_click(cx.listener(move |this, _, window, cx| this.open_peek(project, window, cx)))
+            })
             .into_any_element()
     }
 

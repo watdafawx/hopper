@@ -506,6 +506,10 @@ fn summary(plan_id: u64, p: &ServerPlan) -> Value {
             "by": n.by, "by_project": n.by_project.to_string(), "by_icon": n.by_icon,
         })).collect::<Vec<_>>(),
         "files": p.plan.files,
+        // The mod each file to pick for belongs to, for its icon and page.
+        "owners": p.plan.owners.iter().map(|(rel, o)| (rel.clone(), json!({
+            "name": o.name, "icon": o.icon, "project": o.project.to_string(),
+        }))).collect::<serde_json::Map<String, Value>>(),
         "take": p.plan.default_take(),
         // A clean update's picks: every differing file takes the pack's.
         "clean_take": p.plan.clean_take(),

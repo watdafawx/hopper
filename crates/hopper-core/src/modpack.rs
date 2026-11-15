@@ -1016,6 +1016,13 @@ pub fn override_files_in(zip_path: &Path) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// The CurseForge pack zip of `file_id` when it's already in Hopper's
+/// cache (nothing is downloaded).
+pub(crate) fn cached_pack_zip(file_id: u64) -> Option<PathBuf> {
+    let p = cache_dir().join(format!("{file_id}.zip"));
+    (file_id != 0 && cache_hit(&p)).then_some(p)
+}
+
 /// The pack's own copy of one override file (`rel` relative to the
 /// instance, either slash), as text. `None` when the pack file isn't in
 /// Hopper's cache or doesn't ship it.
