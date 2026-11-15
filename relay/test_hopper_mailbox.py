@@ -301,6 +301,89 @@ class MailboxTest(Base):
         self.assertEqual([e for e in self.a.events() if e["kind"] == "group_follow"], [])
         self.assertEqual(self.c.groups()[gid]["follows"], [{"from": self.a.id, "inst": "p1"}])
 
+    def test_a_group_reaches_members_who_arent_friends(self):
+        # A-B and B-C are friends, A and C aren't. Only B can make the group
+        # (it's made of the owner's friends); after that what reaches whom
+        # is the group's members, not anyone's friend list.
+        a, b, c = self.a, self.b, self.c
+        a.befriend(b)
+        b.befriend(c)
+        self.assertEqual(a.post("/v1/groups", {"name": "x", "members": [b.id, c.id]})["status"], 403)
+        gid = b.post("/v1/groups", {"name": "Crew", "members": [a.id, c.id]})["group"]["id"]
+        for m in (a, c):
+            self.assertIn(gid, m.groups())
+            m.post("/v1/groups/%s/accept" % gid)
+        for m in (a, b, c):
+            m.events()
+
+        def copies(m):
+            return [(e["from"], e["from_name"], e["code"], e["groups"]) for e in m.events() if e["kind"] == "recipe"]
+
+        # B shares the pack; A and C each keep a copy and publish it back.
+        b.post("/v1/recipes", dict(recipe("p1", code="HOP-b1"), to=[a.id, c.id], groups=[gid]))
+        self.assertEqual(copies(a), [(b.id, "hopper-test-b", "HOP-b1", [gid])])
+        self.assertEqual(copies(c), [(b.id, "hopper-test-b", "HOP-b1", [gid])])
+        # A changes its copy: C gets it straight from A, with A's name.
+        r = a.post("/v1/recipes", dict(recipe("p1", code="HOP-a1", key="~copy", marks={"p:1": {"seq": 0, "by": a.id}}), to=[], groups=[gid]))
+        self.assertEqual((r["sent"], r["skipped"]), (2, []))
+        evs = [e for e in c.events() if e["kind"] == "recipe"]
+        self.assertEqual([(e["from"], e["from_name"], e["key"], e["code"], e["direct"]) for e in evs],
+                         [(a.id, "hopper-test-a", "~copy", "HOP-a1", False)])
+        self.assertEqual(evs[0]["marks"], {"p:1": {"seq": 0, "by": a.id}})
+        self.assertEqual(copies(b), [(a.id, "hopper-test-a", "HOP-a1", [gid])])
+        # C changes its copy: A gets it.
+        c.post("/v1/recipes", dict(recipe("p1", code="HOP-c1", key="~copy"), to=[], groups=[gid]))
+        self.assertEqual(copies(a), [(c.id, "hopper-test-c", "HOP-c1", [gid])])
+        self.assertEqual(copies(b), [(c.id, "hopper-test-c", "HOP-c1", [gid])])
+        # Sending straight to a member who isn't a friend still goes nowhere.
+        r = a.post("/v1/recipes", dict(recipe("solo"), to=[c.id], groups=[]))
+        self.assertEqual((r["sent"], r["skipped"]), (0, [c.id]))
+        self.assertEqual(copies(c), [])
+
+        # D is friends with B only. B adds them; A and C can't, as they
+        # don't own the group.
+        d = Client(self.relay, "hopper-test-d")
+        b.befriend(d)
+        self.assertEqual(a.post("/v1/groups/%s" % gid, {"add": [d.id]})["status"], 403)
+        b.post("/v1/groups/%s" % gid, {"add": [d.id]})
+        d.post("/v1/groups/%s/accept" % gid)
+        # On saying yes D gets every member's current copy, the
+        # non-friends' too.
+        got = sorted((e["from"], e["from_name"], e["code"]) for e in d.events() if e["kind"] == "recipe")
+        self.assertEqual(got, sorted([(b.id, "hopper-test-b", "HOP-b1"), (a.id, "hopper-test-a", "HOP-a1"),
+                                      (c.id, "hopper-test-c", "HOP-c1")]))
+        # D's own change reaches all three.
+        for m in (a, b, c):
+            m.events()
+        r = d.post("/v1/recipes", dict(recipe("p1", code="HOP-d1", key="~copy"), to=[], groups=[gid]))
+        self.assertEqual(r["sent"], 3)
+        for m in (a, b, c):
+            self.assertEqual(copies(m), [(d.id, "hopper-test-d", "HOP-d1", [gid])])
+
+        # An Undo is one more publish: C, then A, see the latest.
+        a.post("/v1/recipes", dict(recipe("p1", code="HOP-a2", key="~copy"), to=[], groups=[gid]))
+        self.assertEqual(copies(c), [(a.id, "hopper-test-a", "HOP-a2", [gid])])
+
+        # The member list: everyone sees everyone by name. Online, last seen
+        # and the Minecraft id are only shown for friends.
+        a.post("/v1/profile", {"name": "Ann", "mc_id": "069a79f444e94726a5befca90e38aaf5"})
+        members = {m["id"]: m for m in c.groups()[gid]["members"]}
+        self.assertEqual(set(members), {a.id, b.id, c.id, d.id})
+        self.assertEqual((members[a.id]["name"], members[a.id]["joined"]), ("Ann", True))
+        self.assertEqual((members[a.id]["online"], members[a.id]["last_seen"], members[a.id]["mc_id"]), (False, 0, ""))
+        self.assertTrue(members[b.id]["online"])
+        self.assertGreater(members[b.id]["last_seen"], 0)
+        # And the name reaches C's feed for A's next change.
+        a.post("/v1/recipes", dict(recipe("p1", code="HOP-a3", key="~copy"), to=[], groups=[gid]))
+        self.assertEqual(copies(c), [(a.id, "Ann", "HOP-a3", [gid])])
+        # A follow announced in the group reaches an in-step member who isn't
+        # a friend of the one who followed.
+        c.post("/v1/groups/%s/in-step" % gid, {"on": True})
+        c.events()
+        a.post("/v1/groups/%s/follow" % gid, {"from": b.id, "inst": "p1"})
+        evs = [e for e in c.events() if e["kind"] == "group_follow"]
+        self.assertEqual([(e["from"], e["pack_from"]) for e in evs], [(a.id, b.id)])
+
     def test_unfriending_takes_them_out_of_the_owners_groups(self):
         self.a.befriend(self.b)
         gid = self.make_group([self.b])
