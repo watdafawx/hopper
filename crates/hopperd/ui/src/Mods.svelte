@@ -833,14 +833,14 @@
     <ModBackups {server} onChanged={() => { load(); loadBackupCount(); checkUpdates(false); }} />
   {:else}
     <!-- Laid out as desktop's: actions, search, what's listed (Filter), in what order (Sort). -->
-    <div class="row wrap toolbar" class:tight={listW > 0 && listW <= 760}>
+    <div class="row toolbar">
       <!-- The arrow only shows with mods from links on: Browse is then the only way to add. -->
-      {#if srcOn}<span class="addsplit"><a class="btn sm" href="#{browseHash('mods', server.id)}" oncontextmenu={openAdd}><Plus size={13} />Add content</a><button class="btn sm" title="Other ways to add" aria-label="Other ways to add" aria-haspopup="menu" aria-expanded={!!addMenu} onclick={openAdd}><ChevronDown size={12} /></button></span>{:else}<a class="btn sm" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add content</a>{/if}
+      {#if srcOn}<span class="addsplit"><a class="btn sm" href="#{browseHash('mods', server.id)}" title="Add content" oncontextmenu={openAdd}><Plus size={13} /><span class="lb">Add content</span></a><button class="btn sm" title="Other ways to add" aria-label="Other ways to add" aria-haspopup="menu" aria-expanded={!!addMenu} onclick={openAdd}><ChevronDown size={12} /></button></span>{:else}<a class="btn sm" href="#{browseHash('mods', server.id)}" title="Add content"><Plus size={13} /><span class="lb">Add content</span></a>{/if}
       <span class="row upd">
         <!-- The last check's results stay up while a new one runs; with results on screen the refresh button spins instead, so nothing moves. -->
         <!-- Update all and the check button are one split button; with nothing to update the check button stands alone. -->
-        {#if pendingUpdates.length}<span class="usplit"><button class="btn sm pri" disabled={!!busy} title="Review {pendingUpdates.length === 1 ? '1 update' : `${pendingUpdates.length} updates`}, then update" onclick={() => (reviewing = pendingUpdates)}><Download size={13} />Update all ({pendingUpdates.length})</button><button class="btn sm pri icon" disabled={checking} aria-label="Check for updates" title={checking ? 'Checking for updates' : `Check for updates${checkedAgo ? ` · checked ${checkedAgo}` : ''}`} onclick={() => checkUpdates(true)}><span class:spin={checking} class="rf"><RefreshCw size={13} /></span></button></span>
-        {:else}{#if updates && !checking}<span class="small okt row"><CircleCheck size={14} />Up to date</span>{/if}
+        {#if pendingUpdates.length}<span class="usplit"><button class="btn sm pri" disabled={!!busy} title="Review {pendingUpdates.length === 1 ? '1 update' : `${pendingUpdates.length} updates`}, then update" onclick={() => (reviewing = pendingUpdates)}><Download size={13} /><span class="lb">Update all (</span>{pendingUpdates.length}<span class="lb">)</span></button><button class="btn sm pri icon" disabled={checking} aria-label="Check for updates" title={checking ? 'Checking for updates' : `Check for updates${checkedAgo ? ` · checked ${checkedAgo}` : ''}`} onclick={() => checkUpdates(true)}><span class:spin={checking} class="rf"><RefreshCw size={13} /></span></button></span>
+        {:else}{#if updates && !checking}<span class="small okt row lb"><CircleCheck size={14} />Up to date</span>{/if}
         <button class="btn sm ghost icon" disabled={checking} aria-label="Check for updates" title={checking ? 'Checking for updates' : `Check for updates${checkedAgo ? ` · checked ${checkedAgo}` : ''}`} onclick={() => checkUpdates(true)}><span class:spin={checking} class="rf"><RefreshCw size={13} /></span></button>{/if}
         {#if checking && !pendingUpdates.length}<span class="small muted row"><span class="spinner blue"></span>Checking for updates</span>{/if}
       </span>
@@ -856,8 +856,8 @@
       </div>
       <SortMenu choices={SORTS} {sort} bind:updatesFirst bind:yoursFirst {hasPack} onSort={setSort} />
       <span class="sp"></span>
-      {#if counts.unknown}<button class="btn sm ghost" disabled={!!identifying} onclick={() => identify(false)} title="Look jars up on CurseForge and Modrinth"><ScanSearch size={13} />Identify {counts.unknown}</button>{/if}
-      {#if srcOn && counts.unknown}<button class="btn sm ghost" onclick={() => (finding = true)} title="Jars that link to their GitHub repo can follow it for updates"><Link size={13} />Find sources for {counts.unknown} unknown mod{counts.unknown === 1 ? '' : 's'}</button>{/if}
+      {#if counts.unknown}<button class="btn sm ghost" disabled={!!identifying} onclick={() => identify(false)} title="Look jars up on CurseForge and Modrinth"><ScanSearch size={13} /><span class="lb">Identify </span>{counts.unknown}</button>{/if}
+      {#if srcOn && counts.unknown}<button class="btn sm ghost" onclick={() => (finding = true)} title="Jars that link to their GitHub repo can follow it for updates"><Link size={13} /><span class="lb">Find sources for </span>{counts.unknown}<span class="lb"> unknown mod{counts.unknown === 1 ? '' : 's'}</span></button>{/if}
       <ModProfiles {base} {alive} onChanged={() => changed(false)} />
     </div>
     {#if server.changed_since_start && !restartClosed}<div class="banner small restart-note"><Info size={14} /><span class="grow">Changed while the server runs: restart it to load the changes</span><button class="btn sm" disabled={server.state === 'stopping'} onclick={() => askPower(server, 'restart')}><RotateCcw size={13} />Restart</button><button class="btn sm ghost icon" title="Hide" onclick={() => (restartClosed = true)}><X size={13} /></button></div>{/if}
@@ -1064,17 +1064,26 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .tab { padding: 6px 12px; color: var(--subtle); }
   .tab:hover { color: var(--text); }
   .subtabs .chip { margin-bottom: 6px; }
-  .toolbar { gap: 6px 10px; }
+  /* One line at any width, as desktop's Mods toolbar: labels give way to
+     icons and the search narrows instead of the bar wrapping. */
+  .toolbar { gap: 6px 10px; flex-wrap: nowrap; min-width: 0; container: mbar / inline-size; }
+  .toolbar > :global(*) { flex: none; }
+  .toolbar .find { flex: 0 1 224px; min-width: 90px; }
+  @container mbar (max-width: 900px) {
+    .toolbar :global(.lb) { display: none; }
+  }
+  @container mbar (max-width: 640px) {
+    .toolbar .vr { display: none; }
+  }
+  @container mbar (max-width: 560px) {
+    .toolbar .find { min-width: 64px; }
+  }
   .usplit { display: inline-flex; flex: none; }
   .usplit .btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
   .usplit .btn:last-child { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid #1c0d0240; }
   .rf { display: inline-flex; }
   .rf.spin { animation: rf-spin 1s linear infinite; }
   @keyframes rf-spin { to { transform: rotate(360deg); } }
-  /* A narrow list: the search goes first, the rail wraps under it. */
-  .toolbar.tight > :global(a.btn), .toolbar.tight .addsplit, .toolbar.tight .upd { order: -2; }
-  .toolbar.tight .find { order: -1; flex: 1 0 250px; width: auto; }
-  .toolbar.tight .vr { display: none; }
   .toolbar .vr { margin: 0; }
   .cbl { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--subtle); cursor: pointer; padding: 0 4px; }
   .cbl input, .c-ck input { width: 15px; height: 15px; accent-color: var(--acc); }

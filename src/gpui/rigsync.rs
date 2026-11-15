@@ -124,10 +124,22 @@ pub enum SyncEvent {
 
 impl EventEmitter<SyncEvent> for SyncPanel {}
 
+/// The pairing row's levels for a narrow page (`widgets::Fit`): 1 "Server
+/// pack", 2 its icon only and a narrower pack picker.
+const HEAD_FIT_MAX: usize = 2;
+
+/// The filter row's levels: 1 a narrower search, 2 the Sync button as its
+/// icon and count, 3 the show choices as one menu, 4 the narrowest search.
+const BAR_FIT_MAX: usize = 4;
+
 pub struct SyncPanel {
     store: Entity<Store>,
     /// The side column's width (inside an instance), resizable.
     side_panel: widgets::SidePanel,
+    /// The pairing row and the filter row fitted to the room the page has
+    /// (levels in [`HEAD_FIT_MAX`] and [`BAR_FIT_MAX`]).
+    head_fit: widgets::Fit,
+    bar_fit: widgets::Fit,
     section: Section,
     configs: Entity<crate::configs::ConfigsPanel>,
     history: Entity<crate::configs::HistoryPanel>,
@@ -284,6 +296,8 @@ impl SyncPanel {
         Self {
             store,
             side_panel: widgets::SidePanel::new(widgets::PanelSpec::new("sync.side", 18., 15., 28.)),
+            head_fit: Default::default(),
+            bar_fit: Default::default(),
             // `--section configs|history` for scripted runs.
             section: match std::env::args()
                 .skip_while(|a| a != "--section")
@@ -1649,12 +1663,13 @@ impl SyncPanel {
     ) -> impl IntoElement + use<> {
         // Quick start / stop when a panel is set up; Servers sets one up.
         let in_server_page = self.in_server_page;
+        let lv = self.head_fit.level();
         let controls = (!in_server_page && self.control.read(cx).configured(cx))
             .then(|| self.control.update(cx, |c, cx| c.controls(cx)));
         // The server's page has start / stop above: the pack is what to pick.
         let repair = in_server_page.then(|| {
             div()
-                .w(rems(14.))
+                .w(rems(if lv >= 2 { 10. } else { 14. }))
                 .child(self.pair_picker(&server.root, inst.name.clone(), Some(&inst.root), cx))
         });
         let live = self.restart_line(false, cx);
@@ -1721,14 +1736,15 @@ impl SyncPanel {
                 r.child(Icon::new(IconName::Server).text_color(theme.muted_foreground))
             })
             .when(!in_server_page, |r| r.child(div().truncate().child(server.name.clone())));
-        v_flex()
-            .gap_2()
-            .child(
-                h_flex()
+        let key = widgets::fit_key([inst.name.as_str(), server.name.as_str(), &chips.len().to_string()]);
+        let row = h_flex()
+                    .w_full()
                     .gap_3()
                     .when(!in_instance, |r| r.child(widgets::thumb(icon.as_deref(), rems(if in_server_page { 2. } else { 2.5 }), cx)))
                     .child(title)
-                    .child(h_flex().flex_1().min_w_0().gap_1p5().overflow_hidden().children(chips))
+                    // No width of its own: the chips take what's left and
+                    // ellipsize, so they never make the row step down.
+                    .child(h_flex().w_0().flex_1().min_w_0().gap_1p5().overflow_hidden().children(chips))
                     .children(controls)
                     .when(
                         inst.pack
@@ -1741,7 +1757,11 @@ impl SyncPanel {
                                     .outline()
                                     .small()
                                     .icon(IconName::Package)
-                                    .label("Update from server pack")
+                                    .map(|b| match lv {
+                                        0 => b.label("Update from server pack"),
+                                        1 => b.label("Server pack"),
+                                        _ => b,
+                                    })
                                     .tooltip("Uses the pack author's official server pack: its mods and config files. Shows what changes first, like a pack update.")
                                     .disabled(online || self.running)
                                     .on_click(cx.listener(move |this, _, w, cx| {
@@ -1765,8 +1785,10 @@ impl SyncPanel {
                             .tooltip("Compare again")
                             .disabled(self.running || self.comparing)
                             .on_click(cx.listener(|this, _, _, cx| this.rescan(cx))),
-                    ),
-            )
+                    );
+        v_flex()
+            .gap_2()
+            .child(self.head_fit.wrap("sync-head-fit", row, HEAD_FIT_MAX, key, cx.entity_id()))
             .children(live)
     }
 
@@ -1972,7 +1994,7 @@ impl SyncPanel {
     /// Search; the counts as one filter (Needs action · Kept off · In sync
     /// · All); side and source as two small menus; and, in an instance, the
     /// one filled button: Sync N to server.
-    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn toolbar(&self, rem: Pixels, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         const ENVS: [(EnvFilter, &str); 4] = [
             (EnvFilter::Any, "Any side"),
             (EnvFilter::Client, "Client only"),
@@ -1987,6 +2009,8 @@ impl SyncPanel {
             .position(|(s, _)| *s == self.filters.source)
             .unwrap_or(0);
         let n_sel = self.selected_rows(cx).len();
+        // How far the row has given way to a narrow page (BAR_FIT_MAX).
+        let lv = self.bar_fit.level();
         // Counts go by the search and the side and source menus.
         let groups: Vec<Group> = self.counted(cx).into_iter().map(Group::of).collect();
         let shown = self.shown(cx);
@@ -2038,16 +2062,18 @@ impl SyncPanel {
         // install can't: the running server holds its files.
         let held = self.online(cx) && (nf_differs || !self.allow_online(cx));
         let sync = Some(()).map(|_| {
+            let label = match rigsync::sync_label(to_change - to_remove, to_remove) {
+                Some(_) if !nf_differs && to_off == to_change => format!("Turn off {to_off} on server"),
+                Some(_) if !nf_differs && to_on == to_change => format!("Turn on {to_on} on server"),
+                Some(l) if !nf_differs => l,
+                _ if to_change > 0 => format!("Sync {to_change} to server"),
+                _ => "Sync to server".to_string(),
+            };
             Button::new("update-server")
                 .small()
                 .icon(IconName::ServerCog)
-                .label(match rigsync::sync_label(to_change - to_remove, to_remove) {
-                    Some(_) if !nf_differs && to_off == to_change => format!("Turn off {to_off} on server"),
-                    Some(_) if !nf_differs && to_on == to_change => format!("Turn on {to_on} on server"),
-                    Some(l) if !nf_differs => l,
-                    _ if to_change > 0 => format!("Sync {to_change} to server"),
-                    _ => "Sync to server".to_string(),
-                })
+                // Narrow: the icon and how many; the tooltip still says what.
+                .label(if lv >= 2 { if to_change > 0 { to_change.to_string() } else { String::new() } } else { label })
                 // Picked rows have their own filled button below.
                 .map(|b| if to_change > 0 && n_sel == 0 { b.primary() } else { b.outline() })
                 .tooltip(if held && nf_differs {
@@ -2060,18 +2086,47 @@ impl SyncPanel {
                 .disabled(held || self.running)
                 .on_click(cx.listener(|this, _, w, cx| this.confirm_update(w, cx)))
         });
-        h_flex()
+        let key = widgets::fit_key([format!("{:?} {n_sel} {to_change}", picks.iter().map(|s| s.label()).collect::<Vec<_>>()).as_str()]);
+        let show_menu = (lv >= 3).then(|| {
+            let (view, picks) = (view.clone(), picks.clone());
+            div()
+                .flex_none()
+                .w(rems(10.))
+                .child(widgets::picker(
+                    "sync-show-menu",
+                    choices.get(show_ix).map(|(s, n)| format!("{} {n}", s.label())).unwrap_or_default(),
+                    choices.iter().enumerate().map(|(i, (s, n))| (format!("{} {n}", s.label()), i == show_ix)).collect(),
+                    rem,
+                    std::rc::Rc::new(move |ix, _, cx| {
+                        let Some(s) = picks.get(ix).copied() else { return };
+                        view.update(cx, |this, cx| {
+                            this.show = Some(s);
+                            if s != Show::All {
+                                this.open.extend(Group::ALL.into_iter().filter(|g| s.has(*g)));
+                            }
+                            this.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                            cx.notify();
+                        })
+                    }),
+                ))
+        });
+        let row = h_flex()
+            .w_full()
             .gap_2()
-            .flex_wrap()
             .child(
-                div().w_48().child(
+                div().flex_none().w(rems(match lv {
+                    0 => 12.,
+                    1..=3 => 9.,
+                    _ => 6.5,
+                })).child(
                     widgets::search_input(&self.search)
                         .small()
                         .prefix(Icon::new(IconName::Search).small())
                         .cleanable(true),
                 ),
             )
-            .child(
+            .children(show_menu)
+            .when(lv < 3, |r| r.child(
                 widgets::Segmented::new("sync-show")
                     .selected_index(show_ix)
                     .children(choices.iter().map(|(s, n)| widgets::SegItem::new().label(format!("{} {n}", s.label()))))
@@ -2086,7 +2141,7 @@ impl SyncPanel {
                         }
                         cx.notify();
                     })),
-            )
+            ))
             .child(side)
             .child(source)
             .child(div().flex_1())
@@ -2102,7 +2157,10 @@ impl SyncPanel {
                         })),
                 )
             })
-            .children(sync)
+            .children(sync);
+        // One line at any width: the row gives way step by step (see
+        // BAR_FIT_MAX) instead of wrapping under itself.
+        self.bar_fit.wrap("sync-bar-fit", row, BAR_FIT_MAX, key, cx.entity_id())
     }
 
     /// "Server → Pack" over the version column, lined up with the rows.
@@ -3116,7 +3174,7 @@ impl Render for SyncPanel {
             .into_any_element(),
             Some(Ok(_)) => {
                 let count = self.items.len();
-                let toolbar = self.toolbar(cx);
+                let toolbar = self.toolbar(window.rem_size(), cx);
                 let columns = self.column_header(cx);
                 // Beside the sidebar, the apply bar shows once something is picked.
                 let footer = (!side || !self.selected_rows(cx).is_empty()).then(|| self.footer(&server, cx));
@@ -3139,7 +3197,9 @@ impl Render for SyncPanel {
                     .flex_1()
                     .min_h_0()
                     .gap_3()
-                    .child(toolbar)
+                    // Its own height: the fitted row clips what spills, so a
+                    // column squeezed by a long list would cut its controls.
+                    .child(div().flex_none().child(toolbar))
                     // The list as tall as its rows (shrinking to fit), so the
                     // apply bar and the result sit right under it, not at the
                     // window's bottom past empty space.

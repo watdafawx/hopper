@@ -264,7 +264,7 @@
     <HeroDrift src={hero.src} />
     <Avatar server={s} cls="ic big" />
     <div class="ttl">
-      <div class="row wrap">
+      <div class="row chips">
         <h2 title={s.path}>{s.name}</h2>
         <span class="chip {stateKey(s)}" title={stateTip(s)}><span class="dot {stateKey(s)}"></span>{stateText(s)}{s.boot && !s.progress ? ` · ${s.boot.label}` : ''}{alive && !s.progress ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
         {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}{#if outside(s)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}<ServerAlerts server={s} part="chip" />{#if s.sending}<button class="chip warn" title="Its files are being sent to another panel. It can't start until that's done. Click to see how far it got." onclick={() => openMove(s)}>Sending</button>{/if}
@@ -297,10 +297,10 @@
       {#if session.role === 'viewer'}<span class="chip">View only</span>
       {:else if !alive}
         <!-- A moved copy (or one being sent) can't start: off, saying why. -->
-        <button class="btn go" disabled={!!startWhy} title={startWhy} onclick={() => power('start')}><Play size={14} />Start</button>
+        <button class="btn go" disabled={!!startWhy} title={startWhy || 'Start'} aria-label="Start" onclick={() => power('start')}><Play size={14} /><span class="lb">Start</span></button>
       {:else}
-        <button class="btn" disabled={s.state === 'stopping'} onclick={() => power('stop')}><Square size={14} />Stop</button>
-        <button class="btn" disabled={s.state === 'stopping'} onclick={() => power('restart')}><RotateCw size={14} />Restart</button>
+        <button class="btn" disabled={s.state === 'stopping'} title="Stop" aria-label="Stop" onclick={() => power('stop')}><Square size={14} /><span class="lb">Stop</span></button>
+        <button class="btn" disabled={s.state === 'stopping'} title="Restart" aria-label="Restart" onclick={() => power('restart')}><RotateCw size={14} /><span class="lb">Restart</span></button>
       {/if}
       <HistoryButton {id} onOpen={() => nav('mods', 'history')} />
       <div class="morewrap">
@@ -324,7 +324,7 @@
 
   <nav class="tabs">
     {#each TABS as [t, label, Icon] (t)}
-      <button class:tab-sel={onTab(t)} onclick={() => nav(t)}><Icon size={14} />{label}{#if t === 'logs' && tab !== 'logs' && unseen(id)}<i class="dot" title="A crash you haven't looked at"></i>{/if}{t === 'players' && online != null ? ` ${online}` : ''}</button>
+      <button class:tab-sel={onTab(t)} title={label} onclick={() => nav(t)}><Icon size={14} /><span class="lb">{label}</span>{#if t === 'logs' && tab !== 'logs' && unseen(id)}<i class="dot" title="A crash you haven't looked at"></i>{/if}{t === 'players' && online != null ? ` ${online}` : ''}</button>
     {/each}
   </nav>
 
@@ -422,9 +422,18 @@
 <ModsRemove />
 <style>
   .pad { padding: 18px; }
-  .head { position: relative; display: flex; align-items: center; gap: 12px; padding: 16px 18px 12px; flex-wrap: wrap; }
+  /* One line at any width, as desktop's header: chips and facts ellipsize,
+     then the power buttons drop their words; the actions never move down. */
+  .head { position: relative; display: flex; align-items: center; gap: 12px; padding: 16px 18px 12px; container: shead / inline-size; }
   .head > :global(*:not(.drift)) { position: relative; z-index: 1; }
-  .ttl { flex: 1; min-width: 220px; }
+  .ttl { flex: 1; min-width: 0; }
+  .acts { flex: none; }
+  .chips { flex-wrap: nowrap; min-width: 0; overflow: hidden; }
+  .chips h2 { flex: none; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chips > :global(.chip) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  @container shead (max-width: 620px) {
+    .acts .lb { display: none; }
+  }
   .wrap { flex-wrap: wrap; }
   h2 { font-size: 17px; font-weight: 700; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -434,14 +443,22 @@
   .boot .bar.slow i { background: var(--gold); }
   .packup { cursor: pointer; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
   .packup:hover { filter: brightness(1.2); }
-  .facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; color: var(--subtle); margin-top: 2px; }
+  .facts { display: flex; flex-wrap: nowrap; align-items: center; gap: 4px 16px; color: var(--subtle); margin-top: 2px; min-width: 0; overflow: hidden; }
+  .facts > * { flex: none; white-space: nowrap; }
+  /* The address is last and least: it ellipsizes first. */
+  .facts > .fact.muted { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+  .facts > .fact.muted .mono:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .fact { display: inline-flex; align-items: center; gap: 6px; padding: 0; color: inherit; }
   .fi { display: inline-flex; color: var(--muted); }
   .fi.g { color: var(--green); } .fi.o { color: var(--gold); } .fi.b { color: var(--blue); }
   .cpi { display: inline-flex; align-items: center; padding: 3px 4px; margin-left: -2px; border-radius: var(--radius-sm); color: var(--muted); }
   .cpi:hover { background: var(--raise); color: var(--text); }
   .vlink:hover { color: var(--acc); }
-  .tabs { display: flex; gap: 20px; padding: 0 18px; border-bottom: 1px solid var(--line); margin-bottom: 14px; overflow-x: auto; }
+  .tabs { display: flex; gap: 20px; padding: 0 18px; border-bottom: 1px solid var(--line); margin-bottom: 14px; overflow-x: auto; container: stabs / inline-size; }
+  /* Narrow, as desktop: the tabs keep their icons and the open one its name. */
+  @container stabs (max-width: 1080px) {
+    .tabs button:not(.tab-sel) .lb { display: none; }
+  }
   .tabs button { display: inline-flex; align-items: center; gap: 6px; padding: 9px 0; color: var(--subtle); font-weight: 500; white-space: nowrap; }
   .tabs button:hover { color: var(--text); }
   .tabs button :global(svg) { color: var(--muted); }

@@ -718,14 +718,15 @@ impl Render for PerfView {
             .child(
                 h_flex()
                     .gap_2()
+                    // A narrow page shortens the count, never the button.
                     .child(widgets::caption(
                         format!("{n} run{} recorded", if n == 1 { "" } else { "s" }),
                         cx,
-                    ))
-                    .child(div().flex_1())
+                    ).flex_1().min_w_0())
                     .when_some(folder, |r, dir| {
                         r.child(
                             Button::new("perf-folder")
+                                .flex_none()
                                 .outline()
                                 .small()
                                 .icon(IconName::FolderOpen)

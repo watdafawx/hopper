@@ -10,7 +10,7 @@
     Folder, FolderOpen, File, FileText, FileArchive, Image, HardDrive, Search, FolderPlus, Upload, FolderUp,
     Download, Copy, Pencil, Trash2, RefreshCw, ArrowUp, ArrowLeft, ArrowRight, FilePlus, TextSearch, X,
     List, LayoutGrid, PanelLeft, PanelRight, Scissors, ClipboardPaste, Info, Package, ExternalLink, Layers, TriangleAlert,
-    Link,
+    Link, Ellipsis,
   } from '@lucide/svelte';
   import { api, post, here, target } from './lib/api.js';
   import { bytes } from './lib/format.js';
@@ -54,6 +54,8 @@
   let editingPath = $state(false);
   let pathText = $state('');
   let ctx = $state(null);
+  // The toolbar's ⋯ menu (only shown when the bar is narrow).
+  let toolMore = $state(false);
   let viewer = $state(null);
   let props = $state(null);
   let preview = $state(null);
@@ -699,7 +701,7 @@
   $effect(() => onChange(sid, ['files', 'mods', 'configs', 'worlds', 'backups', 'server', 'players', 'schedule'], refresh));
 </script>
 
-<svelte:window onclick={() => (ctx = null)} onmouseup={bandEnd} onmousemove={bandMove} />
+<svelte:window onclick={() => ((ctx = null), (toolMore = false))} onmouseup={bandEnd} onmousemove={bandMove} />
 
 <!-- The whole explorer is a drop zone (uploads) and listens for mouse back/forward. -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -738,14 +740,32 @@
       <button class:on={prefs.view === 'list'} title="List" onclick={() => setView('list')}><List size={14} /></button>
       <button class:on={prefs.view === 'tiles'} title="Tiles" onclick={() => setView('tiles')}><LayoutGrid size={14} /></button>
     </div>
-    {#if inConfig && prefs.view === 'list'}<button class="btn sm icon" class:on={prefs.group} title="Group by mod" onclick={() => flipPane('group')}><Layers size={14} /></button>{/if}
-    <button class="btn sm icon" class:on={prefs.tree} title="Folder tree" onclick={() => flipPane('tree')}><PanelLeft size={14} /></button>
-    <button class="btn sm icon" class:on={prefs.preview} title="Preview pane" onclick={() => flipPane('preview')}><PanelRight size={14} /></button>
-    <button class="btn sm icon" title="Refresh (F5)" onclick={refresh}><RefreshCw size={14} /></button>
-    <button class="btn sm icon" title="New file" onclick={newFile}><FilePlus size={14} /></button>
-    <button class="btn sm icon" title="New folder" onclick={mkdir}><FolderPlus size={14} /></button>
-    <button class="btn sm icon" title="Upload a folder" onclick={() => folderPick.click()}><FolderUp size={14} /></button>
-    <button class="btn sm pri" onclick={() => filePick.click()}><Upload size={14} />Upload</button>
+    <!-- Narrow, these fold into the ⋯ menu below instead of the bar wrapping. -->
+    <div class="wide">
+      {#if inConfig && prefs.view === 'list'}<button class="btn sm icon" class:on={prefs.group} title="Group by mod" onclick={() => flipPane('group')}><Layers size={14} /></button>{/if}
+      <button class="btn sm icon" class:on={prefs.tree} title="Folder tree" onclick={() => flipPane('tree')}><PanelLeft size={14} /></button>
+      <button class="btn sm icon" class:on={prefs.preview} title="Preview pane" onclick={() => flipPane('preview')}><PanelRight size={14} /></button>
+      <button class="btn sm icon" title="Refresh (F5)" onclick={refresh}><RefreshCw size={14} /></button>
+      <button class="btn sm icon" title="New file" onclick={newFile}><FilePlus size={14} /></button>
+      <button class="btn sm icon" title="New folder" onclick={mkdir}><FolderPlus size={14} /></button>
+      <button class="btn sm icon" title="Upload a folder" onclick={() => folderPick.click()}><FolderUp size={14} /></button>
+    </div>
+    <div class="more">
+      <button class="btn sm icon" title="More" aria-haspopup="menu" aria-expanded={toolMore} onclick={(e) => { e.stopPropagation(); toolMore = !toolMore; }}><Ellipsis size={14} /></button>
+      {#if toolMore}
+        <div class="popover menu tmenu" role="menu" tabindex="-1" onclick={() => (toolMore = false)} onkeydown={() => {}}>
+          {#if inConfig && prefs.view === 'list'}<button class="menu-item" role="menuitem" onclick={() => flipPane('group')}><Layers size={13} />{prefs.group ? 'Ungroup' : 'Group by mod'}</button>{/if}
+          <button class="menu-item" role="menuitem" onclick={() => flipPane('tree')}><PanelLeft size={13} />{prefs.tree ? 'Hide folder tree' : 'Show folder tree'}</button>
+          <button class="menu-item" role="menuitem" onclick={() => flipPane('preview')}><PanelRight size={13} />{prefs.preview ? 'Hide preview pane' : 'Show preview pane'}</button>
+          <button class="menu-item" role="menuitem" onclick={refresh}><RefreshCw size={13} />Refresh</button>
+          <div class="menu-sep"></div>
+          <button class="menu-item" role="menuitem" onclick={newFile}><FilePlus size={13} />New file</button>
+          <button class="menu-item" role="menuitem" onclick={mkdir}><FolderPlus size={13} />New folder</button>
+          <button class="menu-item" role="menuitem" onclick={() => folderPick.click()}><FolderUp size={13} />Upload a folder</button>
+        </div>
+      {/if}
+    </div>
+    <button class="btn sm pri" title="Upload" onclick={() => filePick.click()}><Upload size={14} /><span class="lb">Upload</span></button>
     <button class="btn sm icon ghost" title="Trash" onclick={openTrash}><Trash2 size={14} /></button>
     <input type="file" multiple hidden bind:this={filePick} onchange={(e) => picked(e, false)} />
     <input type="file" hidden webkitdirectory bind:this={folderPick} onchange={(e) => picked(e, true)} />
@@ -977,7 +997,25 @@
 
 <style>
   .fx { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; background: var(--base); }
-  .ftool { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  /* One line at any width, as desktop's toolbars: the address and filter
+     narrow, then the pane and new-file buttons fold into ⋯, then Upload
+     drops its word. */
+  .ftool { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); flex-wrap: nowrap; min-width: 0; container: ftool / inline-size; }
+  .ftool > :global(*) { flex: none; }
+  .ftool > .addr { flex: 1 1 0; min-width: 90px; }
+  .ftool > .find { flex: 0 1 210px; min-width: 120px; width: auto; }
+  .wide { display: contents; }
+  .more { display: none; position: relative; }
+  .tmenu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 40; }
+  @container ftool (max-width: 900px) {
+    .wide { display: none; }
+    .more { display: block; }
+  }
+  @container ftool (max-width: 560px) {
+    .ftool .lb { display: none; }
+    .ftool > .addr { min-width: 70px; }
+    .ftool > .find { min-width: 90px; }
+  }
   .addr { flex: 1; min-width: 220px; display: flex; align-items: center; gap: 2px; border: 1px solid var(--line2); border-radius: var(--radius); padding: 2px 6px; background: var(--bg); cursor: text; min-height: 30px; }
   .addr.input { padding: 3px 8px; }
   .crumbs { color: var(--subtle); font-size: 12.5px; overflow: hidden; }
@@ -1066,5 +1104,5 @@
   .sel-t { user-select: text; word-break: break-all; }
   .icon { padding: 4px 6px; }
   @media (max-width: 1100px) { .prev { display: none; } }
-  @media (max-width: 860px) { .treepane { display: none; } .c-date, .c-kind { display: none; } .find { width: 100%; order: 10; } }
+  @media (max-width: 860px) { .treepane { display: none; } .c-date, .c-kind { display: none; } }
 </style>

@@ -12,7 +12,6 @@ use crate::store::{Store, open_path};
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
@@ -1072,38 +1071,27 @@ impl LogsView {
         let n = self.line_count();
         let filtered = self.visible.is_some();
         let rel = path.strip_prefix(root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
-        let share = crash_list::share_row(self, &rel, cx);
         // The folder of the file shown.
         let shown_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| root.join("logs"));
-        let toolbar = h_flex()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .child(div().w(rems(16.)).child(widgets::search_input(&self.query).small().cleanable(true)))
-            .child(
-                Checkbox::new("errors-only")
-                    .label("Errors and warnings only")
-                    .checked(self.errors_only)
-                    .on_change(cx.listener(|this, v: &bool, _, cx| {
-                        this.errors_only = *v;
-                        this.scroll_to_end();
-                        cx.notify();
-                    })),
-            )
-            .when(filtered, |r| {
-                r.child(widgets::caption(format!("{n} of {total} lines"), cx).text_xs())
-            })
-            .when(loading, |r| r.child(Spinner::new().xsmall()))
-            .child(div().flex_1())
-            .child(share)
-            .child(
-                Button::new("logs-folder")
-                    .small()
-                    .ghost()
-                    .icon(IconName::FolderOpen)
-                    .tooltip(format!("Open its folder ({})", shown_dir.display()))
-                    .on_click(move |_, _, _| open_path(&shown_dir)),
-            );
+        let toolbar = crash_list::log_toolbar(
+            self,
+            crash_list::LogBar {
+                id: "",
+                query: self.query.clone(),
+                errors_only: self.errors_only,
+                shown: filtered.then(|| format!("{n} of {total} lines")),
+                loading,
+                rel,
+                folder_tip: format!("Open its folder ({})", shown_dir.display()),
+                folder: shown_dir,
+            },
+            |this, v, cx| {
+                this.errors_only = v;
+                this.scroll_to_end();
+                cx.notify();
+            },
+            cx,
+        );
         v_flex()
             .flex_1()
             .min_h_0()

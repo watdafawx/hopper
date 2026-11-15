@@ -218,6 +218,44 @@ pub fn toggle_chip(id: impl Into<ElementId>, label: impl Into<SharedString>, on:
         .when(!on, |b| b.border_color(theme.input))
 }
 
+/// A button's label, or just its icon with the label as its tooltip once a
+/// narrow page (`Fit`) needs the room.
+pub fn fit_label(b: Button, label: &str, icon_only: bool) -> Button {
+    if icon_only { b.tooltip(label.to_string()) } else { b.label(label.to_string()) }
+}
+
+/// [`toggle_chip`] with its label shortened to `short` (the whole label
+/// in its tooltip), or to just `icon` when `short` is None: how a toggle
+/// gives way on a narrow page (`Fit`) and still says what it does.
+pub fn toggle_chip_fit(
+    id: impl Into<ElementId>,
+    label: &str,
+    short: Option<&str>,
+    icon: IconName,
+    on: bool,
+    cx: &App,
+) -> Button {
+    match short {
+        Some(s) if s == label => toggle_chip(id, label.to_string(), on, cx),
+        Some(s) => toggle_chip(id, s.to_string(), on, cx).tooltip(label.to_string()),
+        None => {
+            let theme = cx.theme();
+            let variant = gpui_kit::component::button::ButtonCustomVariant::new(cx)
+                .color(if on { theme.secondary_active } else { theme.transparent })
+                .foreground(if on { theme.foreground } else { theme.muted_foreground })
+                .hover(if on { theme.secondary_active } else { theme.secondary_hover })
+                .active(theme.secondary_active);
+            Button::new(id)
+                .small()
+                .icon(icon)
+                .custom(variant)
+                .border_1()
+                .border_color(if on { theme.muted_foreground.opacity(0.55) } else { theme.input })
+                .tooltip(format!("{label}{}", if on { " (on)" } else { "" }))
+        }
+    }
+}
+
 /// A button to the CurseForge key in Settings, when `error` is CurseForge
 /// rejecting the key; put it next to wherever a CurseForge error shows.
 pub fn cf_key_fix(id: impl Into<ElementId>, error: &str) -> Option<Button> {
@@ -3244,6 +3282,10 @@ struct FitState {
     need: Vec<Option<f32>>,
     /// Room given from outside (`room_probe`), else measured around the row.
     outer_room: Option<f32>,
+    /// `room_probe`'s room before it's floored at 0: how far short a
+    /// region is, for a caller with a step past the row's own levels.
+    /// With the rem size it was measured at.
+    probe_raw: Option<(f32, f32)>,
     room: f32,
     key: u64,
 }
@@ -3252,6 +3294,16 @@ impl Fit {
     /// The level to render this frame.
     pub fn level(&self) -> usize {
         self.0.borrow().level
+    }
+
+    /// How many rems the row, at the level it's on, is wider than the room
+    /// `room_probe` measured (0 when it fits or nothing was measured).
+    pub fn short_by(&self) -> f32 {
+        let st = self.0.borrow();
+        match (st.need.get(st.level).copied().flatten(), st.probe_raw) {
+            (Some(n), Some((r, rem))) if rem > 0. => ((n - r) / rem).max(0.),
+            _ => 0.,
+        }
     }
 
     /// Wraps `row` (laid out at its natural width, never squeezed) in a box
@@ -3273,6 +3325,7 @@ impl Fit {
         // itself (a tab bar scrolls); before it, it keeps its natural width
         // so it can be measured against the room.
         let last = self.level() >= max;
+        let rid = id.clone();
         h_flex()
             .relative()
             .w_full()
@@ -3288,7 +3341,9 @@ impl Fit {
             .child(canvas(|_, _, _| {}, |_, _, _, _| {}).absolute().inset_0())
             .on_children_prepainted(move |b, _, cx| {
                 let (Some(inner), Some(outer)) = (b.first(), b.get(1)) else { return };
-                if fit.measured(f32::from(inner.size.width), f32::from(outer.size.width), max) {
+                let changed = fit.measured(f32::from(inner.size.width), f32::from(outer.size.width), max);
+                fit_seen(&rid, &fit, max, inner, outer);
+                if changed {
                     cx.notify(view);
                 }
             })
@@ -3302,19 +3357,22 @@ impl Fit {
         let fit = self.clone();
         canvas(
             move |bounds, window, cx| {
-                let room = f32::from(bounds.size.width - window.rem_size() * minus).max(0.);
+                let raw = f32::from(bounds.size.width - window.rem_size() * minus);
+                let room = raw.max(0.);
                 let changed = {
                     let mut st = fit.0.borrow_mut();
-                    let was = st.outer_room.replace(room);
-                    was.is_none_or(|w| (w - room).abs() > 0.5)
+                    let was = st.probe_raw.replace((raw, f32::from(window.rem_size())));
+                    st.outer_room = Some(room);
+                    was.is_none_or(|(w, _)| (w - raw).abs() > 0.5)
                 };
                 if changed {
                     let need = fit.0.borrow().need.get(fit.level()).copied().flatten();
-                    if let Some(n) = need
-                        && fit.measured(n, room, max)
-                    {
-                        cx.notify(view);
+                    if let Some(n) = need {
+                        fit.measured(n, room, max);
                     }
+                    // Even at the same level: a caller reading `short_by`
+                    // draws differently for the new room.
+                    cx.notify(view);
                 }
             },
             |_, _, _, _| {},
@@ -3343,6 +3401,77 @@ impl Fit {
         st.level = next;
         next != l
     }
+}
+
+/// What a fitted row looked like on its last frame, in window pixels: the
+/// MCP `state` reports these so a test can check a row from its real
+/// bounds (one line, inside its box) instead of reading pixels off a
+/// screenshot, where a backdrop gradient blurs the edges.
+#[derive(Clone)]
+struct FitSeen {
+    at: std::time::Instant,
+    level: usize,
+    max: usize,
+    room: f32,
+    row: Bounds<Pixels>,
+    host: Bounds<Pixels>,
+}
+
+static FIT_SEEN: std::sync::Mutex<Vec<(SharedString, FitSeen)>> = std::sync::Mutex::new(Vec::new());
+
+fn fit_seen(id: &SharedString, fit: &Fit, max: usize, row: &Bounds<Pixels>, host: &Bounds<Pixels>) {
+    let st = fit.0.borrow();
+    let seen = FitSeen { at: std::time::Instant::now(), level: st.level, max, room: st.room, row: *row, host: *host };
+    if let Ok(mut all) = FIT_SEEN.lock() {
+        match all.iter_mut().find(|(k, _)| k == id) {
+            Some((_, s)) => *s = seen,
+            None => all.push((id.clone(), seen)),
+        }
+    }
+}
+
+/// The fitted rows drawn in the last second (see [`FitSeen`]): each one's
+/// level, the room it had and the bounds of the row and of its box.
+/// `right_gap` is the box's right edge less the row's (negative: clipped).
+pub fn fit_report() -> serde_json::Value {
+    let r = |x: Pixels| (f32::from(x) * 10.).round() / 10.;
+    let all = FIT_SEEN.lock().map(|a| a.clone()).unwrap_or_default();
+    let rows: Vec<_> = all
+        .iter()
+        .filter(|(_, s)| s.at.elapsed() < Duration::from_secs(1))
+        .map(|(id, s)| {
+            serde_json::json!({
+                "id": id.as_ref(),
+                "level": s.level,
+                "max": s.max,
+                "room": (s.room * 10.).round() / 10.,
+                "row": [r(s.row.origin.x), r(s.row.origin.y), r(s.row.size.width), r(s.row.size.height)],
+                "box": [r(s.host.origin.x), r(s.host.origin.y), r(s.host.size.width), r(s.host.size.height)],
+                "right_gap": r(s.host.right() - s.row.right()),
+            })
+        })
+        .collect();
+    serde_json::Value::Array(rows)
+}
+
+/// Reports an element's bounds under `id` beside the fitted rows (see
+/// [`fit_report`]), for a check that needs a box the rows don't give: the
+/// page a row must stay inside, or the column beside it.
+pub fn bounds_probe(id: &'static str) -> impl IntoElement {
+    canvas(
+        move |b, _, _| {
+            let seen = FitSeen { at: std::time::Instant::now(), level: 0, max: 0, room: f32::from(b.size.width), row: b, host: b };
+            if let Ok(mut all) = FIT_SEEN.lock() {
+                match all.iter_mut().find(|(k, _)| k.as_ref() == id) {
+                    Some((_, s)) => *s = seen,
+                    None => all.push((id.into(), seen)),
+                }
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
 }
 
 /// A key for [`Fit::wrap`] from the texts a row shows.

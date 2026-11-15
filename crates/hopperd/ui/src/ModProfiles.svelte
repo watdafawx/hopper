@@ -74,7 +74,7 @@
 <svelte:window onclick={() => (open = false)} onkeydown={(e) => e.key === 'Escape' && open && (open = false)} />
 
 <div class="wrapp">
-  <button class="btn sm" onclick={toggleOpen} title="Switch which mods are on"><Layers size={13} />Profiles<ChevronDown size={12} /></button>
+  <button class="btn sm" onclick={toggleOpen} title="Switch which mods are on"><Layers size={13} /><span class="lb">Profiles</span><ChevronDown size={12} /></button>
   {#if open}
     <div class="pop popover menu" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === 'Escape' && (open = false)}>
       <div class="menu-label">Switch which mods are enabled</div>

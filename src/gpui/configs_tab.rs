@@ -156,8 +156,17 @@ pub struct ConfigsTab {
     /// as its panel compares them (the server, the count, whose Hopper sent
     /// the copy, when).
     players: Option<(PathBuf, usize, String, i64)>,
+    /// The toolbar fitted to the room the page has (levels in
+    /// [`BAR_FIT_MAX`]).
+    bar_fit: widgets::Fit,
     _subs: Vec<Subscription>,
 }
+
+/// The toolbar's levels for a narrow page (`widgets::Fit`): 1 a narrower
+/// search, 2 "Descriptions" and "Compare", 3 the filter chips as one
+/// picker, 4 the toggles as icons and a narrower side picker, 5 the
+/// narrowest search.
+const BAR_FIT_MAX: usize = 5;
 
 /// One line of the mod list.
 #[derive(Clone)]
@@ -217,6 +226,7 @@ impl ConfigsTab {
             cache: None,
             ver: 0,
             placeholder_total: None,
+            bar_fit: Default::default(),
             scroll: UniformListScrollHandle::new(),
             server: None,
             fetching: Default::default(),
@@ -872,15 +882,42 @@ impl Render for ConfigsTab {
         let linked = if self.server.is_some() { None } else { self.store.read(cx).server_of(&root).cloned() };
         let running = self.server.as_ref().is_some_and(|s| s.running);
 
-        let chips = h_flex()
-            .gap_1p5()
-            .child(widgets::toggle_chip("cfg-f-all", "All", self.filter == Filter::All, cx).on_click(cx.listener(|this, _, _, cx| this.set_filter(Filter::All, cx))))
-            .child(widgets::toggle_chip("cfg-f-changed", format!("Changed {}", fmt_n(changed_n)), self.filter == Filter::Changed, cx).tooltip("Settings that aren't at the default their file states").on_click(cx.listener(|this, _, _, cx| this.set_filter(Filter::Changed, cx))))
-            .child(widgets::toggle_chip("cfg-f-unsaved", format!("Unsaved {unsaved_n}"), self.filter == Filter::Unsaved, cx).on_click(cx.listener(|this, _, _, cx| this.set_filter(Filter::Unsaved, cx))));
+        // How far the toolbar has given way to a narrow page (BAR_FIT_MAX).
+        let lv = self.bar_fit.level();
+        let filters = [
+            (Filter::All, "All".to_string()),
+            (Filter::Changed, format!("Changed {}", fmt_n(changed_n))),
+            (Filter::Unsaved, format!("Unsaved {unsaved_n}")),
+        ];
+        let chips: AnyElement = if lv >= 3 {
+            // One picker in place of the three chips: the same choices.
+            let label = filters.iter().find(|(f, _)| *f == self.filter).map_or(String::new(), |(_, l)| l.clone());
+            let view_e = cx.entity();
+            div()
+                .w(rems(8.5))
+                .child(widgets::picker(
+                    "cfg-filter",
+                    label,
+                    filters.iter().map(|(f, l)| (l.clone(), *f == self.filter)).collect(),
+                    window.rem_size(),
+                    Rc::new(move |i, _, cx| {
+                        let f = [Filter::All, Filter::Changed, Filter::Unsaved][i.min(2)];
+                        view_e.update(cx, |this, cx| this.set_filter(f, cx));
+                    }),
+                ))
+                .into_any_element()
+        } else {
+            h_flex()
+                .gap_1p5()
+                .child(widgets::toggle_chip("cfg-f-all", "All", self.filter == Filter::All, cx).on_click(cx.listener(|this, _, _, cx| this.set_filter(Filter::All, cx))))
+                .child(widgets::toggle_chip("cfg-f-changed", filters[1].1.clone(), self.filter == Filter::Changed, cx).tooltip("Settings that aren't at the default their file states").on_click(cx.listener(|this, _, _, cx| this.set_filter(Filter::Changed, cx))))
+                .child(widgets::toggle_chip("cfg-f-unsaved", filters[2].1.clone(), self.filter == Filter::Unsaved, cx).on_click(cx.listener(|this, _, _, cx| this.set_filter(Filter::Unsaved, cx))))
+                .into_any_element()
+        };
         let sides: Vec<(Option<Side>, &str)> = vec![(None, "All"), (Some(Side::Client), "This PC"), (Some(Side::Common), "Both"), (Some(Side::Server), "Server decides")];
         let side_label = sides.iter().find(|(s, _)| *s == self.side).map_or("All", |(_, l)| l);
         let view_e = cx.entity();
-        let side_pick = div().w(rems(11.)).child(widgets::picker(
+        let side_pick = div().w(rems(if lv >= 4 { 8.5 } else { 11. })).child(widgets::picker(
             "cfg-side",
             format!("Side: {side_label}"),
             sides.iter().map(|(s, l)| (l.to_string(), *s == self.side)).collect(),
@@ -890,14 +927,21 @@ impl Render for ConfigsTab {
                 view_e.update(cx, |this, cx| this.set_side(s, cx));
             }),
         ));
-        let toolbar = h_flex()
+        let short = |full: &'static str, mid: &'static str| match lv {
+            0 | 1 => Some(full),
+            2 | 3 => Some(mid),
+            _ => None,
+        };
+        let bar = h_flex()
+            .w_full()
             .gap_2()
-            .px_6()
-            .py_2()
-            .flex_wrap()
-            .child(div().w(rems(24.)).child(widgets::search_input(&self.search).small().cleanable(true)))
+            .child(div().flex_none().w(rems(match lv {
+                0 => 24.,
+                1..=4 => 16.,
+                _ => 10.,
+            })).child(widgets::search_input(&self.search).small().cleanable(true)))
             .child(
-                widgets::toggle_chip("cfg-desc", "Also in descriptions", self.desc, cx)
+                widgets::toggle_chip_fit("cfg-desc", "Also in descriptions", short("Also in descriptions", "Descriptions"), IconName::FileText, self.desc, cx)
                     .tooltip("Look in each setting's description too, in the open mod and in other mods")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.desc = !this.desc;
@@ -916,7 +960,7 @@ impl Render for ConfigsTab {
             .child(side_pick)
             .when_some(linked.clone(), |d, s| {
                 d.child(
-                    widgets::toggle_chip("cfg-compare", "Compare with server", self.compare_on, cx)
+                    widgets::toggle_chip_fit("cfg-compare", "Compare with server", short("Compare with server", "Compare"), IconName::GitCompare, self.compare_on, cx)
                         .tooltip(format!("Settings that differ from {}'s copies, side by side", s.name))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.compare_on = !this.compare_on;
@@ -924,6 +968,10 @@ impl Render for ConfigsTab {
                         })),
                 )
             });
+        let key = widgets::fit_key([format!("{changed_n} {unsaved_n} {} {:?}", linked.is_some(), self.side).as_str()]);
+        // One line at any width: the bar gives way step by step (see
+        // BAR_FIT_MAX) instead of wrapping under itself.
+        let toolbar = div().px_6().py_2().child(self.bar_fit.wrap("configs-bar-fit", bar, BAR_FIT_MAX, key, cx.entity_id()));
 
         let n = self.cache.as_ref().map_or(0, |c| c.items.len());
         let list: AnyElement = if n == 0 {

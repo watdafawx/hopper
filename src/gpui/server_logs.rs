@@ -10,15 +10,13 @@
 use crate::crash_help::callout;
 use crate::crash_list::{self, CrashList, Pane};
 use crate::line_select::{LineSelect, Lines};
-use crate::store::{Store, StoreEvent, open_path};
+use crate::store::{Store, StoreEvent};
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::crashdetect::Crash;
 use hopper::instances::Addon;
@@ -788,35 +786,26 @@ impl ServerLogsView {
         }
         let n = self.line_count();
         let filtered = self.visible.is_some();
-        let share = crash_list::share_row(self, rel, cx);
         let dir = root.join("logs");
-        let toolbar = h_flex()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .child(div().w(rems(16.)).child(widgets::search_input(&self.query).small().cleanable(true)))
-            .child(
-                Checkbox::new("srv-errors-only")
-                    .label("Errors and warnings only")
-                    .checked(self.errors_only)
-                    .on_change(cx.listener(|this, v: &bool, _, cx| {
-                        this.errors_only = *v;
-                        this.scroll_to_end();
-                        cx.notify();
-                    })),
-            )
-            .when(filtered, |r| r.child(widgets::caption(format!("{n} of {total} lines"), cx).text_xs()))
-            .when(loading, |r| r.child(Spinner::new().xsmall()))
-            .child(div().flex_1())
-            .child(share)
-            .child(
-                Button::new("srv-logs-folder")
-                    .small()
-                    .ghost()
-                    .icon(IconName::FolderOpen)
-                    .tooltip("Open the logs folder")
-                    .on_click(move |_, _, _| open_path(&dir)),
-            );
+        let toolbar = crash_list::log_toolbar(
+            self,
+            crash_list::LogBar {
+                id: "srv-",
+                query: self.query.clone(),
+                errors_only: self.errors_only,
+                shown: filtered.then(|| format!("{n} of {total} lines")),
+                loading,
+                rel: rel.to_string(),
+                folder_tip: "Open the logs folder".into(),
+                folder: dir,
+            },
+            |this, v, cx| {
+                this.errors_only = v;
+                this.scroll_to_end();
+                cx.notify();
+            },
+            cx,
+        );
         v_flex()
             .flex_1()
             .min_h_0()
