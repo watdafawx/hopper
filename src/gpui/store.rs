@@ -247,6 +247,9 @@ pub enum StoreEvent {
     /// A friend started sharing a mod's settings: the notice offers Keep
     /// mine.
     SettingsShared { root: PathBuf, m: String, mod_name: String, who: String },
+    /// A group kept in step has a pack this PC never followed: the notice
+    /// asks Get (the Follow dialog) or Not now (`group`: the group's id).
+    PackOffer { e: Box<hopper::mailbox::Event>, group: String, text: String },
     /// Open Browse on modpacks to host one (New server's Modpack tab):
     /// None on this PC, else on that paired Hopper Server.
     BrowsePacksFor(Option<String>),
@@ -613,6 +616,14 @@ pub struct Store {
     stale_held_at: Option<Instant>,
     /// Group packs ("from/inst") being installed to keep a group in step.
     auto_following: HashSet<String>,
+    /// Members' changes left out here that the player was told about
+    /// ("<local>|<what it says>"), so each is said once.
+    kept_said: HashSet<String>,
+    /// New group packs ("from/inst") offered this run with Get / Not now,
+    /// so the offer isn't shown again while it's up or after it's closed.
+    pack_offered: HashSet<String>,
+    /// `--dialog given-up`'s sample line (empty otherwise).
+    given_up_preview: Vec<(PathBuf, String)>,
     _mailbox_watch: Option<Task<()>>,
     _mailbox_publish: Option<Task<()>>,
     /// The player's answer about mods from other sources for a follow
@@ -842,6 +853,9 @@ impl Store {
             instance_homes: HashMap::new(),
             stale_held_at: None,
             auto_following: HashSet::new(),
+            kept_said: HashSet::new(),
+            pack_offered: HashSet::new(),
+            given_up_preview: Vec::new(),
             _mailbox_watch: None,
             _mailbox_publish: None,
             pending_follow: Default::default(),

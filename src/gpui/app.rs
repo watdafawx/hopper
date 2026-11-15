@@ -279,6 +279,45 @@ impl AppView {
                     });
                     window.push_notification(n, cx);
                 }
+                StoreEvent::PackOffer { e, group, text } => {
+                    // One toast per pack, up until answered: Get opens the
+                    // usual Follow dialog, Not now never asks again.
+                    struct PackOffer;
+                    let icon = crate::friends::pack_look(this.store.read(cx), &e.code).0;
+                    let (store, e, group, text) = (this.store.clone(), e.clone(), group.clone(), text.clone());
+                    let key = SharedString::from(format!("pack-offer:{}/{}", e.from, e.inst));
+                    let n = gpui_kit::component::notification::Notification::new().id1::<PackOffer>(key).autohide(false).content(move |_, _, cx| {
+                        let (s1, s2, e1, e2, group) = (store.clone(), store.clone(), e.clone(), e.clone(), group.clone());
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .when_some(icon.clone(), |r, p| r.child(widgets::thumb(Some(&p), rems(1.75), cx)))
+                                    .child(div().flex_1().min_w_0().text_sm().child(text.clone())),
+                            )
+                            .child(
+                                h_flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(Button::new("pack-offer-no").label("Not now").small().outline().on_click(cx.listener(
+                                        move |note, _, window, cx| {
+                                            s1.update(cx, |s, cx| s.not_now_pack(&e1.from, &e1.inst, &group, cx));
+                                            note.dismiss(window, cx);
+                                        },
+                                    )))
+                                    .child(Button::new("pack-offer-get").label("Get").small().primary().on_click(cx.listener(
+                                        move |note, _, window, cx| {
+                                            crate::friends::open_follow(s2.clone(), &e2, window, cx);
+                                            note.dismiss(window, cx);
+                                        },
+                                    ))),
+                            )
+                            .into_any_element()
+                    });
+                    window.push_notification(n, cx);
+                }
                 StoreEvent::Schedule(msg, bad) | StoreEvent::Notice(msg, bad) => {
                     let n = if *bad {
                         gpui_kit::component::notification::Notification::warning(msg.clone())
@@ -713,6 +752,31 @@ impl AppView {
                         _ => StoreEvent::GitHubLimited("GitHub won't answer this PC for the next 40 minutes.".to_string()),
                     };
                     this.store.update(cx, |_, cx| cx.emit(event));
+                }
+                // The friends notices of a group, with sample names: a new
+                // pack offered (with the first pack instance's icon), a
+                // locked mod kept, and the Friends panel's Try again bar.
+                "toast-pack" | "toast-kept" | "given-up" => {
+                    let s = this.store.read(cx);
+                    let pack = s.instances().iter().find(|i| i.pack.as_ref().is_some_and(|p| p.project_id != 0)).cloned();
+                    let root = s.instances().first().map(|i| i.root.clone()).unwrap_or_default();
+                    let event = match d.as_str() {
+                        "toast-pack" => {
+                            let base = match pack.as_ref().and_then(|i| i.pack.as_ref()) {
+                                Some(p) => hopper::sharecode::Base::Curse { project: p.project_id, file: p.file_id },
+                                None => hopper::sharecode::Base::Plain { game_version: "1.21.1".into(), loader: "fabric".into() },
+                            };
+                            let code = hopper::sharecode::encode(&hopper::sharecode::Share { base, name: None, loader: None, entries: Vec::new() });
+                            let e = hopper::mailbox::Event { from: "preview".into(), from_name: "Mia".into(), inst: "preview-pack".into(), name: "Mia's Skyblock".into(), code, ..Default::default() };
+                            Some(StoreEvent::PackOffer { e: Box::new(e), group: String::new(), text: "Mia shared Mia's Skyblock. Get it?".into() })
+                        }
+                        "toast-kept" => Some(StoreEvent::Notice("Sodium stays as it is: you locked its version. Mia changed its version.".into(), false)),
+                        _ => None,
+                    };
+                    match event {
+                        Some(e) => this.store.update(cx, |_, cx| cx.emit(e)),
+                        None => this.store.update(cx, |s, cx| s.preview_given_up(root, cx)),
+                    }
                 }
                 // After the server comparison has had time to finish.
                 "side" => cx

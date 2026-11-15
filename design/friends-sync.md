@@ -21,7 +21,9 @@ settings in `crates/hopper-core/src/settings.rs` (`SharedPack`,
 - **Group**: a named set of the owner's friends. Members say yes on their
   own PC before anything reaches them.
 - **Keep everyone in step**: a member's opt-in per group. A group pack any
-  member follows is followed on this PC too, as a new instance.
+  member follows is offered on this PC (a notice: Get opens the Follow
+  dialog, Not now never asks again for that pack). Nothing downloads before
+  the player says Get.
 
 ## Instance ids
 
@@ -235,9 +237,10 @@ read, only the newest code of each pack is applied.
   A follow nobody can be asked about (a followed pack changing, keeping a
   group in step) leaves out what that question would need
   (`sources::carry::auto_skip`).
-- **Keeping in step** installs a new instance; it never replaces one. A pack
-  stopped here (or whose instance was deleted in Hopper) is remembered per
-  group (`FriendGroup::stopped`) and not followed again.
+- **Keeping in step** offers a new pack once per run; Get follows it the
+  usual way. A pack stopped here, answered Not now, or whose instance was
+  deleted in Hopper is remembered per group (`FriendGroup::stopped`) and not
+  offered again.
 - **Status**: `Store::sync_status()` is Off, Connecting, Down(text) or Ok.
   Notices (copied, paired, joined, stopped sharing, errors) go out as
   `StoreEvent::Notice`.
