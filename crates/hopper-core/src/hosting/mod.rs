@@ -35,6 +35,7 @@ pub mod schedule;
 pub mod script;
 pub mod server_pack;
 pub mod version_change;
+pub mod voice_mods;
 pub mod worlds;
 pub mod zip_import;
 

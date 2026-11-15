@@ -18,7 +18,7 @@ use super::wire::Codec;
 use super::{Head, home};
 use crate::tunnel::mux::{self, StreamError};
 
-fn key() -> String {
+pub(super) fn key() -> String {
     format!("hrt_{}", "ab".repeat(32))
 }
 
@@ -27,7 +27,7 @@ fn small() -> Codec {
     Codec { level: 3, window_log: 20, long_distance: false, cache_bytes: 1 << 20 }
 }
 
-fn quick() -> mux::Config {
+pub(super) fn quick() -> mux::Config {
     mux::Config { ping_every: Duration::from_millis(300), dead_after: Duration::from_secs(2), ..link::mux_config() }
 }
 
@@ -36,13 +36,13 @@ fn head(kind: &str, server: &str) -> Vec<u8> {
 }
 
 /// Relay and home over an in-memory connection the test can cut.
-struct Pair {
-    relay: Live,
-    home: Live,
-    cut: JoinHandle<()>,
+pub(super) struct Pair {
+    pub(super) relay: Live,
+    pub(super) home: Live,
+    pub(super) cut: JoinHandle<()>,
 }
 
-async fn pair(cfg: mux::Config) -> Pair {
+pub(super) async fn pair(cfg: mux::Config) -> Pair {
     let (r_io, r_far) = tokio::io::duplex(256 * 1024);
     let (h_io, h_far) = tokio::io::duplex(256 * 1024);
     let cut = tokio::spawn(async move {
@@ -50,7 +50,7 @@ async fn pair(cfg: mux::Config) -> Pair {
         let _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
     });
     let (hash, k) = (link::key_hash(&key()), key());
-    let (relay, home) = tokio::join!(link::relay(r_io, &hash, small(), 25565, cfg.clone()), link::home(h_io, &k, Codec::quiet(), cfg));
+    let (relay, home) = tokio::join!(link::relay(r_io, &hash, small(), (25565, 0), cfg.clone()), link::home(h_io, &k, Codec::quiet(), cfg));
     Pair { relay: relay.expect("relay end"), home: home.expect("home end").0, cut }
 }
 
@@ -168,7 +168,7 @@ async fn a_wrong_key_is_refused() {
     let (r_io, h_io) = tokio::io::duplex(64 * 1024);
     let other = link::key_hash(&format!("hrt_{}", "cd".repeat(32)));
     let k = key();
-    let (relay, home) = tokio::join!(link::relay(r_io, &other, small(), 25565, quick()), link::home(h_io, &k, Codec::quiet(), quick()));
+    let (relay, home) = tokio::join!(link::relay(r_io, &other, small(), (25565, 0), quick()), link::home(h_io, &k, Codec::quiet(), quick()));
     assert!(matches!(relay, Err(LinkError::Refused(_))));
     match home {
         Err(LinkError::Refused(m)) => assert_eq!(m, "The relay key is wrong."),
@@ -183,7 +183,7 @@ async fn a_wrong_key_is_refused() {
 #[tokio::test]
 async fn nothing_is_read_before_the_key() {
     let (r_io, mut c) = tokio::io::duplex(64 * 1024);
-    let relay = tokio::spawn(async move { link::relay(r_io, &link::key_hash(&key()), small(), 25565, quick()).await });
+    let relay = tokio::spawn(async move { link::relay(r_io, &link::key_hash(&key()), small(), (25565, 0), quick()).await });
     let hello = serde_json::to_vec(&serde_json::json!({ "key": "hrt_wrong", "tunnel": quick().tunnel, "version": "x", "recv": Codec::quiet() })).unwrap();
     c.write_all(&(hello.len() as u32).to_be_bytes()).await.unwrap();
     c.write_all(&hello).await.unwrap();
@@ -198,7 +198,7 @@ async fn nothing_is_read_before_the_key() {
     assert_eq!(no["ok"], false);
 
     let (r_io, mut c) = tokio::io::duplex(64 * 1024);
-    let relay = tokio::spawn(async move { link::relay(r_io, &link::key_hash(&key()), small(), 25565, quick()).await });
+    let relay = tokio::spawn(async move { link::relay(r_io, &link::key_hash(&key()), small(), (25565, 0), quick()).await });
     c.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
     assert!(matches!(relay.await.unwrap(), Err(LinkError::Protocol(_))));
     let mut rest = Vec::new();
@@ -485,7 +485,7 @@ fn proxy_header_carries_the_players_address() {
 /// reads every line as routes) changes nothing; a routes line doesn't ask.
 #[test]
 fn ping_ask_keeps_the_routes() {
-    let routes = vec![super::Route { server: "s1".into(), name: "One".into(), velocity: true }];
+    let routes = vec![super::Route { server: "s1".into(), name: "One".into(), velocity: true, voice: false }];
     let ask = serde_json::to_value(super::Control { routes: routes.clone(), pings: true }).unwrap();
     assert_eq!(ask["pings"], true);
     #[derive(serde::Deserialize)]

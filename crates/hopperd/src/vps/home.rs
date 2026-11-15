@@ -179,6 +179,8 @@ pub struct LinkStatus {
     pub retry_at: Option<u64>,
     pub relay_version: String,
     pub game_port: u16,
+    /// The relay's voice port (B6); 0: the relay has none.
+    pub voice_port: u16,
 }
 
 pub struct Home {
@@ -195,6 +197,8 @@ pub struct Home {
     pings: Mutex<Option<(Instant, HashMap<String, HashMap<String, u32>>)>>,
     /// Bumped on every answer, so a waiting reader wakes.
     pings_in: tokio::sync::watch::Sender<u64>,
+    /// Voice through the relay while connected (B6).
+    pub voice: Arc<super::voice::home::Slot>,
 }
 
 fn unix() -> u64 {
@@ -215,6 +219,7 @@ impl Home {
             ask_pings: Notify::new(),
             pings: Mutex::new(None),
             pings_in: tokio::sync::watch::channel(0).0,
+            voice: Arc::default(),
         }
     }
 
@@ -289,6 +294,23 @@ impl Home {
             0 | 25565 => host,
             p => format!("{host}:{p}"),
         }
+    }
+
+    /// Where a server's voice mod tells players to send voice (B6): the
+    /// players' host and the relay's voice port. `None` while the connected
+    /// relay has no voice port (one from before B6 or set up without it);
+    /// before any connection, the voice mods' usual port.
+    pub fn voice_to(&self) -> Option<(String, u16)> {
+        let cfg = self.config();
+        let a = if cfg.public_address.trim().is_empty() { cfg.address.trim() } else { cfg.public_address.trim() };
+        let host = relay_target(a).map(|(h, _)| h).ok().filter(|h| !h.is_empty())?;
+        let s = self.status();
+        let port = match s.voice_port {
+            0 if s.relay_version.is_empty() => hopper_core::hosting::voice_mods::SVC_DEFAULT_PORT,
+            0 => return None,
+            p => p,
+        };
+        Some((host, port))
     }
 
     fn set_status(&self, f: impl FnOnce(&mut LinkStatus)) {
@@ -398,6 +420,37 @@ impl Home {
             "samples": samples,
         })
     }
+
+    /// The card's voice row (B6): `null` when the server has no voice mod.
+    /// `state`: "on" (UDP straight through), "tcp" (UDP doesn't get through
+    /// the VPS, voice rides the tunnel), "checking", "down" (no relay
+    /// connection), "old" (the relay has no voice port), "not-set" (the mod
+    /// still points players at home: "Use the relay" sets it).
+    pub fn voice_json(&self, root: &Path, set: bool) -> Value {
+        let Some(d) = hopper_core::hosting::voice_mods::detect(root, server_port(root)) else { return Value::Null };
+        let s = self.status();
+        let live = self.voice.status();
+        let state = if !set {
+            "not-set"
+        } else if s.state != "up" {
+            "down"
+        } else if s.voice_port == 0 {
+            "old"
+        } else {
+            match live.as_ref().map(|l| l.via) {
+                Some("udp") => "on",
+                Some("tcp") => "tcp",
+                _ => "checking",
+            }
+        };
+        json!({
+            "mod": d.kind.name(),
+            "state": state,
+            "players": live.as_ref().map_or(0, |l| l.players),
+            "rtt_ms": live.as_ref().and_then(|l| l.rtt_ms),
+            "port": if s.voice_port != 0 { s.voice_port } else { hopper_core::hosting::voice_mods::SVC_DEFAULT_PORT },
+        })
+    }
 }
 
 /// Keeps the connection up while the panel runs.
@@ -424,7 +477,7 @@ pub fn start(app: Arc<App>) {
                     backoff = Duration::from_secs(1);
                     log::info!("relay: connected to {} (Hopper Server {})", cfg.address, hello.version);
                     app.vps.set_status(|s| {
-                        *s = LinkStatus { state: "up", since: Some(unix()), relay_version: hello.version.clone(), game_port: hello.game_port, ..Default::default() };
+                        *s = LinkStatus { state: "up", since: Some(unix()), relay_version: hello.version.clone(), game_port: hello.game_port, voice_port: hello.voice_port, ..Default::default() };
                     });
                     let why = run(&app, live, &cfg).await;
                     log::warn!("relay: connection to {} ended ({why})", cfg.address);
@@ -449,7 +502,7 @@ pub fn start(app: Arc<App>) {
             let wait = backoff + jitter;
             let down_since = app.vps.status().since.filter(|_| app.vps.status().state == "down");
             app.vps.set_status(|s| {
-                *s = LinkStatus { state: "down", since: down_since.or(Some(unix())), error: why, retry_at: Some(unix() + wait.as_secs().max(1)), game_port: s.game_port, ..Default::default() };
+                *s = LinkStatus { state: "down", since: down_since.or(Some(unix())), error: why, retry_at: Some(unix() + wait.as_secs().max(1)), game_port: s.game_port, voice_port: s.voice_port, ..Default::default() };
             });
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
@@ -493,22 +546,56 @@ pub(super) async fn connect(cfg: &HomeConfig) -> Result<(Live, link::RelayHello)
         }
         Err(_) => return Err(format!("The port {port} is open but the relay didn't answer.")),
     };
-    link::home(tls, &cfg.key, Codec::quiet(), link::mux_config()).await.map_err(|e| match e {
+    // Voice keys (B6) come from this TLS connection's exported secret:
+    // only its two ends know it, so the UDP path needs no secret of its own.
+    let exported: Option<super::voice::Exported> = tls.get_ref().1.export_keying_material([0u8; 64], super::voice::EXPORTER_LABEL, None).ok();
+    let (mut live, hello) = link::home(tls, &cfg.key, Codec::quiet(), link::mux_config()).await.map_err(|e| match e {
         LinkError::Refused(m) => m,
         e => format!("The relay connection failed: {e}"),
-    })
+    })?;
+    live.exported = exported;
+    Ok((live, hello))
 }
 
 /// The routes home sends on its control stream.
 fn routes(app: &App) -> Control {
     let cfg = app.vps.config();
     let velocity = |id: &str| app.vps_forward.mode(id) == hopper_core::hosting::proxy_forward::Mode::Relay;
-    Control { routes: cfg.servers.iter().filter_map(|id| app.servers.get(id).map(|e| Route { server: id.clone(), name: e.name.clone(), velocity: velocity(id) })).collect(), pings: false }
+    Control { routes: cfg.servers.iter().filter_map(|id| app.servers.get(id).map(|e| Route { server: id.clone(), name: e.name.clone(), velocity: velocity(id), voice: has_voice(app, id) })).collect(), pings: false }
+}
+
+/// The server's voice mod points players at the relay (set with "Use the
+/// relay", B6).
+fn has_voice(app: &App, id: &str) -> bool {
+    let r = app.vps_forward.record(id);
+    r.mode == hopper_core::hosting::proxy_forward::Mode::Relay && r.voice.as_ref().is_some_and(|v| v.kind.is_some())
+}
+
+/// The game port in a server's `server.properties` (25565 when unset).
+pub fn server_port(root: &Path) -> u16 {
+    hopper_core::hosting::properties::Properties::load(&root.join("server.properties"))
+        .ok()
+        .and_then(|p| p.get("server-port").and_then(|v| v.trim().parse().ok()))
+        .unwrap_or(25565)
+}
+
+/// Where home sends voice packets: the voice mod of the first server on
+/// the relay that has voice, on this PC. The relay passes voice for one
+/// server, like the game port in B2 (per-server ports are B7).
+fn voice_target(app: Arc<App>) -> super::voice::home::Target {
+    Arc::new(move || {
+        let cfg = app.vps.config();
+        let id = cfg.servers.iter().find(|id| has_voice(&app, id))?;
+        let e = app.servers.get(id)?;
+        let d = hopper_core::hosting::voice_mods::detect(&e.root, server_port(&e.root))?;
+        let ip = d.bind.filter(|b| !b.is_unspecified()).unwrap_or(std::net::IpAddr::from([127, 0, 0, 1]));
+        Some(SocketAddr::new(ip, d.port))
+    })
 }
 
 /// Runs a connection until it ends; says why.
 async fn run(app: &Arc<App>, live: Live, cfg: &HomeConfig) -> String {
-    let Live { tunnel, counters } = live;
+    let Live { tunnel, counters, exported } = live;
     let mux::Tunnel { handle, mut incoming, done, .. } = tunnel;
     app.vps.connected(handle.clone(), counters);
     let control = async {
@@ -564,6 +651,17 @@ async fn run(app: &Arc<App>, live: Live, cfg: &HomeConfig) -> String {
             }
         }
     };
+    // Voice beside the game streams (B6), while the relay has a voice port.
+    let voice = async {
+        let port = app.vps.status().voice_port;
+        if let (Some(e), true) = (exported, port != 0) {
+            let keys = super::voice::Keys::derive(&e, &link::key_hash(&cfg.key));
+            let host = relay_target(&cfg.address).map(|(h, _)| h).unwrap_or_default();
+            let loopback = hopper_core::paths::loopback_env() == Some(true);
+            super::voice::home::run(app.vps.voice.clone(), handle.clone(), keys, (host, port), loopback, voice_target(app.clone())).await;
+        }
+        std::future::pending::<()>().await
+    };
     let streams = async {
         while let Some(s) = incoming.recv().await {
             let app = app.clone();
@@ -574,6 +672,7 @@ async fn run(app: &Arc<App>, live: Live, cfg: &HomeConfig) -> String {
         r = done => format!("Lost the connection to the relay ({}).", r.map(|e| e.to_string()).unwrap_or_else(|e| e.to_string())),
         why = control => why,
         _ = streams => "Lost the connection to the relay.".into(),
+        _ = voice => "Lost the connection to the relay.".into(),
     };
     handle.close("home is reconnecting").await;
     app.vps.disconnected();
@@ -752,6 +851,8 @@ async fn server_status(State(app): State<Arc<App>>, headers: HeaderMap, method: 
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
     let mut v = app.vps.server_status(&id);
     if v["relayed"] == true {
+        let (a, e2, set) = (app.clone(), e.clone(), has_voice(&app, &id));
+        v["voice"] = tokio::task::spawn_blocking(move || a.vps.voice_json(&e2.root, set)).await.unwrap_or_default();
         let a = app.clone();
         v["forward"] = tokio::task::spawn_blocking(move || super::forward::status_json(&a, &e)).await.unwrap_or_default();
     }

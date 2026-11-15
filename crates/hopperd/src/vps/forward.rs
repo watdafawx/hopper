@@ -191,7 +191,7 @@ fn find_mod(inst: &hopper_core::instances::Instance, m: pf::ForwardMod, file: &s
 
 /// The mod's config and the `server.properties` keys for step `p`, each
 /// written with the old file set aside in History. Returns the keys changed.
-fn files_step(root: &Path, fm: pf::ForwardMod, secret: &str, p: &pf::Plan, rec: &mut Record, since: u64) -> anyhow::Result<Vec<pf::KeyChange>> {
+fn files_step(root: &Path, fm: pf::ForwardMod, secret: &str, p: &pf::Plan, voice_to: Option<(&str, u16)>, rec: &mut Record, since: u64) -> anyhow::Result<Vec<pf::KeyChange>> {
     let cfg_path = root.join(fm.config_rel());
     match p.config {
         Some(true) => {
@@ -220,8 +220,41 @@ fn files_step(root: &Path, fm: pf::ForwardMod, secret: &str, p: &pf::Plan, rec: 
             write_recorded(root, &props_path, &props.to_text())?;
             hopper_core::backups::note_settings(root, since, "server.properties", MOD_NAME, &notes(&changed));
         }
+        voice_step(root, on, voice_to, rec, since)?;
     }
     Ok(changed)
+}
+
+/// The voice mod's advertised address (B6), with the keys: pointed at the
+/// relay (`to`: its players' host and voice port) or put back. Players'
+/// voice then goes to the VPS like their game connection; without it the
+/// mod tells them the home address, which they can't reach.
+fn voice_step(root: &Path, on: bool, to: Option<(&str, u16)>, rec: &mut Record, since: u64) -> anyhow::Result<()> {
+    use hopper_core::hosting::voice_mods as vm;
+    let vnotes = |c: &[vm::VoiceChange]| notes(&c.iter().map(|c| pf::KeyChange { key: c.key.clone(), was: c.was.clone(), now: c.now.clone() }).collect::<Vec<_>>());
+    if on {
+        let (Some((host, port)), None) = (to, rec.voice.as_ref()) else { return Ok(()) };
+        let Some(d) = vm::detect(root, super::home::server_port(root)) else { return Ok(()) };
+        let path = root.join(d.kind.config_rel());
+        let text = std::fs::read_to_string(&path).ok();
+        let (new, before, changes) = vm::apply(d.kind, text.as_deref(), host, port);
+        if let Some(t) = new {
+            write_recorded(root, &path, &t)?;
+            hopper_core::backups::note_settings(root, since, d.kind.config_rel(), MOD_NAME, &vnotes(&changes));
+        }
+        rec.voice = Some(before);
+    } else if let Some(b) = rec.voice.take() {
+        let Some(kind) = b.kind else { return Ok(()) };
+        let path = root.join(kind.config_rel());
+        // Gone (the mod was removed): nothing to put back.
+        let Ok(text) = std::fs::read_to_string(&path) else { return Ok(()) };
+        let (new, changes) = vm::restore(&text, &b);
+        if let Some(t) = new {
+            write_recorded(root, &path, &t)?;
+            hopper_core::backups::note_settings(root, since, kind.config_rel(), MOD_NAME, &vnotes(&changes));
+        }
+    }
+    Ok(())
 }
 
 /// Does `act` to server `e`'s files. The server must be stopped.
@@ -293,7 +326,8 @@ pub fn apply(app: &App, e: &Entry, act: Action, who: hopper_core::actor::Who, jo
             }
         }
     }
-    let changed = files_step(&e.root, fm, &secret, &p, &mut rec, since)?;
+    let to = app.vps.voice_to();
+    let changed = files_step(&e.root, fm, &secret, &p, to.as_ref().map(|(h, p)| (h.as_str(), *p)), &mut rec, since)?;
     if p.to == Mode::Direct {
         // Only empty ones go (remove_dir refuses the rest).
         for d in &rec.made_dirs {
@@ -403,7 +437,7 @@ mod tests {
         let mut rec = Record { forward_mod: Some(ForwardMod::FabricProxyLite), ..Default::default() };
         let fm = ForwardMod::FabricProxyLite;
         let on = pf::plan(Mode::Direct, Action::Use).unwrap();
-        let changed = files_step(&root, fm, "s3cret", &on, &mut rec, 0).unwrap();
+        let changed = files_step(&root, fm, "s3cret", &on, None, &mut rec, 0).unwrap();
         hopper_core::backups::mark_reason(&root, 0, reason(Action::Use));
         assert_eq!(changed.len(), 4);
         let props = std::fs::read_to_string(root.join("server.properties")).unwrap();
@@ -421,7 +455,7 @@ mod tests {
         assert!(note.changes.iter().any(|c| c.key == "server-ip" && c.was == "(not set)"));
 
         let off = pf::plan(Mode::Relay, Action::Stop).unwrap();
-        files_step(&root, fm, "s3cret", &off, &mut rec, 0).unwrap();
+        files_step(&root, fm, "s3cret", &off, None, &mut rec, 0).unwrap();
         // Byte for byte as before, and the relay's config set aside in History.
         assert_eq!(std::fs::read_to_string(root.join("server.properties")).unwrap(), PROPS);
         assert!(!root.join("config/FabricProxy-Lite.toml").exists());
@@ -438,8 +472,8 @@ mod tests {
         std::fs::write(root.join("server.properties"), &crlf).unwrap();
         let fm = ForwardMod::FabricProxyLite;
         let mut rec = Record { forward_mod: Some(fm), ..Default::default() };
-        files_step(&root, fm, "k", &pf::plan(Mode::Direct, Action::Use).unwrap(), &mut rec, 0).unwrap();
-        files_step(&root, fm, "k", &pf::plan(Mode::Relay, Action::Stop).unwrap(), &mut rec, 0).unwrap();
+        files_step(&root, fm, "k", &pf::plan(Mode::Direct, Action::Use).unwrap(), None, &mut rec, 0).unwrap();
+        files_step(&root, fm, "k", &pf::plan(Mode::Relay, Action::Stop).unwrap(), None, &mut rec, 0).unwrap();
         assert_eq!(std::fs::read(root.join("server.properties")).unwrap(), crlf.as_bytes());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -453,10 +487,10 @@ mod tests {
         std::fs::write(root.join("config/proxy-compatible-forge.toml"), old).unwrap();
         let fm = ForwardMod::Pcf;
         let mut rec = Record { forward_mod: Some(fm), ..Default::default() };
-        files_step(&root, fm, "k", &pf::plan(Mode::Direct, Action::Use).unwrap(), &mut rec, 0).unwrap();
+        files_step(&root, fm, "k", &pf::plan(Mode::Direct, Action::Use).unwrap(), None, &mut rec, 0).unwrap();
         assert_eq!(rec.config_before.as_deref(), Some(old));
         assert!(std::fs::read_to_string(root.join("config/proxy-compatible-forge.toml")).unwrap().contains("mode = \"MODERN\""));
-        files_step(&root, fm, "k", &pf::plan(Mode::Relay, Action::Stop).unwrap(), &mut rec, 0).unwrap();
+        files_step(&root, fm, "k", &pf::plan(Mode::Relay, Action::Stop).unwrap(), None, &mut rec, 0).unwrap();
         assert_eq!(std::fs::read_to_string(root.join("config/proxy-compatible-forge.toml")).unwrap(), old);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -467,17 +501,55 @@ mod tests {
         std::fs::write(root.join("server.properties"), PROPS).unwrap();
         let fm = ForwardMod::FabricProxyLite;
         let mut rec = Record { forward_mod: Some(fm), ..Default::default() };
-        files_step(&root, fm, "k", &pf::plan(Mode::Direct, Action::Use).unwrap(), &mut rec, 0).unwrap();
-        files_step(&root, fm, "k", &pf::plan(Mode::Relay, Action::PlayAtHome).unwrap(), &mut rec, 0).unwrap();
+        files_step(&root, fm, "k", &pf::plan(Mode::Direct, Action::Use).unwrap(), None, &mut rec, 0).unwrap();
+        files_step(&root, fm, "k", &pf::plan(Mode::Relay, Action::PlayAtHome).unwrap(), None, &mut rec, 0).unwrap();
         assert_eq!(std::fs::read_to_string(root.join("server.properties")).unwrap(), PROPS);
         // The mod's config stays (the mod is off), so going back needs no secret again.
         assert!(root.join("config/FabricProxy-Lite.toml").exists());
-        files_step(&root, fm, "k", &pf::plan(Mode::Home, Action::BackToRelay).unwrap(), &mut rec, 0).unwrap();
+        files_step(&root, fm, "k", &pf::plan(Mode::Home, Action::BackToRelay).unwrap(), None, &mut rec, 0).unwrap();
         assert!(std::fs::read_to_string(root.join("server.properties")).unwrap().contains("online-mode=false"));
-        files_step(&root, fm, "k", &pf::plan(Mode::Relay, Action::PlayAtHome).unwrap(), &mut rec, 0).unwrap();
-        files_step(&root, fm, "k", &pf::plan(Mode::Home, Action::Stop).unwrap(), &mut rec, 0).unwrap();
+        files_step(&root, fm, "k", &pf::plan(Mode::Relay, Action::PlayAtHome).unwrap(), None, &mut rec, 0).unwrap();
+        files_step(&root, fm, "k", &pf::plan(Mode::Home, Action::Stop).unwrap(), None, &mut rec, 0).unwrap();
         assert_eq!(std::fs::read_to_string(root.join("server.properties")).unwrap(), PROPS);
         assert!(!root.join("config/FabricProxy-Lite.toml").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_voice_mod_points_at_the_relay_and_back_with_the_keys() {
+        use hopper_core::hosting::voice_mods as vm;
+        let root = scratch("voice");
+        std::fs::write(root.join("server.properties"), PROPS).unwrap();
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        std::fs::write(root.join("mods/voicechat-fabric-1.21.1-2.5.26.jar"), b"jar").unwrap();
+        std::fs::create_dir_all(root.join("config/voicechat")).unwrap();
+        let old = "# Simple Voice Chat server config\r\nport=24454\r\nvoice_host=\r\nallow_pings=true\r\n";
+        std::fs::write(root.join(vm::SVC_CONFIG), old).unwrap();
+        let fm = ForwardMod::FabricProxyLite;
+        let mut rec = Record { forward_mod: Some(fm), ..Default::default() };
+        let to = Some(("play.example.net", 24454));
+        let read = || std::fs::read_to_string(root.join(vm::SVC_CONFIG)).unwrap();
+        files_step(&root, fm, "k", &pf::plan(Mode::Direct, Action::Use).unwrap(), to, &mut rec, 0).unwrap();
+        // Java properties escape the colon; the mod reads it back as one.
+        assert!(read().contains(r"voice_host=play.example.net\:24454"), "{}", read());
+        assert_eq!(rec.voice.as_ref().and_then(|v| v.kind), Some(vm::VoiceMod::SimpleVoiceChat));
+        // History has the old config, with the change noted.
+        assert!(history(&root).iter().any(|(to, _)| to == vm::SVC_CONFIG), "{:?}", history(&root));
+        let set = &hopper_core::backups::list(&root)[0];
+        let note = hopper_core::backups::settings_note(&set.dir, vm::SVC_CONFIG).unwrap();
+        assert!(note.changes.iter().any(|c| c.key == "voice_host" && c.now == "play.example.net:24454"), "{:?}", note.changes);
+        // Play at home: back as it was; back on the relay: pointed again.
+        files_step(&root, fm, "k", &pf::plan(Mode::Relay, Action::PlayAtHome).unwrap(), to, &mut rec, 0).unwrap();
+        assert_eq!(read(), old);
+        assert!(rec.voice.is_none());
+        files_step(&root, fm, "k", &pf::plan(Mode::Home, Action::BackToRelay).unwrap(), to, &mut rec, 0).unwrap();
+        assert!(read().contains(r"voice_host=play.example.net\:24454"));
+        files_step(&root, fm, "k", &pf::plan(Mode::Relay, Action::Stop).unwrap(), to, &mut rec, 0).unwrap();
+        assert_eq!(read(), old, "byte for byte, CRLF kept");
+        // A relay without a voice port (`to` None) leaves the mod alone.
+        files_step(&root, fm, "k", &pf::plan(Mode::Direct, Action::Use).unwrap(), None, &mut rec, 0).unwrap();
+        assert_eq!(read(), old);
+        assert!(rec.voice.is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 

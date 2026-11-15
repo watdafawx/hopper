@@ -67,6 +67,10 @@ pub struct RelayHello {
     /// The port players connect to on the VPS.
     #[serde(default)]
     pub game_port: u16,
+    /// The relay's UDP port for voice (B6); 0: none (a relay from before B6,
+    /// or its voice port couldn't be opened).
+    #[serde(default)]
+    pub voice_port: u16,
 }
 
 #[derive(Debug)]
@@ -164,6 +168,9 @@ async fn read_msg<R: AsyncRead + Unpin, T: DeserializeOwned>(r: &mut R) -> Resul
 pub struct Live {
     pub tunnel: Tunnel,
     pub counters: Arc<Counters>,
+    /// The voice keys' secret from this connection's TLS exporter, set by
+    /// whoever holds the TLS session (B6).
+    pub exported: Option<super::voice::Exported>,
 }
 
 /// Home's end: says who it is, checks the answer, starts the tunnel.
@@ -189,18 +196,18 @@ where
     let counters = Arc::new(Counters::default());
     let (tx, rx) = wire::split(io, send, recv, counters.clone()).map_err(LinkError::Protocol)?;
     let tunnel = mux::start(Side::Node, cfg, tx, rx).await.map_err(LinkError::Mux)?;
-    Ok((Live { tunnel, counters }, answer))
+    Ok((Live { tunnel, counters, exported: None }, answer))
 }
 
 /// The relay's end: checks home's key before anything else, then starts
 /// the tunnel. `recv` is how the relay wants the busy direction compressed.
 /// A wrong key gets one "no" and the connection closes.
-pub async fn relay<S>(mut io: S, key: &[u8; 32], recv: Codec, game_port: u16, cfg: mux::Config) -> Result<Live, LinkError>
+pub async fn relay<S>(mut io: S, key: &[u8; 32], recv: Codec, ports: (u16, u16), cfg: mux::Config) -> Result<Live, LinkError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let hello: HomeHello = read_msg(&mut io).await?;
-    let no = |error: &str| RelayHello { ok: false, error: error.into(), tunnel: cfg.tunnel, version: cfg.version.clone(), recv: None, game_port: 0 };
+    let no = |error: &str| RelayHello { ok: false, error: error.into(), tunnel: cfg.tunnel, version: cfg.version.clone(), recv: None, game_port: 0, voice_port: 0 };
     if !same(&key_hash(&hello.key), key) {
         let _ = write_msg(&mut io, &no("The relay key is wrong.")).await;
         let _ = io.shutdown().await;
@@ -216,10 +223,10 @@ where
         let _ = write_msg(&mut io, &no("Home asked for compression settings this relay doesn't give.")).await;
         return Err(LinkError::Refused("codec settings out of range".into()));
     }
-    let ok = RelayHello { ok: true, error: String::new(), tunnel: cfg.tunnel, version: cfg.version.clone(), recv: Some(recv), game_port };
+    let ok = RelayHello { ok: true, error: String::new(), tunnel: cfg.tunnel, version: cfg.version.clone(), recv: Some(recv), game_port: ports.0, voice_port: ports.1 };
     write_msg(&mut io, &ok).await.map_err(LinkError::Io)?;
     let counters = Arc::new(Counters::default());
     let (tx, rx) = wire::split(io, send, recv, counters.clone()).map_err(LinkError::Protocol)?;
     let tunnel = mux::start(Side::Main, cfg, tx, rx).await.map_err(LinkError::Mux)?;
-    Ok(Live { tunnel, counters })
+    Ok(Live { tunnel, counters, exported: None })
 }

@@ -43,6 +43,9 @@ pub const VELOCITY_DATA: &str = "/var/lib/hopper-velocity";
 pub const VELOCITY_UNIT: &str = "/etc/systemd/system/hopper-velocity.service";
 pub const VELOCITY_SERVICE: &str = "hopper-velocity";
 pub const VELOCITY_PORT: u16 = 25577;
+/// The relay's voice port (B6): Simple Voice Chat's usual one, so a player
+/// who types the address by hand finds it where they'd look first.
+pub const VOICE_PORT: u16 = hopper_core::hosting::voice_mods::SVC_DEFAULT_PORT;
 pub const BACKEND_PORT: u16 = 25580;
 
 /// A download pinned in this release: where, its SHA-256 and size.
@@ -329,6 +332,8 @@ pub struct RelayStatus {
     pub tunnel_port: u16,
     pub velocity_port: u16,
     pub backend_port: u16,
+    /// 0 on a relay from before B6.
+    pub voice_port: u16,
 }
 
 /// The last line of `out` that reads as JSON (the program's log goes to
@@ -355,10 +360,18 @@ pub fn elf_arch(head: &[u8]) -> Option<&'static str> {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum FwRule {
-    /// `ufw allow <port>/tcp`.
-    Ufw { port: u16 },
+    /// `ufw allow <port>/tcp` (`/udp` for voice, B6).
+    Ufw {
+        port: u16,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        udp: bool,
+    },
     /// An iptables ACCEPT for the port in INPUT, marked with [`COMMENT`].
-    Iptables { port: u16 },
+    Iptables {
+        port: u16,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        udp: bool,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -380,12 +393,13 @@ pub fn ufw_active(status: &str) -> bool {
     status.lines().any(|l| l.trim().eq_ignore_ascii_case("status: active"))
 }
 
-/// A port `ufw status` already lets in (TCP, from anywhere).
-fn ufw_allows(status: &str, port: u16) -> bool {
+/// A port `ufw status` already lets in (TCP, or UDP, from anywhere; a rule
+/// with no protocol lets in both).
+fn ufw_allows(status: &str, port: u16, udp: bool) -> bool {
     status.lines().any(|l| {
         let mut w = l.split_whitespace();
         let to = w.next().unwrap_or("");
-        (to == port.to_string() || to == format!("{port}/tcp")) && l.contains("ALLOW") && !l.contains("ALLOW OUT")
+        (to == port.to_string() || to == format!("{port}/{}", proto(udp))) && l.contains("ALLOW") && !l.contains("ALLOW OUT")
     })
 }
 
@@ -442,8 +456,9 @@ fn rule_ports(w: &[&str]) -> Option<Vec<u16>> {
     )
 }
 
-/// An ACCEPT for `port` before position `before` (anywhere when `None`).
-fn iptables_accepts(rules: &str, port: u16, before: Option<usize>) -> bool {
+/// An ACCEPT for `port` (TCP, or UDP) before position `before` (anywhere
+/// when `None`).
+fn iptables_accepts(rules: &str, port: u16, udp: bool, before: Option<usize>) -> bool {
     let mut n = 0;
     for l in rules.lines() {
         let w: Vec<&str> = l.split_whitespace().collect();
@@ -456,15 +471,19 @@ fn iptables_accepts(rules: &str, port: u16, before: Option<usize>) -> bool {
         }
         let accept = w.windows(2).any(|p| p == ["-j", "ACCEPT"]);
         let narrowed = w.iter().any(|x| matches!(*x, "-i" | "-s"));
-        if accept && !narrowed && rule_ports(&w).is_some_and(|d| d.contains(&port)) && !w.windows(2).any(|p| p == ["-p", "udp"]) {
+        if accept && !narrowed && rule_ports(&w).is_some_and(|d| d.contains(&port)) && !w.windows(2).any(|p| p == ["-p", proto(!udp)]) {
             return true;
         }
     }
     false
 }
 
-pub fn iptables_rule(port: u16) -> String {
-    format!("-p tcp --dport {port} -m comment --comment {COMMENT} -j ACCEPT")
+pub fn iptables_rule(port: u16, udp: bool) -> String {
+    format!("-p {} --dport {port} -m comment --comment {COMMENT} -j ACCEPT", proto(udp))
+}
+
+fn proto(udp: bool) -> &'static str {
+    if udp { "udp" } else { "tcp" }
 }
 
 /// Native nftables (not iptables' own tables) with an input chain that
@@ -485,41 +504,45 @@ pub fn nft_blocks_input(ruleset: &str) -> bool {
     false
 }
 
-/// What to do so `ports` get in. Only ever *adds* ACCEPT rules for those
-/// ports: it never turns a firewall on, changes a default policy, or
-/// touches any other rule, so the ssh connection it runs over can't be cut.
+/// What to do so the `tcp` and `udp` ports get in. Only ever *adds* ACCEPT
+/// rules for those ports: it never turns a firewall on, changes a default
+/// policy, or touches any other rule, so the ssh connection it runs over
+/// can't be cut.
 ///
-/// - ufw on: `ufw allow <port>/tcp` for each port it doesn't allow yet.
+/// - ufw on: `ufw allow <port>/tcp` (or `/udp`) for each port it doesn't
+///   allow yet.
 /// - otherwise iptables: an ACCEPT inserted just before the first rule that
 ///   would reject the ports (cloud images often end INPUT with a REJECT),
 ///   then `netfilter-persistent save` when that is installed.
 /// - native nftables that drops input: told to the player, not changed.
 /// - nothing filtering: nothing to do.
-pub fn plan_firewall(ufw: Option<&str>, iptables: Option<&str>, nft: Option<&str>, persist: bool, ports: &[u16]) -> FwPlan {
+pub fn plan_firewall(ufw: Option<&str>, iptables: Option<&str>, nft: Option<&str>, persist: bool, tcp: &[u16], udp: &[u16]) -> FwPlan {
     let mut p = FwPlan::default();
+    let all: Vec<(u16, bool)> = tcp.iter().map(|&t| (t, false)).chain(udp.iter().map(|&u| (u, true))).collect();
+    let ports: Vec<u16> = all.iter().map(|a| a.0).collect();
     if let Some(s) = ufw.filter(|s| ufw_active(s)) {
-        for &port in ports {
-            if ufw_allows(s, port) {
+        for &(port, udp) in &all {
+            if ufw_allows(s, port, udp) {
                 p.open.push(port);
             } else {
-                p.add.push(format!("ufw allow {port}/tcp comment {COMMENT}"));
-                p.rules.push(FwRule::Ufw { port });
+                p.add.push(format!("ufw allow {port}/{} comment {COMMENT}", proto(udp)));
+                p.rules.push(FwRule::Ufw { port, udp });
             }
         }
         return p;
     }
     if let Some(rules) = iptables {
-        match iptables_block_at(rules, ports) {
-            None => p.open.extend_from_slice(ports),
+        match iptables_block_at(rules, &ports) {
+            None => p.open.extend_from_slice(&ports),
             Some(at) => {
                 let mut pos = at;
-                for &port in ports {
-                    if iptables_accepts(rules, port, Some(at)) {
+                for &(port, udp) in &all {
+                    if iptables_accepts(rules, port, udp, Some(at)) {
                         p.open.push(port);
                         continue;
                     }
-                    p.add.push(format!("iptables -I INPUT {pos} {}", iptables_rule(port)));
-                    p.rules.push(FwRule::Iptables { port });
+                    p.add.push(format!("iptables -I INPUT {pos} {}", iptables_rule(port, udp)));
+                    p.rules.push(FwRule::Iptables { port, udp });
                     pos += 1;
                 }
                 if !p.add.is_empty() && persist {
@@ -532,7 +555,7 @@ pub fn plan_firewall(ufw: Option<&str>, iptables: Option<&str>, nft: Option<&str
     // A packet has to pass every table that hooks input, so iptables'
     // ACCEPT doesn't get it through a native nftables chain that drops.
     if nft.is_some_and(nft_blocks_input) {
-        let list: Vec<String> = ports.iter().map(|p| format!("{p}/tcp")).collect();
+        let list: Vec<String> = all.iter().map(|(p, u)| format!("{p}/{}", proto(*u))).collect();
         p.manual = Some(format!("The VPS's nftables rules drop what isn't allowed. Allow {} there (in /etc/nftables.conf), then run the setup again.", list.join(" and ")));
         p.open.clear();
     }
@@ -545,10 +568,10 @@ pub fn remove_firewall(rules: &[FwRule], persist: bool) -> Vec<String> {
     let mut ipt = false;
     for r in rules {
         match r {
-            FwRule::Ufw { port } => v.push(format!("ufw delete allow {port}/tcp")),
-            FwRule::Iptables { port } => {
+            FwRule::Ufw { port, udp } => v.push(format!("ufw delete allow {port}/{}", proto(*udp))),
+            FwRule::Iptables { port, udp } => {
                 // Every copy of it, in case Repair ran while one was there.
-                let rule = iptables_rule(*port);
+                let rule = iptables_rule(*port, *udp);
                 v.push(format!("while iptables -C INPUT {rule} 2>/dev/null; do iptables -D INPUT {rule}; done"));
                 ipt = true;
             }
@@ -645,7 +668,7 @@ pub fn install_steps(version: &str, ports: (u16, u16)) -> Vec<Step> {
         Step::new("keys", "Relay key and certificate"),
         Step::new("service", "Relay service"),
         Step::new("velocity-service", "Velocity service"),
-        Step::new("firewall", format!("Firewall on the VPS: {} and {}", ports.0, ports.1)),
+        Step::new("firewall", format!("Firewall on the VPS: {} and {}, voice {VOICE_PORT}", ports.0, ports.1)),
         Step::new("reach", "Ports open from the internet"),
         Step::new("pair", "Connect this panel to the relay"),
     ]
@@ -674,14 +697,15 @@ pub fn size(b: u64) -> String {
     }
 }
 
-/// Ports of the INPUT rules marked as the relay's, from `iptables -S INPUT`.
-pub fn iptables_marked(rules: &str) -> Vec<u16> {
+/// The INPUT rules marked as the relay's, from `iptables -S INPUT`.
+pub fn iptables_marked(rules: &str) -> Vec<FwRule> {
     rules
         .lines()
         .filter(|l| l.split_whitespace().any(|w| w == COMMENT || w == format!("\"{COMMENT}\"")))
         .filter_map(|l| {
             let w: Vec<&str> = l.split_whitespace().collect();
-            w.iter().position(|x| *x == "--dport").and_then(|i| w.get(i + 1)?.parse().ok())
+            let udp = w.windows(2).any(|p| p == ["-p", "udp"]);
+            w.iter().position(|x| *x == "--dport").and_then(|i| w.get(i + 1)?.parse().ok()).map(|port| FwRule::Iptables { port, udp })
         })
         .collect()
 }
@@ -715,7 +739,7 @@ pub fn binary_right(current_sha: &str, recorded_sha: &str, says: &str, version: 
 pub fn keys_right(st: Option<&RelayStatus>, home_key: &str, home_fp: &str, home_addr: &str, addr: &str, bind: &str, ports: (u16, u16), private: bool) -> (bool, bool) {
     let Some(s) = st else { return (false, false) };
     let key = !home_key.is_empty() && s.key_sha256 == super::super::link::hash_hex(&super::super::link::key_hash(home_key)) && home_fp == s.fingerprint;
-    let settings = s.bind == bind && s.game_port == ports.0 && s.tunnel_port == ports.1 && s.velocity_port == VELOCITY_PORT && s.backend_port == BACKEND_PORT;
+    let settings = s.bind == bind && s.game_port == ports.0 && s.tunnel_port == ports.1 && s.velocity_port == VELOCITY_PORT && s.backend_port == BACKEND_PORT && s.voice_port == VOICE_PORT;
     (key, key && settings && private && home_addr == addr)
 }
 

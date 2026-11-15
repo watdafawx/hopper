@@ -21,6 +21,7 @@ pub mod home;
 pub mod link;
 pub mod relay_end;
 pub mod setup;
+pub mod voice;
 pub mod wire;
 
 #[cfg(test)]
@@ -35,7 +36,8 @@ use crate::tunnel::mux::{Stream, StreamError};
 /// A stream's OPEN head.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Head {
-    /// "game" (a player's connection, server list pings too) or "control".
+    /// "game" (a player's connection, server list pings too), "control", or
+    /// "voice" (voice packets while UDP doesn't get through, B6).
     pub kind: String,
     /// The server id the stream is for (game streams).
     #[serde(default)]
@@ -86,6 +88,10 @@ pub struct Route {
     /// players go through Velocity, the rest straight home (B2).
     #[serde(default)]
     pub velocity: bool,
+    /// The server runs a voice mod pointed at the relay (B6): the relay
+    /// passes players' voice packets home. A relay from before B6 ignores it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub voice: bool,
 }
 
 /// The longest control line either end reads.
