@@ -984,7 +984,7 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
             // A jar Hopper has no record of is yours too.
             .or_else(|| (!inst.addons.iter().any(|a| a.file_name.eq_ignore_ascii_case(jar))).then(|| (String::new(), 0, String::new())))
     });
-    let your_mods = yours
+    let mut your_mods: Vec<ModChange> = yours
         .iter()
         .map(|a| ModChange {
             name: if a.name.is_empty() { a.file_name.clone() } else { a.name.clone() },
@@ -994,12 +994,28 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
             ..Default::default()
         })
         .collect();
+    // Jars the player dropped into the mods folder by hand: Hopper has no
+    // record of them, but they're theirs and the update leaves them.
+    let strays = {
+        let mut known: HashSet<String> = inst.addons.iter().map(|a| jar_key(&a.file_name)).collect();
+        known.extend(mods.iter().flat_map(|m| [jar_key(&m.from), jar_key(&m.to)]));
+        for rel in new.keys().chain(old.iter().flat_map(|o| o.keys())) {
+            if let Some(jar) = rel.strip_prefix("mods/") {
+                known.insert(jar_key(jar));
+            }
+        }
+        stray_jars(&inst.root.join("mods"), &known)
+    };
+    your_mods.extend(strays.iter().map(|jar| ModChange { name: jar.clone(), from: jar.clone(), ..Default::default() }));
     let mut skip_rels: HashSet<String> = new.keys().cloned().collect();
     if let Some(o) = &old {
         skip_rels.extend(o.keys().cloned());
     }
     skip_rels.extend(inst.addons.iter().map(|a| format!("{}/{}", a.folder(), a.file_name)));
-    let your_ids = mod_ids(&inst.root.join("mods"), yours.iter().filter(|a| a.folder() == "mods").map(|a| a.file_name.as_str()));
+    let your_ids = mod_ids(
+        &inst.root.join("mods"),
+        yours.iter().filter(|a| a.folder() == "mods").map(|a| a.file_name.as_str()).chain(strays.iter().map(String::as_str)),
+    );
     let (your_files, mod_made) = split_made(your_files(&inst.root, new.keys().map(String::as_str), &skip_rels), &your_ids);
     let owners = crate::configowner::file_owners(inst, files.iter().filter(|f| f.action == FileAction::Conflict).map(|f| f.rel.as_str()));
     Ok(UpdatePlan {
@@ -1011,7 +1027,7 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
         removed,
         updated,
         still_off,
-        kept_mods: inst.addons.iter().filter(|a| !a.from_pack).count(),
+        kept_mods: inst.addons.iter().filter(|a| !a.from_pack).count() + strays.len(),
         base_known: old.is_some(),
         compared: compare,
         needed,
@@ -1122,6 +1138,28 @@ pub fn your_files<'a>(root: &Path, pack_rels: impl Iterator<Item = &'a str>, ski
         }
     }
     out.sort();
+    out
+}
+
+/// A jar's file name the way mods are matched: lower case, without
+/// ".disabled".
+fn jar_key(name: &str) -> String {
+    let low = name.to_ascii_lowercase();
+    low.strip_suffix(".disabled").unwrap_or(&low).to_string()
+}
+
+/// Jars in `mods_dir` that aren't in `known` ([`jar_key`] names), sorted:
+/// the ones the player put there by hand.
+fn stray_jars(mods_dir: &Path, known: &HashSet<String>) -> Vec<String> {
+    let mut out: Vec<String> = fs::read_dir(mods_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| jar_key(n).ends_with(".jar") && !known.contains(&jar_key(n)))
+        .collect();
+    out.sort_by_key(|n| n.to_lowercase());
     out
 }
 
@@ -1715,6 +1753,26 @@ mod tests {
         let n = needed_by_yours(&dir, &dropped, |j| (j == "mine.jar").then(|| ("Mine".to_string(), 9, String::new())));
         assert_eq!(n.len(), 1);
         assert_eq!((n[0].file.as_str(), n[0].by.as_str(), n[0].project), ("core.jar", "Mine", 1));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_jar_dropped_in_the_mods_folder_by_hand_is_yours() {
+        let dir = std::env::temp_dir().join(format!("hopper-packdiff-stray-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for f in ["pack-mod.jar", "Pack-Off.jar.disabled", "AppleSkin-1.0.jar", "mine-off.jar.disabled", "readme.txt"] {
+            fs::write(dir.join(f), b"x").unwrap();
+        }
+        fs::create_dir_all(dir.join("sub.jar")).unwrap();
+        let known: HashSet<String> = ["pack-mod.jar", "pack-off.jar"].iter().map(|s| s.to_string()).collect();
+        // A turned-off one counts too; folders and other files don't.
+        assert_eq!(stray_jars(&dir, &known), vec!["AppleSkin-1.0.jar", "mine-off.jar.disabled"]);
+        assert_eq!(jar_key("Pack-Off.jar.DISABLED"), "pack-off.jar");
+        // Everything known: nothing of yours.
+        let all: HashSet<String> = ["pack-mod.jar", "pack-off.jar", "appleskin-1.0.jar", "mine-off.jar"].iter().map(|s| s.to_string()).collect();
+        assert!(stray_jars(&dir, &all).is_empty());
+        assert!(stray_jars(&dir.join("missing"), &known).is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 

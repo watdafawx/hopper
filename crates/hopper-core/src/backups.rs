@@ -936,13 +936,17 @@ pub fn count_since(root: &Path, since: i64) -> (usize, i64) {
 pub fn list(root: &Path) -> Vec<Set> {
     let base = root.join(crate::sync::BACKUP_DIR);
     let inst = crate::instances::load(root);
-    let mut out: Vec<Set> = fs::read_dir(&base)
+    // One folder per action, hundreds of them, each a handful of small
+    // reads: the disk's wait, not the work, is what takes the time, so the
+    // folders are read side by side.
+    let folders: Vec<(i64, PathBuf)> = fs::read_dir(&base)
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|e| {
-            let when: i64 = e.file_name().to_string_lossy().parse().ok()?;
-            let dir = e.path();
+        .filter_map(|e| Some((e.file_name().to_string_lossy().parse().ok()?, e.path())))
+        .collect();
+    let mut out: Vec<Set> = crate::configindex::par_map(&folders, |(when, dir)| {
+            let (when, dir) = (*when, dir.clone());
             let origins: serde_json::Map<String, serde_json::Value> = fs::read(dir.join(ORIGINS))
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
@@ -965,6 +969,8 @@ pub fn list(root: &Path) -> Vec<Set> {
             let pack = read_pack(&dir);
             (!files.is_empty()).then_some(Set { dir, when, files, pack })
         })
+        .into_iter()
+        .flatten()
         .collect();
     out.sort_by_key(|s| std::cmp::Reverse(s.when));
     out
@@ -976,15 +982,24 @@ pub fn list(root: &Path) -> Vec<Set> {
 pub fn history(root: &Path) -> Vec<Set> {
     let mut sets = list(root);
     let base = root.join(crate::sync::BACKUP_DIR);
-    for e in fs::read_dir(&base).into_iter().flatten().flatten() {
-        let Ok(when) = e.file_name().to_string_lossy().parse::<i64>() else { continue };
-        let dir = e.path();
-        let recs = crate::actor::read_records(&dir);
-        if recs.is_empty() {
-            continue;
-        }
-        let files: Vec<Saved> = recs.iter().map(|r| record_entry(&dir, r)).collect();
-        match sets.iter_mut().find(|s| s.dir == dir) {
+    let folders: Vec<(i64, PathBuf)> = fs::read_dir(&base)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| Some((e.file_name().to_string_lossy().parse::<i64>().ok()?, e.path())))
+        .collect();
+    // Each folder's records are read side by side (see [`list`]).
+    let with_records: Vec<(i64, PathBuf, Vec<Saved>)> = crate::configindex::par_map(&folders, |(when, dir)| {
+        let recs = crate::actor::read_records(dir);
+        (*when, dir.clone(), recs.iter().map(|r| record_entry(dir, r)).collect::<Vec<_>>())
+    })
+    .into_iter()
+    .filter(|(_, _, files)| !files.is_empty())
+    .collect();
+    // Where each folder's set is, so a folder isn't searched for in all of them.
+    let mut at: std::collections::HashMap<PathBuf, usize> = sets.iter().enumerate().map(|(i, s)| (s.dir.clone(), i)).collect();
+    for (when, dir, files) in with_records {
+        match at.get(&dir).map(|&i| &mut sets[i]) {
             Some(s) => {
                 // A modpack update notes "turned on" by setting a note aside
                 // too: that entry stays, the record goes.
@@ -993,6 +1008,7 @@ pub fn history(root: &Path) -> Vec<Set> {
             }
             None => {
                 let pack = read_pack(&dir);
+                at.insert(dir.clone(), sets.len());
                 sets.push(Set { dir, when, files, pack })
             }
         }
@@ -1118,6 +1134,16 @@ fn group_batches(sets: Vec<Set>) -> Vec<Set> {
     out
 }
 
+/// Whether a listed entry is a folder. The listing already says (no extra
+/// look at the disk); only a link has to be followed.
+fn is_dir_entry(e: &fs::DirEntry) -> bool {
+    match e.file_type() {
+        Ok(t) if t.is_symlink() => e.path().is_dir(),
+        Ok(t) => t.is_dir(),
+        Err(_) => e.path().is_dir(),
+    }
+}
+
 fn walk(
     base: &Path,
     dir: &Path,
@@ -1131,7 +1157,7 @@ fn walk(
         if is_bookkeeping(&name) || name == crate::actor::RECORDS_FILE {
             continue;
         }
-        if p.is_dir() {
+        if is_dir_entry(&e) {
             walk(base, &p, origins, ids, out);
             continue;
         }
@@ -1230,21 +1256,29 @@ fn jar_copies(root: &Path) -> Vec<(PathBuf, u64)> {
         for e in fs::read_dir(dir).into_iter().flatten().flatten() {
             let p = e.path();
             let name = e.file_name().to_string_lossy().into_owned();
-            if p.is_dir() {
+            if is_dir_entry(&e) {
                 walk(&p, out);
             } else if is_jar(&name) && !done.contains(&name) {
                 out.push((p, e.metadata().map_or(0, |m| m.len())));
             }
         }
     }
-    let mut out = Vec::new();
-    for d in fs::read_dir(root.join(crate::sync::BACKUP_DIR)).into_iter().flatten().flatten() {
-        // Only action folders (named by the second): not snapshots or worlds.
-        if d.file_name().to_str().is_some_and(|n| n.parse::<u64>().is_ok()) {
-            walk(&d.path(), &mut out);
-        }
-    }
-    out
+    // Only action folders (named by the second): not snapshots or worlds.
+    let folders: Vec<PathBuf> = fs::read_dir(root.join(crate::sync::BACKUP_DIR))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|d| d.file_name().to_str().is_some_and(|n| n.parse::<u64>().is_ok()))
+        .map(|d| d.path())
+        .collect();
+    crate::configindex::par_map(&folders, |d| {
+        let mut out = Vec::new();
+        walk(d, &mut out);
+        out
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Bytes of mod jars History keeps as full copies (from before 0.40, or
@@ -1411,6 +1445,44 @@ mod tests {
         ]});
         fs::write(root.join(crate::instances::HOPPER_FILE), serde_json::to_vec(&v).unwrap()).unwrap();
         root
+    }
+
+    /// Hundreds of folders are read side by side: the list is still every
+    /// folder's files, newest first, and the records join their folders.
+    #[test]
+    fn a_long_history_lists_every_folder_newest_first() {
+        let root = instance("long");
+        let base = root.join(crate::sync::BACKUP_DIR);
+        for k in 0..120i64 {
+            let d = base.join((1_000 + k).to_string());
+            fs::create_dir_all(d.join("mods")).unwrap();
+            fs::write(d.join("mods").join(format!("m{k}.jar")), format!("jar {k}")).unwrap();
+            if k % 4 == 0 {
+                let a = crate::instances::Addon { project_id: 7, file_name: format!("r{k}.jar"), enabled: true, ..Default::default() };
+                let r = crate::actor::Record { did: crate::actor::Did::Added, key: format!("k{k}"), addon: a, who: Default::default(), batch: String::new(), note: String::new() };
+                fs::write(d.join(crate::actor::RECORDS_FILE), serde_json::to_vec(&vec![r]).unwrap()).unwrap();
+            }
+        }
+        // A record-only folder, and an empty one that isn't an entry.
+        let only = base.join("5000");
+        fs::create_dir_all(&only).unwrap();
+        let a = crate::instances::Addon { project_id: 8, file_name: "only.jar".into(), enabled: true, ..Default::default() };
+        let r = crate::actor::Record { did: crate::actor::Did::Off, key: "only".into(), addon: a, who: Default::default(), batch: String::new(), note: String::new() };
+        fs::write(only.join(crate::actor::RECORDS_FILE), serde_json::to_vec(&vec![r]).unwrap()).unwrap();
+        fs::create_dir_all(base.join("6000")).unwrap();
+
+        let sets = history(&root);
+        assert_eq!(sets.len(), 121, "120 set aside + the record-only one");
+        let whens: Vec<i64> = sets.iter().map(|s| s.when).collect();
+        assert!(whens.windows(2).all(|w| w[0] >= w[1]), "newest first");
+        assert_eq!(whens[0], 5000);
+        let first = sets.iter().find(|s| s.when == 1_000).unwrap();
+        assert_eq!(first.files.len(), 2, "its jar and its record");
+        let plain = sets.iter().find(|s| s.when == 1_001).unwrap();
+        assert_eq!((plain.files.len(), plain.files[0].name.as_str()), (1, "m1.jar"));
+        assert_eq!(list(&root).len(), 120);
+        assert_eq!(copies_size(&root), (0..120).map(|k| format!("jar {k}").len() as u64).sum::<u64>());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
