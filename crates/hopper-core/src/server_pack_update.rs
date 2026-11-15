@@ -307,6 +307,23 @@ pub fn plan(
     let file_base = base.as_ref().filter(|_| compare);
     let (mut files, same) =
         packdiff::plan_files_by(file_base.map(|b| &b.files), &new.files, &server.root, file_key);
+    // Files that differ from the new server pack but aren't the server's
+    // edits: the old server pack's copy (its file list is read even for a
+    // quick update), or only spacing and comments apart from the new one.
+    // They take the pack's copy without asking.
+    let quiet = {
+        let mut z = zip::ZipArchive::new(fs::File::open(&new_zip)?)?;
+        packdiff::settle_unedited(&mut files, |rel| {
+            let path = server.root.join(rel);
+            if base.as_ref().and_then(|b| b.files.get(rel)).is_some_and(|k| file_key(&path).as_ref() == Some(k)) {
+                return packdiff::Edited::Untouched;
+            }
+            let (Ok(yours), Some(theirs)) = (fs::read(&path), read(&mut z, &packdiff::entry_name(&prefix, rel))) else {
+                return packdiff::Edited::Yours;
+            };
+            packdiff::edited(rel, None, &yours, &theirs)
+        })
+    };
     let mut merged = HashMap::new();
     if let Some(b) = file_base {
         let conflicts: Vec<_> = files
@@ -420,6 +437,12 @@ pub fn plan(
     your_files.retain(|r| updatable(r, &level));
     let your_ids = packdiff::mod_ids(&server.mods_dir(), added.iter().map(String::as_str));
     let (your_files, mod_made) = packdiff::split_made(your_files, &your_ids);
+    let owners = crate::configowner::folder_file_owners(
+        &server.root,
+        &server.mods_dir(),
+        Some(inst),
+        files.iter().filter(|f| f.action == FileAction::Conflict).map(|f| f.rel.as_str()),
+    );
 
     Ok(ServerPlan {
         plan: UpdatePlan {
@@ -444,6 +467,8 @@ pub fn plan(
             merged,
             settings: Default::default(),
             settings_merged: Default::default(),
+            quiet,
+            owners,
         },
         pack: pack.clone(),
         loader,

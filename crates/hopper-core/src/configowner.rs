@@ -128,6 +128,76 @@ pub fn of_jars(jars: Vec<(String, PathBuf, String)>) -> Vec<ModRef> {
     out
 }
 
+/// The mod a listed file belongs to, as the Mods list shows it: its name,
+/// its icon's URL (empty when unknown) and its project (0 when unknown),
+/// for the icon and the mod's page next to the file.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FileOwner {
+    pub name: String,
+    pub icon: String,
+    pub project: u64,
+}
+
+/// The owners of `rels` among `mods`, shown as `shown(key)` gives (name,
+/// icon, project); files no mod matches are left out.
+fn owners_with<'a>(
+    mods: Vec<ModRef>,
+    rels: impl Iterator<Item = &'a str>,
+    shown: impl Fn(&ModRef) -> FileOwner,
+) -> HashMap<String, FileOwner> {
+    let o = Owners::new(mods);
+    rels.filter_map(|r| o.owner(r).map(|m| (r.to_string(), shown(m)))).collect()
+}
+
+/// The mod each of `rels` belongs to in `inst` (its jars, named and
+/// pictured as the instance knows them).
+pub fn file_owners<'a>(inst: &crate::instances::Instance, rels: impl Iterator<Item = &'a str>) -> HashMap<String, FileOwner> {
+    let rels: Vec<&str> = rels.collect();
+    if rels.is_empty() {
+        return HashMap::new();
+    }
+    let jars: Vec<(String, PathBuf, String)> = inst
+        .addons
+        .iter()
+        .filter(|a| a.class_id == crate::cf::CLASS_MODS || a.file_name.to_lowercase().ends_with(".jar"))
+        .map(|a| (a.file_name.clone(), inst.addon_path(a), a.name.clone()))
+        .collect();
+    owners_with(of_jars(jars), rels.into_iter(), |m| {
+        let a = inst.addons.iter().find(|a| a.file_name == m.key);
+        FileOwner {
+            name: m.name.clone(),
+            icon: a.map(|a| a.icon.clone()).unwrap_or_default(),
+            project: a.map_or(0, |a| a.shown_project()),
+        }
+    })
+}
+
+/// [`file_owners`] for a server: its own jars (in `mods_dir`), named and
+/// pictured by its `hopper.json`, else by the instance it's paired with.
+pub fn folder_file_owners<'a>(
+    root: &Path,
+    mods_dir: &Path,
+    inst: Option<&crate::instances::Instance>,
+    rels: impl Iterator<Item = &'a str>,
+) -> HashMap<String, FileOwner> {
+    let rels: Vec<&str> = rels.collect();
+    if rels.is_empty() {
+        return HashMap::new();
+    }
+    let (refs, known) = folder_mods(root, mods_dir);
+    owners_with(refs, rels.into_iter(), |m| {
+        let a = inst.and_then(|i| {
+            i.addons.iter().find(|a| a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(&m.key))
+        });
+        let (kn, ki) = known.get(&m.key).cloned().unwrap_or_default();
+        FileOwner {
+            name: if !kn.is_empty() { kn } else { m.name.clone() },
+            icon: if !ki.is_empty() { ki } else { a.map(|a| a.icon.clone()).unwrap_or_default() },
+            project: a.map_or(0, |a| a.shown_project()),
+        }
+    })
+}
+
 /// The matcher, built once per mod list.
 pub struct Owners {
     mods: Vec<ModRef>,

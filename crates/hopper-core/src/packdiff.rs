@@ -212,6 +212,16 @@ pub struct UpdatePlan {
     /// the installed version is known): "Both" on a conflicting file.
     #[serde(default)]
     pub(crate) settings_merged: HashMap<String, Vec<u8>>,
+    /// Files that differ from the pack's but that you never really edited
+    /// (the installed version's copy, or only spacing and comments): they
+    /// take the pack's copy without asking, backed up first so History can
+    /// undo the update exactly.
+    #[serde(default)]
+    pub(crate) quiet: Vec<String>,
+    /// The mod each conflicting file belongs to (by path), for its icon and
+    /// page next to the file.
+    #[serde(default)]
+    pub owners: HashMap<String, crate::configowner::FileOwner>,
 }
 
 /// One setting of a conflicting settings file.
@@ -267,6 +277,80 @@ pub fn setting_diffs(rel: &str, base: Option<&str>, yours: &str, theirs: &str) -
         configedit::apply(f, theirs, &edits).ok()
     });
     Some((diffs, merged))
+}
+
+/// What a file that differs from the pack's new copy really is, so only
+/// real edits are asked about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edited {
+    /// Only spacing, line endings or comments differ from the pack's new
+    /// copy: nothing of yours to keep.
+    NoDiff,
+    /// The same as the installed pack version's copy (spacing and comments
+    /// aside): you never edited it, the pack did.
+    Untouched,
+    /// Your own edit (or one that can't be told apart): asked about.
+    Yours,
+}
+
+/// Every line without the spacing at its end, blank lines and a leading
+/// byte order mark left out: two texts that only differ in those read the
+/// same to every mod.
+fn spacing_free(text: &str) -> Vec<&str> {
+    text.trim_start_matches('\u{feff}').lines().map(str::trim_end).filter(|l| !l.is_empty()).collect()
+}
+
+/// Whether `a` and `b` (two copies of `rel`) say the same thing: the same
+/// bytes, the same text but for spacing at line ends and blank lines, or,
+/// for a settings file, exactly the same settings with the same values
+/// (comments, order and layout aside). A file whose settings can't be read
+/// counts as different unless its text matches.
+pub fn same_content(rel: &str, a: &[u8], b: &[u8]) -> bool {
+    if a == b {
+        return true;
+    }
+    let (Ok(a), Ok(b)) = (std::str::from_utf8(a), std::str::from_utf8(b)) else { return false };
+    if spacing_free(a) == spacing_free(b) {
+        return true;
+    }
+    use crate::configedit;
+    let Some(f) = configedit::Format::of(rel) else { return false };
+    let read = |t: &str| -> Option<HashMap<(Vec<String>, String), configedit::Value>> {
+        let s = configedit::parse_as(f, t).ok()?;
+        let m: HashMap<_, _> = s.into_iter().flat_map(|s| s.entries).map(|e| ((e.path, e.key), e.value)).collect();
+        // A parse that found nothing proves nothing about the text.
+        (!m.is_empty()).then_some(m)
+    };
+    let (Some(x), Some(y)) = (read(a), read(b)) else { return false };
+    // A setting only one side has counts: the pack may have added it on
+    // purpose, or you may have.
+    x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| configedit::same(v, w)))
+}
+
+/// What `yours` (your copy of `rel`) is next to the pack's new copy
+/// (`theirs`) and the installed version's (`base`, when known).
+pub fn edited(rel: &str, base: Option<&[u8]>, yours: &[u8], theirs: &[u8]) -> Edited {
+    if same_content(rel, yours, theirs) {
+        Edited::NoDiff
+    } else if base.is_some_and(|b| same_content(rel, yours, b)) {
+        Edited::Untouched
+    } else {
+        Edited::Yours
+    }
+}
+
+/// Conflicts in `files` that aren't edits of yours (by `kind`) become plain
+/// updates that take the pack's copy without asking. Returns them, so the
+/// update still backs them up for History's undo.
+pub fn settle_unedited(files: &mut [FileChange], mut kind: impl FnMut(&str) -> Edited) -> Vec<String> {
+    let mut quiet = Vec::new();
+    for f in files.iter_mut().filter(|f| f.action == FileAction::Conflict) {
+        if kind(&f.rel) != Edited::Yours {
+            f.action = FileAction::Update;
+            quiet.push(f.rel.clone());
+        }
+    }
+    quiet
 }
 
 impl UpdatePlan {
@@ -384,6 +468,7 @@ impl UpdatePlan {
     pub fn decisions(&self, take_theirs: &HashSet<String>) -> Overrides {
         let mut o = Overrides::default();
         o.skip.extend(self.same.iter().cloned());
+        o.backup.extend(self.quiet.iter().cloned());
         for f in &self.files {
             match f.action {
                 FileAction::KeepYours | FileAction::KeepDropped => {
@@ -804,6 +889,29 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
         zip_overrides(z, &p).ok()
     });
     let (mut files, same) = plan_files(old.as_ref(), &new, &inst.root);
+    // Files that differ from the pack's new copy but aren't your edits:
+    // only spacing or comments differ, or yours is the installed version's
+    // copy. A quick update reads that copy from the pack cache when it's
+    // there (no download), so the files only the pack changed aren't
+    // offered as "Keep my edits".
+    let base_zip = old_zip.clone().or_else(|| {
+        (!mr && !is_reinstall(&pack, file)).then(|| modpack::cached_pack_zip(pack.file_id)).flatten()
+    });
+    let base_prefixes: Vec<String> = match (&old_prefixes, &base_zip) {
+        (Some(p), _) => p.clone(),
+        (None, Some(z)) => modpack::read_manifest(z)
+            .ok()
+            .map(|m| vec![if m.overrides.is_empty() { "overrides".to_string() } else { m.overrides }])
+            .unwrap_or_else(|| prefixes.clone()),
+        (None, None) => prefixes.clone(),
+    };
+    let quiet = settle_unedited(&mut files, |rel| {
+        let (Ok(yours), Some(theirs)) = (fs::read(inst.root.join(rel)), read_entry(&new_zip, &prefixes, rel)) else {
+            return Edited::Yours;
+        };
+        let base = base_zip.as_ref().and_then(|z| read_entry(z, &base_prefixes, rel));
+        edited(rel, base.as_deref(), &yours, &theirs)
+    });
     let mut merged = HashMap::new();
     if let Some(old_zip) = &old_zip {
         job.detail("Merging config files you and the pack both changed");
@@ -874,6 +982,7 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
     skip_rels.extend(inst.addons.iter().map(|a| format!("{}/{}", a.folder(), a.file_name)));
     let your_ids = mod_ids(&inst.root.join("mods"), yours.iter().filter(|a| a.folder() == "mods").map(|a| a.file_name.as_str()));
     let (your_files, mod_made) = split_made(your_files(&inst.root, new.keys().map(String::as_str), &skip_rels), &your_ids);
+    let owners = crate::configowner::file_owners(inst, files.iter().filter(|f| f.action == FileAction::Conflict).map(|f| f.rel.as_str()));
     Ok(UpdatePlan {
         file: file.clone(),
         mods,
@@ -896,6 +1005,8 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
         merged,
         settings,
         settings_merged,
+        quiet,
+        owners,
     })
 }
 
@@ -1490,6 +1601,8 @@ mod tests {
             merged: HashMap::new(),
             settings: HashMap::new(),
             settings_merged: HashMap::new(),
+            quiet: Vec::new(),
+            owners: HashMap::new(),
         };
         // Like CurseForge: the pack's copy, except your own settings.
         let take = plan.default_take();
@@ -1644,6 +1757,8 @@ mod tests {
             merged: HashMap::new(),
             settings: HashMap::new(),
             settings_merged: HashMap::new(),
+            quiet: Vec::new(),
+            owners: HashMap::new(),
         };
         // Keep all off.
         let o = plan.decisions_with(&HashSet::new(), &HashSet::new());
@@ -1707,6 +1822,8 @@ mod tests {
             merged: HashMap::new(),
             settings: HashMap::new(),
             settings_merged: HashMap::new(),
+            quiet: Vec::new(),
+            owners: HashMap::new(),
         };
         let o = plan.decisions_with(&HashSet::new(), &HashSet::new());
         assert!(o.skip.contains("mods/gone-2.jar"));
@@ -1715,6 +1832,112 @@ mod tests {
         let o = plan.decisions_with(&HashSet::new(), &back);
         assert!(!o.skip.contains("mods/gone-2.jar") && o.leave_out.is_empty());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A Mekanism-like client config: the installed pack's copy, the new
+    /// pack's (one setting changed), and the variants a player ends up with.
+    const OLD_TOML: &str = "# Client settings\n[client]\n\tenablePlayerSounds = true\n\tbaseSoundVolume = 1.0\n";
+    const NEW_TOML: &str = "# Client settings\n[client]\n\tenablePlayerSounds = true\n\tbaseSoundVolume = 0.5\n";
+
+    #[test]
+    fn files_you_never_edited_are_the_packs() {
+        let rel = "config/Mekanism/client.toml";
+        // Yours is the installed version's copy: the pack changed it, you didn't.
+        assert_eq!(edited(rel, Some(OLD_TOML.as_bytes()), OLD_TOML.as_bytes(), NEW_TOML.as_bytes()), Edited::Untouched);
+        // The same with Windows line endings and trailing spaces.
+        let crlf = OLD_TOML.replace('\n', "  \r\n");
+        assert_eq!(edited(rel, Some(OLD_TOML.as_bytes()), crlf.as_bytes(), NEW_TOML.as_bytes()), Edited::Untouched);
+        // Without the installed copy it can't be told from an edit.
+        assert_eq!(edited(rel, None, OLD_TOML.as_bytes(), NEW_TOML.as_bytes()), Edited::Yours);
+    }
+
+    #[test]
+    fn spacing_and_comments_are_no_difference() {
+        let rel = "config/Mekanism/client.toml";
+        // Only spacing and blank lines apart from the pack's new copy.
+        let spaced = format!("\u{feff}{}\n\n", NEW_TOML.replace('\n', "   \r\n"));
+        assert_eq!(edited(rel, None, spaced.as_bytes(), NEW_TOML.as_bytes()), Edited::NoDiff);
+        // Comments and indentation changed, settings the same.
+        let commented = "# My notes\n[client]\nenablePlayerSounds = true # yes\nbaseSoundVolume = 0.50\n";
+        assert_eq!(edited(rel, None, commented.as_bytes(), NEW_TOML.as_bytes()), Edited::NoDiff);
+        // A plain text file: spacing only.
+        assert!(same_content("kubejs/server_scripts/a.js", b"let a = 1;  \r\n\r\n", b"let a = 1;\n"));
+        assert!(!same_content("kubejs/server_scripts/a.js", b"let a = 2;\n", b"let a = 1;\n"));
+    }
+
+    #[test]
+    fn real_edits_stay_a_choice() {
+        let rel = "config/Mekanism/client.toml";
+        // You changed a setting the pack didn't.
+        let mine = OLD_TOML.replace("enablePlayerSounds = true", "enablePlayerSounds = false");
+        assert_eq!(edited(rel, Some(OLD_TOML.as_bytes()), mine.as_bytes(), NEW_TOML.as_bytes()), Edited::Yours);
+        // A setting only yours has is a difference too.
+        let extra = format!("{OLD_TOML}\tmySetting = 3\n");
+        assert!(!same_content(rel, extra.as_bytes(), OLD_TOML.as_bytes()));
+        // A file whose settings can't be read, changed from the installed copy.
+        let rel = "config/broken.toml";
+        let (base, yours, theirs) = ("a = [1, 2\n", "a = [1, 3\n", "a = [1, 4\n");
+        assert_eq!(edited(rel, Some(base.as_bytes()), yours.as_bytes(), theirs.as_bytes()), Edited::Yours);
+        // Not text at all.
+        assert_eq!(edited("config/x.dat", Some(&[0xff, 1]), &[0xff, 2], &[0xff, 3]), Edited::Yours);
+    }
+
+    #[test]
+    fn unedited_conflicts_update_and_are_backed_up() {
+        let mut files = vec![
+            FileChange { rel: "config/untouched.toml".into(), action: FileAction::Conflict },
+            FileChange { rel: "config/spacing.toml".into(), action: FileAction::Conflict },
+            FileChange { rel: "config/mine.toml".into(), action: FileAction::Conflict },
+            FileChange { rel: "config/broken.toml".into(), action: FileAction::Conflict },
+            FileChange { rel: "config/added.toml".into(), action: FileAction::Add },
+        ];
+        let (base, theirs) = (OLD_TOML.as_bytes(), NEW_TOML.as_bytes());
+        let spaced = NEW_TOML.replace('\n', " \r\n");
+        let mine = OLD_TOML.replace("true", "false");
+        let quiet = settle_unedited(&mut files, |rel| match rel {
+            "config/untouched.toml" => edited(rel, Some(base), base, theirs),
+            "config/spacing.toml" => edited(rel, Some(base), spaced.as_bytes(), theirs),
+            "config/mine.toml" => edited(rel, Some(base), mine.as_bytes(), theirs),
+            _ => edited(rel, Some(b"a = [1"), b"a = [2", b"a = [3"),
+        });
+        assert_eq!(quiet, ["config/untouched.toml", "config/spacing.toml"]);
+        let acts: Vec<FileAction> = files.iter().map(|f| f.action).collect();
+        assert_eq!(
+            acts,
+            [FileAction::Update, FileAction::Update, FileAction::Conflict, FileAction::Conflict, FileAction::Add]
+        );
+        let plan = UpdatePlan {
+            file: cf::File::default(),
+            mods: Vec::new(),
+            files,
+            kept_mods: 0,
+            off: Vec::new(),
+            off_old: HashMap::new(),
+            removed: Vec::new(),
+            updated: Vec::new(),
+            still_off: Vec::new(),
+            base_known: false,
+            compared: false,
+            needed: Vec::new(),
+            your_mods: Vec::new(),
+            your_files: Vec::new(),
+            mod_made: 0,
+            new_zip: PathBuf::new(),
+            prefixes: Vec::new(),
+            same: Vec::new(),
+            merged: HashMap::new(),
+            settings: HashMap::new(),
+            settings_merged: HashMap::new(),
+            quiet,
+            owners: HashMap::new(),
+        };
+        // Only the real edits are asked about; the pack's copy replaces the
+        // rest, each backed up first so History's undo puts it back.
+        let asked: Vec<&str> = plan.conflicts().map(|f| f.rel.as_str()).collect();
+        assert_eq!(asked, ["config/mine.toml", "config/broken.toml"]);
+        let o = plan.decisions(&HashSet::new());
+        assert!(o.backup.contains(&"config/untouched.toml".to_string()) && o.backup.contains(&"config/spacing.toml".to_string()));
+        assert!(!o.skip.contains("config/untouched.toml") && o.skip.contains("config/mine.toml"));
     }
 
     #[test]
@@ -1747,6 +1970,8 @@ mod tests {
             merged: HashMap::new(),
             settings: HashMap::new(),
             settings_merged: HashMap::new(),
+            quiet: Vec::new(),
+            owners: HashMap::new(),
         };
         let o = plan.decisions(&["d".to_string()].into());
         assert!(o.skip.contains("b") && o.skip.contains("c") && o.skip.contains("s"));
@@ -1798,6 +2023,8 @@ mod tests {
             merged: [("config/m.toml".to_string(), b"merged".to_vec())].into(),
             settings: HashMap::new(),
             settings_merged: HashMap::new(),
+            quiet: Vec::new(),
+            owners: HashMap::new(),
         };
         let o = plan.clean_decisions();
         // Your edits give way to the pack's copy, backed up first.

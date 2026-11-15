@@ -569,8 +569,17 @@
                     <div class="cfl">
                       {#each conflicts as rel, ci (rel)}
                         {@const theirs = take.has(rel)}
+                        {@const owner = plan.owners?.[rel]}
                         <div class="cf" role="presentation" onpointerenter={(e) => paintOver(e, 'conflicts', ci, paintAt)}>
                           <div class="row">
+                            <!-- The owning mod's icon opens its page; a file no mod owns gets a plain file icon in the same slot, so every path lines up. -->
+                            {#if owner && owner.project && owner.project !== '0'}
+                              <button class="oi" title="Open {owner.name}" onclick={() => openPeek(owner.project)}>{#if owner.icon}<img src={owner.icon} alt="" width="20" height="20" loading="lazy" />{:else}<span class="ph"></span>{/if}</button>
+                            {:else if owner}
+                              <span class="oi" title={owner.name}>{#if owner.icon}<img src={owner.icon} alt="" width="20" height="20" loading="lazy" />{:else}<span class="ph"></span>{/if}</span>
+                            {:else}
+                              <span class="oi none" aria-hidden="true"><FileText size={14} /></span>
+                            {/if}
                             <span class="ell small grow" title={rel}>{rel}</span>
                             <button class="btn sm ghost" onclick={() => toggleDiff(rel)}>{diffs[rel] !== undefined ? 'Hide changes' : 'Changes'}</button>
                             <div class="seg xs">
@@ -773,6 +782,9 @@
   .mc { display: inline-flex; align-items: center; gap: 8px; width: 220px; flex: none; min-width: 0; font-size: 12.5px; text-align: left; }
   button.mc:hover { color: var(--acc); }
   .need .mc { width: auto; }
+  .oi { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; flex: none; padding: 0; border-radius: var(--radius-sm); }
+  .oi img { display: block; }
+  .oi.none { color: var(--muted); }
   .mc img, .ph { width: 20px; height: 20px; border-radius: var(--radius-sm); background: var(--raise); flex: none; }
   .fold { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--line); text-align: left; font-size: 12.5px; }
   .fold:hover { color: var(--acc); }
