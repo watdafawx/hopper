@@ -87,8 +87,47 @@ fn hm(when: i64) -> String {
     c.get(..5).unwrap_or(&c).to_string()
 }
 
+/// One row of History's list.
+#[derive(Clone, PartialEq)]
+pub(crate) enum Item {
+    /// The people filter.
+    Filter,
+    /// A day header; `true` for the first (no space above it).
+    Day(String, bool),
+    /// An entry, or the head of one that touched several files.
+    Set(usize),
+    /// One file of an open multi-file entry.
+    File(usize, usize),
+}
+
+/// Projects by file name without its version (see `BackupsView::project_of`).
+pub(crate) fn stems_of(projects: &std::collections::HashMap<String, (u64, String)>) -> std::collections::HashMap<String, (u64, String)> {
+    let mut out = std::collections::HashMap::new();
+    for (f, p) in projects {
+        out.entry(hopper::scan::strip_version_suffix(f)).or_insert_with(|| p.clone());
+    }
+    out
+}
+
+/// The shared-settings notes of friends' config changes, by entry file:
+/// read once with History instead of from disk on every frame.
+pub(crate) fn notes_of(sets: &[Set]) -> std::collections::HashMap<std::path::PathBuf, hopper::backups::SettingsNote> {
+    let mut out = std::collections::HashMap::new();
+    for f in sets.iter().flat_map(|s| &s.files) {
+        if f.change == Change::Edited
+            && f.who.as_ref().is_some_and(|w| !w.is_you())
+            && let Some(n) = f.path.parent().and_then(|d| hopper::backups::settings_note(d, &f.restore_to))
+        {
+            out.insert(f.path.clone(), n);
+        }
+    }
+    out
+}
+
 impl BackupsView {
-    /// History, grouped by day.
+    /// History, grouped by day. A list that builds only the rows in view: a
+    /// pack update leaves hundreds of entries, and building them all made
+    /// every scroll frame take as long as laying out the whole history.
     pub(crate) fn history_body(&self, cx: &mut Context<Self>) -> AnyElement {
         if !self.sets_loaded {
             return widgets::skeleton_rows(4, rems(2.5), cx).into_any_element();
@@ -102,12 +141,23 @@ impl BackupsView {
             )
             .into_any_element();
         }
-        let mut col = v_flex().gap_0p5();
+        let view = cx.entity().downgrade();
+        list(self.hlist.clone(), move |ix, _, cx| {
+            view.update(cx, |this, cx| this.history_item(ix, cx)).unwrap_or_else(|_| div().into_any_element())
+        })
+        .size_full()
+        .into_any_element()
+    }
+
+    /// Works out the list's rows again after History, the person filter or
+    /// an open fold changed. Only the rows that changed are measured again,
+    /// so the scroll spot stays.
+    pub(crate) fn sync_items(&mut self) {
         let people = self.people();
+        let mut items: Vec<(String, Item)> = Vec::new();
         if people.len() > 1 {
-            col = col.child(self.who_filter(&people, cx));
+            items.push(("filter".into(), Item::Filter));
         }
-        let faces = !people.is_empty();
         let mut day = String::new();
         for (i, set) in self.sets.iter().enumerate() {
             if !self.shown(set) {
@@ -115,20 +165,63 @@ impl BackupsView {
             }
             let d = day_of(set.when);
             if d != day {
-                col = col.child(
-                    div()
-                        .when(!day.is_empty(), |d| d.pt_3())
-                        .pb_1()
-                        .text_xs()
-                        .font_semibold()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(d.to_uppercase()),
-                );
+                let first = day.is_empty();
+                items.push((format!("day:{first}:{d}"), Item::Day(d.clone(), first)));
                 day = d;
             }
-            col = col.child(self.set_rows(i, set, faces, cx));
+            let dir = set.dir.to_string_lossy();
+            items.push((format!("set:{dir}"), Item::Set(i)));
+            if set.files.len() > 1 && self.open.contains(&set.dir) {
+                items.extend((0..set.files.len()).map(|j| (format!("file:{j}:{dir}"), Item::File(i, j))));
+            }
         }
-        col.into_any_element()
+        self.hfaces = !people.is_empty();
+        self.hpeople = people;
+        let old = &self.hitems;
+        let pre = old.iter().zip(&items).take_while(|(a, b)| a.0 == b.0).count();
+        let max_suf = old.len().min(items.len()) - pre;
+        let suf = old.iter().rev().zip(items.iter().rev()).take(max_suf).take_while(|(a, b)| a.0 == b.0).count();
+        if pre < old.len() || old.len() != items.len() {
+            self.hlist.splice(pre..old.len() - suf, items.len() - pre - suf);
+            // Rows not built yet count as an entry's height, not nothing, so
+            // the scrollbar's thumb is the right size and in the right place
+            // from the first frame (the list shares its state: this sets it).
+            let _ = self.hlist.clone().with_uniform_item_height(px(52.));
+        }
+        self.hitems = items;
+    }
+
+    /// Row `ix` of the list. Each carries the 2px gap below it that the rows
+    /// had as one column; the files of an open fold sit flush under its head.
+    fn history_item(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some((_, item)) = self.hitems.get(ix) else { return div().into_any_element() };
+        let el = match item {
+            Item::Filter => self.who_filter(&self.hpeople, cx),
+            Item::Day(d, first) => div()
+                .when(!*first, |d| d.pt_3())
+                .pb_1()
+                .text_xs()
+                .font_semibold()
+                .text_color(cx.theme().muted_foreground)
+                .child(d.to_uppercase())
+                .into_any_element(),
+            Item::Set(i) => match self.sets.get(*i) {
+                Some(set) => {
+                    let row = self.set_rows(*i, set, self.hfaces, cx);
+                    let folded = set.files.len() < 2 || !self.open.contains(&set.dir);
+                    return div().when(folded, |d| d.pb_0p5()).child(row).into_any_element();
+                }
+                None => div().into_any_element(),
+            },
+            Item::File(i, j) => match self.sets.get(*i).and_then(|s| Some((s, s.files.get(*j)?))) {
+                Some((set, f)) => {
+                    let row = self.entry_row(i * 10_000 + j + 1, f, set.when, true, self.hfaces, cx);
+                    return div().when(j + 1 == set.files.len(), |d| d.pb_0p5()).child(row).into_any_element();
+                }
+                None => div().into_any_element(),
+            },
+        };
+        div().pb_0p5().child(el).into_any_element()
     }
 
     /// Whether a set shows under the person filter.
@@ -174,6 +267,7 @@ impl BackupsView {
         // Picked rows the filter hides would still be undone: start over.
         self.sel.clear();
         self.who_pick = k;
+        self.sync_items();
         cx.notify();
     }
 
@@ -360,6 +454,7 @@ impl BackupsView {
                 if !this.open.remove(&dir) {
                     this.open.insert(dir.clone());
                 }
+                this.sync_items();
                 cx.notify();
             })),
             cx,
@@ -416,28 +511,22 @@ impl BackupsView {
         // off 2 mods").
         let counts = headline.is_some() && (!same || set.who().is_some_and(|w| !w.pack.is_empty()));
         let caption = if counts { format!("{} · {names}", set.summary()) } else { names };
-        v_flex()
+        // Its files, when open, are rows of their own in the list.
+        head.child(lead)
+            .child(v_flex().flex_1().min_w_0().child(title).child(widgets::caption(caption, cx).text_xs().truncate()))
+            .child(widgets::caption(hm(set.when), cx).text_xs())
             .child(
-                head
-                    .child(lead)
-                    .child(v_flex().flex_1().min_w_0().child(title).child(widgets::caption(caption, cx).text_xs().truncate()))
-                    .child(widgets::caption(hm(set.when), cx).text_xs())
-                    .child(
-                        widgets::row_actions(("hist-set-actions", i)).when(undoable, |r| {
-                            r.child(
-                                Button::new(("hist-undo-all", i))
-                                    .xsmall()
-                                    .outline()
-                                    .label("Undo all")
-                                    .disabled(busy)
-                                    .on_click(cx.listener(move |this, _, window, cx| this.undo(all.clone(), window, cx))),
-                            )
-                        }),
-                    ),
+                widgets::row_actions(("hist-set-actions", i)).when(undoable, |r| {
+                    r.child(
+                        Button::new(("hist-undo-all", i))
+                            .xsmall()
+                            .outline()
+                            .label("Undo all")
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, window, cx| this.undo(all.clone(), window, cx))),
+                    )
+                }),
             )
-            .when(open, |c| {
-                c.children(set.files.iter().enumerate().map(|(j, f)| self.entry_row(i * 10_000 + j + 1, f, set.when, true, faces, cx)))
-            })
             .into_any_element()
     }
 
@@ -458,12 +547,8 @@ impl BackupsView {
             }
         };
         // A friend's shared settings: named after the mod, with what changed.
-        let note = f
-            .who
-            .as_ref()
-            .filter(|w| !w.is_you() && f.change == hopper::backups::Change::Edited)
-            .and_then(|_| hopper::backups::settings_note(f.path.parent()?, &f.restore_to));
-        let name = match &note {
+        let note = self.notes.get(&f.path);
+        let name = match note {
             Some(n) if !n.mod_name.is_empty() => format!("{} settings", n.mod_name),
             _ => name,
         };
@@ -495,7 +580,7 @@ impl BackupsView {
                 .child(div().text_color(cx.theme().muted_foreground).child(f.change.verb())),
             None => h_flex().flex_none().child(div().text_color(change_color(f.change, true, cx)).child(f.change.label())),
         };
-        let mut detail = match &note {
+        let mut detail = match note {
             Some(n) => n
                 .changes
                 .iter()

@@ -42,6 +42,21 @@ pub struct BackupsView {
     pub(crate) copies: Option<u64>,
     /// Projects the instance has had, by file name, for backed-up files.
     projects: HashMap<String, (u64, String)>,
+    /// The same by file name without its version, so a row finds another
+    /// version's mod with one lookup instead of walking every project on
+    /// every frame.
+    stems: HashMap<String, (u64, String)>,
+    /// Friends' shared-settings notes by entry file, read once with History
+    /// rather than from disk on every frame.
+    pub(crate) notes: HashMap<PathBuf, hopper::backups::SettingsNote>,
+    /// History's rows as the list shows them (day headers, entries, open
+    /// folds). Only the rows in view are built, so a scroll frame costs the
+    /// same with 1,500 entries as with 15.
+    pub(crate) hitems: Vec<(String, crate::history_view::Item)>,
+    pub(crate) hlist: ListState,
+    /// Everyone with a change in History, and whether rows start with a face.
+    pub(crate) hpeople: Vec<hopper::actor::Who>,
+    pub(crate) hfaces: bool,
     /// Multi-file entries shown open (by folder).
     pub(crate) open: HashSet<PathBuf>,
     /// History rows picked (click, Ctrl / Shift, or press and drag across rows).
@@ -86,18 +101,25 @@ impl BackupsView {
         }
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
-            let (sets, projects, copies) = cx
+            let (sets, projects, copies, stems, notes) = cx
                 .background_spawn(async move {
-                    (hopper::backups::history(&root), hopper::snapshots::projects_seen(&root), hopper::backups::copies_size(&root))
+                    let sets = hopper::backups::history(&root);
+                    let projects = hopper::snapshots::projects_seen(&root);
+                    let stems = crate::history_view::stems_of(&projects);
+                    let notes = crate::history_view::notes_of(&sets);
+                    (sets, projects, hopper::backups::copies_size(&root), stems, notes)
                 })
                 .await;
             this.update(cx, |this, cx| {
                 this.sets = sets;
+                this.stems = stems;
+                this.notes = notes;
                 // Row keys are positions: they mean other rows now.
                 this.sel.clear();
                 this.copies = Some(copies);
                 this.projects = projects;
                 this.sets_loaded = true;
+                this.sync_items();
                 this.reload_usage(cx);
                 cx.notify();
             })
@@ -136,6 +158,7 @@ impl BackupsView {
                         this.error = Some(e);
                     }
                 }
+                this.sync_items();
                 cx.notify();
             })
             .ok();
@@ -319,11 +342,7 @@ impl BackupsView {
         if let Some(p) = self.projects.get(&bare) {
             return Some(p.clone());
         }
-        let stem = hopper::scan::strip_version_suffix(&bare);
-        self.projects
-            .iter()
-            .find(|(f, _)| hopper::scan::strip_version_suffix(f) == stem)
-            .map(|(_, p)| p.clone())
+        self.stems.get(&hopper::scan::strip_version_suffix(&bare)).cloned()
     }
 
     /// A mod's icon and name (or file name) that opens its page, when its
@@ -882,13 +901,14 @@ impl Render for BackupsView {
             // area has none without a set height).
             .child(if filled {
                 let bar = (!snaps_mode && self.sel.many()).then(|| self.history_bar(cx));
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(div().id("backups-list").size_full().overflow_y_scrollbar().child(body))
-                    .children(bar)
-                    .into_any_element()
+                let area = div().relative().flex_1().min_h_0();
+                // History's list scrolls itself (it builds only the rows in view).
+                let area = if snaps_mode {
+                    area.child(div().id("backups-list").size_full().overflow_y_scrollbar().child(body))
+                } else {
+                    area.child(div().id("backups-list").size_full().child(body)).vertical_scrollbar(&self.hlist)
+                };
+                area.children(bar).into_any_element()
             } else {
                 body
             })
@@ -924,6 +944,12 @@ fn open_with(store: Entity<Store>, root: PathBuf, panel: Option<crate::panel_tab
             sets_loaded: false,
             copies: None,
             projects: HashMap::new(),
+            stems: HashMap::new(),
+            notes: HashMap::new(),
+            hitems: Vec::new(),
+            hlist: ListState::new(0, ListAlignment::Top, px(400.)),
+            hpeople: Vec::new(),
+            hfaces: false,
             store,
             root,
             panel,
