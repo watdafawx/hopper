@@ -175,7 +175,10 @@ impl BackupsView {
         cx.spawn(async move |this, cx| {
             let u = cx
                 .background_spawn(async move {
-                    (hopper::retention::usage(&root), hopper::retention::preview(&root), hopper::retention::policy())
+                    {
+                        let (usage, would) = hopper::retention::usage_and_preview(&root);
+                        (usage, would, hopper::retention::policy())
+                    }
                 })
                 .await;
             this.update(cx, |this, cx| {

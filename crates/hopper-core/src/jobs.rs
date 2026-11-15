@@ -66,6 +66,22 @@ pub enum ToastKind {
     Failed,
 }
 
+/// The title of a pack update's "done" toast: "Pack updated to 2",
+/// "Pack reinstalled at 2" for the same file again, "Pack rolled back to 1"
+/// for an older one. CurseForge file ids only grow, so a lower one is an
+/// older version. `was` is the file the pack is on now (0: not known, which
+/// reads as an update). Shared by the desktop's pack and server pack updates
+/// and Hopper Server, so all of them say it the same way.
+pub fn pack_done_title(name: &str, shown: &str, was: u64, now: u64) -> String {
+    if was != 0 && now == was {
+        format!("{name} reinstalled at {shown}")
+    } else if was != 0 && now < was {
+        format!("{name} rolled back to {shown}")
+    } else {
+        format!("{name} updated to {shown}")
+    }
+}
+
 /// The toast a job that ended shows: kind, title and body. `None` while it
 /// runs, when it asked for none, or when the player cancelled it.
 pub fn toast_of(j: &JobState) -> Option<(ToastKind, String, String)> {
@@ -521,6 +537,16 @@ mod tests {
         bad.wait_for(&["c".into()]);
         bad.finish::<()>(&Err(anyhow::anyhow!("boom")));
         assert!(jobs.snapshot().iter().any(|j| j.title == "bad" && j.done));
+    }
+
+    #[test]
+    fn a_pack_update_toast_says_updated_reinstalled_or_rolled_back() {
+        assert_eq!(pack_done_title("P", "2", 10, 20), "P updated to 2");
+        assert_eq!(pack_done_title("P", "2", 20, 20), "P reinstalled at 2");
+        assert_eq!(pack_done_title("P", "1", 20, 10), "P rolled back to 1");
+        // Not known which one it was on: an update.
+        assert_eq!(pack_done_title("P", "1", 0, 10), "P updated to 1");
+        assert_eq!(pack_done_title("P", "1", 0, 0), "P updated to 1");
     }
 
     #[test]

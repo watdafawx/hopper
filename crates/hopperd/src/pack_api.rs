@@ -667,6 +667,7 @@ async fn apply(
             "summary": r.summary(), "mods": r.mods, "files": r.files, "removed": r.removed,
             "loader": r.loader.as_ref().map(|(from, to)| json!({ "from": from, "to": to })),
             "backups": backups, "version": plan.pack.display_name,
+            "headline": hopper_core::jobs::pack_done_title(&e.name, &plan.pack.display_name, plan.from_file_id, plan.plan.file.id),
         }))
     });
     Ok(Json(json!({ "job": job })))

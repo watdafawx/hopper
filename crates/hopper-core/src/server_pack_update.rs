@@ -168,6 +168,11 @@ pub struct ServerPlan {
     /// ([`ServerPlan::reset_versions`]).
     #[serde(default)]
     pub kept_versions: Vec<ModChange>,
+    /// The server pack file the server is on now, from its record (0: no
+    /// record). Only for the toast: it says "reinstalled" or "rolled back"
+    /// instead of "updated".
+    #[serde(default)]
+    pub from_file_id: u64,
 }
 
 impl ServerPlan {
@@ -477,6 +482,7 @@ pub fn plan(
         mods_note,
         kept,
         kept_versions,
+        from_file_id: marker.as_ref().map_or(0, |m| m.server_pack_file_id),
     })
 }
 

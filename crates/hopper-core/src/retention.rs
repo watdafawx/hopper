@@ -202,6 +202,9 @@ fn scan(root: &Path) -> (Vec<Entry>, Store, u64) {
     let base = root.join(crate::sync::BACKUP_DIR);
     let mut out = Vec::new();
     let mut other = 0;
+    // Folders to measure: sizing hundreds of them waits on the disk, so
+    // they're measured side by side below.
+    let mut folders: Vec<(Option<i64>, PathBuf)> = Vec::new();
     for e in fs::read_dir(&base).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let path = e.path();
@@ -209,9 +212,15 @@ fn scan(root: &Path) -> (Vec<Entry>, Store, u64) {
             continue;
         }
         match stamp(&name) {
-            Some(when) if path.is_dir() => out.push(Entry { when, item: Item::Folder { bytes: dir_bytes(&path), dir: path } }),
-            _ if path.is_dir() => other += dir_bytes(&path),
+            Some(when) if path.is_dir() => folders.push((Some(when), path)),
+            _ if path.is_dir() => folders.push((None, path)),
             _ => other += e.metadata().map_or(0, |m| m.len()),
+        }
+    }
+    for (when, dir, bytes) in crate::configindex::par_map(&folders, |(w, p)| (*w, p.clone(), dir_bytes(p))) {
+        match when {
+            Some(when) => out.push(Entry { when, item: Item::Folder { bytes, dir } }),
+            None => other += bytes,
         }
     }
     let mut store = Store { size: HashMap::new(), uses: HashMap::new(), pinned: HashSet::new() };
@@ -236,7 +245,11 @@ fn scan(root: &Path) -> (Vec<Entry>, Store, u64) {
 
 /// How much the backups folder holds, and how much of it pruning manages.
 pub fn usage(root: &Path) -> Usage {
-    let (entries, store, other) = scan(root);
+    usage_of(&scan(root))
+}
+
+fn usage_of((entries, store, other): &(Vec<Entry>, Store, u64)) -> Usage {
+    let other = *other;
     let live: HashSet<String> = store.uses.keys().cloned().collect();
     let folders: u64 = entries.iter().map(|e| if let Item::Folder { bytes, .. } = e.item { bytes } else { 0 }).sum();
     let all = store.bytes(&live);
@@ -350,7 +363,11 @@ pub fn needs_cleanup(root: &Path) -> bool {
 
 fn run(root: &Path, r: Retention, mode: Mode, dry: bool, dispose: Dispose) -> Pruned {
     let _g = lock_for(root);
-    let (entries, store, _) = scan(root);
+    run_scanned(root, scan(root), r, mode, dry, dispose)
+}
+
+fn run_scanned(root: &Path, scanned: (Vec<Entry>, Store, u64), r: Retention, mode: Mode, dry: bool, dispose: Dispose) -> Pruned {
+    let (entries, store, _) = scanned;
     let now = crate::time::now();
     let backlog_to = match mode {
         Mode::Full => None,
@@ -420,6 +437,15 @@ pub fn clean_up(root: &Path) -> Pruned {
 /// What [`clean_up`] would remove now, touching nothing.
 pub fn preview(root: &Path) -> Pruned {
     run(root, policy(), Mode::Full, true, disposer())
+}
+
+/// [`usage`] and [`preview`] from one look at the folder: sizing every
+/// backup is most of what either costs.
+pub fn usage_and_preview(root: &Path) -> (Usage, Pruned) {
+    let _g = lock_for(root);
+    let scanned = scan(root);
+    let usage = usage_of(&scanned);
+    (usage, run_scanned(root, scanned, policy(), Mode::Full, true, disposer()))
 }
 
 /// Notes whether `root` has old backups for Clean up, touching nothing.
@@ -548,6 +574,30 @@ mod tests {
     }
 
     const NO_RULES: Retention = Retention { keep_actions: 0, keep_days: 0, max_mb: 0 };
+
+    #[test]
+    fn usage_and_preview_from_one_look_match_the_two_calls() {
+        let root = tmp("both");
+        let now = crate::time::now();
+        // 40 actions, some with a nested folder, the oldest past the rules.
+        for i in 1..=40i64 {
+            let d = action(&root, &(now - i * DAY).to_string(), 100 + i as usize);
+            if i % 3 == 0 {
+                fs::create_dir_all(d.join("mods")).unwrap();
+                fs::write(d.join("mods/y.jar"), vec![1u8; 50]).unwrap();
+            }
+        }
+        fs::create_dir_all(root.join(crate::sync::BACKUP_DIR).join("worlds")).unwrap();
+        fs::write(root.join(crate::sync::BACKUP_DIR).join("worlds/w.zip"), vec![2u8; 300]).unwrap();
+        let (u, would) = usage_and_preview(&root);
+        let (u2, would2) = (usage(&root), preview(&root));
+        assert_eq!((u.managed, u.pinned, u.other, u.actions), (u2.managed, u2.pinned, u2.other, u2.actions));
+        assert_eq!((would.folders, would.snapshots, would.freed), (would2.folders, would2.snapshots, would2.freed));
+        assert_eq!(u.actions, 40);
+        assert_eq!(u.other, 300, "the world copy is counted, not managed");
+        assert!(would.folders > 0, "the oldest are past the rules");
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn defaults_keep_30_actions_and_30_days_with_no_size_limit() {

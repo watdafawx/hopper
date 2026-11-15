@@ -2949,13 +2949,7 @@ impl Store {
             let shown = hopper::undo::version_of(&file.file_name);
             let shown = if shown.is_empty() { file.display_name.clone() } else { shown };
             let was = full.pack.as_ref().map_or(0, |p| p.file_id);
-            let done = if file.id == was {
-                format!("{name} reinstalled at {shown}")
-            } else if file.id < was {
-                format!("{name} rolled back to {shown}")
-            } else {
-                format!("{name} updated to {shown}")
-            };
+            let done = hopper::jobs::pack_done_title(&name, &shown, was, file.id);
             job.toast(done, failed);
             let loader_before = (full.loader.clone(), full.game_version.clone());
             if backup_worlds {

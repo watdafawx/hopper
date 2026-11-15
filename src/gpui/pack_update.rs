@@ -847,7 +847,10 @@ impl UpdatePreview {
         let id = s.spawn_job_id(format!("{} → {}", server.name, p.plan.file.display_name), move |job| {
             job.announce();
             let to = hopper::undo::version_of(&p.plan.file.file_name);
-            job.toast(format!("{} updated to {to}", server.name), format!("{} didn't update", server.name));
+            job.toast(
+                hopper::jobs::pack_done_title(&server.name, &to, p.from_file_id, p.plan.file.id),
+                format!("{} didn't update", server.name),
+            );
             let r = hopper::server_pack_update::apply(&server, &p, &take, &host, &java, panel.as_deref(), job);
             applying(|m| m.remove(&job.id()));
             let r = r?;
@@ -1918,7 +1921,7 @@ impl UpdatePreview {
                 div().when(!any, |d| d.text_color(muted)).child(if any {
                     parts.join(" · ")
                 } else {
-                    "Nothing of yours in the pack's folders".to_string()
+                    "Nothing of yours in the mods folder or the pack's folders".to_string()
                 }),
                 any.then_some(open == Some(Section::Stays)),
                 cx,

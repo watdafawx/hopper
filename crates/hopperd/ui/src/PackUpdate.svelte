@@ -392,7 +392,7 @@
         if (packJobs.byId[id]) packJobs.byId = { ...packJobs.byId, [id]: { to, detail: st.detail, progress: st.progress } };
       });
       done();
-      say(`${name} updated to ${r.version}. ${String(r.summary || '').replace(/\.$/, '')}.`);
+      say(`${r.headline || `${name} updated to ${r.version}`}. ${String(r.summary || '').replace(/\.$/, '')}.`);
       onDone();
     } catch (e) {
       done();
