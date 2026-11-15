@@ -22,7 +22,7 @@
 //! `HOPPERD_VPS_TEST_OFFLINE=1`, Velocity without account checks (a test
 //! box's logins have no Mojang account).
 //!
-//! B4 adds Velocity (design/vps-relay.md, "B4 as built"): Java 21 and the
+//! B4 adds Velocity (design/vps-relay.md, "B4 as built"; B5 moved it to 4.x): Java and the
 //! Velocity jar, both pinned with their SHA-256 in [`plan`], its own user
 //! and service, and the forwarding secret, sent on stdin.
 

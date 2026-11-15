@@ -777,6 +777,100 @@ units, users, folders or listeners left). The real Mojang login path is not
 tested here (the test box runs Velocity with `online-mode = false` via
 `HOPPERD_VPS_TEST_OFFLINE`).
 
+## B5 as built
+
+Ping from the VPS front, the PROXY v2 check, and new Velocity and Java
+pins. No new ports: everything rides the existing control stream.
+
+### Players tab ping: the method, and why
+
+Option 1 from "Players tab: real ping" above, as planned. The relay's
+front already owns the player's TCP socket, so it reads the kernel's
+smoothed round-trip time (`TCP_INFO`, `tcpi_rtt`) on that socket: the same
+reading `player_ping.rs` takes for players who join through Hopper's own
+address, with no plugin and no guess. Velocity has no way to hand its
+`Player.getPing()` to another process without a plugin (option 2, rejected:
+a Java plugin to build, sign and keep up to date), and the tunnel's RTT says
+nothing about each player (option 3, rejected).
+
+- **Who is who.** After the handshake (login intent only, and only when the
+  port has a server) the front reads the Login Start packet, which is sent
+  in clear before encryption, and lists the socket under that name in
+  `player_ping`, the same list the home router uses. The name is not
+  checked by anyone at that point, so it is used only to label a ping in
+  the Players tab, never for anything that grants access. When two
+  connections claim the same name, the oldest one counts on both ends (a
+  second connection with someone's name can't replace their reading).
+- **Getting it home.** Home asks only when the Players tab needs it: when
+  an online player has no router reading, `player_ping::people` calls
+  `Home::relay_pings`. That sends a control line `{routes..., pings: true}`
+  and waits at most 800 ms for the relay's answer line
+  `{"pings":[{server, name, ms}]}`. An answer is reused for 3 s (the tab
+  polls), and counts as current for 15 s. The ask still carries the full
+  route list, so an older relay (B4) that doesn't know `pings` just sees the
+  same routes again and answers nothing; the tab then shows "—" as before.
+  The relay only logs and applies routes when they changed, so asks don't
+  fill its log.
+- **What the column shows.** `ping to the relay + relay to home` (the
+  front's reading plus the tunnel's RTT from the mux pings, every 20 s),
+  because that is what the player feels. Hover: "Measured at the relay: 151
+  ms to the relay + 20 ms from the relay to this server". Router readings
+  win over relay readings, relay readings over spark; players read at the
+  relay aren't sent to spark.
+
+### PROXY v2 to Velocity
+
+Already done in B4 (`proxy_v2()` in `relay_end.rs`; Velocity's
+`haproxy-protocol = true`, only on its 127.0.0.1:25577 listener). Checked
+again: Velocity's log shows each client's own address and port
+(`Steve (/127.0.0.1:45661)`, `Alex_The_Long_Nm (/127.0.0.2:45222)` from a
+second source address), not the front's.
+
+### Velocity and Java pins
+
+Velocity 3.5.1 lost support on 2026-09-30. PaperMC's API (`fill.papermc.io`
+v3) lists 4.3.1 build 45 as the newest STABLE build (2026-10-27); it needs
+Java 25. Adoptium's API lists Temurin 25.0.5+8 as the newest Java 25 GA JRE.
+
+| What | Version | SHA-256 |
+|---|---|---|
+| Velocity | 4.3.1 build 45 | `0844bcabdcdb4f5b875906fd4c3365bc1bb76918e42bc595ed88ad195258dd75` |
+| Temurin JRE x64 | 25.0.5+8 | `6fac98f0c8202efc3135a9e9e42aa61963ec42d1c5cbb40caf231e7b14a24ef6` |
+| Temurin JRE aarch64 | 25.0.5+8 | `963931723891302ebb2687178532c3d793d71e2577cd058061c7efb396140a86` |
+
+All three were downloaded and hashed before pinning. "Run again" moves a
+3.5.1 relay over: the Java step compares `installed.json`'s `java_sha256`
+and the Velocity step the jar's SHA-256, so both are replaced and Velocity
+restarted. The existing `velocity.toml` (`config-version = "2.7"`) loads in
+4.3.1 without warnings. No copy of the old jar or Java is kept to go back
+to; a later "Go back" would need one.
+
+### Tested (WSL box, Fabric 1.20.1 scratch server)
+
+- Fresh install with the new pins; Use the relay; offline bots log in
+  through Velocity 4.3.1 with modern forwarding into FabricProxy-Lite.
+- Ping against added delay (`tc netem`). In WSL's mirrored networking,
+  127.0.0.1 traffic goes over `loopback0`, not `lo`, so the delay goes there:
+
+  | Delay added | Shown | Parts |
+  |---|---|---|
+  | none | 1 ms | relay 1, home 0 |
+  | 40 ms, player → front | 42–44 ms | kernel srtt 42.6 ms |
+  | 150 ms player → front, 20 ms on the tunnel | 170–173 ms | relay 151–153, home 18–20 |
+
+- Upgrade: the box set back to 3.5.1 + Java 21 (old jar, old JRE, old
+  `java_sha256`), then "Run again": java and velocity "downloaded, checksum
+  ok", Velocity 4.3.1 boots on Java 25, a bot logs in through it.
+
+### Not done (later phases)
+
+- Desktop's server Players tab (`src/gpui/panel_tabs/players.rs`) gets the
+  same `via: "relay"` fields from the server; its tooltip still says the
+  generic text. B8 (desktop parity).
+- The light theme's amber ping colour (`--gold` on the page background) is
+  2.81:1, under 4.5:1. It is the shared colour for every ping, not new
+  here.
+
 ## Open questions for the maintainer (answered: see Decisions)
 
 1. **Voice: built-in UDP relay instead of AmneziaWG?** AmneziaWG needs a

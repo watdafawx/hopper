@@ -52,6 +52,29 @@ pub struct Control {
     /// player on its game port to the first one; per-server ports are B7.
     #[serde(default)]
     pub routes: Vec<Route>,
+    /// Home asks for the players' pings (B5). The line still carries the
+    /// routes, so a relay from before B5 reads it as a routes line and
+    /// changes nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pings: bool,
+}
+
+/// What the relay sends home on the control stream, one JSON object per
+/// line (B5): the answer to a `pings` ask.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct RelayLine {
+    #[serde(default)]
+    pub pings: Vec<Ping>,
+}
+
+/// One player's ping as the relay's front port measures it: the OS's
+/// smoothed round trip on the player's own TCP connection to the VPS.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Ping {
+    pub server: String,
+    /// Lowercase, as the player sent it in Login Start.
+    pub name: String,
+    pub ms: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

@@ -54,28 +54,34 @@ pub struct Pinned {
     pub size: u64,
 }
 
-/// Velocity 3.5.1 (build 615), from PaperMC's downloads. Needs Java 21.
+/// Velocity 4.3.1 (build 45, channel STABLE), from PaperMC's downloads.
+/// Needs Java 25. 3.5.1, the first pin, lost support on 2026-09-30; a
+/// relay set up with it is moved to this one by "Run again" (the jar's
+/// SHA-256 and the Java archive's differ, so both steps replace them).
 pub const VELOCITY: Pinned = Pinned {
-    name: "Velocity 3.5.1",
-    url: "https://fill-data.papermc.io/v1/objects/b4e3164df5377346854dc6cb9e6a78022b1946ff69e89676313f5f6f1c6f0fb3/velocity-3.5.1-615.jar",
-    sha256: "b4e3164df5377346854dc6cb9e6a78022b1946ff69e89676313f5f6f1c6f0fb3",
-    size: 18_932_366,
+    name: "Velocity 4.3.1",
+    url: "https://fill-data.papermc.io/v1/objects/0844bcabdcdb4f5b875906fd4c3365bc1bb76918e42bc595ed88ad195258dd75/velocity-4.3.1-45.jar",
+    sha256: "0844bcabdcdb4f5b875906fd4c3365bc1bb76918e42bc595ed88ad195258dd75",
+    size: 42_342_611,
 };
 
-/// Eclipse Temurin 21.0.13+9 (the JRE), for the VPS's CPU.
+/// The Java the pinned Velocity needs, for the steps' names.
+pub const JAVA_MAJOR: u32 = 25;
+
+/// Eclipse Temurin 25.0.5+8 LTS (the JRE), for the VPS's CPU.
 pub fn java(arch: &str) -> Option<Pinned> {
     match arch {
         "x64" => Some(Pinned {
-            name: "Java 21 (Temurin 21.0.13)",
-            url: "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jre_x64_linux_hotspot_21.0.13_9.tar.gz",
-            sha256: "a535a1df9c6284d9618872984e026ae0352d1f7e9e0605425c0e6114f47351dd",
-            size: 52_181_297,
+            name: "Java 25 (Temurin 25.0.5)",
+            url: "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jre_x64_linux_hotspot_25.0.5_8.tar.gz",
+            sha256: "6fac98f0c8202efc3135a9e9e42aa61963ec42d1c5cbb40caf231e7b14a24ef6",
+            size: 61_736_206,
         }),
         "arm64" => Some(Pinned {
-            name: "Java 21 (Temurin 21.0.13)",
-            url: "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jre_aarch64_linux_hotspot_21.0.13_9.tar.gz",
-            sha256: "b1734db7ade49c3f6acc6ae06233b8c2dd90e3e2f00f67000ae1c972aaa64d8c",
-            size: 51_266_660,
+            name: "Java 25 (Temurin 25.0.5)",
+            url: "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jre_aarch64_linux_hotspot_25.0.5_8.tar.gz",
+            sha256: "963931723891302ebb2687178532c3d793d71e2577cd058061c7efb396140a86",
+            size: 60_517_419,
         }),
         _ => None,
     }
@@ -634,7 +640,7 @@ pub fn install_steps(version: &str, ports: (u16, u16)) -> Vec<Step> {
     vec![
         Step::new("user", "Relay user and folders"),
         Step::new("binary", format!("Hopper relay {version}")),
-        Step::new("java", "Java 21 for Velocity"),
+        Step::new("java", format!("Java {JAVA_MAJOR} for Velocity")),
         Step::new("velocity", format!("{} and the forwarding secret", VELOCITY.name)),
         Step::new("keys", "Relay key and certificate"),
         Step::new("service", "Relay service"),

@@ -399,7 +399,7 @@ async fn players(
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
     let props = Properties::load(&e.root.join("server.properties")).unwrap_or_default();
-    let people = crate::player_ping::people(&e).await;
+    let people = crate::player_ping::people(&app, &e).await;
     Ok(Json(json!({
         "online": e.server.players(),
         "people": people,

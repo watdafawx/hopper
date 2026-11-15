@@ -101,9 +101,29 @@ fn rtt_ms(_: Raw) -> Option<u32> {
 }
 
 /// Router readings for a server's players: lowercase name -> (ms, since).
+/// With two connections under one name, the older one counts: a second
+/// login under a name already online is the one that hasn't been let in
+/// (the server or the relay's Velocity refuses it, or it replaces the
+/// first, which then closes).
 fn router(server: &str) -> HashMap<String, (Option<u32>, SystemTime)> {
     let g = conns().lock().unwrap();
-    g.iter().filter(|c| c.server == server).map(|c| (c.name.to_lowercase(), (rtt_ms(c.raw), c.since))).collect()
+    let mut out: HashMap<String, (Option<u32>, SystemTime)> = HashMap::new();
+    for c in g.iter().filter(|c| c.server == server) {
+        let low = c.name.to_lowercase();
+        if out.get(&low).is_some_and(|(_, since)| *since <= c.since) {
+            continue;
+        }
+        out.insert(low, (rtt_ms(c.raw), c.since));
+    }
+    out
+}
+
+/// What the relay's front port measures for `server`'s players, sent home
+/// on the control stream (design/vps-relay.md, "B5 as built"): lowercase
+/// name -> ms. The relay runs no servers, so every connection listed there
+/// is a player's socket on the VPS.
+pub fn readings(server: &str) -> HashMap<String, u32> {
+    router(server).into_iter().filter_map(|(n, (ms, _))| ms.map(|ms| (n, ms))).collect()
 }
 
 /// spark readings, kept a few seconds so a tab open in two places doesn't
@@ -142,14 +162,19 @@ fn unix(t: SystemTime) -> u64 {
 
 /// Each online player with their ping (`ms`, `null` with `why` when there's
 /// no way to read it) and when they joined (unix seconds, when known).
-pub async fn people(e: &Arc<Entry>) -> Value {
+pub async fn people(app: &crate::App, e: &Arc<Entry>) -> Value {
     let online = e.server.players();
     if online.is_empty() {
         return json!([]);
     }
     let joined = e.server.joined_at();
     let routed = router(&e.id);
-    let missing: Vec<String> = online.iter().filter(|n| !matches!(routed.get(&n.to_lowercase()), Some((Some(_), _)))).cloned().collect();
+    // Players who came through a relay on a VPS: the relay's front port
+    // holds their own connection, so it measures them there (to the VPS),
+    // and the tunnel's round trip adds the way from the VPS to here.
+    let relay = if online.iter().any(|n| !matches!(routed.get(&n.to_lowercase()), Some((Some(_), _)))) { app.vps.relay_pings(&e.id).await } else { None };
+    let relayed = |low: &str| relay.as_ref().and_then(|(m, _)| m.get(low).copied());
+    let missing: Vec<String> = online.iter().filter(|n| !matches!(routed.get(&n.to_lowercase()), Some((Some(_), _))) && relayed(&n.to_lowercase()).is_none()).cloned().collect();
     let has_spark = crate::alerts::has_spark(&e.root);
     let rcon_on = rcon::settings(&e.root).is_some();
     let mut sparked = HashMap::new();
@@ -184,19 +209,29 @@ pub async fn people(e: &Arc<Entry>) -> Value {
         .map(|n| {
             let low = n.to_lowercase();
             let r = routed.get(&low);
-            let (ms, via) = match (r.and_then(|r| r.0), sparked.get(&low)) {
-                (Some(ms), _) => (Some(ms), "router"),
-                (None, Some(ms)) => (Some(*ms), "spark"),
+            let front = relayed(&low);
+            let home = relay.as_ref().and_then(|(_, h)| *h);
+            let (ms, via) = match (r.and_then(|r| r.0), front, sparked.get(&low)) {
+                (Some(ms), _, _) => (Some(ms), "router"),
+                // What the player feels: to the VPS, then on to here.
+                (None, Some(ms), _) => (Some(ms + home.unwrap_or(0)), "relay"),
+                (None, None, Some(ms)) => (Some(*ms), "spark"),
                 _ => (None, ""),
             };
             let since = joined.get(n).copied().or(r.map(|r| r.1));
-            json!({
+            let mut v = json!({
                 "name": n,
                 "ms": ms,
                 "via": via,
                 "why": if ms.is_none() { Some(why) } else { None },
                 "joined": since.map(unix),
-            })
+            });
+            // Both parts, for the tooltip.
+            if via == "relay" {
+                v["relay_ms"] = json!(front);
+                v["home_ms"] = json!(home);
+            }
+            v
         })
         .collect();
     json!(list)

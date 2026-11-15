@@ -478,3 +478,55 @@ fn proxy_header_carries_the_players_address() {
     assert_eq!(&h[32..48], &"::ffff:10.0.0.2".parse::<std::net::Ipv6Addr>().unwrap().octets());
     assert_eq!(h.len(), 16 + 36);
 }
+
+// ---- B5: players' ping from the relay's front port ----------------------------------------
+
+/// The ping ask still carries the routes, so a relay from before B5 (which
+/// reads every line as routes) changes nothing; a routes line doesn't ask.
+#[test]
+fn ping_ask_keeps_the_routes() {
+    let routes = vec![super::Route { server: "s1".into(), name: "One".into(), velocity: true }];
+    let ask = serde_json::to_value(super::Control { routes: routes.clone(), pings: true }).unwrap();
+    assert_eq!(ask["pings"], true);
+    #[derive(serde::Deserialize)]
+    struct Before {
+        routes: Vec<super::Route>,
+    }
+    let old: Before = serde_json::from_value(ask).unwrap();
+    assert_eq!(old.routes, routes);
+    let plain = serde_json::to_string(&super::Control { routes, pings: false }).unwrap();
+    assert!(!plain.contains("pings"), "{plain}");
+}
+
+/// Home asks over the control stream and the relay answers with what its
+/// front port lists for that server's players. (Both ends run in this test
+/// process, so the player's socket is listed here directly; the relay
+/// reading Login Start is checked against a real client on the test VPS.)
+#[tokio::test(flavor = "multi_thread")]
+async fn home_gets_the_relays_ping_readings() {
+    let t = crate::cross_origin_tests::panel_with(crate::TlsInfo { fingerprint: "AA:BB".into(), ca_pem: String::new() });
+    let r = run_relay().await;
+    t.app.vps.set_config(home_cfg(&r, r.tunnel, &t.server)).unwrap();
+    home::start(t.app.clone());
+    wait_for("the link", 15, || r.relay.ready()).await;
+    // A player's connection, with some traffic so the OS has a round trip.
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut player = TcpStream::connect(l.local_addr().unwrap()).await.unwrap();
+    let (mut front, _) = l.accept().await.unwrap();
+    for _ in 0..20 {
+        front.write_all(&[1; 64]).await.unwrap();
+        let mut b = [0u8; 64];
+        player.read_exact(&mut b).await.unwrap();
+        player.write_all(&b).await.unwrap();
+        front.read_exact(&mut b).await.unwrap();
+    }
+    let _listed = crate::player_ping::listen(&t.server, "Steve", &front);
+    let (pings, _) = t.app.vps.relay_pings(&t.server).await.expect("the server uses the relay and it's up");
+    assert!(t.app.vps.has_relay_answer(), "the relay answered the ask");
+    // Loopback can round-trip in under a microsecond, which reads as no
+    // value; when there is one it's under the name, lowercase.
+    if let Some(ms) = pings.get("steve") {
+        assert!(*ms < 1000, "{ms}");
+    }
+    assert!(t.app.vps.relay_pings("not-relayed").await.is_none());
+}
