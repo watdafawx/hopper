@@ -1156,24 +1156,24 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .lk { color: var(--muted); display: grid; }
   .tags { display: flex; gap: 4px; align-items: center; margin-top: 2px; min-width: 0; overflow: hidden; flex-wrap: nowrap; }
   .tag { font-size: 10.5px; padding: 0 6px; flex: none; }
-  .tag.gold { color: var(--gold); background: var(--gold-dim); }
-  .tag.warnc { color: var(--gold); background: var(--gold-dim); }
-  .tag.info { color: var(--blue); background: var(--blue-dim); }
-  .tag.okc, .tag.mr { color: var(--green); background: var(--green-dim); }
+  .tag.gold { color: var(--ink-gold); background: var(--gold-dim); }
+  .tag.warnc { color: var(--ink-gold); background: var(--gold-dim); }
+  .tag.info { color: var(--ink-blue); background: var(--blue-dim); }
+  .tag.okc, .tag.mr { color: var(--ink-green); background: var(--green-dim); }
   .lockt { gap: 3px; cursor: pointer; }
-  .brk { gap: 4px; color: var(--red); background: var(--red-dim); max-width: 160px; min-width: 0; flex: 0 1 auto; }
+  .brk { gap: 4px; color: var(--ink-red); background: var(--red-dim); max-width: 160px; min-width: 0; flex: 0 1 auto; }
   .brk img { border-radius: var(--radius-sm); flex: none; }
   .lockt:hover { color: var(--text); }
   /* The version chip: click to pick another version; with an update, installed → offered. */
-  .vchip { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; max-width: 200px; min-width: 0; padding: 0 6px; border-radius: var(--radius-sm); font-size: 10.5px; line-height: 17px; background: #ffffff0d; color: var(--muted); }
+  .vchip { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; max-width: 200px; min-width: 0; padding: 0 6px; border-radius: var(--radius-sm); font-size: 10.5px; line-height: 17px; background: #ffffff0d; color: var(--ink-muted); }
   .vchip .chev { visibility: hidden; display: grid; color: var(--acc); flex: none; }
-  .vchip:not(.plain):hover { background: var(--acc-dim); color: var(--acc); }
+  .vchip:not(.plain):hover { background: var(--acc-dim); color: var(--ink-acc); }
   .vchip:hover .chev { visibility: visible; }
-  .vchip.upc { background: var(--acc-dim); color: var(--acc); }
+  .vchip.upc { background: var(--acc-dim); color: var(--ink-acc); }
   .vchip.upc b { font-weight: 600; }
   .vchip.upc:hover { background: #f9731640; }
-  .vchip.warnv { background: var(--gold-dim); color: var(--gold); }
-  .vchip.lockv { background: #ffffff0d; color: var(--muted); }
+  .vchip.warnv { background: var(--gold-dim); color: var(--ink-gold); }
+  .vchip.lockv { background: #ffffff0d; color: var(--ink-muted); }
   .c-act { display: flex; justify-content: flex-start; align-items: center; gap: 6px; }
   .archw { display: inline-flex; color: var(--gold); flex: none; cursor: help; }
   .c-on { display: flex; }

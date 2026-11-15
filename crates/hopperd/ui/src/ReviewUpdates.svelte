@@ -120,7 +120,7 @@
   .nm { display: flex; gap: 6px; align-items: center; text-align: left; min-width: 0; font-size: 13px; }
   .grow { flex: 1; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .vchip { display: inline-flex; align-items: center; gap: 4px; max-width: 240px; min-width: 0; padding: 1px 7px; border-radius: var(--radius-sm); background: var(--acc-dim); font-size: 11.5px; color: var(--acc); flex: none; }
+  .vchip { display: inline-flex; align-items: center; gap: 4px; max-width: 240px; min-width: 0; padding: 1px 7px; border-radius: var(--radius-sm); background: var(--acc-dim); font-size: 11.5px; color: var(--ink-acc); flex: none; }
   .to { color: var(--acc); }
   .prob { display: flex; align-items: center; gap: 4px; color: var(--red); margin: 2px 0 0 52px; min-width: 0; }
   .kept { display: flex; align-items: center; gap: 4px; margin: 2px 0 0 52px; }
