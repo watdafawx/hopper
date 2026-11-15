@@ -39,7 +39,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use super::link::{self, LinkError};
 use super::wire::Codec;
-use super::{Control, Head, Route};
+use super::{Control, Head, Ping, Route, RelayLine};
 use crate::tunnel::mux;
 
 const FILE: &str = "relay.json";
@@ -302,20 +302,36 @@ async fn home_conn(r: Arc<Relay>, acceptor: tokio_rustls::TlsAcceptor, sock: Tcp
     log::info!("relay: home panel disconnected ({why})");
 }
 
-/// Reads home's control lines: which servers it carries.
+/// Reads home's control lines: which servers it carries, and asks for the
+/// players' pings (answered on the same stream).
 async fn control(r: &Relay, epoch: u64, s: mux::Stream) {
-    let mux::Stream { mut rx, tx, .. } = s;
-    // Home's end stays open while the connection lasts.
-    let _keep = tx;
+    let mux::Stream { mut rx, mut tx, .. } = s;
     let mut lines = Lines::default();
     while let Ok(Some(chunk)) = rx.recv().await {
         let Ok(got) = lines.push(&chunk) else { return };
         for line in got {
             let Ok(c) = serde_json::from_slice::<Control>(&line) else { continue };
-            let mut h = r.home.lock().unwrap();
-            if let Some(h) = h.as_mut().filter(|h| h.epoch == epoch) {
-                log::info!("relay: home carries {}", c.routes.iter().map(|r| if r.name.is_empty() { r.server.as_str() } else { r.name.as_str() }).collect::<Vec<_>>().join(", "));
-                h.routes = c.routes;
+            let servers: Vec<String> = c.routes.iter().map(|rt| rt.server.clone()).collect();
+            {
+                let mut h = r.home.lock().unwrap();
+                let Some(h) = h.as_mut().filter(|h| h.epoch == epoch) else { return };
+                if h.routes != c.routes {
+                    log::info!("relay: home carries {}", c.routes.iter().map(|r| if r.name.is_empty() { r.server.as_str() } else { r.name.as_str() }).collect::<Vec<_>>().join(", "));
+                    h.routes = c.routes;
+                }
+            }
+            if c.pings {
+                let mut out = RelayLine::default();
+                for server in servers {
+                    for (name, ms) in crate::player_ping::readings(&server) {
+                        out.pings.push(Ping { server: server.clone(), name, ms });
+                    }
+                }
+                let mut line = serde_json::to_vec(&out).expect("pings");
+                line.push(b'\n');
+                if line.len() <= super::MAX_CONTROL_LINE && tx.send(&line).await.is_err() {
+                    return;
+                }
             }
         }
     }
@@ -372,7 +388,7 @@ async fn player_conn(r: &Relay, mut sock: TcpStream, peer: SocketAddr) -> anyhow
     // The handshake says whether it's the server list or a join; the
     // bytes go on to home unchanged.
     let mut buf = Vec::new();
-    let hs = read_until(&mut sock, &mut buf, |b| {
+    let (hs, used) = read_until(&mut sock, &mut buf, |b| {
         if core::is_legacy_ping(b) {
             anyhow::bail!("pre-1.7 ping");
         }
@@ -383,6 +399,18 @@ async fn player_conn(r: &Relay, mut sock: TcpStream, peer: SocketAddr) -> anyhow
         let h = r.home.lock().unwrap();
         h.as_ref().filter(|h| !h.handle.is_dead()).and_then(|h| h.routes.first().map(|rt| (h.handle.clone(), rt.server.clone(), rt.velocity)))
     };
+    // A joining player: list their socket here, so home's Players tab can
+    // show the ping this end measures (B5). Their name is the next packet,
+    // sent in the clear before any encryption; the bytes still go on as
+    // they came. Declared after `sock`, so it's dropped first: a reading
+    // never touches a closed socket.
+    let mut _listed = None;
+    if hs.is_login()
+        && let Some((_, server, _)) = &target
+        && let Ok((name, _)) = read_until(&mut sock, &mut buf, |b| core::read_login_name(&b[used..])).await
+    {
+        _listed = Some(crate::player_ping::listen(server, &name, &sock));
+    }
     // A server that checks accounts through the relay: Velocity takes the
     // player (it ends their encryption, so what goes home compresses), told
     // who they are with a PROXY header. With home away the relay answers
@@ -402,7 +430,8 @@ async fn player_conn(r: &Relay, mut sock: TcpStream, peer: SocketAddr) -> anyhow
         let head = Head { kind: "game".into(), server, peer: peer.to_string() };
         if let Ok(mut stream) = handle.open(serde_json::to_vec(&head).expect("head")).await {
             stream.tx.send(&buf).await.map_err(|e| anyhow::anyhow!("tunnel: {e:?}"))?;
-            return super::pipe(sock, stream, |_| {}, |_| {}).await.map_err(anyhow::Error::msg);
+            // Borrowed, so the socket outlives `_listed`.
+            return super::pipe(&mut sock, stream, |_| {}, |_| {}).await.map_err(anyhow::Error::msg);
         }
     }
     offline(&mut sock, buf, &hs).await
@@ -455,12 +484,13 @@ pub fn proxy_v2(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
     h
 }
 
-/// Reads until `parse` has a whole packet (at most 8 KB, 10 s).
-async fn read_until<T>(sock: &mut TcpStream, buf: &mut Vec<u8>, parse: impl Fn(&[u8]) -> anyhow::Result<Read<T>>) -> anyhow::Result<T> {
+/// Reads until `parse` has a whole packet (at most 8 KB, 10 s): the
+/// packet and the bytes it used.
+async fn read_until<T>(sock: &mut TcpStream, buf: &mut Vec<u8>, parse: impl Fn(&[u8]) -> anyhow::Result<Read<T>>) -> anyhow::Result<(T, usize)> {
     let mut chunk = [0u8; 1024];
     loop {
-        if let Read::Done(t, _) = parse(buf)? {
-            return Ok(t);
+        if let Read::Done(t, n) = parse(buf)? {
+            return Ok((t, n));
         }
         if buf.len() > 8 * 1024 {
             anyhow::bail!("too much before the packet ended");

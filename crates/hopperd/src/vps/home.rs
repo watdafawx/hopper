@@ -189,6 +189,12 @@ pub struct Home {
     stats: Mutex<Stats>,
     /// Try now (or the settings changed).
     wake: Notify,
+    /// The Players tab wants the relay's pings: the control loop asks.
+    ask_pings: Notify,
+    /// The relay's last answer: when, and server -> lowercase name -> ms.
+    pings: Mutex<Option<(Instant, HashMap<String, HashMap<String, u32>>)>>,
+    /// Bumped on every answer, so a waiting reader wakes.
+    pings_in: tokio::sync::watch::Sender<u64>,
 }
 
 fn unix() -> u64 {
@@ -206,6 +212,9 @@ impl Home {
             link: Mutex::new(None),
             stats: Mutex::new(Stats { saved, ..Default::default() }),
             wake: Notify::new(),
+            ask_pings: Notify::new(),
+            pings: Mutex::new(None),
+            pings_in: tokio::sync::watch::channel(0).0,
         }
     }
 
@@ -227,6 +236,46 @@ impl Home {
     /// Sends the routes again now (a server's relay settings changed).
     pub fn wake(&self) {
         self.wake.notify_one();
+    }
+
+    /// The relay's ping readings for `server`'s players (lowercase name ->
+    /// ms, measured on each player's own connection to the VPS) and the
+    /// tunnel's round trip from the VPS to here. `None` when the server
+    /// doesn't use the relay or it isn't connected. Asked for only while
+    /// the Players tab is open; an answer is reused for a few seconds, and
+    /// a slow one is waited for at most 800 ms (the next refresh has it).
+    pub async fn relay_pings(&self, server: &str) -> Option<(HashMap<String, u32>, Option<u32>)> {
+        if !self.config().servers.iter().any(|s| s == server) {
+            return None;
+        }
+        let rtt = {
+            let l = self.link.lock().unwrap();
+            let (h, _) = l.as_ref().filter(|(h, _)| !h.is_dead())?;
+            h.rtt().map(|d| d.as_millis().min(u32::MAX as u128) as u32)
+        };
+        let fresh = |max: Duration| self.pings.lock().unwrap().as_ref().filter(|(at, _)| at.elapsed() < max).map(|(_, m)| m.get(server).cloned().unwrap_or_default());
+        if let Some(m) = fresh(Duration::from_secs(3)) {
+            return Some((m, rtt));
+        }
+        let mut seen = self.pings_in.subscribe();
+        self.ask_pings.notify_one();
+        let _ = tokio::time::timeout(Duration::from_millis(800), seen.changed()).await;
+        Some((fresh(Duration::from_secs(15)).unwrap_or_default(), rtt))
+    }
+
+    #[cfg(test)]
+    pub fn has_relay_answer(&self) -> bool {
+        self.pings.lock().unwrap().is_some()
+    }
+
+    /// An answer from the relay.
+    fn got_pings(&self, line: super::RelayLine) {
+        let mut by: HashMap<String, HashMap<String, u32>> = HashMap::new();
+        for p in line.pings {
+            by.entry(p.server).or_default().insert(p.name.to_lowercase(), p.ms);
+        }
+        *self.pings.lock().unwrap() = Some((Instant::now(), by));
+        self.pings_in.send_modify(|n| *n += 1);
     }
 
     /// What players type to join through the relay.
@@ -454,7 +503,7 @@ pub(super) async fn connect(cfg: &HomeConfig) -> Result<(Live, link::RelayHello)
 fn routes(app: &App) -> Control {
     let cfg = app.vps.config();
     let velocity = |id: &str| app.vps_forward.mode(id) == hopper_core::hosting::proxy_forward::Mode::Relay;
-    Control { routes: cfg.servers.iter().filter_map(|id| app.servers.get(id).map(|e| Route { server: id.clone(), name: e.name.clone(), velocity: velocity(id) })).collect() }
+    Control { routes: cfg.servers.iter().filter_map(|id| app.servers.get(id).map(|e| Route { server: id.clone(), name: e.name.clone(), velocity: velocity(id) })).collect(), pings: false }
 }
 
 /// Runs a connection until it ends; says why.
@@ -463,10 +512,15 @@ async fn run(app: &Arc<App>, live: Live, cfg: &HomeConfig) -> String {
     let mux::Tunnel { handle, mut incoming, done, .. } = tunnel;
     app.vps.connected(handle.clone(), counters);
     let control = async {
-        let Ok(mut s) = handle.open(serde_json::to_vec(&Head { kind: "control".into(), server: String::new(), peer: String::new() }).expect("head")).await else {
+        let Ok(s) = handle.open(serde_json::to_vec(&Head { kind: "control".into(), server: String::new(), peer: String::new() }).expect("head")).await else {
             return "Lost the connection to the relay.".to_string();
         };
-        let mut sent = None;
+        let mux::Stream { mut tx, rx, .. } = s;
+        // The relay's answers (pings), read beside the loop below; aborted
+        // with it.
+        let answers = tokio::spawn(read_answers(app.clone(), rx));
+        let _stop = AbortOnDrop(answers);
+        let mut sent: Option<Control> = None;
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut n = 0u64;
@@ -482,12 +536,22 @@ async fn run(app: &Arc<App>, live: Live, cfg: &HomeConfig) -> String {
             if sent.as_ref() != Some(&r) {
                 let mut line = serde_json::to_vec(&r).expect("routes");
                 line.push(b'\n');
-                if s.tx.send(&line).await.is_err() {
+                if tx.send(&line).await.is_err() {
                     return "Lost the connection to the relay.".to_string();
                 }
                 sent = Some(r);
             }
             tokio::select! {
+                _ = app.vps.ask_pings.notified() => {
+                    // The routes ride along, so a relay from before B5 reads
+                    // this as the same routes again and changes nothing.
+                    let ask = Control { pings: true, ..sent.clone().unwrap_or_default() };
+                    let mut line = serde_json::to_vec(&ask).expect("routes");
+                    line.push(b'\n');
+                    if tx.send(&line).await.is_err() {
+                        return "Lost the connection to the relay.".to_string();
+                    }
+                }
                 _ = tick.tick() => {
                     n += 1;
                     app.vps.tick();
@@ -514,6 +578,29 @@ async fn run(app: &Arc<App>, live: Live, cfg: &HomeConfig) -> String {
     handle.close("home is reconnecting").await;
     app.vps.disconnected();
     why
+}
+
+/// Ends a task when its owner goes.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Reads the relay's control lines (answers to ping asks) until the stream
+/// ends. A relay from before B5 sends none.
+async fn read_answers(app: Arc<App>, mut rx: mux::RecvHalf) {
+    let mut lines = super::relay_end::Lines::default();
+    while let Ok(Some(chunk)) = rx.recv().await {
+        let Ok(got) = lines.push(&chunk) else { return };
+        for line in got {
+            if let Ok(l) = serde_json::from_slice::<super::RelayLine>(&line) {
+                app.vps.got_pings(l);
+            }
+        }
+    }
 }
 
 /// A player stream: checked against the servers set to use the relay, then

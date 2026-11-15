@@ -39,6 +39,16 @@
     }
   }
 
+  /** Where a ping reading comes from, for its tooltip. A player who came
+   * through the relay is measured on the VPS (their own connection there),
+   * plus the tunnel's round trip from the VPS to this server. */
+  function pingTitle(i) {
+    if (i.via === 'spark') return 'Ping from spark';
+    if (i.via !== 'relay') return 'Ping through Hopper’s address';
+    if (i.home_ms == null) return `Measured at the relay: ${i.relay_ms} ms to the relay`;
+    return `Measured at the relay: ${i.relay_ms} ms to the relay + ${i.home_ms} ms from the relay to this server`;
+  }
+
   /** Runs an action, then reads the lists again shortly after (the server
    * saves its files itself). */
   async function act(action, who, reason = '') {
@@ -91,7 +101,7 @@
           <span class="sp"></span>
           {#if data?.people}
             {@const i = info.get(p)}
-            {#if i?.ms != null}<span class="ping {pingLevel(i.ms)}" title={i.via === 'spark' ? 'Ping from spark' : 'Ping through Hopper’s address'}>{i.ms} ms</span>
+            {#if i?.ms != null}<span class="ping {pingLevel(i.ms)}" title={pingTitle(i)}>{i.ms} ms</span>
             {:else}<span class="ping muted" title={i?.why || ''}>—</span>{/if}
             <span class="on muted" title={i?.joined ? 'Time online' : ''}>{i?.joined ? onlineFor(i.joined, now) : ''}</span>
           {/if}
