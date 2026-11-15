@@ -409,7 +409,7 @@ token and pin, the VPS unit's hardening.
 | B3 | L | Setup over ssh: dialog, checks, steps (idempotent), cloud port check from home, "Remove the relay", repair | Against a throwaway VM or a local Ubuntu container with sshd. Never the live relay. Screenshots of every step state. |
 | B4 | M | Server changes: PCF install + config, properties, voice host, History group, Stop using the relay, Play at home, router relay-only refusal, Settings lock and wording | Scratch server: History shows each entry, undo restores, direct login refused. |
 | B5 | M | Players tab ping from the VPS front, PROXY v2 to Velocity | Ping column vs a known latency (tc netem on the test VM). |
-| B6 | M | Voice relay (UDP, home dials out, kept open by keepalives, AEAD) | Voice works through a test VM; if UDP is blocked, the card says so. |
+| B6 | M | **Done** (see "B6 as built"). Voice relay (UDP, home dials out, kept open by keepalives, AEAD) | Voice works through a test VM; if UDP is blocked, the card says so. |
 | B7 | M | Several servers: forced hosts, per-server loopback ports, relay list in Settings › Relays | Two scratch servers behind one test relay. |
 | B8 | M | Desktop parity: relay card, ping column, wording, setup through the API | Desktop test build paired with a scratch panel. |
 | B9 | M | Security review + fixes. At most a generic note: "switch an existing hand-made Velocity setup over to Hopper's relay" (not the migration of any one server) | Review table filled in. |
@@ -870,6 +870,172 @@ to; a later "Go back" would need one.
 - The light theme's amber ping colour (`--gold` on the page background) is
   2.81:1, under 4.5:1. It is the shared colour for every ping, not new
   here.
+
+## B6 as built
+
+Voice chat mods (Simple Voice Chat, Plasmo Voice) through the relay.
+Players send their voice UDP to the VPS; the relay hands it home; home
+hands it to the server's voice port and the answers go back the same way.
+Nothing opens at home: home dials out to the relay's voice port and keeps
+that path open with keepalives, like the tunnel itself.
+
+```
+player ──UDP 24454──▶ relay (VPS) ══ sealed UDP (home dialled out) ══▶ home hopperd ──UDP──▶ 127.0.0.1:<mod's port>
+                        ╲═══ or the "voice" stream on the TCP tunnel, while UDP doesn't get through ═══╱
+```
+
+### Keys: nothing new for the owner
+
+Both ends take 64 bytes from the TLS exporter of the tunnel connection
+they already share (`EXPORTER-hopper-relay-voice`, no context). HKDF-SHA256
+over that, salted with the SHA-256 of the relay key, gives a 32-bit session
+id and one ChaCha20-Poly1305 key per direction. Every new connection has
+new keys, so a restart or a reconnect retires the old ones on both ends
+(the relay drops them when that connection's epoch ends). The relay key
+and pin are what they were; the owner never sees a voice key.
+
+### Packets between home and the relay
+
+`"HRV"`, version 1, kind (1 keepalive, 2 ack, 3 data), the session id
+(u32) and a counter (u64, the nonce): 17 clear bytes, used as the AEAD's
+associated data, then the sealed body and its 16-byte tag. A data body is
+the relay's flow id (u32) and the player's packet.
+
+- **Order of checks** (each cheaper than the next): size, magic, version,
+  kind, session, a 64-entry replay window (newer than any seen, or unseen
+  inside the window), then the tag. A counter counts as seen only after
+  its tag matched, so a forged packet can't block a real one.
+- **Home's address** follows its newest good packet (NAT can move it), never
+  an older one replayed from somewhere else.
+- **Keepalives**: home sends one a second for the first three, then every
+  5 s, with its send time and whether it hears the relay's acks; the relay
+  acks each with the send time back (home's round trip) and its flow count.
+  UDP counts as working both ways while home's newest ack is under 15 s
+  old and the relay has heard "I hear you".
+- **TCP fallback**: while UDP isn't working both ways, home opens a mux
+  stream of kind `voice` and both ends send `u16 length, u32 flow, packet`
+  frames on it. It needs nothing open on the VPS beyond the tunnel port.
+  UDP is retried all the time; the first good ack moves voice back.
+
+### Limits on the relay's voice port
+
+| What | Limit | Why |
+|---|---|---|
+| A player's packet | the voice mod's shape: SVC `0xFF` + 16-byte id + at least 1 byte; Plasmo's `4E 90 04 E9` magic | Scans and junk are dropped before any state is made |
+| Packet size | 2048 bytes (sealed: 2085) | Bigger than any voice frame; nothing is read past it |
+| Flows | 512, at most 8 per source IP, forgotten after 60 s quiet | One host can't take all the slots |
+| Per player | 120 packets/s, burst 240, each way (down: 1000/s, burst 2000) | A talking player sends ~50/s |
+| Tag checks | 5000/s, burst 10000, for sealed packets not from home's address | A flood of fakes can't take the CPU; home's own packets never wait on this budget |
+
+The last row changed during testing: at first every sealed-looking packet
+spent the shared budget, and a flood of 92k junk packets a second on the
+test VPS cost a real player 60 % of their packets (home's answers were
+being refused for lack of budget). Now the cheap checks (session, replay
+window) come first and packets from home's current address skip the
+budget; `a_flood_of_fakes_cant_crowd_out_home` covers it.
+
+### Server side (Use the relay, Stop, Play at home, Back to the relay)
+
+`hopper_core::hosting::voice_mods` finds the mod (its jar plus its config
+file) and its port from that config:
+
+| Mod | File | Changed |
+|---|---|---|
+| Simple Voice Chat | `config/voicechat/voicechat-server.properties` | `voice_host` → the relay's players' address and voice port |
+| Plasmo Voice 2.x | `config/plasmovoice/config.toml` | `[host.public]` `ip` and `port` → the same (the table is added if it wasn't there, and removed again on undo) |
+
+The relay's address is the players' address from the setup (or the relay's
+own address), and its voice port is the one the relay reported when it
+connected (24454). The change is one more step of "Use the relay": written
+through History like B4's (a settings note with was/now per key), recorded
+in the forward record (`voice`, the old values), undone by "Play at home"
+and "Stop using the relay" (back to exactly what was there, byte for byte
+when nothing else changed), and redone by "Back to the relay". A server
+with no voice mod gets no step. Home's voice link sends players' packets
+to the mod's own bind address and port (an unspecified bind is 127.0.0.1).
+
+SVC's config is written with Java properties escaping (`127.0.0.1\:24454`);
+SVC reads that back fine and logs `Voice host is '127.0.0.1:24454'`. SVC
+rewrites the whole file on its first start (all keys, its own comments);
+the restore works per key, so that doesn't matter.
+
+### VPS side
+
+- The relay listens on UDP 24454 (`--voice-port`, default 24454, `0` turns
+  voice off) beside its two TCP ports, and says so in its hello and in
+  `relay status` (`voice_port`). An older relay reports no voice port: the
+  card says "Repair the relay setup", and "Run again" ("binary" step) moves
+  it over.
+- The firewall step opens UDP 24454 beside the two TCP ports (ufw `allow
+  24454/udp`, iptables `-p udp` rule with Hopper's comment) and Remove takes
+  out only rules with that mark.
+- "Ports open from the internet" still checks only the TCP ports: home can't
+  tell an open UDP port from a silent one by probing. Home's voice link is
+  the check: if no ack comes back in 15 s, the card says to open UDP 24454
+  on the provider's firewall.
+
+### Relay card
+
+One voice row under the forwarding row (option A of the mock):
+
+| State | Pill | Text | Right side |
+|---|---|---|---|
+| on | Voice on (green) | "Simple Voice Chat · 3 players" | "UDP 24454 · 21 ms" |
+| tcp | Voice slow (amber) | same | "through the tunnel", plus a note: "UDP is blocked by the VPS provider's firewall. Open UDP 24454 on its firewall page for this VPS; until then voice goes through the tunnel, with more delay." |
+| checking | Voice | "Simple Voice Chat · checking UDP 24454…" | |
+| old | Voice off | "The relay needs an update for voice." | Repair (owner) |
+| not set | Voice off | "Simple Voice Chat · not through the relay yet" (relay already in use when the mod was added: "… · stop and use the relay again to add it") | |
+
+No row for a server without a voice mod, and none while playing at home
+(that state's own note says players join at home). Every text fits one
+line in the card's narrowest width (512 px, beside the console at 1100 px)
+and has its full text as a tooltip.
+
+### Tested (WSL box, Fabric 1.20.1 scratch server with SVC 2.6.27)
+
+The test client sends SVC's own unauthenticated ping (`0xFF`, SVC's ping
+id, then a 24-byte payload; `allow_pings=true`), the packet SVC answers
+without a logged-in player, 20 ms apart like a talking player.
+
+| Path | Sent | Back | Median | p95 | Worst |
+|---|---|---|---|---|---|
+| Straight to SVC (baseline, no relay) | 500 | 500 | 0.20 ms | 0.26 ms | 0.42 ms |
+| Through the relay, UDP | 1500 | 1500 | 0.95–1.02 ms | 1.16–1.25 ms | 1.72 ms |
+| Through the relay, home's UDP dropped on the VPS (tunnel) | 1000 | 1000 | 1.23 ms | 1.53 ms | 2.68 ms |
+| UDP again after the drop rule went | 500 | 500 | 1.01 ms | 1.20 ms | 1.78 ms |
+
+Home's UDP was dropped with an iptables rule on the VPS matching the sealed
+packets' magic, so players' UDP still arrived. Home went "checking" for
+15 s, then "tcp"; with the rule removed it was back on UDP within 2 s.
+
+- Junk flood at the voice port (random bytes, fake `HRV` packets, fake SVC
+  shapes; ~95k packets/s from the player's own IP): before the budget fix
+  79/200 pings came back, after it 200/200 (median 0.79 ms). The relay
+  stayed up both times.
+- Use, Play at home, Back to the relay and Stop on the running server:
+  SVC logged `Voice host is '127.0.0.1:24454'` after Use and Back, nothing
+  after Play at home and Stop (`voice_host=` empty again); each step is in
+  History with was/now.
+- A B5 relay binary showed "old"; "Run again" replaced the binary and the
+  card went to "Voice on".
+- With ufw on: "Run again" added `24454/udp ALLOW # hopper-relay` (v4 and
+  v6) beside the TCP rules; Remove took all three out, nothing left
+  listening.
+
+Not tested: a real game client talking (no Mojang logins on the test box);
+Plasmo Voice on a running server (unit tests only); a real provider
+firewall blocking UDP (stood in for by iptables); the iptables firewall
+path with a REJECT rule (unit tests only; the box's iptables accepted all,
+so the step rightly added nothing).
+
+### Not done (later phases)
+
+- One voice port per relay: several servers with voice behind one relay
+  (B7) need a port each or a mod-level way to tell them apart. Today the
+  first relayed server with a voice mod gets voice.
+- Desktop relay card voice row (B8).
+- A server that joined voice while already relayed needs "Stop using the
+  relay" and "Use" again to be pointed at it.
 
 ## Open questions for the maintainer (answered: see Decisions)
 

@@ -273,6 +273,10 @@ pub struct Record {
     /// Folders the relay made (`mods`, `config`), taken out by "Stop" when
     /// nothing else is in them.
     pub made_dirs: Vec<String>,
+    /// The voice mod's advertised address before the relay pointed it at
+    /// itself (B6); `None` when the server has no voice mod or it wasn't
+    /// changed.
+    pub voice: Option<super::voice_mods::VoiceBefore>,
 }
 
 /// The folders "Use the relay" may write into.

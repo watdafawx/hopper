@@ -99,13 +99,13 @@ const PORTS: [u16; 2] = [25565, 25566];
 #[test]
 fn ufw_on_gets_an_allow_for_each_port_it_lacks() {
     let st = "Status: active\n\nTo                         Action      From\n--                         ------      ----\n22/tcp                     ALLOW       Anywhere\n25566/tcp                  ALLOW       Anywhere\n22/tcp (v6)                ALLOW       Anywhere (v6)\n";
-    let p = plan_firewall(Some(st), Some("-P INPUT DROP\n-A INPUT -j ufw-before-input\n"), None, true, &PORTS);
+    let p = plan_firewall(Some(st), Some("-P INPUT DROP\n-A INPUT -j ufw-before-input\n"), None, true, &PORTS, &[]);
     safe(&p);
     assert_eq!(p.add, vec!["ufw allow 25565/tcp comment hopper-relay"]);
-    assert_eq!(p.rules, vec![FwRule::Ufw { port: 25565 }]);
+    assert_eq!(p.rules, vec![FwRule::Ufw { port: 25565, udp: false }]);
     assert_eq!(p.open, vec![25566]);
     // ufw off: its rules don't count, iptables is read instead.
-    let p = plan_firewall(Some("Status: inactive\n"), Some("-P INPUT ACCEPT\n"), None, false, &PORTS);
+    let p = plan_firewall(Some("Status: inactive\n"), Some("-P INPUT ACCEPT\n"), None, false, &PORTS, &[]);
     assert!(p.add.is_empty() && p.open == PORTS && p.manual.is_none());
 }
 
@@ -114,7 +114,7 @@ fn iptables_accepts_go_just_before_the_images_reject() {
     // A cloud image's INPUT: established, icmp, lo, ssh, then a catch-all REJECT.
     let rules = "-P INPUT ACCEPT\n-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT\n-A INPUT -p icmp -j ACCEPT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT\n-A INPUT -j REJECT --reject-with icmp-host-prohibited\n";
     assert_eq!(iptables_block_at(rules, &PORTS), Some(5));
-    let p = plan_firewall(None, Some(rules), None, true, &PORTS);
+    let p = plan_firewall(None, Some(rules), None, true, &PORTS, &[]);
     safe(&p);
     assert_eq!(
         p.add,
@@ -126,12 +126,12 @@ fn iptables_accepts_go_just_before_the_images_reject() {
     );
     assert!(p.saved);
     // Without netfilter-persistent nothing claims they were saved.
-    let p = plan_firewall(None, Some(rules), None, false, &PORTS);
+    let p = plan_firewall(None, Some(rules), None, false, &PORTS, &[]);
     assert!(!p.saved && p.add.len() == 2);
     // A REJECT for these ports only also counts; one for other ports doesn't.
     let r2 = "-P INPUT ACCEPT\n-A INPUT -p tcp -m tcp --dport 8080 -j DROP\n-A INPUT -p tcp -m multiport --dports 25565,25566 -j REJECT --reject-with tcp-reset\n";
     assert_eq!(iptables_block_at(r2, &PORTS), Some(2));
-    assert_eq!(plan_firewall(None, Some(r2), None, false, &PORTS).add[0], "iptables -I INPUT 2 -p tcp --dport 25565 -m comment --comment hopper-relay -j ACCEPT");
+    assert_eq!(plan_firewall(None, Some(r2), None, false, &PORTS, &[]).add[0], "iptables -I INPUT 2 -p tcp --dport 25565 -m comment --comment hopper-relay -j ACCEPT");
     // Interface- or sender-only rejects don't turn players away.
     assert_eq!(iptables_block_at("-P INPUT ACCEPT\n-A INPUT -i docker0 -j DROP\n-A INPUT -s 10.0.0.0/8 -j REJECT\n", &PORTS), None);
 }
@@ -139,18 +139,18 @@ fn iptables_accepts_go_just_before_the_images_reject() {
 #[test]
 fn iptables_default_drop_appends_and_open_ports_are_left_alone() {
     let rules = "-P INPUT DROP\n-A INPUT -i lo -j ACCEPT\n-A INPUT -p tcp --dport 22 -j ACCEPT\n-A INPUT -p tcp --dport 25565 -j ACCEPT\n";
-    let p = plan_firewall(None, Some(rules), None, false, &PORTS);
+    let p = plan_firewall(None, Some(rules), None, false, &PORTS, &[]);
     safe(&p);
     assert_eq!(p.open, vec![25565]);
     assert_eq!(p.add, vec!["iptables -I INPUT 4 -p tcp --dport 25566 -m comment --comment hopper-relay -j ACCEPT"]);
     // Re-running after the setup added them: nothing to do (repair = no change).
     let after = "-P INPUT ACCEPT\n-A INPUT -i lo -j ACCEPT\n-A INPUT -p tcp -m tcp --dport 25565 -m comment --comment hopper-relay -j ACCEPT\n-A INPUT -p tcp -m tcp --dport 25566 -m comment --comment hopper-relay -j ACCEPT\n-A INPUT -j REJECT --reject-with icmp-host-prohibited\n";
-    let p = plan_firewall(None, Some(after), None, true, &PORTS);
+    let p = plan_firewall(None, Some(after), None, true, &PORTS, &[]);
     assert!(p.add.is_empty() && p.rules.is_empty(), "{p:?}");
     assert_eq!(p.open, PORTS.to_vec());
-    assert_eq!(iptables_marked(after), vec![25565, 25566]);
+    assert_eq!(iptables_marked(after), vec![FwRule::Iptables { port: 25565, udp: false }, FwRule::Iptables { port: 25566, udp: false }]);
     // Nothing filtering at all.
-    let p = plan_firewall(None, Some("-P INPUT ACCEPT\n"), None, true, &PORTS);
+    let p = plan_firewall(None, Some("-P INPUT ACCEPT\n"), None, true, &PORTS, &[]);
     assert!(p.add.is_empty() && p.open == PORTS);
 }
 
@@ -158,7 +158,7 @@ fn iptables_default_drop_appends_and_open_ports_are_left_alone() {
 fn native_nftables_that_drops_is_left_to_the_player() {
     let nft = "table inet filter {\n\tchain input {\n\t\ttype filter hook input priority filter; policy drop;\n\t\ttcp dport 22 accept\n\t}\n}\n";
     assert!(nft_blocks_input(nft));
-    let p = plan_firewall(None, None, Some(nft), false, &PORTS);
+    let p = plan_firewall(None, None, Some(nft), false, &PORTS, &[]);
     assert!(p.add.is_empty());
     assert!(p.manual.as_deref().unwrap().contains("25565/tcp and 25566/tcp"));
     // iptables-nft's own table isn't native: read through iptables.
@@ -168,12 +168,12 @@ fn native_nftables_that_drops_is_left_to_the_player() {
 
 #[test]
 fn removing_takes_out_exactly_what_was_added() {
-    let rules = vec![FwRule::Ufw { port: 25565 }, FwRule::Iptables { port: 25566 }];
+    let rules = vec![FwRule::Ufw { port: 25565, udp: false }, FwRule::Iptables { port: 25566, udp: false }];
     let v = remove_firewall(&rules, true);
     assert_eq!(v[0], "ufw delete allow 25565/tcp");
     assert_eq!(v[1], "while iptables -C INPUT -p tcp --dport 25566 -m comment --comment hopper-relay -j ACCEPT 2>/dev/null; do iptables -D INPUT -p tcp --dport 25566 -m comment --comment hopper-relay -j ACCEPT; done");
     assert_eq!(v[2], "netfilter-persistent save");
-    assert!(remove_firewall(&[FwRule::Ufw { port: 1 }], true).len() == 1, "ufw keeps its own rules");
+    assert!(remove_firewall(&[FwRule::Ufw { port: 1, udp: false }], true).len() == 1, "ufw keeps its own rules");
     assert!(remove_firewall(&[], true).is_empty());
     // The record round-trips.
     let i = Installed { made_user: true, firewall: rules, binary_sha256: "ab".into(), binary_version: "1".into(), ..Default::default() };
@@ -212,8 +212,10 @@ fn each_step_sees_when_it_has_nothing_to_do() {
     // The key.
     let key = "hrt_00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     let hash = crate::vps::link::hash_hex(&crate::vps::link::key_hash(key));
-    let st = RelayStatus { key_sha256: hash, fingerprint: "FP".into(), bind: "0.0.0.0".into(), game_port: 25565, tunnel_port: 25566, velocity_port: VELOCITY_PORT, backend_port: BACKEND_PORT, ..Default::default() };
+    let st = RelayStatus { key_sha256: hash, fingerprint: "FP".into(), bind: "0.0.0.0".into(), game_port: 25565, tunnel_port: 25566, velocity_port: VELOCITY_PORT, backend_port: BACKEND_PORT, voice_port: VOICE_PORT, ..Default::default() };
     let b2 = RelayStatus { velocity_port: 0, backend_port: 0, ..st.clone() };
+    let b5 = RelayStatus { voice_port: 0, ..st.clone() };
+    assert_eq!(keys_right(Some(&b5), key, "FP", "h:25566", "h:25566", "0.0.0.0", (25565, 25566), true), (true, false), "a relay from before B6 gets its voice port, same key");
     assert_eq!(keys_right(Some(&b2), key, "FP", "h:25566", "h:25566", "0.0.0.0", (25565, 25566), true), (true, false), "a B2 relay gets Velocity's ports, same key");
     let ports = (25565, 25566);
     assert_eq!(keys_right(Some(&st), key, "FP", "h:25566", "h:25566", "0.0.0.0", ports, true), (true, true));
@@ -277,4 +279,35 @@ fn velocity_is_pinned_and_set_up_for_the_chain() {
     let stat = format!("{ETC} root {VELOCITY_USER} 750\n{SECRET} root {VELOCITY_USER} 640\n{VELOCITY_TOML} root {VELOCITY_USER} 640\n{VELOCITY_DATA} {VELOCITY_USER} {VELOCITY_USER} 700\n{VELOCITY_JAR} root root 644\n");
     assert!(velocity_files_right(&stat));
     assert!(!velocity_files_right(&stat.replace("640", "644")), "the secret readable by all is locked again");
+}
+
+#[test]
+fn voice_gets_a_udp_rule_beside_the_tcp_ones() {
+    // ufw: a TCP allow for the port doesn't let UDP in; a bare one does.
+    let st = "Status: active\n\nTo                         Action      From\n--                         ------      ----\n24454/tcp                  ALLOW       Anywhere\n";
+    let p = plan_firewall(Some(st), None, None, false, &[25565], &[24454]);
+    assert_eq!(p.add, vec!["ufw allow 25565/tcp comment hopper-relay", "ufw allow 24454/udp comment hopper-relay"]);
+    assert_eq!(p.rules[1], FwRule::Ufw { port: 24454, udp: true });
+    let bare = "Status: active\n\nTo                         Action      From\n--                         ------      ----\n24454                      ALLOW       Anywhere\n";
+    assert_eq!(plan_firewall(Some(bare), None, None, false, &[], &[24454]).open, vec![24454]);
+    // iptables: a UDP accept before the image's REJECT; a TCP accept for the
+    // same port doesn't count for UDP.
+    let rules = "-P INPUT ACCEPT\n-A INPUT -p tcp --dport 24454 -j ACCEPT\n-A INPUT -j REJECT --reject-with icmp-host-prohibited\n";
+    let p = plan_firewall(None, Some(rules), None, true, &[], &[24454]);
+    safe(&p);
+    assert_eq!(p.add, vec!["iptables -I INPUT 2 -p udp --dport 24454 -m comment --comment hopper-relay -j ACCEPT", "netfilter-persistent save"]);
+    let after = "-P INPUT ACCEPT\n-A INPUT -p udp -m udp --dport 24454 -m comment --comment hopper-relay -j ACCEPT\n-A INPUT -j REJECT --reject-with icmp-host-prohibited\n";
+    assert!(plan_firewall(None, Some(after), None, true, &[], &[24454]).add.is_empty());
+    assert_eq!(iptables_marked(after), vec![FwRule::Iptables { port: 24454, udp: true }]);
+    // Taken out by protocol, and the record keeps it.
+    let v = remove_firewall(&[FwRule::Ufw { port: 24454, udp: true }, FwRule::Iptables { port: 24454, udp: true }], false);
+    assert_eq!(v[0], "ufw delete allow 24454/udp");
+    assert!(v[1].contains("-p udp --dport 24454"));
+    let j = serde_json::to_string(&FwRule::Iptables { port: 24454, udp: true }).unwrap();
+    assert_eq!(serde_json::from_str::<FwRule>(&j).unwrap(), FwRule::Iptables { port: 24454, udp: true });
+    // A record from before B6 (no "udp") reads as TCP.
+    assert_eq!(serde_json::from_str::<FwRule>(r#"{"kind":"ufw","port":25565}"#).unwrap(), FwRule::Ufw { port: 25565, udp: false });
+    // nftables that drops: the player is told the UDP port too.
+    let nft = "table inet filter {\n\tchain input {\n\t\ttype filter hook input priority filter; policy drop;\n\t}\n}\n";
+    assert!(plan_firewall(None, None, Some(nft), false, &[25565], &[24454]).manual.unwrap().contains("25565/tcp and 24454/udp"));
 }

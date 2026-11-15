@@ -88,12 +88,12 @@
   const ASK = {
     use: {
       title: 'Use the relay for this server?',
-      body: (m) => `Players join through ${r.address} and the relay checks their accounts. Hopper adds ${m}${m === 'FabricProxy-Lite' ? ' (with Fabric API, which it needs, when the server has none)' : ''}, writes its settings and sets four server settings the relay needs (online mode, secure chat profiles, compression, the server's address). Every change is in History.`,
+      body: (m) => `Players join through ${r.address} and the relay checks their accounts. Hopper adds ${m}${m === 'FabricProxy-Lite' ? ' (with Fabric API, which it needs, when the server has none)' : ''}, writes its settings and sets four server settings the relay needs (online mode, secure chat profiles, compression, the server's address).${vc ? ` It points ${vc.mod} at the relay too, so voice chat goes through it.` : ''} Every change is in History.`,
       ok: 'Use the relay',
     },
     stop: {
       title: 'Stop using the relay for this server?',
-      body: (m) => `Hopper removes the mods it added for the relay and puts the four server settings back as they were. Players join with this server's own address again.`,
+      body: (m) => `Hopper removes the mods it added for the relay and puts the four server settings back as they were.${vc ? ` ${vc.mod}'s voice address goes back too.` : ''} Players join with this server's own address again.`,
       ok: 'Stop using the relay',
     },
     'play-at-home': {
@@ -125,6 +125,27 @@
       load();
     }
   }
+
+  // Voice chat through the relay (B6): `null` when the server has no voice mod.
+  const vc = $derived(r?.voice ?? null);
+  const voiceText = $derived.by(() => {
+    if (!vc) return '';
+    const who = `${vc.players} ${vc.players === 1 ? 'player' : 'players'}`;
+    switch (vc.state) {
+      case 'on':
+      case 'tcp':
+        return `${vc.mod} · ${who}`;
+      case 'checking':
+        return `${vc.mod} · checking UDP ${vc.port}…`;
+      // Short enough for one line in the card's narrowest width; the Repair
+      // button and the buttons above say what to do.
+      case 'old':
+        return 'The relay needs an update for voice.';
+      default:
+        // (Playing at home shows its own note instead of this row.)
+        return mode === 'relay' ? `${vc.mod} · stop and use the relay again to add it` : `${vc.mod} · not through the relay yet`;
+    }
+  });
 
   async function retry() {
     busy = true;
@@ -210,6 +231,23 @@
           {#if doing}<span class="tiny muted">{doing}…</span>{/if}
         </div>
       {/if}
+      {#if vc}
+        <!-- Voice chat through the relay (B6): one line, and a plain note when UDP doesn't get through. -->
+        <div class="voice">
+          {#if vc.state === 'on'}<span class="pill running">Voice on</span>
+          {:else if vc.state === 'tcp'}<span class="pill starting">Voice slow</span>
+          {:else if vc.state === 'checking'}<span class="pill">Voice</span>
+          {:else}<span class="pill">Voice off</span>{/if}
+          <span class="small vt" title={voiceText}>{voiceText}</span>
+          <span class="sp"></span>
+          {#if vc.state === 'on'}<span class="tiny muted vr">UDP {vc.port}{vc.rtt_ms != null ? ` · ${vc.rtt_ms < 1 ? 'under 1' : vc.rtt_ms} ms` : ''}</span>
+          {:else if vc.state === 'tcp'}<span class="tiny muted vr">through the tunnel</span>
+          {:else if vc.state === 'old' && session.owner && onSetup}<button class="btn sm" onclick={onSetup}>Repair</button>{/if}
+        </div>
+        {#if vc.state === 'tcp'}
+          <div class="note">UDP is blocked by the VPS provider's firewall. Open UDP {vc.port} on its firewall page for this VPS; until then voice goes through the tunnel, with more delay.</div>
+        {/if}
+      {/if}
     {/if}
   </div>
 {/if}
@@ -241,5 +279,12 @@
   .acts { margin-top: 10px; flex-wrap: wrap; }
   .note.back { color: var(--text); background: var(--green-dim); }
   .fwd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+  /* Voice: one line at any width; the text gives way (ellipsis, full text
+     on hover) before the pill or the port move. */
+  .voice { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; min-width: 0; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+  .voice > :global(*) { flex: none; }
+  .voice .vt { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .voice .sp { flex: 1 1 0; min-width: 0; }
+  .voice .vr { white-space: nowrap; }
   @media (max-width: 520px) { .stats { grid-template-columns: 1fr 1fr; } }
 </style>

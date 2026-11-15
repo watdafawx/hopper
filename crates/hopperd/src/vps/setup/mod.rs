@@ -43,7 +43,7 @@ use hopper_core::hosting::relay_codec::CodecConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use self::plan::{BACKEND_PORT, BIN, DATA, ETC, Installed, JAVA, JAVA_DIR, OPT, SECRET, Step, UNIT, USER, VELOCITY, VELOCITY_DATA, VELOCITY_DIR, VELOCITY_JAR, VELOCITY_PORT, VELOCITY_SERVICE, VELOCITY_TOML, VELOCITY_UNIT, VELOCITY_USER, as_relay, as_root, sh_quote};
+use self::plan::{BACKEND_PORT, BIN, DATA, ETC, Installed, JAVA, JAVA_DIR, OPT, SECRET, Step, UNIT, USER, VELOCITY, VELOCITY_DATA, VELOCITY_DIR, VELOCITY_JAR, VELOCITY_PORT, VELOCITY_SERVICE, VELOCITY_TOML, VELOCITY_UNIT, VELOCITY_USER, VOICE_PORT, as_relay, as_root, sh_quote};
 use self::ssh::{Auth, Out, Ssh};
 use super::home::{HomeConfig, TUNNEL_PORT, write_private};
 use super::link;
@@ -487,7 +487,7 @@ async fn step_keys(c: &mut Ctx<'_>, host: &str, ports: (u16, u16)) -> StepResult
         return Ok(("ok", "key matches this panel's".into()));
     }
     let key = if key_ok { home.key.clone() } else { link::new_key() };
-    let init = format!("{BIN} relay init --data {DATA} --key-stdin --bind {bind} --game-port {} --tunnel-port {} --velocity-port {VELOCITY_PORT} --backend-port {BACKEND_PORT}", ports.0, ports.1);
+    let init = format!("{BIN} relay init --data {DATA} --key-stdin --bind {bind} --game-port {} --tunnel-port {} --velocity-port {VELOCITY_PORT} --backend-port {BACKEND_PORT} --voice-port {VOICE_PORT}", ports.0, ports.1);
     let o = c.root_in(&as_relay(&init), format!("{key}\n").as_bytes(), SHORT).await?;
     let got: Option<Value> = plan::last_json(&o.out);
     let fp = got.as_ref().and_then(|v| v["fingerprint"].as_str()).map(str::to_string);
@@ -682,7 +682,7 @@ async fn firewall_state(c: &Ctx<'_>) -> Result<(Tools, Option<String>, Option<St
 
 async fn step_firewall(c: &Ctx<'_>, inst: &mut Installed, ports: (u16, u16)) -> StepResult {
     let (t, ufw, ipt, nft) = firewall_state(c).await?;
-    let p = plan::plan_firewall(ufw.as_deref(), ipt.as_deref(), nft.as_deref(), t.persist, &[ports.0, ports.1]);
+    let p = plan::plan_firewall(ufw.as_deref(), ipt.as_deref(), nft.as_deref(), t.persist, &[ports.0, ports.1], &[VOICE_PORT]);
     for cmd in &p.add {
         c.must(cmd, "Opening the port").await?;
     }
@@ -696,7 +696,7 @@ async fn step_firewall(c: &Ctx<'_>, inst: &mut Installed, ports: (u16, u16)) -> 
     }
     if p.rules.is_empty() {
         // No firewall on, or one that lets everything in: nothing to open.
-        let none = ufw.as_deref().is_none_or(|s| !plan::ufw_active(s)) && ipt.as_deref().is_none_or(|r| plan::iptables_block_at(r, &[ports.0, ports.1]).is_none());
+        let none = ufw.as_deref().is_none_or(|s| !plan::ufw_active(s)) && ipt.as_deref().is_none_or(|r| plan::iptables_block_at(r, &[ports.0, ports.1, VOICE_PORT]).is_none());
         return Ok(("ok", if none { "nothing on the VPS blocks them".into() } else { "already open".into() }));
     }
     let ipt_added = p.rules.iter().any(|r| matches!(r, plan::FwRule::Iptables { .. }));
@@ -716,6 +716,8 @@ async fn step_reach(host: &str, ports: (u16, u16)) -> StepResult {
         }
     }
     if shut.is_empty() {
+        // UDP has no answer to wait for here: home's voice link checks it once
+        // connected, and the relay card says when it doesn't get through.
         return Ok(("ok", format!("{} and {} answer from here", ports.0, ports.1)));
     }
     let list: Vec<String> = shut.iter().map(|p| format!("{p}/tcp")).collect();
@@ -830,9 +832,9 @@ async fn remove(app: &Arc<App>) -> Result<(), String> {
         let mut rules = inst.firewall.clone();
         // A rule marked as the relay's that the record lost (a run that
         // stopped half-way) goes too; nothing unmarked is touched.
-        for port in ipt.as_deref().map(plan::iptables_marked).unwrap_or_default() {
-            if !rules.contains(&plan::FwRule::Iptables { port }) {
-                rules.push(plan::FwRule::Iptables { port });
+        for r in ipt.as_deref().map(plan::iptables_marked).unwrap_or_default() {
+            if !rules.contains(&r) {
+                rules.push(r);
             }
         }
         if rules.is_empty() {

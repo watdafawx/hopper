@@ -73,11 +73,14 @@ pub struct RelayConfig {
     /// Where Velocity sends them on, on 127.0.0.1: each connection there
     /// becomes a stream to home (0: none).
     pub backend_port: u16,
+    /// UDP port for voice chat (B6); 0: no voice. Players' voice mods send
+    /// here, and so does home (sealed), from the connection it dialled.
+    pub voice_port: u16,
 }
 
 impl Default for RelayConfig {
     fn default() -> Self {
-        RelayConfig { key_sha256: String::new(), bind: "0.0.0.0".into(), game_port: core::DEFAULT_PORT, tunnel_port: 25566, cache_mb: None, window_log: None, velocity_port: 0, backend_port: 0 }
+        RelayConfig { key_sha256: String::new(), bind: "0.0.0.0".into(), game_port: core::DEFAULT_PORT, tunnel_port: 25566, cache_mb: None, window_log: None, velocity_port: 0, backend_port: 0, voice_port: hopper_core::hosting::voice_mods::SVC_DEFAULT_PORT }
     }
 }
 
@@ -112,6 +115,8 @@ pub struct Relay {
     game_port: u16,
     /// Velocity's port on 127.0.0.1 (0: none).
     pub velocity_port: u16,
+    /// The voice port (B6), when it could be opened.
+    pub voice: Option<Arc<super::voice::relay::RelayVoice>>,
     home: Mutex<Option<HomeLink>>,
     epoch: AtomicU64,
     fails: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
@@ -133,6 +138,7 @@ impl Relay {
             recv,
             game_port,
             velocity_port: 0,
+            voice: None,
             home: Mutex::new(None),
             epoch: AtomicU64::new(0),
             fails: Mutex::new(HashMap::new()),
@@ -219,6 +225,13 @@ pub async fn serve(relay: Arc<Relay>, game: TcpListener, tunnel: TcpListener, tl
             });
         }
     };
+    let voice = relay.voice.clone();
+    let voice = async move {
+        match voice {
+            Some(v) => v.run().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
     let acceptor = tokio_rustls::TlsAcceptor::from(tls);
     let homes = async move {
         loop {
@@ -247,7 +260,7 @@ pub async fn serve(relay: Arc<Relay>, game: TcpListener, tunnel: TcpListener, tl
             });
         }
     };
-    tokio::join!(homes, players, backends);
+    tokio::join!(homes, players, backends, voice);
 }
 
 async fn home_conn(r: Arc<Relay>, acceptor: tokio_rustls::TlsAcceptor, sock: TcpStream, peer: SocketAddr) {
@@ -263,7 +276,11 @@ async fn home_conn(r: Arc<Relay>, acceptor: tokio_rustls::TlsAcceptor, sock: Tcp
         r.failed(peer.ip());
         return;
     }
-    let live = match link::relay(tls, &r.key, r.recv, r.game_port, r.mux.clone()).await {
+    // The voice keys come from this TLS session (see `voice`), taken before
+    // the link owns the connection.
+    let exported: Option<super::voice::Exported> = tls.get_ref().1.export_keying_material([0u8; 64], super::voice::EXPORTER_LABEL, None).ok();
+    let voice_port = r.voice.as_ref().map_or(0, |v| v.port);
+    let live = match link::relay(tls, &r.key, r.recv, (r.game_port, voice_port), r.mux.clone()).await {
         Ok(l) => l,
         Err(e) => {
             r.failed(peer.ip());
@@ -281,19 +298,32 @@ async fn home_conn(r: Arc<Relay>, acceptor: tokio_rustls::TlsAcceptor, sock: Tcp
         old.handle.close("Another home connection took over this relay.").await;
     }
     log::info!("relay: home panel connected from {}", peer.ip());
-    // Home opens only control streams; anything else is dropped (reset).
+    if let (Some(v), Some(e)) = (&r.voice, &exported) {
+        v.attach(epoch, &super::voice::Keys::derive(e, &r.key));
+    }
+    // Home opens only control and voice streams; anything else is dropped
+    // (reset).
     let rc = r.clone();
     let streams = tokio::spawn(async move {
         while let Some(s) = incoming.recv().await {
             let head: Option<Head> = serde_json::from_slice(&s.head).ok();
-            if head.is_some_and(|h| h.kind == "control") {
-                let rc = rc.clone();
-                tokio::spawn(async move { control(&rc, epoch, s).await });
+            match head.map(|h| h.kind).as_deref() {
+                Some("control") => {
+                    let rc = rc.clone();
+                    tokio::spawn(async move { control(&rc, epoch, s).await });
+                }
+                Some("voice") if rc.voice.is_some() => {
+                    tokio::spawn(rc.voice.clone().expect("voice").stream(epoch, s));
+                }
+                _ => {}
             }
         }
     });
     let why = done.await.map(|e| e.to_string()).unwrap_or_else(|e| e.to_string());
     streams.abort();
+    if let Some(v) = &r.voice {
+        v.detach(epoch);
+    }
     let mut h = r.home.lock().unwrap();
     if h.as_ref().is_some_and(|h| h.epoch == epoch) {
         *h = None;
@@ -318,6 +348,9 @@ async fn control(r: &Relay, epoch: u64, s: mux::Stream) {
                 if h.routes != c.routes {
                     log::info!("relay: home carries {}", c.routes.iter().map(|r| if r.name.is_empty() { r.server.as_str() } else { r.name.as_str() }).collect::<Vec<_>>().join(", "));
                     h.routes = c.routes;
+                }
+                if let Some(v) = &r.voice {
+                    v.set_enabled(epoch, h.routes.iter().any(|rt| rt.voice));
                 }
             }
             if c.pings {
@@ -562,7 +595,7 @@ async fn take_packet(sock: &mut TcpStream, buf: &mut Vec<u8>, parse: impl Fn(&[u
 
 const USAGE: &str = "hopperd relay init [--data <dir>] [--key-stdin]   make the relay key (shown once) and CA
 hopperd relay status [--data <dir>]   the certificate fingerprint and settings, as JSON
-hopperd relay [run] [--data <dir>] [--bind <addr>] [--game-port <n>] [--tunnel-port <n>] [--velocity-port <n>] [--backend-port <n>]";
+hopperd relay [run] [--data <dir>] [--bind <addr>] [--game-port <n>] [--tunnel-port <n>] [--velocity-port <n>] [--backend-port <n>] [--voice-port <n> (UDP, 0: none)]";
 
 struct Args {
     data: PathBuf,
@@ -571,13 +604,14 @@ struct Args {
     tunnel_port: Option<u16>,
     velocity_port: Option<u16>,
     backend_port: Option<u16>,
+    voice_port: Option<u16>,
     /// `init` takes the key from stdin instead of making one: the home
     /// panel's ssh setup makes it, so it never shows on a console.
     key_stdin: bool,
 }
 
 fn parse(args: &[String]) -> anyhow::Result<(String, Args)> {
-    let mut a = Args { data: crate::config::data_dir().join("relay"), bind: None, game_port: None, tunnel_port: None, velocity_port: None, backend_port: None, key_stdin: false };
+    let mut a = Args { data: crate::config::data_dir().join("relay"), bind: None, game_port: None, tunnel_port: None, velocity_port: None, backend_port: None, voice_port: None, key_stdin: false };
     let mut cmd = String::from("run");
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -591,6 +625,7 @@ fn parse(args: &[String]) -> anyhow::Result<(String, Args)> {
             "--tunnel-port" => a.tunnel_port = Some(val()?.parse().context("--tunnel-port takes a number")?),
             "--velocity-port" => a.velocity_port = Some(val()?.parse().context("--velocity-port takes a number")?),
             "--backend-port" => a.backend_port = Some(val()?.parse().context("--backend-port takes a number")?),
+            "--voice-port" => a.voice_port = Some(val()?.parse().context("--voice-port takes a number")?),
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -622,6 +657,9 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
     if let Some(p) = a.backend_port {
         cfg.backend_port = p;
     }
+    if let Some(p) = a.voice_port {
+        cfg.voice_port = p;
+    }
     if cmd == "status" {
         // Read by the home panel's setup over ssh to check what is there;
         // the key itself isn't kept here, only its hash.
@@ -629,7 +667,7 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
         let out = json!({
             "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint, "key_sha256": cfg.key_sha256,
             "bind": cfg.bind, "game_port": cfg.game_port, "tunnel_port": cfg.tunnel_port,
-            "velocity_port": cfg.velocity_port, "backend_port": cfg.backend_port,
+            "velocity_port": cfg.velocity_port, "backend_port": cfg.backend_port, "voice_port": cfg.voice_port,
         });
         println!("{out}");
         return Ok(());
@@ -660,7 +698,7 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
         println!("On the home panel, set the relay's address, this key and this fingerprint (PUT /api/v1/vps-relay; see design/vps-relay.md, \"Pairing by hand\").");
         return Ok(());
     }
-    if a.bind.is_some() || a.game_port.is_some() || a.tunnel_port.is_some() || a.velocity_port.is_some() || a.backend_port.is_some() {
+    if a.bind.is_some() || a.game_port.is_some() || a.tunnel_port.is_some() || a.velocity_port.is_some() || a.backend_port.is_some() || a.voice_port.is_some() {
         cfg.save(&a.data)?;
     }
     let key = link::hash_from_hex(&cfg.key_sha256).context("No relay key yet. Run hopperd relay init first.")?;
@@ -676,9 +714,26 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
         log::info!("hopperd {} relay: players on {}:{}, home on {}:{} (certificate {fingerprint}); cache {} MB, window 2^{}", env!("CARGO_PKG_VERSION"), cfg.bind, cfg.game_port, cfg.bind, cfg.tunnel_port, recv.cache_bytes >> 20, recv.window_log);
         // Velocity's side is on this machine only.
         let backend = if cfg.backend_port != 0 { Some(TcpListener::bind(("127.0.0.1", cfg.backend_port)).await.with_context(|| format!("listening for Velocity on 127.0.0.1:{}", cfg.backend_port))?) } else { None };
+        // Voice is extra: a port someone else holds leaves the relay
+        // running without it (home's card says voice isn't there).
+        let voice = if cfg.voice_port != 0 {
+            match super::voice::relay::RelayVoice::bind(&cfg.bind, cfg.voice_port).await {
+                Ok(v) => {
+                    log::info!("relay: voice on {}:{}/udp", cfg.bind, v.port);
+                    Some(v)
+                }
+                Err(e) => {
+                    log::warn!("relay: no voice: can't open {}:{}/udp ({e})", cfg.bind, cfg.voice_port);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut relay = Relay::new(key, recv, cfg.game_port);
         if let Some(r) = Arc::get_mut(&mut relay) {
             r.velocity_port = cfg.velocity_port;
+            r.voice = voice;
         }
         tokio::select! {
             _ = serve(relay, game, tunnel, tls, backend) => {}
