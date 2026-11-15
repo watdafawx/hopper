@@ -52,6 +52,60 @@ fn bases(files: &[String]) -> Vec<String> {
 fn fetch_remote(root: &Path, r: &Remote) -> anyhow::Result<Fetched> {
     let c = Client::for_remote(r)?;
     let v = c.get(&Client::server_path(&r.id, "/mods/instance"))?;
+    let f = read_reply(root, &v)?;
+    if let Some(dir) = last_dir() {
+        save_last_in(&dir, root, &v);
+    }
+    Ok(f)
+}
+
+// ---- the last list, kept for the next start ----
+//
+// After a restart the Mods tab of a server on a Hopper Server had nothing
+// to show until the panel answered: a blank area, then the whole list at
+// once. The last answer is kept on disk per server, shown as soon as the
+// tab opens, and replaced by the panel's fresh answer when it comes.
+
+/// Where the last lists are kept.
+fn last_dir() -> Option<PathBuf> {
+    hopper::paths::dirs().map(|d| d.cache_dir().join("server-mods"))
+}
+
+/// The file for one server's last list. The root names the panel and the
+/// server; hashed, as it holds characters a file name can't.
+fn last_file(dir: &Path, root: &Path) -> PathBuf {
+    // FNV-1a: stable across Rust versions, unlike the std hasher.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in root.to_string_lossy().as_bytes() {
+        h = (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
+    }
+    dir.join(format!("{h:016x}.json"))
+}
+
+/// Keeps the panel's answer for `root`. Written to a side file first, so a
+/// crash mid-write never leaves half a list to read next time.
+fn save_last_in(dir: &Path, root: &Path, reply: &Value) {
+    let path = last_file(dir, root);
+    let body = json!({ "root": root.to_string_lossy(), "reply": reply });
+    let tmp = path.with_extension("tmp");
+    let ok = std::fs::create_dir_all(dir).is_ok()
+        && serde_json::to_vec(&body).is_ok_and(|b| std::fs::write(&tmp, b).is_ok())
+        && std::fs::rename(&tmp, &path).is_ok();
+    if !ok {
+        log::debug!("couldn't keep the mod list of {}", root.display());
+    }
+}
+
+/// The answer kept for `root`, when there is one for exactly that server.
+fn load_last_in(dir: &Path, root: &Path) -> Option<Value> {
+    let mut v: Value = serde_json::from_slice(&std::fs::read(last_file(dir, root)).ok()?).ok()?;
+    (v["root"].as_str() == Some(root.to_string_lossy().as_ref())).then(|| v["reply"].take())
+}
+
+/// Servers whose shown list is still the kept one: no fresh answer yet.
+static FROM_LAST: std::sync::LazyLock<std::sync::Mutex<HashSet<PathBuf>>> = std::sync::LazyLock::new(Default::default);
+
+fn read_reply(root: &Path, v: &Value) -> anyhow::Result<Fetched> {
     let mut inst: Instance = serde_json::from_value(v["instance"].clone())?;
     inst.root = root.to_path_buf();
     note_untrusted(root, &v);
@@ -138,6 +192,18 @@ impl Store {
     pub fn open_server_mods(&mut self, root: &Path, name: &str) {
         let root = root.to_path_buf();
         if let Some(r) = remote(&root) {
+            // Nothing shown yet this run: the last list first, while the
+            // panel is asked.
+            if !self.is_server_list(&root)
+                && let Some(dir) = last_dir()
+                && last_file(&dir, &root).exists()
+            {
+                let root = root.clone();
+                self.spawn(move || {
+                    let f = load_last_in(&dir, &root).and_then(|v| read_reply(&root, &v).ok()).map(Box::new);
+                    Msg::ServerModsKept(root, f)
+                });
+            }
             self.fetch_server_mods(&root, &r);
             return;
         }
@@ -168,33 +234,66 @@ impl Store {
         });
     }
 
+    /// The list kept from the last run arrived: shown until the panel's
+    /// fresh one comes. Dropped when the fresh one (or an error) was first.
+    pub(super) fn server_mods_kept(&mut self, root: PathBuf, f: Option<Box<Fetched>>) {
+        let Some(f) = f else { return };
+        if self.is_server_list(&root) || self.server_mods_err.contains_key(&root) {
+            return;
+        }
+        FROM_LAST.lock().unwrap_or_else(|e| e.into_inner()).insert(root.clone());
+        self.show_fetched(root, *f);
+    }
+
+    /// Puts a fetched list in the table. True when its jars differ from
+    /// the list shown before (none shown counts as no change).
+    fn show_fetched(&mut self, root: PathBuf, f: Fetched) -> bool {
+        let Fetched { mut inst, loose } = f;
+        inst.root = root.clone();
+        if remote(&root).is_some() {
+            for l in &loose {
+                self.want_image(&l.icon);
+            }
+            self.remote_loose.insert(root.clone(), loose);
+        }
+        // Before the empty stand-in below: the first list isn't a change,
+        // and counting it one asked the panel for updates a second time
+        // while the Mods tab's own check was still running.
+        let changed = self.instance(&root).is_some_and(|old| !same_files(&old.addons, &inst.addons));
+        if !self.is_server_list(&root) {
+            self.server_insts.push(Instance { root: root.clone(), ..Default::default() });
+        }
+        self.put_instance(inst);
+        changed
+    }
+
     pub(super) fn server_mods_arrived(&mut self, root: PathBuf, res: Result<Box<Fetched>, String>) {
         self.server_fetching.remove(&root);
+        let was_kept = FROM_LAST.lock().unwrap_or_else(|e| e.into_inner()).remove(&root);
         match res {
             Ok(f) => {
                 self.server_mods_err.remove(&root);
-                let Fetched { mut inst, loose } = *f;
-                inst.root = root.clone();
-                if remote(&root).is_some() {
-                    for l in &loose {
-                        self.want_image(&l.icon);
-                    }
-                    self.remote_loose.insert(root.clone(), loose);
-                }
-                if !self.is_server_list(&root) {
-                    self.server_insts.push(Instance { root: root.clone(), ..Default::default() });
-                }
-                let changed = remote(&root).is_some() && self.instance(&root).is_some_and(|old| !same_files(&old.addons, &inst.addons));
-                self.put_instance(inst);
+                let changed = self.show_fetched(root.clone(), *f);
                 // Jars changed on the panel (a sync, an update there): its own
                 // offers moved with them, and the desktop's copy is up to 30
-                // minutes old. The panel answers from its cache, so this is cheap.
-                if changed && let Some(r) = remote(&root) {
+                // minutes old. The panel answers from its cache, so this is
+                // cheap. A check already on its way gets the new offers.
+                let checking = self.updates.get(&root).is_some_and(|u| u.checking);
+                if changed
+                    && !checking
+                    && let Some(r) = remote(&root)
+                {
                     self.check_remote_updates(&root, r, false);
                 }
             }
             Err(e) => {
                 log::warn!("mods of {}: {e}", root.display());
+                // Only last run's list on show: the panel is out of reach, so
+                // say so rather than show a list that may be out of date.
+                if was_kept {
+                    self.server_insts.retain(|i| i.root != root);
+                    self.remote_loose.remove(&root);
+                }
                 self.server_mods_err.insert(root.clone(), e);
             }
         }
@@ -723,8 +822,37 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use super::same_files;
+    use super::{last_file, load_last_in, read_reply, same_files, save_last_in};
     use hopper::instances::Addon;
+    use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn the_last_list_comes_back_for_its_own_server_only() {
+        let dir = std::env::temp_dir().join(format!("hopper-last-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (a, b) = (Path::new(r"hopperd:\p1\srv-a"), Path::new(r"hopperd:\p1\srv-b"));
+        assert!(load_last_in(&dir, a).is_none(), "nothing kept yet");
+        let reply = json!({
+            "instance": { "name": "A", "addons": [{ "file_name": "x-1.0.jar", "name": "X" }] },
+            "loose": [{ "file": "y.jar", "icon": "" }],
+        });
+        save_last_in(&dir, a, &reply);
+        let back = load_last_in(&dir, a).expect("kept");
+        assert_eq!(back, reply);
+        let f = read_reply(a, &back).expect("reads as a list");
+        assert_eq!(f.inst.root, a);
+        assert_eq!(f.inst.addons.len(), 1);
+        assert_eq!(f.loose[0].file, "y.jar");
+        assert!(load_last_in(&dir, b).is_none(), "another server has its own");
+        // A file that names another server (a hash clash) is not this one's.
+        std::fs::copy(last_file(&dir, a), last_file(&dir, b)).unwrap();
+        assert!(load_last_in(&dir, b).is_none());
+        // Half a file reads as nothing kept.
+        std::fs::write(last_file(&dir, a), b"{\"root\":").unwrap();
+        assert!(load_last_in(&dir, a).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn a(f: &str) -> Addon {
         Addon { file_name: f.into(), ..Default::default() }

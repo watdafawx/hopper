@@ -174,6 +174,9 @@ pub enum Msg {
     Nothing,
     /// A server's mod list, read from its folder or fetched from its panel.
     ServerMods(PathBuf, Result<Box<server_mods::Fetched>, String>),
+    /// A Hopper Server's mod list as the last run left it, shown until the
+    /// panel answers.
+    ServerModsKept(PathBuf, Option<Box<server_mods::Fetched>>),
     /// A change on a Hopper Server failed: why (the list is fetched again).
     RemoteFailed(PathBuf, String),
     /// A Hopper Server's update offers: the list, archived files, and what
@@ -1597,6 +1600,7 @@ impl Store {
             Msg::SessionSaved(root) => cx.emit(StoreEvent::SessionSaved(root)),
             Msg::Nothing => {}
             Msg::ServerMods(root, res) => self.server_mods_arrived(root, res),
+            Msg::ServerModsKept(root, f) => self.server_mods_kept(root, f),
             Msg::RemoteFailed(root, why) => self.remote_failed(root, why, cx),
             Msg::RemoteUpdates(root, list, archived, breaks) => {
                 self.archived.insert(root.clone(), archived);
