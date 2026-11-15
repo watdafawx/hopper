@@ -1668,6 +1668,38 @@ pub fn filter_menu(
         })
 }
 
+/// One of the filters [`filters_menu`] folds together: its name, its
+/// options (the first means no filter), the picked one and what a pick does.
+pub struct FilterGroup {
+    pub name: &'static str,
+    pub options: Vec<&'static str>,
+    pub picked: usize,
+    pub on_pick: Rc<dyn Fn(usize, &mut Window, &mut App)>,
+}
+
+/// Several [`filter_menu`]s as one "Filters ▾" button, for a toolbar with
+/// no room left for each: the same choices, a section per filter. Says
+/// how many filters are on, so a narrowed list isn't a surprise.
+pub fn filters_menu(id: impl Into<ElementId>, groups: Vec<FilterGroup>) -> impl IntoElement {
+    let on = groups.iter().filter(|g| g.picked != 0).count();
+    let label = if on > 0 { format!("Filters {on}") } else { "Filters".to_string() };
+    let groups = Rc::new(groups);
+    Button::new(id)
+        .small()
+        .outline()
+        .label(label)
+        .dropdown_caret(true)
+        .dropdown_menu(move |menu: PopupMenu, _, _| {
+            groups.iter().enumerate().fold(menu, |m, (gi, g)| {
+                let m = if gi > 0 { m.separator() } else { m };
+                g.options.iter().enumerate().fold(m.label(g.name), |m, (ix, l)| {
+                    let f = g.on_pick.clone();
+                    m.item(PopupMenuItem::new(*l).checked(ix == g.picked).on_click(move |_, w, cx| f(ix, w, cx)))
+                })
+            })
+        })
+}
+
 /// "332.8K downloads".
 pub fn downloads_label(count: f64) -> String {
     match count as u64 {
@@ -2893,11 +2925,22 @@ pub struct SidePanel {
     pub spec: PanelSpec,
     /// The width while the edge is dragged.
     drag: Option<f32>,
+    /// The most the page beside it lets it take, in rem (see `cap_to`).
+    cap: std::cell::Cell<Option<f32>>,
 }
 
 impl SidePanel {
     pub const fn new(spec: PanelSpec) -> Self {
-        Self { spec, drag: None }
+        Self { spec, drag: None, cap: std::cell::Cell::new(None) }
+    }
+
+    /// Set by the page it docks beside, before it reads the width: the
+    /// window's share alone can't say what's left once the page's own
+    /// list takes its part, and a panel at its widest could leave the page
+    /// no room at all. Never below the panel's minimum. True when it
+    /// changed: a cached panel then needs a redraw at its new width.
+    pub fn cap_to(&self, rem: Option<f32>) -> bool {
+        self.cap.replace(rem) != rem
     }
 
     /// Saved (collapsed, open width).
@@ -2919,7 +2962,8 @@ impl SidePanel {
             return PanelLayout { width: rail, collapsed: true };
         }
         let window_w = window.viewport_size().width / window.rem_size();
-        let cap = (window_w * spec.share).max(spec.min);
+        let share = window_w * spec.share;
+        let cap = self.cap.get().map_or(share, |c| c.min(share)).max(spec.min);
         PanelLayout { width: w.clamp(spec.min, spec.max).min(cap), collapsed: false }
     }
 

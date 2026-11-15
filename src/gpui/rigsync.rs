@@ -129,8 +129,11 @@ impl EventEmitter<SyncEvent> for SyncPanel {}
 const HEAD_FIT_MAX: usize = 2;
 
 /// The filter row's levels: 1 a narrower search, 2 the Sync button as its
-/// icon and count, 3 the show choices as one menu, 4 the narrowest search.
-const BAR_FIT_MAX: usize = 4;
+/// icon and count, 3 the show choices as one menu, 4 the narrowest search,
+/// 5 Side and Source as one Filters menu and a narrower show menu, 6 the
+/// search and the show menu at their least (an instance's Server tab
+/// beside its side column).
+const BAR_FIT_MAX: usize = 6;
 
 pub struct SyncPanel {
     store: Entity<Store>,
@@ -2024,30 +2027,33 @@ impl SyncPanel {
         let picks: Vec<Show> = choices.iter().map(|(s, _)| *s).collect();
         let view = cx.entity();
         let (v1, v2) = (view.clone(), view.clone());
-        let side = widgets::filter_menu(
-            "sync-env",
-            "Side",
-            ENVS.iter().map(|(_, l)| *l).collect(),
-            env_ix,
-            std::rc::Rc::new(move |ix, _, cx| {
-                v1.update(cx, |this, cx| {
-                    this.filters.env = ENVS[ix].0;
-                    cx.notify();
-                })
-            }),
-        );
-        let source = widgets::filter_menu(
-            "sync-source",
-            "Source",
-            SOURCES.iter().map(|(_, l)| *l).collect(),
-            src_ix,
-            std::rc::Rc::new(move |ix, _, cx| {
-                v2.update(cx, |this, cx| {
-                    this.filters.source = SOURCES[ix].0;
-                    cx.notify();
-                })
-            }),
-        );
+        let pick_env: std::rc::Rc<dyn Fn(usize, &mut Window, &mut App)> = std::rc::Rc::new(move |ix, _, cx| {
+            v1.update(cx, |this, cx| {
+                this.filters.env = ENVS[ix].0;
+                cx.notify();
+            })
+        });
+        let pick_src: std::rc::Rc<dyn Fn(usize, &mut Window, &mut App)> = std::rc::Rc::new(move |ix, _, cx| {
+            v2.update(cx, |this, cx| {
+                this.filters.source = SOURCES[ix].0;
+                cx.notify();
+            })
+        });
+        let envs: Vec<&'static str> = ENVS.iter().map(|(_, l)| *l).collect();
+        let srcs: Vec<&'static str> = SOURCES.iter().map(|(_, l)| *l).collect();
+        let filters = if lv >= 5 {
+            widgets::filters_menu("sync-filters", vec![
+                widgets::FilterGroup { name: "Side", options: envs, picked: env_ix, on_pick: pick_env },
+                widgets::FilterGroup { name: "Source", options: srcs, picked: src_ix, on_pick: pick_src },
+            ])
+            .into_any_element()
+        } else {
+            h_flex()
+                .gap_2()
+                .child(widgets::filter_menu("sync-env", "Side", envs, env_ix, pick_env))
+                .child(widgets::filter_menu("sync-source", "Source", srcs, src_ix, pick_src))
+                .into_any_element()
+        };
         // What Sync changes: the whole comparison, whatever the filters.
         let whole = self.whole(cx);
         let to_change = whole.iter().filter(|g| Show::Needs.has(**g)).count();
@@ -2091,7 +2097,11 @@ impl SyncPanel {
             let (view, picks) = (view.clone(), picks.clone());
             div()
                 .flex_none()
-                .w(rems(10.))
+                .w(rems(match lv {
+                    ..=4 => 10.,
+                    5 => 8.,
+                    _ => 7.,
+                }))
                 .child(widgets::picker(
                     "sync-show-menu",
                     choices.get(show_ix).map(|(s, n)| format!("{} {n}", s.label())).unwrap_or_default(),
@@ -2117,7 +2127,8 @@ impl SyncPanel {
                 div().flex_none().w(rems(match lv {
                     0 => 12.,
                     1..=3 => 9.,
-                    _ => 6.5,
+                    4 | 5 => 6.5,
+                    _ => 4.5,
                 })).child(
                     widgets::search_input(&self.search)
                         .small()
@@ -2142,8 +2153,7 @@ impl SyncPanel {
                         cx.notify();
                     })),
             ))
-            .child(side)
-            .child(source)
+            .child(filters)
             .child(div().flex_1())
             .when(n_sel > 0, |r| {
                 r.child(

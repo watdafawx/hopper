@@ -69,13 +69,16 @@ pub fn name_room(title: &str, facts: &[String]) -> f32 {
     title.max(facts).clamp(TITLE_MIN, 28.)
 }
 
-/// One fact under a hero's title: a colored icon and its text.
+/// One fact under a hero's title: a colored icon and its text. When the
+/// name column is at its least (the actions took the rest), a fact that
+/// runs out of room ends in "…" instead of being cut mid-word.
 pub fn fact(icon: IconName, color: Hsla, text: impl Into<SharedString>) -> Div {
     h_flex()
-        .flex_none()
+        .flex_shrink(1.)
+        .min_w_0()
         .gap_1p5()
-        .child(Icon::new(icon).xsmall().text_color(color))
-        .child(text.into())
+        .child(Icon::new(icon).xsmall().text_color(color).flex_none())
+        .child(div().min_w_0().truncate().child(text.into()))
 }
 
 /// A quieter fact (author, downloads, address): icon and text both muted.

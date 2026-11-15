@@ -1517,7 +1517,7 @@ impl AddonsView {
                         h_flex()
                             .gap_3()
                             .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning))
-                            .child(div().flex_1().text_sm().child(title))
+                            .child(div().flex_1().min_w_0().text_sm().child(title))
                             .child(
                                 Button::new("find-shader-loader")
                                     .small()

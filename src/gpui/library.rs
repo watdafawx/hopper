@@ -257,22 +257,29 @@ const SIDEBAR_MIN: f32 = 14.0;
 const SIDEBAR_MAX: f32 = 36.0;
 const SIDEBAR_COLLAPSE: f32 = 10.0;
 const RAIL: f32 = 4.5;
+/// The least room the instance page keeps beside a docked panel, in rem:
+/// about where its header, tabs and toolbars have folded as far as they go.
+const PAGE_MIN: f32 = 30.0;
 
 /// The header's levels for a narrow page (`widgets::Fit`): 1 "Update pack",
 /// 2 its icon only, 3 Folder and the pack's page into ⋯, 4 Settings into ⋯,
-/// 5 the paired server as its state dot, 6 Play as its icon.
-const HEADER_FIT_MAX: usize = 6;
+/// 5 the paired server as its state dot, 6 Play as its icon, 7 History
+/// into ⋯ (the page beside the mod peek at its widest).
+const HEADER_FIT_MAX: usize = 7;
 
 /// Header buttons folded into its ⋯ menu for room.
 #[derive(Clone, Copy)]
 struct HeaderFold {
     folder: bool,
     settings: bool,
+    history: bool,
 }
 
 pub struct LibraryView {
     /// The list's width while its edge is being dragged.
     drag_width: Option<f32>,
+    /// The list is folded to its rail while a docked panel needs the room.
+    squeezed: bool,
     /// Instance groups folded shut.
     folded: std::collections::HashSet<String>,
     store: Entity<Store>,
@@ -540,6 +547,7 @@ impl LibraryView {
         }));
         let mut view = Self {
             drag_width: None,
+            squeezed: false,
             folded: Default::default(),
             store,
             pack_desc,
@@ -1098,7 +1106,7 @@ impl LibraryView {
         let (collapsed, width) = match self.drag_width {
             Some(w) if w < SIDEBAR_COLLAPSE => (true, RAIL),
             Some(w) => (false, w.clamp(SIDEBAR_MIN, SIDEBAR_MAX)),
-            None if settings.sidebar_collapsed => (true, RAIL),
+            None if settings.sidebar_collapsed || self.squeezed => (true, RAIL),
             None => (false, saved),
         };
         (collapsed, width, if collapsed { saved } else { RAIL })
@@ -1984,7 +1992,7 @@ impl LibraryView {
         let primary = cx.theme().primary;
         // How far the header has given way to a narrow page (HEADER_FIT_MAX).
         let lv = self.hero_actions.level();
-        let fold = HeaderFold { folder: lv >= 3, settings: lv >= 4 };
+        let fold = HeaderFold { folder: lv >= 3, settings: lv >= 4, history: lv >= 7 };
         let mut key_parts: Vec<String> = Vec::new();
         let pack_update = store.pack_update(inst).cloned().map(|f| {
             let full = format!("Update pack to {}", f.display_name);
@@ -2170,7 +2178,7 @@ impl LibraryView {
                                         .on_click(cx.listener(|this, _, _, cx| this.set_tab(InstTab::Settings, cx))),
                                 )
                             })
-                            .child(history)
+                            .when(!fold.history, |r| r.child(history))
                             .child(
                                 Button::new("more")
                                     .outline()
@@ -3120,18 +3128,45 @@ impl Render for LibraryView {
         }
         let config_panel = self.config_shown();
         let peek = self.peek_shown(cx).filter(|_| config_panel.is_none());
-        let peek_w = peek.as_ref().map_or(0.0, |p| p.read(cx).panel_width(window, cx));
-        let config_w = config_panel.as_ref().map_or(0.0, |_| {
-            let s = self.store.read(cx).settings();
-            s.panel_widths.get("config.panel").copied().unwrap_or(30.).abs().clamp(24., 48.).min(window.viewport_size().width / window.rem_size() * 0.4)
-        });
-        let peek_w = peek_w + config_w;
         // One dock on the right: a config file, else a mod's page, else
         // Friends. A mod opened from Friends takes the dock; Friends is
         // back when it closes.
         let friends_shown = self.friends_shown(cx);
         let friends_w = if friends_shown { self.friends.read(cx).width(window, cx) } else { 0.0 };
-        self.detail_w = window.viewport_size().width / window.rem_size() - side - peek_w - friends_w;
+        // The page keeps PAGE_MIN beside the dock: the dock gives way
+        // first, down to its minimum, then the instance list folds to its
+        // rail for as long as the dock is open (not saved). The window's
+        // share alone left the page nothing at 960 px with the dock at its
+        // widest.
+        let win = window.viewport_size().width / window.rem_size();
+        let dock_min = if config_panel.is_some() {
+            crate::configs_tab::PANEL.min
+        } else if peek.is_some() || friends_shown {
+            widgets::DOCK.min
+        } else {
+            0.0
+        };
+        let squeeze = self.drag_width.is_none() && side > RAIL && dock_min > 0. && win - side - dock_min < PAGE_MIN;
+        if squeeze != self.squeezed {
+            self.squeezed = squeeze;
+            cx.notify();
+        }
+        let side = if squeeze { RAIL } else { side };
+        let dock_cap = Some(win - side - PAGE_MIN);
+        let peek_w = peek.as_ref().map_or(0.0, |p| {
+            if p.read(cx).cap_dock(dock_cap) {
+                p.update(cx, |_, cx| cx.notify());
+            }
+            p.read(cx).panel_width(window, cx)
+        });
+        let config_w = config_panel.as_ref().map_or(0.0, |p| {
+            if p.read(cx).cap_to(dock_cap) {
+                p.update(cx, |_, cx| cx.notify());
+            }
+            p.read(cx).panel_width(window, cx)
+        });
+        let peek_w = peek_w + config_w;
+        self.detail_w = win - side - peek_w - friends_w;
         // The table fits its columns to this; it is re-laid out whenever
         // the room changes (its bounds change), so no notify is needed.
         let (room, list_open) = (self.detail_w, side > RAIL);
@@ -3411,7 +3446,7 @@ fn instance_menu(
 ) -> PopupMenu {
     let (fold, site) = match header.clone() {
         Some((f, site)) => (f, site),
-        None => (HeaderFold { folder: true, settings: true }, None),
+        None => (HeaderFold { folder: true, settings: true, history: false }, None),
     };
     let header = header.is_some();
     let store = view.read(cx).store.clone();
@@ -3471,6 +3506,16 @@ fn instance_menu(
                 this.select(r.clone(), cx);
                 this.set_tab(InstTab::Settings, cx);
             })
+        }))
+        .when(!fold.history, |m| m.separator())
+    })
+    // The header's History button, folded in here for room: it opens the
+    // same window and marks it seen, as the button does.
+    .when(fold.history, |m| {
+        let (s, r) = (st(), r.clone());
+        m.item(PopupMenuItem::new("History").icon(IconName::RotateCcwClock).on_click(move |_, window, cx| {
+            crate::history_button::mark_seen(&r);
+            crate::backups_view::open(s.clone(), r.clone(), window, cx)
         }))
         .separator()
     })

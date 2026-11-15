@@ -466,7 +466,10 @@ impl Render for MotdEditor {
         // At 1.5x the game's GUI scale 1: the message area is LIST_WIDTH
         // game pixels, and a 6 px letter is one monospace cell (0.55 em).
         let scale = 1.5;
-        let preview = div().p_2p5().overflow_hidden().rounded(theme.radius).bg(rgb(0x1d150e)).child(
+        // The list is as wide as the game draws it; on a narrow page it
+        // scrolls sideways instead of making the whole form wider than the
+        // page (which cut off the lines and their hints).
+        let preview = div().id("motd-preview").w_full().min_w_0().p_2p5().overflow_x_scroll().rounded(theme.radius).bg(rgb(0x1d150e)).child(
             h_flex()
                 .items_start()
                 .gap_1p5()

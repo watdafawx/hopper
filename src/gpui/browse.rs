@@ -6070,6 +6070,12 @@ impl BrowseView {
         self.dock.layout(self.store.read(cx).settings(), window).width
     }
 
+    /// The most the dock may take beside the page it's in (see
+    /// `SidePanel::cap_to`).
+    pub fn cap_dock(&self, rem: Option<f32>) -> bool {
+        self.dock.cap_to(rem)
+    }
+
     /// The dock around a project panel's `body`, sliding in when `id`
     /// changes.
     fn frame(&mut self, id: ElementId, body: AnyElement, window: &Window, cx: &mut Context<Self>) -> AnyElement {

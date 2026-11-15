@@ -55,7 +55,7 @@ enum Pick {
 
 // ---- the side panel ---------------------------------------------------------------------
 
-const PANEL: widgets::PanelSpec = widgets::PanelSpec::new("config.panel", 30., 24., 48.).trailing();
+pub(crate) const PANEL: widgets::PanelSpec = widgets::PanelSpec::new("config.panel", 30., 24., 48.).trailing();
 
 pub enum ConfigPanelEvent {
     Close,
@@ -99,6 +99,16 @@ impl ConfigPanel {
 
     pub fn root(&self, cx: &App) -> PathBuf {
         self.view.read(cx).root().to_path_buf()
+    }
+
+    /// The panel's width now, in rem.
+    pub fn panel_width(&self, window: &Window, cx: &App) -> f32 {
+        self.panel.layout(self.store.read(cx).settings(), window).width
+    }
+
+    /// The most it may take beside the page (see `SidePanel::cap_to`).
+    pub fn cap_to(&self, rem: Option<f32>) -> bool {
+        self.panel.cap_to(rem)
     }
 }
 
