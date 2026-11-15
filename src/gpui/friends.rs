@@ -1058,7 +1058,7 @@ impl FriendsPanel {
                     .child(div().text_sm().font_medium().truncate().child(widgets::marked(p.name.clone(), words, cx)))
                     .child(widgets::caption(sub, cx).text_xs().truncate()),
             )
-            .when(news > 0, |r| r.child(widgets::chip(chip_ink(theme.primary, cx)).child(format!("{news} new"))))
+            .when(news > 0, |r| r.child(widgets::chip(theme.primary).child(format!("{news} new"))))
             .children(menu)
             .child(Icon::new(IconName::ChevronRight).small().flex_none().text_color(theme.muted_foreground))
             .into_any_element()
@@ -1253,7 +1253,7 @@ impl FriendsPanel {
                 .id(SharedString::from(format!("following:{key}")))
                 .flex_none()
                 .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("You follow this pack. Your copy updates when they change theirs.").build(w, cx))
-                .child(widgets::chip(chip_ink(theme.success, cx)).child("Following"))
+                .child(widgets::chip(theme.success).child("Following"))
                 .into_any_element(),
             (None, true) => {
                 let e = e.clone();
@@ -2477,7 +2477,7 @@ impl FriendsPanel {
                 h_flex()
                     .gap_2()
                     .items_start()
-                    .child(Icon::new(icon.0).xsmall().flex_none().mt(px(3.)).text_color(chip_ink(icon.1, cx)))
+                    .child(Icon::new(icon.0).xsmall().flex_none().mt(px(3.)).text_color(crate::theme::chip_ink(icon.1)))
                     .child(
                         v_flex()
                             .flex_1()
@@ -2711,13 +2711,6 @@ impl Render for FriendsPanel {
         let _ = &theme;
         widgets::dock(SharedString::from("friends-dock"), &self.panel, |t: &mut Self| &mut t.panel, &self.store, content, window, cx)
     }
-}
-
-/// A chip's text colour. On a light theme orange and green text on their
-/// own faint tint is too pale to read (2.8:1 for the orange), so it is
-/// darkened there until the 12px text reads at 4.5:1 on the tint.
-fn chip_ink(c: Hsla, cx: &App) -> Hsla {
-    if cx.theme().mode.is_dark() { c } else { hsla(c.h, c.s, (c.l - 0.13).max(0.), c.a) }
 }
 
 /// "or" between two ways in, with a line either side.

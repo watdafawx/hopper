@@ -4608,7 +4608,7 @@ It stays disabled after updating: turn it on in the On column.")
                                         div()
                                             .min_w_0()
                                             .truncate()
-                                            .text_color(theme.muted_foreground)
+                                            .text_color(crate::theme::chip_ink(theme.muted_foreground))
                                             .child(old),
                                     )
                                     .child(
@@ -4622,7 +4622,7 @@ It stays disabled after updating: turn it on in the On column.")
                                             .min_w_0()
                                             .truncate()
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(primary)
+                                            .text_color(crate::theme::chip_ink(primary))
                                             .child(new),
                                     ),
                             ),
@@ -4639,9 +4639,9 @@ It stays disabled after updating: turn it on in the On column.")
                                 }
                                 (!v.is_empty()).then(|| {
                                     chip.bg(theme.muted)
-                                        .text_color(theme.muted_foreground)
+                                        .text_color(crate::theme::chip_ink(theme.muted_foreground))
                                         .group_hover("file", move |s| {
-                                            s.bg(primary.opacity(widgets::alpha::TINT)).text_color(crate::theme::ink(primary))
+                                            s.bg(primary.opacity(widgets::alpha::TINT)).text_color(crate::theme::chip_ink(primary))
                                         })
                                         .child(div().min_w_0().truncate().child(v))
                                 })
@@ -5106,7 +5106,7 @@ Change version", a.file_name).into()
                     .rounded(crate::theme::radius_sm())
                     .text_xs()
                     .bg(warn.opacity(widgets::alpha::TINT))
-                    .text_color(warn)
+                    .text_color(crate::theme::chip_ink(warn))
                     .child(Icon::new(IconName::TriangleAlert).xsmall())
                     .child(format!("needs {n}"))
                     .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
@@ -5139,7 +5139,7 @@ Change version", a.file_name).into()
                     .rounded(crate::theme::radius_sm())
                     .text_xs()
                     .bg(warn.opacity(widgets::alpha::TINT))
-                    .text_color(warn)
+                    .text_color(crate::theme::chip_ink(warn))
                     .child(Icon::new(IconName::TriangleAlert).xsmall())
                     .child("breaks")
                     .child(widgets::thumb(icon.as_deref(), rems(0.85), cx))
@@ -5910,9 +5910,9 @@ impl Render for UpdateReview {
                                 .rounded(crate::theme::radius_sm())
                                 .bg(theme.primary.opacity(widgets::alpha::TINT))
                                 .text_xs()
-                                .child(div().min_w_0().truncate().text_color(theme.muted_foreground).child(r.from.clone()))
+                                .child(div().min_w_0().truncate().text_color(crate::theme::chip_ink(theme.muted_foreground)).child(r.from.clone()))
                                 .child(Icon::new(IconName::ArrowRight).xsmall().flex_none().text_color(theme.primary))
-                                .child(div().min_w_0().truncate().text_color(crate::theme::ink(theme.primary)).child(r.to.clone())),
+                                .child(div().min_w_0().truncate().text_color(crate::theme::chip_ink(theme.primary)).child(r.to.clone())),
                         ))
                 }))
         });

@@ -1319,7 +1319,7 @@ impl AppView {
             .map(|c| match color {
                 Some(color) => c
                     .font_semibold()
-                    .text_color(color)
+                    .text_color(crate::theme::chip_ink(color))
                     .bg(color.opacity(0.12))
                     .border_1()
                     .border_color(color.opacity(0.3))

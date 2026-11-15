@@ -440,6 +440,21 @@ pub fn ink(c: Hsla) -> Hsla {
     out
 }
 
+/// A chip's or status pill's text colour. On a light theme the colour is
+/// mixed half way to black (in sRGB), so a label on its own faint tint reads
+/// well past 4.5:1 whatever the hue: the plain colour is 1.5-4:1 there.
+/// Dark themes keep the colour as it is. Hopper Server's web UI uses the
+/// same rule (`--ink-*` in its app.css), so a chip looks the same in both.
+pub fn chip_ink(c: Hsla) -> Hsla {
+    if LIGHT_PAGE.load(Ordering::Relaxed) == 0 { c } else { half_black(c) }
+}
+
+/// `c` mixed 50% with black in sRGB, like CSS `color-mix(in srgb, c 50%, #000)`.
+fn half_black(c: Hsla) -> Hsla {
+    let o = gpui_kit::Rgba::from(c);
+    Hsla::from(gpui_kit::Rgba { r: o.r * 0.5, g: o.g * 0.5, b: o.b * 0.5, a: o.a })
+}
+
 /// The contrast [`ink`] aims for: 4.5:1 plus a little, since thin small text
 /// anti-aliases lighter than its colour.
 const INK_RATIO: f32 = 5.0;
@@ -648,6 +663,26 @@ fn config(p: &Palette) -> Option<ThemeConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Chip text on light themes: half way to black, like the web UI's
+    /// `color-mix(in srgb, c 50%, #000)`, and readable on the chip's 10% tint
+    /// over every background of every light theme.
+    #[::core::prelude::v1::test]
+    fn chip_ink_reads_on_its_tint_in_every_light_theme() {
+        let c = gpui_kit::Rgba::from(half_black(gpui_kit::Hsla::from(gpui_kit::Rgba { r: 0.9176, g: 0.3451, b: 0.0471, a: 1. })));
+        assert!((c.r - 0.4588).abs() < 0.005 && (c.g - 0.1725).abs() < 0.005 && (c.b - 0.0235).abs() < 0.005);
+        for p in PALETTES.iter().filter(|p| !p.dark) {
+            for color in [p.accent, p.success, p.warning, p.danger, p.info, p.muted] {
+                let k = parse(color);
+                let ink = gpui_kit::Rgba::from(half_black(gpui_kit::Hsla::from(gpui_kit::Rgba { r: k.0, g: k.1, b: k.2, a: 1. })));
+                for bg in [p.bg, p.panel, p.surface, p.raised] {
+                    let tint = parse(&mix(bg, color, crate::widgets::alpha::TINT));
+                    let r = ratio(Rgba(ink.r, ink.g, ink.b, 1.), tint);
+                    assert!(r >= 4.5, "{}: {color} on {bg} is {r:.2}:1", p.name);
+                }
+            }
+        }
+    }
 
     #[::core::prelude::v1::test]
     fn every_palette_makes_a_theme() {
