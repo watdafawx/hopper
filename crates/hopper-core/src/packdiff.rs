@@ -710,6 +710,19 @@ fn zip_overrides(zip: &Path, prefixes: &[String]) -> anyhow::Result<HashMap<Stri
     Ok(out)
 }
 
+/// A pack mod that left the manifest's file list but still ships as a jar in
+/// the new version's overrides (one taken off CurseForge, so the pack
+/// carries it in its zip) is still the pack's: it isn't dropped. `new` is
+/// the new version's override files ([`zip_overrides`]).
+fn keep_shipped_jars(mods: &mut Vec<ModChange>, new: &HashMap<String, String>) {
+    let shipped: HashSet<String> = new.keys().map(|k| k.replace('\\', "/").to_lowercase()).collect();
+    mods.retain(|m| {
+        let jar = m.from.to_lowercase();
+        let jar = jar.strip_suffix(".disabled").unwrap_or(&jar);
+        !(m.action == ModAction::Remove && shipped.contains(&format!("mods/{jar}")))
+    });
+}
+
 fn file_hash(path: &Path) -> Option<String> {
     fs::read(path).ok().map(|b| sha1_of(&b))
 }
@@ -841,11 +854,17 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
             manifest.overrides.clone()
         };
         job.detail("Comparing mods");
+        // The installed version's mods tell the ones you updated or removed
+        // from the pack's own changes. A quick update reads them from the
+        // pack cache when it's there; without them, a pack mod you updated
+        // would be put back to the pack's older file with no word.
+        let reinstall = is_reinstall(&pack, file);
         let had: Option<HashMap<u64, u64>> = old_zip
-            .as_ref()
-            .and_then(|z| modpack::read_manifest(z).ok())
+            .clone()
+            .or_else(|| (!reinstall).then(|| modpack::cached_pack_zip(pack.file_id)).flatten())
+            .and_then(|z| modpack::read_manifest(&z).ok())
             .map(|m| m.files.iter().map(|f| (f.project_id, f.file_id)).collect());
-        let (mods, removed, mine) = cf_mod_changes(inst, &manifest, had.as_ref())?;
+        let (mods, removed, mine) = cf_mod_changes(inst, &manifest, had.as_ref(), !reinstall)?;
         updated = mine;
         (vec![prefix], mods, removed)
     };
@@ -854,6 +873,7 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
     mods.retain(|m| !(m.action == ModAction::Add && removed_names.contains(&m.to)));
     job.detail("Comparing config files");
     let new = zip_overrides(&new_zip, &prefixes)?;
+    keep_shipped_jars(&mut mods, &new);
     let old_prefixes: Option<Vec<String>> = old_zip.as_ref().map(|z| {
         if mr {
             prefixes.clone()
@@ -1358,6 +1378,7 @@ fn cf_mod_changes(
     inst: &Instance,
     manifest: &crate::instances::PackManifest,
     had: Option<&HashMap<u64, u64>>,
+    no_downgrade: bool,
 ) -> anyhow::Result<(Vec<ModChange>, Vec<OffMod>, Vec<OffMod>)> {
     let wanted: HashMap<u64, u64> = manifest
         .files
@@ -1391,13 +1412,32 @@ fn cf_mod_changes(
         return Ok((out, Vec::new(), Vec::new()));
     }
     let files = cf::get_files(&todo)?;
-    let (mut removed, mut mine) = (Vec::new(), Vec::new());
     let projects: HashMap<u64, cf::Mod> =
         cf::get_mods(&files.iter().map(|f| f.mod_id).collect::<Vec<_>>())
             .unwrap_or_default()
             .into_iter()
             .map(|m| (m.id, m))
             .collect();
+    let (more, removed, mine) = sort_pack_files(inst, files, &projects, had, no_downgrade);
+    out.extend(more);
+    out.sort_by_key(|m| (m.action as u8, m.name.to_lowercase()));
+    Ok((out, removed, mine))
+}
+
+/// What each pack file that differs from yours is: a pack mod you removed
+/// (it would come back), one you updated yourself (yours stays unless you
+/// take the pack's), or a plain add or update. With no installed version
+/// to compare (`had` is `None`, or it doesn't list the project) and
+/// `no_downgrade`, a mod whose file is newer than the pack's counts as
+/// yours: an update never silently puts an older file in its place.
+fn sort_pack_files(
+    inst: &Instance,
+    files: Vec<cf::File>,
+    projects: &HashMap<u64, cf::Mod>,
+    had: Option<&HashMap<u64, u64>>,
+    no_downgrade: bool,
+) -> (Vec<ModChange>, Vec<OffMod>, Vec<OffMod>) {
+    let (mut out, mut removed, mut mine) = (Vec::new(), Vec::new(), Vec::new());
     let names: HashMap<u64, String> = projects.iter().map(|(k, m)| (*k, m.name.clone())).collect();
     let logo = |id: u64| {
         projects
@@ -1423,9 +1463,13 @@ fn cf_mod_changes(
         // You updated it yourself (it isn't the installed version's file),
         // and it's on: keep yours or take the pack's. Turned-off ones are
         // in the turned-off list.
+        let yours = |a: &crate::instances::Addon| match had.and_then(|h| h.get(&f.mod_id)) {
+            Some(old) => *old != a.file_id,
+            None => no_downgrade && crate::file_age::Age::of_addon(a).newer_than(&f.age()),
+        };
         if let Some(a) = have
             && a.enabled
-            && had.is_some_and(|h| h.get(&f.mod_id).is_some_and(|old| *old != a.file_id))
+            && yours(a)
         {
             mine.push(OffMod {
                 name: names.get(&f.mod_id).cloned().unwrap_or_else(|| a.name.clone()),
@@ -1455,9 +1499,8 @@ fn cf_mod_changes(
             },
         });
     }
-    out.sort_by_key(|m| (m.action as u8, m.name.to_lowercase()));
     mine.sort_by_key(|m| m.name.to_lowercase());
-    Ok((out, removed, mine))
+    (out, removed, mine)
 }
 
 fn mr_mod_changes(inst: &Instance, index: &modpack::MrIndex) -> Vec<ModChange> {
@@ -2067,6 +2110,87 @@ mod tests {
         assert!(o.enable.contains(&7) && o.enable.contains(&11));
         assert!(o.leave_out.is_empty() && !o.skip.contains("mods/x.jar"));
         assert!(o.keep_mine.is_empty());
+    }
+
+    /// TNP Limitless 8, 1.79.0 -> 1.80.0 as a quick update (no installed
+    /// version to compare): Kobolds, Block Prints and Async Particles, which
+    /// the player had updated, went back to the pack's older files with no
+    /// word. A file newer than the pack's is yours; a pack file newer than
+    /// yours is still the pack's update.
+    /// TNP Limitless 8, 1.79.0 -> 1.80.0: CC Tweaked Compat is no longer on
+    /// CurseForge, so both versions ship its jar in overrides/mods. The plan
+    /// listed it as dropped and the update removed it.
+    #[test]
+    fn a_jar_the_new_version_ships_in_overrides_is_not_dropped() {
+        let change = |from: &str, project: u64| ModChange {
+            name: from.into(),
+            from: from.into(),
+            to: String::new(),
+            action: ModAction::Remove,
+            project,
+            icon: String::new(),
+        };
+        let mut mods = vec![change("cc-tweaked-1.120.2.jar", 1676502), change("gone-1.0.jar", 7)];
+        let new: HashMap<String, String> = [
+            ("mods/cc-tweaked-1.120.2.jar".to_string(), "aa".to_string()),
+            ("config/gone.toml".to_string(), "bb".to_string()),
+        ]
+        .into();
+        keep_shipped_jars(&mut mods, &new);
+        let left: Vec<&str> = mods.iter().map(|m| m.from.as_str()).collect();
+        assert_eq!(left, ["gone-1.0.jar"], "only the mod the pack really dropped goes");
+    }
+
+    #[test]
+    fn a_quick_update_never_puts_back_an_older_file() {
+        let mine = |p: u64, f: u64, name: &str| crate::instances::Addon {
+            project_id: p,
+            file_id: f,
+            file_name: name.into(),
+            name: name.into(),
+            enabled: true,
+            from_pack: true,
+            ..Default::default()
+        };
+        let inst = Instance {
+            addons: vec![
+                mine(484967, 9257299, "Kobolds-4.0.2.jar"),
+                mine(1025374, 7591219, "blockprints-merged-1.21.1-2.4.0.jar"),
+                mine(1215753, 9600000, "AsyncParticles-21.1.4.12-1.21.1.jar"),
+                mine(698309, 8082824, "Explorify v1.6.5.mod.jar"),
+            ],
+            ..Default::default()
+        };
+        let pack = |p: u64, f: u64, name: &str| cf::File { id: f, mod_id: p, file_name: name.into(), ..Default::default() };
+        let files = || {
+            vec![
+                pack(484967, 8125214, "Kobolds-3.0.42.jar"),
+                pack(1025374, 6997789, "blockprints-merged-1.21.1-2.3.0.jar"),
+                pack(1215753, 9570320, "AsyncParticles-21.1.4.11-1.21.1.jar"),
+                pack(698309, 9509145, "Explorify-v1.6.6.mod.jar"),
+            ]
+        };
+        let keys = |v: &[OffMod]| v.iter().map(|m| m.key.clone()).collect::<Vec<_>>();
+        let updates = |v: &[ModChange]| v.iter().filter(|m| m.action == ModAction::Update).map(|m| m.from.clone()).collect::<Vec<_>>();
+
+        let (out, removed, yours) = sort_pack_files(&inst, files(), &HashMap::new(), None, true);
+        assert!(removed.is_empty());
+        let mut k = keys(&yours);
+        k.sort();
+        assert_eq!(k, ["u:1025374", "u:1215753", "u:484967"]);
+        assert!(yours.iter().all(|m| !m.pack_newer), "yours stay by default");
+        assert_eq!(updates(&out), ["Explorify v1.6.5.mod.jar"]);
+
+        // With the installed version (1.79.0) known: the same answer.
+        let had: HashMap<u64, u64> = [(484967, 8125214), (1025374, 6997789), (1215753, 9256646), (698309, 8082824)].into();
+        let (out, _, yours) = sort_pack_files(&inst, files(), &HashMap::new(), Some(&had), true);
+        assert_eq!(yours.len(), 3);
+        assert_eq!(updates(&out), ["Explorify v1.6.5.mod.jar"]);
+
+        // A reinstall of the installed version takes the pack's files back.
+        let (out, _, yours) = sort_pack_files(&inst, files(), &HashMap::new(), None, false);
+        assert!(yours.is_empty());
+        assert_eq!(updates(&out).len(), 4);
     }
 }
 

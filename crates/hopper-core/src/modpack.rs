@@ -1026,21 +1026,21 @@ pub fn cached_override_files(file_id: u64) -> Option<Vec<String>> {
     override_files_in(&cache_dir().join(format!("{file_id}.zip")))
 }
 
-/// What a pack zip's overrides put in the instance (lower case, forward
-/// slashes), minus the files `overrides` says to skip. Empty when the zip
-/// can't be read.
-fn shipped_set(zip_path: &Path, overrides: Option<&Overrides>) -> HashSet<String> {
+/// What a pack zip's overrides hold (lower case, forward slashes), the
+/// files an update skips too: a jar the pack still ships stays the pack's
+/// and must not count as dropped because yours is already the same file
+/// (or you kept yours). Empty when the zip can't be read.
+fn shipped_set(zip_path: &Path) -> HashSet<String> {
     override_files_in(zip_path)
         .unwrap_or_default()
         .into_iter()
         .map(|p| p.replace('\\', "/").to_lowercase())
-        .filter(|p| !overrides.is_some_and(|o| o.skip.iter().any(|s| s.eq_ignore_ascii_case(p))))
         .collect()
 }
 
 /// [`shipped_set`] for a Modrinth pack: what its `overrides` and
-/// `client-overrides` folders hold.
-fn mr_shipped_set(zip_path: &Path, overrides: Option<&Overrides>) -> HashSet<String> {
+/// `client-overrides` folders hold, skipped files included (see there).
+fn mr_shipped_set(zip_path: &Path, _overrides: Option<&Overrides>) -> HashSet<String> {
     let Ok(mut z) = fs::File::open(zip_path).map_err(anyhow::Error::from).and_then(|f| Ok(zip::ZipArchive::new(f)?)) else {
         return HashSet::new();
     };
@@ -1058,7 +1058,6 @@ fn mr_shipped_set(zip_path: &Path, overrides: Option<&Overrides>) -> HashSet<Str
             }
         }
     }
-    out.retain(|p| !overrides.is_some_and(|o| o.skip.iter().any(|s| s.eq_ignore_ascii_case(p))));
     out
 }
 
@@ -1569,7 +1568,7 @@ fn apply_pack(
     adopt_kept(inst, overrides);
     // The jars this pack ships in its overrides, written below: the pack's
     // own, so an update keeps their records and the files are replaced.
-    let shipped = shipped_set(zip_path, overrides);
+    let shipped = shipped_set(zip_path);
     commit(inst, staged, |a| {
         a.from_pack
             && !wanted.contains_key(&a.project_id)
@@ -3871,6 +3870,48 @@ mod pack_fix_tests {
         let backups = walk(&inst.root.join(crate::sync::BACKUP_DIR));
         assert!(backups.iter().any(|p| p.ends_with("x-1.jar.disabled")));
         assert!(backups.iter().any(|p| p.ends_with("gone.jar.disabled")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// TNP Limitless 8, 1.79.0 -> 1.80.0: the pack ships CC: Tweaked in its
+    /// overrides, the player's copy is the same file (so the update skips
+    /// it) and its record names a stranger's re-upload the manifest doesn't
+    /// list. It stayed the pack's file, yet the update took it away.
+    #[test]
+    fn a_skipped_override_jar_is_not_dropped() {
+        let dir = temp("skipped-override");
+        let root = dir.join("inst");
+        fs::create_dir_all(root.join("mods")).unwrap();
+        fs::write(root.join("mods/cc-tweaked-1.120.2.jar"), b"cc").unwrap();
+        fs::write(root.join("mods/off-1.jar.disabled"), b"off").unwrap();
+        let mut inst = Instance {
+            root: root.clone(),
+            addons: vec![
+                Addon { project_id: 1676502, file_id: 8778582, file_name: "cc-tweaked-1.120.2.jar".into(), enabled: true, from_pack: true, ..Default::default() },
+                Addon { file_name: "off-1.jar".into(), enabled: false, from_pack: true, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let zip_path = dir.join("pack.zip");
+        let mut z = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        z.start_file::<_, ()>("manifest.json", Default::default()).unwrap();
+        z.write_all(br#"{"minecraft":{"version":"1.21.1","modLoaders":[]},"name":"P","files":[],"overrides":"overrides"}"#).unwrap();
+        for (name, bytes) in [("overrides/mods/cc-tweaked-1.120.2.jar", &b"cc"[..]), ("overrides/mods/off-1.jar", b"off")] {
+            z.start_file::<_, ()>(name, Default::default()).unwrap();
+            z.write_all(bytes).unwrap();
+        }
+        z.finish().unwrap();
+        let manifest = read_manifest(&zip_path).unwrap();
+        let o = Overrides {
+            skip: ["mods/cc-tweaked-1.120.2.jar".to_string()].into(),
+            disable: ["mods/off-1.jar".to_string()].into(),
+            ..Default::default()
+        };
+        let jobs = crate::jobs::Jobs::default();
+        apply_pack(&mut inst, None, &zip_path, &manifest, Some(&o), &jobs.start("t")).unwrap();
+        assert_eq!(mods(&inst), ["cc-tweaked-1.120.2.jar", "off-1.jar.disabled"]);
+        assert!(inst.addon_by_file("cc-tweaked-1.120.2.jar").is_some_and(|a| a.enabled));
+        assert!(inst.addon_by_file("off-1.jar").is_some_and(|a| !a.enabled), "a turned-off pack jar stays off");
         let _ = fs::remove_dir_all(&dir);
     }
 
