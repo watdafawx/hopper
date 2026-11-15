@@ -98,6 +98,18 @@ pub(crate) enum Item {
     Set(usize),
     /// One file of an open multi-file entry.
     File(usize, usize),
+    /// The configs of an open pack update, a fold of their own.
+    Configs(usize),
+}
+
+/// Where a pack update's configs fold is noted as open (beside its own).
+fn configs_key(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("#configs")
+}
+
+/// "368 configs", or "12 files" when they aren't all configs.
+fn configs_label(set: &Set, rest: &[usize]) -> String {
+    set.rest_label(rest)
 }
 
 /// Projects by file name without its version (see `BackupsView::project_of`).
@@ -171,7 +183,19 @@ impl BackupsView {
             }
             let dir = set.dir.to_string_lossy();
             items.push((format!("set:{dir}"), Item::Set(i)));
-            if set.files.len() > 1 && self.open.contains(&set.dir) {
+            if set.pack.is_some() {
+                // Open: its mods, then its configs in a fold of their own.
+                if self.open.contains(&set.dir) {
+                    let (mods, rest) = set.pack_parts();
+                    items.extend(mods.iter().map(|&j| (format!("file:{j}:{dir}"), Item::File(i, j))));
+                    if !rest.is_empty() {
+                        items.push((format!("configs:{dir}"), Item::Configs(i)));
+                        if self.open.contains(&configs_key(&set.dir)) {
+                            items.extend(rest.iter().map(|&j| (format!("file:{j}:{dir}"), Item::File(i, j))));
+                        }
+                    }
+                }
+            } else if set.files.len() > 1 && self.open.contains(&set.dir) {
                 items.extend((0..set.files.len()).map(|j| (format!("file:{j}:{dir}"), Item::File(i, j))));
             }
         }
@@ -208,20 +232,32 @@ impl BackupsView {
             Item::Set(i) => match self.sets.get(*i) {
                 Some(set) => {
                     let row = self.set_rows(*i, set, self.hfaces, cx);
-                    let folded = set.files.len() < 2 || !self.open.contains(&set.dir);
-                    return div().when(folded, |d| d.pb_0p5()).child(row).into_any_element();
+                    return div().when(self.ends_entry(ix, *i), |d| d.pb_0p5()).child(row).into_any_element();
                 }
                 None => div().into_any_element(),
             },
             Item::File(i, j) => match self.sets.get(*i).and_then(|s| Some((s, s.files.get(*j)?))) {
                 Some((set, f)) => {
                     let row = self.entry_row(i * 10_000 + j + 1, f, set.when, true, self.hfaces, cx);
-                    return div().when(j + 1 == set.files.len(), |d| d.pb_0p5()).child(row).into_any_element();
+                    return div().when(self.ends_entry(ix, *i), |d| d.pb_0p5()).child(row).into_any_element();
+                }
+                None => div().into_any_element(),
+            },
+            Item::Configs(i) => match self.sets.get(*i) {
+                Some(set) => {
+                    let row = self.configs_row(*i, set, cx);
+                    return div().when(self.ends_entry(ix, *i), |d| d.pb_0p5()).child(row).into_any_element();
                 }
                 None => div().into_any_element(),
             },
         };
         div().pb_0p5().child(el).into_any_element()
+    }
+
+    /// Whether row `ix` is the last of entry `i` (its head, files and
+    /// folds): the entry's gap goes below it.
+    fn ends_entry(&self, ix: usize, i: usize) -> bool {
+        !matches!(self.hitems.get(ix + 1).map(|x| &x.1), Some(Item::File(k, _) | Item::Configs(k)) if *k == i)
     }
 
     /// Whether a set shows under the person filter.
@@ -309,6 +345,16 @@ impl BackupsView {
             if !self.shown(set) {
                 continue;
             }
+            if set.pack.is_some() {
+                if self.open.contains(&set.dir) {
+                    let (mods, rest) = set.pack_parts();
+                    out.extend(mods.iter().map(|j| (i * 10_000 + j + 1).to_string()));
+                    if self.open.contains(&configs_key(&set.dir)) {
+                        out.extend(rest.iter().map(|j| (i * 10_000 + j + 1).to_string()));
+                    }
+                }
+                continue;
+            }
             match set.files.as_slice() {
                 [_] => out.push((i * 10_000).to_string()),
                 files if self.open.contains(&set.dir) => out.extend((0..files.len()).map(|j| (i * 10_000 + j + 1).to_string())),
@@ -323,7 +369,8 @@ impl BackupsView {
         let mut out = Vec::new();
         for (i, set) in self.sets.iter().enumerate() {
             for (j, f) in set.files.iter().enumerate() {
-                let key = if set.files.len() == 1 { i * 10_000 } else { i * 10_000 + j + 1 };
+                // A pack update's files are always rows of its fold.
+                let key = if set.files.len() == 1 && set.pack.is_none() { i * 10_000 } else { i * 10_000 + j + 1 };
                 if self.sel.contains(&key.to_string()) && f.change.undoable() {
                     out.push(f.clone());
                 }
@@ -419,9 +466,173 @@ impl BackupsView {
         }))
     }
 
+    /// What starts an entry of several files: whoever made it (several
+    /// people stacked), or its chevron when History names nobody.
+    fn set_lead(&self, set: &Set, faces: bool, chevron: gpui_kit::component::Icon, cx: &mut Context<Self>) -> AnyElement {
+        let people = set.people();
+        if !faces {
+            div().size(rems(FACE)).flex_none().flex().items_center().justify_center().child(chevron).into_any_element()
+        } else if let [w] = people.as_slice() {
+            self.who_face(w, rems(FACE), cx)
+        } else if !people.is_empty() {
+            let small = rems(FACE * 0.8);
+            let fs: Vec<AnyElement> = people.iter().take(3).map(|w| self.who_face(w, small, cx)).collect();
+            div()
+                .size(rems(FACE))
+                .flex_none()
+                .flex()
+                .items_center()
+                .child(widgets::face_stack(fs, cx.theme().background, small, cx.theme().radius))
+                .into_any_element()
+        } else {
+            div().size(rems(FACE)).flex_none().into_any_element()
+        }
+    }
+
+    /// A pack update: one row with what it did to how many mods, and its
+    /// configs. Open, its mods are listed first and its configs stay in a
+    /// fold of their own, so the mods aren't lost among hundreds of configs.
+    fn pack_rows(&self, i: usize, set: &Set, pack: &hopper::backups::PackMark, faces: bool, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.open.contains(&set.dir);
+        let dir = set.dir.clone();
+        let all: Vec<Saved> = set.files.iter().filter(|f| f.change.undoable()).cloned().collect();
+        let undoable = !all.is_empty();
+        let busy = self.busy.is_some();
+        let kids: Vec<String> = (0..set.files.len()).map(|j| (i * 10_000 + j + 1).to_string()).collect();
+        let all_picked = kids.iter().all(|k| self.sel.contains(k));
+        let head = h_flex()
+            .id(("hist-set", i))
+            .gap_2()
+            .px_2()
+            .py_1p5()
+            .rounded(cx.theme().radius)
+            .hover(|s| widgets::row_hover(s, cx))
+            .clickable(cx);
+        let head = self.pickable(
+            head,
+            kids,
+            Some(Rc::new(move |this: &mut Self, cx: &mut Context<Self>| {
+                if !this.open.remove(&dir) {
+                    this.open.insert(dir.clone());
+                }
+                this.sync_items();
+                cx.notify();
+            })),
+            cx,
+        );
+        let head = if all_picked { widgets::row_selected(head, cx) } else { head };
+        let chevron = gpui_kit::component::Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small();
+        let lead = self.set_lead(set, faces, chevron.clone(), cx);
+        let muted = cx.theme().muted_foreground;
+        // "Updated pack All the Mods 10 to 1.80.0", the pack's name cut
+        // short first when the row is narrow.
+        let title = h_flex()
+            .gap_1()
+            .min_w_0()
+            .text_sm()
+            .child(div().flex_none().whitespace_nowrap().text_color(change_color(Change::Updated, true, cx)).child("Updated pack"))
+            .child(div().min_w_0().truncate().whitespace_nowrap().font_semibold().child(pack.name.clone()))
+            .when(!pack.version.is_empty(), |r| r.child(div().flex_none().whitespace_nowrap().child(format!("to {}", pack.version))))
+            .when(faces, |r| r.child(div().flex_none().text_color(muted).child(chevron)));
+        // What it did, counted: a chip per kind, its configs last.
+        let (_, rest) = set.pack_parts();
+        let mut chips: Vec<AnyElement> = set
+            .pack_counts()
+            .into_iter()
+            .map(|(c, n)| widgets::chip(change_color(c, true, cx)).child(format!("{n} {}", c.verb())).into_any_element())
+            .collect();
+        if !rest.is_empty() {
+            chips.push(widgets::chip(change_color(Change::Edited, true, cx)).child(configs_label(set, &rest)).into_any_element());
+        }
+        head.child(lead)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(title)
+                    .child(h_flex().gap_1().min_w_0().overflow_hidden().children(chips)),
+            )
+            .child(widgets::caption(hm(set.when), cx).text_xs())
+            .child(
+                widgets::row_actions(("hist-set-actions", i)).when(undoable, |r| {
+                    r.child(
+                        Button::new(("hist-undo-all", i))
+                            .xsmall()
+                            .outline()
+                            .label("Undo all")
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, window, cx| this.undo(all.clone(), window, cx))),
+                    )
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// An open pack update's configs: "Changed 368 configs", a fold of its
+    /// own with its own Undo all.
+    fn configs_row(&self, i: usize, set: &Set, cx: &mut Context<Self>) -> AnyElement {
+        let (_, rest) = set.pack_parts();
+        let key = configs_key(&set.dir);
+        let open = self.open.contains(&key);
+        let all: Vec<Saved> = rest.iter().map(|&j| &set.files[j]).filter(|f| f.change.undoable()).cloned().collect();
+        let undoable = !all.is_empty();
+        let busy = self.busy.is_some();
+        let kids: Vec<String> = rest.iter().map(|j| (i * 10_000 + j + 1).to_string()).collect();
+        let all_picked = kids.iter().all(|k| self.sel.contains(k));
+        let names = rest.iter().take(3).map(|&j| set.files[j].title()).collect::<Vec<_>>().join(", ") + if rest.len() > 3 { "…" } else { "" };
+        let row = h_flex()
+            .id(("hist-configs", i))
+            .gap_2()
+            .px_2()
+            .py_1p5()
+            // Under the pack's text, like its mods.
+            .pl(rems(FACE + 1.))
+            .rounded(cx.theme().radius)
+            .hover(|s| widgets::row_hover(s, cx))
+            .clickable(cx);
+        let row = self.pickable(
+            row,
+            kids,
+            Some(Rc::new(move |this: &mut Self, cx: &mut Context<Self>| {
+                if !this.open.remove(&key) {
+                    this.open.insert(key.clone());
+                }
+                this.sync_items();
+                cx.notify();
+            })),
+            cx,
+        );
+        let row = if all_picked { widgets::row_selected(row, cx) } else { row };
+        let chevron = gpui_kit::component::Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small();
+        let title = h_flex()
+            .gap_1p5()
+            .text_sm()
+            .child(div().text_color(change_color(Change::Edited, true, cx)).child("Changed"))
+            .child(configs_label(set, &rest))
+            .child(div().text_color(cx.theme().muted_foreground).child(chevron));
+        row.child(v_flex().flex_1().min_w_0().child(title).child(widgets::caption(names, cx).text_xs().truncate()))
+            .child(
+                widgets::row_actions(("hist-configs-actions", i)).when(undoable, |r| {
+                    r.child(
+                        Button::new(("hist-undo-configs", i))
+                            .xsmall()
+                            .outline()
+                            .label("Undo all")
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, window, cx| this.undo(all.clone(), window, cx))),
+                    )
+                }),
+            )
+            .into_any_element()
+    }
+
     /// One action: a row, or a fold of rows when it touched several files.
     /// `faces`: History names people, so each row starts with one.
     fn set_rows(&self, i: usize, set: &Set, faces: bool, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(pack) = &set.pack {
+            return self.pack_rows(i, set, pack, faces, cx);
+        }
         if let [f] = set.files.as_slice() {
             return self.entry_row(i * 10_000, f, set.when, false, faces, cx).into_any_element();
         }
@@ -466,23 +677,7 @@ impl BackupsView {
         // Mods 10", their name in bold, and what it came to below.
         let headline = faces.then(|| set.headline()).flatten();
         let people = set.people();
-        let lead = if !faces {
-            div().size(rems(FACE)).flex_none().flex().items_center().justify_center().child(chevron.clone()).into_any_element()
-        } else if let [w] = people.as_slice() {
-            self.who_face(w, rems(FACE), cx)
-        } else if !people.is_empty() {
-            let small = rems(FACE * 0.8);
-            let fs: Vec<AnyElement> = people.iter().take(3).map(|w| self.who_face(w, small, cx)).collect();
-            div()
-                .size(rems(FACE))
-                .flex_none()
-                .flex()
-                .items_center()
-                .child(widgets::face_stack(fs, cx.theme().background, small, cx.theme().radius))
-                .into_any_element()
-        } else {
-            div().size(rems(FACE)).flex_none().into_any_element()
-        };
+        let lead = self.set_lead(set, faces, chevron.clone(), cx);
         let title = match &headline {
             Some(h) => {
                 let who = set.who().or(people.first()).map(Who::label).unwrap_or_default();

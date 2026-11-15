@@ -348,6 +348,9 @@ struct UndoBody {
     /// One file of the entry; none: all of them.
     #[serde(default)]
     name: Option<String>,
+    /// Several files of the entry (a pack update's configs).
+    #[serde(default)]
+    names: Vec<String>,
 }
 
 /// Undo from History, as desktop's: a mod downloads again from its site
@@ -364,6 +367,7 @@ async fn history_undo(State(app): State<Arc<App>>, headers: HeaderMap, method: M
         // the whole (first) set.
         let files: Vec<_> = match &b.name {
             Some(n) => sets.iter().flat_map(|s| &s.files).filter(|f| f.name == *n).take(1).cloned().collect(),
+            None if !b.names.is_empty() => sets[0].files.iter().filter(|f| b.names.contains(&f.name)).cloned().collect(),
             None => sets[0].files.clone(),
         };
         anyhow::ensure!(!files.is_empty(), "Nothing to undo.");
@@ -404,8 +408,9 @@ async fn history_put_back(State(app): State<Arc<App>>, headers: HeaderMap, metho
     let e = entry(&app, &headers, &method, &id)?;
     let running = e.server.state().is_alive();
     let put = blocking(move || {
-        let set = backups::list(&e.root).into_iter().find(|s| s.when == b.when).ok_or_else(|| anyhow::anyhow!("That History entry is gone."))?;
-        let f = set.files.iter().find(|f| f.name == b.name).ok_or_else(|| anyhow::anyhow!("That History entry is gone."))?;
+        // As Undo finds it: a pack update's files sit in several folders.
+        let sets: Vec<_> = backups::history(&e.root).into_iter().filter(|s| s.when == b.when).collect();
+        let f = sets.iter().flat_map(|s| &s.files).find(|f| f.name == b.name).ok_or_else(|| anyhow::anyhow!("That History entry is gone."))?;
         let r = f.src.as_ref().ok_or_else(|| anyhow::anyhow!("{}: History doesn't know where it came from", f.name))?;
         let mut inst = crate::mods_api::instance_of(&e)?;
         let file = hopper_core::undo::choices(&inst, r)?.into_iter().find(|c| c.id == b.file_id).ok_or_else(|| anyhow::anyhow!("That version isn't offered any more."))?;
