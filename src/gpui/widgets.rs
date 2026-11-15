@@ -3226,32 +3226,139 @@ pub fn tab_dot(color: Hsla) -> Div {
 /// levels the caller defines: level 0 is the full row, each level after it
 /// gives up a little more (a long label shortens, then a button goes icon
 /// only, then secondary buttons fold into the row's ⋯ menu). Both the room
-/// and the row are measured after layout, so a side panel opening, closing
-/// or being dragged re-lays the row out on the next frame; the window's
-/// width alone can't say what a docked panel leaves.
+/// and the row are measured after layout; the window's width alone can't
+/// say what a docked panel leaves.
 ///
 /// A row that doesn't fit steps up a level; one whose level below was seen
 /// to fit the room it has now steps back down. Widths seen at each level
-/// are kept until the row's `key` changes (different labels), so a stable
-/// room settles on one level without flickering between two.
+/// are kept per row `key` (its labels), so a stable room settles on one
+/// level without flickering between two.
+///
+/// Measuring after layout alone would leave the row one frame behind the
+/// room: while a panel's edge or the window is dragged every frame would be
+/// painted at the level the last frame needed (clipped, or with room left
+/// over), and a jump of several levels would take as many frames. So the
+/// page tells Fit how much room it has as it renders ([`set_page_room`]):
+/// the row's room keeps a fixed distance to it, learned when the row was
+/// measured, and with the widths already seen at each level the row picks
+/// the level that fits before it is laid out. Measuring stays the fallback
+/// for a level not seen yet.
 #[derive(Clone, Default)]
 pub struct Fit(Rc<std::cell::RefCell<FitState>>);
 
 #[derive(Default)]
 struct FitState {
     level: usize,
-    /// The row's width last seen at each level.
+    /// The row's own width at each level, seen when it overflowed.
     need: Vec<Option<f32>>,
+    /// The row's box width this frame, till the room it's held to is known.
+    last_w: Option<f32>,
     /// Room given from outside (`room_probe`), else measured around the row.
     outer_room: Option<f32>,
     room: f32,
     key: u64,
+    /// `need` for the last few other keys: a row whose content flips with the
+    /// window's width (the Mods bar's hint) would otherwise learn its widths
+    /// again, a wrong frame per level, every time the width crosses over.
+    others: Vec<(u64, Vec<Option<f32>>)>,
+    /// The page's room less the row's, when the row was last measured.
+    offset: Option<f32>,
+}
+
+thread_local! {
+    static PAGE_ROOM: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+}
+
+/// The width (px) the page holding [`Fit`] rows has this frame: the window
+/// less the side panels beside it, as the page works it out while it renders
+/// (a panel being dragged included). Set before the rows render.
+pub fn set_page_room(px: f32) {
+    PAGE_ROOM.with(|r| r.set(Some(px)));
+}
+
+fn page_room() -> Option<f32> {
+    PAGE_ROOM.with(|r| r.get())
+}
+
+impl FitState {
+    /// The row's content changed: keeps the widths seen for the old content
+    /// and takes back any seen for the new.
+    fn switch_key(&mut self, key: u64) {
+        let old = std::mem::take(&mut self.need);
+        if !old.is_empty() {
+            self.others.retain(|(k, _)| *k != self.key);
+            self.others.insert(0, (self.key, old));
+            self.others.truncate(4);
+        }
+        if let Some(i) = self.others.iter().position(|(k, _)| *k == key) {
+            self.need = self.others.remove(i).1;
+        }
+        self.key = key;
+    }
+
+    /// The level `room` calls for by the widths seen: down while the level
+    /// below was seen to fit, up while this one was seen not to. It only
+    /// goes where measuring would also take it, so the two never disagree
+    /// and flicker; a level with no width seen is left to measuring.
+    fn predict(&self, room: f32) -> usize {
+        let top = self.need.len() - 1;
+        let mut l = self.level.min(top);
+        while l > 0 && self.need[l - 1].is_some_and(|n| n <= room + 0.5) {
+            l -= 1;
+        }
+        while l < top && self.need[l].is_some_and(|n| n > room + 0.5) {
+            l += 1;
+        }
+        l
+    }
+
+    /// Takes in this frame's row width against `room`; true when the level
+    /// changed. The row's box grows to fill the room, so only a row wider
+    /// than the room shows its own width: that is the one kept, and one
+    /// kept that now fits a smaller room is forgotten (its content changed).
+    fn decide(&mut self, room: f32, max: usize) -> bool {
+        let Some(w) = self.last_w.take() else { return false };
+        self.room = room;
+        // A room squeezed to nothing no longer moves with the page.
+        if let Some(page) = page_room()
+            && room > 0.5
+        {
+            self.offset = Some(page - room);
+        }
+        if self.need.len() <= max {
+            self.need.resize(max + 1, None);
+        }
+        let l = self.level.min(max);
+        if w > room + 0.5 {
+            self.need[l] = Some(w);
+        } else if self.need[l].is_some_and(|n| n > room + 0.5) {
+            self.need[l] = None;
+        }
+        let next = if w > room + 0.5 && l < max {
+            l + 1
+        } else if l > 0 && self.need[l - 1].is_none_or(|n| n <= room + 0.5) {
+            l - 1
+        } else {
+            l
+        };
+        self.level = next;
+        next != l
+    }
 }
 
 impl Fit {
-    /// The level to render this frame.
+    /// The level to render this frame: the one the page's room this frame
+    /// calls for, when the row has been measured against it before.
     pub fn level(&self) -> usize {
-        self.0.borrow().level
+        let mut st = self.0.borrow_mut();
+        if let (Some(page), Some(offset)) = (page_room(), st.offset)
+            && !st.need.is_empty()
+        {
+            let room = page - offset;
+            let p = st.predict(room);
+            st.level = p;
+        }
+        st.level
     }
 
     /// Wraps `row` (laid out at its natural width, never squeezed) in a box
@@ -3262,8 +3369,7 @@ impl Fit {
         {
             let mut st = self.0.borrow_mut();
             if st.key != key {
-                st.key = key;
-                st.need.clear();
+                st.switch_key(key);
             }
             st.level = st.level.min(max);
         }
@@ -3288,8 +3394,12 @@ impl Fit {
             .child(canvas(|_, _, _| {}, |_, _, _, _| {}).absolute().inset_0())
             .on_children_prepainted(move |b, _, cx| {
                 let (Some(inner), Some(outer)) = (b.first(), b.get(1)) else { return };
-                if fit.measured(f32::from(inner.size.width), f32::from(outer.size.width), max) {
-                    cx.notify(view);
+                let mut st = fit.0.borrow_mut();
+                st.last_w = Some(f32::from(inner.size.width));
+                // With a probe the room is known once the probe, later in
+                // this frame, has been laid out: it decides then.
+                if st.outer_room.is_none() && st.decide(f32::from(outer.size.width), max) {
+                    notify_after_frame(view, cx);
                 }
             })
             .id(ElementId::Name(id))
@@ -3303,18 +3413,10 @@ impl Fit {
         canvas(
             move |bounds, window, cx| {
                 let room = f32::from(bounds.size.width - window.rem_size() * minus).max(0.);
-                let changed = {
-                    let mut st = fit.0.borrow_mut();
-                    let was = st.outer_room.replace(room);
-                    was.is_none_or(|w| (w - room).abs() > 0.5)
-                };
-                if changed {
-                    let need = fit.0.borrow().need.get(fit.level()).copied().flatten();
-                    if let Some(n) = need
-                        && fit.measured(n, room, max)
-                    {
-                        cx.notify(view);
-                    }
+                let mut st = fit.0.borrow_mut();
+                st.outer_room = Some(room);
+                if st.decide(room, max) {
+                    notify_after_frame(view, cx);
                 }
             },
             |_, _, _, _| {},
@@ -3322,27 +3424,15 @@ impl Fit {
         .absolute()
         .inset_0()
     }
+}
 
-    /// Records this frame's widths; true when the level changed.
-    fn measured(&self, need: f32, room: f32, max: usize) -> bool {
-        let mut st = self.0.borrow_mut();
-        let room = st.outer_room.unwrap_or(room);
-        st.room = room;
-        let l = st.level;
-        if st.need.len() <= max {
-            st.need.resize(max + 1, None);
-        }
-        st.need[l] = Some(need);
-        let next = if need > room + 0.5 && l < max {
-            l + 1
-        } else if l > 0 && st.need[l - 1].is_none_or(|n| n <= room + 0.5) {
-            l - 1
-        } else {
-            l
-        };
-        st.level = next;
-        next != l
-    }
+/// A notify from inside a frame (prepaint) marks the view dirty but not the
+/// cached parts it draws through, and the dirty marks are cleared when the
+/// frame ends, so the next frame can reuse a part still showing the old
+/// level (a tab bar left clipped). Sent once the frame is done, it redraws
+/// like any other change.
+fn notify_after_frame(view: EntityId, cx: &mut App) {
+    cx.defer(move |cx| cx.notify(view));
 }
 
 /// A key for [`Fit::wrap`] from the texts a row shows.
@@ -3397,6 +3487,82 @@ pub fn short_label(name: &str, max: usize) -> String {
     }
     let cut: String = name.chars().take(max.saturating_sub(1)).collect();
     format!("{}…", cut.trim_end())
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::{Fit, set_page_room};
+
+    /// The row's own width at levels 0..=3; the last level squeezes.
+    const NATURAL: [f32; 4] = [500., 400., 300., 200.];
+    const MAX: usize = 3;
+    /// What the page has beyond the row's room (padding, other controls).
+    const AROUND: f32 = 120.;
+
+    /// One frame: the page renders (level picked), the row is laid out in
+    /// a box that grows to the room, and Fit takes in what it measured.
+    /// Returns the level painted and whether that frame was the wrong one.
+    fn frame(fit: &Fit, room: f32) -> (usize, bool) {
+        set_page_room(room + AROUND);
+        let l = fit.level().min(MAX);
+        let w = if l == MAX { NATURAL[l].min(room) } else { NATURAL[l].max(room) };
+        let mut st = fit.0.borrow_mut();
+        st.last_w = Some(w);
+        (l, st.decide(room, MAX))
+    }
+
+    fn settle(fit: &Fit, room: f32) -> usize {
+        for _ in 0..10 {
+            if !frame(fit, room).1 {
+                return frame(fit, room).0;
+            }
+        }
+        panic!("no level settles at {room}");
+    }
+
+    #[test]
+    fn learns_once_then_keeps_up_in_the_same_frame() {
+        let fit = Fit::default();
+        assert_eq!(settle(&fit, 600.), 0);
+        // First time narrower than a level: measured, one frame late.
+        assert_eq!(settle(&fit, 450.), 1);
+        assert_eq!(settle(&fit, 350.), 2);
+        assert_eq!(settle(&fit, 250.), 3);
+        assert_eq!(settle(&fit, 600.), 0);
+        // Seen before: every frame of a drag is drawn at the right level.
+        for room in [580., 480., 450., 390., 320., 299., 250., 180., 260., 310., 420., 520., 700.] {
+            let (l, wrong) = frame(&fit, room);
+            let want = NATURAL[..MAX].iter().position(|n| *n <= room).unwrap_or(MAX);
+            assert_eq!((l, wrong), (want, false), "room {room}");
+        }
+        // A jump of several levels at once too.
+        assert_eq!(frame(&fit, 150.), (3, false));
+        assert_eq!(frame(&fit, 900.), (0, false));
+    }
+
+    #[test]
+    fn a_steady_room_stays_put() {
+        let fit = Fit::default();
+        settle(&fit, 600.);
+        settle(&fit, 350.);
+        for _ in 0..5 {
+            assert_eq!(frame(&fit, 350.), (2, false));
+        }
+    }
+
+    #[test]
+    fn content_flipping_back_keeps_what_it_learned() {
+        let fit = Fit::default();
+        for room in [600., 450., 350., 250., 600.] {
+            settle(&fit, room);
+        }
+        let learned = fit.0.borrow().need.clone();
+        fit.0.borrow_mut().switch_key(1);
+        assert!(fit.0.borrow().need.is_empty());
+        fit.0.borrow_mut().switch_key(0);
+        assert_eq!(fit.0.borrow().need, learned);
+        assert_eq!(frame(&fit, 320.), (2, false));
+    }
 }
 
 #[cfg(test)]

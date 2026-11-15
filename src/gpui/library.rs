@@ -3130,6 +3130,9 @@ impl Render for LibraryView {
         let friends_shown = self.friends_shown(cx);
         let friends_w = if friends_shown { self.friends.read(cx).width(window, cx) } else { 0.0 };
         self.detail_w = window.viewport_size().width / window.rem_size() - side - peek_w - friends_w;
+        // The page's header, tabs and toolbars fit themselves to this in
+        // the same frame, so they keep up with a dragged edge.
+        widgets::set_page_room(f32::from(window.rem_size()) * self.detail_w);
         // The table fits its columns to this; it is re-laid out whenever
         // the room changes (its bounds change), so no notify is needed.
         let (room, list_open) = (self.detail_w, side > RAIL);

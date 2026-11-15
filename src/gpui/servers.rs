@@ -2681,6 +2681,9 @@ impl Render for ServersView {
         let room = window.viewport_size().width / window.rem_size() - layout.width - peek_w;
         self.sync.update(cx, |p, _| p.room = Some(room));
         self.detail_w = room;
+        // The header, tabs and toolbars fit themselves to this in the same
+        // frame, so they keep up with a dragged edge.
+        widgets::set_page_room(f32::from(window.rem_size()) * room);
         let arts = self.arts(cx);
         if let Some(a) = self.picked.as_ref().and_then(|p| arts.get(p)).cloned() {
             self.want_blur(&a, cx);
