@@ -224,6 +224,24 @@ impl Home {
         self.status.lock().unwrap().clone()
     }
 
+    /// Sends the routes again now (a server's relay settings changed).
+    pub fn wake(&self) {
+        self.wake.notify_one();
+    }
+
+    /// What players type to join through the relay.
+    pub fn players_address(&self) -> String {
+        let cfg = self.config();
+        if !cfg.public_address.trim().is_empty() {
+            return cfg.public_address.trim().to_string();
+        }
+        let host = relay_target(&cfg.address).map(|(h, _)| h).unwrap_or_default();
+        match self.status().game_port {
+            0 | 25565 => host,
+            p => format!("{host}:{p}"),
+        }
+    }
+
     fn set_status(&self, f: impl FnOnce(&mut LinkStatus)) {
         f(&mut self.status.lock().unwrap());
     }
@@ -311,15 +329,8 @@ impl Home {
         let (sent_bps, vanilla_bps) = st.now.get(id).copied().unwrap_or_default();
         let samples: Vec<Sample> = st.saved.samples.get(id).map(|q| q.iter().copied().collect()).unwrap_or_default();
         let open = st.live.get(id).map_or(0, |l| l.open.load(Ordering::Relaxed));
-        let address = if !cfg.public_address.trim().is_empty() {
-            cfg.public_address.trim().to_string()
-        } else {
-            let host = relay_target(&cfg.address).map(|(h, _)| h).unwrap_or_default();
-            match s.game_port {
-                0 | 25565 => host,
-                p => format!("{host}:{p}"),
-            }
-        };
+        drop(st);
+        let address = self.players_address();
         let now = unix();
         json!({
             "relayed": true,
@@ -442,7 +453,8 @@ pub(super) async fn connect(cfg: &HomeConfig) -> Result<(Live, link::RelayHello)
 /// The routes home sends on its control stream.
 fn routes(app: &App) -> Control {
     let cfg = app.vps.config();
-    Control { routes: cfg.servers.iter().filter_map(|id| app.servers.get(id).map(|e| Route { server: id.clone(), name: e.name.clone() })).collect() }
+    let velocity = |id: &str| app.vps_forward.mode(id) == hopper_core::hosting::proxy_forward::Mode::Relay;
+    Control { routes: cfg.servers.iter().filter_map(|id| app.servers.get(id).map(|e| Route { server: id.clone(), name: e.name.clone(), velocity: velocity(id) })).collect() }
 }
 
 /// Runs a connection until it ends; says why.
@@ -650,6 +662,11 @@ async fn retry(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) 
 
 async fn server_status(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, UrlPath(id): UrlPath<String>) -> ApiResult<Json<Value>> {
     require(&app, &headers, &method)?;
-    app.servers.get(&id).ok_or_else(|| not_found("server"))?;
-    Ok(Json(app.vps.server_status(&id)))
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    let mut v = app.vps.server_status(&id);
+    if v["relayed"] == true {
+        let a = app.clone();
+        v["forward"] = tokio::task::spawn_blocking(move || super::forward::status_json(&a, &e)).await.unwrap_or_default();
+    }
+    Ok(Json(v))
 }

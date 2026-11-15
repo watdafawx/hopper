@@ -234,8 +234,15 @@
   {/if}
 {/snippet}
 
+<!-- A key the relay through a VPS sets: the reason instead of the usual
+     line, a link to the relay card, and the control locked (design/vps-relay.md). -->
+{#snippet lockline(why)}
+  {why} <a class="relay-link" href="#/server/{encodeURIComponent(sid)}">Relay settings</a>
+{/snippet}
+
 {#snippet field(k)}
   {@const s = spec(k)}
+  {@const why = props?.locked?.[k]}
   {#if k === 'motd'}
     <!-- The message gets the whole width: tools, two lines and a preview. -->
     <div class="fl full" class:dirty={dirty(k)}>
@@ -244,8 +251,8 @@
     </div>
   {:else if s}
     <div class="fl" class:dirty={dirty(k)}>
-      <div class="lab"><div>{s.label}</div><div class="tiny muted">{s.description} <span class="mono key">{s.key}</span></div></div>
-      <div class="ctl">
+      <div class="lab"><div>{s.label}</div><div class="tiny muted">{#if why}{@render lockline(why)}{:else}{s.description}{/if} <span class="mono key">{s.key}</span></div></div>
+      <fieldset class="ctl" disabled={!!why} title={why ? 'Set by the relay' : undefined}>
         {#if s.kind === 'bool'}
           <label class="switch" title={values[k] === 'true' ? 'On' : 'Off'}><input type="checkbox" checked={values[k] === 'true'} onchange={(e) => (values[k] = e.currentTarget.checked ? 'true' : 'false')} /><span></span></label>
         {:else if s.kind === 'enum'}
@@ -256,12 +263,12 @@
         {:else}
           {@render text(k)}
         {/if}
-      </div>
+      </fieldset>
     </div>
   {:else}
     <div class="fl" class:dirty={dirty(k)}>
-      <div class="lab mono small">{k}</div>
-      <div class="ctl">{@render text(k)}</div>
+      <div class="lab"><div class="mono small">{k}</div>{#if why}<div class="tiny muted">{@render lockline(why)}</div>{/if}</div>
+      <fieldset class="ctl" disabled={!!why} title={why ? 'Set by the relay' : undefined}>{@render text(k)}</fieldset>
     </div>
   {/if}
 {/snippet}
@@ -351,7 +358,10 @@
   .fl.dirty { background: var(--acc-dim); border-radius: var(--radius); }
   .lab > div:first-child { font-weight: 500; }
   .key { color: var(--muted); margin-left: 4px; }
-  .ctl { display: flex; align-items: center; gap: 8px; justify-content: flex-end; min-width: 0; }
+  .ctl { display: flex; align-items: center; gap: 8px; justify-content: flex-end; min-width: 0; border: 0; margin: 0; padding: 0; }
+  .ctl:disabled :is(input, select) { opacity: .55; cursor: default; }
+  /* The plain link orange is too light on the light theme's small grey text (2.2:1); as AddPanel's fix link. */
+  .relay-link { color: color-mix(in srgb, var(--acc) 60%, var(--text)); }
   .w { width: 100px; padding: 5px 8px; }
   .wide { width: 300px; padding: 5px 9px; }
   .sel { background: var(--base); border: 1px solid var(--line2); border-radius: var(--radius); padding: 5px 8px; color: var(--text); width: 12rem; font: inherit; }

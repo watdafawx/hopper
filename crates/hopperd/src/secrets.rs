@@ -23,7 +23,9 @@ pub fn is_secret_key(key: &str) -> bool {
 /// A file holding them: any `server.properties`, wherever it is (a copy in
 /// a subfolder or a pack's template is often the real one renamed).
 pub fn is_secret_file(rel: &str) -> bool {
-    parts(rel).last().is_some_and(|n| n.eq_ignore_ascii_case("server.properties"))
+    // The forwarding mods' configs hold the relay's forwarding secret
+    // (design/vps-relay.md, B4): whoever has it can join as anyone.
+    parts(rel).last().is_some_and(|n| ["server.properties", "proxy-compatible-forge.toml", "FabricProxy-Lite.toml"].iter().any(|s| n.eq_ignore_ascii_case(s)))
 }
 
 /// A path's folder and file names the way Windows reads them: no empty or
@@ -154,6 +156,8 @@ mod tests {
     fn hidden_paths() {
         assert!(is_secret_file("server.properties") && is_secret_file("old/Server.Properties") && is_secret_file("a\\server.properties"));
         assert!(!is_secret_file("config/server.properties.txt") && !is_secret_file("mods"));
+        assert!(is_secret_file("config/proxy-compatible-forge.toml") && is_secret_file("config/fabricproxy-lite.toml") && is_secret_file("FabricProxy-Lite.toml"));
+        assert!(!is_secret_file("config/fabric-api.toml"));
         assert!(is_hidden_path(".hopper-trash/abc/item") && is_hidden_path("./.hopper-server-backups/x.zip"));
         assert!(!is_hidden_path("config/create.toml") && !is_hidden_path(""));
     }

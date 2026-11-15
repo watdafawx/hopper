@@ -176,7 +176,7 @@ fn removing_takes_out_exactly_what_was_added() {
     assert!(remove_firewall(&[FwRule::Ufw { port: 1 }], true).len() == 1, "ufw keeps its own rules");
     assert!(remove_firewall(&[], true).is_empty());
     // The record round-trips.
-    let i = Installed { made_user: true, firewall: rules, binary_sha256: "ab".into(), binary_version: "1".into() };
+    let i = Installed { made_user: true, firewall: rules, binary_sha256: "ab".into(), binary_version: "1".into(), ..Default::default() };
     let back: Installed = serde_json::from_str(&serde_json::to_string(&i).unwrap()).unwrap();
     assert_eq!(back, i);
     assert!(serde_json::to_string(&i).unwrap().contains(r#"{"kind":"ufw","port":25565}"#));
@@ -212,7 +212,9 @@ fn each_step_sees_when_it_has_nothing_to_do() {
     // The key.
     let key = "hrt_00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     let hash = crate::vps::link::hash_hex(&crate::vps::link::key_hash(key));
-    let st = RelayStatus { key_sha256: hash, fingerprint: "FP".into(), bind: "0.0.0.0".into(), game_port: 25565, tunnel_port: 25566, ..Default::default() };
+    let st = RelayStatus { key_sha256: hash, fingerprint: "FP".into(), bind: "0.0.0.0".into(), game_port: 25565, tunnel_port: 25566, velocity_port: VELOCITY_PORT, backend_port: BACKEND_PORT, ..Default::default() };
+    let b2 = RelayStatus { velocity_port: 0, backend_port: 0, ..st.clone() };
+    assert_eq!(keys_right(Some(&b2), key, "FP", "h:25566", "h:25566", "0.0.0.0", (25565, 25566), true), (true, false), "a B2 relay gets Velocity's ports, same key");
     let ports = (25565, 25566);
     assert_eq!(keys_right(Some(&st), key, "FP", "h:25566", "h:25566", "0.0.0.0", ports, true), (true, true));
     assert_eq!(keys_right(Some(&st), key, "FP", "h:25566", "h:25566", "127.0.0.1", ports, true), (true, false), "new settings keep the key");
@@ -244,8 +246,35 @@ fn a_new_key_reads_back_and_a_passphrase_comes_off() {
 #[test]
 fn install_and_remove_list_their_steps() {
     let ids: Vec<&str> = install_steps("0.72.7", (25565, 25566)).iter().map(|s| s.id).collect();
-    assert_eq!(ids, ["user", "binary", "keys", "service", "firewall", "reach", "pair"]);
+    assert_eq!(ids, ["user", "binary", "java", "velocity", "keys", "service", "velocity-service", "firewall", "reach", "pair"]);
     assert!(install_steps("0.72.7", (25565, 25566)).iter().all(|s| s.state == "wait"));
     let ids: Vec<&str> = remove_steps().iter().map(|s| s.id).collect();
     assert_eq!(ids, ["service", "firewall", "files", "user", "pair", "login"]);
+}
+
+#[test]
+fn velocity_is_pinned_and_set_up_for_the_chain() {
+    // Pinned downloads: 64 hex each, https only.
+    for p in [VELOCITY, java("x64").unwrap(), java("arm64").unwrap()] {
+        assert!(p.sha256.len() == 64 && p.sha256.chars().all(|c| c.is_ascii_hexdigit()), "{}", p.name);
+        assert!(p.url.starts_with("https://") && !p.url.contains(['\'', ' ']));
+        assert!(p.size > 1_000_000);
+    }
+    assert!(java("riscv").is_none());
+    let t = velocity_toml(true);
+    assert!(t.contains("player-info-forwarding-mode = \"modern\""));
+    assert!(t.contains(&format!("bind = \"127.0.0.1:{VELOCITY_PORT}\"")));
+    assert!(t.contains(&format!("home = \"127.0.0.1:{BACKEND_PORT}\"")));
+    assert!(t.contains("online-mode = true") && t.contains("haproxy-protocol = true"));
+    assert!(t.contains(&format!("forwarding-secret-file = \"{SECRET}\"")));
+    assert!(velocity_toml(false).contains("online-mode = false"));
+    let u = velocity_unit();
+    for flag in ["-Dvelocity.max-plugin-message-payload-size.clientbound=16777216", "-Dvelocity.max-plugin-message-payload-size.serverbound=16777216", "-Dvelocity.max-known-packs=1024"] {
+        assert!(u.contains(flag), "{flag}");
+    }
+    assert!(u.contains(&format!("User={VELOCITY_USER}")) && u.contains(&format!("ReadWritePaths={VELOCITY_DATA}")));
+    assert!(!u.contains("MemoryDenyWriteExecute"), "Java's JIT needs it");
+    let stat = format!("{ETC} root {VELOCITY_USER} 750\n{SECRET} root {VELOCITY_USER} 640\n{VELOCITY_TOML} root {VELOCITY_USER} 640\n{VELOCITY_DATA} {VELOCITY_USER} {VELOCITY_USER} 700\n{VELOCITY_JAR} root root 644\n");
+    assert!(velocity_files_right(&stat));
+    assert!(!velocity_files_right(&stat.replace("640", "644")), "the secret readable by all is locked again");
 }

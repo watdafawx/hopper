@@ -179,6 +179,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::changes::routes())
         .merge(crate::vps::home::routes_api())
         .merge(crate::vps::setup::routes())
+        .merge(crate::vps::forward::routes())
         .merge(crate::fs_api::routes())
         .merge(crate::pack_api::routes())
         .merge(crate::manage_api::routes())

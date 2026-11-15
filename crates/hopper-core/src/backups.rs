@@ -962,7 +962,9 @@ fn record_entry(dir: &Path, r: &crate::actor::Record) -> Saved {
         change,
         now: None,
         now_site: "",
-        reason: String::new(),
+        // A mod added by something with a name ("Turned on the relay
+        // through a VPS") says so, like the files it set aside.
+        reason: fs::read_to_string(dir.join(REASON)).unwrap_or_default(),
         who: Some(r.who.clone()),
         batch: r.batch.clone(),
         record: Some((r.did, r.key.clone())),

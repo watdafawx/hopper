@@ -91,6 +91,8 @@ async fn get_props(
         "values": values,
         "specs": properties::COMMON.iter().map(spec_json).collect::<Vec<_>>(),
         "motd_vars": vars,
+        // Keys the relay set while the server checks accounts through it.
+        "locked": crate::vps::forward::locked_keys(&app, &id),
     })))
 }
 
@@ -125,9 +127,18 @@ async fn put_props(
     let sid = e.id.clone();
     let mut values = b.values;
     let motd_text = values.remove("motd");
+    let locked = crate::vps::forward::locked_keys(&app, &sid);
     blocking(move || {
         let path = e.root.join("server.properties");
         let mut p = Properties::load(&path)?;
+        // A key the relay set stays as it is (sending it unchanged is fine).
+        for (k, v) in &values {
+            if let Some(why) = locked.get(k.as_str())
+                && p.get(k).map(str::trim) != Some(v.trim())
+            {
+                anyhow::bail!("{k} can't be changed now. {why} Stop using the relay on this server, or play at home, to change it.");
+            }
+        }
         for (k, v) in values {
             p.set(&k, v.trim());
         }

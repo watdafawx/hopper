@@ -83,6 +83,7 @@ pub(crate) fn panel_with(tls: crate::TlsInfo) -> T {
         moves: crate::moves::Moves::new(&data),
         vps: crate::vps::home::Home::new(&data),
         vps_setup: crate::vps::setup::Setup::new(&data),
+        vps_forward: crate::vps::forward::Forward::new(&data),
     });
     app.rescan();
     let server = app.servers.list().first().expect("the test server").id.clone();

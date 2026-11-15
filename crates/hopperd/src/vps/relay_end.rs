@@ -67,11 +67,17 @@ pub struct RelayConfig {
     /// The zstd window for what home sends, as a power of two (default 28,
     /// 256 MB).
     pub window_log: Option<u32>,
+    /// Velocity on this VPS (B4), on 127.0.0.1: players of a server that
+    /// checks accounts through the relay go there (0: no Velocity).
+    pub velocity_port: u16,
+    /// Where Velocity sends them on, on 127.0.0.1: each connection there
+    /// becomes a stream to home (0: none).
+    pub backend_port: u16,
 }
 
 impl Default for RelayConfig {
     fn default() -> Self {
-        RelayConfig { key_sha256: String::new(), bind: "0.0.0.0".into(), game_port: core::DEFAULT_PORT, tunnel_port: 25566, cache_mb: None, window_log: None }
+        RelayConfig { key_sha256: String::new(), bind: "0.0.0.0".into(), game_port: core::DEFAULT_PORT, tunnel_port: 25566, cache_mb: None, window_log: None, velocity_port: 0, backend_port: 0 }
     }
 }
 
@@ -104,6 +110,8 @@ pub struct Relay {
     key: [u8; 32],
     recv: Codec,
     game_port: u16,
+    /// Velocity's port on 127.0.0.1 (0: none).
+    pub velocity_port: u16,
     home: Mutex<Option<HomeLink>>,
     epoch: AtomicU64,
     fails: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
@@ -124,6 +132,7 @@ impl Relay {
             key,
             recv,
             game_port,
+            velocity_port: 0,
             home: Mutex::new(None),
             epoch: AtomicU64::new(0),
             fails: Mutex::new(HashMap::new()),
@@ -191,8 +200,25 @@ impl rustls::server::ResolvesServerCert for Fixed {
 }
 
 /// Runs both listeners until the process ends.
-pub async fn serve(relay: Arc<Relay>, game: TcpListener, tunnel: TcpListener, tls: Arc<rustls::ServerConfig>) {
+pub async fn serve(relay: Arc<Relay>, game: TcpListener, tunnel: TcpListener, tls: Arc<rustls::ServerConfig>, backend: Option<TcpListener>) {
     let r = relay.clone();
+    let rb = relay.clone();
+    // Velocity's connections on to the server: each is a stream to home.
+    let backends = async move {
+        let Some(l) = backend else { return std::future::pending::<()>().await };
+        loop {
+            let Ok((sock, peer)) = l.accept().await else {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            };
+            let r = rb.clone();
+            tokio::spawn(async move {
+                if let Err(e) = backend_conn(&r, sock).await {
+                    log::debug!("relay: Velocity's connection {peer}: {e:#}");
+                }
+            });
+        }
+    };
     let acceptor = tokio_rustls::TlsAcceptor::from(tls);
     let homes = async move {
         loop {
@@ -221,7 +247,7 @@ pub async fn serve(relay: Arc<Relay>, game: TcpListener, tunnel: TcpListener, tl
             });
         }
     };
-    tokio::join!(homes, players);
+    tokio::join!(homes, players, backends);
 }
 
 async fn home_conn(r: Arc<Relay>, acceptor: tokio_rustls::TlsAcceptor, sock: TcpStream, peer: SocketAddr) {
@@ -355,9 +381,24 @@ async fn player_conn(r: &Relay, mut sock: TcpStream, peer: SocketAddr) -> anyhow
     .await?;
     let target = {
         let h = r.home.lock().unwrap();
-        h.as_ref().filter(|h| !h.handle.is_dead()).and_then(|h| h.routes.first().map(|rt| (h.handle.clone(), rt.server.clone())))
+        h.as_ref().filter(|h| !h.handle.is_dead()).and_then(|h| h.routes.first().map(|rt| (h.handle.clone(), rt.server.clone(), rt.velocity)))
     };
-    if let Some((handle, server)) = target {
+    // A server that checks accounts through the relay: Velocity takes the
+    // player (it ends their encryption, so what goes home compresses), told
+    // who they are with a PROXY header. With home away the relay answers
+    // as before.
+    if let Some((_, _, true)) = &target
+        && r.velocity_port != 0
+    {
+        let mut v = TcpStream::connect(("127.0.0.1", r.velocity_port)).await.context("connecting to Velocity")?;
+        let _ = v.set_nodelay(true);
+        let local = sock.local_addr().unwrap_or(peer);
+        v.write_all(&proxy_v2(peer, local)).await?;
+        v.write_all(&buf).await?;
+        tokio::io::copy_bidirectional(&mut sock, &mut v).await?;
+        return Ok(());
+    }
+    if let Some((handle, server, _)) = target {
         let head = Head { kind: "game".into(), server, peer: peer.to_string() };
         if let Ok(mut stream) = handle.open(serde_json::to_vec(&head).expect("head")).await {
             stream.tx.send(&buf).await.map_err(|e| anyhow::anyhow!("tunnel: {e:?}"))?;
@@ -365,6 +406,53 @@ async fn player_conn(r: &Relay, mut sock: TcpStream, peer: SocketAddr) -> anyhow
         }
     }
     offline(&mut sock, buf, &hs).await
+}
+
+/// One of Velocity's connections on to the server: a stream to home for
+/// the server that checks accounts through the relay. Velocity is only
+/// sent players while home is connected; if home went away since, the
+/// connection ends and Velocity tells the player.
+async fn backend_conn(r: &Relay, sock: TcpStream) -> anyhow::Result<()> {
+    let _ = sock.set_nodelay(true);
+    let target = {
+        let h = r.home.lock().unwrap();
+        h.as_ref().filter(|h| !h.handle.is_dead()).and_then(|h| h.routes.iter().find(|rt| rt.velocity).map(|rt| (h.handle.clone(), rt.server.clone())))
+    };
+    let (handle, server) = target.context("home isn't connected")?;
+    let head = Head { kind: "game".into(), server, peer: "velocity".into() };
+    let stream = handle.open(serde_json::to_vec(&head).expect("head")).await.map_err(|e| anyhow::anyhow!("tunnel: {e:?}"))?;
+    super::pipe(sock, stream, |_| {}, |_| {}).await.map_err(anyhow::Error::msg)
+}
+
+/// A PROXY protocol v2 header (TCP, `src` the player): Velocity reads the
+/// player's real address from it for its logs, limits and forwarding.
+pub fn proxy_v2(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
+    let v6 = |a: SocketAddr| match a {
+        SocketAddr::V4(s) => std::net::SocketAddrV6::new(s.ip().to_ipv6_mapped(), s.port(), 0, 0),
+        SocketAddr::V6(s) => s,
+    };
+    let mut h = b"\r\n\r\n\0\r\nQUIT\n".to_vec();
+    h.push(0x21); // version 2, PROXY
+    match (src, dst) {
+        (SocketAddr::V4(s), SocketAddr::V4(d)) => {
+            h.push(0x11); // TCP over IPv4
+            h.extend_from_slice(&12u16.to_be_bytes());
+            h.extend_from_slice(&s.ip().octets());
+            h.extend_from_slice(&d.ip().octets());
+            h.extend_from_slice(&s.port().to_be_bytes());
+            h.extend_from_slice(&d.port().to_be_bytes());
+        }
+        (s, d) => {
+            let (s, d) = (v6(s), v6(d));
+            h.push(0x21); // TCP over IPv6
+            h.extend_from_slice(&36u16.to_be_bytes());
+            h.extend_from_slice(&s.ip().octets());
+            h.extend_from_slice(&d.ip().octets());
+            h.extend_from_slice(&s.port().to_be_bytes());
+            h.extend_from_slice(&d.port().to_be_bytes());
+        }
+    }
+    h
 }
 
 /// Reads until `parse` has a whole packet (at most 8 KB, 10 s).
@@ -444,20 +532,22 @@ async fn take_packet(sock: &mut TcpStream, buf: &mut Vec<u8>, parse: impl Fn(&[u
 
 const USAGE: &str = "hopperd relay init [--data <dir>] [--key-stdin]   make the relay key (shown once) and CA
 hopperd relay status [--data <dir>]   the certificate fingerprint and settings, as JSON
-hopperd relay [run] [--data <dir>] [--bind <addr>] [--game-port <n>] [--tunnel-port <n>]";
+hopperd relay [run] [--data <dir>] [--bind <addr>] [--game-port <n>] [--tunnel-port <n>] [--velocity-port <n>] [--backend-port <n>]";
 
 struct Args {
     data: PathBuf,
     bind: Option<String>,
     game_port: Option<u16>,
     tunnel_port: Option<u16>,
+    velocity_port: Option<u16>,
+    backend_port: Option<u16>,
     /// `init` takes the key from stdin instead of making one: the home
     /// panel's ssh setup makes it, so it never shows on a console.
     key_stdin: bool,
 }
 
 fn parse(args: &[String]) -> anyhow::Result<(String, Args)> {
-    let mut a = Args { data: crate::config::data_dir().join("relay"), bind: None, game_port: None, tunnel_port: None, key_stdin: false };
+    let mut a = Args { data: crate::config::data_dir().join("relay"), bind: None, game_port: None, tunnel_port: None, velocity_port: None, backend_port: None, key_stdin: false };
     let mut cmd = String::from("run");
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -469,6 +559,8 @@ fn parse(args: &[String]) -> anyhow::Result<(String, Args)> {
             "--bind" => a.bind = Some(val()?),
             "--game-port" => a.game_port = Some(val()?.parse().context("--game-port takes a number")?),
             "--tunnel-port" => a.tunnel_port = Some(val()?.parse().context("--tunnel-port takes a number")?),
+            "--velocity-port" => a.velocity_port = Some(val()?.parse().context("--velocity-port takes a number")?),
+            "--backend-port" => a.backend_port = Some(val()?.parse().context("--backend-port takes a number")?),
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -494,6 +586,12 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
     if let Some(p) = a.tunnel_port {
         cfg.tunnel_port = p;
     }
+    if let Some(p) = a.velocity_port {
+        cfg.velocity_port = p;
+    }
+    if let Some(p) = a.backend_port {
+        cfg.backend_port = p;
+    }
     if cmd == "status" {
         // Read by the home panel's setup over ssh to check what is there;
         // the key itself isn't kept here, only its hash.
@@ -501,6 +599,7 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
         let out = json!({
             "version": env!("CARGO_PKG_VERSION"), "fingerprint": fingerprint, "key_sha256": cfg.key_sha256,
             "bind": cfg.bind, "game_port": cfg.game_port, "tunnel_port": cfg.tunnel_port,
+            "velocity_port": cfg.velocity_port, "backend_port": cfg.backend_port,
         });
         println!("{out}");
         return Ok(());
@@ -531,7 +630,7 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
         println!("On the home panel, set the relay's address, this key and this fingerprint (PUT /api/v1/vps-relay; see design/vps-relay.md, \"Pairing by hand\").");
         return Ok(());
     }
-    if a.bind.is_some() || a.game_port.is_some() || a.tunnel_port.is_some() {
+    if a.bind.is_some() || a.game_port.is_some() || a.tunnel_port.is_some() || a.velocity_port.is_some() || a.backend_port.is_some() {
         cfg.save(&a.data)?;
     }
     let key = link::hash_from_hex(&cfg.key_sha256).context("No relay key yet. Run hopperd relay init first.")?;
@@ -545,9 +644,14 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
         let game = TcpListener::bind((cfg.bind.as_str(), cfg.game_port)).await.with_context(|| format!("listening for players on {}:{}", cfg.bind, cfg.game_port))?;
         let tunnel = TcpListener::bind((cfg.bind.as_str(), cfg.tunnel_port)).await.with_context(|| format!("listening for home on {}:{}", cfg.bind, cfg.tunnel_port))?;
         log::info!("hopperd {} relay: players on {}:{}, home on {}:{} (certificate {fingerprint}); cache {} MB, window 2^{}", env!("CARGO_PKG_VERSION"), cfg.bind, cfg.game_port, cfg.bind, cfg.tunnel_port, recv.cache_bytes >> 20, recv.window_log);
-        let relay = Relay::new(key, recv, cfg.game_port);
+        // Velocity's side is on this machine only.
+        let backend = if cfg.backend_port != 0 { Some(TcpListener::bind(("127.0.0.1", cfg.backend_port)).await.with_context(|| format!("listening for Velocity on 127.0.0.1:{}", cfg.backend_port))?) } else { None };
+        let mut relay = Relay::new(key, recv, cfg.game_port);
+        if let Some(r) = Arc::get_mut(&mut relay) {
+            r.velocity_port = cfg.velocity_port;
+        }
         tokio::select! {
-            _ = serve(relay, game, tunnel, tls) => {}
+            _ = serve(relay, game, tunnel, tls, backend) => {}
             _ = tokio::signal::ctrl_c() => log::info!("relay: stopping"),
         }
         Ok(())
