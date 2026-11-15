@@ -3023,6 +3023,110 @@ fn plain_pack_addon(path: &str, sha1: &str) -> Option<crate::instances::Addon> {
     })
 }
 
+/// A pack file's plain entry ([`plain_pack_addon`]) named through what
+/// Modrinth said of its hash, so updates and icons work. `None` when
+/// Modrinth doesn't know the file.
+fn named_on_modrinth(
+    plain: &crate::instances::Addon,
+    versions: &HashMap<String, crate::modrinth::Version>,
+    projects: &[crate::modrinth::Project],
+) -> Option<crate::instances::Addon> {
+    let v = versions.get(&plain.mr_sha1)?;
+    let p = projects.iter().find(|p| p.id == v.project_id)?;
+    let m = crate::modrinth::project_to_mod(p, "");
+    let mut mr_file = crate::modrinth::version_to_file(v);
+    if let Some(mr) = mr_file.modrinth.as_mut() {
+        mr.sha1 = plain.mr_sha1.clone();
+    }
+    let mut a = addon_from(&m, &mr_file, true);
+    a.file_name = plain.file_name.clone();
+    a.class_id = plain.class_id;
+    a.env = crate::modrinth::env(&p.client_side, &p.server_side).to_string();
+    Some(a)
+}
+
+/// The file a Modrinth pack's index lists for a mod: by its file name
+/// (`name`, as a code names a pack mod: "n:<file name>") or by its Modrinth
+/// project (`project`, an addon's hashed id), client files only.
+pub(crate) fn mr_index_file<'a>(index: &'a MrIndex, name: Option<&str>, project: Option<u64>) -> Option<&'a MrIndexFile> {
+    index
+        .files
+        .iter()
+        .filter(|f| !f.env.as_ref().and_then(|e| e.get("client")).is_some_and(|c| c == "unsupported"))
+        .find(|f| {
+            name.is_some_and(|n| f.file_name().eq_ignore_ascii_case(n))
+                || project.is_some_and(|p| f.project().is_some_and(|fp| crate::modrinth::num_id(fp) == p))
+        })
+}
+
+/// Puts a Modrinth pack's own file `f` back: downloaded again from the
+/// pack's own links (checked against the pack's hash), in place of whatever
+/// file of the same mod is there now (that one goes to History), on, and
+/// counted as the pack's. How a group member's Undo of an update or removal
+/// of a pack mod ("as the pack has it") lands here.
+pub(crate) fn put_back_mr_file(inst: &mut Instance, f: &MrIndexFile, job: &Job, download: MrDownload, lookup: &dyn Fn(&[String]) -> MrLookup) -> anyhow::Result<()> {
+    let sha1 = f.sha1();
+    let plain = plain_pack_addon(&f.path, &sha1).with_context(|| format!("{} isn't in a folder Hopper keeps track of", f.path))?;
+    let project = f.project().map(crate::modrinth::num_id);
+    // The same mod: its project when the link names one, else the file name.
+    let is_it = |a: &crate::instances::Addon| {
+        project.is_some_and(|p| a.project_id == p) || a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(&plain.file_name)
+    };
+    let here = inst.addons.iter().position(|a| is_it(a));
+    let same = here.is_some_and(|i| {
+        let a = &inst.addons[i];
+        a.file_name.eq_ignore_ascii_case(&plain.file_name) && (a.mr_sha1.eq_ignore_ascii_case(&sha1) || fs::read(inst.addon_path(a)).is_ok_and(|b| crate::modrinth::sha1(&b) == sha1))
+    });
+    if !same {
+        let tmp = inst.root.join(plain.folder()).join(format!("{}.hopper-tmp", plain.file_name));
+        if let Some(p) = tmp.parent() {
+            fs::create_dir_all(p)?;
+        }
+        let expect = cf::Expect { len: f.file_size, sha1: sha1.clone() };
+        let mut last = anyhow::anyhow!("the pack gives no download link for {}", plain.file_name);
+        let mut got = false;
+        for url in &f.downloads {
+            match download(url, &tmp, &expect, job) {
+                Ok(()) => {
+                    got = true;
+                    break;
+                }
+                Err(e) => last = e,
+            }
+        }
+        if !got {
+            let _ = fs::remove_file(&tmp);
+            return Err(last);
+        }
+        let (versions, projects) = if sha1.is_empty() { Default::default() } else { lookup(std::slice::from_ref(&sha1)) };
+        let mut new = named_on_modrinth(&plain, &versions, &projects).unwrap_or(plain.clone());
+        if new.project_id == 0
+            && let Some(p) = project
+        {
+            new.project_id = p;
+            new.mr_project = f.project().unwrap_or_default().to_string();
+        }
+        let old = crate::install::take_old(inst, |a| is_it(a))?;
+        if let Err(e) = crate::install::replace_addon(inst, old, new, &tmp) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+    }
+    let at = inst.addons.iter().position(|a| a.file_name.eq_ignore_ascii_case(&plain.file_name));
+    if let Some(i) = at {
+        inst.addons[i].from_pack = true;
+        if !inst.addons[i].enabled {
+            crate::install::set_enabled_later(inst, i, true)?;
+        }
+    }
+    Ok(())
+}
+
+/// [`put_back_mr_file`] online: the pack's links, Modrinth for its name.
+pub(crate) fn put_back_mr_file_online(inst: &mut Instance, f: &MrIndexFile, job: &Job) -> anyhow::Result<()> {
+    put_back_mr_file(inst, f, job, &|url, dest, expect, job| cf::download_checked(url, dest, expect, Some(job), |_| {}), &lookup_on_modrinth)
+}
+
 /// Modrinth versions (by sha1) and their projects.
 type MrLookup = (
     HashMap<String, crate::modrinth::Version>,
@@ -3193,22 +3297,9 @@ fn apply_mrpack_with(
         let Some(plain) = s.addon.as_mut() else {
             continue;
         };
-        let Some(v) = versions.get(&plain.mr_sha1) else {
-            continue;
-        };
-        let Some(p) = projects.iter().find(|p| p.id == v.project_id) else {
-            continue;
-        };
-        let m = crate::modrinth::project_to_mod(p, "");
-        let mut mr_file = crate::modrinth::version_to_file(v);
-        if let Some(mr) = mr_file.modrinth.as_mut() {
-            mr.sha1 = plain.mr_sha1.clone();
+        if let Some(a) = named_on_modrinth(plain, &versions, &projects) {
+            *plain = a;
         }
-        let mut a = addon_from(&m, &mr_file, true);
-        a.file_name = plain.file_name.clone();
-        a.class_id = plain.class_id;
-        a.env = crate::modrinth::env(&p.client_side, &p.server_side).to_string();
-        *plain = a;
     }
     // Mods kept only on this PC keep their file (or stay out).
     staged.retain(|s| !s.addon.as_ref().is_some_and(|a| leaves(overrides, a)));

@@ -467,9 +467,7 @@ pub fn make(inst: &Instance, job: &Job) -> anyhow::Result<Made> {
         ),
         Some(p) if is_mr(p.project_id) => {
             let (project, version) = modrinth_pack_ids(inst, job)?;
-            let file = crate::source::file(num_id(&project), num_id(&version))?;
-            let zip = crate::modpack::fetch_mrpack(&file, job)?;
-            let index = crate::modpack::read_mr_index(&zip)?;
+            let index = mr_index_of(&project, &version, job)?;
             let sha1 = index
                 .files
                 .iter()
@@ -643,6 +641,19 @@ fn strip_bom(b: &[u8]) -> &[u8] {
 /// The Modrinth project and version of a Modrinth pack instance. Packs
 /// installed before Hopper kept them are looked up by name and version
 /// number, and the instance remembers what was found.
+/// The index of a Modrinth pack instance's own pack version (its zip is
+/// cached after the first time).
+pub(crate) fn mr_pack_index(inst: &Instance, job: &Job) -> anyhow::Result<crate::modpack::MrIndex> {
+    let (project, version) = modrinth_pack_ids(inst, job)?;
+    mr_index_of(&project, &version, job)
+}
+
+fn mr_index_of(project: &str, version: &str, job: &Job) -> anyhow::Result<crate::modpack::MrIndex> {
+    let file = crate::source::file(num_id(project), num_id(version))?;
+    let zip = crate::modpack::fetch_mrpack(&file, job)?;
+    crate::modpack::read_mr_index(&zip)
+}
+
 fn modrinth_pack_ids(inst: &Instance, job: &Job) -> anyhow::Result<(String, String)> {
     let p = inst.pack.as_ref().context("no pack")?;
     if !p.mr_project.is_empty() && !p.mr_version.is_empty() {

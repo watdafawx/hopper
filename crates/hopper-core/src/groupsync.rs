@@ -817,15 +817,22 @@ pub fn apply(inst: &mut Instance, todo: &[Change], skip_sources: &[crate::source
             },
             (State::Unlisted, _) => match (&c.was, at) {
                 (State::Off, Some(i)) => switch(inst, i, true, &name, job),
-                (State::File { .. }, Some(i)) if !inst.addons[i].from_pack => crate::install::remove(inst, i),
+                // A Modrinth pack names its mods by file, so a pack mod
+                // updated here (no longer counted as the pack's) is found
+                // by asking the pack first, below.
+                (State::File { .. }, Some(i)) if !inst.addons[i].from_pack && !is_mr_pack(inst) => crate::install::remove(inst, i),
                 // Back to the pack's own file: how an undone update or
                 // removal of a pack mod reads in a member's code.
                 (State::File { .. } | State::Removed, _) => match pack_file(inst, &c.key, job) {
-                    Some((project, file)) => put_back_pack_file(inst, project, file, job),
-                    None => {
-                        job.note(format!("{name}: putting back the modpack's own file isn't done by sync"));
-                        Ok(())
-                    }
+                    Some(PackFile::Curse(project, file)) => put_back_pack_file(inst, project, file, job),
+                    Some(PackFile::Modrinth(f)) => put_back_mr_file(inst, &f, job),
+                    None => match at {
+                        Some(i) if matches!(c.was, State::File { .. }) && !inst.addons[i].from_pack => crate::install::remove(inst, i),
+                        _ => {
+                            job.note(format!("{name}: putting back the modpack's own file isn't done by sync"));
+                            Ok(())
+                        }
+                    },
                 },
                 _ => Ok(()),
             },
@@ -843,15 +850,69 @@ pub fn apply(inst: &mut Instance, todo: &[Change], skip_sources: &[crate::source
     }
 }
 
-/// The file this instance's CurseForge pack version has for the mod `key`
-/// ("p:<project>"), as (project, file): what "as the pack has it" means
-/// here. None for a Modrinth pack, a mod the pack doesn't have, or a
-/// manifest that can't be read.
-fn pack_file(inst: &Instance, key: &str, job: &Job) -> Option<(u64, u64)> {
-    let p = inst.pack.as_ref().filter(|p| p.project_id != 0 && p.file_id != 0 && !is_mr(p.project_id))?;
+/// A pack version's own file of one mod: what "as the pack has it" means.
+enum PackFile {
+    /// A CurseForge pack's: (project, file).
+    Curse(u64, u64),
+    /// A Modrinth pack's index entry (its links and hash).
+    Modrinth(crate::modpack::MrIndexFile),
+}
+
+fn is_mr_pack(inst: &Instance) -> bool {
+    inst.pack.as_ref().is_some_and(|p| p.project_id != 0 && is_mr(p.project_id))
+}
+
+/// The file this instance's pack version has for the mod `key`. A
+/// CurseForge pack's manifest lists it by project ("p:<project>"). A
+/// Modrinth pack's index lists files: a code names its mods by file name
+/// ("n:<file name>"), and a mod here updated to another file by its
+/// Modrinth project ("p:<number>", read off the pack's download link).
+/// None for a mod the pack doesn't have, or a list that can't be read.
+fn pack_file(inst: &Instance, key: &str, job: &Job) -> Option<PackFile> {
+    let p = inst.pack.as_ref().filter(|p| p.project_id != 0)?;
+    if is_mr(p.project_id) {
+        let (name, project) = match (key.strip_prefix("n:"), key.strip_prefix("p:")) {
+            (Some(n), _) => (Some(n), None),
+            (_, Some(p)) => (None, Some(p.parse::<u64>().ok()?)),
+            _ => return None,
+        };
+        let index = mr_pack_index(inst, job)?;
+        return crate::modpack::mr_index_file(&index, name, project).cloned().map(PackFile::Modrinth);
+    }
+    if p.file_id == 0 {
+        return None;
+    }
     let project: u64 = key.strip_prefix("p:")?.parse().ok()?;
     let m = crate::sharecode::curse_manifest(inst, p.project_id, p.file_id, job).ok()?;
-    m.files.iter().find(|f| f.project_id == project).map(|f| (project, f.file_id))
+    m.files.iter().find(|f| f.project_id == project).map(|f| PackFile::Curse(project, f.file_id))
+}
+
+#[cfg(test)]
+thread_local! {
+    // Tests hand in a Modrinth pack's index and its files' bytes by link.
+    static TEST_MR: std::cell::RefCell<Option<(String, HashMap<String, Vec<u8>>)>> = const { std::cell::RefCell::new(None) };
+}
+
+fn mr_pack_index(inst: &Instance, job: &Job) -> Option<crate::modpack::MrIndex> {
+    #[cfg(test)]
+    if let Some(json) = TEST_MR.with(|t| t.borrow().as_ref().map(|(j, _)| j.clone())) {
+        return serde_json::from_str(&json).ok();
+    }
+    crate::sharecode::mr_pack_index(inst, job).ok()
+}
+
+fn put_back_mr_file(inst: &mut Instance, f: &crate::modpack::MrIndexFile, job: &Job) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if let Some(files) = TEST_MR.with(|t| t.borrow().as_ref().map(|(_, b)| b.clone())) {
+        let download = move |url: &str, dest: &Path, e: &crate::cf::Expect, _: &Job| -> anyhow::Result<()> {
+            let b = files.get(url).ok_or_else(|| anyhow::anyhow!("no file at {url}"))?;
+            anyhow::ensure!(crate::modrinth::sha1(b) == e.sha1, "hash differs");
+            std::fs::write(dest, b)?;
+            Ok(())
+        };
+        return crate::modpack::put_back_mr_file(inst, f, job, &download, &|_| Default::default());
+    }
+    crate::modpack::put_back_mr_file_online(inst, f, job)
 }
 
 /// Puts the pack's own `file` of `project` back, on and counted as the
@@ -3043,9 +3104,9 @@ mod tests {
         let inst = Instance { root: dir.clone(), pack: Some(pack), ..Default::default() };
         let jobs = crate::jobs::Jobs::new(crate::waker::noop());
         let job = jobs.start_quiet("test");
-        assert_eq!(pack_file(&inst, "p:7", &job), Some((7, 71)));
-        assert_eq!(pack_file(&inst, "p:8", &job), None, "not one of the pack's");
-        assert_eq!(pack_file(&inst, "n:x.jar", &job), None);
+        assert!(matches!(pack_file(&inst, "p:7", &job), Some(PackFile::Curse(7, 71))));
+        assert!(pack_file(&inst, "p:8", &job).is_none(), "not one of the pack's");
+        assert!(pack_file(&inst, "n:x.jar", &job).is_none());
         // Removed here, put back by the member: it does something.
         let back = Change { key: "p:7".into(), was: State::Removed, now: State::Unlisted, entry: None };
         assert!(does_something(&inst, &back));
@@ -3057,5 +3118,56 @@ mod tests {
         assert!(inst.addons[0].enabled && inst.addons[0].from_pack);
         job.finish(&Ok::<(), anyhow::Error>(()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same for a Modrinth pack, whose codes name pack mods by file
+    /// ("n:<file name>") and whose files come from the pack's own links,
+    /// not a CurseForge file id. A member undid their update of a pack mod
+    /// (or its removal): here the pack's exact old file comes back from the
+    /// pack's link, hash-checked, on and the pack's, in place of the update.
+    #[test]
+    fn an_undone_modrinth_pack_mod_change_goes_back_to_the_packs_own_file() {
+        const OLD: &[u8] = b"sodium 0.5 as the pack has it";
+        let url = "https://cdn.modrinth.com/data/AANobbMI/versions/v05/sodium-0.5.jar";
+        let index = serde_json::json!({
+            "name": "P", "versionId": "1.0",
+            "files": [{ "path": "mods/sodium-0.5.jar", "hashes": { "sha1": crate::modrinth::sha1(OLD) },
+                        "downloads": [url], "fileSize": OLD.len() }],
+            "dependencies": { "minecraft": "1.21.1" }
+        });
+        let project = num_id("AANobbMI");
+        let pack = crate::instances::PackRef { project_id: num_id("packproj"), file_id: num_id("packver"), version: "1.0".into(), ..Default::default() };
+        let jobs = crate::jobs::Jobs::new(crate::waker::noop());
+        // Updated here (a pack mod still, or a fresh copy taken after the
+        // member's removal), then removed here.
+        for (tag, updated_from_pack) in [("pack", Some(true)), ("fresh", Some(false)), ("gone", None)] {
+            let dir = std::env::temp_dir().join(format!("hopper-gs-mrback-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("mods")).unwrap();
+            let mut inst = Instance { root: dir.clone(), pack: Some(pack.clone()), game_version: "1.21.1".into(), ..Default::default() };
+            if let Some(from_pack) = updated_from_pack {
+                std::fs::write(dir.join("mods/sodium-0.6.jar"), b"sodium 0.6").unwrap();
+                inst.addons.push(Addon { project_id: project, file_id: num_id("v06"), file_name: "sodium-0.6.jar".into(), name: "Sodium".into(), enabled: true, from_pack, class_id: crate::cf::CLASS_MODS, mr_version: "v06".into(), ..Default::default() });
+            }
+            inst.save().unwrap();
+            TEST_MR.with(|t| *t.borrow_mut() = Some((index.to_string(), HashMap::from([(url.to_string(), OLD.to_vec())]))));
+            let mut todo = vec![Change { key: "n:sodium-0.5.jar".into(), was: State::Removed, now: State::Unlisted, entry: None }];
+            if updated_from_pack.is_some() {
+                todo.push(Change { key: format!("p:{project}"), was: State::File { file: "mr:v06".into(), on: true }, now: State::Unlisted, entry: None });
+            }
+            assert!(todo.iter().all(|c| does_something(&inst, c)), "{tag}");
+            let job = jobs.start_quiet("test");
+            apply(&mut inst, &todo, &[], &job).unwrap();
+            job.finish(&Ok::<(), anyhow::Error>(()));
+            TEST_MR.with(|t| *t.borrow_mut() = None);
+            assert_eq!(std::fs::read(dir.join("mods/sodium-0.5.jar")).ok().as_deref(), Some(OLD), "{tag}: the pack's file isn't back");
+            assert!(!dir.join("mods/sodium-0.6.jar").exists(), "{tag}: the update is still in");
+            let sodium: Vec<&Addon> = inst.addons.iter().filter(|a| a.file_name.starts_with("sodium")).collect();
+            assert_eq!(sodium.len(), 1, "{tag}: {sodium:?}");
+            assert!(sodium[0].enabled && sodium[0].from_pack, "{tag}");
+            assert_eq!(sodium[0].project_id, project, "{tag}: it's still the same mod");
+            assert_eq!(sodium[0].mr_sha1, crate::modrinth::sha1(OLD), "{tag}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

@@ -88,8 +88,19 @@ pub(crate) fn remote_file(r: &Ref) -> anyhow::Result<crate::cf::File> {
     if r.mr_version.is_empty() {
         crate::source::file(r.project_id, r.file_id)
     } else {
-        Ok(crate::modrinth::version_to_file(&crate::modrinth::version(&r.mr_version)?))
+        Ok(mr_file_of(crate::modrinth::version(&r.mr_version)?, &r.sha1))
     }
+}
+
+/// The file of Modrinth version `v` that is the jar with `sha1`: a version
+/// can carry several, and a modpack lists the one it uses by its hash, which
+/// needn't be the version's main file.
+fn mr_file_of(mut v: crate::modrinth::Version, sha1: &str) -> crate::cf::File {
+    if let Some(i) = v.files.iter().position(|f| f.hashes.get("sha1").is_some_and(|h| h.eq_ignore_ascii_case(sha1))) {
+        let f = v.files.swap_remove(i);
+        v.files = vec![f];
+    }
+    crate::modrinth::version_to_file(&v)
 }
 
 fn check_online(r: &Ref) -> bool {
@@ -1378,6 +1389,23 @@ pub fn delete(set: &Set, permanent: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Modrinth pack can list a version's second file (a "-slim" or
+    /// loader-specific jar): Undo downloads that very file, not the
+    /// version's main one, or the hash never matches.
+    #[test]
+    fn a_modrinth_note_downloads_the_file_with_its_hash() {
+        let file = |name: &str, primary: bool, h: &str| crate::modrinth::VersionFile {
+            url: format!("https://cdn.modrinth.com/data/P/versions/V/{name}"),
+            filename: name.into(),
+            primary,
+            size: 1,
+            hashes: [("sha1".to_string(), h.to_string())].into_iter().collect(),
+        };
+        let v = crate::modrinth::Version { id: "V".into(), project_id: "P".into(), files: vec![file("main.jar", true, "aa"), file("pack.jar", false, "bb")], ..Default::default() };
+        assert_eq!(mr_file_of(v.clone(), "BB").file_name, "pack.jar");
+        assert_eq!(mr_file_of(v, "cc").file_name, "main.jar", "unknown hash: the main file, as before");
+    }
 
     /// What the fake CurseForge hands out for project 5, file 9.
     const REMOTE: &[u8] = b"jar v1";

@@ -101,7 +101,12 @@ pub(crate) fn replace_addon(
 ) -> anyhow::Result<()> {
     if let Some(old) = old {
         keep_history(&mut new, &old);
-        let old_path = inst.addon_path(&old);
+        // On or off as the player sees it, which the entry can lag behind:
+        // a switch waiting for the game to let go of the jar (the Mods tab
+        // shows it already), or a jar turned off outside Hopper.
+        let (old_path, seen_on) = seen_state(inst, &old);
+        new.enabled = seen_on;
+        crate::locked::unqueue_rename(&inst.root, &inst.addon_path(&old));
         if !same_path(&old_path, &inst.addon_path(&new)) && !same_path(&old_path, downloaded) {
             // A running game holding the old jar doesn't stop the update:
             // the old one leaves when the game lets go of it.
@@ -133,6 +138,19 @@ pub(crate) fn replace_addon(
     Ok(())
 }
 
+/// Where `a`'s jar is on disk and whether the player sees it on: a switch
+/// queued for the game wins, then the file that's there (`x.jar` or
+/// `x.jar.disabled`), then the entry.
+fn seen_state(inst: &Instance, a: &Addon) -> (std::path::PathBuf, bool) {
+    let path = inst.addon_path(a);
+    let twin = Addon { enabled: !a.enabled, ..a.clone() };
+    let twin_path = inst.addon_path(&twin);
+    let (path, on) = if !path.exists() && twin_path.exists() { (twin_path, twin.enabled) } else { (path, a.enabled) };
+    let key = a.file_name.trim_end_matches(".disabled").to_lowercase();
+    let on = crate::locked::switches(&inst.root).get(&key).copied().unwrap_or(on);
+    (path, on)
+}
+
 /// Takes the entry a new file of a project replaces out of `inst.addons`,
 /// and sets every other entry `is_old` picks aside (to backups, so History
 /// can put it back) so no older copy of the mod stays beside the new file,
@@ -141,7 +159,7 @@ pub(crate) fn replace_addon(
 /// updates share this rule.
 pub(crate) fn take_old(inst: &mut Instance, is_old: impl Fn(&Addon) -> bool) -> anyhow::Result<Option<Addon>> {
     let hits: Vec<usize> = (0..inst.addons.len()).filter(|&i| is_old(&inst.addons[i])).collect();
-    let Some(&keep) = hits.iter().find(|&&i| inst.addons[i].enabled).or(hits.first()) else {
+    let Some(&keep) = hits.iter().find(|&&i| seen_state(inst, &inst.addons[i]).1).or(hits.first()) else {
         return Ok(None);
     };
     // Highest index first, so the others keep their places while removing.
@@ -2812,6 +2830,60 @@ mod stale_copy_tests {
         kept.sort();
         assert_eq!(kept, vec![jar("1.20.0"), jar("1.22.0")]);
         assert!(root.join("mods/jei.jar").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A mod turned off (its jar `.jar.disabled`) that gets a single update
+    /// or Update all stays off: the new file lands as `.jar.disabled` too
+    /// (mekanism_magic, 2026-11-11).
+    #[test]
+    fn an_update_keeps_a_turned_off_mod_off() {
+        let mut off = fox("1.22.0");
+        off.enabled = false;
+        let mut inst = saved("keepoff", vec![off, other("jei.jar")]);
+        let (_jobs, job) = job();
+        place(&mut inst, "1.22.0", "1.23.0", &job);
+        let root = inst.root.clone();
+        assert_eq!(fox_jars(&root), vec![format!("{}.disabled", jar("1.23.0"))]);
+        let back = crate::instances::load(&root).unwrap();
+        let a = back.addons.iter().find(|a| a.project_id == fox_id()).unwrap();
+        assert!(!a.enabled, "the updated mod came back on");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Turned off while the game held the jar: the switch waits for the game
+    /// (the Mods tab already shows it off) and the entry still says on. An
+    /// update meanwhile must go in off, not take the entry's "on".
+    #[test]
+    fn an_update_keeps_a_mod_whose_switch_off_waits_for_the_game_off() {
+        let mut inst = saved("queuedoff", vec![fox("1.22.0"), other("jei.jar")]);
+        let jar_path = inst.mods_dir().join(jar("1.22.0"));
+        crate::locked::queue_rename(&inst.root, &jar_path, &crate::sync::disabled_path(&jar_path)).unwrap();
+        let (_jobs, job) = job();
+        place(&mut inst, "1.22.0", "1.23.0", &job);
+        let root = inst.root.clone();
+        assert_eq!(fox_jars(&root), vec![format!("{}.disabled", jar("1.23.0"))]);
+        let back = crate::instances::load(&root).unwrap();
+        assert!(!back.addons.iter().find(|a| a.project_id == fox_id()).unwrap().enabled);
+        assert!(crate::locked::switches(&root).is_empty(), "the old jar's switch is still waiting");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The jar is `.jar.disabled` on disk but the entry says on (turned off
+    /// outside Hopper, or an entry saved over): the file is the truth. The
+    /// update goes in off and the old `.disabled` jar goes to History.
+    #[test]
+    fn an_update_follows_the_jar_on_disk_when_the_entry_disagrees() {
+        let mut inst = saved("diskoff", vec![fox("1.22.0"), other("jei.jar")]);
+        let on = inst.mods_dir().join(jar("1.22.0"));
+        std::fs::rename(&on, crate::sync::disabled_path(&on)).unwrap();
+        let (_jobs, job) = job();
+        place(&mut inst, "1.22.0", "1.23.0", &job);
+        let root = inst.root.clone();
+        assert_eq!(fox_jars(&root), vec![format!("{}.disabled", jar("1.23.0"))]);
+        let back = crate::instances::load(&root).unwrap();
+        assert!(!back.addons.iter().find(|a| a.project_id == fox_id()).unwrap().enabled);
+        assert_eq!(history(&root), vec![vec![format!("{}.disabled", jar("1.22.0"))]]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
