@@ -87,6 +87,12 @@
     sel.clear();
     whoPick = k;
   }
+  // How far a set's own rows sit in: under the head's text, past its
+  // faces (side by side, up to three) and the gap, as desktop's History.
+  function indent(s) {
+    const n = faces ? Math.min(Math.max(setPeople(s).length, 1), 3) : 1;
+    return `${8 + n * 24 + (n - 1) * 2 + 10}px`;
+  }
   // Everyone in a set, once each.
   function setPeople(s) {
     const m = new Map();
@@ -318,7 +324,7 @@
   {@const k = keyOf(s, f)}
   {@const i = order.indexOf(k)}
   {@const w = nested ? null : f.who}
-  <div class="row ent row-hover" class:nested class:row-sel={sel.has(k)} role="presentation" onpointerdown={(e) => down(e, i)} onpointerenter={(e) => paintOver(e, 'hist', i, setAt)} onclick={(e) => rowClick(e, k)}>
+  <div class="row ent row-hover" class:nested class:row-sel={sel.has(k)} style:padding-left={nested ? indent(s) : null} role="presentation" onpointerdown={(e) => down(e, i)} onpointerenter={(e) => paintOver(e, 'hist', i, setAt)} onclick={(e) => rowClick(e, k)}>
     {#if faces && !nested}{@render face(w, false)}{/if}
     <div class="col grow">
       <div class="row t">
@@ -366,7 +372,7 @@
             <div class="row ent row-hover" class:row-sel={headPicked(s)} role="presentation" onpointerdown={headDown} onpointerenter={(e) => headEnter(e, s)}>
               <button class="nm grow" onclick={(e) => headClick(e, s)}>
                 {#if faces}
-                  {#if ps.length > 1}<span class="faces">{#each ps.slice(0, 3) as w, j (j)}{@render face(w, true)}{/each}</span>{:else}{@render face(ps[0], false)}{/if}
+                  {#if ps.length > 1}<span class="faces">{#each ps.slice(0, 3) as w, j (j)}{@render face(w, false)}{/each}</span>{:else}{@render face(ps[0], false)}{/if}
                 {:else if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
                 <span class="col grow pk">
                   <span class="row t">
@@ -385,7 +391,7 @@
             {#if open.has(setKey(s))}
               {#each modsOf(s) as f, j (j)}{@render entry(s, f, true)}{/each}
               {#if rest.length}
-                <div class="row ent row-hover nested" class:row-sel={cfgPicked(s)} role="presentation" onpointerdown={headDown} onpointerenter={(e) => cfgEnter(e, s)}>
+                <div class="row ent row-hover nested" class:row-sel={cfgPicked(s)} style:padding-left={indent(s)} role="presentation" onpointerdown={headDown} onpointerenter={(e) => cfgEnter(e, s)}>
                   <button class="nm grow" onclick={(e) => cfgClick(e, s)}>
                     <span class="col grow">
                       <span class="row t"><span class="ch pri">Changed</span>{s.parts.rest_label}<span class="chev">{#if open.has(cfgKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}</span></span>
@@ -407,7 +413,7 @@
             <div class="row ent row-hover" class:row-sel={headPicked(s)} role="presentation" onpointerdown={(e) => { if (e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey) { held = true; start = null; window.addEventListener('pointerup', () => { held = false; start = null; }, { once: true, capture: true }); } }} onpointerenter={(e) => headEnter(e, s)}>
               <button class="nm grow" onclick={(e) => headClick(e, s)}>
                 {#if faces}
-                  {#if ps.length > 1}<span class="faces">{#each ps.slice(0, 3) as w, j (j)}{@render face(w, true)}{/each}</span>{:else}{@render face(ps[0], false)}{/if}
+                  {#if ps.length > 1}<span class="faces">{#each ps.slice(0, 3) as w, j (j)}{@render face(w, false)}{/each}</span>{:else}{@render face(ps[0], false)}{/if}
                 {:else if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
                 <span class="col grow">
                   {#if faces && s.head}
@@ -510,8 +516,9 @@
   .face.you { color: var(--acc); background: var(--acc-dim); }
   .face.blank { background: none; }
   .face.small { width: 16px; height: 16px; font-size: 10px; border-radius: 4px; }
-  .faces { display: inline-flex; width: 24px; flex: none; }
-  .faces .face + .face { margin-left: -8px; box-shadow: 0 0 0 2px var(--bg-1, #17181c); }
+  /* Several people: their faces side by side at full size. Overlapped,
+     the see-through tiles hid one initial under the next. */
+  .faces { display: inline-flex; gap: 2px; flex: none; }
   .grow { flex: 1; min-width: 0; }
   .col { display: flex; flex-direction: column; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

@@ -127,6 +127,10 @@ pub struct Tag {
     pub who: Who,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub batch: String,
+    /// Set aside by an Undo putting something back, so History can say so
+    /// instead of guessing a verb from the files.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub undo: bool,
 }
 
 struct Scope {
@@ -257,14 +261,16 @@ pub(crate) fn tag_for_file(root: &Path, file: &str) -> Tag {
     let f = base(file);
     SCOPES.with(|v| {
         let v = v.borrow();
-        let Some(s) = v.iter().rev().find(|s| s.root == r && !s.quiet) else { return Tag::default() };
-        let mine = |who: Who| Tag { who, batch: s.batch.clone() };
+        // Undo's own scope is innermost while it puts a file back.
+        let undo = v.iter().rev().find(|s| s.root == r).is_some_and(|s| s.quiet);
+        let Some(s) = v.iter().rev().find(|s| s.root == r && !s.quiet) else { return Tag { undo, ..Tag::default() } };
+        let mine = |who: Who| Tag { who, batch: s.batch.clone(), undo };
         if let Some(w) = s.files.get(&f) {
             return mine(w.clone());
         }
         match &s.default {
             Some(w) => mine(w.clone()),
-            None => Tag::default(),
+            None => Tag { undo, ..Tag::default() },
         }
     })
 }
@@ -279,7 +285,7 @@ fn tag_for_addon(root: &Path, a: &Addon) -> Option<Tag> {
         if s.quiet {
             return None;
         }
-        let mine = |who: Who| Some(Tag { who, batch: s.batch.clone() });
+        let mine = |who: Who| Some(Tag { who, batch: s.batch.clone(), undo: false });
         if let Some(w) = s.keys.get(&crate::groupsync::addon_key(a)).or_else(|| s.files.get(&base(&a.file_name))) {
             return mine(w.clone());
         }
@@ -467,6 +473,10 @@ mod tests {
         assert_eq!(tag_for_addon(root, &addon("a.jar", 1, true)).unwrap().batch, "");
         let _q = quiet(root);
         assert_eq!(tag_for_addon(root, &addon("a.jar", 1, true)), None);
+        // What Undo sets aside is marked as its own, for History to say so.
+        assert!(tag_for_file(root, "a.jar").undo);
+        drop(_q);
+        assert!(!tag_for_file(root, "a.jar").undo);
     }
 
     #[test]

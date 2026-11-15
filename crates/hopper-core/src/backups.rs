@@ -468,6 +468,9 @@ pub struct Saved {
     pub who: Option<crate::actor::Who>,
     /// The sync or bulk action it was part of (one row in History).
     pub batch: String,
+    /// Set aside by an Undo that put an older file back: History says
+    /// "put back" rather than guessing a verb from what's there now.
+    pub put_back: bool,
     /// A record-only entry (added, turned on or off): what it was and the
     /// mod's key. Nothing was set aside; Undo switches it back.
     pub record: Option<(crate::actor::Did, String)>,
@@ -490,6 +493,14 @@ const PACK_KINDS: [Change; 11] = [
 ];
 
 impl Saved {
+    /// What History says was done: the change's verb, or "put back" for
+    /// what an Undo set aside ("You put back Create", with "0.6 → 0.5.1"
+    /// under it). An undo's file is judged like any other, so it would read
+    /// "rolled back" or "switched", as if someone had picked that.
+    pub fn verb(&self) -> &'static str {
+        if self.put_back { "put back" } else { self.change.verb() }
+    }
+
     /// A mod (its copy, note or record), not a config or another file.
     pub fn is_mod(&self) -> bool {
         self.src.is_some() || self.record.is_some() || is_jar(&self.name)
@@ -796,8 +807,8 @@ impl Set {
             (false, 1) => "1 file".to_string(),
             (false, _) => format!("{n} files"),
         };
-        let same = self.files.iter().all(|f| f.change == self.files[0].change);
-        let verb = if same { self.files[0].change.verb() } else { "changed" };
+        let same = self.files.iter().all(|f| f.verb() == self.files[0].verb());
+        let verb = if same { self.files[0].verb() } else { "changed" };
         if let Some(w) = self.who() {
             if !w.pack.is_empty() && !w.is_you() {
                 return Some(format!("Updated from {}'s {}", w.name, w.pack));
@@ -834,7 +845,7 @@ impl Set {
                 // The rest of the entry, for Hopper desktop.
                 "src": f.src, "now": f.now, "now_site": f.now_site, "reason": f.reason,
                 // Who did it ("" name: you), and for a record what Undo switches back.
-                "who": f.who, "verb": f.change.verb(), "batch": f.batch,
+                "who": f.who, "verb": f.verb(), "batch": f.batch, "put_back": f.put_back,
                 "record": f.record.as_ref().map(|(d, k)| serde_json::json!({ "did": d, "key": k })),
                 "undo": f.change.undoable(),
             })).collect::<Vec<_>>(),
@@ -874,6 +885,7 @@ impl Set {
                 reason: s(f, "reason"),
                 who: serde_json::from_value(f["who"].clone()).ok(),
                 batch: s(f, "batch"),
+                put_back: f["put_back"].as_bool().unwrap_or(false),
                 record: serde_json::from_value(f["record"]["did"].clone()).ok().map(|d| (d, s(&f["record"], "key"))),
             })
             .collect();
@@ -958,6 +970,7 @@ pub fn list(root: &Path) -> Vec<Set> {
                 if let Some(t) = tags.get(&f.name) {
                     f.who = Some(t.who.clone());
                     f.batch = t.batch.clone();
+                    f.put_back = t.undo;
                 }
                 judge(root, inst.as_ref(), f);
             }
@@ -1039,6 +1052,7 @@ fn record_entry(dir: &Path, r: &crate::actor::Record) -> Saved {
             reason: String::new(),
             who: Some(r.who.clone()),
             batch: r.batch.clone(),
+            put_back: false,
             record: Some((r.did, r.key.clone())),
         };
     }
@@ -1076,6 +1090,7 @@ fn record_entry(dir: &Path, r: &crate::actor::Record) -> Saved {
         reason: fs::read_to_string(dir.join(REASON)).unwrap_or_default(),
         who: Some(r.who.clone()),
         batch: r.batch.clone(),
+        put_back: false,
         record: Some((r.did, r.key.clone())),
     }
 }
@@ -1173,6 +1188,7 @@ fn walk(
             reason: String::new(),
             who: None,
             batch: String::new(),
+            put_back: false,
             record: None,
         });
     }
@@ -1551,6 +1567,11 @@ mod tests {
         // The text it had is History now, so the undo can be undone.
         let f = list(&root).remove(0).files.remove(0);
         assert_eq!(fs::read_to_string(&f.path).unwrap(), "new = 2");
+        // It says the undo put the old text back, not that someone changed it.
+        assert!(f.put_back);
+        assert_eq!(f.verb(), "put back");
+        let back = Set::from_json(&list(&root).remove(0).to_json()).unwrap();
+        assert_eq!(back.files[0].verb(), "put back");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1649,6 +1670,7 @@ mod tests {
             reason: String::new(),
             who: None,
             batch: String::new(),
+            put_back: false,
             record: None,
         }
     }
@@ -1776,6 +1798,7 @@ mod tests {
                 reason: "Clean update".into(),
                 who: Some(crate::actor::Who::friend("Mia", "mb1", "", "")),
                 batch: "b1".into(),
+                put_back: false,
                 record: None,
             }],
             pack: None,

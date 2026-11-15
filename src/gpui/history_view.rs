@@ -37,6 +37,25 @@ fn person_key(w: &Who) -> String {
 
 /// The size of the face before a row.
 const FACE: f32 = 1.5;
+/// The gap between faces when several people made one change.
+const FACE_GAP: f32 = 0.125;
+/// At most this many faces before a row.
+const MAX_FACES: usize = 3;
+
+/// How wide a row's lead is: one face, or several side by side. Side by
+/// side, not overlapped: the initials on tinted tiles are see-through and
+/// overlapping hid one letter under the next.
+fn lead_width(people: usize) -> f32 {
+    let n = people.clamp(1, MAX_FACES) as f32;
+    n * FACE + (n - 1.) * FACE_GAP
+}
+
+/// How far an entry's own rows sit in: under the head's text, past its
+/// faces (or chevron) and the gap (`px_2` + `gap_2`).
+fn set_indent(set: &Set, faces: bool) -> f32 {
+    let n = if faces { set.people().len() } else { 1 };
+    lead_width(n) + 1.
+}
 
 /// Someone with no face to show (not signed in to Minecraft, or a Hopper
 /// Server user): their initial on a tinted tile, yours in the primary tint,
@@ -238,7 +257,7 @@ impl BackupsView {
             },
             Item::File(i, j) => match self.sets.get(*i).and_then(|s| Some((s, s.files.get(*j)?))) {
                 Some((set, f)) => {
-                    let row = self.entry_row(i * 10_000 + j + 1, f, set.when, true, self.hfaces, cx);
+                    let row = self.entry_row(i * 10_000 + j + 1, f, set.when, Some(set_indent(set, self.hfaces)), self.hfaces, cx);
                     return div().when(self.ends_entry(ix, *i), |d| d.pb_0p5()).child(row).into_any_element();
                 }
                 None => div().into_any_element(),
@@ -475,15 +494,8 @@ impl BackupsView {
         } else if let [w] = people.as_slice() {
             self.who_face(w, rems(FACE), cx)
         } else if !people.is_empty() {
-            let small = rems(FACE * 0.8);
-            let fs: Vec<AnyElement> = people.iter().take(3).map(|w| self.who_face(w, small, cx)).collect();
-            div()
-                .size(rems(FACE))
-                .flex_none()
-                .flex()
-                .items_center()
-                .child(widgets::face_stack(fs, cx.theme().background, small, cx.theme().radius))
-                .into_any_element()
+            let fs: Vec<AnyElement> = people.iter().take(MAX_FACES).map(|w| self.who_face(w, rems(FACE), cx)).collect();
+            h_flex().flex_none().w(rems(lead_width(people.len()))).gap(rems(FACE_GAP)).children(fs).into_any_element()
         } else {
             div().size(rems(FACE)).flex_none().into_any_element()
         }
@@ -587,7 +599,7 @@ impl BackupsView {
             .px_2()
             .py_1p5()
             // Under the pack's text, like its mods.
-            .pl(rems(FACE + 1.))
+            .pl(rems(set_indent(set, true)))
             .rounded(cx.theme().radius)
             .hover(|s| widgets::row_hover(s, cx))
             .clickable(cx);
@@ -634,7 +646,7 @@ impl BackupsView {
             return self.pack_rows(i, set, pack, faces, cx);
         }
         if let [f] = set.files.as_slice() {
-            return self.entry_row(i * 10_000, f, set.when, false, faces, cx).into_any_element();
+            return self.entry_row(i * 10_000, f, set.when, None, faces, cx).into_any_element();
         }
         let open = self.open.contains(&set.dir);
         let dir = set.dir.clone();
@@ -728,7 +740,8 @@ impl BackupsView {
     /// One file: what happened to it, its versions, when, and Undo.
     /// `faces`: rows start with whoever made the change ("Mia turned off
     /// Sodium"); entries from before History noted that keep a blank there.
-    fn entry_row(&self, key: usize, f: &Saved, when: i64, nested: bool, faces: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn entry_row(&self, key: usize, f: &Saved, when: i64, nest: Option<f32>, faces: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let nested = nest.is_some();
         let (pid, icon, name) = match &f.src {
             Some(r) => {
                 let known = self.project_of(&f.name, cx);
@@ -756,7 +769,7 @@ impl BackupsView {
             .px_2()
             .py_1p5()
             // Under the head's text: past its face (or chevron) and gap.
-            .when(nested, |r| r.pl(rems(FACE + 1.)))
+            .when_some(nest, |r, pl| r.pl(rems(pl)))
             .rounded(cx.theme().radius)
             .hover(|s| widgets::row_hover(s, cx))
             .clickable(cx);
@@ -772,7 +785,7 @@ impl BackupsView {
                 .flex_none()
                 .gap_1p5()
                 .child(div().font_semibold().child(w.label()))
-                .child(div().text_color(cx.theme().muted_foreground).child(f.change.verb())),
+                .child(div().text_color(cx.theme().muted_foreground).child(f.verb())),
             None => h_flex().flex_none().child(div().text_color(change_color(f.change, true, cx)).child(f.change.label())),
         };
         let mut detail = match note {
