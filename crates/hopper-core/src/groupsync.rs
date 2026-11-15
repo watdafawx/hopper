@@ -484,10 +484,36 @@ pub fn stamps_of(marks: &BTreeMap<String, Mark>, now: &Mods) -> BTreeMap<String,
         .collect()
 }
 
-/// [`stamps_of`] for an instance's code, off the UI thread.
-pub fn stamps(inst: &Instance, copy: &PackCopy, now: &Share) -> BTreeMap<String, Stamp> {
-    let found = projects_of(inst, &[now]);
-    stamps_of(&copy.marks, &mods(now, lookup(&found)))
+/// The stamps a code going out carries ([`stamps_of`]), plus one for each
+/// mod this code changes itself (against `sent`, the last code this copy
+/// published): `seq` 0 by `me`, "made in this very code". A member only
+/// compares a code with the last one it took from this copy, and the relay
+/// keeps just the newest code per sender, so a change that puts a mod back
+/// the way that member last saw it would otherwise read as no change at
+/// all: an Undo right after taking someone's update (before they read the
+/// echo) never reached them, and they kept the update. Left out when the
+/// pack version moved, where a mod can differ only because of the version.
+pub fn stamps_out(marks: &BTreeMap<String, Mark>, sent: Option<&Mods>, now: &Mods, me: &str) -> BTreeMap<String, Stamp> {
+    let mut out = stamps_of(marks, now);
+    if let Some(sent) = sent.filter(|s| s.pack == now.pack) {
+        for c in changes(sent, now) {
+            if !out.contains_key(&c.key) && marks.get(&c.key).is_none_or(|m| m.state != c.now) {
+                out.insert(c.key, Stamp { seq: 0, by: me.to_string() });
+            }
+        }
+    }
+    out
+}
+
+/// [`stamps_out`] for an instance's code, off the UI thread.
+pub fn stamps(inst: &Instance, copy: &PackCopy, now: &Share, me: &str) -> BTreeMap<String, Stamp> {
+    let sent = (!copy.sent.is_empty()).then(|| crate::sharecode::decode(&copy.sent).ok()).flatten();
+    let found = match &sent {
+        Some(s) => projects_of(inst, &[now, s]),
+        None => projects_of(inst, &[now]),
+    };
+    let sent = sent.as_ref().map(|s| mods(s, lookup(&found)));
+    stamps_out(&copy.marks, sent.as_ref(), &mods(now, lookup(&found)), me)
 }
 
 /// A code another member sent, kept until it's taken in.
@@ -631,7 +657,24 @@ pub fn plan(
             continue;
         };
         let found: Vec<Change> = match copy.got.get(&from).and_then(|p| decode(&p.code)) {
-            Some(prev) => changes(&prev, &now),
+            Some(prev) => {
+                let mut found = changes(&prev, &now);
+                // Made in this code (see `stamps_out`) but the same as in
+                // the last code taken from them: they changed it and back
+                // in a code this PC never got (the relay keeps the newest
+                // only). Here it may still be the way in between.
+                for (k, s) in &g.stamps {
+                    if s.seq != 0 || s.by != from || found.iter().any(|c| c.key == *k) {
+                        continue;
+                    }
+                    let was = will.get(k).cloned().unwrap_or_else(|| state_of(here, k));
+                    let to = state_of(&now, k);
+                    if was != to {
+                        found.push(Change { key: k.clone(), was, now: to, entry: now.map.get(k).map(|(_, e)| e.clone()) });
+                    }
+                }
+                found
+            }
             None => g
                 .stamps
                 .keys()
@@ -651,7 +694,9 @@ pub fn plan(
             // as `sent_marks` sees it too).
             let unsent = sent.is_some_and(|s| state_of(s, &c.key) != state_of(here, &c.key))
                 && copy.marks.get(&c.key).is_none_or(|m| m.state != state_of(here, &c.key));
-            let stamp = g.stamps.get(&c.key).filter(|s| s.seq > 0 && s.seq <= g.seq);
+            // A stamp "made in this code" dates the change by the code.
+            let own = Stamp { seq: g.seq, by: from.clone() };
+            let stamp = g.stamps.get(&c.key).map(|s| if s.seq == 0 && s.by == from { &own } else { s }).filter(|s| s.seq > 0 && s.seq <= g.seq);
             let (seq, by, name) = match stamp {
                 Some(s) if s.by == from => (s.seq, from.clone(), g.name.clone()),
                 Some(s) => (s.seq, s.by.clone(), name_of(&s.by)),
@@ -773,10 +818,15 @@ pub fn apply(inst: &mut Instance, todo: &[Change], skip_sources: &[crate::source
             (State::Unlisted, _) => match (&c.was, at) {
                 (State::Off, Some(i)) => switch(inst, i, true, &name, job),
                 (State::File { .. }, Some(i)) if !inst.addons[i].from_pack => crate::install::remove(inst, i),
-                (State::File { .. } | State::Removed, _) => {
-                    job.note(format!("{name}: putting back the modpack's own file isn't done by sync"));
-                    Ok(())
-                }
+                // Back to the pack's own file: how an undone update or
+                // removal of a pack mod reads in a member's code.
+                (State::File { .. } | State::Removed, _) => match pack_file(inst, &c.key, job) {
+                    Some((project, file)) => put_back_pack_file(inst, project, file, job),
+                    None => {
+                        job.note(format!("{name}: putting back the modpack's own file isn't done by sync"));
+                        Ok(())
+                    }
+                },
                 _ => Ok(()),
             },
             (State::File { on, .. }, Some(e)) => file_change(inst, at, e, *on, skip_sources, job),
@@ -791,6 +841,33 @@ pub fn apply(inst: &mut Instance, todo: &[Change], skip_sources: &[crate::source
         None => Ok(()),
         Some((name, e)) => Err(e.context(format!("Couldn't change {name}"))),
     }
+}
+
+/// The file this instance's CurseForge pack version has for the mod `key`
+/// ("p:<project>"), as (project, file): what "as the pack has it" means
+/// here. None for a Modrinth pack, a mod the pack doesn't have, or a
+/// manifest that can't be read.
+fn pack_file(inst: &Instance, key: &str, job: &Job) -> Option<(u64, u64)> {
+    let p = inst.pack.as_ref().filter(|p| p.project_id != 0 && p.file_id != 0 && !is_mr(p.project_id))?;
+    let project: u64 = key.strip_prefix("p:")?.parse().ok()?;
+    let m = crate::sharecode::curse_manifest(inst, p.project_id, p.file_id, job).ok()?;
+    m.files.iter().find(|f| f.project_id == project).map(|f| (project, f.file_id))
+}
+
+/// Puts the pack's own `file` of `project` back, on and counted as the
+/// pack's again (whatever file of it is here now goes to History).
+fn put_back_pack_file(inst: &mut Instance, project: u64, file: u64, job: &Job) -> anyhow::Result<()> {
+    let same = inst.addons.iter().any(|a| a.project_id == project && a.file_id == file);
+    if !same {
+        crate::install::install_file(inst, project, file, job)?;
+    }
+    if let Some(i) = inst.addons.iter().position(|a| a.project_id == project) {
+        inst.addons[i].from_pack = true;
+        if !inst.addons[i].enabled {
+            crate::install::set_enabled_later(inst, i, true)?;
+        }
+    }
+    Ok(())
 }
 
 /// Whether making `c` here would take a mod's file away: a removal, or a
@@ -907,7 +984,9 @@ pub fn does_something(inst: &Instance, c: &Change) -> bool {
     let here = find_addon(inst, &c.key);
     match (&c.now, &c.entry) {
         (State::Off | State::Removed, _) => here.is_some(),
-        (State::Unlisted, _) => here.is_some(),
+        // A pack mod taken out here and put back by a member (an undone
+        // removal) comes back as the pack has it.
+        (State::Unlisted, _) => here.is_some() || c.was == State::Removed,
         (State::File { .. }, Some(_)) => true,
         (State::File { .. }, None) => false,
     }
@@ -1684,7 +1763,7 @@ mod tests {
                 return;
             }
             let now_mods = self.mods();
-            let stamps = if stamped { stamps_of(&self.copy.marks, &now_mods) } else { BTreeMap::new() };
+            let stamps = if stamped { stamps_out(&self.copy.marks, dec(&self.copy.sent).as_ref(), &now_mods, &self.id) } else { BTreeMap::new() };
             for to in all.iter().filter(|t| **t != self.id) {
                 relay.seq += 1;
                 let q = relay.queues.entry(to.to_string()).or_default();
@@ -2840,5 +2919,67 @@ mod tests {
         }
         assert_eq!(keep_pack_mods(&inst, todo, &mut merged, &pver(86), &job).len(), 3);
         job.finish(&Ok::<(), anyhow::Error>(()));
+    }
+
+    /// Undo from History is a change like any other: B updates mod 2, A
+    /// takes it, then B (or A) undoes it. The undo reaches everyone and
+    /// the earlier update never comes back, whoever made it and however
+    /// quickly the undo follows.
+    #[test]
+    fn an_undone_update_stays_undone_everywhere() {
+        for (undoer, quick) in [("B", false), ("A", false), ("B", true), ("A", true)] {
+            let (mut relay, mut a, mut b, mut c) = group();
+            b.set(2, 22, true);
+            b.publish(&mut relay, &ALL, true);
+            online(&mut a, &mut relay);
+            if !quick {
+                online(&mut c, &mut relay);
+                online(&mut b, &mut relay);
+            }
+            let u = if undoer == "A" { &mut a } else { &mut b };
+            u.set(2, 21, true);
+            u.publish(&mut relay, &ALL, true);
+            for _ in 0..4 {
+                for pc in [&mut a, &mut b, &mut c] {
+                    online(pc, &mut relay);
+                }
+            }
+            for pc in [&a, &b, &c] {
+                assert_eq!(pc.mods[&2], (21, true), "{undoer} undid (quick: {quick}); {} has it back", pc.id);
+            }
+        }
+    }
+
+    /// A member undoing their update (or removal) of a pack mod sends it as
+    /// "as the pack has it" (no longer listed). Here that is the file this
+    /// instance's CurseForge pack version lists, not "leave it be".
+    #[test]
+    fn an_undone_pack_mod_change_goes_back_to_the_packs_own_file() {
+        let dir = std::env::temp_dir().join(format!("hopper-gs-packfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("mods")).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{"name":"P","version":"1.0","projectID":500,"files":[{"projectID":7,"fileID":71,"required":true}],"overrides":"overrides"}"#,
+        )
+        .unwrap();
+        let pack = crate::instances::PackRef { project_id: 500, file_id: 5001, version: "1.0".into(), ..Default::default() };
+        let inst = Instance { root: dir.clone(), pack: Some(pack), ..Default::default() };
+        let jobs = crate::jobs::Jobs::new(crate::waker::noop());
+        let job = jobs.start_quiet("test");
+        assert_eq!(pack_file(&inst, "p:7", &job), Some((7, 71)));
+        assert_eq!(pack_file(&inst, "p:8", &job), None, "not one of the pack's");
+        assert_eq!(pack_file(&inst, "n:x.jar", &job), None);
+        // Removed here, put back by the member: it does something.
+        let back = Change { key: "p:7".into(), was: State::Removed, now: State::Unlisted, entry: None };
+        assert!(does_something(&inst, &back));
+        // Already the pack's file but off here: turned on, the pack's again.
+        let mut inst = inst;
+        std::fs::write(dir.join("mods").join("m.jar.disabled"), b"x").unwrap();
+        inst.addons.push(Addon { project_id: 7, file_id: 71, file_name: "m.jar".into(), enabled: false, class_id: crate::cf::CLASS_MODS, ..Default::default() });
+        put_back_pack_file(&mut inst, 7, 71, &job).unwrap();
+        assert!(inst.addons[0].enabled && inst.addons[0].from_pack);
+        job.finish(&Ok::<(), anyhow::Error>(()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1171,8 +1171,10 @@ impl Store {
             Kind::On | Kind::Added if !a.enabled => return None,
             _ => {}
         }
-        // A pack mod set to another file reads as an update.
-        let kind = if m.kind == Kind::Added && a.from_pack { Kind::Updated } else { m.kind };
+        // A pack mod set to another file reads as an update, and so does
+        // one put back to the pack's own file (an undone update: the code
+        // no longer lists it, which reads as a removal).
+        let kind = if matches!(m.kind, Kind::Added | Kind::Removed) && a.from_pack { Kind::Updated } else { m.kind };
         Some(kind.says(&m.name))
     }
 
@@ -2234,7 +2236,7 @@ impl PublishWork {
             };
             // A group copy says when each mod got the way it is, so a change
             // it only passes on keeps its own date (see `groupsync::Stamp`).
-            let marks = copy.as_ref().map(|c| groupsync::stamps(&inst, &c.copy, &made.share)).unwrap_or_default();
+            let marks = copy.as_ref().map(|c| groupsync::stamps(&inst, &c.copy, &made.share, &self.me)).unwrap_or_default();
             // The group's shared mod settings ride along whole, so a member
             // who was away catches up from this one recipe.
             let (configs, carried, too_big) = copy.as_ref().map(|c| super::config_sync::payload(&c.copy.configs)).unwrap_or_default();
