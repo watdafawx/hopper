@@ -1171,8 +1171,10 @@ impl Store {
             Kind::On | Kind::Added if !a.enabled => return None,
             _ => {}
         }
-        // A pack mod set to another file reads as an update.
-        let kind = if m.kind == Kind::Added && a.from_pack { Kind::Updated } else { m.kind };
+        // A pack mod set to another file reads as an update, and so does
+        // one put back to the pack's own file (an undone update: the code
+        // no longer lists it, which reads as a removal).
+        let kind = if matches!(m.kind, Kind::Added | Kind::Removed) && a.from_pack { Kind::Updated } else { m.kind };
         Some(kind.says(&m.name))
     }
 
