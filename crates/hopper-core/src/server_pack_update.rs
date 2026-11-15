@@ -852,6 +852,10 @@ pub fn apply(
             server_pack: plan.file.file_name.clone(),
         },
     )?;
+    // History shows what it set aside as one pack update, like an instance's.
+    let version = crate::undo::version_of(&p.pack.file_name);
+    let version = if version.is_empty() { p.pack.display_name.clone() } else { version };
+    crate::backups::mark_pack(root, stamp, &crate::backups::PackMark { name: server.name.clone(), version });
     if backups.is_dir() {
         report.backups = Some(backups);
     }

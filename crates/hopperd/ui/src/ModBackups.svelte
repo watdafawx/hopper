@@ -44,7 +44,9 @@
     busy = true;
     try {
       const r = await post(`${base}/mod-backups/undo`, { when: set.when, name: file?.name ?? (set.files.length === 1 ? set.files[0].name : null) });
-      if (r.restored.length) say(`Put back ${r.restored.join(', ')}.${r.restart_needed ? ' Restart the server to load it.' : ''}`);
+      // A whole pack update is hundreds of files: counted, not listed.
+      const what = r.restored.length > 3 ? `${r.restored.length} files` : r.restored.join(', ');
+      if (r.restored.length) say(`Put back ${what}.${r.restart_needed ? ' Restart the server to load it.' : ''}`);
       for (const e of r.errors) say(e, true);
       if (r.gone) {
         if (!r.gone.choices.length) say(`${r.gone.title}: ${r.gone.message}. It has no other version for this Minecraft and loader, so it can't be put back.`, true);
@@ -98,12 +100,21 @@
     const at = who ? s.head.indexOf(who) : -1;
     return at < 0 ? [s.head, '', ''] : [s.head.slice(0, at), who, s.head.slice(at + who.length)];
   }
+  // A pack update: its mods first, its configs in a fold of their own (its
+  // key is the set's plus "#configs"), as desktop shows it.
+  const cfgKey = (s) => `${setKey(s)}#configs`;
+  const modsOf = (s) => (s.parts?.mods ?? []).map((j) => s.files[j]);
+  const restOf = (s) => (s.parts?.rest ?? []).map((j) => s.files[j]);
   // The rows shown, in order (a fold's files count once it is open).
   const order = $derived.by(() => {
     const out = [];
     for (const s of data?.sets ?? []) {
       if (!shown(s)) continue;
-      if (s.files.length === 1) out.push(keyOf(s, s.files[0]));
+      if (s.pack) {
+        if (!open.has(setKey(s))) continue;
+        for (const f of modsOf(s)) out.push(keyOf(s, f));
+        if (open.has(cfgKey(s))) for (const f of restOf(s)) out.push(keyOf(s, f));
+      } else if (s.files.length === 1) out.push(keyOf(s, s.files[0]));
       else if (open.has(setKey(s))) for (const f of s.files) out.push(keyOf(s, f));
     }
     return out;
@@ -145,6 +156,42 @@
     if (held && start && e.buttons & 1) addKeys([start, ...kidsOf(s)]);
   }
   const headPicked = (s) => s.files.every((f) => sel.has(keyOf(s, f)));
+  // A pack update's configs fold: the same, for its configs only.
+  function cfgClick(e, s) {
+    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+      const kids = restOf(s).map((f) => keyOf(s, f));
+      const all = kids.every((k) => sel.has(k));
+      const next = new Set(sel.keys);
+      for (const k of kids) all ? next.delete(k) : next.add(k);
+      sel.keys = next;
+    } else flip(cfgKey(s));
+  }
+  function cfgEnter(e, s) {
+    if (held && start && e.buttons & 1) addKeys([start, ...restOf(s).map((f) => keyOf(s, f))]);
+  }
+  const cfgPicked = (s) => restOf(s).every((f) => sel.has(keyOf(s, f)));
+  // Undo all on the configs fold: just those files of the entry.
+  async function undoConfigs(s) {
+    busy = true;
+    try {
+      const r = await post(`${base}/mod-backups/undo`, { when: s.when, names: restOf(s).filter((f) => f.undo !== false).map((f) => f.name) });
+      if (r.restored.length) say(`Put back ${r.restored.length} file${r.restored.length === 1 ? '' : 's'}.${r.restart_needed ? ' Restart the server to load them.' : ''}`);
+      for (const e of r.errors) say(e, true);
+      await load();
+      if (r.restored.length) onChanged();
+    } catch (e) {
+      say(e.message, true);
+    } finally {
+      busy = false;
+    }
+  }
+  // A press on a fold's head starts a drag that picks what it passes.
+  function headDown(e) {
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    held = true;
+    start = null;
+    window.addEventListener('pointerup', () => { held = false; start = null; }, { once: true, capture: true });
+  }
   // Undoes the picked rows, newest first, one after the other.
   async function undoPicked() {
     const rows = [];
@@ -311,7 +358,48 @@
       {#each days as d (d.day)}
         <div class="day tiny">{d.day}</div>
         {#each d.sets as s (setKey(s))}
-          {#if s.files.length === 1}
+          {#if s.pack}
+            <!-- A pack update: one row with what it did to how many mods;
+                 open, its mods first and its configs in a fold of their own. -->
+            {@const ps = setPeople(s)}
+            {@const rest = restOf(s)}
+            <div class="row ent row-hover" class:row-sel={headPicked(s)} role="presentation" onpointerdown={headDown} onpointerenter={(e) => headEnter(e, s)}>
+              <button class="nm grow" onclick={(e) => headClick(e, s)}>
+                {#if faces}
+                  {#if ps.length > 1}<span class="faces">{#each ps.slice(0, 3) as w, j (j)}{@render face(w, true)}{/each}</span>{:else}{@render face(ps[0], false)}{/if}
+                {:else if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
+                <span class="col grow pk">
+                  <span class="row t">
+                    <span class="ch blue">Updated pack</span><b class="ell">{s.pack.name}</b>{#if s.pack.version}<span class="nw">to {s.pack.version}</span>{/if}
+                    {#if faces}<span class="chev">{#if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}</span>{/if}
+                  </span>
+                  <span class="row cnts">
+                    {#each s.counts ?? [] as c (c.change)}<span class="chip cnt {tone(c.change)}">{c.n} {c.verb}</span>{/each}
+                    {#if rest.length}<span class="chip cnt pri">{s.parts.rest_label}</span>{/if}
+                  </span>
+                </span>
+              </button>
+              <span class="tiny muted" title={`${dateOf(iso(s.when))} · ${ago(iso(s.when))}`}>{hm(s.when)}</span>
+              {#if s.files.some((f) => f.undo !== false)}<button class="btn sm" disabled={busy} onclick={() => undo(s)}>Undo all</button>{/if}
+            </div>
+            {#if open.has(setKey(s))}
+              {#each modsOf(s) as f, j (j)}{@render entry(s, f, true)}{/each}
+              {#if rest.length}
+                <div class="row ent row-hover nested" class:row-sel={cfgPicked(s)} role="presentation" onpointerdown={headDown} onpointerenter={(e) => cfgEnter(e, s)}>
+                  <button class="nm grow" onclick={(e) => cfgClick(e, s)}>
+                    <span class="col grow">
+                      <span class="row t"><span class="ch pri">Changed</span>{s.parts.rest_label}<span class="chev">{#if open.has(cfgKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}</span></span>
+                      <span class="tiny muted ell">{rest.slice(0, 3).map((f) => f.title).join(', ') + (rest.length > 3 ? '…' : '')}</span>
+                    </span>
+                  </button>
+                  {#if rest.some((f) => f.undo !== false)}<button class="btn sm" disabled={busy} onclick={() => undoConfigs(s)}>Undo all</button>{/if}
+                </div>
+                {#if open.has(cfgKey(s))}
+                  {#each rest as f, j (j)}{@render entry(s, f, true)}{/each}
+                {/if}
+              {/if}
+            {/if}
+          {:else if s.files.length === 1}
             {@render entry(s, s.files[0], false)}
           {:else}
             {@const ps = setPeople(s)}
@@ -402,6 +490,18 @@
   .who { font-weight: 600; }
   .verb { color: var(--subtle); flex: none; }
   .chev { display: inline-flex; color: var(--subtle); flex: none; }
+  .nw { flex: none; white-space: nowrap; }
+  .pk { gap: 3px; }
+  /* Wraps rather than clips, so a narrow window still shows every count. */
+  .cnts { gap: 4px; min-width: 0; flex-wrap: wrap; }
+  /* A pack update's counts, tinted like the change they count. The text leans
+     toward the page's text colour: raw yellow or red on a pale tint is too faint to read. */
+  .cnt { flex: none; --k: var(--subtle); color: color-mix(in srgb, var(--k) 60%, var(--text)); }
+  .cnt.red { --k: var(--red); background: var(--red-dim); }
+  .cnt.blue { --k: var(--blue); background: var(--blue-dim); }
+  .cnt.warn { --k: var(--gold); background: var(--gold-dim); }
+  .cnt.green { --k: var(--green); background: var(--green-dim); }
+  .cnt.pri { --k: var(--acc); background: var(--acc-dim); }
   .whos { gap: 6px; flex-wrap: wrap; }
   .wchip { cursor: pointer; height: 26px; padding: 0 10px 2px 6px; font-size: 12px; gap: 6px; }
   .wchip:first-child { padding-left: 10px; }

@@ -144,6 +144,34 @@ pub fn mark_reason(root: &Path, since: u64, reason: &str) {
     }
 }
 
+/// Beside a History folder's files: the pack update that set them aside.
+const PACK: &str = ".pack-update.json";
+
+/// The pack update a History entry came from: "All the Mods 10", "1.80.0".
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PackMark {
+    pub name: String,
+    pub version: String,
+}
+
+/// Marks every History folder made since `since` (unix seconds) as part of
+/// updating the pack to `m`. A pack update sets mods and configs aside over
+/// many seconds, one folder each; History shows them as one entry.
+pub fn mark_pack(root: &Path, since: u64, m: &PackMark) {
+    let Ok(body) = serde_json::to_vec(m) else { return };
+    for d in fs::read_dir(root.join(crate::sync::BACKUP_DIR)).into_iter().flatten().flatten() {
+        let Some(stamp) = d.file_name().to_str().and_then(|s| s.parse::<u64>().ok()) else { continue };
+        if stamp >= since {
+            let _ = fs::write(d.path().join(PACK), &body);
+        }
+    }
+}
+
+fn read_pack(dir: &Path) -> Option<PackMark> {
+    fs::read(dir.join(PACK)).ok().and_then(|b| serde_json::from_slice(&b).ok())
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Cand {
     project_id: u64,
@@ -360,7 +388,7 @@ pub fn record(backup_dir: &Path, saved: &Path, original_rel: &str) {
 
 /// A History folder's own notes, not entries.
 fn is_bookkeeping(name: &str) -> bool {
-    matches!(name, ORIGINS | IDS | CHECKED | REASON | SETTINGS | crate::actor::WHO_FILE)
+    matches!(name, ORIGINS | IDS | CHECKED | REASON | PACK | SETTINGS | crate::actor::WHO_FILE)
 }
 
 /// Beside a History folder's files: which settings a friend's shared
@@ -445,7 +473,28 @@ pub struct Saved {
     pub record: Option<(crate::actor::Did, String)>,
 }
 
+/// The order a pack update's mods are listed in: what most players look for
+/// first.
+const PACK_KINDS: [Change; 11] = [
+    Change::Updated,
+    Change::RolledBack,
+    Change::Removed,
+    Change::Added,
+    Change::TurnedOff,
+    Change::TurnedOn,
+    Change::Switched,
+    Change::Replaced,
+    Change::Edited,
+    Change::Moved,
+    Change::Copied,
+];
+
 impl Saved {
+    /// A mod (its copy, note or record), not a config or another file.
+    pub fn is_mod(&self) -> bool {
+        self.src.is_some() || self.record.is_some() || is_jar(&self.name)
+    }
+
     /// The mod's name when History knows it, else the file's.
     pub fn title(&self) -> String {
         match &self.src {
@@ -641,6 +690,8 @@ pub struct Set {
     /// Seconds since the epoch.
     pub when: i64,
     pub files: Vec<Saved>,
+    /// The pack update it is, when it is one ([`mark_pack`]).
+    pub pack: Option<PackMark>,
 }
 
 impl Set {
@@ -652,6 +703,31 @@ impl Set {
     pub fn who(&self) -> Option<&crate::actor::Who> {
         let first = self.files.first()?.who.as_ref()?;
         self.files.iter().all(|f| f.who.as_ref().is_some_and(|w| w.name == first.name && w.id == first.id)).then_some(first)
+    }
+
+    /// A pack update's entries in the order History lists them: its mods,
+    /// grouped by what happened to them, then the rest (configs mostly),
+    /// by name. Indices into `files`.
+    pub fn pack_parts(&self) -> (Vec<usize>, Vec<usize>) {
+        let (mut mods, rest): (Vec<usize>, Vec<usize>) = (0..self.files.len()).partition(|&j| self.files[j].is_mod());
+        mods.sort_by_cached_key(|&j| {
+            let f = &self.files[j];
+            (PACK_KINDS.iter().position(|c| *c == f.change).unwrap_or(PACK_KINDS.len()), f.title().to_lowercase())
+        });
+        (mods, rest)
+    }
+
+    /// "368 configs" for files that are all configs, else "12 files".
+    pub fn rest_label(&self, rest: &[usize]) -> String {
+        let text = rest.iter().all(|&j| self.files.get(j).is_some_and(|f| is_text(&f.name)));
+        crate::words::count(rest.len(), if text { "config" } else { "file" })
+    }
+
+    /// How many of a pack update's mods each change took, in
+    /// [`Self::pack_parts`]'s order: "12 updated, 2 rolled back".
+    pub fn pack_counts(&self) -> Vec<(Change, usize)> {
+        let mods: Vec<&Saved> = self.files.iter().filter(|f| f.is_mod()).collect();
+        PACK_KINDS.iter().map(|c| (*c, mods.iter().filter(|f| f.change == *c).count())).filter(|(_, n)| *n > 0).collect()
     }
 
     /// The people behind its entries, in order, each once.
@@ -748,7 +824,7 @@ impl Set {
     /// as an instance's.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "when": self.when, "size": self.size(),
+            "when": self.when, "size": self.size(), "pack": self.pack,
             "files": self.files.iter().map(|f| serde_json::json!({
                 "name": f.name, "size": f.size, "restore_to": f.restore_to, "download": f.download,
                 // Shown as is by the web UI.
@@ -763,6 +839,13 @@ impl Set {
                 "undo": f.change.undoable(),
             })).collect::<Vec<_>>(),
             "head": self.headline(), "summary": self.summary(),
+            // A pack update's mods first and its configs apart, with what it
+            // did to how many mods, as desktop shows it.
+            "parts": self.pack.as_ref().map(|_| {
+                let (mods, rest) = self.pack_parts();
+                serde_json::json!({ "mods": mods, "rest_label": self.rest_label(&rest), "rest": rest })
+            }),
+            "counts": self.pack.as_ref().map(|_| self.pack_counts().into_iter().map(|(c, n)| serde_json::json!({ "change": c.label(), "verb": c.verb(), "n": n })).collect::<Vec<_>>()),
         })
     }
 
@@ -795,7 +878,8 @@ impl Set {
             })
             .collect();
         // Sets are told apart by their time; there is no folder here.
-        Some(Set { dir: PathBuf::from(when.to_string()), when, files })
+        let pack = serde_json::from_value(v["pack"].clone()).ok();
+        Some(Set { dir: PathBuf::from(when.to_string()), when, files, pack })
     }
 }
 
@@ -878,7 +962,8 @@ pub fn list(root: &Path) -> Vec<Set> {
                 judge(root, inst.as_ref(), f);
             }
             files.sort_by_key(|f| f.name.to_lowercase());
-            (!files.is_empty()).then_some(Set { dir, when, files })
+            let pack = read_pack(&dir);
+            (!files.is_empty()).then_some(Set { dir, when, files, pack })
         })
         .collect();
     out.sort_by_key(|s| std::cmp::Reverse(s.when));
@@ -906,10 +991,34 @@ pub fn history(root: &Path) -> Vec<Set> {
                 let shown: Vec<String> = s.files.iter().map(|f| f.name.trim_end_matches(".disabled").to_lowercase()).collect();
                 s.files.extend(files.into_iter().filter(|f| !shown.contains(&f.name.to_lowercase())));
             }
-            None => sets.push(Set { dir, when, files }),
+            None => {
+                let pack = read_pack(&dir);
+                sets.push(Set { dir, when, files, pack })
+            }
         }
     }
-    group_batches(sets)
+    group_packs(group_batches(sets))
+}
+
+/// Joins the sets one pack update left, one after another, into one: it
+/// takes many seconds and sets each mod aside in the folder of its second.
+/// The joined set takes the newest one's time, which is how Hopper Server
+/// finds an entry again for Undo, so both apps join them the same way.
+fn group_packs(sets: Vec<Set>) -> Vec<Set> {
+    let mut out: Vec<Set> = Vec::new();
+    for s in sets {
+        match out.last_mut() {
+            Some(last) if s.pack.is_some() && last.pack == s.pack => {
+                last.when = last.when.max(s.when);
+                last.files.extend(s.files);
+            }
+            _ => out.push(s),
+        }
+    }
+    for s in out.iter_mut().filter(|s| s.pack.is_some()) {
+        s.files.sort_by_key(|f| f.name.to_lowercase());
+    }
+    out
 }
 
 /// A record as a History entry.
@@ -979,6 +1088,7 @@ fn group_batches(sets: Vec<Set>) -> Vec<Set> {
     let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for s in sets {
         let mut plain = Vec::new();
+        let pack = s.pack;
         for f in s.files {
             if f.batch.is_empty() {
                 plain.push(f);
@@ -993,12 +1103,12 @@ fn group_batches(sets: Vec<Set>) -> Vec<Set> {
                     at.insert(f.batch.clone(), out.len());
                     // Its own key: the folder it started in, and the batch.
                     let dir = PathBuf::from(format!("{}#{}", s.dir.display(), f.batch));
-                    out.push(Set { dir, when: s.when, files: vec![f] });
+                    out.push(Set { dir, when: s.when, files: vec![f], pack: pack.clone() });
                 }
             }
         }
         if !plain.is_empty() {
-            out.push(Set { dir: s.dir, when: s.when, files: plain });
+            out.push(Set { dir: s.dir, when: s.when, files: plain, pack });
         }
     }
     for s in &mut out {
@@ -1592,6 +1702,45 @@ mod tests {
     }
 
     #[test]
+    fn one_pack_update_is_one_set() {
+        let root = std::env::temp_dir().join(format!("hopper-backups-pack-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let base = root.join(crate::sync::BACKUP_DIR);
+        // Yours before the update, three folders of the update, yours after.
+        for (when, name) in [(900, "mine.toml"), (1000, "a.toml"), (1003, "b.toml"), (1009, "c.toml"), (1100, "later.toml")] {
+            let d = base.join(when.to_string()).join("config");
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join(name), "x").unwrap();
+        }
+        // A mod it removed, set aside in the middle of it.
+        fs::create_dir_all(base.join("1003").join("mods")).unwrap();
+        fs::write(base.join("1003").join("mods").join("zzz-1.0.jar"), "j").unwrap();
+        let atm = PackMark { name: "All the Mods 10".into(), version: "1.80.0".into() };
+        mark_pack(&root, 1000, &atm);
+        // The later change isn't part of it.
+        fs::remove_file(base.join("1100").join(PACK)).unwrap();
+        let sets = history(&root);
+        assert_eq!(sets.iter().map(|s| s.files.len()).collect::<Vec<_>>(), [1, 4, 1]);
+        assert_eq!(sets[1].when, 1009);
+        assert_eq!(sets[1].pack.as_ref(), Some(&atm));
+        assert!(sets[0].pack.is_none() && sets[2].pack.is_none());
+        // Mods first, then the configs by name.
+        let (mods, rest) = sets[1].pack_parts();
+        let names = |ix: &[usize]| ix.iter().map(|&j| sets[1].files[j].name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&mods), ["zzz-1.0.jar"]);
+        assert_eq!(names(&rest), ["a.toml", "b.toml", "c.toml"]);
+        assert_eq!(sets[1].pack_counts(), [(Change::Removed, 1)]);
+        // The marks aren't entries, and Hopper Server sends the pack along.
+        assert!(!sets[1].files.iter().any(|f| f.name.starts_with('.')));
+        let j = sets[1].to_json();
+        assert_eq!(Set::from_json(&j).unwrap().pack, Some(atm));
+        assert_eq!(j["parts"]["rest_label"], "3 configs");
+        assert_eq!(j["counts"][0]["verb"], "removed");
+        assert!(sets[0].to_json()["parts"].is_null());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn pack_update_copies_go_back_to_their_folder() {
         let root = std::env::temp_dir().join(format!("hopper-backups-pu-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -1629,6 +1778,7 @@ mod tests {
                 batch: "b1".into(),
                 record: None,
             }],
+            pack: None,
         };
         let back = Set::from_json(&set.to_json()).unwrap();
         assert_eq!(back.when, set.when);
