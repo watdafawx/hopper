@@ -786,6 +786,54 @@ fn answer(
     Ok(v)
 }
 
+/// One person on the Friends panel's Everyone list.
+#[derive(Clone, Debug)]
+pub struct Listed {
+    pub id: String,
+    pub name: String,
+    /// None for someone who isn't your friend: met through a group or a pack.
+    pub friend: Option<Friend>,
+    /// Their packs shown on the list (not the ones only shared with groups
+    /// you're in: those are on the group's page).
+    pub packs: Vec<Event>,
+}
+
+/// Everyone on the Friends panel's list: friends (online first, then the
+/// most recently seen), then people who aren't your friends: anyone who
+/// shares a pack outside your groups (so it doesn't vanish), and every
+/// member of a group you joined. Each person once, never you. `recipes`
+/// are the packs to show (hidden ones already left out).
+pub fn everyone(me: &str, friends: &[Friend], recipes: &[Event], groups: &[Group], down: bool) -> Vec<Listed> {
+    let joined: Vec<&Group> = groups.iter().filter(|g| g.me.joined).collect();
+    // A pack that came only through groups you're in is on the group's page.
+    let in_groups = |e: &Event| !e.direct && !e.groups.is_empty() && e.groups.iter().all(|g| joined.iter().any(|x| &x.id == g));
+    let theirs: Vec<&Event> = recipes.iter().filter(|e| !in_groups(e)).collect();
+    let mut friends: Vec<Friend> = friends.to_vec();
+    friends.sort_by_key(|f| (std::cmp::Reverse(f.online && !down), std::cmp::Reverse(f.last_seen)));
+    let mut people: Vec<Listed> = Vec::new();
+    let add = |people: &mut Vec<Listed>, id: &str, name: &str, friend: Option<Friend>| {
+        if id.is_empty() || id == me || people.iter().any(|p| p.id == id) {
+            return;
+        }
+        people.push(Listed { id: id.to_string(), name: name.to_string(), friend, packs: Vec::new() });
+    };
+    for f in friends {
+        let (id, name) = (f.id.clone(), f.name.clone());
+        add(&mut people, &id, &name, Some(f));
+    }
+    for e in &theirs {
+        add(&mut people, &e.from, &e.from_name, None);
+    }
+    // Only members who said yes: the invited aren't in the group yet.
+    for m in joined.iter().flat_map(|g| g.members.iter()).filter(|m| m.joined) {
+        add(&mut people, &m.id, &m.name, None);
+    }
+    for p in &mut people {
+        p.packs = theirs.iter().filter(|e| e.from == p.id).map(|e| (*e).clone()).collect();
+    }
+    people
+}
+
 fn account_path() -> PathBuf {
     crate::paths::dirs()
         .map(|d| d.data_dir().join("mailbox.json"))
@@ -795,6 +843,81 @@ fn account_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn friend(id: &str, name: &str) -> Friend {
+        Friend { id: id.into(), name: name.into(), ..Default::default() }
+    }
+
+    fn member(id: &str, name: &str, joined: bool) -> GroupMember {
+        GroupMember { id: id.into(), name: name.into(), joined, ..Default::default() }
+    }
+
+    fn group(id: &str, joined: bool, members: Vec<GroupMember>) -> Group {
+        Group { id: id.into(), name: id.into(), owner: "me".into(), me: GroupMe { joined, in_step: false }, members, ..Default::default() }
+    }
+
+    fn ids(list: &[Listed]) -> Vec<&str> {
+        list.iter().map(|p| p.id.as_str()).collect()
+    }
+
+    #[test]
+    fn group_members_who_arent_friends_are_listed() {
+        // Mia is a friend; Robin is only in the group, and shares nothing.
+        let friends = [friend("mia", "Mia")];
+        let groups = [group("g1", true, vec![member("me", "Me", true), member("mia", "Mia", true), member("robin", "Robin", true)])];
+        let list = everyone("me", &friends, &[], &groups, false);
+        assert_eq!(ids(&list), ["mia", "robin"]);
+        assert!(list[0].friend.is_some());
+        assert_eq!((list[1].name.as_str(), list[1].friend.is_none()), ("Robin", true));
+    }
+
+    #[test]
+    fn group_members_once_never_you_never_the_invited() {
+        let groups = [
+            group("g1", true, vec![member("me", "Me", true), member("robin", "Robin", true), member("sam", "Sam", false)]),
+            group("g2", true, vec![member("robin", "Robin", true), member("me", "Me", true)]),
+            // An invitation you haven't said yes to: not your group yet.
+            group("g3", false, vec![member("kai", "Kai", true)]),
+        ];
+        let list = everyone("me", &[], &[], &groups, false);
+        assert_eq!(ids(&list), ["robin"]);
+    }
+
+    #[test]
+    fn a_friend_in_a_group_is_listed_as_a_friend() {
+        let friends = [friend("robin", "Robin")];
+        let groups = [group("g1", true, vec![member("robin", "Robin", true)])];
+        let list = everyone("me", &friends, &[], &groups, false);
+        assert_eq!(ids(&list), ["robin"]);
+        assert!(list[0].friend.is_some());
+    }
+
+    #[test]
+    fn group_only_packs_stay_on_the_group_page() {
+        let direct = Event { from: "zoe".into(), from_name: "Zoe".into(), inst: "a".into(), ..Default::default() };
+        let via_group = Event { from: "robin".into(), from_name: "Robin".into(), inst: "b".into(), direct: false, groups: vec!["g1".into()], ..Default::default() };
+        let groups = [group("g1", true, vec![member("robin", "Robin", true)])];
+        let list = everyone("me", &[], &[direct, via_group], &groups, false);
+        // Zoe shares outside a group, Robin is in it; Robin's group pack isn't
+        // repeated on the list.
+        assert_eq!(ids(&list), ["zoe", "robin"]);
+        assert_eq!((list[0].packs.len(), list[1].packs.len()), (1, 0));
+    }
+
+    #[test]
+    fn friends_online_first_then_last_seen() {
+        let mut a = friend("a", "A");
+        a.last_seen = 5;
+        let mut b = friend("b", "B");
+        b.online = true;
+        let mut c = friend("c", "C");
+        c.last_seen = 9;
+        let list = everyone("me", &[a.clone(), b.clone(), c.clone()], &[], &[], false);
+        assert_eq!(ids(&list), ["b", "c", "a"]);
+        // Mailbox down: nobody is known to be online.
+        let list = everyone("me", &[a, b, c], &[], &[], true);
+        assert_eq!(ids(&list), ["c", "a", "b"]);
+    }
 
     #[test]
     fn an_account_round_trips() {
