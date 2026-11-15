@@ -11,6 +11,7 @@ use crate::addons_extra::is_hopper_file;
 use crate::crash_help::callout;
 use crate::store::open_folder;
 use crate::widgets;
+use crate::widgets::ToastAction as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
@@ -576,7 +577,7 @@ impl AddonsView {
                 let view = cx.entity().downgrade();
                 let (store2, root2) = (store.clone(), root.clone());
                 let note = Notification::success(format!("{} {what} to {label}", if mv { "Moved" } else { "Copied" }))
-                    .action(move |_, _, cx| {
+                    .action_below(move |_, _, cx| {
                         let (undone, view, store, root, new, src, removed) = (
                             undone.clone(),
                             view.clone(),
@@ -1079,7 +1080,7 @@ impl AddonsView {
         let view = cx.entity().downgrade();
         let undone = Rc::new(std::cell::Cell::new(false));
         let note = Notification::success(text)
-            .action(move |_, _, cx| {
+            .action_below(move |_, _, cx| {
                 let (view, undo, undone) = (view.clone(), undo.clone(), undone.clone());
                 Button::new("undo-pack-change").label("Undo").disabled(undone.get()).on_click(cx.listener(
                     move |note, _, window, cx| {

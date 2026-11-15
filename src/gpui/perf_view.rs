@@ -3,6 +3,7 @@
 
 use crate::store::{Msg, Store, StoreEvent, open_path};
 use crate::widgets;
+use crate::widgets::ToastAction as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::notification::Notification;
@@ -273,7 +274,7 @@ impl PerfView {
         self.applied.push(Applied { id, root, text, before, after });
         let view = cx.entity();
         let undone = Rc::new(std::cell::Cell::new(false));
-        let note = Notification::success(toast).action(move |_, _, cx| {
+        let note = Notification::success(toast).action_below(move |_, _, cx| {
             let (view, undone) = (view.clone(), undone.clone());
             Button::new("perf-undo")
                 .label("Undo")

@@ -4,6 +4,7 @@
 use crate::drag_pick::{self, DragPick, PickDrag, PickState, Picks, Sweep};
 use crate::store::Store;
 use crate::widgets::{self, Clickable as _};
+use crate::widgets::ToastAction as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -2037,7 +2038,7 @@ impl AddonsView {
             .on_close(move |_, _| {
                 closed.borrow_mut().take();
             })
-            .action(move |_, _, cx| {
+            .action_below(move |_, _, cx| {
                 let (store, root, kept) = (store.clone(), root.clone(), kept.clone());
                 let done = kept.borrow().is_none();
                 Button::new("locked-just-me")
@@ -2418,7 +2419,7 @@ impl AddonsView {
             } else {
                 format!("Removed {n} files. Undo here or in ⋯ › History.")
             })
-            .action(move |_, _, cx| {
+            .action_below(move |_, _, cx| {
                 let (store, root, moved, undone) =
                     (store.clone(), root.clone(), moved.clone(), undone.clone());
                 Button::new("undo-remove")
@@ -2473,7 +2474,7 @@ impl AddonsView {
                     let mut note = Notification::success(text).autohide(true);
                     if let Some(token) = token {
                         let undone = Rc::new(std::cell::Cell::new(false));
-                        note = note.action(move |_, _, cx| {
+                        note = note.action_below(move |_, _, cx| {
                             let (store, root, token, undone) = (store.clone(), root.clone(), token.clone(), undone.clone());
                             Button::new("undo-remove")
                                 .label("Undo")
@@ -5931,7 +5932,7 @@ impl BulkSum {
             return;
         }
         let undone = Rc::new(std::cell::Cell::new(false));
-        let note = note.action(move |_, _, cx| {
+        let note = note.action_below(move |_, _, cx| {
             let (store, root, replaced, undone) = (store.clone(), root.clone(), replaced.clone(), undone.clone());
             Button::new("undo-update")
                 .label("Undo")

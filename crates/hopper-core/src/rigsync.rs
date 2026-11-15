@@ -940,19 +940,19 @@ pub fn push(rows: &[DiffEntry], inst: &Instance, server: &ServerInfo) -> Vec<Syn
     crate::sync::plan(&rows, &inst.mods_dir(), &server.mods_dir())
 }
 
-/// The mods just added to the pack that a sync would copy to the server and
-/// that it lacks, so the player can be offered to put them there right away.
-/// `added` holds their jar names in lower case. Mods that belong on the
-/// client only (by side, the built-in list or a flag), turned-off copies and
-/// the "Never sync" list are left out, as a sync leaves them out.
-pub fn to_offer(diff: &[DiffEntry], added: &HashSet<String>, blacklist: &HashSet<String>) -> Vec<DiffEntry> {
+/// The pack's mods the server lacks that a sync would copy there, for the
+/// "Add to server" button on the instance's notice: it copies just these and
+/// removes nothing. Mods that belong on the client only (by side, the
+/// built-in list or a flag), turned-off copies and the "Never sync" list are
+/// left out, as a sync leaves them out.
+pub fn to_add(diff: &[DiffEntry], blacklist: &HashSet<String>) -> Vec<DiffEntry> {
     diff.iter()
         .filter(|d| {
             d.status == DiffStatus::OnlyClient
                 && d.action == DiffAction::CopyToServer
                 && !is_wont(d)
                 && !is_hidden(d, blacklist)
-                && d.client.as_ref().is_some_and(|c| !c.off && added.contains(&c.file_name.to_lowercase()))
+                && d.client.as_ref().is_some_and(|c| !c.off)
         })
         .cloned()
         .collect()
@@ -1221,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn to_offer_keeps_just_added_mods_the_server_needs() {
+    fn to_add_keeps_just_the_mods_the_server_needs() {
         use crate::model::ModInfo;
         let m = |id: &str, file: &str, side: &str| ModInfo {
             mod_id: id.into(),
@@ -1247,20 +1247,12 @@ mod tests {
         ];
         let server = vec![m("onserver", "onserver-1.jar", "both")];
         let diff = crate::diff::compute_diff(&client, &server);
-        let added: HashSet<String> = [
-            "handsondelight-1.2.jar", "diegesis-0.4.jar", "sodium-0.6.jar", "iris-1.8.jar",
-            "hidden-1.jar", "onserver-2.jar", "offmod-1.jar", "flagged-1.jar",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
         let hidden: HashSet<String> = ["hidden".to_string()].into();
-        let mut ids: Vec<String> = to_offer(&diff, &added, &hidden).iter().map(|d| d.client.as_ref().unwrap().mod_id.clone()).collect();
+        let mut ids: Vec<String> = to_add(&diff, &hidden).iter().map(|d| d.client.as_ref().unwrap().mod_id.clone()).collect();
         ids.sort();
-        // Client-only (side or built-in list), Never sync, flagged, off,
-        // already there in another build, and mods added earlier: left out.
-        assert_eq!(ids, ["diegesis", "handsondelight"]);
-        assert!(to_offer(&diff, &HashSet::new(), &hidden).is_empty());
+        // Client-only (side or built-in list), Never sync, flagged, off and
+        // already there in another build: left out.
+        assert_eq!(ids, ["diegesis", "handsondelight", "old"]);
     }
     use super::*;
 

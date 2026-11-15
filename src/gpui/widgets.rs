@@ -3353,4 +3353,61 @@ pub fn fit_key<'a>(parts: impl IntoIterator<Item = &'a str>) -> u64 {
         p.hash(&mut h);
     }
     h.finish()
+/// Toasts with a button. The kit's `Notification::action` puts the button
+/// beside the words, so a long label (or a long name in the title) leaves
+/// the words a narrow column that wraps every word or two. This puts the
+/// button under the words, right-aligned, and keeps the words full width.
+pub trait ToastAction {
+    fn action_below<F>(self, action: F) -> Self
+    where
+        F: Fn(
+                &mut gpui_kit::component::notification::Notification,
+                &mut Window,
+                &mut Context<gpui_kit::component::notification::Notification>,
+            ) -> Button
+            + 'static;
+}
+
+impl ToastAction for gpui_kit::component::notification::Notification {
+    fn action_below<F>(self, action: F) -> Self
+    where
+        F: Fn(
+                &mut gpui_kit::component::notification::Notification,
+                &mut Window,
+                &mut Context<gpui_kit::component::notification::Notification>,
+            ) -> Button
+            + 'static,
+    {
+        // Like the kit's action: a toast that asks something stays until
+        // it's answered or closed.
+        self.autohide(false).content(move |note, window, cx| {
+            h_flex().w_full().justify_end().pt_2().child(action(note, window, cx).small()).into_any_element()
+        })
+    }
+}
+
+/// A name cut to `max` characters with an ellipsis, for a toast or a button
+/// label that has no room for a long server or friend name (GPUI breaks a
+/// word too long for its line in the middle).
+pub fn short_label(name: &str, max: usize) -> String {
+    if name.chars().count() <= max {
+        return name.to_string();
+    }
+    let cut: String = name.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end())
+}
+
+#[cfg(test)]
+mod short_label_tests {
+    use super::short_label;
+
+    #[test]
+    fn cuts_long_names_only() {
+        assert_eq!(short_label("dg", 24), "dg");
+        assert_eq!(short_label("abcdefghij", 10), "abcdefghij");
+        assert_eq!(short_label("abcdefghijk", 10), "abcdefghi…");
+        // No space left before the ellipsis, and counted in characters.
+        assert_eq!(short_label("Drunk Gamblers Server", 7), "Drunk…");
+        assert_eq!(short_label("ÄÖÜäöüßÄÖÜ!", 10), "ÄÖÜäöüßÄÖ…");
+    }
 }

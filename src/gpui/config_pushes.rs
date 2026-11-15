@@ -6,6 +6,7 @@
 //! panel can show players' copies beside the server's.
 
 use crate::store::Store;
+use crate::widgets::ToastAction as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::notification::Notification;
@@ -107,7 +108,7 @@ fn show(name: String, remote: hopper::hopperd::Remote, root: PathBuf, pushes: Ve
     let note = Notification::info(text)
         .title("Settings from the server")
         .id1::<PushNote>(SharedString::from(name.clone()))
-        .action({
+        .action_below({
             let (done, pushes, remote, root, name) = (done.clone(), pushes.clone(), remote.clone(), root.clone(), name.clone());
             move |_, _, cx| {
                 let (done, pushes, remote, root, name) = (done.clone(), pushes.clone(), remote.clone(), root.clone(), name.clone());
