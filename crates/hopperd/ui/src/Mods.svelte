@@ -269,7 +269,16 @@
   const cols = $derived(colOrder.filter((c) => c === 'on' || (!colHidden.includes(c) && fitsCol(c))));
   const COL_W = { author: '130px', side: '40px', on: '64px', added: '86px' };
   // Check, icon, name, Update / Changelog, the movable columns, ⋯ and Remove.
-  const gridCols = $derived(`22px 30px minmax(0, 1fr) ${narrow ? 110 : 190}px ${cols.map((c) => COL_W[c]).join(' ')} 74px`);
+  // As the row narrows, as desktop's: Remove moves into the ⋯ menu first, then
+  // (the name keeps about 12 characters) the Update column goes in as "Update to X".
+  const NAME_MIN = 100;
+  const actW = $derived(narrow ? 110 : 190);
+  const colsW = $derived(cols.reduce((s, c) => s + parseInt(COL_W[c], 10), 0));
+  // Room the name gets with an action column of `a` px and an end column of `e` px (16 padding, 10 gaps).
+  const nameRoom = (a, e) => listW - 16 - 22 - 30 - a - colsW - e - 10 * (4 + cols.length);
+  const foldDel = $derived(listW > 0 && nameRoom(actW, 74) < NAME_MIN);
+  const foldUp = $derived(foldDel && nameRoom(actW, 52) < NAME_MIN);
+  const gridCols = $derived(`22px 30px minmax(0, 1fr) ${foldUp ? 0 : actW}px ${cols.map((c) => COL_W[c]).join(' ')} ${foldDel ? 52 : 74}px`);
   // The same mod in twice (an old jar left beside the new one): every
   // copy but the newest, as desktop's "Keep newest" finds them.
   const twice = $derived.by(() => {
@@ -869,7 +878,7 @@
     {#if clientOn}<div class="small warn">{clientOn} client-only mod{clientOn === 1 ? '' : 's'} on: servers usually don't need {clientOn === 1 ? 'it' : 'them'}, and some won't start with them. <button class="link" onclick={() => (chip = 'client')}>Show</button></div>{/if}
 
     <div class="split">
-      <div class="list" class:sidein={hasSide && !cols.includes('side')} class:narrow style:--cols={gridCols} bind:clientWidth={listW}>
+      <div class="list" class:sidein={hasSide && !cols.includes('side')} class:narrow class:foldup={foldUp} class:folded={foldDel} style:--cols={gridCols} bind:clientWidth={listW}>
         <div class="tr th" oncontextmenu={openColMenu} role="row" tabindex="-1">
           <span class="c-ck"><input type="checkbox" checked={allShownPicked} onchange={checkAll} title="Select all shown" /></span>
           <span></span>
@@ -936,7 +945,8 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
               </div>
             </div>
             <div class="c-act">
-              {#if done.has(m.project_id)}<span class="okt small row"><CircleCheck size={13} />Updated</span>
+              {#if foldUp}
+              {:else if done.has(m.project_id)}<span class="okt small row"><CircleCheck size={13} />Updated</span>
               {:else if up}
                 {#if isArchived(m)}<span class="archw" title="The author archived this version. Update to get the newer one."><TriangleAlert size={14} /></span>{/if}
                 <div class="splitb" class:warnb={breaking} class:lockb={vl}>
@@ -954,7 +964,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
             <span class="c-end row">
               {#if cfg.sid === sid}{@const cm = modForFile(m.file)}{#if cm}<button class="ib cfg" class:chg={cm.changed > 0} class:on={cfgFor?.file === m.file} title={cm.changed ? `Config: ${cm.changed} setting${cm.changed === 1 ? '' : 's'} not at default` : 'Config'} aria-label="{m.name} config" onclick={(e) => openCfg(m, e)}><SlidersHorizontal size={13} /></button>{/if}{/if}
               <button class="ib more" title="More" onclick={(e) => openMenu(m, e)}><Ellipsis size={14} /></button>
-              <button class="ib del" title="Remove (kept in .hopper-backups)" onclick={async (e) => { e.stopPropagation(); if (await drop([m])) changed(true); }}><Trash2 size={13} /></button>
+              {#if !foldDel}<button class="ib del" title="Remove (kept in .hopper-backups)" onclick={async (e) => { e.stopPropagation(); if (await drop([m])) changed(true); }}><Trash2 size={13} /></button>{/if}
             </span>
           </div>
         {/each}
@@ -994,6 +1004,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   {@const mup = pending(m) ? m.update : null}
   {@const mvl = versionLocked(m)}
   <div class="ctx popover menu" style:left="{menu.x}px" style:top="{menu.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+    {#if foldUp && mup}<button class="menu-item" disabled={updating.has(m.project_id) || !!busy} onclick={(e) => act((m) => updateOne(m, e))}><Download size={13} /><span class="ell">Update to {mup.to}</span></button><div class="menu-sep"></div>{/if}
     {#if m.source && browseOf(m)}<a class="menu-item" href="#{browseHash('mods', server.id)}/{m.source}/{encodeURIComponent(browseOf(m))}" onclick={() => (menu = null)}><Search size={13} />Open in Browse</a>
     {:else if shownBrowse(m)}{@const sb = shownBrowse(m)}<a class="menu-item" href="#{browseHash('mods', server.id)}/{sb.source}/{encodeURIComponent(sb.id)}" onclick={() => (menu = null)}><Search size={13} />Open in Browse</a>{/if}
     {#if m.source}<button class="menu-item" onclick={() => act((m) => (versionsFor = m))}><Clock size={13} />Versions and changelogs</button>{/if}
@@ -1177,6 +1188,10 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .ib.cfg.chg { color: var(--acc); }
   .ib.cfg.on { color: var(--text); background: #ffffff10; }
   .mod:hover .more, .mod:hover .ghostcl, .mod.sel .more, .mod.sel .ghostcl, .mod.keys .more, .mod.keys .ghostcl, .mod.menu .more, .mod.menu .ghostcl, .mod.peeked .more, .mod.peeked .ghostcl { visibility: visible; }
+  /* Folded: the ⋯ menu holds Remove (and Update), so it is always there to reach, and the empty Update column takes no hit area. */
+  .folded .mod .more { visibility: visible; }
+  .foldup .c-act { overflow: hidden; }
+  .ib:focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
   .ghostcl { color: var(--subtle); gap: 5px; }
   .splitb { display: inline-flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; font-size: 12px; max-width: 100%; }
   .splitb button { padding: 3px 8px; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; color: var(--subtle); }
