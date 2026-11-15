@@ -2234,7 +2234,7 @@ impl PublishWork {
             };
             // A group copy says when each mod got the way it is, so a change
             // it only passes on keeps its own date (see `groupsync::Stamp`).
-            let marks = copy.as_ref().map(|c| groupsync::stamps(&inst, &c.copy, &made.share)).unwrap_or_default();
+            let marks = copy.as_ref().map(|c| groupsync::stamps(&inst, &c.copy, &made.share, &self.me)).unwrap_or_default();
             // The group's shared mod settings ride along whole, so a member
             // who was away catches up from this one recipe.
             let (configs, carried, too_big) = copy.as_ref().map(|c| super::config_sync::payload(&c.copy.configs)).unwrap_or_default();

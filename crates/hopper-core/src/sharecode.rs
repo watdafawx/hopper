@@ -612,7 +612,7 @@ fn addon_sha1(inst: &Instance, a: &Addon) -> Option<String> {
 
 /// The CurseForge pack's manifest: the copy beside the instance when it's
 /// for this version, else the pack zip's.
-fn curse_manifest(
+pub(crate) fn curse_manifest(
     inst: &Instance,
     project: u64,
     file: u64,
