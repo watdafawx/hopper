@@ -1252,12 +1252,21 @@ impl FriendsPanel {
             cx,
         )
         .text_sm();
+        // Through a group the pack is kept the same both ways.
+        let two_way = !e.groups.is_empty();
         let action: AnyElement = match (&waiting, follows.is_empty()) {
             (Some(root), _) => self.update_button(format!("their-update:{key}").into(), e, root.clone(), down, cx).into_any_element(),
             (None, false) => div()
                 .id(SharedString::from(format!("following:{key}")))
                 .flex_none()
-                .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("You follow this pack. Your copy updates when they change theirs.").build(w, cx))
+                .tooltip(move |w, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(if two_way {
+                        "You follow this pack. It stays the same for everyone in the group: changes go both ways."
+                    } else {
+                        "You follow this pack. Your copy updates when they change theirs."
+                    })
+                    .build(w, cx)
+                })
                 .child(widgets::chip(theme.success).child("Following"))
                 .into_any_element(),
             (None, true) => {
@@ -1267,7 +1276,13 @@ impl FriendsPanel {
                     .outline()
                     .label("Follow")
                     .disabled(down)
-                    .tooltip(if down { CANT_CONNECT } else { "Follow: your copy updates when they change theirs." })
+                    .tooltip(if down {
+                        CANT_CONNECT
+                    } else if two_way {
+                        "Follow: this pack stays the same for everyone in the group. Changes go both ways."
+                    } else {
+                        "Follow: your copy updates when they change theirs."
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| this.follow(e.clone(), window, cx)));
                 widgets::reveal_on_hover(row_id.clone(), SharedString::from(format!("follow-at:{key}")), b, window, cx).into_any_element()
             }
@@ -1311,16 +1326,7 @@ impl FriendsPanel {
                     })
                     .when_some(changed, |c, t| c.child(widgets::caption(t, cx).text_xs().truncate().pl(rems(1.625))))
                     .when_some(copy_note, |c, t| c.child(warn_line(t, cx)))
-                    .when(missing > 0, |c| {
-                        c.child(warn_line(
-                            format!(
-                                "{missing} file{} can't be downloaded from any site. Ask {sender} to send {}.",
-                                if missing == 1 { "" } else { "s" },
-                                if missing == 1 { "it" } else { "them" }
-                            ),
-                            cx,
-                        ))
-                    }),
+                    .when(missing > 0, |c| c.child(warn_line(hand_added_line(&e.left_out, &sender), cx))),
             )
             .child(action)
             .children(hide)
@@ -2636,6 +2642,7 @@ impl Render for FriendsPanel {
         let heard = !s.mailbox_friends().is_empty() || !s.mailbox_recipes().is_empty() || !s.mailbox_groups().is_empty();
         let groups: Vec<Group> = s.mailbox_groups().to_vec();
         let down = matches!(status, SyncStatus::Down(_));
+        let unsent = s.unsent_line();
         let body: AnyElement = match &status {
             SyncStatus::Off => self.off(cx),
             SyncStatus::Connecting if !heard => {
@@ -2680,8 +2687,24 @@ impl Render for FriendsPanel {
                                                 (true, false) => format!("Showing what you had last time. {e}"),
                                             },
                                             cx,
-                                        )),
+                                        ))
+                                        // Changes made here wait for the connection.
+                                        .when_some(unsent.clone(), |c, t| {
+                                            c.child(div().pt_1().text_xs().text_color(theme.foreground).child(t))
+                                        }),
                                 ),
+                            ),
+                        )
+                    })
+                    // Connected, but changes still wait: on their way, or
+                    // the last send failed and Hopper tries again.
+                    .when_some(unsent.filter(|_| !down), |c, t| {
+                        c.child(
+                            div().p_3().flex_none().child(
+                                widgets::notice_bar(theme.primary, IconName::CloudUpload, cx)
+                                    .px_3()
+                                    .items_start()
+                                    .child(div().flex_1().min_w_0().text_sm().child(t)),
                             ),
                         )
                     })
@@ -2993,11 +3016,17 @@ impl Render for FollowChooser {
             FollowPick::Existing(ix) => rows.get(ix).map(|r| r.1.clone()),
             FollowPick::New => None,
         };
+        // A group's pack is kept the same both ways; a friend's own share
+        // only comes from them.
+        let group = !self.req.groups.is_empty();
+        let intro = if group {
+            "Follow: this pack stays the same for everyone in the group. When anyone changes it, you included, the change reaches everyone. Only the mod list is shared. The mods download from their own sites.".to_string()
+        } else {
+            format!("Follow: your copy updates when {who} changes theirs. Your changes stay on this PC. Only the mod list comes from {who}. The mods download from their own sites.")
+        };
         v_flex()
             .gap_3()
-            .child(div().text_sm().child(format!(
-                "Follow: your copy updates when {who} changes theirs. Only the mod list comes from {who}. The mods download from their own sites."
-            )))
+            .child(div().text_sm().child(intro))
             .child(widgets::caption("Where should it go?", cx).text_xs().font_medium())
             .child(list)
             .when_some(over, |c, inst| {
@@ -3009,22 +3038,14 @@ impl Render for FollowChooser {
                         .rounded(theme.radius)
                         .bg(theme.warning.opacity(widgets::alpha::TINT))
                         .child(Icon::new(IconName::TriangleAlert).small().flex_none().text_color(theme.warning))
-                        .child(div().flex_1().min_w_0().text_sm().child(format!(
-                            "{inst} gets {who}'s mods and settings now, and again each time {who} changes the pack. Your own changes there are replaced. You can undo each change in History."
-                        ))),
+                        .child(div().flex_1().min_w_0().text_sm().child(if group {
+                            format!("{inst} gets the group's mods and settings now. After that, what you change there goes to the group, and what others change comes to you. You can undo each change in History.")
+                        } else {
+                            format!("{inst} gets {who}'s mods and settings now, and again each time {who} changes the pack. Your own changes there are replaced. You can undo each change in History.")
+                        })),
                 )
             })
-            .when(!self.req.left_out.is_empty(), |c| {
-                let n = self.req.left_out.len();
-                c.child(widgets::fine_print(
-                    format!(
-                        "{n} file{} can't be downloaded from any site. Ask {who} to send {}.",
-                        if n == 1 { "" } else { "s" },
-                        if n == 1 { "it" } else { "them" }
-                    ),
-                    cx,
-                ))
-            })
+            .when(!self.req.left_out.is_empty(), |c| c.child(widgets::fine_print(hand_added_line(&self.req.left_out, &who), cx)))
     }
 }
 
@@ -3848,6 +3869,27 @@ fn group_submenu(
         }
         sub
     })
+}
+
+/// The files a friend added by hand (on no mod site), by name, and who to
+/// ask for them. Long lists name the first few.
+pub fn hand_added_line(names: &[String], who: &str) -> String {
+    const SHOWN: usize = 3;
+    let n = names.len();
+    let mut list = names.iter().take(SHOWN).cloned().collect::<Vec<_>>();
+    if n > SHOWN {
+        list.push(format!("{} more", n - SHOWN));
+    }
+    let listed = match list.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    if n == 1 {
+        format!("{listed} isn't on any mod site, so Hopper can't download it. Ask {who} to send it.")
+    } else {
+        format!("{listed} aren't on any mod site, so Hopper can't download them. Ask {who} to send them.")
+    }
 }
 
 fn name_or(name: &str, or: &str) -> String {

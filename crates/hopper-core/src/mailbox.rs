@@ -277,6 +277,15 @@ pub fn unauthorized(e: &anyhow::Error) -> bool {
 /// server words, and what to do next.
 pub fn says(e: &anyhow::Error) -> String {
     let theirs = e.downcast_ref::<MailboxError>();
+    // Full means two things: too much still waiting for friends who are
+    // away, or too many packs kept in groups. Both say what makes room.
+    if let Some(m) = theirs.filter(|m| m.code == "storage_full") {
+        return if m.message.contains("group") {
+            "Your groups already hold as many of your packs as they can. Stop sharing a pack in a group you don't need, then try again.".into()
+        } else {
+            "Too many of your packs are waiting for friends who are offline. They get them when they come online, and then there's room to share more. Stopping a share you don't need also makes room.".into()
+        };
+    }
     if let Some(t) = theirs.and_then(|m| says_code(&m.code)) {
         return t.into();
     }
@@ -311,7 +320,7 @@ const SOMETHING_WRONG: &str = "Something went wrong with Friends. Try again in a
 /// Plain sentences for the service's other answers.
 fn says_code(code: &str) -> Option<&'static str> {
     Some(match code {
-        "busy" | "internal" | "storage_full" => SOMETHING_WRONG,
+        "busy" | "internal" => SOMETHING_WRONG,
         "rate_limited" => "Too many tries. Wait a minute, then try again.",
         "too_large" => "This pack has too many mods to share with friends.",
         "group_full" => "That group is full.",
@@ -1167,6 +1176,20 @@ mod tests {
         for code in ["busy", "internal", "storage_full", "rate_limited", "too_large", "group_full", "groups_full", "group_packs_full", "owner_leaves", "friends_full", "their_friends_full", "invite_unknown", "needs_update", "invites_full", ""] {
             let said = says(&err(409, code)).to_lowercase();
             assert!(!words.iter().any(|w| said.contains(w)), "{code}: {said}");
+        }
+    }
+
+    #[test]
+    fn full_says_what_makes_room() {
+        let full = |message: &str| -> anyhow::Error {
+            MailboxError { status: 409, code: "storage_full".into(), message: message.into() }.into()
+        };
+        let waiting = says(&full("you have shared too much with your friends at once"));
+        assert!(waiting.contains("waiting for friends who are offline") && waiting.contains("come online"), "{waiting}");
+        let groups = says(&full("you share too much through groups already"));
+        assert!(groups.contains("Stop sharing a pack in a group"), "{groups}");
+        for said in [waiting, groups] {
+            assert!(!said.contains("Try again in a few minutes"), "{said}");
         }
     }
 

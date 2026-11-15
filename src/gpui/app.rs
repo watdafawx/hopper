@@ -1524,18 +1524,26 @@ impl AppView {
                                     // invitation): a dot, until the panel is opened.
                                     let open = self.page == Page::Library && self.library.read(cx).friends_open();
                                     let news = !open && self.store.read(cx).friends_news();
+                                    // Shared packs with changes not sent yet
+                                    // (offline, or the send failed): a count,
+                                    // shown even with the panel open.
+                                    let unsent = self.store.read(cx).unsent_packs().len();
+                                    let tip: SharedString = if unsent > 0 {
+                                        match unsent {
+                                            1 => "Friends: changes to 1 pack are waiting to be sent".into(),
+                                            n => format!("Friends: changes to {n} packs are waiting to be sent").into(),
+                                        }
+                                    } else if news {
+                                        "Friends: something new from your friends".into()
+                                    } else {
+                                        "Friends: share packs and play the same ones as your friends".into()
+                                    };
                                     let button = Button::new("open-friends")
                                         .ghost()
                                         .small()
                                         .icon(IconName::Users)
                                         .selected(open)
-                                        .when(!dialog, |b| {
-                                            b.tooltip(if news {
-                                                "Friends: something new from your friends"
-                                            } else {
-                                                "Friends: share packs and play the same ones as your friends"
-                                            })
-                                        })
+                                        .when(!dialog, |b| b.tooltip(tip))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             // From another page it opens the panel; on the
                                             // Library it opens or closes it.
@@ -1546,7 +1554,24 @@ impl AppView {
                                                 this.library.update(cx, |l, cx| l.toggle_friends(cx));
                                             }
                                         }));
-                                    if news {
+                                    if unsent > 0 {
+                                        // The History button's badge, in the
+                                        // same corner, so both read alike.
+                                        let theme = cx.theme();
+                                        let rem: f32 = theme.font_size.into();
+                                        let label = if unsent > 99 { "99+".to_string() } else { unsent.to_string() };
+                                        div()
+                                            .relative()
+                                            .flex_none()
+                                            .child(button)
+                                            .child(
+                                                crate::widgets::count_badge(label, theme.primary, theme.primary_foreground, cx)
+                                                    .absolute()
+                                                    .top(px((rem * 0.0667).round()))
+                                                    .right(px((rem * -0.1333).round())),
+                                            )
+                                            .into_any_element()
+                                    } else if news {
                                         gpui_kit::component::badge::Badge::new()
                                             .dot()
                                             .color(cx.theme().primary)
