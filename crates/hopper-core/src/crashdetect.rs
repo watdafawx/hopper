@@ -4572,7 +4572,9 @@ net.neoforged.neoforge.logging.CrashReportExtender$ModLoadingCrashException: Mod
         let c = from_report(&root, &report, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
         let addon = &c.suspects[0];
         assert_eq!((addon.file_name.as_str(), addon.certainty), ("vista-advanced-player-1.21.1-1.0.1.jar", Certainty::Certain));
-        assert_eq!(addon.why, "Vista was updated today (5.6.5 → 5.6.8). Vista: Advanced Player was made for an older Vista.");
+        // In the first 20 minutes after midnight the update was yesterday.
+        let why = |day: &str| format!("Vista was updated {day} (5.6.5 → 5.6.8). Vista: Advanced Player was made for an older Vista.");
+        assert!(addon.why == why("today") || addon.why == why("yesterday"), "{}", addon.why);
         assert!(addon.steps[0].starts_with("Turn off Vista: Advanced Player"), "{:?}", addon.steps);
         assert!(addon.steps[1].starts_with("Or undo the Vista update (back to 5.6.5). This may help"), "{:?}", addon.steps);
         assert!(!addon.steps.iter().any(|s| s.starts_with("Update ")), "{:?}", addon.steps);
