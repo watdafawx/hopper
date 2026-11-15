@@ -104,7 +104,7 @@ pub fn expand(t: &str, vars: &BTreeMap<String, String>) -> String {
 
 /// "Limitless 8 - v1.78.1" → "v1.78.1": the pack's version without its
 /// name.
-fn short_version(pack: &str, version: &str) -> String {
+pub(crate) fn short_version(pack: &str, version: &str) -> String {
     let v = version.trim();
     let v = v.strip_prefix(pack.trim()).unwrap_or(v).trim_start_matches([' ', '-', '_', '|', ':']).trim();
     if !v.contains(char::is_whitespace) {

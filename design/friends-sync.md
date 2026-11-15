@@ -111,6 +111,23 @@ as it is, with a note in the task that says to install the pack again from
 the sender's share code. The new loader is installed like a change in the
 instance's Settings, once the game has closed if it is running.
 
+The pack version is kept the same way, under `~pack` (`grouppack::PACK_KEY`):
+the code's base (`pack:cf:<project>:<file>` or `pack:mr:<project>:<version>`).
+A member who moves the pack ahead or back makes one change; the others run
+the full pack update with "Keep my changes" and a History entry in that
+member's name, before any mod change (a member's mods are relative to their
+pack version). It waits while the game runs, when the update needs the
+player to pick per file, or after a failed try (the instance page shows
+"Update pack to X"), and the members' other changes wait with it. Another
+pack (a different project) is left alone with a note. Mods that only differ
+because the sender is on another version are not changes: a mod that leaves
+a list because the sender's pack now ships it (by project, or by jar name
+for override jars), or a pack mod taken out that their version drops. That
+needs what each version ships (`grouppack::ships`, read from the manifest or
+mrpack index and cached under `pack-ships`). A member on another version
+never swaps or takes out a pack mod here. Settings a pack update writes are
+the pack's, not the player's: config sync snapshots them after the update.
+
 `reason` is `unshared` (the share was turned off) or `deleted` (the pack is
 gone on the sender's PC); anything else becomes `unshared`. The desktop
 works out what to take back by comparing `mailbox_sent` (what reached the

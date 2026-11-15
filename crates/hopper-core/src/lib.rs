@@ -50,6 +50,7 @@ pub mod fuzzy;
 pub mod listorder;
 pub mod namematch;
 pub mod game;
+pub mod grouppack;
 pub mod groupsync;
 pub mod history;
 pub mod hopperd;

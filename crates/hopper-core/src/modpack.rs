@@ -638,6 +638,51 @@ pub fn pack_project_ids(project_id: u64, file_id: u64) -> Option<HashSet<u64>> {
     }
 }
 
+/// What a CurseForge pack version comes with, as `grouppack::Ships`: each
+/// project its manifest lists ("p:<project>") and each jar in its
+/// overrides' mods folder ("n:<file name>"). From the cached zip when the
+/// pack was downloaded already, else read from CurseForge by range (only
+/// the manifest and the zip's list of names).
+pub(crate) fn curse_ships(file: &cf::File, _job: &Job) -> anyhow::Result<crate::grouppack::Ships> {
+    let of = |m: &PackManifest, names: &mut dyn Iterator<Item = String>| {
+        let dir = format!("{}/mods/", if m.overrides.is_empty() { "overrides" } else { m.overrides.as_str() });
+        let mut out: crate::grouppack::Ships = m.files.iter().map(|f| format!("p:{}", f.project_id)).collect();
+        for n in names {
+            if let Some(jar) = n.strip_prefix(&dir).filter(|j| !j.contains('/') && j.to_lowercase().ends_with(".jar")) {
+                out.insert(format!("n:{}", jar.to_lowercase()));
+            }
+        }
+        out
+    };
+    let cached = cache_dir().join(format!("{}.zip", file.id));
+    if cache_hit(&cached) {
+        let m = read_manifest(&cached)?;
+        let z = zip::ZipArchive::new(fs::File::open(&cached)?)?;
+        let names: Vec<String> = z.file_names().map(str::to_string).collect();
+        return Ok(of(&m, &mut names.into_iter()));
+    }
+    let url = cf::download_url(file)?;
+    let entries = crate::serverpack::remote_zip_entries(&url, file.file_length)?;
+    let e = entries.iter().find(|e| e.name == "manifest.json").context("pack has no manifest.json")?;
+    let m: PackManifest = serde_json::from_slice(&crate::serverpack::remote_zip_read(&url, e)?)?;
+    Ok(of(&m, &mut entries.iter().map(|e| e.name.clone())))
+}
+
+/// [`curse_ships`] for a Modrinth pack version: each file's project
+/// ("p:<project>", Hopper's number) and name ("n:<file name>").
+pub(crate) fn modrinth_ships(file: &cf::File, job: &Job) -> anyhow::Result<crate::grouppack::Ships> {
+    let zip = fetch_mrpack(file, job)?;
+    let index = read_mr_index(&zip)?;
+    let mut out = crate::grouppack::Ships::new();
+    for f in index.files.iter().filter(|f| f.path.starts_with("mods/")) {
+        out.insert(format!("n:{}", f.file_name().to_lowercase()));
+        if let Some(p) = f.project() {
+            out.insert(format!("p:{}", crate::modrinth::num_id(p)));
+        }
+    }
+    Ok(out)
+}
+
 /// Which of an instance's mods its modpack ships (the rest were added on
 /// top: the Mods tab's "Only yours").
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2792,11 +2837,15 @@ pub fn update_any(
         }
     };
     let m = crate::source::get_mod(pack_id)?;
+    // Settings the new version writes are the pack's, not the player's:
+    // shared settings (`configsync`) must not send them as changes of theirs.
+    let settings_before = crate::configsync::before_pack_update(&inst.root);
     if crate::modrinth::is_mr(pack_id) {
         update_mrpack(inst, &m, file, Some(overrides), job)?;
     } else {
         update(inst, &m, file, Some(overrides), job)?;
     }
+    crate::configsync::after_pack_update(&inst.root, &settings_before);
     // Mods you had turned off stay off unless you chose to turn them on.
     if !overrides.enable.is_empty() {
         for pid in &overrides.enable {
@@ -2822,6 +2871,24 @@ pub fn update_any(
 /// the player starts goes through [`update_any`] and may change them.
 pub fn update_any_synced(inst: &mut Instance, pack_id: u64, file: &cf::File, job: &Job) -> anyhow::Result<()> {
     let plan = crate::packdiff::plan(inst, file, true, job)?;
+    synced_with(inst, pack_id, file, &plan, job)
+}
+
+/// [`update_any_synced`] for the pack version a group pack kept both ways
+/// moved to, unless the update needs the player to pick (settings both
+/// they and the pack changed, or a mod of theirs needs one the pack
+/// drops: [`crate::packdiff::UpdatePlan::needs_say`]). False: nothing was
+/// changed; the player picks in the update dialog.
+pub fn update_group_pack(inst: &mut Instance, pack_id: u64, file: &cf::File, job: &Job) -> anyhow::Result<bool> {
+    let plan = crate::packdiff::plan(inst, file, true, job)?;
+    if plan.needs_say() {
+        return Ok(false);
+    }
+    synced_with(inst, pack_id, file, &plan, job)?;
+    Ok(true)
+}
+
+fn synced_with(inst: &mut Instance, pack_id: u64, file: &cf::File, plan: &crate::packdiff::UpdatePlan, job: &Job) -> anyhow::Result<()> {
     let mut o = plan.decisions_with(&plan.default_take(), &plan.default_choices());
     o.only_here = inst.only_here.keys().cloned().collect();
     update_any(inst, pack_id, file, Some(&o), job)

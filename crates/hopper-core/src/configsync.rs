@@ -1026,6 +1026,68 @@ pub fn keep(root: &Path, m: &str, on: bool) -> anyhow::Result<()> {
     local.save(root)
 }
 
+/// The shared settings' values as the files have them before a pack
+/// update, by file and setting (see [`after_pack_update`]).
+#[derive(Debug, Default)]
+pub struct PackBefore(BTreeMap<String, BTreeMap<String, String>>);
+
+/// Reads every file the shared settings' snapshot names, before a pack
+/// update writes over them. Nothing (and no reads) when no mod's settings
+/// are shared in this instance.
+pub fn before_pack_update(root: &Path) -> PackBefore {
+    let local = Local::load(root);
+    let mut out = BTreeMap::new();
+    for rel in local.snap.values().flat_map(|files| files.keys()) {
+        if out.contains_key(rel) {
+            continue;
+        }
+        if let Some(s) = FileNow::read(root, rel).settings {
+            out.insert(rel.clone(), s.iter().map(|(k, e)| (k.clone(), e.value.text())).collect());
+        }
+    }
+    PackBefore(out)
+}
+
+/// After a pack update: a setting the update changed (or added) is the
+/// pack's, not this player's, so the snapshot moves with it and the next
+/// [`scan`] doesn't send it to the group as their change. Every member's
+/// own pack update brings those values. A setting the update left alone
+/// keeps its snapshot, so a change the player made before still goes out.
+pub fn after_pack_update(root: &Path, before: &PackBefore) {
+    let mut local = Local::load(root);
+    if local.snap.is_empty() {
+        return;
+    }
+    let mut changed = false;
+    let mut read: BTreeMap<String, Option<Settings>> = BTreeMap::new();
+    for files in local.snap.values_mut() {
+        for (rel, keys) in files.iter_mut() {
+            let now = read.entry(rel.clone()).or_insert_with(|| FileNow::read(root, rel).settings);
+            let Some(now) = now.as_ref() else { continue };
+            let was = before.0.get(rel);
+            for (k, e) in now {
+                let by_pack = was.and_then(|w| w.get(k)).is_none_or(|w| !same_text(&e.value, w));
+                if !by_pack {
+                    continue;
+                }
+                let text = e.value.text();
+                if keys.get(k) != Some(&text) {
+                    keys.insert(k.clone(), text);
+                    changed = true;
+                }
+                // What Hopper wrote there from the group is gone too: the
+                // game didn't refuse it.
+                if local.wrote.remove(&fk(rel, k)).is_some() {
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed && let Err(e) = local.save(root) {
+        log::warn!("keeping the shared settings' snapshot after a pack update: {e:#}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1310,6 +1372,39 @@ mod tests {
         let t = tick(&dir, &state, &m, "me", "g").unwrap();
         assert!(t.own.is_empty(), "{:?}", t.own);
         assert!(t.wrote.iter().all(|w| w.who != "Mia"), "{:?}", t.wrote);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_a_pack_update_writes_are_the_packs_not_the_players() {
+        let dir = std::env::temp_dir().join(format!("hopper-configsync-pack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        let rel = "config/jei-client.toml";
+        std::fs::write(dir.join(rel), TOML).unwrap();
+        let m = BTreeMap::from([("p:1".to_string(), ("JEI".to_string(), vec![rel.to_string()]))]);
+        let state = st(&[("p:1", &[])]);
+        // Snapshot first.
+        let t = tick(&dir, &state, &m, "me", "g").unwrap();
+        assert!(t.own.is_empty());
+        // The player changes a setting, not sent yet.
+        let mine = change(TOML, "listOnLeft = true", "listOnLeft = false");
+        std::fs::write(dir.join(rel), &mine).unwrap();
+        // The pack's new version changes another one (and adds one).
+        let before = before_pack_update(&dir);
+        let packs = change(&mine, "maxColumns = 9", "maxColumns = 12\n\tnewThing = 2");
+        std::fs::write(dir.join(rel), &packs).unwrap();
+        after_pack_update(&dir, &before);
+        // Only the player's own change goes out.
+        let t = tick(&dir, &state, &m, "me", "g").unwrap();
+        assert_eq!(t.own.iter().map(|o| (o.k.as_str(), o.v.as_str())).collect::<Vec<_>>(), [("client/listOnLeft", "false")]);
+        // Nothing shared here: nothing is read or written.
+        let plain = dir.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let b = before_pack_update(&plain);
+        assert!(b.0.is_empty());
+        after_pack_update(&plain, &b);
+        assert!(!plain.join(LOCAL_FILE).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
