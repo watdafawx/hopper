@@ -39,22 +39,25 @@ fn person_key(w: &Who) -> String {
 const FACE: f32 = 1.5;
 /// The gap between faces when several people made one change.
 const FACE_GAP: f32 = 0.125;
-/// At most this many faces before a row.
-const MAX_FACES: usize = 3;
-
-/// How wide a row's lead is: one face, or several side by side. Side by
+/// Room for this many faces before a row; more people fold into "+n" in
+/// the last one.
+const FACE_SLOTS: usize = 2;
+/// The face column: one width on every row, so every row's text starts at
+/// the same place however many people made the change. Faces sit side by
 /// side, not overlapped: the initials on tinted tiles are see-through and
 /// overlapping hid one letter under the next.
-fn lead_width(people: usize) -> f32 {
-    let n = people.clamp(1, MAX_FACES) as f32;
-    n * FACE + (n - 1.) * FACE_GAP
+const LEAD_W: f32 = FACE_SLOTS as f32 * FACE + (FACE_SLOTS - 1) as f32 * FACE_GAP;
+
+/// How many faces a row shows, and how many people the "+n" after them
+/// stands for.
+fn face_split(people: usize) -> (usize, usize) {
+    if people <= FACE_SLOTS { (people, 0) } else { (FACE_SLOTS - 1, people - (FACE_SLOTS - 1)) }
 }
 
-/// How far an entry's own rows sit in: under the head's text, past its
-/// faces (or chevron) and the gap (`px_2` + `gap_2`).
-fn set_indent(set: &Set, faces: bool) -> f32 {
-    let n = if faces { set.people().len() } else { 1 };
-    lead_width(n) + 1.
+/// How far an entry's own rows sit in: under the head's text, past the
+/// face column (or chevron) and the gap (`px_2` + `gap_2`).
+fn set_indent(faces: bool) -> f32 {
+    (if faces { LEAD_W } else { FACE }) + 1.
 }
 
 /// Someone with no face to show (not signed in to Minecraft, or a Hopper
@@ -257,7 +260,7 @@ impl BackupsView {
             },
             Item::File(i, j) => match self.sets.get(*i).and_then(|s| Some((s, s.files.get(*j)?))) {
                 Some((set, f)) => {
-                    let row = self.entry_row(i * 10_000 + j + 1, f, set.when, Some(set_indent(set, self.hfaces)), self.hfaces, cx);
+                    let row = self.entry_row(i * 10_000 + j + 1, f, set.when, Some(set_indent(self.hfaces)), self.hfaces, cx);
                     return div().when(self.ends_entry(ix, *i), |d| d.pb_0p5()).child(row).into_any_element();
                 }
                 None => div().into_any_element(),
@@ -488,17 +491,40 @@ impl BackupsView {
     /// What starts an entry of several files: whoever made it (several
     /// people stacked), or its chevron when History names nobody.
     fn set_lead(&self, set: &Set, faces: bool, chevron: gpui_kit::component::Icon, cx: &mut Context<Self>) -> AnyElement {
-        let people = set.people();
         if !faces {
             div().size(rems(FACE)).flex_none().flex().items_center().justify_center().child(chevron).into_any_element()
-        } else if let [w] = people.as_slice() {
-            self.who_face(w, rems(FACE), cx)
-        } else if !people.is_empty() {
-            let fs: Vec<AnyElement> = people.iter().take(MAX_FACES).map(|w| self.who_face(w, rems(FACE), cx)).collect();
-            h_flex().flex_none().w(rems(lead_width(people.len()))).gap(rems(FACE_GAP)).children(fs).into_any_element()
         } else {
-            div().size(rems(FACE)).flex_none().into_any_element()
+            self.face_column(SharedString::from(format!("hist-more:{}", set.dir.display())), &set.people(), cx)
         }
+    }
+
+    /// The faces before a row, in a column of one width for every row: up
+    /// to two faces, or the first and "+n" for the rest (hover names them).
+    /// Empty when History doesn't know who made the change.
+    fn face_column(&self, key: SharedString, people: &[Who], cx: &mut Context<Self>) -> AnyElement {
+        let (shown, more) = face_split(people.len());
+        let faces: Vec<AnyElement> = people.iter().take(shown).map(|w| self.who_face(w, rems(FACE), cx)).collect();
+        let more = (more > 0).then(|| {
+            let theme = cx.theme();
+            let muted = theme.muted_foreground;
+            let names: SharedString = people[shown..].iter().map(Who::label).collect::<Vec<_>>().join(", ").into();
+            div()
+                .id(ElementId::Name(key))
+                .flex_none()
+                .size(rems(FACE))
+                .rounded(theme.radius)
+                .bg(muted.opacity(widgets::alpha::TINT * 2.))
+                .text_color(crate::theme::ink(muted))
+                .text_size(rems(FACE * 0.45))
+                .font_semibold()
+                .flex()
+                .items_center()
+                .justify_center()
+                .whitespace_nowrap()
+                .child(format!("+{more}"))
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(names.clone()).build(w, cx))
+        });
+        h_flex().flex_none().w(rems(LEAD_W)).gap(rems(FACE_GAP)).children(faces).children(more).into_any_element()
     }
 
     /// A pack update: one row with what it did to how many mods, and its
@@ -599,7 +625,7 @@ impl BackupsView {
             .px_2()
             .py_1p5()
             // Under the pack's text, like its mods.
-            .pl(rems(set_indent(set, true)))
+            .pl(rems(set_indent(self.hfaces)))
             .rounded(cx.theme().radius)
             .hover(|s| widgets::row_hover(s, cx))
             .clickable(cx);
@@ -776,9 +802,9 @@ impl BackupsView {
         let row = self.pickable(row, vec![key.to_string()], None, cx);
         let row = if picked { widgets::row_selected(row, cx) } else { row };
         let who = f.who.as_ref().filter(|_| !nested);
-        let lead = (faces && !nested).then(|| match who {
-            Some(w) => self.who_face(w, rems(FACE), cx),
-            None => div().size(rems(FACE)).flex_none().into_any_element(),
+        let lead = (faces && !nested).then(|| {
+            let people: Vec<Who> = who.cloned().into_iter().collect();
+            self.face_column(SharedString::from(format!("hist-more:{}", f.path.display())), &people, cx)
         });
         let what = match who {
             Some(w) => h_flex()
@@ -1218,5 +1244,33 @@ fn change_color(c: Change, same: bool, cx: &App) -> Hsla {
         Change::TurnedOn | Change::Added => t.success,
         Change::TurnedOff => t.muted_foreground,
         Change::Moved | Change::Copied => t.info,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: GPUI's own `test` macro would shadow the std one.
+    use super::{FACE, FACE_SLOTS, LEAD_W, face_split, set_indent};
+
+    #[test]
+    fn face_column_fits_two_then_folds_into_more() {
+        assert_eq!(face_split(0), (0, 0));
+        assert_eq!(face_split(1), (1, 0));
+        assert_eq!(face_split(2), (2, 0));
+        // Three or more: the first face and "+n" for everyone else.
+        assert_eq!(face_split(3), (1, 2));
+        assert_eq!(face_split(7), (1, 6));
+        // Whatever shows always fits the column.
+        for n in 0..10 {
+            let (shown, more) = face_split(n);
+            assert!(shown + usize::from(more > 0) <= FACE_SLOTS);
+        }
+    }
+
+    #[test]
+    fn nested_rows_sit_under_the_text_whoever_made_it() {
+        // One indent for every entry: past the fixed column and the gap.
+        assert_eq!(set_indent(true), LEAD_W + 1.);
+        assert_eq!(set_indent(false), FACE + 1.);
     }
 }
