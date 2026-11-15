@@ -67,6 +67,7 @@ pub(crate) fn panel_with(tls: crate::TlsInfo) -> T {
         addresses: RwLock::new(Vec::new()),
         snapshot,
         refresh: tokio::sync::Notify::new(),
+        edge: Default::default(),
         jobs: Default::default(),
         results: Default::default(),
         job_servers: Default::default(),

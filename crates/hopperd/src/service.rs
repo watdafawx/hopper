@@ -234,8 +234,35 @@ mod imp {
                 delay: Duration::from_secs(10),
             }]),
         });
+        allow_router(exe);
         s.start::<&str>(&[]).context("starting the service")?;
         Ok(())
+    }
+
+    const ROUTER_RULE: &str = "Hopper Server router";
+
+    /// Lets players reach the router process: a firewall rule for its one
+    /// fixed program file, beside the service's exe (see `crate::edge`). As
+    /// a service nothing can ask Windows' "allow access" question.
+    fn allow_router(exe: &Path) {
+        let prog = exe.with_file_name(crate::edge::PROGRAM);
+        let _ = std::process::Command::new("netsh").args(["advfirewall", "firewall", "delete", "rule", &format!("name={ROUTER_RULE}")]).output();
+        let r = std::process::Command::new("netsh")
+            .args(["advfirewall", "firewall", "add", "rule", &format!("name={ROUTER_RULE}"), "dir=in", "action=allow", "enable=yes"])
+            .arg(format!("program={}", prog.display()))
+            .output();
+        if !r.is_ok_and(|o| o.status.success()) {
+            log::warn!("couldn't add the firewall rule for {}; players outside this PC may not reach the router", prog.display());
+        }
+    }
+
+    fn remove_router_rule() {
+        let _ = std::process::Command::new("netsh").args(["advfirewall", "firewall", "delete", "rule", &format!("name={ROUTER_RULE}")]).output();
+    }
+
+    /// The service's `--data` folder (its command line has it).
+    fn data_of(s: &windows_service::service::Service) -> Option<PathBuf> {
+        split_command(&s.query_config().ok()?.executable_path.to_string_lossy()).1
     }
 
     fn stop_and_wait(s: &windows_service::service::Service) -> anyhow::Result<()> {
@@ -259,8 +286,10 @@ mod imp {
             .open_service(name(), ServiceAccess::STOP | ServiceAccess::DELETE | ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG)
             .context("the service isn't installed")?;
         let exe = s.query_config().ok().map(|c| split_command(&c.executable_path.to_string_lossy()).0);
+        // A real stop: the service stops its router process as it goes.
         stop_and_wait(&s)?;
         s.delete().context("removing the service")?;
+        remove_router_rule();
         Ok(exe)
     }
 
@@ -280,8 +309,12 @@ mod imp {
     pub fn restart() -> anyhow::Result<()> {
         let m = manager(ServiceManagerAccess::CONNECT)?;
         let s = m
-            .open_service(name(), ServiceAccess::STOP | ServiceAccess::START | ServiceAccess::QUERY_STATUS)
+            .open_service(name(), ServiceAccess::STOP | ServiceAccess::START | ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG)
             .context("the service isn't installed")?;
+        // A restart: players on the router stay connected.
+        if let Some(d) = data_of(&s) {
+            crate::edge::keep_through_restart(&d);
+        }
         stop_and_wait(&s)?;
         s.start::<&str>(&[]).context("starting the service")
     }
@@ -296,6 +329,9 @@ mod imp {
         let exe = split_command(&s.query_config()?.executable_path.to_string_lossy()).0;
         if crate::absolute(&exe) == crate::absolute(new) {
             bail!("That's the copy the service runs already.");
+        }
+        if let Some(d) = data_of(&s) {
+            crate::edge::keep_through_restart(&d);
         }
         stop_and_wait(&s)?;
         let copied = super::copy_retrying(new, &exe);
@@ -454,7 +490,17 @@ mod imp {
     }
 
     pub fn uninstall() -> anyhow::Result<Option<PathBuf>> {
+        let data = std::fs::read_to_string(UNIT).ok().and_then(|u| {
+            let line = u.lines().find(|l| l.starts_with("ExecStart="))?.to_string();
+            line.split_once("--data \"").and_then(|(_, d)| d.split_once('"')).map(|(d, _)| PathBuf::from(d))
+        });
         let _ = systemctl(&["disable", "--now", "hopperd"]);
+        // systemd stops only hopperd's own process (KillMode=process, so
+        // servers and the router outlive restarts); uninstalling ends the
+        // router too.
+        if let Some(r) = data.as_deref().and_then(crate::edge::read_run) {
+            crate::edge::kill(&r);
+        }
         std::fs::remove_file(UNIT).with_context(|| format!("removing {UNIT} (run with sudo)"))?;
         systemctl(&["daemon-reload"])?;
         Ok(None)

@@ -1031,6 +1031,10 @@ impl Supervisor {
             .and_then(|s| s["servers_up"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()))
             .unwrap_or_default()
     }
+
+    fn router_players(&self) -> u64 {
+        self.status.lock().unwrap().as_ref().and_then(|s| s["router_players"].as_u64()).unwrap_or(0)
+    }
 }
 
 /// Keeps the panel running: starts it again after it restarts itself (exit
@@ -1201,9 +1205,19 @@ fn handle(sup: &Arc<Supervisor>, cmd: Cmd) -> bool {
         }
         Cmd::Quit => {
             let up = sup.servers_up();
+            // Quitting stops the router too, which disconnects its players.
+            let players = sup.router_players();
+            let dropped = match players {
+                0 => String::new(),
+                1 => "\n\n1 player is on through the server address. Quitting disconnects them.".into(),
+                n => format!("\n\n{n} players are on through the server address. Quitting disconnects them."),
+            };
+            if up.is_empty() && players > 0 && !confirm(dropped.trim_start()) {
+                return true;
+            }
             if !up.is_empty() {
                 let q = format!(
-                    "{} server{} running: {}.\n\nStop {} before quitting?\nYes stops {} cleanly first. No quits and leaves {} running (Hopper Server finds {} again next time).",
+                    "{} server{} running: {}.\n\nStop {} before quitting?\nYes stops {} cleanly first. No quits and leaves {} running (Hopper Server finds {} again next time).{dropped}",
                     up.len(),
                     if up.len() == 1 { " is" } else { "s are" },
                     up.join(", "),

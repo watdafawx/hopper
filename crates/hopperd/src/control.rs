@@ -159,6 +159,8 @@ async fn status(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Sock
         "port": cfg.port,
         "servers_up": up,
         "servers": app.servers.list().len(),
+        // Players the router process pipes: quitting disconnects them.
+        "router_players": app.edge.players(),
         "setup_code": app.auth.setup_code(),
         "lan": lan,
         "home": cfg.home,
