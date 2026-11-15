@@ -437,7 +437,7 @@ mod tests {
     fn packed_frames_unpack_to_the_same_pixels() {
         let frame = |seed: u8| {
             let buf = image::RgbaImage::from_fn(5, 3, |x, y| {
-                image::Rgba([seed, x as u8 * seed, y as u8, if x == 2 { seed } else { 255 }])
+                image::Rgba([seed, (x as u8).wrapping_mul(seed), y as u8, if x == 2 { seed } else { 255 }])
             });
             RenderImage::new(vec![image::Frame::new(buf)])
         };
