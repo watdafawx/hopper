@@ -203,6 +203,18 @@ pub fn short_version(pack: &str, display: &str) -> String {
     crate::hosting::motd::short_version(pack, display)
 }
 
+/// The pack version a file is, for the notice and the toast: "13.6.0" of
+/// "Fabulously.Optimized-13.6.0.zip". The file name first: a display name
+/// like "13.6.0 for 26.1.2" ends in the Minecraft version, which
+/// [`short_version`] would take.
+pub fn version_name(pack: &str, file: &crate::cf::File) -> String {
+    let from_file = crate::instance_ops::pack_version_label(&file.file_name);
+    if !from_file.is_empty() && from_file.chars().any(|c| c.is_ascii_digit()) {
+        return from_file;
+    }
+    short_version(pack, &file.display_name)
+}
+
 /// The toast and the task's note once the group's pack version is in:
 /// "McFawx updated All the Mods 10 to 8.6. Your edits were kept."
 pub fn says_done(who: &str, pack: &str, version: &str, back: bool) -> String {
@@ -210,6 +222,15 @@ pub fn says_done(who: &str, pack: &str, version: &str, back: bool) -> String {
     let verb = if back { "moved" } else { "updated" };
     let pack = if pack.is_empty() { "the pack" } else { pack };
     format!("{who} {verb} {pack} {}{version}. Your edits were kept.", if back { "back to " } else { "to " })
+}
+
+/// Why the group's pack version couldn't go in, in plain words: the
+/// notice shows it to the player, not the web request that failed.
+pub fn failed_says(e: &anyhow::Error) -> String {
+    if format!("{e:#}").contains("status: 404") {
+        return "the pack's site doesn't have that version.".into();
+    }
+    crate::recipe::says(e)
 }
 
 /// Why the group's pack version isn't in yet, for the instance page.
@@ -256,7 +277,7 @@ impl Due {
         match &self.wait {
             Wait::Game => "Your copy updates when you close the game. Your edits are kept.".into(),
             Wait::Pick => "Some of your settings changed in this update too. Pick what to keep, then the group's other changes follow.".into(),
-            Wait::Failed(why) => format!("Couldn't update: {why}"),
+            Wait::Failed(why) => format!("Couldn't update: {why} Hopper tries again in 10 minutes."),
         }
     }
 
@@ -312,5 +333,16 @@ mod tests {
         assert_eq!(d.title(), "McFawx updated All the Mods 10 to 8.6");
         assert_eq!(d.action(), "Update pack to 8.6");
         assert_eq!(short_version("All the Mods 10", "All the Mods 10-8.6"), "8.6");
+    }
+
+    #[test]
+    fn a_version_is_named_by_the_pack_not_by_minecraft() {
+        let file = |name: &str, display: &str| crate::cf::File { file_name: name.into(), display_name: display.into(), ..Default::default() };
+        // The display name ends in the Minecraft version: "to 26.1.2" was
+        // shown for Fabulously Optimized 13.6.0.
+        assert_eq!(version_name("Fabulously Optimized", &file("Fabulously.Optimized-13.6.0.zip", "13.6.0 for 26.1.2")), "13.6.0");
+        assert_eq!(version_name("All the Mods 10", &file("All the Mods 10-8.6.zip", "All the Mods 10-8.6")), "8.6");
+        // A file name without a version: the display name's.
+        assert_eq!(version_name("All the Mods 10", &file("pack.zip", "All the Mods 10-8.6")), "8.6");
     }
 }

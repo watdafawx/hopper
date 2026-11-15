@@ -154,7 +154,6 @@ pub struct GroupMerged {
     pub merged: groupsync::Merged,
 }
 
-/// The newest waiting code's number, which a failed try is kept against.
 /// A pack version from the group that couldn't go in (see
 /// `Store::pack_due_ready`): why, when, the pack file the instance was on
 /// and the newest code waiting then.
@@ -169,6 +168,11 @@ pub struct PackDue {
 /// tried again by itself.
 const PACK_RETRY: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// How soon a group pack version that waited for the game looks again
+/// once the game seems closed.
+const GAME_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The newest waiting code's number, which a failed try is kept against.
 fn newest_waiting(c: &PackCopy) -> String {
     c.waiting.values().map(|g| g.seq).max().unwrap_or(0).to_string()
 }
@@ -1099,6 +1103,22 @@ impl Store {
         (inst.pack.as_ref().map_or(0, |p| p.file_id) == d.file).then_some(&d.due)
     }
 
+    /// "Try again" on a group pack version whose update failed: tried now
+    /// instead of after the wait. The notice stays up meanwhile.
+    pub fn retry_group_pack(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let Some(id) = self.instance(root).map(|i| i.id.clone()) else { return };
+        if let Some(d) = self.group_pack_due.get_mut(&id) {
+            d.at = Instant::now().checked_sub(PACK_RETRY).unwrap_or(d.at);
+        }
+        self.follow_tick(cx);
+        cx.notify();
+    }
+
+    /// The group pack version at `root` is being tried right now.
+    pub fn group_pack_trying(&self, root: &Path) -> bool {
+        self.instance(root).is_some_and(|i| self.group_merging.contains(&i.id))
+    }
+
     /// Whether a group copy may take in its members' changes now, when
     /// the pack version they moved to couldn't go in last time: the game
     /// closed, the player updated the pack (from the notice), another code
@@ -1112,7 +1132,9 @@ impl Store {
             return true;
         }
         match &d.due.wait {
-            Wait::Game => self.running(root).is_none(),
+            // The merge looks at the processes itself, so it can see a game
+            // the store's map doesn't list yet: not every tick, then.
+            Wait::Game => self.running(root).is_none() && now.duration_since(d.at) >= GAME_RECHECK,
             Wait::Pick => false,
             Wait::Failed(_) => now.duration_since(d.at) >= PACK_RETRY,
         }
