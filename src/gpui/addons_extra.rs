@@ -1567,14 +1567,14 @@ impl AddonsView {
     }
 
     /// Named sets of disabled mods to switch between.
-    pub(crate) fn profiles_button(&self, inst: &Instance, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn profiles_button(&self, inst: &Instance, icon_only: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let names: Vec<String> = inst.mod_profiles.iter().map(|p| p.name.clone()).collect();
         let view = cx.entity();
         Button::new("profiles")
             .small()
             .outline()
             .icon(IconName::Layers)
-            .label("Profiles")
+            .map(|b| if icon_only { b.tooltip("Profiles") } else { b.label("Profiles") })
             .dropdown_caret(true)
             .dropdown_menu(move |menu, window, cx| {
                 let mut menu = menu.label("Switch which mods are enabled");

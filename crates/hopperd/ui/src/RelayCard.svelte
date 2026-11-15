@@ -89,14 +89,14 @@
 {#if r?.relayed}
   <div class="card relay">
     <h3>
-      <Globe size={14} />Relay through a VPS
+      <Globe size={14} /><span class="t">Relay through a VPS</span>
       {#if up}<span class="pill running"><span class="glow"></span>Connected</span>
       {:else if r.state === 'connecting'}<span class="pill starting"><span class="glow"></span>Connecting</span>
       {:else if r.state === 'off'}<span class="pill">Off</span>
       {:else}<span class="pill crashed"><span class="glow"></span>Not connected</span>{/if}
       <span class="sp"></span>
-      {#if up}<span class="tiny muted">since {clock(r.since)}{#if r.rtt_ms != null} · {r.rtt_ms < 1 ? 'under 1' : r.rtt_ms} ms to the relay{/if}</span>
-      {:else if r.state === 'down' && r.retry_in != null}<span class="tiny muted">{r.retry_in > 0 ? `trying again in ${r.retry_in} s` : 'trying again now'}</span>{/if}
+      {#if up}{@const when = `since ${clock(r.since)}${r.rtt_ms != null ? ` · ${r.rtt_ms < 1 ? 'under 1' : r.rtt_ms} ms to the relay` : ''}`}<span class="tiny muted when" title={when}>{when}</span>
+      {:else if r.state === 'down' && r.retry_in != null}<span class="tiny muted when">{r.retry_in > 0 ? `trying again in ${r.retry_in} s` : 'trying again now'}</span>{/if}
       {#if onSetup}<button class="btn ghost sm icon" title="Relay setup: check, repair or remove it" aria-label="Relay setup" onclick={onSetup}><Settings2 size={14} /></button>{/if}
     </h3>
     {#if r.address}
@@ -131,7 +131,13 @@
 
 <style>
   .relay { margin-bottom: 12px; flex: none; }
-  h3 { flex-wrap: wrap; }
+  /* One line at any width: the status text gives way (ellipsis) before the
+     title, the pill or the settings button move. */
+  h3 { flex-wrap: nowrap; min-width: 0; }
+  h3 > :global(*) { flex: none; }
+  h3 .t { white-space: nowrap; }
+  h3 .sp { flex: 1 1 0; min-width: 0; }
+  h3 .when { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sp { flex: 1; }
   .lbl { margin-bottom: 4px; }
   .addr { display: flex; align-items: center; gap: 8px; background: var(--base); border: 1px solid var(--line2); border-radius: var(--radius); padding: 6px 6px 6px 10px; }

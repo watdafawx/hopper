@@ -31,6 +31,42 @@ pub struct Hero {
     /// (value, label) figures, shown in one box over the actions.
     pub stats: Vec<(String, String)>,
     pub actions: Div,
+    /// Fits the pills and the actions to the room the page has (see
+    /// [`HeroFit`]); without it they keep their full width.
+    pub fit: Option<HeroFit>,
+}
+
+/// How a hero shrinks when its page is narrow (a side panel open, a small
+/// window): the pills past the first few fold into a "+N" pill, and the
+/// actions step through the page's own levels (`actions_max` of them,
+/// see `widgets::Fit`). The name column keeps [`TITLE_MIN`] for itself.
+pub struct HeroFit {
+    pub pills: widgets::Fit,
+    /// The pills' labels, for the "+N" pill's tooltip.
+    pub pill_names: Vec<SharedString>,
+    pub actions: widgets::Fit,
+    pub actions_max: usize,
+    /// A key for the actions' content (`widgets::fit_key`).
+    pub actions_key: u64,
+    /// The main facts' texts (Minecraft, loader, version): the name column
+    /// keeps room for them and the name before the actions get any.
+    pub facts: Vec<String>,
+    pub view: EntityId,
+}
+
+/// The name column's narrowest width in rem: the actions give way before
+/// the name goes below it.
+pub const TITLE_MIN: f32 = 12.;
+
+/// The room in rem the name column asks for before the actions give way:
+/// the whole name and the main facts on one line, within reason (a very
+/// long name still ellipsizes rather than pushing every action into ⋯).
+/// Estimated from the texts, a little generous.
+pub fn name_room(title: &str, facts: &[String]) -> f32 {
+    let title = title.chars().count() as f32 * 0.95;
+    let facts: f32 = facts.iter().map(|f| f.chars().count() as f32 * 0.5 + 1.5).sum::<f32>()
+        + facts.len().saturating_sub(1) as f32;
+    title.max(facts).clamp(TITLE_MIN, 28.)
 }
 
 /// One fact under a hero's title: a colored icon and its text.
@@ -43,13 +79,16 @@ pub fn fact(icon: IconName, color: Hsla, text: impl Into<SharedString>) -> Div {
 }
 
 /// A quieter fact (author, downloads, address): icon and text both muted.
+/// Last in the row, it ellipsizes when the row runs out of room instead of
+/// being cut mid-word.
 pub fn soft_fact(icon: IconName, text: impl Into<SharedString>, cx: &App) -> Div {
     h_flex()
-        .flex_none()
+        .flex_shrink(1.)
+        .min_w_0()
         .gap_1p5()
         .text_color(cx.theme().muted_foreground)
-        .child(Icon::new(icon).xsmall())
-        .child(text.into())
+        .child(Icon::new(icon).xsmall().flex_none())
+        .child(div().min_w_0().truncate().child(text.into()))
 }
 
 /// The facts row a hero's facts go in.
@@ -67,6 +106,38 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
     let glass = widgets::glass(cx);
     let dark = theme.mode.is_dark();
     let taller = h.summary.is_some();
+    let fit = h.fit;
+    let title_min = fit.as_ref().map_or(TITLE_MIN, |f| name_room(h.title.as_ref(), &f.facts));
+    // Pills that don't fit fold into "+N", which names them on hover.
+    let pills: AnyElement = match &fit {
+        Some(f) => {
+            let n = h.pills.len();
+            let max = n.saturating_sub(1);
+            let hidden = f.pills.level().min(max);
+            let rest: Vec<SharedString> = f.pill_names.iter().skip(n - hidden).cloned().collect();
+            let key = widgets::fit_key(f.pill_names.iter().map(|s| s.as_ref()));
+            f.pills
+                .wrap(
+                    "hero-pills",
+                    h_flex()
+                        .gap_1p5()
+                        .children(h.pills.into_iter().take(n - hidden))
+                        .when(hidden > 0, |r| {
+                            let tip: SharedString = rest.join(", ").into();
+                            r.child(
+                                widgets::pill(format!("+{hidden}"), theme.muted_foreground, false)
+                                    .id("hero-pills-more")
+                                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)),
+                            )
+                        }),
+                    max,
+                    key,
+                    f.view,
+                )
+                .into_any_element()
+        }
+        None => h_flex().gap_1p5().flex_wrap().children(h.pills).into_any_element(),
+    };
     let fx = crate::hero_drift::backdrop(h.art.as_deref(), h.title.as_ref(), cx);
 
     // The art: large, rounded, lifted off the backdrop.
@@ -123,9 +194,9 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
         .child(
             v_flex()
                 .flex_1()
-                .min_w_0()
+                .min_w(rems(title_min))
                 .gap_1p5()
-                .child(h_flex().gap_1p5().flex_wrap().children(h.pills))
+                .child(pills)
                 .child(
                     div()
                         .text_size(rems(1.65))
@@ -137,7 +208,16 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
                 .child(h.facts)
                 .children(h.summary),
         )
-        .child(v_flex().flex_none().items_end().gap_3().children(stats).child(h.actions));
+        .child(v_flex().flex_none().items_end().gap_3().children(stats).child(match &fit {
+            Some(f) => f
+                .actions
+                .wrap("hero-actions", h.actions, f.actions_max, f.actions_key, f.view)
+                .into_any_element(),
+            None => h.actions.into_any_element(),
+        }))
+        // The room the actions may take: the row less its padding, the art,
+        // the gaps and the name column's minimum.
+        .when_some(fit.as_ref(), |r, f| r.child(f.actions.room_probe(1.5 * 2. + 6.5 + 1.25 * 2. + title_min, f.actions_max, f.view)));
 
     let backdrop = backdrop(h.blur, fx, cx);
 

@@ -635,22 +635,28 @@ impl ServerControl {
 
     /// The state and the buttons, for the server's header.
     pub fn controls(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.controls_in(false, false, cx)
+        self.controls_in(false, false, false, cx)
     }
 
     /// For the Servers page's header: full-size buttons, Start green like
     /// Play, and no state chip (the header has the state pill).
     pub fn controls_hero(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.controls_in(false, true, cx)
+        self.controls_in(false, true, false, cx)
+    }
+
+    /// The header's, for a narrow page: Stop and Restart as icons.
+    pub fn controls_hero_compact(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.controls_in(false, true, true, cx)
     }
 
     /// The same, narrow: Stop and Restart as icons with tooltips, for a
     /// side column.
     pub fn controls_compact(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.controls_in(true, false, cx)
+        self.controls_in(true, false, true, cx)
     }
 
-    fn controls_in(&self, compact: bool, hero: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// `icons`: Stop and Restart without their words (named on hover).
+    fn controls_in(&self, compact: bool, hero: bool, icons: bool, cx: &mut Context<Self>) -> AnyElement {
         let size = move |b: Button| if hero { b } else { b.small() };
         let theme = cx.theme().clone();
         let pname = self.panel_name(cx);
@@ -726,7 +732,7 @@ impl ServerControl {
                         size(Button::new("panel-stop"))
                             .outline()
                             .icon(IconName::Square)
-                            .map(|b| if compact { b.tooltip("Stop") } else { b.label("Stop") })
+                            .map(|b| if icons { b.tooltip("Stop") } else { b.label("Stop") })
                             .disabled(busy.is_some())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.request(PanelAction::Stop, window, cx)
@@ -736,7 +742,7 @@ impl ServerControl {
                         size(Button::new("panel-restart"))
                             .outline()
                             .icon(IconName::RotateCcw)
-                            .map(|b| if compact { b.tooltip("Restart") } else { b.label("Restart") })
+                            .map(|b| if icons { b.tooltip("Restart") } else { b.label("Restart") })
                             .disabled(busy.is_some())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.request(PanelAction::Restart, window, cx)
