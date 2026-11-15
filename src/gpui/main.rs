@@ -295,7 +295,18 @@ fn init_logging() {
         b.parse_filters(&spec);
     }
     b.format(|buf, r| {
-        let text = hopper::applog::line(&hopper::time::log_stamp(), r.level(), r.target(), &r.args().to_string());
+        // GPUI's `log_err` leaves the target empty for crates outside its
+        // own repo, which made "RefCell already borrowed" untraceable: name
+        // the file and line instead.
+        let at;
+        let target = match (r.target(), r.file(), r.line()) {
+            ("", Some(file), Some(line)) => {
+                at = format!("{}:{line}", source_short(file));
+                at.as_str()
+            }
+            (t, _, _) => t,
+        };
+        let text = hopper::applog::line(&hopper::time::log_stamp(), r.level(), target, &r.args().to_string());
         buf.write_all(text.as_bytes())
     });
     b.target(env_logger::Target::Pipe(Box::new(hopper::applog::Pipe)));
@@ -308,6 +319,27 @@ fn init_logging() {
         log::error!("panic at {at}: {}", info.payload_as_str().unwrap_or("no message"));
         previous(info);
     }));
+}
+
+/// `crate-1.2.3/src/file.rs` from a source path anywhere on disk (a
+/// registry checkout, a git checkout, a build machine's folder).
+fn source_short(file: &str) -> String {
+    let file = file.replace('\\', "/");
+    match file.rsplit_once("/src/") {
+        Some((head, tail)) => format!("{}/src/{tail}", head.rsplit('/').next().unwrap_or(head)),
+        None => file,
+    }
+}
+
+#[cfg(test)]
+mod log_target_tests {
+    #[test]
+    fn source_short_keeps_crate_and_file() {
+        let reg = r"C:\Users\a\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gpui-pre-0.3.9\src\window.rs";
+        assert_eq!(super::source_short(reg), "gpui-pre-0.3.9/src/window.rs");
+        assert_eq!(super::source_short("/home/a/gpui/src/app/async_context.rs"), "gpui/src/app/async_context.rs");
+        assert_eq!(super::source_short("build.rs"), "build.rs");
+    }
 }
 
 /// CF_API_KEY and friends: `.env` next to the exe, the working dir, then
