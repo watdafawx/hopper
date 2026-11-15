@@ -24,7 +24,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::groupsync::Kind;
 use hopper::instances::Instance;
-use hopper::mailbox::{Event, Friend, Group};
+use hopper::mailbox::{Event, Friend, Group, Met};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -83,11 +83,12 @@ enum Page {
     Packs,
 }
 
-/// Someone in the Friends list: a friend, or someone who shares a pack
-/// through a group without being one. `packs` leaves out what's listed
-/// under a group.
+/// Someone in the Friends list: a friend, a member of a group you joined, or
+/// someone who shares a pack with you directly. `packs` leaves out what's
+/// listed under a group.
 struct Person {
     friend: Option<Friend>,
+    met: Met,
     id: String,
     name: String,
     packs: Vec<Event>,
@@ -961,8 +962,12 @@ impl FriendsPanel {
         hopper::mailbox::everyone(&s.mailbox_id(), s.mailbox_friends(), recipes, groups, down)
             .into_iter()
             .map(|p| {
-                let or = if p.friend.is_some() { "A friend" } else { "A group member" };
-                Person { name: name_or(&p.name, or), id: p.id, friend: p.friend, packs: p.packs }
+                let or = match p.met {
+                    Met::Friend => "A friend",
+                    Met::Group => "A group member",
+                    Met::Pack => "Someone",
+                };
+                Person { name: name_or(&p.name, or), id: p.id, friend: p.friend, met: p.met, packs: p.packs }
             })
             .collect()
     }
@@ -1021,7 +1026,7 @@ impl FriendsPanel {
             1 => "1 pack".to_string(),
             n => format!("{n} packs"),
         };
-        let sub = format!("{} · {packs}", status(p.friend.as_ref(), down));
+        let sub = format!("{} · {packs}", status(p.friend.as_ref(), p.met, down));
         // As their page's New section counts: changed since the page was
         // last open, and not followed (those show under Following).
         let s = self.store.read(cx);
@@ -1089,7 +1094,7 @@ impl FriendsPanel {
     fn friend_page(&mut self, p: &Person, down: bool, window: &mut Window, cx: &mut Context<Self>) -> (Option<AnyElement>, AnyElement) {
         let theme = cx.theme().clone();
         let n = p.packs.len();
-        let mut sub = status(p.friend.as_ref(), down);
+        let mut sub = status(p.friend.as_ref(), p.met, down);
         if p.friend.is_some() {
             sub += &match self.gets(&p.id, cx) {
                 0 => " · gets none of your packs".to_string(),
@@ -2373,8 +2378,8 @@ impl FriendsPanel {
         (Some(top), self.everyone(&people, &recipes, down, window, cx))
     }
 
-    /// Everyone: online friends, then offline ones, then people met only
-    /// through a group. Searching narrows them and adds the packs that match.
+    /// Everyone: online friends, then offline ones, then members of your
+    /// groups, then people who only share a pack with you. Searching narrows them and adds the packs that match.
     fn everyone(&mut self, people: &[Person], recipes: &[Event], down: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let s = self.store.read(cx);
         let has_friends = people.iter().any(|p| p.friend.is_some());
@@ -2387,11 +2392,13 @@ impl FriendsPanel {
         let mut on_rows = Vec::new();
         let mut off_rows = Vec::new();
         let mut other_rows = Vec::new();
+        let mut sharer_rows = Vec::new();
         for (i, p) in people.iter().enumerate().filter(|(_, p)| hits(&p.name, &words)) {
             let row = self.friend_row(i, p, &words, down, window, cx);
             match &p.friend {
                 Some(f) if f.online && !down => on_rows.push(row),
                 Some(_) => off_rows.push(row),
+                None if p.met == Met::Pack => sharer_rows.push(row),
                 None => other_rows.push(row),
             }
         }
@@ -2408,7 +2415,7 @@ impl FriendsPanel {
             }
         }
         let _ = recipes;
-        let nothing = !words.is_empty() && on_rows.is_empty() && off_rows.is_empty() && other_rows.is_empty() && pack_hits.is_empty();
+        let nothing = !words.is_empty() && on_rows.is_empty() && off_rows.is_empty() && other_rows.is_empty() && sharer_rows.is_empty() && pack_hits.is_empty();
         let groups_here = self.store.read(cx).mailbox_groups().iter().any(|g| g.me.joined);
         v_flex()
             .pb_2()
@@ -2418,6 +2425,7 @@ impl FriendsPanel {
             .when(!on_rows.is_empty(), |c| c.child(cap("Online", Some(on_rows.len()), None, cx)).children(on_rows))
             .when(!off_rows.is_empty(), |c| c.child(cap("Offline", Some(off_rows.len()), None, cx)).children(off_rows))
             .when(!other_rows.is_empty(), |c| c.child(cap("In your groups", Some(other_rows.len()), None, cx)).children(other_rows))
+            .when(!sharer_rows.is_empty(), |c| c.child(cap("Sharing with you", Some(sharer_rows.len()), None, cx)).children(sharer_rows))
             .when(!pack_hits.is_empty(), |c| c.child(cap("Packs", Some(pack_hits.len()), None, cx)).children(pack_hits))
             .when(nothing, |c| c.child(div().px_3().py_3().child(widgets::fine_print(format!("Nothing matches \u{201c}{q}\u{201d}."), cx))))
             .when(words.is_empty() && has_friends, |c| {
@@ -2732,13 +2740,16 @@ fn or_line(cx: &App) -> Div {
 
 /// Whether a friend is online. With the service out of reach "online" is
 /// stale, so it says when they were last seen instead.
-fn status(f: Option<&Friend>, down: bool) -> String {
+/// For someone who isn't a friend it says how they got on the list: in a
+/// group with you, or just sharing a pack (they're not in any group of yours).
+fn status(f: Option<&Friend>, met: Met, down: bool) -> String {
     match f {
         Some(f) if f.online && !down => "Online".to_string(),
         Some(f) if down && f.last_seen == 0 => "Online status unknown".to_string(),
         Some(f) if f.last_seen > 0 => format!("Last online {}", ago(f.last_seen)),
         Some(_) => "Offline".to_string(),
-        None => "In a group with you".to_string(),
+        None if met == Met::Group => "In a group with you".to_string(),
+        None => "Not a friend yet".to_string(),
     }
 }
 
@@ -2751,7 +2762,7 @@ fn member_status(m: &hopper::mailbox::GroupMember, you: bool, friend: Option<&Fr
         return String::new();
     }
     match friend {
-        Some(f) => status(Some(f), down),
+        Some(f) => status(Some(f), Met::Friend, down),
         None => String::new(),
     }
 }
@@ -3897,6 +3908,14 @@ mod tests {
         assert_eq!(member_status(&m, true, Some(&f), false), "");
         let invited = hopper::mailbox::GroupMember { joined: false, ..m.clone() };
         assert_eq!(member_status(&invited, false, Some(&f), false), "");
+    }
+
+    #[::core::prelude::v1::test]
+    fn non_friends_say_how_you_met() {
+        assert_eq!(status(None, Met::Group, false), "In a group with you");
+        assert_eq!(status(None, Met::Pack, false), "Not a friend yet");
+        let f = Friend { id: "b".into(), online: true, ..Default::default() };
+        assert_eq!(status(Some(&f), Met::Friend, false), "Online");
     }
 
     #[::core::prelude::v1::test]
