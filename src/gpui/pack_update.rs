@@ -189,9 +189,6 @@ pub struct UpdatePreview {
     /// Instance mode: the comparison job, while it runs (the button shows
     /// its progress).
     plan_job: Option<u64>,
-    /// Instance mode, once Update was clicked: the job the button follows,
-    /// and whether it's the update itself (not the snapshot before it).
-    update: Option<(u64, bool)>,
     /// The summary line whose list is open.
     section: Option<Section>,
     /// The open list's filter tab, and (What stays) which tab.
@@ -264,7 +261,6 @@ impl UpdatePreview {
             clean: false,
             file: None,
             plan_job: None,
-            update: None,
             section: None,
             filter: 0,
             folders: HashSet::new(),
@@ -767,24 +763,12 @@ impl UpdatePreview {
 
     /// Instance mode: the same, for "Update" (or "Reinstall").
     fn instance_footer(&self, cx: &App) -> (&'static str, AnyElement) {
-        let (icon, go, done) = if self.reinstall {
-            (IconName::RotateCcw, "Reinstall", "Reinstalled")
+        let (icon, go) = if self.reinstall {
+            (IconName::RotateCcw, "Reinstall")
         } else {
-            (IconName::Download, "Update", "Updated")
+            (IconName::Download, "Update")
         };
         let jobs = |id| self.store.read(cx).job_state(id);
-        match self.update {
-            // The snapshot before the update: the update starts after it.
-            Some((id, false)) => {
-                let label = match jobs(id) {
-                    Some(j) if !j.done => widgets::job_label(&j.detail, j.progress),
-                    _ => "Starting the update".into(),
-                };
-                return ("Close", busy_button("upd-go", icon, label, None, cx));
-            }
-            Some((id, true)) => return ("Close", job_button("upd-go", icon, jobs(id).as_ref(), done, cx)),
-            None => {}
-        }
         match &self.plan {
             Some(Ok(_)) => ("Cancel", go_button("upd-go", icon, go).into_any_element()),
             Some(Err(_)) => ("Cancel", go_button("upd-go", icon, go).disabled(true).into_any_element()),
@@ -830,8 +814,9 @@ impl UpdatePreview {
         cx.notify();
     }
 
-    /// Starts the update; the dialog stays open on its progress (closing
-    /// it doesn't stop the update). Returns whether the dialog may close.
+    /// Starts the update in the background and closes the dialog, as for
+    /// an instance: Tasks and a toast at the end follow it. A dialog opened
+    /// again while it runs shows its progress.
     fn apply_server(view: &Entity<Self>, cx: &mut App) -> bool {
         let v = view.read(cx);
         let Some(t) = &v.server else { return false };
@@ -858,12 +843,16 @@ impl UpdatePreview {
         let host = s.settings().server_host.clone();
         let java = hopper::launch::installer_java(std::path::Path::new(&s.settings().launcher_dir));
         let panel = hopper::panel::for_server(s.settings(), &server);
+        let (shown_root, to_v) = (shown.server.root.clone(), hopper::undo::version_of(&p.plan.file.file_name));
         let id = s.spawn_job_id(format!("{} → {}", server.name, p.plan.file.display_name), move |job| {
             job.announce();
+            let to = hopper::undo::version_of(&p.plan.file.file_name);
+            job.toast(format!("{} updated to {to}", server.name), format!("{} didn't update", server.name));
             let r = hopper::server_pack_update::apply(&server, &p, &take, &host, &java, panel.as_deref(), job);
             applying(|m| m.remove(&job.id()));
             let r = r?;
             job.detail(r.summary());
+            job.toast_body(format!("{}.", r.summary().trim_end_matches('.')), None);
             if let Some(b) = &r.backups {
                 job.note(format!("Replaced and removed files: {}", b.display()));
             }
@@ -885,6 +874,7 @@ impl UpdatePreview {
             }
             Ok(crate::store::Msg::ServersChanged)
         });
+        s.note_pack_job(&shown_root, id, to_v);
         applying(|m| m.insert(id, ServerTarget { apply: Some(id), ..shown }));
         view.update(cx, |v, cx| {
             if let Some(t) = v.server.as_mut() {
@@ -892,7 +882,7 @@ impl UpdatePreview {
             }
             v.follow_apply(cx);
         });
-        false
+        true
     }
 
     /// Server mode: redraws while the update runs.
@@ -1343,14 +1333,10 @@ impl UpdatePreview {
         cx.notify();
     }
 
-    /// Starts the update; the dialog stays open on its progress (closing
-    /// it doesn't stop the update). Returns whether the dialog may close.
+    /// Starts the update in the background and closes the dialog: Tasks,
+    /// the instance's row and a toast at the end follow it.
     fn apply(view: &Entity<Self>, cx: &mut App) -> bool {
         let v = view.read(cx);
-        // Already started: the button only closes once it's done.
-        if let Some((id, real)) = v.update {
-            return real && v.store.read(cx).job_state(id).is_none_or(|j| j.done);
-        }
         let Some(Ok(plan)) = &v.plan else {
             return false;
         };
@@ -1364,6 +1350,14 @@ impl UpdatePreview {
         };
         let (store, root, file) = (v.store.clone(), v.root.clone(), plan.file.clone());
         let backup = v.backup_worlds;
+        // The done toast says how many of the player's edits stayed, as
+        // the summary's "pack files you changed: kept" counted them.
+        let kept = if v.clean { 0 } else { v.edited_kept(plan) };
+        let kept = match kept {
+            0 => String::new(),
+            1 => "1 of your edits was kept.".to_string(),
+            n => format!("{n} of your edits were kept."),
+        };
         if let Ok(mut g) = REVIEWS.lock()
             && let Some(m) = g.as_mut()
         {
@@ -1371,23 +1365,26 @@ impl UpdatePreview {
         }
         // No automatic snapshot: backups are the user's to make. Replaced
         // files still go to .hopper-backups.
-        let id = store.update(cx, |s, cx| {
-            let id = s.update_pack(&root, file, Some(overrides), backup);
-            cx.notify();
-            id
-        });
-        // The dialog follows the update (if still open).
-        view.update(cx, |v, cx| {
-            match id {
-                Some(id) => {
-                    v.update = Some((id, true));
-                    v.redraw_while(id, cx);
-                }
-                None => v.update = None,
-            }
+        // The update runs in the background: Tasks, the instance's row and
+        // a toast at the end follow it, so the dialog closes now.
+        store.update(cx, |s, cx| {
+            s.update_pack(&root, file, Some(overrides), backup, kept);
             cx.notify();
         });
-        false
+        true
+    }
+
+    /// Pack files the player edited that the update keeps (their copy, a
+    /// file the pack dropped, or a conflict settled their way).
+    fn edited_kept(&self, plan: &UpdatePlan) -> usize {
+        plan.files
+            .iter()
+            .filter(|f| match f.action {
+                FileAction::KeepYours | FileAction::KeepDropped => true,
+                FileAction::Conflict => !self.take.contains(&f.rel),
+                _ => false,
+            })
+            .count()
     }
 
     /// Opens a summary line's list (closing any other), or closes it.
@@ -2628,7 +2625,7 @@ impl Render for UpdatePreview {
                     _ => self.from.clone(),
                 };
                 // The choice is fixed once the update runs.
-                let bar = (self.update.is_none() && self.server.as_ref().is_none_or(|t| t.apply.is_none()))
+                let bar = (self.server.as_ref().is_none_or(|t| t.apply.is_none()))
                     .then(|| self.mode_bar(cx));
                 (!caption.is_empty() || bar.is_some()).then(|| {
                     h_flex()
@@ -2770,7 +2767,7 @@ pub fn switch(store: Entity<Store>, root: PathBuf, file: cf::File, window: &mut 
                 Ok(p) => {
                     let overrides = p.clean_decisions();
                     store.update(cx, |s, cx| {
-                        s.update_pack(&root, file, Some(overrides), false);
+                        s.update_pack(&root, file, Some(overrides), false, String::new());
                         cx.notify();
                     });
                 }

@@ -224,6 +224,9 @@ pub fn repair(inst: &Instance, job: &Job) -> anyhow::Result<usize> {
         return Ok(fixed);
     }
     let files = cf::get_files(&missing.iter().map(|a| a.file_id).collect::<Vec<_>>())?;
+    // Files whose authors only allow website downloads: listed as pending,
+    // so Hopper's download window gets them, as for installs and updates.
+    let mut website = Vec::new();
     for (i, a) in missing.iter().enumerate() {
         job.progress(i, missing.len());
         let Some(f) = files.iter().find(|f| f.id == a.file_id) else {
@@ -235,13 +238,26 @@ pub fn repair(inst: &Instance, job: &Job) -> anyhow::Result<usize> {
                 cf::download(&url, &inst.addon_path(a), |_| {})?;
                 fixed += 1;
             }
-            Err(_) => job.note(format!(
-                "{} — download by hand: {}/download/{}",
-                a.name,
-                a.page.trim_end_matches('/'),
-                a.file_id
-            )),
+            Err(_) => {
+                let expect = f.expect();
+                website.push(crate::modpack::Pending {
+                    name: a.name.clone(),
+                    file_name: a.file_name.clone(),
+                    folder: a.folder().to_string(),
+                    project_id: a.project_id,
+                    file_id: a.file_id,
+                    url: format!("{}/download/{}", a.page.trim_end_matches('/'), a.file_id),
+                    reason: "The author only allows downloads from the CurseForge website".into(),
+                    size: expect.len,
+                    sha1: expect.sha1,
+                    addon: Some((*a).clone()),
+                    replaces: String::new(),
+                });
+            }
         }
+    }
+    if !website.is_empty() {
+        crate::modpack::add_pending(&inst.root, &website)?;
     }
     Ok(fixed)
 }

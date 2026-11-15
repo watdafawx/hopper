@@ -39,6 +39,67 @@ pub struct JobState {
     /// What a running job is on right now, shown on a line of its own
     /// under the detail: a mod by name (with its icon) and how far it is.
     pub item: Option<JobItem>,
+    /// Shown in the app when it ends, whether or not the app is in front
+    /// (see [`Job::toast`]).
+    pub toast: Option<Toast>,
+}
+
+/// What a job's end says in the app's corner (see [`Job::toast`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Toast {
+    /// The title when it worked: "TNP Limitless 8 updated to 1.80.0".
+    pub done: String,
+    /// The title when it failed: "TNP Limitless 8 didn't update".
+    pub failed: String,
+    /// The line under a done one ("15 of your edits were kept."), or empty.
+    pub body: String,
+    /// The instance whose website-only files a Retry gets again.
+    pub root: Option<std::path::PathBuf>,
+}
+
+/// How a finished job's toast looks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastKind {
+    Done,
+    /// Done, but files from the CurseForge website are missing.
+    Missing,
+    Failed,
+}
+
+/// The toast a job that ended shows: kind, title and body. `None` while it
+/// runs, when it asked for none, or when the player cancelled it.
+pub fn toast_of(j: &JobState) -> Option<(ToastKind, String, String)> {
+    let t = j.toast.as_ref().filter(|_| j.done && !j.cancelled)?;
+    if let Some(e) = &j.error {
+        return Some((ToastKind::Failed, t.failed.clone(), e.clone()));
+    }
+    let mut body = vec![t.body.clone()];
+    let kind = match (j.waited, j.waits_failed) {
+        (0, _) => ToastKind::Done,
+        (1, 0) => {
+            body.push("1 file came from the CurseForge website.".into());
+            ToastKind::Done
+        }
+        (n, 0) => {
+            body.push(format!("{n} files came from the CurseForge website."));
+            ToastKind::Done
+        }
+        (1, _) => {
+            body.push("The file from the CurseForge website didn't download.".into());
+            ToastKind::Missing
+        }
+        // "2 of 2 didn't download" reads like a sum; say "none of them".
+        (n, f) if f >= n => {
+            body.push(format!("None of the {n} files from the CurseForge website downloaded."));
+            ToastKind::Missing
+        }
+        (n, f) => {
+            body.push(format!("{f} of {n} files from the CurseForge website didn't download."));
+            ToastKind::Missing
+        }
+    };
+    let body = body.into_iter().filter(|b| !b.is_empty()).collect::<Vec<_>>().join(" ");
+    Some((kind, t.done.clone(), body))
 }
 
 /// The thing a running job is busy with (see [`Job::item`]).
@@ -121,6 +182,7 @@ impl Jobs {
             presence: None,
             cancelled: false,
             item: None,
+            toast: None,
         });
         drop(g);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -317,6 +379,38 @@ impl Job {
         self.jobs.update(self.id, |j| j.announce = true);
     }
 
+    /// Shows a toast in the app when it ends: `done` or `failed` as the
+    /// title. Called again, it replaces the titles and keeps the body.
+    pub fn toast(&self, done: impl Into<String>, failed: impl Into<String>) {
+        let (done, failed) = (done.into(), failed.into());
+        self.jobs.update(self.id, |j| {
+            let t = j.toast.get_or_insert_with(Toast::default);
+            t.done = done;
+            t.failed = failed;
+        });
+    }
+
+    /// Records website-only files the work waited for itself (rather than
+    /// through [`Job::wait_for`]): `n` in all, `failed` of them didn't come.
+    /// Its toast says so like any other.
+    pub fn waited(&self, n: usize, failed: usize) {
+        self.jobs.update(self.id, |j| {
+            j.waited = n;
+            j.waits_failed = failed;
+        });
+    }
+
+    /// The line under the toast when it worked, and the instance a Retry of
+    /// its website-only files goes to.
+    pub fn toast_body(&self, body: impl Into<String>, root: Option<std::path::PathBuf>) {
+        let body = body.into();
+        self.jobs.update(self.id, |j| {
+            let t = j.toast.get_or_insert_with(Toast::default);
+            t.body = body;
+            t.root = root;
+        });
+    }
+
     pub fn note(&self, n: impl Into<String>) {
         let n = n.into();
         self.jobs.update(self.id, |j| j.notes.push(n));
@@ -427,6 +521,48 @@ mod tests {
         bad.wait_for(&["c".into()]);
         bad.finish::<()>(&Err(anyhow::anyhow!("boom")));
         assert!(jobs.snapshot().iter().any(|j| j.title == "bad" && j.done));
+    }
+
+    #[test]
+    fn a_finished_job_says_how_it_went_in_its_toast() {
+        let jobs = Jobs::default();
+        let quiet = jobs.start("No toast");
+        quiet.finish(&anyhow::Ok(()));
+        assert_eq!(toast_of(&jobs.snapshot()[0]), None);
+
+        let job = jobs.start("Pack");
+        job.toast("Pack updated to 2", "Pack didn't update");
+        job.toast_body("15 of your edits were kept.", None);
+        assert_eq!(toast_of(&jobs.snapshot()[1]), None, "not while it runs");
+        job.wait_for(&["a".into(), "b".into()]);
+        job.finish(&anyhow::Ok(()));
+        jobs.settle("a", true);
+        jobs.settle("b", true);
+        assert_eq!(
+            toast_of(&jobs.snapshot()[1]),
+            Some((ToastKind::Done, "Pack updated to 2".into(), "15 of your edits were kept. 2 files came from the CurseForge website.".into()))
+        );
+
+        let missing = jobs.start("Missing");
+        missing.toast("M updated", "M didn't update");
+        missing.wait_for(&["c".into()]);
+        missing.finish(&anyhow::Ok(()));
+        jobs.settle("c", false);
+        assert_eq!(
+            toast_of(&jobs.snapshot()[2]),
+            Some((ToastKind::Missing, "M updated".into(), "The file from the CurseForge website didn't download.".into()))
+        );
+
+        let bad = jobs.start("Bad");
+        bad.toast("B updated", "B didn't update");
+        bad.finish::<()>(&Err(anyhow::anyhow!("connection reset")));
+        assert_eq!(toast_of(&jobs.snapshot()[3]), Some((ToastKind::Failed, "B didn't update".into(), "connection reset".into())));
+
+        let stopped = jobs.start("Stopped");
+        stopped.toast("S updated", "S didn't update");
+        stopped.cancel();
+        stopped.finish::<()>(&Err(anyhow::anyhow!("Cancelled")));
+        assert_eq!(toast_of(&jobs.snapshot()[4]), None, "the player stopped it");
     }
 
     #[test]

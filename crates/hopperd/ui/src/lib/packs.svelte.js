@@ -5,6 +5,10 @@ import { api } from './api.js';
 
 export const packUpdates = $state({ byId: {} });
 
+// Pack updates running per server id: { to, detail, progress }. The update
+// dialog closes on Update (as in desktop), so the server page shows these.
+export const packJobs = $state({ byId: {} });
+
 /** Reads every server's cached check (the panel checks stale ones in the background). */
 export async function refreshPackUpdates() {
   try {

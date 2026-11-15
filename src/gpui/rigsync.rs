@@ -1599,7 +1599,14 @@ impl SyncPanel {
                     widgets::caption("The same version as the pack.", cx).text_xs()
                 })
         });
+        // The update dialog closes on Update; the button follows the update.
+        let pack_job = self.store.read(cx).pack_job(&server.root);
         let pack_btn = cf_pack.then(|| {
+            if let Some((to, j)) = &pack_job {
+                let line = crate::library::pack_job_line(to, j);
+                let b = Button::new("server-pack-update").small().w_full().icon(IconName::Package).label(line.clone());
+                return widgets::busy_button(b, j.progress, cx).tooltip(format!("{line}. Tasks has the details"));
+            }
             let (server, inst) = (server.clone(), inst.clone());
             Button::new("server-pack-update")
                 .map(|b| if behind { b.primary() } else { b.outline() })

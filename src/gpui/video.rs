@@ -92,7 +92,7 @@ pub fn play(v: &Video, window: &mut Window, cx: &mut App) {
 
 /// The main window's handle, as the player's owner.
 #[cfg(windows)]
-fn hwnd(window: &Window) -> Option<isize> {
+pub(crate) fn hwnd(window: &Window) -> Option<isize> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     match HasWindowHandle::window_handle(window).ok()?.as_raw() {
         RawWindowHandle::Win32(h) => Some(h.hwnd.get()),

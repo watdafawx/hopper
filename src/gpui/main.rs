@@ -31,6 +31,7 @@ mod discord;
 mod drag_pick;
 mod files_changes;
 mod fetch_progress;
+mod job_toast;
 #[cfg(windows)]
 mod fetch_window;
 mod friends;
@@ -143,7 +144,8 @@ fn main() {
     if args.get(1).is_some_and(|a| a == "--fetch") && args.len() > 2 {
         let parallel = args[3..].iter().find_map(|a| a.strip_prefix("--parallel=")?.parse().ok()).unwrap_or(1);
         let urls = args[3..].iter().filter(|a| !a.starts_with("--")).cloned().collect();
-        std::process::exit(fetch_window::run(args[2].clone().into(), urls, parallel));
+        let look = fetch_window::Look::from_args(&args[3..]);
+        std::process::exit(fetch_window::run(args[2].clone().into(), urls, parallel, look));
     }
     // Website-only pack zips come through the same window, one at a time.
     #[cfg(windows)]

@@ -181,6 +181,8 @@ pub struct AppView {
     /// Jobs already reported, and servers already reported as crashed.
     told_jobs: std::collections::HashSet<u64>,
     told_crashes: std::collections::HashSet<std::path::PathBuf>,
+    /// File pages already said to wait for the player (see `job_toast::waiting`).
+    told_waits: std::collections::HashSet<String>,
     /// The Ctrl+K command palette, while open.
     pub(crate) palette: Option<crate::palette::Open>,
     /// Back and forward.
@@ -511,6 +513,7 @@ impl AppView {
             _save_bounds: None,
             told_jobs: Default::default(),
             told_crashes: Default::default(),
+            told_waits: Default::default(),
             palette: None,
             history: Default::default(),
             _auto_restart: None,
@@ -1154,11 +1157,19 @@ impl AppView {
         })
         .detach();
         self._subscriptions
-            .push(cx.observe_in(&self.store.clone(), window, |this, store, window, cx| {
+            .push(cx.observe_in(&self.store.clone(), window, |this, store_e, window, cx| {
                 let away = !window.is_window_active();
-                let store = store.read(cx);
+                let store = store_e.read(cx);
+                let mut ended = Vec::new();
                 for j in store.jobs().snapshot() {
-                    if j.done && this.told_jobs.insert(j.id) && away {
+                    if !(j.done && this.told_jobs.insert(j.id)) {
+                        continue;
+                    }
+                    // Work that went on after its dialog closed says how it ended.
+                    if j.toast.is_some() {
+                        ended.push(j.clone());
+                    }
+                    if away {
                         match &j.error {
                             Some(_) if j.cancelled => {}
                             Some(e) => crate::tray::notify(&j.title, e, true),
@@ -1169,6 +1180,14 @@ impl AppView {
                         }
                     }
                 }
+                let waits = store.fetches_waiting_on_player();
+                let waits: Vec<(String, String, String)> = waits
+                    .into_iter()
+                    .map(|(root, url, file)| {
+                        let inst = store.instance(&root).map(|i| i.name.clone()).unwrap_or_else(|| "Hopper".into());
+                        (inst, url, file)
+                    })
+                    .collect();
                 for s in store.servers() {
                     let crashed = store.panel_stats(&s.root).is_some_and(|p| p.crashed);
                     if crashed && this.told_crashes.insert(s.root.clone()) {
@@ -1176,6 +1195,19 @@ impl AppView {
                     } else if !crashed {
                         this.told_crashes.remove(&s.root);
                     }
+                }
+                for j in &ended {
+                    crate::job_toast::ended(&store_e, j, window, cx);
+                }
+                for (inst, url, file) in &waits {
+                    if this.told_waits.insert(url.clone()) {
+                        crate::job_toast::waiting(inst, url, file, window, cx);
+                    }
+                }
+                let gone: Vec<String> = this.told_waits.iter().filter(|u| !waits.iter().any(|w| &w.1 == *u)).cloned().collect();
+                for u in gone {
+                    this.told_waits.remove(&u);
+                    crate::job_toast::not_waiting(&u, window, cx);
                 }
             }));
     }
@@ -1576,6 +1608,7 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::frame_log::start();
         let _t = crate::frame_log::span("app.render");
+        crate::fetch_progress::follow_app(window, cx);
         // Cached: a page re-renders only when it (or what it reads) changes,
         // not on every frame of a dialog or spinner animating above it.
         // Browse and the Library cache their own columns instead (`part.rs`):
