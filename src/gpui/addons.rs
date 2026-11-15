@@ -4949,7 +4949,7 @@ Change version", a.file_name).into()
             .flex()
             .items_center()
             .gap_3()
-            .child(div().flex_1().text_sm().child(text))
+            .child(div().flex_1().min_w_0().text_sm().child(text))
             .child(Button::new("only-here-review").small().outline().label("Review").on_click(cx.listener(move |this, _, _, cx| {
                 this.selected = files.iter().cloned().collect();
                 cx.notify();
@@ -4984,7 +4984,7 @@ Change version", a.file_name).into()
             .flex()
             .items_center()
             .gap_3()
-            .child(div().flex_1().text_sm().child(text))
+            .child(div().flex_1().min_w_0().text_sm().child(text))
             .child(Button::new("client-on-show").small().outline().label("Show").on_click(cx.listener(|this, _, _, cx| {
                 this.show = Show::ClientOnly;
                 cx.notify();

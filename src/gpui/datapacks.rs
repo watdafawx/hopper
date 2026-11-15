@@ -446,7 +446,7 @@ impl AddonsView {
             .child(
                 h_flex()
                     .gap_3()
-                    .child(div().flex_1().text_sm().child(
+                    .child(div().flex_1().min_w_0().text_sm().child(
                         "Paxi loads data packs into every world, new ones included. Without it, each world has its own.",
                     ))
                     .child(

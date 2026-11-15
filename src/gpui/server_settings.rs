@@ -357,7 +357,7 @@ impl ServerSettings {
             return Field::new()
                 .label(spec.label)
                 .description(format!("{} Use variables like {{pack_version}} to keep it up to date.", spec.description))
-                .child(div().w_full().child(ed.clone()));
+                .child(div().w_full().min_w_0().child(ed.clone()));
         }
         let control: AnyElement = match spec.kind {
             PropKind::Bool => Switch::new(spec.key)

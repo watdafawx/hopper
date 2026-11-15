@@ -1369,7 +1369,7 @@ impl SettingsTab {
         let retry = a.wake.as_ref().map_or(0, |w| w.retry) as i64 * 60;
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         if let Some((by, at, why)) = a.failed.clone().filter(|(_, at, _)| self.sleep_on && self.wake_on && (retry == 0 || now < at + retry)) {
-            col = col.child(widgets::notice_bar(theme.danger, IconName::TriangleAlert, cx).child(div().flex_1().text_sm().child(format!(
+            col = col.child(widgets::notice_bar(theme.danger, IconName::TriangleAlert, cx).child(div().flex_1().min_w_0().text_sm().child(format!(
                 "{by} woke it {}, but it {why}. {}",
                 since(at),
                 if self.wake_retry > 0 { format!("Joining tries again {} min after that.", self.wake_retry) } else { "Joining won't start it again until you start it here.".into() }
@@ -1553,7 +1553,7 @@ impl SettingsTab {
                 .rounded(theme.radius)
                 .bg(theme.muted)
                 .child(Icon::new(IconName::Moon).small().text_color(theme.muted_foreground))
-                .child(div().flex_1().text_sm().child(text))
+                .child(div().flex_1().min_w_0().text_sm().child(text))
                 .child(Button::new("settings-sleep-goto").ghost().small().label("Change in General").on_click(cx.listener(move |this, _, _, cx| {
                     this.page = general;
                     cx.notify();
@@ -1576,7 +1576,7 @@ impl SettingsTab {
             col = col.child(
                 widgets::notice_bar(theme.warning, IconName::TriangleAlert, cx)
                     .child(
-                        div().flex_1().text_sm().child(format!(
+                        div().flex_1().min_w_0().text_sm().child(format!(
                             "This server uses port {}, the port players join on. Give it its own port so the router can take {}.",
                             a.port, a.port
                         )),
