@@ -1083,3 +1083,31 @@ fn gap_a_members_undo_then_another_change_reaches_the_sharer() {
     assert_eq!(pcs[0].mods[&6], (61, false), "B's later change landed on A");
     assert_eq!(pcs[0].mods[&4], (41, true), "A has B's undo too");
 }
+
+/// S21. A changes six mods while offline and closes Hopper before any try
+/// reaches the mailbox; later Hopper opens again, online. The six go out
+/// on the first publish after the start (the copy saved in settings still
+/// names the last code sent, so the difference is A's), and each member's
+/// rows name A.
+#[test]
+#[ignore = "starts relay/hopper_mailbox.py; run with --ignored"]
+fn s21_offline_changes_survive_closing_hopper() {
+    let relay = Relay::start();
+    let (_, mut pcs) = group_of(&relay, &["A", "B", "C"]);
+    pcs[0].offline();
+    six_changes(&mut pcs[0]);
+    // Hopper closed while still offline: nothing reached the mailbox.
+    pcs[0].restart();
+    assert_eq!(queued_from(&relay, &pcs[1], &pcs[0]), 1, "only A's first code is queued for B");
+    pcs[0].online();
+    pcs[0].tick();
+    assert!(pcs[0].merges.is_empty(), "the feed read from the start changes nothing on A");
+    assert_eq!(pcs[0].mods, after_six(), "A's own changes stay");
+    for i in 1..3 {
+        pcs[i].tick();
+        assert_eq!(pcs[i].mods, after_six(), "{} has all six", pcs[i].name);
+        assert_eq!(pcs[i].who(4), "Turned off by A");
+        assert_eq!(pcs[i].who(7), "Added by A");
+        assert_eq!(pcs[i].who(2), "Removed by A");
+    }
+}

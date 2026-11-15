@@ -985,6 +985,50 @@ impl Store {
         Some((r.error.as_str(), r.next.is_some()))
     }
 
+    /// Followed and group packs Hopper stopped updating by itself (the same
+    /// failure too many times), with one line each for the Friends panel:
+    /// (instance root, what happened).
+    pub fn given_up(&self) -> Vec<(PathBuf, String)> {
+        let mut out = Vec::new();
+        for c in &self.settings.group_copies {
+            let Some(r) = self.group_retry.get(&c.local).filter(|r| r.gave_up && !c.waiting.is_empty() && r.code == newest_waiting(c)) else { continue };
+            let Some(i) = self.instances.iter().find(|i| i.id == c.local) else { continue };
+            out.push((i.root.clone(), format!("Hopper stopped trying to update {} with the group's changes. {}", i.name, r.error)));
+        }
+        for (root, r) in &self.follow_retry {
+            let Some(f) = self.follow_at(root).filter(|f| r.gave_up && f.waiting() && r.code == f.seen) else { continue };
+            let name = self.instance(root).map(|i| i.name.clone()).unwrap_or_else(|| f.name.clone());
+            let who = if f.peer_name.is_empty() { "your friend" } else { &f.peer_name };
+            out.push((root.clone(), format!("Hopper stopped trying to update {name} with {who}'s changes. {}", r.error)));
+        }
+        out.extend(self.given_up_preview.iter().cloned());
+        out.sort_by(|a, b| a.1.cmp(&b.1));
+        out
+    }
+
+    /// `--dialog given-up`: a sample line for the Friends panel, to check
+    /// its layout without a pack that keeps failing. Try again clears it.
+    pub fn preview_given_up(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let t = "Hopper stopped trying to update Mia's Skyblock with the group's changes. The mod sites wouldn't give Hopper that file.";
+        self.given_up_preview = vec![(root, t.to_string())];
+        cx.notify();
+    }
+
+    /// "Try again" on a pack Hopper stopped updating by itself: its failed
+    /// tries are forgotten and it's tried now, as after a restart.
+    pub fn try_follow_again(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let r = match self.group_copy(root).map(|c| c.local.clone()) {
+            Some(local) => self.group_retry.remove(&local),
+            None => self.follow_retry.remove(root),
+        };
+        if let Some(r) = r {
+            self.jobs.dismiss(r.job);
+        }
+        self.given_up_preview.retain(|(p, _)| p != root);
+        self.follow_tick(cx);
+        cx.notify();
+    }
+
     /// Whether the follow at `root` is being updated now, or will be as
     /// soon as another task on it ends or its game finishes launching.
     pub fn follow_updating(&self, root: &Path) -> bool {
@@ -1337,6 +1381,12 @@ impl Store {
         if let Some(says) = merged.pack_done {
             cx.emit(StoreEvent::Notice(says, false));
         }
+        // Members' changes left out here (a locked mod): the player sees
+        // why their copy differs, once per change, in one notice per merge.
+        let kept: Vec<String> = merged.kept.iter().map(|k| k.says()).filter(|s| self.kept_said.insert(format!("{local}|{s}"))).collect();
+        if !kept.is_empty() {
+            cx.emit(StoreEvent::Notice(kept.join(" "), false));
+        }
         if merged.held {
             if self.group_held.get(&local).is_none_or(|(s, _)| *s != sent_seq) {
                 self.group_held.insert(local, (sent_seq, Instant::now()));
@@ -1662,24 +1712,42 @@ impl Store {
         self.keep_in_step(cx);
     }
 
-    /// For each group kept in step: every group pack a member follows is
-    /// followed here too, as a new instance, unless this PC already
-    /// follows it or stopped following it (`groupsync::to_follow`).
+    /// For each group kept in step: every group pack a member follows that
+    /// this PC hasn't followed, or said Not now to, is offered once with
+    /// Get / Not now (`groupsync::to_follow`). Nothing is downloaded until
+    /// the player says so: a whole modpack can be gigabytes.
     fn keep_in_step(&mut self, cx: &mut Context<Self>) {
-        // `auto_following` covers the minutes before the new instance
-        // exists; from then on the follow is in settings.
+        // `pack_offered` covers an offer still up (or closed) this run;
+        // `auto_following` the minutes before a new instance exists. From
+        // then on the follow is in settings, and Not now in `stopped`.
         let todo = groupsync::to_follow(&self.settings, &self.mailbox_groups, &self.mailbox_recipes, &self.mailbox_id(), |k| {
-            self.auto_following.contains(k)
+            self.auto_following.contains(k) || self.pack_offered.contains(k)
         });
-        for (e, gid, gname) in todo {
-            let req = FollowReq::of(&e);
-            self.auto_following.insert(format!("{}/{}", req.peer_id, req.inst));
-            cx.emit(StoreEvent::Notice(
-                format!("Following {}'s {}, so your packs stay the same as {gname}.", req.who(), req.pack()),
-                false,
-            ));
-            self.follow(req, FollowTarget::New, None, &gid, cx);
+        for (e, gid, _) in todo {
+            self.pack_offered.insert(format!("{}/{}", e.from, e.inst));
+            let mut req = FollowReq::of(&e);
+            if req.peer_name.is_empty() {
+                req.peer_name = self.friend_name(&e.from);
+            }
+            let text = format!("{} shared {}. Get it?", req.who(), req.pack());
+            cx.emit(StoreEvent::PackOffer { e: Box::new(e), group: gid, text });
         }
+    }
+
+    /// Not now on a new group pack's offer: it isn't offered again, as if
+    /// this PC had stopped following it.
+    pub fn not_now_pack(&mut self, from: &str, inst: &str, group: &str, cx: &mut Context<Self>) {
+        let key = format!("{from}/{inst}");
+        self.update_settings(
+            |st| {
+                for g in st.friend_groups.iter_mut().filter(|g| g.id == group) {
+                    if !g.stopped.contains(&key) {
+                        g.stopped.push(key.clone());
+                    }
+                }
+            },
+            cx,
+        );
     }
 
     /// Starts following. `skip`: the player's answer about mods from other
@@ -2441,7 +2509,10 @@ impl PublishWork {
                     log::warn!("sharing {}: {e:#}", inst.name);
                     out.failed = true;
                     // Out of reach: the waiting count and the panel say so.
-                    if mailbox::failure(&e) != mailbox::Failure::Unreachable {
+                    // Couldn't save is a 503 too, but the service did
+                    // answer: say that once, as it isn't the internet.
+                    let unsaved = e.downcast_ref::<mailbox::MailboxError>().is_some_and(|m| m.code == "save_failed");
+                    if unsaved || mailbox::failure(&e) != mailbox::Failure::Unreachable {
                         out.problems.push(format!("Couldn't send your changes to {}. {}", inst.name, mailbox::says(&e)));
                     }
                 }

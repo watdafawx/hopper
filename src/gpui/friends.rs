@@ -1757,7 +1757,7 @@ impl FriendsPanel {
                         .gap_0p5()
                         .child(div().text_sm().font_medium().child("Keep my packs the same as the group"))
                         .child(widgets::fine_print(
-                            "This PC gets the group's packs, and when anyone changes a mod in one, your copy changes too. Your other instances don't change.",
+                            "Hopper asks before getting a pack someone shares with the group. Once you have one, when anyone changes a mod in it, your copy changes too. Your other instances don't change.",
                             cx,
                         )),
                 )
@@ -2643,6 +2643,7 @@ impl Render for FriendsPanel {
         let groups: Vec<Group> = s.mailbox_groups().to_vec();
         let down = matches!(status, SyncStatus::Down(_));
         let unsent = s.unsent_line();
+        let given_up = s.given_up();
         let body: AnyElement = match &status {
             SyncStatus::Off => self.off(cx),
             SyncStatus::Connecting if !heard => {
@@ -2708,6 +2709,30 @@ impl Render for FriendsPanel {
                             ),
                         )
                     })
+                    // Packs Hopper stopped updating by itself: the player
+                    // can start it again. The button sits under the words so
+                    // they keep the panel's width.
+                    .children(given_up.into_iter().enumerate().map(|(i, (root, t))| {
+                        let store = self.store.clone();
+                        div().p_3().flex_none().child(
+                            widgets::notice_bar(theme.warning, IconName::TriangleAlert, cx).px_3().items_start().child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .child(div().text_sm().child(t))
+                                    .child(
+                                        h_flex().justify_end().child(
+                                            Button::new(("friends-try-again", i))
+                                                .small()
+                                                .outline()
+                                                .label("Try again")
+                                                .on_click(move |_, _, cx| store.update(cx, |s, cx| s.try_follow_again(&root, cx))),
+                                        ),
+                                    ),
+                            ),
+                        )
+                    }))
                     .children(top)
                     .child(div().id(scroll_id).flex_1().min_h_0().overflow_y_scrollbar().child(content));
                 h_flex().size_full().items_start().child(self.rail(&groups, cx)).child(main).into_any_element()
@@ -3244,7 +3269,7 @@ impl Render for GroupForm {
                     .gap_1()
                     .when(matches!(self.mode, GroupMode::New), |c| {
                         c.child(widgets::fine_print(
-                            "A group shares packs with several friends at once. Turn on \u{201c}Keep my packs the same as the group\u{201d} and this PC follows every pack someone in the group follows.",
+                            "A group shares packs with several friends at once. Turn on \u{201c}Keep my packs the same as the group\u{201d} and Hopper offers you every pack someone in the group shares.",
                             cx,
                         ))
                     })
@@ -3898,7 +3923,7 @@ fn name_or(name: &str, or: &str) -> String {
 
 /// A friend's pack's icon and CurseForge project, when an instance here is
 /// the same pack (the code names the pack; its icon isn't sent).
-fn pack_look(s: &Store, code: &str) -> (Option<PathBuf>, u64) {
+pub(crate) fn pack_look(s: &Store, code: &str) -> (Option<PathBuf>, u64) {
     let Ok(share) = hopper::sharecode::decode(code) else { return (None, 0) };
     let hopper::sharecode::Base::Curse { project, .. } = share.base else { return (None, 0) };
     let icon = s

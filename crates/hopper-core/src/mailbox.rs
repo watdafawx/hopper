@@ -315,6 +315,18 @@ pub fn says(e: &anyhow::Error) -> String {
 /// Said while Hopper can't reach the friends service at all.
 pub const CANT_CONNECT: &str = "Can't connect right now. We'll keep trying.";
 
+/// Said when the service took a change but couldn't save it.
+pub const SAVE_FAILED: &str = "Friends couldn't save your change just now. Hopper sends it again by itself.";
+
+/// Whether a failed call is worth trying again by itself: no answer, the
+/// service busy or down for a moment, or it couldn't save the change.
+/// Anything else (full, not allowed, a used-up code) fails the same way
+/// again.
+pub fn retryable(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<MailboxError>()
+        .is_some_and(|m| m.status == 0 || (500..600).contains(&m.status) || matches!(m.code.as_str(), "save_failed" | "busy" | "internal"))
+}
+
 const SOMETHING_WRONG: &str = "Something went wrong with Friends. Try again in a few minutes.";
 
 /// Plain sentences for the service's other answers.
@@ -327,6 +339,9 @@ fn says_code(code: &str) -> Option<&'static str> {
         "groups_full" => "You're in as many groups as Hopper allows. Leave or delete one first.",
         "group_packs_full" => "This group has as many packs as it can hold. Stop sharing one first.",
         "owner_leaves" => "You made this group, so you can't leave it. Delete it instead.",
+        // The change reached the service but its disk said no; that passes
+        // by itself, and Hopper sends the change again.
+        "save_failed" => SAVE_FAILED,
         _ => return None,
     })
 }
@@ -1166,6 +1181,10 @@ mod tests {
         assert_eq!(says(&err(403, "")), SOMETHING_WRONG);
         assert_eq!(says(&err(503, "busy")), SOMETHING_WRONG);
         assert_eq!(says(&err(429, "rate_limited")), "Too many tries. Wait a minute, then try again.");
+        // Couldn't save: said plainly, and worth trying again by itself.
+        assert_eq!(says(&err(503, "save_failed")), SAVE_FAILED);
+        assert!(retryable(&err(503, "save_failed")) && retryable(&err(0, "")) && retryable(&err(502, "")));
+        assert!(!retryable(&err(409, "storage_full")) && !retryable(&err(403, "")) && !retryable(&anyhow::anyhow!("x")));
         assert_eq!(
             says(&err(409, "owner_leaves")),
             "You made this group, so you can't leave it. Delete it instead."
@@ -1173,7 +1192,7 @@ mod tests {
         // Hopper's own errors already read as sentences.
         assert_eq!(says(&anyhow::anyhow!("The pack folder is gone")), "The pack folder is gone");
         let words = ["relay", "mailbox", "sync service", "token", "429", "409"];
-        for code in ["busy", "internal", "storage_full", "rate_limited", "too_large", "group_full", "groups_full", "group_packs_full", "owner_leaves", "friends_full", "their_friends_full", "invite_unknown", "needs_update", "invites_full", ""] {
+        for code in ["busy", "internal", "storage_full", "rate_limited", "too_large", "group_full", "groups_full", "group_packs_full", "owner_leaves", "friends_full", "their_friends_full", "invite_unknown", "needs_update", "invites_full", "save_failed", ""] {
             let said = says(&err(409, code)).to_lowercase();
             assert!(!words.iter().any(|w| said.contains(w)), "{code}: {said}");
         }

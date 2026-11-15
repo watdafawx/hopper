@@ -272,6 +272,11 @@ pub const SLOW_RETRY: Duration = Duration::from_secs(300);
 
 /// Whether `e` is the kind of failure that ends by itself.
 fn passes(e: &anyhow::Error) -> bool {
+    // The friends service down for a moment, or it couldn't save: its
+    // message doesn't carry the status, so ask the error itself.
+    if crate::mailbox::retryable(e) {
+        return true;
+    }
     let all = format!("{e:#}").to_lowercase();
     let words = ["dns", "connect", "timed out", "timeout", "network", "unreachable", "connection", "files open", "503", "502", "504", "500 "];
     words.iter().any(|w| all.contains(w))
@@ -665,7 +670,10 @@ mod tests {
     #[test]
     fn a_failure_that_passes_by_itself_is_tried_slowly_not_given_up() {
         let t0 = Instant::now();
-        for e in [anyhow::anyhow!("dns error: no such host"), anyhow::anyhow!("Another program has this instance's files open.")] {
+        let unsaved = || -> anyhow::Error {
+            crate::mailbox::MailboxError { status: 503, code: "save_failed".into(), message: "could not save that; try again".into() }.into()
+        };
+        for e in [anyhow::anyhow!("dns error: no such host"), anyhow::anyhow!("Another program has this instance's files open."), unsaved()] {
             let mut r = Retry::failed(None, "HOP-1", &e, 1, t0);
             for n in 2..=GIVE_UP_AFTER + 3 {
                 r = Retry::failed(Some(&r), "HOP-1", &e, n as u64, t0);
