@@ -302,6 +302,31 @@ pub fn place_downloads(inst: &mut Instance, dir: &Path) -> anyhow::Result<Vec<St
     Ok(placed)
 }
 
+/// Puts the instance's pending files in place from `dirs` as they land,
+/// until none is left or `still_coming` says the rest won't come (the
+/// download window gave up on them, or the player closed it). For work
+/// that needs those files before it goes on: a server that updates with
+/// its instance must get the website-only mods too. Returns the files
+/// still missing.
+pub fn place_fetched(
+    inst: &mut Instance,
+    dirs: &[PathBuf],
+    still_coming: &dyn Fn(&[Pending]) -> bool,
+    job: &Job,
+    tick: Duration,
+) -> anyhow::Result<Vec<Pending>> {
+    loop {
+        for d in dirs {
+            place_downloads(inst, d)?;
+        }
+        let left = pending_downloads(inst);
+        if left.is_empty() || job.is_cancelled() || !still_coming(&left) {
+            return Ok(left);
+        }
+        std::thread::sleep(tick);
+    }
+}
+
 /// Moves the old file a loose pending file replaces (see
 /// [`Pending::replaces`]) into the instance's backups, once the new one is
 /// in its folder. Nothing to do when it has the new file's name (just
@@ -2467,6 +2492,52 @@ mod tests {
         assert!(pending_downloads(&inst).is_empty());
         assert_eq!(inst.addons.len(), 1);
         assert_eq!(inst.addons[0].project_id, 42);
+        fs::remove_dir_all(&t).unwrap();
+    }
+
+    /// Work that needs the website-only files (a server updating with its
+    /// instance) waits until each lands and is in place, and stops waiting
+    /// once the rest won't come.
+    #[test]
+    fn waits_for_fetched_files_then_goes_on() {
+        let t = std::env::temp_dir().join(format!("hopper-fetched-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&t);
+        let (dl, root) = (t.join("fetched"), t.join("inst"));
+        fs::create_dir_all(&dl).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        let pending = |n: &str, body: &[u8]| Pending {
+            name: n.into(),
+            file_name: format!("{n}.jar"),
+            folder: "mods".into(),
+            size: body.len() as u64,
+            sha1: crate::modrinth::sha1(body),
+            ..Default::default()
+        };
+        let (a, b) = (b"aaa".to_vec(), b"bbbb".to_vec());
+        add_pending(&root, &[pending("a", &a), pending("b", &b)]).unwrap();
+        let mut inst = Instance { root: root.clone(), name: "t".into(), ..Default::default() };
+        let job = crate::jobs::Jobs::default().start("t");
+        // The window saves one file per look, as it would over a minute.
+        let looks = std::cell::Cell::new(0);
+        let saves = |left: &[Pending]| {
+            looks.set(looks.get() + 1);
+            match looks.get() {
+                1 => fs::write(dl.join("a.jar"), &a).unwrap(),
+                2 => fs::write(dl.join("b.jar"), &b).unwrap(),
+                _ => {}
+            }
+            !left.is_empty()
+        };
+        let left = place_fetched(&mut inst, &[dl.clone()], &saves, &job, Duration::ZERO).unwrap();
+        assert!(left.is_empty());
+        assert_eq!(fs::read(root.join("mods/a.jar")).unwrap(), a);
+        assert_eq!(fs::read(root.join("mods/b.jar")).unwrap(), b);
+
+        // A file the window gave up on: no endless wait, and it's still listed.
+        add_pending(&root, &[pending("c", b"c")]).unwrap();
+        let left = place_fetched(&mut inst, &[dl.clone()], &|_| false, &job, Duration::ZERO).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].file_name, "c.jar");
         fs::remove_dir_all(&t).unwrap();
     }
 

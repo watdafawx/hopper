@@ -9,6 +9,11 @@
 //! loop. Exit code: 0 every file came, 1 some didn't, 2 no WebView2.
 //! Each step goes to stdout as a [`hopper::webfetch::Event`] line, so the
 //! app can show the player what it's waiting for.
+//!
+//! `--bg=RRGGBB` paints the window and its pages in the app's theme before
+//! a page draws (no white flash), and `--behind=HWND` opens it just behind
+//! the app's window without taking focus: players asked that it stop
+//! jumping in front. The app says when a page needs them.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -78,7 +83,27 @@ fn bounds(window: &Window, i: usize, n: usize) -> Rect {
     }
 }
 
-pub fn run(dir: PathBuf, urls: Vec<String>, parallel: usize) -> i32 {
+/// How the app wants the window to look and sit (see the module doc).
+#[derive(Clone, Copy, Default)]
+pub struct Look {
+    pub bg: Option<(u8, u8, u8)>,
+    pub behind: Option<isize>,
+}
+
+impl Look {
+    /// `--bg=RRGGBB` and `--behind=HWND` among `args`.
+    pub fn from_args(args: &[String]) -> Look {
+        let bg = args.iter().find_map(|a| {
+            let h = a.strip_prefix("--bg=")?;
+            let v = u32::from_str_radix(h, 16).ok().filter(|_| h.len() == 6)?;
+            Some(((v >> 16) as u8, (v >> 8) as u8, v as u8))
+        });
+        let behind = args.iter().find_map(|a| a.strip_prefix("--behind=")?.parse().ok()).filter(|h| *h != 0);
+        Look { bg, behind }
+    }
+}
+
+pub fn run(dir: PathBuf, urls: Vec<String>, parallel: usize, look: Look) -> i32 {
     if urls.is_empty() {
         return 0;
     }
@@ -98,11 +123,16 @@ pub fn run(dir: PathBuf, urls: Vec<String>, parallel: usize) -> i32 {
     let event_loop = EventLoopBuilder::<Ev>::with_user_event().build();
     let proxy = event_loop.create_proxy();
     let size = if k == 1 { LogicalSize::new(960.0, 680.0) } else { LogicalSize::new(1280.0, 860.0) };
-    let mut builder = WindowBuilder::new().with_title(title(0)).with_inner_size(size);
-    // A test run (`HOPPER_TEST_WINDOW=1`): off the primary monitor and not
-    // taking the keyboard. The env var comes from the app that started us.
+    // Hidden until it sits behind the app; never takes focus (the player
+    // may be typing in Hopper or playing).
+    let mut builder =
+        WindowBuilder::new().with_title(title(0)).with_inner_size(size).with_visible(false).with_focused(false);
+    if let Some((r, g, b)) = look.bg {
+        builder = builder.with_background_color((r, g, b, 255));
+    }
+    // A test run (`HOPPER_TEST_WINDOW=1`): off the primary monitor. The env
+    // var comes from the app that started us.
     if crate::test_window() {
-        builder = builder.with_focused(false);
         let primary = event_loop.primary_monitor();
         if let Some(m) = event_loop.available_monitors().find(|m| Some(m) != primary.as_ref()) {
             let p = m.position();
@@ -112,6 +142,10 @@ pub fn run(dir: PathBuf, urls: Vec<String>, parallel: usize) -> i32 {
     let Ok(window) = builder.build(&event_loop) else {
         return 2;
     };
+    behind(&window, look.behind);
+    window.set_visible(true);
+    // Showing it can lift it; put it back under the app.
+    behind(&window, look.behind);
     say(Say::Window(window.hwnd() as i64));
     // Cookies (Cloudflare's clearance) kept between runs, not next to the exe.
     let data = hopper::paths::dirs().map(|d| d.data_dir().join("webview"));
@@ -119,7 +153,11 @@ pub fn run(dir: PathBuf, urls: Vec<String>, parallel: usize) -> i32 {
     let slots: Vec<Rc<Slot>> = (0..k).map(|_| Rc::new(Slot::default())).collect();
     let mut views: Vec<WebView> = Vec::with_capacity(k);
     for (si, slot) in slots.iter().enumerate() {
-        let builder = WebViewBuilder::new_with_web_context(&mut context)
+        let mut builder = WebViewBuilder::new_with_web_context(&mut context).with_focused(false);
+        if let Some((r, g, b)) = look.bg {
+            builder = builder.with_background_color((r, g, b, 255));
+        }
+        let builder = builder
             .with_url("about:blank")
             // Cloudflare's check page is "Just a moment..."; CurseForge's own
             // page counts down to the download.
@@ -324,5 +362,24 @@ mod tests {
         assert_eq!(super::grid(4), (2, 2));
         assert_eq!(super::grid(5), (3, 2));
         assert_eq!(super::grid(8), (3, 3));
+    }
+}
+
+/// Puts `window` just under the app's window `owner` in the stack, without
+/// activating either, so it opens behind Hopper rather than over it.
+fn behind(window: &Window, owner: Option<isize>) {
+    let Some(owner) = owner else { return };
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos};
+    unsafe {
+        let _ = SetWindowPos(
+            HWND(window.hwnd() as *mut _),
+            Some(HWND(owner as *mut _)),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
 }

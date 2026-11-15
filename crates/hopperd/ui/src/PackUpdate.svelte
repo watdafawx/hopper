@@ -12,6 +12,7 @@
   import { onMount, onDestroy, untrack } from 'svelte';
   import { api, post } from './lib/api.js';
   import { followJob } from './lib/jobs.js';
+  import { packJobs } from './lib/packs.svelte.js';
   import { say } from './lib/toast.svelte.js';
   import { ago } from './lib/browse.js';
   import { plural } from './lib/worlds.js';
@@ -363,20 +364,39 @@
   }
 
   // ---- updating ----
+  // Closes on Update and runs in the background, as in desktop: the server
+  // page shows how far it got and a toast says how it ended.
   async function update() {
     planErr = '';
     applying = { detail: 'Starting', progress: null };
+    const id = server.id, name = server.name;
+    const to = target?.name || plan?.server_pack || '';
+    let job;
     try {
-      const { job } = await post(`${base}/pack/apply`, { plan_id: plan.plan, take: [...take], keep: [...keep], reset_versions: resetVersions });
-      result = await followJob(job, (st) => (applying = st));
-      say(`${server.name} is on ${result.version}. Old files are in backups.`);
-      onDone();
+      ({ job } = await post(`${base}/pack/apply`, { plan_id: plan.plan, take: [...take], keep: [...keep], reset_versions: resetVersions }));
     } catch (e) {
       // The plan is used up either way: prepare it again.
-      say(e.message, true);
-      prepare();
-    } finally {
       applying = null;
+      say(`${name} didn't update: ${e.message}`, true);
+      prepare();
+      return;
+    }
+    packJobs.byId = { ...packJobs.byId, [id]: { to, detail: 'Starting', progress: null } };
+    onClose();
+    const done = () => {
+      const { [id]: _, ...rest } = packJobs.byId;
+      packJobs.byId = rest;
+    };
+    try {
+      const r = await followJob(job, (st) => {
+        if (packJobs.byId[id]) packJobs.byId = { ...packJobs.byId, [id]: { to, detail: st.detail, progress: st.progress } };
+      });
+      done();
+      say(`${name} updated to ${r.version}. ${String(r.summary || '').replace(/\.$/, '')}.`);
+      onDone();
+    } catch (e) {
+      done();
+      say(`${name} didn't update: ${e.message}`, true);
     }
   }
 

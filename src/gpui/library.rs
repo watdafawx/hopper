@@ -1513,6 +1513,11 @@ impl LibraryView {
         {
             sub.push_str(&format!(" · v{}", p.version));
         }
+        // A pack update runs behind its closed dialog: the row says how far.
+        let pack_job = store.pack_job(root).map(|(to, j)| {
+            sub = pack_job_line(&to, &j);
+            j.progress
+        });
         let name = inst.name.clone();
         let theme = cx.theme();
         let group: SharedString = format!("row:{}", root.display()).into();
@@ -1594,9 +1599,20 @@ impl LibraryView {
             .child(thumb)
             .child(
                 v_flex()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .gap_0p5()
+                    // In the row's padding, so the row keeps its height.
+                    .when_some(pack_job, |d, p| {
+                        d.child(
+                            div().absolute().left_0().right_0().bottom_neg_1().child(
+                                gpui_kit::component::progress::Progress::new(id("row-pack-bar", root))
+                                    .xsmall()
+                                    .value(p.unwrap_or(0.0) * 100.0),
+                            ),
+                        )
+                    })
                     .child(
                         h_flex()
                             .gap_2()
@@ -1676,13 +1692,22 @@ impl LibraryView {
         let store = self.store.read(cx);
         if let Some(full) = store.instance(root).cloned() {
             store.spawn_instance_job(&full.root.clone(), format!("Repairing {}", full.name), move |job| {
+                job.toast(format!("{} repaired", full.name), format!("{} couldn't be repaired", full.name));
                 let n = hopper::instance_ops::repair(&full, job)?;
-                job.detail(if n == 0 {
-                    "Nothing was missing".into()
-                } else {
-                    format!("Restored {n} files")
-                });
-                Ok(Msg::InstanceChanged(full.root.clone()))
+                // Website-only files it found missing: the download window
+                // gets them, as for installs and updates.
+                let pages = hopper::modpack::pending_urls_at(&full.root);
+                let text = match (n, pages.len()) {
+                    (0, 0) => "Nothing was missing".to_string(),
+                    (n, 0) => format!("Restored {}", hopper::words::count(n, "file")),
+                    (n, w) => format!("Restored {}, getting {} from the CurseForge website", hopper::words::count(n, "file"), hopper::words::count(w, "file")),
+                };
+                job.toast_body(format!("{text}."), Some(full.root.clone()));
+                job.detail(text);
+                if pages.is_empty() {
+                    return Ok(Msg::InstanceChanged(full.root.clone()));
+                }
+                Ok(Msg::Updated(full.root.clone(), Vec::new(), pages, None))
             });
         }
     }
@@ -2040,6 +2065,22 @@ impl LibraryView {
                     },
                     cx,
                 ))
+        });
+        // While its update runs (the dialog closed on Update) the button
+        // shows how far it got, as Tasks does.
+        let pack_update = pack_update.or_else(|| {
+            let (to, j) = store.pack_job(&root)?;
+            let full = pack_job_line(&to, &j);
+            key_parts.push(full.clone());
+            let label = match (lv, j.progress) {
+                (0, _) => full.clone(),
+                (_, Some(p)) => format!("{}%", (p.clamp(0.0, 1.0) * 100.0).floor() as u32),
+                (_, None) => "Updating".into(),
+            };
+            let b = Button::new("update-pack-busy").outline().icon(IconName::Download).label(label);
+            Some(h_flex().gap_1().child(
+                widgets::busy_button(b, j.progress, cx).tooltip(format!("{full}. Tasks has the details")),
+            ))
         });
         // The paired server: its name and a state dot (green running, grey
         // stopped, red when its last start crashed). The name opens the
@@ -3657,4 +3698,17 @@ fn instance_menu(
         .disabled(playing || launcher.is_some())
         .on_click(move |_, window, cx| crate::dialogs::confirm_delete(s.clone(), r.clone(), window, cx))
     })
+}
+
+/// A running pack update in a line: "Updating to 1.80.0 · 66%", or what
+/// it waits on ("Updating to 1.80.0 · getting 2 files from CurseForge").
+pub(crate) fn pack_job_line(to: &str, j: &hopper::jobs::JobState) -> String {
+    let what = if to.is_empty() { "Updating".to_string() } else { format!("Updating to {to}") };
+    if j.detail.contains("CurseForge website") {
+        return format!("{what} · getting files from CurseForge");
+    }
+    match j.progress {
+        Some(p) => format!("{what} · {}%", (p.clamp(0.0, 1.0) * 100.0).floor() as u32),
+        None => what,
+    }
 }

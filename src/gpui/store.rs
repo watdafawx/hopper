@@ -104,6 +104,9 @@ pub enum Msg {
     /// Projects updated, download pages to fetch, and the project whose
     /// install or update asked for them (its button shows their progress).
     Updated(PathBuf, Vec<u64>, Vec<String>, Option<u64>),
+    /// Download pages for the download window, from a job that waits for
+    /// them itself (instance, pages, the project that asked).
+    Fetch(PathBuf, Vec<String>, Option<u64>),
     Running(HashMap<PathBuf, Running>),
     /// Categories looked up for installed projects, by [`hopper::modmeta::key`].
     Categories(HashMap<String, Vec<String>>),
@@ -538,6 +541,10 @@ pub struct Store {
     /// Files the download window gets or got, with each one's step, for
     /// the buttons waiting on them ([`Store::fetch_view`]).
     fetching: Arc<Mutex<Vec<crate::fetch_progress::FetchFile>>>,
+    /// Running pack updates by instance or server folder: (job, version it
+    /// goes to). The update dialog closes on Update, so the row and header
+    /// show its progress instead ([`Store::pack_job`]).
+    pack_jobs: Arc<Mutex<HashMap<PathBuf, (u64, String)>>>,
     /// Image URLs waiting for the download workers.
     image_queue: Arc<(std::sync::Mutex<ImageQueue>, std::sync::Condvar)>,
     /// Hopper's own update, once checked.
@@ -780,6 +787,7 @@ impl Store {
             tr_tick: cx.new(|_| TrTick),
             fetch_queue: Default::default(),
             fetching: Default::default(),
+            pack_jobs: Default::default(),
             pending: HashMap::new(),
             local: Arc::new(hopper::hosting::LocalPanel::new()),
             making: Default::default(),
@@ -1200,6 +1208,7 @@ impl Store {
                 // names and sizes are known.
                 self.fetch_pages(&root, pages, by);
             }
+            Msg::Fetch(root, pages, by) => self.fetch_pages(&root, pages, by),
             Msg::Reidentified(root) => {
                 self.handle(Msg::InstanceChanged(root.clone()), cx);
                 self.check_updates(&root, true);
@@ -2891,6 +2900,7 @@ impl Store {
         file: hopper::cf::File,
         overrides: Option<hopper::modpack::Overrides>,
         backup_worlds: bool,
+        kept: String,
     ) -> Option<u64> {
         let Some(mut full) = self.instance(root).cloned() else {
             return None;
@@ -2899,6 +2909,7 @@ impl Store {
             return None;
         };
         self.pack_updates.remove(&pid);
+        let to = hopper::undo::version_of(&file.file_name);
         let server = self
             .server_of(root)
             .cloned()
@@ -2921,9 +2932,27 @@ impl Store {
         let dir = PathBuf::from(&self.settings.launcher_dir);
         let defaults = self.launch_defaults();
         let native = self.settings.launch_native;
+        let (fetching, wake) = (self.fetching.clone(), self.wake.clone());
         let id = self.spawn_instance_job_id(&full.root.clone(), format!("{} → {}", full.name, file.display_name), move |job| {
             job.announce();
             job.presence(full.name.clone(), true);
+            let name = full.name.clone();
+            let failed = format!("{name} didn't update");
+            // Named after the file the player picked, like the progress line:
+            // a pack's own version field is sometimes stale (Just Create SMP
+            // 0.4 calls itself 0.1.0). CurseForge file ids only grow, so a
+            // lower one is an older version.
+            let shown = hopper::undo::version_of(&file.file_name);
+            let shown = if shown.is_empty() { file.display_name.clone() } else { shown };
+            let was = full.pack.as_ref().map_or(0, |p| p.file_id);
+            let done = if file.id == was {
+                format!("{name} reinstalled at {shown}")
+            } else if file.id < was {
+                format!("{name} rolled back to {shown}")
+            } else {
+                format!("{name} updated to {shown}")
+            };
+            job.toast(done, failed);
             let loader_before = (full.loader.clone(), full.game_version.clone());
             if backup_worlds {
                 for w in hopper::instance_ops::worlds(&full) {
@@ -2945,6 +2974,7 @@ impl Store {
                 let _ = tx.send(Msg::RecheckPacks);
                 return Err(e);
             }
+            job.toast_body(kept, Some(full.root.clone()));
             // A new loader is installed now, not on the next Play.
             if (full.loader.clone(), full.game_version.clone()) != loader_before
                 && !full.loader.is_empty()
@@ -2956,20 +2986,59 @@ impl Store {
             if (full.loader.clone(), full.game_version.clone()) != loader_before && !cf_open {
                 sync_cf_loader(&mut full, job);
             }
+            // Website-only files the pack wants: the download window gets
+            // them, as for mod updates.
+            let mut pages = hopper::modpack::pending_urls_at(&full.root);
             if server_up && let Some(s) = &server {
                 job.note(format!("{} is running, so it wasn't updated. Stop it, then use Server sync.", s.name));
             } else if let Some(server) = server {
+                // The server gets the instance's mods: the website-only ones
+                // have to be in the instance first, or the server misses them.
+                if !pages.is_empty() {
+                    let _ = tx.send(Msg::Fetch(full.root.clone(), pages.clone(), Some(pid)));
+                    wake();
+                    let left = wait_for_fetched(&mut full, &fetching, job)?;
+                    job.waited(pages.len(), left.len());
+                    if !left.is_empty() {
+                        job.note(format!(
+                            "{} didn't get {} from the CurseForge website. Retry them from the instance's Mods tab, then use Server sync.",
+                            server.name,
+                            and_list(&left.iter().map(|p| p.name.clone()).collect::<Vec<_>>())
+                        ));
+                    }
+                    // Handled here: the files that didn't come stay on the
+                    // Mods tab with a Retry.
+                    pages.clear();
+                }
                 match hopper::server_update::update_server(&server, &full, &host, &anyway, &hidden, &java, panel.as_deref(), job) {
                     Ok(r) => job.note(format!("{}: {}", server.name, r.summary())),
                     Err(e) => job.note(format!("{} not updated: {e:#}", server.name)),
                 }
             }
-            // Website-only files the pack wants: the download window gets
-            // them, as for mod updates.
-            let pages = hopper::modpack::pending_urls_at(&full.root);
             Ok(Msg::Updated(full.root.clone(), Vec::new(), pages, Some(pid)))
         });
+        self.note_pack_job(root, id, to);
         Some(id)
+    }
+
+    /// Notes a pack update running on the instance or server at `root`,
+    /// going to version `to`.
+    pub fn note_pack_job(&self, root: &Path, id: u64, to: String) {
+        self.pack_jobs.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), (id, to));
+    }
+
+    /// The pack update running on `root`: the version it goes to and its
+    /// job. `None` once it ended (its toast says how).
+    pub fn pack_job(&self, root: &Path) -> Option<(String, hopper::jobs::JobState)> {
+        let mut m = self.pack_jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let (id, to) = m.get(root)?.clone();
+        match self.job_state(id).filter(|j| !j.done) {
+            Some(j) => Some((to, j)),
+            None => {
+                m.remove(root);
+                None
+            }
+        }
     }
 
     pub fn updates(&self, root: &Path) -> Option<&Updates> {
@@ -3329,6 +3398,17 @@ impl Store {
         let f = self.fetching.lock().unwrap_or_else(|e| e.into_inner());
         let mine: Vec<_> = f.iter().filter(|x| x.root == root).cloned().collect();
         (crate::fetch_progress::FetchView::of(&mine), mine)
+    }
+
+    /// Files whose page waits for the player to tick CurseForge's "not a
+    /// bot" box: (instance root, url, file name). The window sits behind
+    /// Hopper, so the app says so once per file.
+    pub fn fetches_waiting_on_player(&self) -> Vec<(PathBuf, String, String)> {
+        let f = self.fetching.lock().unwrap_or_else(|e| e.into_inner());
+        f.iter()
+            .filter(|x| x.step == hopper::webfetch::Step::Check)
+            .map(|x| (x.root.clone(), x.url.clone(), x.name.clone()))
+            .collect()
     }
 
     /// The player gets these files from their pages in the browser: the
@@ -4854,6 +4934,38 @@ fn apply_mc_options(
     if let Err(e) = hopper::mcoptions::apply_window(&inst.root, inst.settings.effective_window(window).mode, &mut inst.applied_options) {
         log::warn!("window setting for {}: {e:#}", inst.name);
     }
+}
+
+/// Puts the instance's website-only files in place as Hopper's download
+/// window saves them (the job holds the instance, so the download watcher
+/// leaves it alone), with the window's step as the job's detail. Gives up
+/// on files the window failed or that never turn up. Returns the ones
+/// still missing.
+fn wait_for_fetched(
+    inst: &mut hopper::instances::Instance,
+    fetching: &Arc<Mutex<Vec<crate::fetch_progress::FetchFile>>>,
+    job: &Job,
+) -> anyhow::Result<Vec<hopper::modpack::Pending>> {
+    use hopper::webfetch::Step;
+    let started = std::time::Instant::now();
+    let still = |left: &[hopper::modpack::Pending]| {
+        let f = fetching.lock().unwrap_or_else(|e| e.into_inner());
+        let mine: Vec<&crate::fetch_progress::FetchFile> = f.iter().filter(|x| left.iter().any(|p| p.url == x.url)).collect();
+        if let Some(v) = crate::fetch_progress::FetchView::of(mine.iter().copied()) {
+            job.detail(v.detail());
+            job.progress(v.done, v.total);
+        }
+        if mine.is_empty() {
+            // The window's queue hasn't picked them up yet (or there is no
+            // window and the browser has them): a short grace.
+            return started.elapsed() < Duration::from_secs(15);
+        }
+        mine.iter().any(|x| {
+            let s = x.shown_step();
+            s.is_open() || s == Step::Done
+        })
+    };
+    hopper::modpack::place_fetched(inst, &hopper::modpack::landing_dirs(), &still, job, Duration::from_secs(1))
 }
 
 fn prepare_loader(

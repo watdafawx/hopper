@@ -14,11 +14,29 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::webfetch::{Event, Step};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// The open download window's handle (0: none), for "Show window".
 static WINDOW: AtomicI64 = AtomicI64::new(0);
+
+/// The app's window, which the download window opens just behind (0: not
+/// known yet), and the theme's background as 0xRRGGBB (`u32::MAX`: not
+/// known yet). Kept current by [`follow_app`].
+static OWNER: AtomicI64 = AtomicI64::new(0);
+static BG: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// Notes the app's window and theme for the next download window. Called
+/// as the app draws, so a theme change reaches the next window.
+pub fn follow_app(window: &Window, cx: &App) {
+    #[cfg(windows)]
+    if let Some(h) = crate::video::hwnd(window) {
+        OWNER.store(h as i64, Ordering::Relaxed);
+    }
+    let c = Rgba::from(cx.theme().background);
+    let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    BG.store(ch(c.r) << 16 | ch(c.g) << 8 | ch(c.b), Ordering::Relaxed);
+}
 
 /// Redraws the app when the window opens, reports a step or closes (the
 /// title bar's chip and dialogs follow it). Set once by the store.
@@ -45,10 +63,21 @@ pub const PLACE_WITHIN: Duration = Duration::from_secs(30);
 pub fn run_window(dir: &Path, urls: &[String], parallel: usize, mut on: impl FnMut(Event)) -> Option<i32> {
     use std::io::BufRead;
     let exe = std::env::current_exe().ok()?;
-    let mut child = std::process::Command::new(exe)
-        .arg("--fetch")
-        .arg(dir)
-        .arg(format!("--parallel={parallel}"))
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--fetch").arg(dir).arg(format!("--parallel={parallel}"));
+    match BG.load(Ordering::Relaxed) {
+        u32::MAX => {}
+        bg => {
+            cmd.arg(format!("--bg={bg:06x}"));
+        }
+    }
+    match OWNER.load(Ordering::Relaxed) {
+        0 => {}
+        h => {
+            cmd.arg(format!("--behind={h}"));
+        }
+    }
+    let mut child = cmd
         .args(urls)
         .stdout(std::process::Stdio::piped())
         .spawn()
