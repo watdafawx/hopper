@@ -1039,7 +1039,7 @@ impl AddonsView {
                     .child(div().text_sm().font_medium().child("Off"))
                     .child(widgets::caption("Vanilla look, best FPS", cx).text_xs()),
             )
-            .when(self.action_fits(), |r| r.child(col_action(self.compact)))
+            .when(self.show_action(), |r| r.child(col_action(self.compact)))
             .children(self.spacer())
             .children(crate::addons::in_col_order(&self.col_order, {
                 use crate::addons::Col;
@@ -1055,7 +1055,7 @@ impl AddonsView {
                 }
                 cells
             }))
-            .child(col_trash())
+            .child(col_trash(self.cols.rm))
             .into_any_element()
     }
 

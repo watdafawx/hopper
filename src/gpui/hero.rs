@@ -48,6 +48,11 @@ pub struct HeroFit {
     pub actions_max: usize,
     /// A key for the actions' content (`widgets::fit_key`).
     pub actions_key: u64,
+    /// The figures' box over the actions, fitted to the same room: its
+    /// cells narrow, then the last figures go one at a time, then the box.
+    /// Without it a wide action row (an "Update pack to …") left the box
+    /// pushing the column past the hero's edge.
+    pub stats: widgets::Fit,
     /// The main facts' texts (Minecraft, loader, version): the name column
     /// keeps room for them and the name before the actions get any.
     pub facts: Vec<String>,
@@ -175,17 +180,26 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
         });
 
     let line = white().opacity(0.08);
-    let stats = (!h.stats.is_empty()).then(|| {
+    // The figures' levels: 0 as they are, 1 narrower cells, then one
+    // figure fewer per level, the last level none.
+    let n_stats = h.stats.len();
+    let stats_max = n_stats + 1;
+    let stats_key = widgets::fit_key(h.stats.iter().flat_map(|(v, l)| [v.as_str(), l.as_str()]));
+    let stats_lv = fit.as_ref().filter(|_| n_stats > 0).map_or(0, |f| f.stats.level().min(stats_max));
+    let tight = stats_lv >= 1;
+    let acts_last = fit.as_ref().is_some_and(|f| f.actions.level() > f.actions_max);
+    let keep_n = if stats_lv <= 1 { n_stats } else { n_stats.saturating_sub(stats_lv - 1) };
+    let stats = (keep_n > 0).then(|| {
         h_flex()
             .flex_none()
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(line)
             .bg(black().opacity(if dark { 0.3 } else { 0.08 }))
-            .children(h.stats.into_iter().enumerate().map(|(i, (v, l))| {
+            .children(h.stats.into_iter().take(keep_n).enumerate().map(|(i, (v, l))| {
                 v_flex()
-                    .min_w(rems(5.75))
-                    .px_4()
+                    .when(!tight, |c| c.min_w(rems(5.75)).px_4())
+                    .when(tight, |c| c.px_3())
                     .py_1p5()
                     .when(i > 0, |c| c.border_l_1().border_color(line))
                     .child(div().text_base().font_weight(FontWeight::BOLD).child(v))
@@ -225,17 +239,41 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
                 .child(h.facts)
                 .children(h.summary),
         )
-        .child(v_flex().flex_none().items_end().gap_3().children(stats).child(match &fit {
-            Some(f) => f
-                .actions
-                .wrap("hero-actions", h.actions, f.actions_max + 1, f.actions_key, f.view)
-                .into_any_element(),
-            None => h.actions.into_any_element(),
-        }))
+        .child(
+            v_flex()
+                // At the actions' last level they take the room they're
+                // given (a server's one-line note is cut short): the column
+                // gives way too, else it keeps their full width past the
+                // hero's edge.
+                .map(|c| if acts_last { c.flex_shrink(1.).min_w_0() } else { c.flex_none() })
+                .items_end()
+                .map(|c| match &fit {
+                    // The figures fit to the actions' room too; at their
+                    // last level the box is gone, the gap with it.
+                    Some(f) if n_stats > 0 => c.child(
+                        f.stats
+                            .wrap_end("hero-stats", h_flex().children(stats), stats_max, stats_key, f.view)
+                            .when(keep_n > 0, |d| d.mb_3()),
+                    ),
+                    _ => c.children(stats.map(|s| s.mb_3())),
+                })
+                .child(match &fit {
+                    Some(f) => f
+                        .actions
+                        .wrap("hero-actions", h.actions, f.actions_max + 1, f.actions_key, f.view)
+                        .into_any_element(),
+                    None => h.actions.into_any_element(),
+                }),
+        )
         // The room the actions may take: the row less its padding, the art,
         // the gaps and the room the name keeps (the same at every level, so
-        // the level a room settles on doesn't move the room).
-        .when_some(fit.as_ref(), |r, f| r.child(f.actions.room_probe(1.5 * 2. + 6.5 + 1.25 * 2. + keep, f.actions_max + 1, f.view)));
+        // the level a room settles on doesn't move the room). The figures
+        // get the same room.
+        .when_some(fit.as_ref(), |r, f| {
+            let minus = 1.5 * 2. + 6.5 + 1.25 * 2. + keep;
+            r.child(f.actions.room_probe(minus, f.actions_max + 1, f.view))
+                .when(n_stats > 0, |r| r.child(f.stats.room_probe(minus, stats_max, f.view)))
+        });
 
     let backdrop = backdrop(h.blur, fx, cx);
 

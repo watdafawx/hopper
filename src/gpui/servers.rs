@@ -1166,6 +1166,8 @@ pub struct ServersView {
     /// the page has (see `widgets::Fit`).
     hero_pills: widgets::Fit,
     hero_actions: widgets::Fit,
+    /// The figures box over the header actions (`hero::HeroFit::stats`).
+    hero_stats: widgets::Fit,
     tabs_fit: widgets::Fit,
     _subscriptions: Vec<Subscription>,
 }
@@ -1174,6 +1176,10 @@ pub struct ServersView {
 /// button without how it reaches the panel, 2 that button as its icon,
 /// 3 Stop and Restart as icons.
 const HEADER_FIT_MAX: usize = 3;
+/// The Mods table pads itself as on an instance's page, inside the server
+/// body's own padding: it's drawn this much wider on each side (rem) so its
+/// rows line up with the tabs and get the room an instance's rows get.
+const MODS_INSET: f32 = 1.5;
 
 /// The Sync tab's code (see [`tabs_for`]).
 pub const TAB_SYNC: usize = 5;
@@ -1403,6 +1409,7 @@ impl ServersView {
             detail_w: 80.0,
             hero_pills: Default::default(),
             hero_actions: Default::default(),
+            hero_stats: Default::default(),
             tabs_fit: Default::default(),
             _subscriptions: subs,
         };
@@ -2235,7 +2242,9 @@ impl ServersView {
             }
         };
         let actions = h_flex()
-            .flex_none()
+            // At the last level the row takes the room it's given: the
+            // status note gives way first (cut short, whole on hover).
+            .map(|r| if lv > HEADER_FIT_MAX { r.flex_shrink(1.).min_w_0() } else { r.flex_none() })
             .flex_nowrap()
             .gap_2()
             .child(self.control.update(cx, |c, cx| if lv >= 3 { c.controls_hero_compact(cx) } else { c.controls_hero(cx) }))
@@ -2259,6 +2268,7 @@ impl ServersView {
                     pills: self.hero_pills.clone(),
                     pill_names,
                     actions: self.hero_actions.clone(),
+                    stats: self.hero_stats.clone(),
                     actions_max: HEADER_FIT_MAX,
                     actions_key: widgets::fit_key(key_parts.iter().map(|s| s.as_str())),
                     facts: fact_texts,
@@ -2342,7 +2352,7 @@ impl ServersView {
                         _ => self.p_settings.clone().into_any_element(),
                     },
                 };
-                c.child(div().flex_1().min_h_0().child(body))
+                c.child(div().flex_1().min_h_0().when(self.tab == TAB_MODS, |d| d.mx(rems(-MODS_INSET))).child(body))
             })
             .when(self.tab == TAB_OVERVIEW, |c| {
                 let players = self.control.update(cx, |ctl, cx| ctl.players_view(cx));
@@ -2504,7 +2514,7 @@ impl ServersView {
             })
             .when(self.tab == TAB_MODS && !remote && self.mods_table_for(s, cx), |c| {
                 let area = self.mods_area(s, cx);
-                c.child(div().flex_1().min_h_0().child(area))
+                c.child(div().flex_1().min_h_0().mx(rems(-MODS_INSET)).child(area))
             })
             .when(self.tab == TAB_MODS && !remote && !self.mods_table_for(s, cx), |c| c.child(
                 v_flex()
@@ -2673,11 +2683,24 @@ impl Render for ServersView {
         }
         let view = cx.entity();
         let view2 = view.clone();
+        // The page keeps PAGE_MIN beside a docked mod page, as on Library:
+        // the mod page gives way first, down to its minimum, then the
+        // server list folds to its rail while the mod page is open.
+        let win = window.viewport_size().width / window.rem_size();
+        let docked = self.mods_peek(cx);
+        self.list_panel.fold_for(false);
+        let open = self.list_panel.layout(self.store.read(cx).settings(), window);
+        self.list_panel.fold_for(docked.is_some() && !open.collapsed && win - open.width - widgets::DOCK.min < widgets::PAGE_MIN);
         let layout = self.list_panel.layout(self.store.read(cx).settings(), window);
         let collapsed = layout.collapsed;
+        if let Some(p) = &docked
+            && p.read(cx).cap_dock(Some(win - layout.width - widgets::PAGE_MIN))
+        {
+            p.update(cx, |_, cx| cx.notify());
+        }
         // The Sync tab fits its rows to the room beside the list and a
         // docked mod page.
-        let peek_w = self.mods_peek(cx).map_or(0.0, |p| p.read(cx).panel_width(window, cx));
+        let peek_w = docked.map_or(0.0, |p| p.read(cx).panel_width(window, cx));
         let room = window.viewport_size().width / window.rem_size() - layout.width - peek_w;
         self.sync.update(cx, |p, _| p.room = Some(room));
         self.detail_w = room;

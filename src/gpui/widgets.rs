@@ -538,6 +538,9 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         .gap_1()
         .min_w_0()
         .overflow_hidden()
+        // Only the "+n" left: it stays whole beside a version chip that
+        // narrows (the chip gives way, not the count).
+        .when(keep == 0, |r| r.flex_none())
         .children(items.into_iter().map(|(_, el)| el))
         .when(n_hidden > 0, |r| {
             let rest: SharedString = hidden.join(", ").into();
@@ -2927,11 +2930,24 @@ pub struct SidePanel {
     drag: Option<f32>,
     /// The most the page beside it lets it take, in rem (see `cap_to`).
     cap: std::cell::Cell<Option<f32>>,
+    /// Folded to its rail for now (see `fold_for`), not saved.
+    folded: std::cell::Cell<bool>,
 }
 
 impl SidePanel {
     pub const fn new(spec: PanelSpec) -> Self {
-        Self { spec, drag: None, cap: std::cell::Cell::new(None) }
+        Self { spec, drag: None, cap: std::cell::Cell::new(None), folded: std::cell::Cell::new(false) }
+    }
+
+    /// For a list beside a page with a dock on its other side: folds the
+    /// list to its rail, for as long as `fold` holds, so the page keeps
+    /// its least room (the dock gives way first, down to its minimum).
+    /// The fold isn't saved: the list opens again when the dock closes.
+    /// A list being dragged keeps the width it's dragged to. True when it
+    /// changed.
+    pub fn fold_for(&self, fold: bool) -> bool {
+        let fold = fold && self.spec.rail.is_some() && self.drag.is_none();
+        self.folded.replace(fold) != fold
     }
 
     /// Set by the page it docks beside, before it reads the width: the
@@ -2956,7 +2972,10 @@ impl SidePanel {
         let (collapsed, w) = match self.drag {
             Some(w) if spec.rail.is_some_and(|(below, _)| w < below) => (true, w),
             Some(w) => (false, w),
-            None => self.saved(s),
+            None => {
+                let (c, w) = self.saved(s);
+                (c || self.folded.get(), w)
+            }
         };
         if let (true, Some((_, rail))) = (collapsed, spec.rail) {
             return PanelLayout { width: rail, collapsed: true };
@@ -3088,6 +3107,12 @@ pub fn side_panel<V: 'static>(
 /// panel. One spec, so each opens at the same width and a drag on either
 /// moves both. Up to 70% of the window: a project page needs the room.
 pub const DOCK: PanelSpec = PanelSpec::new("dock", 32., 26., 64.).trailing().share(0.7);
+
+/// The least room an instance or server page keeps beside a docked panel,
+/// in rem: about where its header, tabs and toolbars have folded as far
+/// as they go. The dock gives way first, then the page's list folds to
+/// its rail.
+pub const PAGE_MIN: f32 = 30.0;
 
 /// A panel in the right-hand dock ([`DOCK`]): [`side_panel`] with the dock's
 /// border and background, sliding in whenever `id` changes. `content`
@@ -3516,6 +3541,16 @@ impl Fit {
     /// highest level the caller has; `key` changes when the row's content
     /// does (widths are kept per key, so flipping back is free).
     pub fn wrap(&self, id: impl Into<SharedString>, row: impl IntoElement, max: usize, key: u64, view: EntityId) -> Stateful<Div> {
+        self.wrap_at(id, row, max, key, view, false)
+    }
+
+    /// [`Fit::wrap`] for a row that sits at the end of its box (a column
+    /// aligned to the right, as the hero's figures over its actions).
+    pub fn wrap_end(&self, id: impl Into<SharedString>, row: impl IntoElement, max: usize, key: u64, view: EntityId) -> Stateful<Div> {
+        self.wrap_at(id, row, max, key, view, true)
+    }
+
+    fn wrap_at(&self, id: impl Into<SharedString>, row: impl IntoElement, max: usize, key: u64, view: EntityId, end: bool) -> Stateful<Div> {
         {
             let mut st = self.0.borrow_mut();
             if st.key != key {
@@ -3535,10 +3570,13 @@ impl Fit {
             .w_full()
             .min_w_0()
             .overflow_hidden()
+            // At the end, the row keeps its own width (it doesn't grow into
+            // a box another row made wider), so what's measured is its own.
+            .when(end, |d| d.justify_end())
             .child(
                 div()
                     .flex()
-                    .flex_grow(1.)
+                    .when(!end, |d| d.flex_grow(1.))
                     .map(|d| if last { d.flex_shrink(1.).min_w_0() } else { d.flex_shrink_0() })
                     .child(row),
             )

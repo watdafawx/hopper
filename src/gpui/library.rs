@@ -257,9 +257,7 @@ const SIDEBAR_MIN: f32 = 14.0;
 const SIDEBAR_MAX: f32 = 36.0;
 const SIDEBAR_COLLAPSE: f32 = 10.0;
 const RAIL: f32 = 4.5;
-/// The least room the instance page keeps beside a docked panel, in rem:
-/// about where its header, tabs and toolbars have folded as far as they go.
-const PAGE_MIN: f32 = 30.0;
+use crate::widgets::PAGE_MIN;
 
 /// The header's levels for a narrow page (`widgets::Fit`): 1 "Update pack",
 /// 2 its icon only, 3 Folder and the pack's page into ⋯, 4 Settings into ⋯,
@@ -323,6 +321,8 @@ pub struct LibraryView {
     /// the page has (see `widgets::Fit`).
     hero_pills: widgets::Fit,
     hero_actions: widgets::Fit,
+    /// The figures box over the header actions (`hero::HeroFit::stats`).
+    hero_stats: widgets::Fit,
     tabs_fit: widgets::Fit,
     addons: Entity<AddonsView>,
     server: Entity<SyncPanel>,
@@ -574,6 +574,7 @@ impl LibraryView {
             detail_w: 80.0,
             hero_pills: Default::default(),
             hero_actions: Default::default(),
+            hero_stats: Default::default(),
             tabs_fit: Default::default(),
             addons,
             server,
@@ -2482,6 +2483,7 @@ impl LibraryView {
                     pills: self.hero_pills.clone(),
                     pill_names,
                     actions: self.hero_actions.clone(),
+                    stats: self.hero_stats.clone(),
                     actions_max: HEADER_FIT_MAX,
                     actions_key,
                     facts: fact_texts,
@@ -3188,7 +3190,6 @@ impl Render for LibraryView {
         // Friends. A mod opened from Friends takes the dock; Friends is
         // back when it closes.
         let friends_shown = self.friends_shown(cx);
-        let friends_w = if friends_shown { self.friends.read(cx).width(window, cx) } else { 0.0 };
         // The page keeps PAGE_MIN beside the dock: the dock gives way
         // first, down to its minimum, then the instance list folds to its
         // rail for as long as the dock is open (not saved). The window's
@@ -3223,6 +3224,15 @@ impl Render for LibraryView {
             p.read(cx).panel_width(window, cx)
         });
         let peek_w = peek_w + config_w;
+        // Friends too: its saved width could leave the page a sliver.
+        let friends_w = if friends_shown {
+            if self.friends.read(cx).cap_to(dock_cap) {
+                self.friends.update(cx, |_, cx| cx.notify());
+            }
+            self.friends.read(cx).width(window, cx)
+        } else {
+            0.0
+        };
         self.detail_w = win - side - peek_w - friends_w;
         // The page's header, tabs and toolbars fit themselves to this in
         // the same frame, so they keep up with a dragged edge. After the

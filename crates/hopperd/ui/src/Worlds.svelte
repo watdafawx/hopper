@@ -5,7 +5,7 @@
   // Active. New world, Make active, Reset and delete (a backup first only
   // when ticked), upload,
   // download, and pre-generation with Chunky on the active world.
-  import { Globe, FolderOpen, Download, Archive, RotateCcw, Trash2, Plus, Upload, ChevronRight, ChevronDown, Pause, Play, X, AlertTriangle, Package, Link } from '@lucide/svelte';
+  import { Globe, FolderOpen, Download, Archive, RotateCcw, Trash2, Plus, Upload, ChevronRight, ChevronDown, Pause, Play, X, AlertTriangle, Package, Link, Ellipsis, CircleCheck } from '@lucide/svelte';
   import SourceAdd from './SourceAdd.svelte';
   import { relative, fullDate, plural } from './lib/worlds.js';
   import { api, post, del } from './lib/api.js';
@@ -29,6 +29,8 @@
   let dlg = $state(null); // { kind: 'new' | 'reset' | 'pregen', ... }
   let error = $state('');
   let fileInput = $state();
+  // The toolbar's ⋯ menu (only shown when the bar is narrow).
+  let toolMore = $state(false);
   // Adding a data pack from GitHub or a link: { dest }.
   let sourcePack = $state(null);
   // Shown only with mods from links on (Settings › Mod sources), as on desktop.
@@ -207,16 +209,31 @@
   $effect(() => onChange(sid, ['worlds', 'backups'], load));
 </script>
 
-<svelte:window onkeydowncapture={dlgKeys} />
+<svelte:window onkeydowncapture={dlgKeys} onclick={() => (toolMore = false)} />
 
+<!-- One line at any width, as desktop's Worlds bar: the buttons go icon
+     only, then Upload and Backups fold into ⋯. -->
+<div class="wtop">
 <div class="top row">
-  <span class="small muted">{data ? `${plural(data.worlds.length, 'world')} · ${bytes(data.total_size)}` : ''}</span>
-  {#if busy}<span class="busy small"><span class="spinner"></span>{busy}</span>{/if}
+  <span class="small muted ell">{data ? `${plural(data.worlds.length, 'world')} · ${bytes(data.total_size)}` : ''}</span>
+  {#if busy}<span class="busy small"><span class="spinner"></span><span class="ell">{busy}</span></span>{/if}
   <span class="sp"></span>
-  <button class="btn sm" disabled={!!busy || !!pendingUpload} onclick={() => fileInput.click()} title="Upload a world as a zip"><Upload size={13} />{pendingUpload ? 'Uploading…' : 'Upload world'}</button>
+  <div class="wide">
+    <button class="btn sm" disabled={!!busy || !!pendingUpload} onclick={() => fileInput.click()} title="Upload a world as a zip"><Upload size={13} /><span class="lb">{pendingUpload ? 'Uploading…' : 'Upload world'}</span></button>
+    <button class="btn sm" title="Backups" onclick={openBackups}><Archive size={13} /><span class="lb">Backups</span></button>
+  </div>
+  <div class="more">
+    <button class="btn sm icon" title="More" aria-haspopup="menu" aria-expanded={toolMore} onclick={(e) => { e.stopPropagation(); toolMore = !toolMore; }}><Ellipsis size={14} /></button>
+    {#if toolMore}
+      <div class="popover menu tmenu" role="menu" tabindex="-1" onclick={() => (toolMore = false)} onkeydown={() => {}}>
+        <button class="menu-item" role="menuitem" disabled={!!busy || !!pendingUpload} onclick={() => fileInput.click()}><Upload size={13} />{pendingUpload ? 'Uploading…' : 'Upload world'}</button>
+        <button class="menu-item" role="menuitem" onclick={openBackups}><Archive size={13} />Backups</button>
+      </div>
+    {/if}
+  </div>
   <input type="file" accept=".zip" bind:this={fileInput} onchange={pickZip} hidden />
-  <button class="btn sm" onclick={openBackups}><Archive size={13} />Backups</button>
-  <button class="btn sm pri" disabled={!!busy} onclick={openNew}><Plus size={13} />New world</button>
+  <button class="btn sm pri" title="New world" disabled={!!busy} onclick={openNew}><Plus size={13} /><span class="lb">New world</span></button>
+</div>
 </div>
 
 {#if data}
@@ -233,12 +250,12 @@
         {#if w.created}
           <button class="btn sm icon ghost" title="Open world folder" onclick={() => openFiles(w.name)}><FolderOpen size={14} /></button>
           <button class="btn sm icon ghost" title="Download as zip" onclick={() => zip(w)}><Download size={14} /></button>
-          <button class="btn sm" disabled={!!busy} onclick={() => backup(w)}><Archive size={13} />Back up</button>
+          <button class="btn sm" title="Back up" disabled={!!busy} onclick={() => backup(w)}><Archive size={13} /><span class="lb">Back up</span></button>
         {/if}
         {#if w.active}
-          {#if w.created}<button class="btn sm" disabled={alive || !!busy} title={alive ? 'Stop the server first' : 'Start this world over'} onclick={() => openReset(w)}><RotateCcw size={13} />Reset…</button>{/if}
+          {#if w.created}<button class="btn sm" disabled={alive || !!busy} title={alive ? 'Stop the server first' : 'Start this world over'} onclick={() => openReset(w)}><RotateCcw size={13} /><span class="lb">Reset…</span></button>{/if}
         {:else}
-          <button class="btn sm" disabled={alive || !!busy} title={alive ? 'Stop the server first' : 'Load this world on the next start'} onclick={() => makeActive(w)}>Make active</button>
+          <button class="btn sm" disabled={alive || !!busy} title={alive ? 'Stop the server first' : 'Load this world on the next start'} onclick={() => makeActive(w)}><CircleCheck size={13} /><span class="lb">Make active</span></button>
           <button class="btn sm icon ghost" disabled={!!busy} title="Delete (to the server's trash)" onclick={() => remove(w)}><Trash2 size={14} /></button>
         {/if}
       </div>
@@ -375,8 +392,28 @@
 {#if sourcePack}<SourceAdd {server} pack={sourcePack} onClose={() => (sourcePack = null)} onChanged={load} />{/if}
 
 <style>
-  .top { margin-bottom: 10px; gap: 8px; flex-wrap: wrap; }
-  .world { padding: 12px 14px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .wtop { container: wtop / inline-size; }
+  .top { margin-bottom: 10px; gap: 8px; flex-wrap: nowrap; min-width: 0; }
+  .top > :global(*), .wide > :global(*) { flex: none; }
+  .top > .ell, .top > .busy { flex: 0 1 auto; min-width: 0; }
+  .top > .sp { flex: 1 1 0; min-width: 0; }
+  .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wide { display: contents; }
+  .more { display: none; position: relative; }
+  .tmenu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 40; }
+  @container wtop (max-width: 560px) {
+    .top .lb { display: none; }
+  }
+  @container wtop (max-width: 400px) {
+    .wide { display: none; }
+    .more { display: block; }
+  }
+  /* A world's buttons go icon only before its name runs out of room. */
+  .world { container: wrow / inline-size; padding: 12px 14px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .world > .row > :global(.btn) { flex: none; }
+  @container wrow (max-width: 620px) {
+    .world > .row .lb { display: none; }
+  }
   .world.act { border-color: #f9731655; }
   .world > .row { gap: 8px; }
   .wq { width: 48px; height: 48px; border-radius: var(--radius); flex: none; display: grid; place-items: center; background: var(--raise); color: var(--subtle); object-fit: cover; image-rendering: pixelated; }

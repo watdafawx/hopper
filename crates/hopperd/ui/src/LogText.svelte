@@ -8,7 +8,7 @@
   // so that is a sum, no measuring per line), the number stays on its first
   // row and the rest are indented to the text.
   import { tick, onDestroy } from 'svelte';
-  import { Search, X, Share2, FileText, ArrowDown, ScrollText } from '@lucide/svelte';
+  import { Search, X, Share2, FileText, ArrowDown, ScrollText, Ellipsis } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { rightClear } from './lib/rightclear.js';
 
@@ -30,6 +30,8 @@
   let cut = $state(false);
   let query = $state('');
   let onlyBad = $state(false);
+  // The toolbar's ⋯ menu (only shown when the bar is narrow).
+  let toolMore = $state(false);
   let visible = $state(document.visibilityState === 'visible');
   // Only the rows in view (and a few around) are drawn.
   let box = $state();
@@ -186,16 +188,30 @@
 </script>
 
 <svelte:document onvisibilitychange={() => (visible = document.visibilityState === 'visible')} />
+<svelte:window onclick={() => (toolMore = false)} />
 
 <section class="term">
+  <!-- One line at any width, as desktop's log bar: the labels shorten,
+       then the buttons go icon only, then they fold into ⋯. -->
   <div class="tb">
     <div class="input find"><Search size={13} /><input use:rightClear placeholder="Search {name}" bind:value={query} spellcheck="false" />{#if query}<button class="x" title="Clear" onclick={() => (query = '')}><X size={12} /></button>{/if}</div>
-    <label class="row small only"><input type="checkbox" bind:checked={onlyBad} />Errors and warnings only</label>
-    {#if shown}<span class="tiny muted">{shown.length} of {lines.length} lines</span>{/if}
+    <label class="row small only" title="Errors and warnings only"><input type="checkbox" bind:checked={onlyBad} /><span class="long">Errors and warnings only</span><span class="short">Errors only</span></label>
+    {#if shown}<span class="tiny muted count">{shown.length} of {lines.length} lines</span>{/if}
     <span class="sp"></span>
-    {#if alive && !path.endsWith('.gz')}<span class="tiny muted">Follows the server as it writes</span>{/if}
-    <button class="btn sm ghost" title="Opens the file in the editor" onclick={() => openFile(path)}><FileText size={13} />Open file</button>
-    {#if canShareLog(server)}<button class="btn sm" title="Upload it and get a link for Discord or a bug report. The log becomes public." onclick={() => onShare(path)}><Share2 size={13} />Share on mclo.gs</button>{/if}
+    {#if alive && !path.endsWith('.gz')}<span class="tiny muted follows">Follows the server as it writes</span>{/if}
+    <div class="wide">
+      <button class="btn sm ghost" title="Opens the file in the editor" onclick={() => openFile(path)}><FileText size={13} /><span class="lb">Open file</span></button>
+      {#if canShareLog(server)}<button class="btn sm" title="Upload it and get a link for Discord or a bug report. The log becomes public." onclick={() => onShare(path)}><Share2 size={13} /><span class="lb">Share on mclo.gs</span></button>{/if}
+    </div>
+    <div class="more">
+      <button class="btn sm icon" title="More" aria-haspopup="menu" aria-expanded={toolMore} onclick={(e) => { e.stopPropagation(); toolMore = !toolMore; }}><Ellipsis size={14} /></button>
+      {#if toolMore}
+        <div class="popover menu tmenu" role="menu" tabindex="-1" onclick={() => (toolMore = false)} onkeydown={() => {}}>
+          <button class="menu-item" role="menuitem" onclick={() => openFile(path)}><FileText size={13} />Open file</button>
+          {#if canShareLog(server)}<button class="menu-item" role="menuitem" onclick={() => onShare(path)}><Share2 size={13} />Share on mclo.gs</button>{/if}
+        </div>
+      {/if}
+    </div>
   </div>
   <span class="probe" bind:this={probe} aria-hidden="true">{'0'.repeat(100)}</span>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -223,7 +239,30 @@
 
 <style>
   .term { flex: 1; min-width: 0; min-height: 360px; background: var(--term); border: 1px solid var(--line); border-radius: var(--radius-lg); display: flex; flex-direction: column; overflow: hidden; position: relative; }
-  .tb { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--line); background: var(--base); flex-wrap: wrap; }
+  .tb { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--line); background: var(--base); flex-wrap: nowrap; min-width: 0; container: logtb / inline-size; }
+  .tb > :global(*) { flex: none; }
+  .tb > .sp { flex: 1 1 0; min-width: 0; }
+  .tb > .find { flex: 0 1 220px; min-width: 110px; width: auto; }
+  .tb .count, .tb .follows { white-space: nowrap; }
+  .only .short { display: none; }
+  .wide { display: contents; }
+  .wide > :global(*) { flex: none; }
+  .more { display: none; position: relative; }
+  .tmenu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 40; }
+  @container logtb (max-width: 820px) {
+    .tb .follows { display: none; }
+    .only .long { display: none; }
+    .only .short { display: inline; }
+  }
+  @container logtb (max-width: 640px) {
+    .tb .lb { display: none; }
+    .tb .wide .btn { padding-left: 7px; padding-right: 7px; }
+  }
+  @container logtb (max-width: 480px) {
+    .tb .count { display: none; }
+    .wide { display: none; }
+    .more { display: block; }
+  }
   .find { padding: 3px 8px; width: 220px; }
   .find .x { color: var(--muted); display: grid; place-items: center; }
   .only { gap: 6px; color: var(--subtle); white-space: nowrap; }

@@ -202,6 +202,12 @@ impl FriendsPanel {
         self.panel.layout(self.store.read(cx).settings(), window).width
     }
 
+    /// The most the panel may take beside the page (`SidePanel::cap_to`);
+    /// true when that changed.
+    pub fn cap_to(&self, rem: Option<f32>) -> bool {
+        self.panel.cap_to(rem)
+    }
+
     /// Opens the share popover of a pack (instance id), or closes it.
     fn set_pop(&mut self, pop: Option<String>, cx: &mut Context<Self>) {
         if pop.is_some() {

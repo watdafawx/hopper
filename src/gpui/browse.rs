@@ -2260,7 +2260,11 @@ impl BrowseView {
         let (m1, hover) = (m.clone(), theme.primary);
         div()
             .id(id)
-            .flex_none()
+            // In a narrow card the author is cut short well before the
+            // project's name is (the name is what's read).
+            .flex_shrink(8.)
+            .min_w(rems(3.))
+            .truncate()
             .text_sm()
             .text_color(theme.muted_foreground)
             .clickable(cx)
@@ -3508,9 +3512,12 @@ impl BrowseView {
                         h_flex()
                             .gap_2()
                             .child(
+                                // Narrow (beside a project), the count is cut
+                                // short instead of running under Sort.
                                 h_flex()
                                     .min_w_0()
-                                    .child(widgets::caption(note, cx).flex_none().whitespace_nowrap())
+                                    .overflow_hidden()
+                                    .child(widgets::caption(note, cx).min_w_0().truncate())
                                     .children(site_name)
                                     .when(!tail.is_empty(), |r| r.child(widgets::caption(tail, cx))),
                             )
@@ -6031,6 +6038,15 @@ impl Render for BrowseView {
         self.logos.show([results.entity_id()].into_iter().chain(has_detail.then(|| panel.entity_id())));
         // The cache style carries the column's width (a cached view sizes by it).
         let filters_w = self.filters_panel.layout(self.store.read(cx).settings(), window).width;
+        // Beside an open project the results keep PAGE_MIN, as Library's
+        // page does: the project gives way down to its minimum, then the
+        // filters step aside till it closes (Library folds its list).
+        let win = window.viewport_size().width / window.rem_size();
+        let no_filters = has_detail && win - filters_w - widgets::DOCK.min < widgets::PAGE_MIN;
+        let filters_w = if no_filters { 0. } else { filters_w };
+        if self.dock.cap_to(has_detail.then_some(win - filters_w - widgets::PAGE_MIN)) {
+            cx.notify();
+        }
         let filters = AnyView::from(filters).cached(StyleRefinement::default().w(rems(filters_w)).flex_none().h_full());
         let results = AnyView::from(results).cached(StyleRefinement::default().flex_1().min_w_0().h_full());
         // The panel too, so a redraw from above (a file flying into the
@@ -6055,7 +6071,7 @@ impl Render for BrowseView {
                     linear_color_stop(site_color(self.modrinth).opacity(0.), 0.55),
                 ))
             })
-            .child(filters)
+            .when(!no_filters, |r| r.child(filters))
             .child(results)
             .children(detail)
             .children(self.logo_layer.clone())
