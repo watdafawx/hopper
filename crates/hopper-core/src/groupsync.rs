@@ -613,6 +613,97 @@ pub struct Merged {
     /// in either (a member's mod changes are relative to their version, so
     /// they wait for it); the caller shows it and tries again later.
     pub pack_due: Option<crate::grouppack::Due>,
+    /// Members' changes left out on purpose, and why (see [`Kept`]). Their
+    /// codes are taken in all the same: the change isn't tried again.
+    pub kept: Vec<Kept>,
+}
+
+/// A member's change sync didn't make here, for the player to see.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Kept {
+    /// The mod's key and its name here.
+    pub key: String,
+    pub name: String,
+    /// What the member did, and their name.
+    pub kind: Kind,
+    pub by: String,
+    pub why: KeptWhy,
+}
+
+/// Why a member's change was left out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeptWhy {
+    /// The player locked the mod's version here: sync may turn it on or
+    /// off, but never swaps, removes or puts back its file.
+    Locked,
+}
+
+impl Kept {
+    /// "Sodium stays as it is: you locked its version. Mia updated it."
+    pub fn says(&self) -> String {
+        let why = match self.why {
+            KeptWhy::Locked => "you locked its version",
+        };
+        let what = match self.kind {
+            Kind::Added => "added it",
+            Kind::Removed => "removed it",
+            Kind::On => "turned it on",
+            Kind::Off => "turned it off",
+            Kind::Updated => "changed its version",
+        };
+        if self.by.is_empty() {
+            format!("{} stays as it is: {why}.", self.name)
+        } else {
+            format!("{} stays as it is: {why}. {} {what}.", self.name, self.by)
+        }
+    }
+}
+
+/// The file a mod here is, the way a code names it ("cf:<file>",
+/// "mr:<version>", "src:<file name>").
+fn file_here(a: &Addon) -> Option<String> {
+    if a.source.is_some() {
+        return Some(format!("src:{}", a.file_name.trim_end_matches(".disabled").to_lowercase()));
+    }
+    if !a.mr_version.is_empty() {
+        return Some(format!("mr:{}", a.mr_version));
+    }
+    (a.file_id != 0 && !is_mr(a.project_id)).then(|| format!("cf:{}", a.file_id))
+}
+
+/// Whether `c` would change the file of a mod the player locked here.
+/// Turning it on or off keeps the file, so that still goes through.
+pub fn locked_out(inst: &Instance, c: &Change) -> bool {
+    let Some(a) = find_addon(inst, &c.key).map(|i| &inst.addons[i]) else { return false };
+    if !a.locked {
+        return false;
+    }
+    match &c.now {
+        State::Off => false,
+        // Back on as the pack has it, from turned off: a switch. Anything
+        // else back to "as the pack has it" puts the pack's file back.
+        State::Unlisted => c.was != State::Off,
+        State::Removed => true,
+        State::File { file, .. } => file_here(a).is_none_or(|f| f != *file),
+    }
+}
+
+/// Leaves out the changes that would change a locked mod's file, and
+/// lists them in `merged.kept`. Their marks go too: "Updated by Mia" on a
+/// mod that wasn't would be wrong.
+fn keep_locked(inst: &Instance, mut todo: Vec<Change>, merged: &mut Merged) -> Vec<Change> {
+    todo.retain(|c| {
+        if !locked_out(inst, c) {
+            return true;
+        }
+        let by = merged.made.iter().rev().find(|(k, _, _)| *k == c.key).map(|(_, _, n)| n.clone()).unwrap_or_default();
+        let name = find_addon(inst, &c.key).map(|i| inst.addons[i].name.clone()).unwrap_or_else(|| c.key.clone());
+        merged.made.retain(|(k, _, _)| *k != c.key);
+        merged.marks.retain(|(k, _)| *k != c.key);
+        merged.kept.push(Kept { key: c.key.clone(), name, kind: c.kind(), by, why: KeptWhy::Locked });
+        false
+    });
+    todo
 }
 
 /// Decides each waiting code's changes against this copy (`here`: its
@@ -656,15 +747,21 @@ pub fn plan(
             out.taken.push((from, g));
             continue;
         };
-        let found: Vec<Change> = match copy.got.get(&from).and_then(|p| decode(&p.code)) {
-            Some(prev) => {
+        let found: Vec<Change> = match copy.got.get(&from).and_then(|p| decode(&p.code).map(|m| (m, p.seq))) {
+            Some((prev, prev_seq)) => {
                 let mut found = changes(&prev, &now);
-                // Made in this code (see `stamps_out`) but the same as in
-                // the last code taken from them: they changed it and back
-                // in a code this PC never got (the relay keeps the newest
-                // only). Here it may still be the way in between.
+                // The same as in the last code taken from them, but changed
+                // since: they changed it and back in codes this PC never
+                // got (the relay keeps the newest only), so here it may
+                // still be the way in between. Either made in this very
+                // code (see `stamps_out`), or dated after that last code: an
+                // undo they sent, then another code on top of it while this
+                // PC was away. The verdict below still weighs it against
+                // what's known here.
                 for (k, s) in &g.stamps {
-                    if s.seq != 0 || s.by != from || found.iter().any(|c| c.key == *k) {
+                    let made_now = s.seq == 0 && s.by == from;
+                    let since = s.seq > prev_seq && s.seq <= g.seq;
+                    if !(made_now || since) || found.iter().any(|c| c.key == *k) {
                         continue;
                     }
                     let was = will.get(k).cloned().unwrap_or_else(|| state_of(here, k));
@@ -804,6 +901,12 @@ pub fn apply(inst: &mut Instance, todo: &[Change], skip_sources: &[crate::source
         if let Some(i) = at.filter(|&i| removes(c) && ships_jar(&shipped, &inst.addons[i])) {
             inst.addons[i].from_pack = true;
             job.note(keeps_pack_jar_note(&name));
+            continue;
+        }
+        // `merge` leaves these out already (and says so); any other caller
+        // gets the same guard.
+        if locked_out(inst, c) {
+            job.note(format!("{name}: kept, you locked its version"));
             continue;
         }
         let r: anyhow::Result<()> = match (&c.now, &c.entry) {
@@ -1168,7 +1271,9 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
     let loader_set = loader_change.first().is_some_and(|c| move_loader(&mut inst, c, pack_loader.as_deref(), &mut merged, job));
     let todo = keep_pack_mods(&inst, todo, &mut merged, &here_pack, job);
     // Mods kept only on this PC only learn how the others have them.
-    let (mut todo, kept) = crate::onlyhere::split(&mut inst, todo, &mut merged);
+    let (todo, kept) = crate::onlyhere::split(&mut inst, todo, &mut merged);
+    // A mod the player locked keeps its file, whoever changed it.
+    let mut todo = keep_locked(&inst, todo, &mut merged);
     // A change to a mod this copy doesn't have (an echo of a removal, a
     // switch of a mod removed here) changes nothing; the task only tells
     // what really changes. Its mark stays, so who changed it last still
@@ -1656,6 +1761,45 @@ mod tests {
         let here = m(vec![cf(11, false)]);
         let (todo, _) = plan(&copy, &here, Some(&here), false, dec);
         assert_eq!(todo.iter().map(|c| c.key.clone()).collect::<Vec<_>>(), ["p:3"]);
+    }
+
+    /// Seen on rig (Lithium): Sam turned 1 off (seq 10) and went away. Mia
+    /// took it, turned 1 back on (seq 12), then turned 3 off (seq 14). The
+    /// relay keeps her newest code only; in it the undo carries its stamp,
+    /// and her last code Sam took (seq 5) had 1 on too.
+    #[test]
+    fn an_undo_sent_before_another_code_still_reaches_a_member_who_was_away() {
+        let mut copy = PackCopy::default();
+        copy.got.insert("mia".into(), got(code(vec![cf(11, true), cf(31, true)]), 5, "Mia"));
+        copy.marks.insert("p:1".into(), Mark { state: st(11, false), seq: 10, by: "sam".into(), ..Default::default() });
+        let mut g = got(code(vec![cf(11, true), cf(31, false)]), 14, "Mia");
+        g.stamps.insert("p:1".into(), Stamp { seq: 12, by: "mia".into() });
+        g.stamps.insert("p:3".into(), Stamp { seq: 0, by: "mia".into() });
+        copy.arrive("mia", g);
+        let here = m(vec![cf(11, false), cf(31, true)]);
+        let (todo, merged) = plan(&copy, &here, Some(&here), false, dec);
+        let mut got: Vec<(String, State)> = todo.iter().map(|c| (c.key.clone(), c.now.clone())).collect();
+        got.sort();
+        assert_eq!(got, [("p:1".to_string(), st(11, true)), ("p:3".to_string(), st(31, false))]);
+        let m1 = merged.marks.iter().find(|(k, _)| k == "p:1").map(|(_, m)| m.clone()).unwrap();
+        assert_eq!((m1.seq, m1.by.as_str(), m1.kind), (12, "mia", Kind::On));
+    }
+
+    /// The other side of the rule above: a stamp from before the last code
+    /// taken, or older than the change known here, sets nothing back.
+    #[test]
+    fn an_older_stamp_on_an_unchanged_mod_undoes_nothing() {
+        for stamp in [4, 8] {
+            let mut copy = PackCopy::default();
+            copy.got.insert("mia".into(), got(code(vec![cf(11, true), cf(31, true)]), 5, "Mia"));
+            copy.marks.insert("p:1".into(), Mark { state: st(11, false), seq: 10, by: "sam".into(), ..Default::default() });
+            let mut g = got(code(vec![cf(11, true), cf(31, false)]), 14, "Mia");
+            g.stamps.insert("p:1".into(), Stamp { seq: stamp, by: "mia".into() });
+            copy.arrive("mia", g);
+            let here = m(vec![cf(11, false), cf(31, true)]);
+            let (todo, _) = plan(&copy, &here, Some(&here), false, dec);
+            assert_eq!(todo.iter().map(|c| c.key.clone()).collect::<Vec<_>>(), ["p:3"], "stamp {stamp}");
+        }
     }
 
     #[test]
@@ -2291,6 +2435,76 @@ mod tests {
         let inst = Instance { root, name: "T".into(), addons: vec![a], ..Default::default() };
         inst.save().unwrap();
         inst
+    }
+
+    fn locked_inst(tag: &str) -> Instance {
+        let root = std::env::temp_dir().join(format!("hopper-groupsync-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        let mk = |project: u64, file: u64, name: &str, locked: bool| {
+            std::fs::write(root.join("mods").join(format!("{name}.jar")), b"jar").unwrap();
+            Addon { project_id: project, file_id: file, name: name.into(), file_name: format!("{name}.jar"), enabled: true, locked, ..Default::default() }
+        };
+        let addons = vec![mk(1, 11, "Sodium", true), mk(2, 21, "Iris", false)];
+        let inst = Instance { root: root.clone(), name: "T".into(), addons, ..Default::default() };
+        inst.save().unwrap();
+        inst
+    }
+
+    fn ch(key: &str, was: State, now: State) -> Change {
+        let entry = match &now {
+            State::File { file, on } => Some(cf(file.trim_start_matches("cf:").parse().unwrap(), *on)),
+            _ => None,
+        };
+        Change { key: key.into(), was, now, entry }
+    }
+
+    #[test]
+    fn a_locked_mod_keeps_its_file_but_still_turns_on_and_off() {
+        let inst = locked_inst("locked-rules");
+        let out = |c: Change| locked_out(&inst, &c);
+        assert!(out(ch("p:1", st(11, true), st(12, true))), "another version");
+        assert!(out(ch("p:1", st(11, true), State::Removed)), "removed");
+        assert!(out(ch("p:1", st(11, true), State::Unlisted)), "taken out / back to the pack's file");
+        assert!(out(ch("p:1", st(12, false), st(12, true))), "the member's other version, even as a switch there");
+        assert!(!out(ch("p:1", st(11, true), st(11, false))), "turned off");
+        assert!(!out(ch("p:1", State::Unlisted, State::Off)), "pack mod turned off");
+        assert!(!out(ch("p:1", State::Off, State::Unlisted)), "pack mod turned back on");
+        assert!(!out(ch("p:2", st(21, true), st(22, true))), "not locked");
+        assert!(!out(ch("p:9", State::Unlisted, st(91, true))), "not here");
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn a_group_change_to_a_locked_mod_is_left_out_and_said_why() {
+        let inst = locked_inst("locked-merge");
+        let mia = |seq| Mark { state: st(12, true), kind: Kind::Updated, by: "mia".into(), name: "Mia".into(), seq, at: seq };
+        let mut merged = Merged::default();
+        for (k, s) in [("p:1", 12), ("p:2", 13)] {
+            merged.marks.push((k.into(), mia(s)));
+            merged.made.push((k.into(), Kind::Updated, "Mia".into()));
+        }
+        let todo = vec![ch("p:1", st(11, true), st(12, true)), ch("p:2", st(21, true), st(22, true))];
+        let left = keep_locked(&inst, todo, &mut merged);
+        assert_eq!(left.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), ["p:2"]);
+        assert_eq!(merged.kept, [Kept { key: "p:1".into(), name: "Sodium".into(), kind: Kind::Updated, by: "Mia".into(), why: KeptWhy::Locked }]);
+        assert_eq!(merged.kept[0].says(), "Sodium stays as it is: you locked its version. Mia changed its version.");
+        assert!(!merged.marks.iter().any(|(k, _)| k == "p:1"), "no 'Updated by Mia' on it");
+        assert!(!merged.made.iter().any(|(k, _, _)| k == "p:1"));
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn apply_never_removes_a_locked_mod() {
+        let mut inst = locked_inst("locked-apply");
+        let notes = apply_notes(&mut inst, &[ch("p:1", st(11, true), State::Removed)]);
+        assert!(inst.root.join("mods").join("Sodium.jar").is_file());
+        assert!(inst.addon_by_file("Sodium.jar").is_some());
+        assert!(notes.iter().any(|n| n == "Sodium: kept, you locked its version"), "{notes:?}");
+        // A switch still goes through.
+        apply_notes(&mut inst, &[ch("p:1", st(11, true), st(11, false))]);
+        assert!(!inst.addons[0].enabled, "turned off");
+        let _ = std::fs::remove_dir_all(&inst.root);
     }
 
     fn turn_off() -> Change {
