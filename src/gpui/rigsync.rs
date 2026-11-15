@@ -1835,7 +1835,7 @@ impl SyncPanel {
                     .bg(warn.opacity(widgets::alpha::TINT))
                     .text_xs()
                     .font_semibold()
-                    .text_color(warn)
+                    .text_color(crate::theme::chip_ink(warn))
                     .child(Icon::new(IconName::TriangleAlert).xsmall())
                     .child(format!("Also differs: {}", d.summary()))
                     .child(Icon::new(IconName::ChevronRight).xsmall()),

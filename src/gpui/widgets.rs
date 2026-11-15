@@ -581,8 +581,9 @@ pub fn glass(cx: &App) -> bool {
     cx.theme().background.a < 0.99
 }
 
-/// A rounded status pill: `color` text on a tinted fill, no border, with a
-/// small glowing dot when `dot`.
+/// A rounded status pill: `color` text (darkened on light themes, see
+/// `theme::chip_ink`) on a tinted fill, no border, with a small glowing dot
+/// in the plain colour when `dot`.
 pub fn pill(text: impl Into<SharedString>, color: Hsla, dot: bool) -> Div {
     div()
         .flex()
@@ -595,7 +596,7 @@ pub fn pill(text: impl Into<SharedString>, color: Hsla, dot: bool) -> Div {
         // The small radius, like every chip.
         .rounded(crate::theme::radius_sm())
         .bg(color.opacity(alpha::TINT))
-        .text_color(color)
+        .text_color(crate::theme::chip_ink(color))
         .text_xs()
         // The UI font's tall ascent leaves centred capitals about a pixel
         // low; a little more room below lifts them to the middle.
@@ -1252,10 +1253,10 @@ pub trait Clickable: InteractiveElement + Styled + Sized {
 
 impl<E: InteractiveElement + Styled> Clickable for E {}
 
-/// A chip: `color` text (darkened on light themes, see `theme::ink`) on a
+/// A chip: `color` text (darkened on light themes, see `theme::chip_ink`) on a
 /// faint fill of it, no border, the small radius. gpui_kit's xsmall tag size; `.small()` still works.
 pub fn chip(color: Hsla) -> gpui_kit::component::tag::Tag {
-    gpui_kit::component::tag::Tag::custom(color.opacity(alpha::TINT), crate::theme::ink(color), gpui_kit::transparent_black())
+    gpui_kit::component::tag::Tag::custom(color.opacity(alpha::TINT), crate::theme::chip_ink(color), gpui_kit::transparent_black())
         .xsmall()
         .flex_none()
         // A count or label in a chip stays on one line, however long.
@@ -1371,7 +1372,7 @@ where
                             .rounded(crate::theme::radius_sm())
                             .bg(color.opacity(alpha::TINT))
                             .text_xs()
-                            .text_color(color)
+                            .text_color(crate::theme::chip_ink(color))
                             .child(Icon::new(IconName::TriangleAlert).xsmall())
                             .child(title.into())
                             .child(div().opacity(0.6).child("·"))
