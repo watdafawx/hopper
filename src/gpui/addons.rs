@@ -6140,6 +6140,11 @@ impl Render for AddonsView {
         self.ensure_rows();
         self.fit_columns(window, cx);
         let Some(inst) = self.table.inst.clone() else {
+            // A Hopper Server's list on its way the first time (nothing
+            // kept from the last run): rows to come, not a blank area.
+            if self.remote {
+                return div().px_6().pt_4().child(widgets::skeleton_rows(6, rems(ROW_H), cx)).into_any_element();
+            }
             return div().into_any_element();
         };
         // A Hopper Server's data packs: being read, or out of reach.

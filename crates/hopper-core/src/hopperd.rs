@@ -697,7 +697,12 @@ impl Client {
     }
 
     pub fn get(&self, path: &str) -> anyhow::Result<Value> {
-        reply(self.send_via(Lane::Call, |a| a.get(&self.url(path)).header("Authorization", &self.auth()).call()))
+        let t = Instant::now();
+        let r = reply(self.send_via(Lane::Call, |a| a.get(&self.url(path)).header("Authorization", &self.auth()).call()));
+        // With RUST_LOG=hopper_core::hopperd=debug: each call and how long
+        // it took, to see what a slow page is waiting for.
+        log::debug!("GET {path}: {:.0} ms{}", t.elapsed().as_secs_f64() * 1000.0, if r.is_err() { " (failed)" } else { "" });
+        r
     }
 
     pub fn post(&self, path: &str, body: Value) -> anyhow::Result<Value> {
