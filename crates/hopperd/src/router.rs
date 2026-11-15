@@ -213,27 +213,33 @@ pub fn start(app: Arc<App>) {
                 if let Ok((list, unknown)) = tokio::task::spawn_blocking(move || fallback_answers(&a)).await {
                     app.edge.set_answers(list, unknown);
                 }
-            } else if current.as_ref().map(|c| c.0) != wanted {
+            } else {
+                // A router process left from before (in_panel was just turned
+                // on) is reached and told to stop listening, so the port is
+                // free here; it quits once the players on it leave.
+                crate::edge::client::Client::start(&app);
                 app.edge.set_listen(None);
-                if let Some((_, h)) = current.take() {
-                    h.abort();
-                }
-                // (A port that couldn't be had is tried again every round.)
-                let mut st = Status::default();
-                if let Some(port) = wanted {
-                    match TcpListener::bind((bind.as_str(), port)).await {
-                        Ok(l) => {
-                            log::info!("server addresses: listening for Minecraft on port {port}");
-                            st.listening = Some(port);
-                            current = Some((port, tokio::spawn(accept(app.clone(), l))));
-                        }
-                        Err(e) => {
-                            st.error = Some(bind_error(&app, port, &e));
-                            log::warn!("server addresses: {}", st.error.as_deref().unwrap_or(""));
+                if current.as_ref().map(|c| c.0) != wanted {
+                    if let Some((_, h)) = current.take() {
+                        h.abort();
+                    }
+                    // (A port that couldn't be had is tried again every round.)
+                    let mut st = Status::default();
+                    if let Some(port) = wanted {
+                        match TcpListener::bind((bind.as_str(), port)).await {
+                            Ok(l) => {
+                                log::info!("server addresses: listening for Minecraft on port {port}");
+                                st.listening = Some(port);
+                                current = Some((port, tokio::spawn(accept(app.clone(), l))));
+                            }
+                            Err(e) => {
+                                st.error = Some(bind_error(&app, port, &e));
+                                log::warn!("server addresses: {}", st.error.as_deref().unwrap_or(""));
+                            }
                         }
                     }
+                    *app.router.status.lock().unwrap() = st;
                 }
-                *app.router.status.lock().unwrap() = st;
             }
             let a = app.clone();
             let _ = tokio::task::spawn_blocking(move || sleep_and_time(&a)).await;

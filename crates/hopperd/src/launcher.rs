@@ -276,7 +276,8 @@ fn already_running(found: Found) -> anyhow::Result<()> {
             start_service_tray();
         }
         (Some(101), Found::Tray(r)) => {
-            quit_running(&r)?;
+            // An update: the router process keeps its players.
+            quit_running(&r, true)?;
             let exe = if r.exe.as_os_str().is_empty() { std::env::current_exe()? } else { r.exe.clone() };
             let me_exe = std::env::current_exe()?;
             if crate::absolute(&exe) != crate::absolute(&me_exe) {
@@ -298,7 +299,7 @@ fn already_running(found: Found) -> anyhow::Result<()> {
             }
             match found {
                 Found::Service { .. } => elevate(&["service", "uninstall", "--remove-files"])?,
-                Found::Tray(r) => quit_running(&r)?,
+                Found::Tray(r) => quit_running(&r, false)?,
             }
             set_startup(false)?;
             clear_mode();
@@ -322,11 +323,12 @@ fn tray_status(r: &Running) -> Option<serde_json::Value> {
 }
 
 /// Asks a running tray's panel to quit, tray and all, and waits for both.
-fn quit_running(r: &Running) -> anyhow::Result<()> {
+/// `keep_router`: an update, so players on the router stay connected.
+fn quit_running(r: &Running, keep_router: bool) -> anyhow::Result<()> {
     let _ = control_agent()
         .post(&format!("http://127.0.0.1:{}/api/v1/local/quit", r.port))
         .header(control::HEADER, &r.token)
-        .send_json(serde_json::json!({ "tray": true }));
+        .send_json(serde_json::json!({ "tray": true, "keep_router": keep_router }));
     let ok = wait_exit(r.pid, Duration::from_secs(30)) && r.tray_pid.is_none_or(|p| wait_exit(p, Duration::from_secs(15)));
     if !ok {
         bail!("{} didn't quit. Quit it from its tray icon and try again.", service::display());
@@ -1209,8 +1211,8 @@ fn handle(sup: &Arc<Supervisor>, cmd: Cmd) -> bool {
             let players = sup.router_players();
             let dropped = match players {
                 0 => String::new(),
-                1 => "\n\n1 player is on through the server address. Quitting disconnects them.".into(),
-                n => format!("\n\n{n} players are on through the server address. Quitting disconnects them."),
+                1 => "\n\n1 player is playing through the router. Quitting disconnects them.".into(),
+                n => format!("\n\n{n} players are playing through the router. Quitting disconnects them."),
             };
             if up.is_empty() && players > 0 && !confirm(dropped.trim_start()) {
                 return true;

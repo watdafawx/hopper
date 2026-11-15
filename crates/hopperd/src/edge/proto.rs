@@ -18,6 +18,20 @@ pub const MAX_FRAME: usize = 4 << 20;
 pub const CHUNK: usize = 16 * 1024;
 /// Before the token is checked, only a small hello is read.
 pub const MAX_HELLO: usize = 4096;
+/// The longest a splice takes in the edge: connecting to the server and
+/// writing the replay, all of it. Past this the edge gives up on it.
+pub const SPLICE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long hopperd waits for `Spliced`: the edge's limit plus room for the
+/// channel, so the edge's answer (good or not) comes first.
+pub const SPLICE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Bytes of player data on the way over the channel, per direction, before
+/// the side sending them waits (the edge) or refuses more (hopperd).
+pub const CHANNEL_BUDGET: usize = 8 << 20;
+/// Bytes queued for one connection that its other end hasn't taken yet.
+/// Past this the connection is closed: before a splice a player sends a
+/// handshake and a login, and hopperd writes answers and, for the lobby
+/// island, one small world (well under this).
+pub const CONN_QUEUE: usize = 4 << 20;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -45,8 +59,15 @@ pub enum Msg {
     Listening { port: Option<u16>, error: Option<String> },
     /// A player connected: their bytes follow as data frames.
     Open { conn: u64, peer: String },
-    /// The answer to `Splice`.
-    Spliced { conn: u64, ok: bool, error: Option<String> },
+    /// The answer to `Splice`. A good one names the pipe, so a hopperd that
+    /// stopped waiting for it (see [`SPLICE_WAIT`]) still lists the player.
+    Spliced {
+        conn: u64,
+        ok: bool,
+        error: Option<String>,
+        #[serde(default)]
+        pipe: Option<PipeInfo>,
+    },
     /// A piped player left.
     Ended { conn: u64 },
     /// Each pipe's round-trip time as the OS keeps it, in ms.

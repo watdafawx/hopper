@@ -11,6 +11,14 @@
 //!
 //! On top of that every connection starts with the edge's token (see
 //! `serve`).
+//!
+//! The edge doesn't check which program the client is. Only this account
+//! (and SYSTEM) can open the channel at all, and every program of this
+//! account can read the run file with the token anyway, so a program check
+//! would keep out nobody the access list doesn't. What a client can make
+//! the edge do is also limited (splices only to 127.0.0.1, see `serve`).
+//! The pipe's name ends in a random part from the run file, so another
+//! account can't hold the name first either.
 
 use std::path::Path;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -26,18 +34,29 @@ pub struct Peer {
 }
 
 /// The channel's address for the edge of the panel data folder `dir`.
-pub fn address(dir: &Path) -> String {
+///
+/// Windows: the pipe's name ends in `random` (new for each edge, kept in
+/// the run file), so no other program can know it in advance and hold it
+/// first to keep the router from starting. Linux: the socket in the edge
+/// folder (or the short fallback of [`super::socket_path`]).
+pub fn address(dir: &Path, random: &str) -> anyhow::Result<String> {
     #[cfg(windows)]
     {
         use sha2::Digest as _;
         let full = crate::absolute(dir).to_string_lossy().to_lowercase();
         let h = sha2::Sha256::digest(full.as_bytes());
         let hex: String = h[..8].iter().map(|b| format!("{b:02x}")).collect();
-        format!(r"\\.\pipe\hopperd-edge-{hex}")
+        Ok(format!(r"\\.\pipe\hopperd-edge-{hex}-{random}"))
     }
     #[cfg(unix)]
     {
-        super::edge_dir(dir).join("edge.sock").to_string_lossy().into_owned()
+        let _ = random;
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from);
+        let p = super::socket_path(dir, runtime.as_deref(), unsafe { libc::geteuid() });
+        if p.as_os_str().len() > 107 {
+            anyhow::bail!("the router's socket path {} is too long for Linux; use a shorter data folder", p.display());
+        }
+        Ok(p.to_string_lossy().into_owned())
     }
 }
 
@@ -192,10 +211,15 @@ mod ux {
             if let Some(dir) = p.parent() {
                 super::super::private_folder(dir)?;
             }
-            // A socket left by an edge that ended; anything else is refused.
+            // A socket left by an edge that ended; anything else is refused,
+            // and so is a socket someone still answers on (another edge:
+            // deleting it would cut that one off from every hopperd).
             if let Ok(m) = std::fs::symlink_metadata(p) {
                 if !m.file_type().is_socket() {
                     anyhow::bail!("{path} is there and isn't the router's socket");
+                }
+                if std::os::unix::net::UnixStream::connect(p).is_ok() {
+                    anyhow::bail!("another router is listening on {path}");
                 }
                 std::fs::remove_file(p)?;
             }

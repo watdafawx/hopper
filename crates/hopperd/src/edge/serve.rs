@@ -17,7 +17,7 @@
 //! back before it is told to join again.
 
 use super::local::{self, Stream};
-use super::proto::{self, Answer, CHUNK, Frame, MAX_FRAME, MAX_HELLO, Msg, PROTO, PipeInfo};
+use super::proto::{self, Answer, CHANNEL_BUDGET, CHUNK, CONN_QUEUE, Frame, MAX_FRAME, MAX_HELLO, Msg, PROTO, PipeInfo, SPLICE_TIMEOUT};
 use hopper_core::hosting::router::{self as core, Read};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{Notify, Semaphore, mpsc, watch};
 
 /// How long a login waits for hopperd to come back.
 pub const HOLD_FOR: Duration = Duration::from_secs(20);
@@ -55,13 +55,25 @@ enum Cmd {
 
 struct Conn {
     tx: mpsc::UnboundedSender<Cmd>,
+    /// Bytes from hopperd in `tx` not yet written to the player (capped at
+    /// [`CONN_QUEUE`]).
+    queued: Arc<AtomicUsize>,
     pipe: Option<PipeInfo>,
     task: Option<tokio::task::AbortHandle>,
+}
+
+/// A connection's orders from hopperd, and its share of [`Conn::queued`].
+struct Inbox {
+    rx: mpsc::UnboundedReceiver<Cmd>,
+    queued: Arc<AtomicUsize>,
 }
 
 struct Ctl {
     epoch: u64,
     tx: mpsc::UnboundedSender<Frame>,
+    /// Player bytes in `tx` may total [`CHANNEL_BUDGET`]; past that a leg
+    /// stops reading its player until the channel catches up.
+    budget: Arc<Semaphore>,
 }
 
 struct Listen {
@@ -120,6 +132,20 @@ impl Edge {
             Some(c) if c.epoch == epoch => c.tx.send(f).is_ok(),
             _ => false,
         }
+    }
+
+    /// A player's bytes to hopperd generation `epoch`, waiting while the
+    /// channel has [`CHANNEL_BUDGET`] of them on the way. False when that
+    /// hopperd is gone.
+    async fn send_data(&self, epoch: u64, conn: u64, b: Vec<u8>) -> bool {
+        let budget = match &*self.ctl.lock().unwrap() {
+            Some(c) if c.epoch == epoch => c.budget.clone(),
+            _ => return false,
+        };
+        // Closed when that hopperd goes.
+        let Ok(p) = budget.acquire_many_owned(b.len().min(CHANNEL_BUDGET) as u32).await else { return false };
+        p.forget();
+        self.send(epoch, Frame::Data(conn, b))
     }
 
     fn send_now(&self, f: Frame) {
@@ -261,15 +287,20 @@ impl Edge {
         let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
         let _ = tx.send(Frame::Msg(welcome));
         let epoch = self.next_gen.fetch_add(1, Ordering::SeqCst);
+        let budget = Arc::new(Semaphore::new(CHANNEL_BUDGET));
         // Queued after the welcome, so legs opened from now on follow it.
-        *self.ctl.lock().unwrap() = Some(Ctl { epoch, tx });
+        *self.ctl.lock().unwrap() = Some(Ctl { epoch, tx, budget: budget.clone() });
         *self.alone_since.lock().unwrap() = None;
         self.epoch.send_replace(epoch);
         log::info!("router: Hopper Server connected (process {:?})", peer.pid);
+        let b = budget.clone();
         let writer = tokio::spawn(async move {
             while let Some(f) = rx.recv().await {
                 if proto::write(&mut w, &f).await.is_err() {
                     break;
+                }
+                if let Frame::Data(_, d) = &f {
+                    b.add_permits(d.len().min(CHANNEL_BUDGET));
                 }
             }
         });
@@ -284,6 +315,8 @@ impl Edge {
             }
         }
         writer.abort();
+        // Legs waiting for room on this channel stop waiting.
+        budget.close();
         let mut ctl = self.ctl.lock().unwrap();
         if ctl.as_ref().is_some_and(|c| c.epoch == epoch) {
             *ctl = None;
@@ -297,7 +330,17 @@ impl Edge {
         let to = |conn: u64, c: Cmd| self.conns.lock().unwrap().get(&conn).is_some_and(|x| x.tx.send(c).is_ok());
         match f {
             Frame::Data(conn, b) => {
-                to(conn, Cmd::Data(b));
+                if let Some(x) = self.conns.lock().unwrap().get(&conn) {
+                    // A player who doesn't read what hopperd writes is let go
+                    // rather than kept in memory.
+                    let n = b.len();
+                    if x.queued.fetch_add(n, Ordering::SeqCst) + n > CONN_QUEUE {
+                        log::debug!("router: connection {conn} isn't reading; closing it");
+                        let _ = x.tx.send(Cmd::Close);
+                    } else {
+                        let _ = x.tx.send(Cmd::Data(b));
+                    }
+                }
             }
             Frame::Msg(Msg::Close { conn }) => {
                 to(conn, Cmd::Close);
@@ -305,7 +348,7 @@ impl Edge {
             Frame::Msg(Msg::Splice { conn, port, replay, consumed, server, player }) => {
                 let replay = proto::unb64(&replay).unwrap_or_default();
                 if !to(conn, Cmd::Splice { port, replay, consumed, server, player }) {
-                    self.send(epoch, Frame::Msg(Msg::Spliced { conn, ok: false, error: Some("the player left".into()) }));
+                    self.send(epoch, Frame::Msg(Msg::Spliced { conn, ok: false, error: Some("the player left".into()), pipe: None }));
                 }
             }
             Frame::Msg(Msg::Listen { bind, port }) => {
@@ -364,10 +407,11 @@ impl Edge {
             let _ = sock.set_nodelay(true);
             let id = self.next_conn.fetch_add(1, Ordering::SeqCst);
             let (tx, rx) = mpsc::unbounded_channel();
-            self.conns.lock().unwrap().insert(id, Conn { tx, pipe: None, task: None });
+            let queued = Arc::new(AtomicUsize::new(0));
+            self.conns.lock().unwrap().insert(id, Conn { tx, queued: queued.clone(), pipe: None, task: None });
             let me = self.clone();
             let task = tokio::spawn(async move {
-                me.clone().conn(id, sock, peer, rx).await;
+                me.clone().conn(id, sock, peer, Inbox { rx, queued }).await;
                 me.conns.lock().unwrap().remove(&id);
             });
             if let Some(c) = self.conns.lock().unwrap().get_mut(&id) {
@@ -376,7 +420,7 @@ impl Edge {
         }
     }
 
-    async fn conn(self: Arc<Self>, id: u64, mut sock: TcpStream, peer: SocketAddr, rx: mpsc::UnboundedReceiver<Cmd>) {
+    async fn conn(self: Arc<Self>, id: u64, mut sock: TcpStream, peer: SocketAddr, rx: Inbox) {
         let mut gens = self.epoch.subscribe();
         let mut record = Vec::new();
         let mut epoch = *gens.borrow_and_update();
@@ -389,7 +433,7 @@ impl Edge {
         if !self.send(epoch, Frame::Msg(Msg::Open { conn: id, peer: peer.to_string() })) {
             return;
         }
-        if !record.is_empty() && !self.send(epoch, Frame::Data(id, record.clone())) {
+        if !record.is_empty() && !self.send_data(epoch, id, record.clone()).await {
             return;
         }
         self.leg(id, sock, record, epoch, rx, gens).await;
@@ -397,7 +441,7 @@ impl Edge {
 
     /// A connection on hopperd's leg, until hopperd is done with it or
     /// splices it.
-    async fn leg(self: &Arc<Self>, id: u64, mut sock: TcpStream, mut record: Vec<u8>, epoch: u64, mut rx: mpsc::UnboundedReceiver<Cmd>, mut gens: watch::Receiver<u64>) {
+    async fn leg(self: &Arc<Self>, id: u64, mut sock: TcpStream, mut record: Vec<u8>, epoch: u64, mut rx: Inbox, mut gens: watch::Receiver<u64>) {
         let mut overflow = record.len() > MAX_RECORD;
         let mut chunk = vec![0u8; CHUNK];
         loop {
@@ -415,26 +459,34 @@ impl Edge {
                             record = Vec::new();
                         }
                     }
-                    if !self.send(epoch, Frame::Data(id, chunk[..n].to_vec())) {
+                    if !self.send_data(epoch, id, chunk[..n].to_vec()).await {
                         return;
                     }
                 }
-                c = rx.recv() => match c {
+                c = rx.rx.recv() => match c {
                     Some(Cmd::Data(b)) => {
+                        rx.queued.fetch_sub(b.len(), Ordering::SeqCst);
                         if !matches!(tokio::time::timeout(Duration::from_secs(10), sock.write_all(&b)).await, Ok(Ok(()))) {
                             self.send(epoch, Frame::Msg(Msg::Close { conn: id }));
                             return;
                         }
                     }
                     Some(Cmd::Splice { port, replay, consumed, server, player }) => {
-                        match self.splice(&record, overflow, port, &replay, consumed).await {
+                        // All of it within the limit hopperd waits for, so the
+                        // answer always gets there before hopperd gives up.
+                        let r = tokio::time::timeout(SPLICE_TIMEOUT, self.splice(&record, overflow, port, &replay, consumed))
+                            .await
+                            .unwrap_or_else(|_| Err(anyhow::anyhow!("the server didn't take the connection in time")));
+                        match r {
                             Ok(up) => {
-                                self.send(epoch, Frame::Msg(Msg::Spliced { conn: id, ok: true, error: None }));
-                                return self.pipe(id, sock, up, server, player).await;
+                                let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                                let info = PipeInfo { conn: id, server, player, since };
+                                self.send(epoch, Frame::Msg(Msg::Spliced { conn: id, ok: true, error: None, pipe: Some(info.clone()) }));
+                                return self.pipe(sock, up, info).await;
                             }
                             Err(e) => {
                                 log::debug!("router: couldn't hand connection {id} to port {port}: {e:#}");
-                                self.send(epoch, Frame::Msg(Msg::Spliced { conn: id, ok: false, error: Some(format!("{e:#}")) }));
+                                self.send(epoch, Frame::Msg(Msg::Spliced { conn: id, ok: false, error: Some(format!("{e:#}")), pipe: None }));
                             }
                         }
                     }
@@ -469,17 +521,19 @@ impl Edge {
         if consumed > record.len() || replay.len() > MAX_RECORD {
             anyhow::bail!("hand-over doesn't match what the player sent");
         }
-        let mut up = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(("127.0.0.1", port))).await??;
+        // (The caller limits all of this to SPLICE_TIMEOUT.)
+        let mut up = TcpStream::connect(("127.0.0.1", port)).await?;
         let _ = up.set_nodelay(true);
         up.write_all(replay).await?;
         up.write_all(&record[consumed..]).await?;
         Ok(up)
     }
 
-    async fn pipe(self: &Arc<Self>, id: u64, mut sock: TcpStream, mut up: TcpStream, server: String, player: String) {
-        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    async fn pipe(self: &Arc<Self>, mut sock: TcpStream, mut up: TcpStream, info: PipeInfo) {
+        let id = info.conn;
+        let player = info.player.clone();
         if let Some(c) = self.conns.lock().unwrap().get_mut(&id) {
-            c.pipe = Some(PipeInfo { conn: id, server: server.clone(), player: player.clone(), since });
+            c.pipe = Some(info);
         }
         {
             // Listed by connection number for the ping readings; dropped

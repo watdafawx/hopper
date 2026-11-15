@@ -110,8 +110,11 @@ impl Ctl {
         self.send(Msg::Splice { conn, port: server, replay: proto::b64(&got), consumed: read_upto as u64, server: "srv".into(), player: "Steve".into() }).await;
         loop {
             match self.next().await {
-                Frame::Msg(Msg::Spliced { conn: c, ok, error }) if c == conn => {
+                Frame::Msg(Msg::Spliced { conn: c, ok, error, pipe }) if c == conn => {
                     assert!(ok, "splice failed: {error:?}");
+                    // Named, so a hopperd that stopped waiting still lists the player.
+                    let p = pipe.expect("a good splice names its pipe");
+                    assert_eq!((p.conn, p.server.as_str(), p.player.as_str()), (conn, "srv", "Steve"));
                     return conn;
                 }
                 _ => {}
@@ -429,4 +432,171 @@ async fn a_squatted_pipe_is_refused_both_ways() {
     assert!(local::Listener::bind(&name).is_err());
     // Held by this process, not by the pid the run file names.
     assert!(local::connect(&name, std::process::id() + 1).await.is_err());
+}
+
+/// An edge from another Hopper Server version answers the hello with its own
+/// channel version and its players, and takes no orders: hopperd learns
+/// both (and replaces it once nobody is on; see `client::supervise`).
+#[tokio::test]
+async fn an_edge_of_another_version_is_told_apart() {
+    use super::client::{Refused, hello};
+    let rig = rig(Duration::from_secs(20)).await;
+    // This hopperd pretends to be a newer one.
+    let mut s = local::connect(&rig.channel, std::process::id()).await.unwrap();
+    match hello(&mut s, &rig.token, PROTO + 1).await {
+        Err(Refused::Version { theirs, pipes }) => assert_eq!((theirs, pipes), (PROTO, 0)),
+        other => panic!("expected a version mismatch, got {other:?}"),
+    }
+    // It isn't taken as this edge's hopperd: a matching one still connects.
+    let mut s = local::connect(&rig.channel, std::process::id()).await.unwrap();
+    assert!(hello(&mut s, &rig.token, PROTO).await.is_ok());
+}
+
+#[test]
+fn the_channel_is_retried_ever_more_slowly() {
+    use super::client::backoff;
+    assert_eq!(backoff(0), Duration::from_millis(200));
+    assert!((0..20).all(|n| backoff(n) <= backoff(n + 1)));
+    assert_eq!(backoff(50), Duration::from_secs(30));
+}
+
+/// A port the edge couldn't have is asked for again every router round
+/// until it listens there; a port it has isn't asked for again.
+#[test]
+fn a_port_not_had_yet_is_asked_for_again() {
+    use super::client::needs_listen;
+    let want = Some(("0.0.0.0".to_string(), 25565));
+    assert!(needs_listen(&None, &want, None));
+    assert!(needs_listen(&want, &want, None), "couldn't bind last time: ask again");
+    assert!(needs_listen(&want, &want, Some(25566)));
+    assert!(!needs_listen(&want, &want, Some(25565)));
+    assert!(needs_listen(&want, &None, Some(25565)), "router off: stop");
+    assert!(!needs_listen(&None, &None, None));
+}
+
+#[test]
+fn a_start_failure_is_said_plainly() {
+    let e = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied)).context(r"starting C:\x\hopperd-edge.exe");
+    let s = super::client::start_error(&e);
+    assert!(s.starts_with("The router couldn't start (Windows or an antivirus didn't let its program run)"), "{s}");
+    assert!(!s.contains(r"C:\x"), "no paths or raw errors: {s}");
+    assert!(super::client::start_error(&anyhow::anyhow!("no place for the router's program")).contains("no folder its program could be copied to"));
+}
+
+/// Two edges started for one folder at once: only the first gets the lock,
+/// and the second one leaves (it can't take the first's channel).
+#[test]
+fn only_one_edge_holds_a_folder() {
+    let dir = std::env::temp_dir().join(format!("hopperd-edge-lock-{}", std::process::id()));
+    super::private_folder(&dir).unwrap();
+    let first = super::take_lock(&dir).unwrap();
+    assert!(first.is_some());
+    assert!(super::take_lock(&dir).unwrap().is_none());
+    drop(first);
+    assert!(super::take_lock(&dir).unwrap().is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_long_data_folder_gets_a_short_socket() {
+    let short = std::path::Path::new("/var/lib/hopperd");
+    assert_eq!(super::socket_path(short, None, 1000), short.join("edge").join("edge.sock"));
+    let long = std::path::PathBuf::from(format!("/home/someone/{}", "deep/".repeat(30)));
+    let p = super::socket_path(&long, Some(std::path::Path::new("/run/user/1000")), 1000);
+    assert!(p.starts_with("/run/user/1000") && p.as_os_str().len() <= 107, "{}", p.display());
+    // A runtime folder that's long too, or none: /tmp, named for this account.
+    let p = super::socket_path(&long, Some(&long), 1000);
+    assert!(p.to_string_lossy().starts_with("/tmp/hopperd-edge-1000-") && p.as_os_str().len() <= 107, "{}", p.display());
+    assert_eq!(super::socket_path(&long, None, 1000), p);
+    // Two data folders don't share one.
+    assert_ne!(super::socket_path(&long.join("a"), None, 1000), p);
+}
+
+/// The service (SYSTEM) never runs the router from the data folder.
+#[test]
+fn a_service_runs_the_router_only_from_beside_its_exe() {
+    let exe = std::path::Path::new("/opt/hopper");
+    let data = std::path::Path::new("/data");
+    assert_eq!(super::paths_for(Some(exe), data, true), vec![exe.join(super::PROGRAM)]);
+    assert_eq!(super::paths_for(Some(exe), data, false), vec![exe.join(super::PROGRAM), super::edge_dir(data).join(super::PROGRAM)]);
+    assert_eq!(super::paths_for(None, data, false), vec![super::edge_dir(data).join(super::PROGRAM)]);
+}
+
+#[test]
+fn the_firewall_line_says_what_to_do() {
+    assert_eq!(super::firewall_note(Some("Allow\r\n")), None);
+    assert_eq!(super::firewall_note(None), None, "couldn't tell: no line");
+    let blocked = super::firewall_note(Some("Allow\r\nBlock\r\n")).unwrap();
+    assert!(blocked.starts_with("Windows Firewall blocks the router"), "{blocked}");
+    let none = super::firewall_note(Some("")).unwrap();
+    assert!(none.contains("If Windows asks about it, choose Allow"), "{none}");
+}
+
+/// Turning the in-panel router on (or the router off) tells the edge to stop
+/// listening: the port is free at once while players on it stay.
+#[tokio::test]
+async fn a_draining_edge_lets_go_of_the_port() {
+    let rig = rig(Duration::from_secs(20)).await;
+    let server = fake_server(Vec::new()).await;
+    let (mut ctl, _) = Ctl::connect(&rig, &rig.token).await.unwrap();
+    ctl.listen(rig.port).await;
+    let mut player = TcpStream::connect(("127.0.0.1", rig.port)).await.unwrap();
+    let hello = login("Steve", rig.port);
+    player.write_all(&hello).await.unwrap();
+    ctl.route_to(server, hello.len()).await;
+    ctl.send(Msg::Stop { drain: true }).await;
+    let t = std::time::Instant::now();
+    let freed = loop {
+        if let Ok(l) = TcpListener::bind(("127.0.0.1", rig.port)).await {
+            break l;
+        }
+        assert!(t.elapsed() < Duration::from_secs(2), "the port stayed taken");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    drop(freed);
+    assert_eq!(rig.edge.pipes().len(), 1, "the player on a server stays");
+}
+
+#[test]
+fn ending_an_edge_that_isnt_there_is_done() {
+    let dir = std::env::temp_dir().join(format!("hopperd-edge-none-{}", std::process::id()));
+    assert!(super::end_for(&dir, Duration::from_millis(10)));
+}
+
+/// Each edge's pipe gets a name nobody can know before it starts.
+#[cfg(windows)]
+#[test]
+fn the_pipe_name_has_a_random_part() {
+    let d = std::path::Path::new(r"C:\data");
+    let a = local::address(d, "0123abcd").unwrap();
+    let b = local::address(d, "fedc9876").unwrap();
+    assert!(a.starts_with(r"\\.\pipe\hopperd-edge-") && a.ends_with("-0123abcd"), "{a}");
+    assert_ne!(a, b);
+}
+
+/// A symlink where the edge folder goes is refused before anything is
+/// changed: its target keeps its permissions.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_edge_folder_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let base = std::env::temp_dir().join(format!("hopperd-edge-link-{}", std::process::id()));
+    let target = base.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let link = base.join("edge");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert!(super::private_folder(&link).is_err());
+    assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o755);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A socket another edge still answers on isn't deleted by a second one.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_live_socket_isnt_taken_over() {
+    let name = channel_name();
+    let _first = local::Listener::bind(&name).unwrap();
+    assert!(local::Listener::bind(&name).is_err());
+    assert!(std::path::Path::new(&name).exists());
 }

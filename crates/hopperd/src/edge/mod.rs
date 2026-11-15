@@ -67,13 +67,58 @@ pub fn private_folder(dir: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        // Checked before anything is changed: set_permissions follows a
+        // symlink, so a link planted here would have its target made 0700
+        // and the socket and token put wherever it points.
         let m = std::fs::symlink_metadata(dir)?;
         if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } {
             anyhow::bail!("{} isn't this account's own folder", dir.display());
         }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+/// Held by the edge for as long as it runs: one edge per data folder, even
+/// when two are started at once (each would otherwise take the channel
+/// from the other and leave one running unseen).
+pub const LOCK_FILE: &str = "lock";
+
+/// Takes the edge lock in `dir`, or None when another edge holds it.
+pub fn take_lock(dir: &Path) -> anyhow::Result<Option<std::fs::File>> {
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let path = dir.join(LOCK_FILE);
+    let f = o.open(&path).with_context(|| format!("opening {}", path.display()))?;
+    match f.try_lock() {
+        Ok(()) => Ok(Some(f)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(e).with_context(|| format!("locking {}", path.display())),
+    }
+}
+
+/// The Unix socket's path. Linux takes at most 107 bytes, which a deep data
+/// folder can pass: then it goes in a short folder of this account's own
+/// (the runtime folder, else /tmp), named after the data folder so two
+/// panels don't meet. That folder gets the edge folder's checks
+/// ([`private_folder`]): one made by another account is refused.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn socket_path(data: &Path, runtime: Option<&Path>, uid: u32) -> PathBuf {
+    const MAX: usize = 107;
+    let own = edge_dir(data).join("edge.sock");
+    if own.as_os_str().len() <= MAX {
+        return own;
+    }
+    use sha2::Digest as _;
+    let h = sha2::Sha256::digest(crate::absolute(data).to_string_lossy().as_bytes());
+    let hex: String = h[..6].iter().map(|b| format!("{b:02x}")).collect();
+    let sub = format!("hopperd-edge-{hex}");
+    match runtime.filter(|r| r.has_root() &&r.join(&sub).join("edge.sock").as_os_str().len() <= MAX) {
+        Some(r) => r.join(sub).join("edge.sock"),
+        None => PathBuf::from(format!("/tmp/hopperd-edge-{uid}-{hex}")).join("edge.sock"),
+    }
 }
 
 /// A process's start time and program file, if it runs.
@@ -148,15 +193,41 @@ pub fn kill(r: &RunFile) {
     }
 }
 
+/// Ends the edge running for the data folder `data`, if one does (checked as
+/// [`kill`] does), and waits up to `wait` for it to be gone. True when no
+/// edge for `data` runs afterwards.
+pub fn end_for(data: &Path, wait: std::time::Duration) -> bool {
+    let Some(r) = read_run(data) else { return true };
+    kill(&r);
+    let t = std::time::Instant::now();
+    while is_ours(&r) {
+        if t.elapsed() > wait {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    true
+}
+
 /// Where the edge runs from: one fixed path per install, so a firewall
 /// rule for it keeps working and hopperd's own file stays free to update.
 pub fn program_paths(data: &Path) -> Vec<PathBuf> {
+    let exe_dir = if cfg!(windows) { std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) } else { None };
+    paths_for(exe_dir.as_deref(), data, cfg!(windows) && crate::autoupdate::AS_SERVICE.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// [`program_paths`] from its parts. A Windows service runs as SYSTEM: it
+/// only runs the edge from beside its own exe (an admin-only folder once
+/// installed), never from the data folder, which other accounts may be
+/// able to write to.
+pub(crate) fn paths_for(exe_dir: Option<&Path>, data: &Path, windows_service: bool) -> Vec<PathBuf> {
     let mut v = Vec::new();
-    #[cfg(windows)]
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+    if let Some(dir) = exe_dir {
         v.push(dir.join(PROGRAM));
     }
-    v.push(edge_dir(data).join(PROGRAM));
+    if !windows_service {
+        v.push(edge_dir(data).join(PROGRAM));
+    }
     v
 }
 
@@ -222,12 +293,58 @@ pub async fn on_panel_stop(app: &crate::App) {
     let keep = edge_dir(&app.boot_dir).join(KEEP_MARKER);
     let marked = std::fs::metadata(&keep).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|d| d.as_secs() < 600));
     let _ = std::fs::remove_file(&keep);
-    let updating = crate::control::exit_code() == crate::control::EXIT_UPDATED;
-    if updating || marked {
+    if keeps_running(crate::control::exit_code(), marked, crate::control::keep_router()) {
         log::info!("router: keeps running through the restart; players stay connected");
         return;
     }
-    app.edge.stop_for_good().await;
+    app.edge.stop_for_good(&app.boot_dir).await;
+}
+
+/// The actions ("Allow" / "Block", one per line) of the enabled inbound
+/// Windows Firewall rules for program `exe`; None when that couldn't be
+/// read. Reading rules needs no admin.
+#[cfg(windows)]
+pub fn firewall_actions(exe: &Path) -> Option<String> {
+    use std::os::windows::process::CommandExt as _;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let path = exe.to_string_lossy().replace('\'', "''");
+    // Action, Enabled and Direction print the same in every language.
+    let script = format!(
+        "Get-NetFirewallApplicationFilter -Program '{path}' -ErrorAction SilentlyContinue | Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {{ $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' }} | ForEach-Object {{ $_.Action.ToString() }}"
+    );
+    let out = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The router card's line for what [`firewall_actions`] found: nothing when
+/// the router's program is allowed (or it couldn't be told).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn firewall_note(actions: Option<&str>) -> Option<String> {
+    let actions = actions?;
+    let has = |a: &str| actions.lines().any(|l| l.trim().eq_ignore_ascii_case(a));
+    if has("Block") {
+        Some(format!(
+            "Windows Firewall blocks the router ({PROGRAM}), so players on other PCs can't join. Allow it in Windows Security > Firewall & network protection > Allow an app through firewall."
+        ))
+    } else if !has("Allow") {
+        Some(format!(
+            "Windows Firewall hasn't allowed the router ({PROGRAM}) yet, so players on other PCs may not get in. If Windows asks about it, choose Allow; or allow it in Windows Security > Firewall & network protection > Allow an app through firewall."
+        ))
+    } else {
+        None
+    }
+}
+
+/// Whether the edge outlives this stop: an update (the tray's exit code, or
+/// a launcher "Update to" that asked the panel to quit and keep it), or a
+/// `service restart` / `service update` marker. Anything else is a real stop.
+pub(crate) fn keeps_running(exit_code: i32, marked: bool, asked: bool) -> bool {
+    exit_code == crate::control::EXIT_UPDATED || marked || asked
 }
 
 /// Asks a restart that stops the panel (`service restart`, `service
@@ -265,7 +382,18 @@ pub fn command(args: &[String], mut log: env_logger::Builder) -> anyhow::Result<
     }
 }
 
+fn random_hex(n: usize) -> anyhow::Result<String> {
+    let mut raw = vec![0u8; n];
+    getrandom::fill(&mut raw).map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(raw.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn run(data: &Path) -> anyhow::Result<()> {
+    // Held until this function returns, so for the edge's whole life.
+    let Some(_lock) = take_lock(&edge_dir(data))? else {
+        log::info!("router: another router runs for this folder; leaving it");
+        return Ok(());
+    };
     if let Some(r) = read_run(data)
         && r.pid != std::process::id()
         && is_ours(&r)
@@ -273,10 +401,8 @@ fn run(data: &Path) -> anyhow::Result<()> {
         log::info!("router: another router (process {}) runs for this folder; leaving it", r.pid);
         return Ok(());
     }
-    let mut raw = [0u8; 32];
-    getrandom::fill(&mut raw).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-    let channel = local::address(data);
+    let token = random_hex(32)?;
+    let channel = local::address(data, &random_hex(8)?)?;
     let created = proc_info(std::process::id()).map_or(0, |(c, _)| c);
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
     rt.block_on(async {
