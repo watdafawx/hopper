@@ -1030,3 +1030,56 @@ fn s19_a_group_member_who_rejoins_gets_the_latest_again() {
     let e = pcs[1].seen.iter().rev().find(|e| e.kind() == Kind::Recipe && e.from == pcs[0].id()).expect("B is handed A's pack again");
     assert_eq!(e.code, pcs[0].code());
 }
+
+/// A turns mod 4 off and goes offline right after it goes out; B takes
+/// it in and turns mod 4 back on. `more`: B sends one more code after
+/// that (another change of B's), as happened on rig when B took in a
+/// change A made offline.
+fn member_undoes_while_sharer_away(more: bool) -> (Relay, Vec<Pc>) {
+    let relay = Relay::start();
+    let (_, mut pcs) = group_of(&relay, &["A", "B"]);
+    pcs[0].mods.insert(4, (41, false));
+    pcs[0].publish().unwrap();
+    pcs[0].offline();
+    pcs[1].tick();
+    assert_eq!(pcs[1].mods[&4], (41, false), "B took A's change");
+    pcs[1].mods.insert(4, (41, true));
+    pcs[1].publish().unwrap();
+    if more {
+        pcs[1].mods.insert(6, (61, false));
+        pcs[1].publish().unwrap();
+    }
+    pcs[0].online();
+    for _ in 0..3 {
+        for p in pcs.iter_mut() {
+            p.tick();
+        }
+    }
+    (relay, pcs)
+}
+
+/// S20. B undoes A's change while A is away, and B's undo is the newest
+/// code A gets from B: A takes the undo.
+#[test]
+#[ignore = "starts relay/hopper_mailbox.py; run with --ignored"]
+fn s20_a_members_undo_reaches_the_sharer_on_reconnect() {
+    let (_relay, pcs) = member_undoes_while_sharer_away(false);
+    assert_eq!(pcs[1].mods[&4], (41, true));
+    assert_eq!(pcs[0].mods[&4], (41, true), "A has B's undo");
+    assert_eq!(pcs[0].who(4), "Turned on by B");
+}
+
+/// GAP (seen on rig, Lithium): as S20, but B sent another code after the
+/// undo. The mailbox keeps only B's newest code; in it the undo's stamp
+/// carries a number (it wasn't made in that code), and A's last code from
+/// B (from before A went away) had mod 4 on too, so `groupsync::plan`
+/// finds no change from B for mod 4 and skips the numbered stamp. A keeps
+/// mod 4 off, B has it on, and nothing ever says they differ.
+#[test]
+#[ignore = "gap: a member's undo is lost when another code follows it while the sharer is away"]
+fn gap_a_members_undo_then_another_change_reaches_the_sharer() {
+    let (_relay, pcs) = member_undoes_while_sharer_away(true);
+    assert_eq!(pcs[1].mods[&4], (41, true));
+    assert_eq!(pcs[0].mods[&6], (61, false), "B's later change landed on A");
+    assert_eq!(pcs[0].mods[&4], (41, true), "A has B's undo too");
+}
