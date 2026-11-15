@@ -3353,6 +3353,8 @@ pub fn fit_key<'a>(parts: impl IntoIterator<Item = &'a str>) -> u64 {
         p.hash(&mut h);
     }
     h.finish()
+}
+
 /// Toasts with a button. The kit's `Notification::action` puts the button
 /// beside the words, so a long label (or a long name in the title) leaves
 /// the words a narrow column that wraps every word or two. This puts the
