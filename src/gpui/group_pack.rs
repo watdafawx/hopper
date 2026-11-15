@@ -2,7 +2,8 @@
 //! moved the pack to another version that this PC couldn't follow yet
 //! (the game runs, the update needs the player to pick, or it failed). The
 //! update itself runs by itself when it can (`groupsync::merge`); the
-//! button opens the usual update dialog for that version.
+//! button opens the usual update dialog for that version, and a failed
+//! try can be tried again at once.
 
 use crate::store::Store;
 use crate::widgets;
@@ -18,11 +19,11 @@ pub fn group_pack_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut C
     let s = store.read(cx);
     let due = s.group_pack_due(root)?.clone();
     let busy = s.is_busy(root);
+    let trying = s.group_pack_trying(root);
+    let failed = matches!(due.wait, Wait::Failed(_));
     let theme = cx.theme();
-    let color = match due.wait {
-        Wait::Failed(_) => theme.warning,
-        _ => theme.info,
-    };
+    let color = if failed { theme.warning } else { theme.info };
+    let (store2, root2) = (store.clone(), root.to_path_buf());
     let (store, root) = (store.clone(), root.to_path_buf());
     Some(
         widgets::notice_bar(color, IconName::RefreshCw, cx)
@@ -35,11 +36,23 @@ pub fn group_pack_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut C
                     .child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(due.title()))
                     .child(widgets::caption(due.detail(), cx)),
             )
+            .when(failed, |bar| {
+                bar.child(
+                    Button::new("group-pack-retry")
+                        .small()
+                        .outline()
+                        .flex_none()
+                        .label(if trying { "Trying..." } else { "Try again" })
+                        .disabled(busy || trying)
+                        .on_click(move |_, _, cx| store2.update(cx, |s, cx| s.retry_group_pack(&root2, cx))),
+                )
+            })
             .when_some(due.file.clone(), |bar, file| {
                 bar.child(
                     Button::new("group-pack-update")
                         .small()
                         .outline()
+                        .flex_none()
                         .label(due.action())
                         .disabled(busy)
                         .tooltip("Opens the update, where you can see what changes and pick what to keep")

@@ -102,6 +102,14 @@ pub fn watch(
         .ok();
 }
 
+/// Whether Minecraft runs in `root` right now, from a fresh look at the
+/// processes. For work that must not run under a game (a pack update)
+/// and can't wait for [`watch`]'s next round: just after Hopper starts,
+/// its map is still empty while a game already runs.
+pub fn runs_in(root: &std::path::Path) -> bool {
+    !scan(&mut System::new(), &[root.to_path_buf()]).is_empty()
+}
+
 /// Ends a running game.
 pub fn stop(pid: u32) -> anyhow::Result<()> {
     let mut sys = System::new();

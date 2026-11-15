@@ -645,7 +645,12 @@ pub fn plan(
         let mut held = false;
         for c in found {
             let cur = will.get(&c.key).cloned().unwrap_or_else(|| state_of(here, &c.key));
-            let unsent = sent.is_some_and(|s| state_of(s, &c.key) != state_of(here, &c.key));
+            // Changed here since the last code sent, unless the group's
+            // last change of it is what's here: that was taken in from
+            // a member, not made here (a publish that didn't get out yet,
+            // as `sent_marks` sees it too).
+            let unsent = sent.is_some_and(|s| state_of(s, &c.key) != state_of(here, &c.key))
+                && copy.marks.get(&c.key).is_none_or(|m| m.state != state_of(here, &c.key));
             let stamp = g.stamps.get(&c.key).filter(|s| s.seq > 0 && s.seq <= g.seq);
             let (seq, by, name) = match stamp {
                 Some(s) if s.by == from => (s.seq, from.clone(), g.name.clone()),
@@ -1128,7 +1133,7 @@ fn pack_step(
     let version = file
         .as_ref()
         .ok()
-        .map(|f| crate::grouppack::short_version(&pack_name, &f.display_name))
+        .map(|f| crate::grouppack::version_name(&pack_name, f))
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| if back { "an older version".into() } else { "a new version".into() });
     let found = file.as_ref().ok().cloned();
@@ -1136,11 +1141,13 @@ fn pack_step(
     let file = match file {
         Ok(f) => f,
         Err(e) => {
-            merged.pack_due = Some(due(Wait::Failed(format!("{e:#}"))));
+            merged.pack_due = Some(due(Wait::Failed(crate::grouppack::failed_says(&e))));
             return Ok(PackRun::Waits);
         }
     };
-    if !pack_ok {
+    // The store's map of running games stays empty for a few seconds after
+    // Hopper starts, while a game may already run: look again here.
+    if !pack_ok || crate::game::runs_in(root) {
         merged.pack_due = Some(due(Wait::Game));
         return Ok(PackRun::Waits);
     }
@@ -1160,11 +1167,14 @@ fn pack_step(
         }
         Err(e) => {
             job.check_cancelled()?;
-            merged.pack_due = Some(due(Wait::Failed(format!("{e:#}"))));
+            merged.pack_due = Some(due(Wait::Failed(crate::grouppack::failed_says(&e))));
             return Ok(PackRun::Waits);
         }
     }
     *inst = crate::instances::load(root).with_context(|| format!("{} isn't an instance any more", root.display()))?;
+    // The pack's own name for the version it now is, as the instance page
+    // shows it.
+    let version = inst.pack.as_ref().map(|p| p.version.trim().to_string()).filter(|v| !v.is_empty()).unwrap_or(version);
     let says = crate::grouppack::says_done(&mark.name, &pack_name, &version, back);
     job.note(says.clone());
     merged.pack_done = Some(says);
@@ -2754,6 +2764,35 @@ mod tests {
         // This PC moved to 87 itself and hasn't published it yet.
         let (todo, merged) = plan(&copy, &pmods(87, vec![]), Some(&pmods(85, vec![])), false, pdec);
         assert!(todo.is_empty());
+        assert!(merged.held);
+    }
+
+    #[test]
+    fn a_pack_version_taken_from_the_group_and_not_sent_yet_holds_nothing_back() {
+        // This PC followed McFawx to 86; its own code still says 85 (the
+        // mailbox was down, so it never went out). McFawx's next move, to
+        // 87, was held as if 86 were this PC's own unsent change, then
+        // dropped after the wait: no notice and no update, ever.
+        let mut copy = pcopy();
+        copy.got.insert("A".into(), got(pcode(86, vec![]), 5, "McFawx"));
+        copy.marks.insert(PACK_KEY.into(), Mark { state: pver(86), kind: Kind::Updated, by: "A".into(), name: "McFawx".into(), seq: 5, at: 5 });
+        copy.arrive("A", got(pcode(87, vec![]), 9, "McFawx"));
+        let (todo, merged) = plan(&copy, &pmods(86, vec![]), Some(&pmods(85, vec![])), false, pdec);
+        assert!(!merged.held);
+        assert_eq!(pack_change(&todo).map(|c| c.now.clone()), Some(pver(87)));
+        // The same for a mod: McFawx's change taken in, then changed again.
+        let mut copy = pcopy();
+        copy.got.insert("A".into(), got(pcode(86, vec![cf(51, true)]), 5, "McFawx"));
+        copy.marks.insert("p:5".into(), Mark { state: State::File { file: "cf:51".into(), on: true }, kind: Kind::Added, by: "A".into(), name: "McFawx".into(), seq: 5, at: 5 });
+        copy.arrive("A", got(pcode(86, vec![cf(51, false)]), 9, "McFawx"));
+        let (todo, merged) = plan(&copy, &pmods(86, vec![cf(51, true)]), Some(&pmods(86, vec![])), false, pdec);
+        assert!(!merged.held);
+        assert_eq!(todo.iter().map(|c| (c.key.as_str(), c.kind())).collect::<Vec<_>>(), [("p:5", Kind::Off)]);
+        // A change this PC made itself still holds the others back.
+        let mut copy = pcopy();
+        copy.got.insert("A".into(), got(pcode(85, vec![]), 1, "McFawx"));
+        copy.arrive("A", got(pcode(86, vec![]), 5, "McFawx"));
+        let (_, merged) = plan(&copy, &pmods(87, vec![]), Some(&pmods(85, vec![])), false, pdec);
         assert!(merged.held);
     }
 
