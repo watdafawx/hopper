@@ -1724,6 +1724,22 @@ mod tests {
         seq: u64,
         /// Per member: (seq, from, code).
         queues: BTreeMap<String, Vec<(u64, String, Got)>>,
+        /// Each sender's last code, as the group keeps it for whoever
+        /// joins later (`group_pack_events` in the relay).
+        packs: BTreeMap<String, Got>,
+    }
+
+    impl Relay {
+        /// `id` says yes to the group: every member's last code reaches
+        /// them, numbered with the joining.
+        fn join(&mut self, id: &str) {
+            self.seq += 1;
+            let since = self.seq;
+            let q = self.queues.entry(id.to_string()).or_default();
+            for (from, g) in self.packs.iter().filter(|(from, _)| *from != id) {
+                q.push((since, from.clone(), Got { seq: since, ..g.clone() }));
+            }
+        }
     }
 
     impl Pc {
@@ -1769,7 +1785,8 @@ mod tests {
                 let q = relay.queues.entry(to.to_string()).or_default();
                 q.retain(|(_, from, _)| *from != self.id);
                 let g = Got { code: now.clone(), seq: relay.seq, at: relay.seq, name: self.id.clone(), stamps: stamps.clone() };
-                q.push((relay.seq, self.id.clone(), g));
+                q.push((relay.seq, self.id.clone(), g.clone()));
+                relay.packs.insert(self.id.clone(), g);
             }
             let seq = relay.seq;
             // As `sent_marks` and `publish_done` do.
@@ -2015,6 +2032,65 @@ mod tests {
         c.read(&relay);
         c.merge();
         assert_eq!(c.mods[&3], (31, false));
+    }
+
+    /// A and C aren't friends (both are B's). The relay gives every member
+    /// each member's copy (`relay/test_hopper_mailbox.py`,
+    /// `test_a_group_reaches_members_who_arent_friends`), so nothing here
+    /// passes through B: each change goes straight to everyone, under the
+    /// name of whoever made it.
+    #[test]
+    fn members_who_arent_friends_get_each_others_changes_and_a_late_member_gets_them_all() {
+        let (mut relay, mut a, mut b, mut c) = group();
+        // B is away the whole time.
+        a.set(1, 11, false);
+        a.set(4, 42, true);
+        a.publish(&mut relay, &ALL, true);
+        online(&mut c, &mut relay);
+        assert_eq!((c.mods[&1], c.mods[&4]), ((11, false), (42, true)));
+        let says = |pc: &Pc, k: &str| pc.copy.marks[k].kind.says(&pc.copy.marks[k].name);
+        assert_eq!((says(&c, "p:1"), says(&c, "p:4")), ("Turned off by A".to_string(), "Updated by A".to_string()));
+        c.set(2, 21, false);
+        c.publish(&mut relay, &ALL, true);
+        online(&mut a, &mut relay);
+        assert_eq!(a.mods[&2], (21, false));
+        assert_eq!(says(&a, "p:2"), "Turned off by C");
+        // C turns 3 off while A is closed; then D, a friend of B only,
+        // joins and installs the pack as A last shared it.
+        c.set(3, 31, false);
+        c.publish(&mut relay, &ALL, true);
+        let all4 = ["A", "B", "C", "D"];
+        let mut d = Pc::new("D", false, &a.mods.iter().map(|(p, (f, on))| (*p, *f, *on)).collect::<Vec<_>>());
+        d.follow_code = a.code();
+        relay.join("D");
+        online_in(&mut d, &mut relay, &all4);
+        let want: BTreeMap<u64, (u64, bool)> = [(1, (11, false)), (2, (21, false)), (3, (31, false)), (4, (42, true))].into_iter().collect();
+        assert_eq!(d.mods, want, "D has the group's current state, C's late change too");
+        assert_eq!(says(&d, "p:3"), "Turned off by C");
+        // D undoes A's turning 1 off: everyone gets it, B on coming back.
+        d.set(1, 11, true);
+        d.publish(&mut relay, &all4, true);
+        for _ in 0..3 {
+            for pc in [&mut a, &mut b, &mut c, &mut d] {
+                online_in(pc, &mut relay, &all4);
+            }
+        }
+        let want: BTreeMap<u64, (u64, bool)> = [(1, (11, true)), (2, (21, false)), (3, (31, false)), (4, (42, true))].into_iter().collect();
+        for pc in [&a, &b, &c, &d] {
+            assert_eq!(pc.mods, want, "{} ends like the others", pc.id);
+            assert_eq!(pc.copy.marks["p:1"].by, "D", "on {}", pc.id);
+        }
+        // D's own mark has no name (its own changes aren't "by" anyone).
+        for pc in [&a, &b, &c] {
+            assert_eq!(says(pc, "p:1"), "Turned on by D", "on {}", pc.id);
+        }
+        assert_eq!(says(&b, "p:4"), "Updated by A");
+    }
+
+    fn online_in(pc: &mut Pc, relay: &mut Relay, all: &[&str]) {
+        pc.read(relay);
+        pc.merge();
+        pc.publish(relay, all, true);
     }
 
     /// Kim takes the sharer's update of mod 1 (11 -> 12) late: by the time

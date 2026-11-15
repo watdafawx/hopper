@@ -1091,4 +1091,57 @@ mod tests {
         let revoke = events.iter().find(|e| e.kind() == Kind::Revoke).unwrap();
         assert_eq!((revoke.direct, revoke.reason.as_str()), (false, "left_group"));
     }
+
+    /// A-B and B-C are friends, A and C aren't: a group made by B still
+    /// carries A's copy to C and C's to A, with the sender's name and
+    /// stamps, and a late member who knows only B gets both.
+    #[test]
+    #[ignore = "needs a live mailbox (HOPPER_MAILBOX_URL)"]
+    fn a_group_reaches_members_who_arent_friends() {
+        let base = live();
+        let a = Mailbox::register(&base, "hopper-test-a").unwrap();
+        let b = Mailbox::register(&base, "hopper-test-b").unwrap();
+        let c = Mailbox::register(&base, "hopper-test-c").unwrap();
+        let d = Mailbox::register(&base, "hopper-test-d").unwrap();
+        for m in [&a, &c, &d] {
+            m.join(&b.invite().unwrap().0).unwrap();
+        }
+        let id = |m: &Mailbox| m.account().id.clone();
+        assert!(a.create_group("x", &[id(&b), id(&c)]).is_err(), "only friends can be added");
+        let g = b.create_group("Crew", &[id(&a), id(&c)]).unwrap();
+        for m in [&a, &c] {
+            m.accept_group(&g.id).unwrap();
+        }
+        let copy = |m: &Mailbox, code: &str| {
+            let marks = [("p:1".to_string(), crate::groupsync::Stamp { seq: 0, by: id(m) })].into_iter().collect();
+            m.publish_to(&[], &[g.id.clone()], "pack-1", crate::groupsync::COPY_KEY, "ATM", code, &[], &marks).unwrap()
+        };
+        let got = |m: &Mailbox, from: &Mailbox| -> Vec<Event> {
+            let (_, evs) = m.events(0, 0).unwrap();
+            evs.into_iter().filter(|e| e.kind() == Kind::Recipe && e.from == from.account().id).collect()
+        };
+        assert_eq!(copy(&a, "HOP-a1").sent, 2);
+        let e = got(&c, &a).pop().expect("C gets A's copy");
+        assert_eq!((e.from_name.as_str(), e.key.as_str(), e.code.as_str(), e.direct), ("hopper-test-a", "~copy", "HOP-a1", false));
+        assert_eq!(e.groups, [g.id.clone()]);
+        assert_eq!(e.marks["p:1"].by, a.account().id);
+        copy(&c, "HOP-c1");
+        assert_eq!(got(&a, &c).pop().expect("A gets C's copy").code, "HOP-c1");
+        // D, a friend of B only, joins and gets both.
+        b.edit_group(&g.id, None, &[id(&d)], &[]).unwrap();
+        d.accept_group(&g.id).unwrap();
+        assert_eq!(got(&d, &a).pop().expect("D gets A's copy").code, "HOP-a1");
+        assert_eq!(got(&d, &c).pop().expect("D gets C's copy").code, "HOP-c1");
+        assert_eq!(copy(&d, "HOP-d1").sent, 3);
+        for m in [&a, &b, &c] {
+            assert_eq!(got(m, &d).pop().expect("D's copy reaches everyone").code, "HOP-d1");
+        }
+        // The member list names everyone; presence only for friends.
+        let gs = c.groups().unwrap();
+        let ms = &gs.iter().find(|x| x.id == g.id).unwrap().members;
+        assert_eq!(ms.len(), 4);
+        let ma = ms.iter().find(|m| m.id == a.account().id).unwrap();
+        assert_eq!((ma.name.as_str(), ma.joined, ma.online, ma.last_seen), ("hopper-test-a", true, false, 0));
+        assert!(ms.iter().find(|m| m.id == b.account().id).unwrap().online);
+    }
 }
