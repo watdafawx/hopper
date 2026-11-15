@@ -612,6 +612,10 @@ pub struct Store {
     /// Instances moved to the group's loader while their game ran: the new
     /// loader is installed when it closes.
     group_loader_waiting: HashSet<PathBuf>,
+    /// Group copies (local ids) whose group moved the pack to a version
+    /// this PC couldn't follow yet, with when that was found and the pack
+    /// file the instance was on then (see `friends::pack_due_ready`).
+    group_pack_due: HashMap<String, friends::PackDue>,
     /// Members' copies that came before this PC's copy of the pack was
     /// set up, by sender and pack; the newest of each.
     group_strays: HashMap<(String, String), hopper::mailbox::Event>,
@@ -820,6 +824,7 @@ impl Store {
             github_limit_told: None,
             group_held: Default::default(),
             group_loader_waiting: Default::default(),
+            group_pack_due: Default::default(),
             group_strays: Default::default(),
             cfg: Default::default(),
             server_files_got: Default::default(),

@@ -3343,7 +3343,7 @@ fn alert_of<'a>(rows: impl Iterator<Item = &'a SyncRow>, cx: &App) -> Option<Til
 /// Who changed a group pack last, and how: "Mia turned off 2 mods · 3 h
 /// ago". Changes this PC made aren't news, so they're skipped.
 fn changed_by(s: &Store, root: &Path, me: &str) -> Option<String> {
-    use hopper::groupsync::{LOADER_KEY, State};
+    use hopper::groupsync::{LOADER_KEY, PACK_KEY, State};
     let c = s.group_copy(root)?;
     // What others did to a mod kept only on this PC didn't happen here.
     let kept = s.instance(root).map(|i| &i.only_here);
@@ -3354,11 +3354,12 @@ fn changed_by(s: &Store, root: &Path, me: &str) -> Option<String> {
         c.marks
             .iter()
             .filter(|(k, m)| if k.as_str() == LOADER_KEY { Some(&m.state) == loader.as_ref() } else { !kept.is_some_and(|o| o.contains_key(*k)) })
-            .map(|(k, m)| (k.as_str() == LOADER_KEY, m))
+            .map(|(k, m)| (k.as_str(), m))
     };
-    let (is_loader, last) = marks().filter(|(_, m)| m.by != me).max_by_key(|(_, m)| (m.at, m.seq))?;
-    // The mods that one change touched the same way.
-    let n = marks().filter(|(l, m)| !l && m.by == last.by && m.seq == last.seq && m.kind == last.kind).count();
+    let (key, last) = marks().filter(|(_, m)| m.by != me).max_by_key(|(_, m)| (m.at, m.seq))?;
+    // The mods that one change touched the same way (the loader and the
+    // pack version aren't mods).
+    let n = marks().filter(|(k, m)| !k.starts_with('~') && m.by == last.by && m.seq == last.seq && m.kind == last.kind).count();
     let verb = match last.kind {
         Kind::Added => "added",
         Kind::Removed => "took out",
@@ -3366,8 +3367,10 @@ fn changed_by(s: &Store, root: &Path, me: &str) -> Option<String> {
         Kind::Off => "turned off",
         Kind::Updated => "updated",
     };
-    let what = if is_loader {
+    let what = if key == LOADER_KEY {
         "the loader".to_string()
+    } else if key == PACK_KEY {
+        "the pack".to_string()
     } else if n == 1 {
         "a mod".to_string()
     } else {

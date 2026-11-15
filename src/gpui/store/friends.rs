@@ -155,6 +155,20 @@ pub struct GroupMerged {
 }
 
 /// The newest waiting code's number, which a failed try is kept against.
+/// A pack version from the group that couldn't go in (see
+/// `Store::pack_due_ready`): why, when, the pack file the instance was on
+/// and the newest code waiting then.
+pub struct PackDue {
+    pub due: hopper::grouppack::Due,
+    pub at: Instant,
+    pub file: u64,
+    pub code: String,
+}
+
+/// How long a group pack version whose update failed waits before it is
+/// tried again by itself.
+const PACK_RETRY: std::time::Duration = std::time::Duration::from_secs(600);
+
 fn newest_waiting(c: &PackCopy) -> String {
     c.waiting.values().map(|g| g.seq).max().unwrap_or(0).to_string()
 }
@@ -1043,6 +1057,11 @@ impl Store {
                 continue;
             }
             let Some(root) = self.instances.iter().find(|i| i.id == c.local).map(|i| i.root.clone()) else { continue };
+            // The group moved the pack and this PC couldn't follow yet: the
+            // members' other changes wait for it too.
+            if !self.pack_due_ready(c, &root, now) {
+                continue;
+            }
             // Waiting for a change made here to be sent; after a while the
             // others' changes go in anyway.
             let ignore_unsent = match self.group_held.get(&c.local) {
@@ -1070,6 +1089,34 @@ impl Store {
     }
 
     // ---- Group packs kept both ways ---------------------------------------
+
+    /// The pack version the group moved this instance's pack to that it
+    /// hasn't followed yet, and why.
+    pub fn group_pack_due(&self, root: &Path) -> Option<&hopper::grouppack::Due> {
+        let inst = self.instance(root)?;
+        let d = self.group_pack_due.get(&inst.id)?;
+        // Updated since (from the notice): it's being taken in now.
+        (inst.pack.as_ref().map_or(0, |p| p.file_id) == d.file).then_some(&d.due)
+    }
+
+    /// Whether a group copy may take in its members' changes now, when
+    /// the pack version they moved to couldn't go in last time: the game
+    /// closed, the player updated the pack (from the notice), another code
+    /// came, or a failed try waited a while. Picking per file is the
+    /// player's, in the update dialog.
+    fn pack_due_ready(&self, c: &PackCopy, root: &Path, now: Instant) -> bool {
+        use hopper::grouppack::Wait;
+        let Some(d) = self.group_pack_due.get(&c.local) else { return true };
+        let file = self.instance(root).and_then(|i| i.pack.as_ref()).map_or(0, |p| p.file_id);
+        if file != d.file || newest_waiting(c) != d.code {
+            return true;
+        }
+        match &d.due.wait {
+            Wait::Game => self.running(root).is_none(),
+            Wait::Pick => false,
+            Wait::Failed(_) => now.duration_since(d.at) >= PACK_RETRY,
+        }
+    }
 
     /// The copy of a group pack at `root`, when it is kept both ways.
     pub fn group_copy(&self, root: &Path) -> Option<&PackCopy> {
@@ -1146,6 +1193,7 @@ impl Store {
         let back: Vec<PackCopy> = gone.into_iter().filter(|c| c.local != c.inst).collect();
         for c in &back {
             self.group_held.remove(&c.local);
+            self.group_pack_due.remove(&c.local);
             if let Some(r) = self.group_retry.remove(&c.local) {
                 self.jobs.dismiss(r.job);
             }
@@ -1203,8 +1251,11 @@ impl Store {
             _ => format!("Updating {name} with the group's changes"),
         };
         let (tx, local, r2) = (self.tx.clone(), copy.local.clone(), root.clone());
+        // A pack update while the game runs would pull files out from under
+        // it: the group's pack version waits for it to close.
+        let pack_ok = self.running(&root).is_none();
         self.spawn_instance_job_quiet(&root, title, move |job| {
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| groupsync::merge(&r2, &copy, allow, ignore_unsent, job)))
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| groupsync::merge(&r2, &copy, allow, ignore_unsent, pack_ok, job)))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("Hopper hit a bug and stopped this task.")));
             match r {
                 Ok(merged) => Ok(Msg::GroupMerged(Box::new(GroupMerged { local, root: r2, merged }))),
@@ -1247,6 +1298,21 @@ impl Store {
                 }
             }
         });
+        // The group's pack version: in (said once), or waiting with its
+        // notice on the instance page.
+        match merged.pack_due {
+            Some(due) => {
+                let file = self.instance(&root).and_then(|i| i.pack.as_ref()).map_or(0, |p| p.file_id);
+                let code = self.settings.group_copies.iter().find(|c| c.local == local).map(newest_waiting).unwrap_or_default();
+                self.group_pack_due.insert(local.clone(), PackDue { due, at: Instant::now(), file, code });
+            }
+            None => {
+                self.group_pack_due.remove(&local);
+            }
+        }
+        if let Some(says) = merged.pack_done {
+            cx.emit(StoreEvent::Notice(says, false));
+        }
         if merged.held {
             if self.group_held.get(&local).is_none_or(|(s, _)| *s != sent_seq) {
                 self.group_held.insert(local, (sent_seq, Instant::now()));

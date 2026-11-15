@@ -136,11 +136,20 @@ pub fn loader_of(share: &Share) -> Option<String> {
 
 /// A code's mods by key, and its loader. `project` says whose a file is
 /// (None: couldn't tell, and then `unsure` is set and the mod is left out).
+#[derive(Clone)]
 pub struct Mods {
     pub map: BTreeMap<String, (State, Entry)>,
     pub unsure: bool,
     /// [`loader_of`] the code.
     pub loader: Option<String>,
+    /// The code's pack version ([`crate::grouppack::pack_state`]).
+    pub pack: State,
+    /// What that pack version comes with, when looked up
+    /// ([`fill_packs`]); needed only to compare codes of two versions.
+    pub ships: Option<crate::grouppack::Ships>,
+    /// The file names of its mods, by key, where known: a jar the new pack
+    /// version ships by name is found by it.
+    pub names: BTreeMap<String, String>,
 }
 
 impl Mods {
@@ -148,6 +157,9 @@ impl Mods {
     pub fn state(&self, key: &str) -> State {
         if key == LOADER_KEY {
             return loader_state(self.loader.as_ref());
+        }
+        if key == PACK_KEY {
+            return self.pack.clone();
         }
         self.map.get(key).map(|(s, _)| s.clone()).unwrap_or_default()
     }
@@ -181,7 +193,38 @@ pub fn mods(share: &Share, mut project: impl FnMut(&Entry) -> Option<u64>) -> Mo
         };
         map.insert(key, (state, e.clone()));
     }
-    Mods { map, unsure, loader: loader_of(share) }
+    Mods { map, unsure, loader: loader_of(share), pack: crate::grouppack::pack_state(&share.base), ships: None, names: BTreeMap::new() }
+}
+
+pub use crate::grouppack::PACK_KEY;
+
+/// Fills in what each code's pack version comes with ([`Mods::ships`])
+/// and the file names of their mods this instance knows, when the codes
+/// are of more than one pack version (only then is it needed: a mod a
+/// member had that their new version ships is not one they removed).
+pub fn fill_packs(inst: &Instance, all: &mut [&mut Mods], job: &Job) {
+    let mut packs: Vec<State> = all.iter().map(|m| m.pack.clone()).collect();
+    packs.sort();
+    packs.dedup();
+    if packs.len() < 2 {
+        return;
+    }
+    let ships: Vec<(State, Option<crate::grouppack::Ships>)> = packs
+        .into_iter()
+        .map(|p| {
+            let s = crate::grouppack::Version::of(&p).and_then(|v| crate::grouppack::ships(&v, job));
+            (p, s)
+        })
+        .collect();
+    for m in all.iter_mut() {
+        m.ships = ships.iter().find(|(p, _)| *p == m.pack).and_then(|(_, s)| s.clone());
+        let keys: Vec<String> = m.map.iter().filter(|(_, (s, _))| matches!(s, State::File { .. })).map(|(k, _)| k.clone()).collect();
+        for k in keys {
+            if let Some(i) = find_addon(inst, &k) {
+                m.names.insert(k, inst.addons[i].file_name.clone());
+            }
+        }
+    }
 }
 
 /// One mod that differs between two codes.
@@ -196,7 +239,7 @@ pub struct Change {
 
 impl Change {
     pub fn kind(&self) -> Kind {
-        if self.key == LOADER_KEY {
+        if self.key == LOADER_KEY || self.key == PACK_KEY {
             return Kind::Updated;
         }
         match (&self.was, &self.now) {
@@ -220,8 +263,20 @@ impl Change {
 
 /// The mods that differ from `was` to `now`. A mod `now` doesn't list
 /// while one of its files couldn't be identified isn't called removed: it
-/// may only be the one that wasn't recognised.
+/// may only be the one that wasn't recognised. Between codes of two pack
+/// versions, what only differs because of the version (see
+/// [`crate::grouppack::explained`]) is no change; the version itself is
+/// one ([`PACK_KEY`]).
 pub fn changes(was: &Mods, now: &Mods) -> Vec<Change> {
+    let mut out = mod_changes(was, now);
+    out.retain(|c| !crate::grouppack::explained(was, now, c));
+    if was.pack != now.pack {
+        out.push(Change { key: PACK_KEY.to_string(), was: was.pack.clone(), now: now.pack.clone(), entry: None });
+    }
+    out
+}
+
+fn mod_changes(was: &Mods, now: &Mods) -> Vec<Change> {
     let mut out = Vec::new();
     for (k, (s, e)) in &now.map {
         let before = was.map.get(k).map(|(s, _)| s.clone()).unwrap_or_default();
@@ -318,7 +373,15 @@ pub fn sent_marks(inst: &Instance, copy: &PackCopy, now: &Share, me: &str, seq: 
         return Vec::new();
     };
     let found = projects_of(inst, &[&prev, now]);
-    let (prev, now) = (mods(&prev, lookup(&found)), mods(now, lookup(&found)));
+    let (mut prev, mut now) = (mods(&prev, lookup(&found)), mods(now, lookup(&found)));
+    // After this copy's own pack update: a mod of the player's the new
+    // version ships isn't one they removed.
+    if prev.pack != now.pack {
+        let jobs = crate::jobs::Jobs::new(crate::waker::noop());
+        let j = jobs.start_quiet("Reading the pack's mod list");
+        fill_packs(inst, &mut [&mut prev, &mut now], &j);
+        j.finish(&Ok::<(), anyhow::Error>(()));
+    }
     new_marks(inst, &copy.marks, &prev, &now, &pack_ships(inst), (me, seq, at), remote_file_name)
 }
 
@@ -514,6 +577,16 @@ pub struct Merged {
     /// already; the new loader still has to be installed (not while the
     /// game runs).
     pub loader: Option<String>,
+    /// For each change decided, the pack version of the code it came in
+    /// (a member on another version than this copy can't swap or take out
+    /// a pack mod here: see [`merge`]).
+    pub packs: BTreeMap<String, State>,
+    /// The group's pack version went in: what to tell the player.
+    pub pack_done: Option<String>,
+    /// The group's pack version couldn't go in yet. Nothing else was taken
+    /// in either (a member's mod changes are relative to their version, so
+    /// they wait for it); the caller shows it and tries again later.
+    pub pack_due: Option<crate::grouppack::Due>,
 }
 
 /// Decides each waiting code's changes against this copy (`here`: its
@@ -592,6 +665,7 @@ pub fn plan(
                     marks.insert(c.key.clone(), m.clone());
                     out.marks.push((c.key.clone(), m));
                     out.made.push((c.key.clone(), kind, name));
+                    out.packs.insert(c.key.clone(), now.pack.clone());
                     will.insert(c.key.clone(), c.now.clone());
                     todo.retain(|t| t.key != c.key);
                     todo.push(c);
@@ -877,7 +951,12 @@ fn move_loader(inst: &mut Instance, c: &Change, pack: Option<&str>, merged: &mut
 /// thread. `allow`: mods from other links may be put in by themselves.
 /// `ignore_unsent`: a change here waited for its publish too long; the
 /// other members' changes to that mod are dropped and the rest go in.
-pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, job: &Job) -> anyhow::Result<Merged> {
+///
+/// A pack version a member moved to (and that wins) goes in first, as a
+/// whole pack update that keeps this player's edits; `pack_ok` false (the
+/// game is running) leaves it, and everything else, for later
+/// ([`Merged::pack_due`]).
+pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pack_ok: bool, job: &Job) -> anyhow::Result<Merged> {
     // Held to the end: an update that finished meanwhile would otherwise be
     // undone by this older copy, with its new jar left behind unlisted.
     let _edit = crate::instances::edit_lock(root);
@@ -906,12 +985,43 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, job
     all.extend(sent.iter());
     all.extend(theirs.iter());
     let found = projects_of(&inst, &all);
-    let here = mods(&here, lookup(&found));
-    let sent = sent.map(|s| mods(&s, lookup(&found)));
-    let (todo, mut merged) = plan(copy, &here, sent.as_ref(), ignore_unsent, |c| read(c).map(|s| mods(&s, lookup(&found))));
+    let read_mods = |s: &Share| mods(s, lookup(&found));
+    let mut here = read_mods(&here);
+    let mut sent = sent.as_ref().map(read_mods);
+    let mut codes: HashMap<String, Mods> = HashMap::new();
+    for g in copy.got.values().chain(copy.waiting.values()) {
+        if let Some(s) = read(&g.code) {
+            codes.insert(g.code.clone(), read_mods(&s));
+        }
+    }
+    {
+        let mut every: Vec<&mut Mods> = vec![&mut here];
+        every.extend(sent.iter_mut());
+        every.extend(codes.values_mut());
+        fill_packs(&inst, &mut every, job);
+    }
+    let (todo, mut merged) = plan(copy, &here, sent.as_ref(), ignore_unsent, |c| codes.get(c).cloned());
+    // The pack version goes first: a member's mod changes are relative to
+    // their version, and the update may bring or take out mods itself.
+    let (pack_change, todo): (Vec<Change>, Vec<Change>) = todo.into_iter().partition(|c| c.key == PACK_KEY);
+    let mut here_pack = here.pack.clone();
+    let mut pack_loader = pack_loader;
+    if let Some(c) = pack_change.first() {
+        match pack_step(&mut inst, root, c, &here.pack, pack_ok, &copy.group, &mut merged, job)? {
+            PackRun::Nothing => {}
+            PackRun::Waits => return Ok(Merged { pack_due: merged.pack_due, ..Default::default() }),
+            PackRun::Done => {
+                here_pack = c.now.clone();
+                // The new version's own loader is the one to go back to.
+                pack_loader = Some(inst.loader.clone());
+            }
+        }
+    }
+    let shipped = if here_pack != here.pack { pack_ships(&inst) } else { shipped };
     // The loader isn't a mod: it is moved here, not through `apply`.
     let (loader_change, todo): (Vec<Change>, Vec<Change>) = todo.into_iter().partition(|c| c.key == LOADER_KEY);
     let loader_set = loader_change.first().is_some_and(|c| move_loader(&mut inst, c, pack_loader.as_deref(), &mut merged, job));
+    let todo = keep_pack_mods(&inst, todo, &mut merged, &here_pack, job);
     // Mods kept only on this PC only learn how the others have them.
     let (mut todo, kept) = crate::onlyhere::split(&mut inst, todo, &mut merged);
     // A change to a mod this copy doesn't have (an echo of a removal, a
@@ -941,7 +1051,7 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, job
         }
         false
     });
-    if (kept || loader_set) && todo.is_empty() {
+    if (kept || loader_set || merged.pack_done.is_some()) && todo.is_empty() {
         inst.save()?;
     }
     if !todo.is_empty() {
@@ -967,6 +1077,135 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, job
         apply(&mut inst, &todo, &skip, job)?;
     }
     Ok(merged)
+}
+
+/// How the pack version step of a [`merge`] went.
+enum PackRun {
+    /// Nothing to do (already on it, or another pack altogether).
+    Nothing,
+    /// It can't go in now; [`Merged::pack_due`] says why.
+    Waits,
+    /// Updated; `inst` is the instance after it.
+    Done,
+}
+
+/// Moves this instance to the pack version a member moved to (`c`), the
+/// way the update dialog's "Keep my changes" does: the new pack zip, its
+/// overrides and configs, this player's edits kept, one History entry
+/// named after the member. `here`: this copy's pack version.
+#[allow(clippy::too_many_arguments)]
+fn pack_step(
+    inst: &mut Instance,
+    root: &Path,
+    c: &Change,
+    here: &State,
+    pack_ok: bool,
+    group: &str,
+    merged: &mut Merged,
+    job: &Job,
+) -> anyhow::Result<PackRun> {
+    use crate::grouppack::{Due, Step, Version, Wait};
+    let mark = merged.marks.iter().rev().find(|(k, _)| k == PACK_KEY).map(|(_, m)| m.clone()).unwrap_or_default();
+    let v = match crate::grouppack::step(here, c) {
+        Step::Move(v) => v,
+        Step::Nothing => {
+            merged.made.retain(|(k, _, _)| k != PACK_KEY);
+            return Ok(PackRun::Nothing);
+        }
+        Step::Other => {
+            let who = if mark.name.is_empty() { "Someone" } else { mark.name.as_str() };
+            job.show();
+            job.note(format!("{who} has another pack in the group's copy now. Install it again from their share code to follow."));
+            merged.made.retain(|(k, _, _)| k != PACK_KEY);
+            return Ok(PackRun::Nothing);
+        }
+    };
+    let (pid, fid) = v.ids();
+    let pack_name = inst.pack.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+    // CurseForge numbers a pack's files in the order they came out.
+    let back = matches!(v, Version::Curse { .. }) && inst.pack.as_ref().is_some_and(|p| fid < p.file_id);
+    let file = crate::source::file(pid, fid);
+    let version = file
+        .as_ref()
+        .ok()
+        .map(|f| crate::grouppack::short_version(&pack_name, &f.display_name))
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| if back { "an older version".into() } else { "a new version".into() });
+    let found = file.as_ref().ok().cloned();
+    let due = |wait| Due { to: v.clone(), file: found.clone(), version: version.clone(), pack: pack_name.clone(), who: mark.name.clone(), back, wait };
+    let file = match file {
+        Ok(f) => f,
+        Err(e) => {
+            merged.pack_due = Some(due(Wait::Failed(format!("{e:#}"))));
+            return Ok(PackRun::Waits);
+        }
+    };
+    if !pack_ok {
+        merged.pack_due = Some(due(Wait::Game));
+        return Ok(PackRun::Waits);
+    }
+    job.show();
+    job.detail(format!("Updating {} to {version}", if pack_name.is_empty() { "the pack" } else { pack_name.as_str() }));
+    let updated = {
+        // Whatever the new version changes is the member's in History.
+        let _scope = crate::actor::begin(root, Some(crate::actor::Who::friend(&mark.name, &mark.by, group, "")));
+        let _own = crate::actor::own_all();
+        crate::modpack::update_group_pack(inst, pid, &file, job)
+    };
+    match updated {
+        Ok(true) => {}
+        Ok(false) => {
+            merged.pack_due = Some(due(Wait::Pick));
+            return Ok(PackRun::Waits);
+        }
+        Err(e) => {
+            job.check_cancelled()?;
+            merged.pack_due = Some(due(Wait::Failed(format!("{e:#}"))));
+            return Ok(PackRun::Waits);
+        }
+    }
+    *inst = crate::instances::load(root).with_context(|| format!("{} isn't an instance any more", root.display()))?;
+    let says = crate::grouppack::says_done(&mark.name, &pack_name, &version, back);
+    job.note(says.clone());
+    merged.pack_done = Some(says);
+    Ok(PackRun::Done)
+}
+
+/// Leaves out of `todo` what a member on another pack version than this
+/// copy (`here_pack`) did to a pack mod here, swapping its file or taking
+/// it out: what their version has of it isn't this one's. The task says
+/// so; it isn't marked as theirs.
+fn keep_pack_mods(inst: &Instance, mut todo: Vec<Change>, merged: &mut Merged, here_pack: &State, job: &Job) -> Vec<Change> {
+    todo.retain(|c| {
+        if merged.packs.get(&c.key).is_none_or(|p| p == here_pack) || !swaps_pack_mod(inst, c) {
+            return true;
+        }
+        let name = find_addon(inst, &c.key).map(|i| inst.addons[i].name.clone()).unwrap_or_default();
+        job.show();
+        job.note(format!("{name}: kept as the pack has it. Their copy is on another version of the pack."));
+        merged.made.retain(|(k, _, _)| *k != c.key);
+        merged.marks.retain(|(k, _)| *k != c.key);
+        false
+    });
+    todo
+}
+
+/// Whether making `c` here would swap a pack mod's file for another or
+/// take it out (turning it on or off is fine).
+fn swaps_pack_mod(inst: &Instance, c: &Change) -> bool {
+    let Some(i) = find_addon(inst, &c.key) else { return false };
+    let a = &inst.addons[i];
+    if !a.from_pack {
+        return false;
+    }
+    match (&c.now, &c.entry) {
+        (State::Removed, _) => true,
+        (State::Unlisted, _) => matches!(c.was, State::File { .. }),
+        (State::File { .. }, Some(Entry::CurseFile { file, .. })) => *file != a.file_id,
+        (State::File { .. }, Some(Entry::ModrinthFile { version, .. })) => *version != a.mr_version && num_id(version) != a.file_id,
+        (State::File { .. }, Some(Entry::Source { .. })) => true,
+        _ => false,
+    }
 }
 
 /// The group packs "Keep everyone in step" follows here as new instances:
@@ -2092,7 +2331,7 @@ mod tests {
         copy.arrive("mia", loader_got(&plain(theirs), 10, "Mia"));
         let jobs = crate::jobs::Jobs::default();
         let job = jobs.start("t");
-        let merged = merge(&inst.root, &copy, false, false, &job).unwrap();
+        let merged = merge(&inst.root, &copy, false, false, true, &job).unwrap();
         let notes = jobs.snapshot().into_iter().flat_map(|j| j.notes).collect();
         let back = crate::instances::load(&inst.root).unwrap();
         let _ = std::fs::remove_dir_all(&inst.root);
@@ -2339,5 +2578,228 @@ mod tests {
         let marks = new_marks(&claimed, &BTreeMap::new(), &prev, &now, &Default::default(), ("lead", 10, 10), name_of);
         assert!(marks.iter().any(|(k, m)| *k == key && m.kind == Kind::Removed));
         let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    // ---- the pack version ------------------------------------------------------------
+
+    /// Pack project 1. Version 85 ships mod 6 (file 61); version 86 ships
+    /// mod 6 (file 62) and mod 5 (file 51), which members had added
+    /// themselves on 85.
+    fn ships_of(file: u64) -> crate::grouppack::Ships {
+        match file {
+            85 => ["p:6"].iter().map(|s| s.to_string()).collect(),
+            86 => ["p:6", "p:5"].iter().map(|s| s.to_string()).collect(),
+            _ => Default::default(),
+        }
+    }
+    fn pshare(file: u64, entries: Vec<Entry>) -> Share {
+        Share { base: Base::Curse { project: 1, file }, name: None, loader: None, entries }
+    }
+    fn pcode(file: u64, entries: Vec<Entry>) -> String {
+        crate::sharecode::encode(&pshare(file, entries))
+    }
+    /// A code read the way `merge` reads it: with what its pack version
+    /// ships, when that could be looked up.
+    fn pmods_of(s: &Share, known: bool) -> Mods {
+        let mut m = mods(s, project_of_file);
+        if let Base::Curse { file, .. } = s.base
+            && known
+        {
+            m.ships = Some(ships_of(file));
+        }
+        m
+    }
+    fn pmods(file: u64, entries: Vec<Entry>) -> Mods {
+        pmods_of(&pshare(file, entries), true)
+    }
+    fn pdec(c: &str) -> Option<Mods> {
+        crate::sharecode::decode(c).ok().map(|s| pmods_of(&s, true))
+    }
+    fn pver(file: u64) -> State {
+        crate::grouppack::pack_state(&Base::Curse { project: 1, file })
+    }
+    fn pack_change(todo: &[Change]) -> Option<&Change> {
+        todo.iter().find(|c| c.key == PACK_KEY)
+    }
+
+    #[test]
+    fn a_pack_version_change_is_one_updated_change() {
+        let c = changes(&pmods(85, vec![cf(71, true)]), &pmods(86, vec![cf(71, true)]));
+        assert_eq!(c.len(), 1);
+        assert_eq!((c[0].key.as_str(), c[0].kind()), (PACK_KEY, Kind::Updated));
+        assert_eq!((c[0].was.clone(), c[0].now.clone()), (pver(85), pver(86)));
+        // A plain code has no pack version: nothing to compare.
+        assert!(changes(&m(vec![cf(11, true)]), &m(vec![cf(11, true)])).is_empty());
+    }
+
+    #[test]
+    fn a_mod_the_new_pack_version_ships_is_not_removed() {
+        // The leader added mod 5 on 85; 86 ships it, so their code stops
+        // listing it. That is no removal: followers on 85 keep it.
+        let was = pmods(85, vec![cf(51, true), cf(71, true)]);
+        let c = changes(&was, &pmods(86, vec![cf(71, true)]));
+        assert_eq!(c.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), [PACK_KEY]);
+        // What 86 ships couldn't be looked up: still never a removal.
+        let c = changes(&was, &pmods_of(&pshare(86, vec![cf(71, true)]), false));
+        assert_eq!(c.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), [PACK_KEY]);
+        // A mod 86 doesn't ship that left the code was removed.
+        let c = changes(&was, &pmods(86, vec![cf(51, true)]));
+        let gone: Vec<_> = c.iter().filter(|c| c.key != PACK_KEY).map(|c| (c.key.as_str(), c.kind())).collect();
+        assert_eq!(gone, [("p:7", Kind::Removed)]);
+        // Within one version the old rule holds.
+        let c = changes(&pmods(85, vec![cf(51, true)]), &pmods(85, vec![]));
+        assert_eq!(c.iter().map(|c| (c.key.as_str(), c.kind())).collect::<Vec<_>>(), [("p:5", Kind::Removed)]);
+    }
+
+    #[test]
+    fn a_jar_the_new_version_ships_by_name_is_not_removed() {
+        let mut was = pmods(85, vec![cf(51, true)]);
+        was.names.insert("p:5".into(), "fivemod-1.0.jar".into());
+        let mut now = pmods(86, vec![]);
+        now.ships = Some(["n:fivemod-1.0.jar".to_string()].into_iter().collect());
+        assert_eq!(changes(&was, &now).iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), [PACK_KEY]);
+    }
+
+    #[test]
+    fn a_pack_mod_taken_out_that_the_new_version_drops_is_no_change() {
+        // On 85 they took out pack mod 6; 87 doesn't have it at all.
+        let c = changes(&pmods(85, vec![Entry::Remove(Target::Curse(6))]), &pmods(87, vec![]));
+        assert_eq!(c.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), [PACK_KEY]);
+        // 86 still has it: putting it back is theirs.
+        let c = changes(&pmods(85, vec![Entry::Remove(Target::Curse(6))]), &pmods(86, vec![]));
+        assert_eq!(c.iter().filter(|c| c.key != PACK_KEY).count(), 1);
+    }
+
+    fn pcopy() -> PackCopy {
+        PackCopy { inst: "pack".into(), group: "g".into(), local: "here".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_member_ahead_on_the_pack_is_followed_without_deleting_their_added_mod() {
+        // McFawx (A) and this PC both on 85 with mod 5 added; McFawx moves
+        // to 86, which ships mod 5.
+        let mut copy = pcopy();
+        copy.got.insert("A".into(), got(pcode(85, vec![cf(51, true)]), 3, "McFawx"));
+        copy.arrive("A", got(pcode(86, vec![]), 9, "McFawx"));
+        let here = pmods(85, vec![cf(51, true)]);
+        let (todo, merged) = plan(&copy, &here, Some(&here), false, pdec);
+        assert_eq!(todo.len(), 1, "{todo:?}");
+        let c = pack_change(&todo).expect("the pack version");
+        assert_eq!(c.now, pver(86));
+        assert_eq!(merged.made, [(PACK_KEY.to_string(), Kind::Updated, "McFawx".to_string())]);
+        assert_eq!(crate::grouppack::step(&here.pack, c), crate::grouppack::Step::Move(crate::grouppack::Version::Curse { project: 1, file: 86 }));
+        // Once this PC is on 86 too, McFawx's next code is an echo.
+        let mut copy = copy.clone();
+        copy.got.insert("A".into(), merged.taken[0].1.clone());
+        copy.waiting.clear();
+        copy.marks.extend(merged.marks.iter().cloned());
+        copy.arrive("A", got(pcode(86, vec![cf(81, true)]), 12, "McFawx"));
+        let (todo, _) = plan(&copy, &pmods(86, vec![]), None, false, pdec);
+        assert_eq!(todo.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), ["p:8"]);
+    }
+
+    #[test]
+    fn a_member_behind_on_the_pack_never_moves_it_back() {
+        // This PC is on 86 (McFawx moved it at 9); Kim is still on 85 and
+        // only adds a mod.
+        let mut copy = pcopy();
+        copy.marks.insert(PACK_KEY.into(), Mark { state: pver(86), kind: Kind::Updated, by: "A".into(), name: "McFawx".into(), seq: 9, at: 9 });
+        copy.got.insert("K".into(), got(pcode(85, vec![cf(51, true)]), 4, "Kim"));
+        copy.arrive("K", got(pcode(85, vec![cf(51, true), cf(71, true)]), 11, "Kim"));
+        let here = pmods(86, vec![]);
+        let (todo, _) = plan(&copy, &here, Some(&here), false, pdec);
+        assert!(pack_change(&todo).is_none(), "{todo:?}");
+        assert_eq!(todo.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), ["p:7"]);
+    }
+
+    #[test]
+    fn moving_the_pack_back_is_a_change_and_the_latest_move_wins() {
+        // McFawx moves 85 -> 86 at 5, Mia moves 86 -> 85 at 8: back to 85.
+        let mut copy = pcopy();
+        copy.got.insert("A".into(), got(pcode(85, vec![]), 1, "McFawx"));
+        copy.got.insert("M".into(), got(pcode(86, vec![]), 2, "Mia"));
+        copy.arrive("A", got(pcode(86, vec![]), 5, "McFawx"));
+        copy.arrive("M", got(pcode(85, vec![]), 8, "Mia"));
+        let here = pmods(85, vec![]);
+        let (todo, merged) = plan(&copy, &here, Some(&here), false, pdec);
+        let c = pack_change(&todo).unwrap();
+        assert_eq!(c.now, pver(85));
+        assert_eq!(merged.marks.last().map(|(_, m)| m.name.as_str()), Some("Mia"));
+        assert_eq!(crate::grouppack::step(&here.pack, c), crate::grouppack::Step::Nothing);
+        // The other way round: Mia's move back came first, McFawx's later.
+        let mut copy = pcopy();
+        copy.got.insert("A".into(), got(pcode(85, vec![]), 1, "McFawx"));
+        copy.got.insert("M".into(), got(pcode(86, vec![]), 2, "Mia"));
+        copy.arrive("M", got(pcode(85, vec![]), 5, "Mia"));
+        copy.arrive("A", got(pcode(86, vec![]), 8, "McFawx"));
+        let here = pmods(86, vec![]);
+        let (todo, _) = plan(&copy, &here, Some(&here), false, pdec);
+        assert_eq!(pack_change(&todo).unwrap().now, pver(86));
+        // A later move back on its own reaches a PC on the newer version.
+        let mut copy = pcopy();
+        copy.got.insert("A".into(), got(pcode(86, vec![]), 5, "McFawx"));
+        copy.marks.insert(PACK_KEY.into(), Mark { state: pver(86), kind: Kind::Updated, by: "A".into(), name: "McFawx".into(), seq: 5, at: 5 });
+        copy.arrive("A", got(pcode(85, vec![]), 9, "McFawx"));
+        let here = pmods(86, vec![]);
+        let (todo, _) = plan(&copy, &here, Some(&here), false, pdec);
+        let c = pack_change(&todo).unwrap();
+        assert_eq!(crate::grouppack::step(&here.pack, c), crate::grouppack::Step::Move(crate::grouppack::Version::Curse { project: 1, file: 85 }));
+    }
+
+    #[test]
+    fn a_pack_version_changed_here_and_not_sent_holds_the_others_back() {
+        let mut copy = pcopy();
+        copy.got.insert("A".into(), got(pcode(85, vec![]), 1, "McFawx"));
+        copy.arrive("A", got(pcode(86, vec![]), 5, "McFawx"));
+        // This PC moved to 87 itself and hasn't published it yet.
+        let (todo, merged) = plan(&copy, &pmods(87, vec![]), Some(&pmods(85, vec![])), false, pdec);
+        assert!(todo.is_empty());
+        assert!(merged.held);
+    }
+
+    #[test]
+    fn a_pack_move_goes_out_stamped_and_a_new_member_takes_it() {
+        let mut marks = BTreeMap::new();
+        marks.insert(PACK_KEY.to_string(), Mark { state: pver(86), kind: Kind::Updated, by: "A".into(), name: String::new(), seq: 9, at: 9 });
+        let stamps = stamps_of(&marks, &pmods(86, vec![]));
+        assert_eq!(stamps.get(PACK_KEY).map(|s| s.seq), Some(9));
+        // A member's first code: only its dated changes are taken, and the
+        // pack version is one.
+        let mut copy = pcopy();
+        let mut g = got(pcode(86, vec![]), 12, "McFawx");
+        g.stamps = stamps;
+        copy.arrive("A", g);
+        let (todo, _) = plan(&copy, &pmods(85, vec![]), None, false, pdec);
+        assert_eq!(pack_change(&todo).map(|c| c.now.clone()), Some(pver(86)));
+    }
+
+    #[test]
+    fn a_member_on_another_version_never_swaps_or_takes_out_a_pack_mod() {
+        let jobs = crate::jobs::Jobs::new(crate::waker::noop());
+        let job = jobs.start_quiet("test");
+        let addon = |p: u64, f: u64, from_pack: bool| Addon { project_id: p, file_id: f, file_name: format!("m{p}.jar"), name: format!("Mod {p}"), from_pack, enabled: true, ..Default::default() };
+        let inst = Instance { addons: vec![addon(6, 62, true), addon(7, 71, false)], ..Default::default() };
+        // Kim (on 85) moved pack mod 6 to another file, took out mod 7
+        // (hers to take out: not the pack's) and added mod 9.
+        let todo = vec![
+            Change { key: "p:6".into(), was: State::Unlisted, now: st(63, true), entry: Some(cf(63, true)) },
+            Change { key: "p:7".into(), was: st(71, true), now: State::Unlisted, entry: None },
+            Change { key: "p:9".into(), was: State::Unlisted, now: st(91, true), entry: Some(cf(91, true)) },
+        ];
+        let mut merged = Merged::default();
+        for c in &todo {
+            merged.packs.insert(c.key.clone(), pver(85));
+            merged.made.push((c.key.clone(), c.kind(), "Kim".into()));
+        }
+        let kept = keep_pack_mods(&inst, todo.clone(), &mut merged, &pver(86), &job);
+        assert_eq!(kept.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), ["p:7", "p:9"]);
+        assert!(merged.made.iter().all(|(k, _, _)| k != "p:6"));
+        // On the same version, a swap is theirs to make.
+        let mut merged = Merged::default();
+        for c in &todo {
+            merged.packs.insert(c.key.clone(), pver(86));
+        }
+        assert_eq!(keep_pack_mods(&inst, todo, &mut merged, &pver(86), &job).len(), 3);
+        job.finish(&Ok::<(), anyhow::Error>(()));
     }
 }
