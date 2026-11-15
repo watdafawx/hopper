@@ -1069,14 +1069,14 @@ fn s20_a_members_undo_reaches_the_sharer_on_reconnect() {
     assert_eq!(pcs[0].who(4), "Turned on by B");
 }
 
-/// GAP (seen on rig, Lithium): as S20, but B sent another code after the
-/// undo. The mailbox keeps only B's newest code; in it the undo's stamp
+/// Was a gap (seen on rig, Lithium): as S20, but B sent another code after
+/// the undo. The mailbox keeps only B's newest code; in it the undo's stamp
 /// carries a number (it wasn't made in that code), and A's last code from
-/// B (from before A went away) had mod 4 on too, so `groupsync::plan`
-/// finds no change from B for mod 4 and skips the numbered stamp. A keeps
-/// mod 4 off, B has it on, and nothing ever says they differ.
+/// B (from before A went away) had mod 4 on too. `groupsync::plan` now
+/// also weighs a stamp dated after the last code taken from that member,
+/// so A takes the undo.
 #[test]
-#[ignore = "gap: a member's undo is lost when another code follows it while the sharer is away"]
+#[ignore = "starts relay/hopper_mailbox.py; run with --ignored"]
 fn gap_a_members_undo_then_another_change_reaches_the_sharer() {
     let (_relay, pcs) = member_undoes_while_sharer_away(true);
     assert_eq!(pcs[1].mods[&4], (41, true));
