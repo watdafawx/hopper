@@ -786,6 +786,17 @@ fn answer(
     Ok(v)
 }
 
+/// How someone got onto the Everyone list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Met {
+    /// A friend.
+    Friend,
+    /// Not a friend, but said yes in a group you joined.
+    Group,
+    /// Not a friend and in none of your groups; shares a pack with you directly.
+    Pack,
+}
+
 /// One person on the Friends panel's Everyone list.
 #[derive(Clone, Debug)]
 pub struct Listed {
@@ -793,6 +804,7 @@ pub struct Listed {
     pub name: String,
     /// None for someone who isn't your friend: met through a group or a pack.
     pub friend: Option<Friend>,
+    pub met: Met,
     /// Their packs shown on the list (not the ones only shared with groups
     /// you're in: those are on the group's page).
     pub packs: Vec<Event>,
@@ -801,8 +813,10 @@ pub struct Listed {
 /// Everyone on the Friends panel's list: friends (online first, then the
 /// most recently seen), then people who aren't your friends: anyone who
 /// shares a pack outside your groups (so it doesn't vanish), and every
-/// member of a group you joined. Each person once, never you. `recipes`
-/// are the packs to show (hidden ones already left out).
+/// member of a group you joined. Each person once, never you. `met` says
+/// which of the three they are; a group member who also shares a pack
+/// directly counts as a group member. `recipes` are the packs to show
+/// (hidden ones already left out).
 pub fn everyone(me: &str, friends: &[Friend], recipes: &[Event], groups: &[Group], down: bool) -> Vec<Listed> {
     let joined: Vec<&Group> = groups.iter().filter(|g| g.me.joined).collect();
     // A pack that came only through groups you're in is on the group's page.
@@ -815,7 +829,8 @@ pub fn everyone(me: &str, friends: &[Friend], recipes: &[Event], groups: &[Group
         if id.is_empty() || id == me || people.iter().any(|p| p.id == id) {
             return;
         }
-        people.push(Listed { id: id.to_string(), name: name.to_string(), friend, packs: Vec::new() });
+        let met = if friend.is_some() { Met::Friend } else { Met::Group };
+        people.push(Listed { id: id.to_string(), name: name.to_string(), friend, met, packs: Vec::new() });
     };
     for f in friends {
         let (id, name) = (f.id.clone(), f.name.clone());
@@ -830,6 +845,11 @@ pub fn everyone(me: &str, friends: &[Friend], recipes: &[Event], groups: &[Group
     }
     for p in &mut people {
         p.packs = theirs.iter().filter(|e| e.from == p.id).map(|e| (*e).clone()).collect();
+        // Someone in a group with you stays under groups even if they also
+        // share a pack directly; only the rest are met through a pack.
+        if p.friend.is_none() && !joined.iter().flat_map(|g| g.members.iter()).any(|m| m.joined && m.id == p.id) {
+            p.met = Met::Pack;
+        }
     }
     people
 }
@@ -902,6 +922,39 @@ mod tests {
         // repeated on the list.
         assert_eq!(ids(&list), ["zoe", "robin"]);
         assert_eq!((list[0].packs.len(), list[1].packs.len()), (1, 0));
+    }
+
+    fn met_of<'a>(list: &'a [Listed], id: &str) -> Met {
+        list.iter().find(|p| p.id == id).unwrap().met
+    }
+
+    #[test]
+    fn a_direct_sharer_who_isnt_in_a_group_is_met_by_pack() {
+        let direct = Event { from: "zoe".into(), from_name: "Zoe".into(), inst: "a".into(), ..Default::default() };
+        let groups = [group("g1", true, vec![member("robin", "Robin", true)])];
+        let list = everyone("me", &[friend("mia", "Mia")], &[direct], &groups, false);
+        assert_eq!(met_of(&list, "mia"), Met::Friend);
+        assert_eq!(met_of(&list, "zoe"), Met::Pack);
+        assert_eq!(met_of(&list, "robin"), Met::Group);
+    }
+
+    #[test]
+    fn a_group_member_who_also_shares_directly_stays_under_groups() {
+        let direct = Event { from: "robin".into(), from_name: "Robin".into(), inst: "a".into(), ..Default::default() };
+        let groups = [group("g1", true, vec![member("robin", "Robin", true)])];
+        let list = everyone("me", &[], &[direct], &groups, false);
+        assert_eq!(ids(&list), ["robin"]);
+        assert_eq!(met_of(&list, "robin"), Met::Group);
+        assert_eq!(list[0].packs.len(), 1);
+    }
+
+    #[test]
+    fn someone_only_invited_to_a_group_who_shares_directly_is_met_by_pack() {
+        // Sam hasn't said yes to the group, so he isn't "in a group with you".
+        let direct = Event { from: "sam".into(), from_name: "Sam".into(), inst: "a".into(), ..Default::default() };
+        let groups = [group("g1", true, vec![member("sam", "Sam", false)])];
+        let list = everyone("me", &[], &[direct], &groups, false);
+        assert_eq!(met_of(&list, "sam"), Met::Pack);
     }
 
     #[test]
