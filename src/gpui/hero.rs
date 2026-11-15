@@ -107,7 +107,18 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
     let dark = theme.mode.is_dark();
     let taller = h.summary.is_some();
     let fit = h.fit;
-    let title_min = fit.as_ref().map_or(TITLE_MIN, |f| name_room(h.title.as_ref(), &f.facts));
+    // One level past the page's own: every action is as small as it gets
+    // and still doesn't fit, so the name gives up the room it kept and
+    // ellipsizes instead of the actions being cut off at the edge.
+    let squeezed = fit.as_ref().is_some_and(|f| f.actions.level() > f.actions_max);
+    let title_min = fit
+        .as_ref()
+        .filter(|_| !squeezed)
+        .map_or(TITLE_MIN, |f| name_room(h.title.as_ref(), &f.facts));
+    let keep = fit.as_ref().map_or(TITLE_MIN, |f| name_room(h.title.as_ref(), &f.facts));
+    // Past that (a side panel at its widest): the name at its least still
+    // leaves the actions short, so the art gives its room too.
+    let no_art = squeezed && fit.as_ref().is_some_and(|f| f.actions.short_by() > keep - TITLE_MIN);
     // Pills that don't fit fold into "+N", which names them on hover.
     let pills: AnyElement = match &fit {
         Some(f) => {
@@ -190,7 +201,7 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
         .items_center()
         .gap_5()
         .px_6()
-        .child(art)
+        .when(!no_art, |r| r.child(art))
         .child(
             v_flex()
                 .flex_1()
@@ -211,13 +222,14 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
         .child(v_flex().flex_none().items_end().gap_3().children(stats).child(match &fit {
             Some(f) => f
                 .actions
-                .wrap("hero-actions", h.actions, f.actions_max, f.actions_key, f.view)
+                .wrap("hero-actions", h.actions, f.actions_max + 1, f.actions_key, f.view)
                 .into_any_element(),
             None => h.actions.into_any_element(),
         }))
         // The room the actions may take: the row less its padding, the art,
-        // the gaps and the name column's minimum.
-        .when_some(fit.as_ref(), |r, f| r.child(f.actions.room_probe(1.5 * 2. + 6.5 + 1.25 * 2. + title_min, f.actions_max, f.view)));
+        // the gaps and the room the name keeps (the same at every level, so
+        // the level a room settles on doesn't move the room).
+        .when_some(fit.as_ref(), |r, f| r.child(f.actions.room_probe(1.5 * 2. + 6.5 + 1.25 * 2. + keep, f.actions_max + 1, f.view)));
 
     let backdrop = backdrop(h.blur, fx, cx);
 
@@ -240,6 +252,8 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
         })
         .child(backdrop)
         .child(content)
+        // Its box, for layout checks: the actions must end inside it.
+        .child(widgets::bounds_probe("hero"))
         .h(rems(if taller { HERO + 1.5 } else { HERO }))
         .into_any_element()
 }

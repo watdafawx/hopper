@@ -408,6 +408,9 @@ fn state(app: &AppView, window: &Window, cx: &App) -> Value {
         "theme": theme_state(window, cx),
         "zoom": store.settings().zoom,
         "scale": window.scale_factor(),
+        "viewport": [f32::from(window.viewport_size().width), f32::from(window.viewport_size().height)],
+        // Fitted rows' bounds (widgets::fit_report), for layout checks.
+        "fits": crate::widgets::fit_report(),
         "selected_instance": app.library.read(cx).selected().and_then(|r| store.instance(r)).map(|i| i.name.clone()),
         "instances": store.instances().iter().map(|i| json!({
             "name": i.name,

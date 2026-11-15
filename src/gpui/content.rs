@@ -119,6 +119,9 @@ pub struct WorldsView {
     pg_open: bool,
     /// Counts lists asked for, so only the newest one keeps polling.
     poll: u64,
+    /// The bar above the list fitted to its room: level 1 shows its
+    /// buttons as icons (their names in tooltips), 2 the filled one too.
+    bar_fit: widgets::Fit,
 }
 
 impl EventEmitter<ContentEvent> for WorldsView {}
@@ -129,6 +132,7 @@ impl WorldsView {
             store,
             root: None,
             source: WorldsSource::Instance,
+            bar_fit: Default::default(),
             worlds: Vec::new(),
             packs: HashMap::new(),
             total: 0,
@@ -1337,9 +1341,14 @@ impl WorldsView {
     fn toolbar(&self, empty: bool, cx: &mut Context<Self>) -> AnyElement {
         let Some(root) = self.root.clone() else { return div().into_any_element() };
         let count = plural(self.worlds.len(), "world");
+        // How far the bar has given way to a narrow page (see `bar_fit`).
+        let lv = self.bar_fit.level();
+        let fit = |b: Button, label: &str, at: usize| widgets::fit_label(b, label, lv >= at);
+        let key = widgets::fit_key([count.as_str(), self.busy.as_deref().unwrap_or(""), if empty { "e" } else { "" }]);
+        let wrap = |row: Div| self.bar_fit.wrap("worlds-bar-fit", row.w_full(), 2, key, cx.entity_id()).into_any_element();
         if let Some(t) = self.target() {
             let caption = if self.total > 0 { format!("{count} · {}", hopper::instance_ops::human_bytes(self.total)) } else { count };
-            return h_flex()
+            return wrap(h_flex()
                 .gap_2()
                 .child(widgets::caption(caption, cx))
                 .when_some(self.busy.clone(), |r, b| {
@@ -1355,58 +1364,52 @@ impl WorldsView {
                 .child(div().flex_1())
                 .when_some(t.local.clone(), |r, dir| {
                     r.child(
-                        Button::new("server-folder")
+                        fit(Button::new("server-folder")
                             .outline()
                             .small()
-                            .icon(IconName::FolderOpen)
-                            .label("Server folder")
+                            .icon(IconName::FolderOpen), "Server folder", 1)
                             .on_click(move |_, _, _| open_path(&dir)),
                     )
                 })
                 .child(
-                    Button::new("upload-world")
+                    fit(Button::new("upload-world")
                         .outline()
                         .small()
-                        .icon(IconName::Upload)
-                        .label(if self.busy.as_deref().is_some_and(|b| b.starts_with("Uploading")) { "Uploading…" } else { "Upload world" })
-                        .tooltip("Upload a world as a zip")
+                        .icon(IconName::Upload), if self.busy.as_deref().is_some_and(|b| b.starts_with("Uploading")) { "Uploading…" } else { "Upload world" }, 1)
+                        .when(lv < 1, |b| b.tooltip("Upload a world as a zip"))
                         .disabled(self.busy.is_some())
                         .on_click(cx.listener(|this, _, window, cx| this.pick_upload(window, cx))),
                 )
                 .child(
-                    Button::new("new-world")
+                    fit(Button::new("new-world")
                         .primary()
                         .small()
-                        .icon(IconName::Plus)
-                        .label("New world")
+                        .icon(IconName::Plus), "New world", 2)
                         .on_click(cx.listener(|this, _, window, cx| this.start_create(window, cx))),
-                )
-                .into_any_element();
+                ));
         }
         let (saves, backups) = (
             root.join("saves"),
             root.join(hopper::sync::BACKUP_DIR).join("worlds"),
         );
-        h_flex()
+        wrap(h_flex()
             .gap_2()
             .child(widgets::caption(count, cx))
             .child(div().flex_1())
             .child(
-                Button::new("saves")
+                fit(Button::new("saves")
                     .outline()
                     .small()
-                    .icon(IconName::FolderOpen)
-                    .label("Saves folder")
+                    .icon(IconName::FolderOpen), "Saves folder", 1)
                     .on_click(move |_, _, _| open_path(&saves)),
             )
             .child(
                 // Only the folder; the instance's Backups dialog is
                 // in the header's menu.
-                Button::new("world-backups")
+                fit(Button::new("world-backups")
                     .outline()
                     .small()
-                    .icon(IconName::ExternalLink)
-                    .label("Open backups folder")
+                    .icon(IconName::ExternalLink), "Open backups folder", 1)
                     .on_click(move |_, _, _| {
                         let _ = std::fs::create_dir_all(&backups);
                         open_path(&backups)
@@ -1414,11 +1417,10 @@ impl WorldsView {
             )
             .when(!empty, |r| {
                 r.child(
-                    Button::new("get-worlds")
+                    fit(Button::new("get-worlds")
                         .primary()
                         .small()
-                        .icon(IconName::Plus)
-                        .label("Get worlds")
+                        .icon(IconName::Plus), "Get worlds", 2)
                         .on_click(cx.listener(|_, _, _, cx| {
                             cx.emit(ContentEvent::Browse {
                                 class: hopper::cf::CLASS_WORLDS,
@@ -1426,8 +1428,7 @@ impl WorldsView {
                             })
                         })),
                 )
-            })
-            .into_any_element()
+            }))
     }
 }
 
@@ -1958,10 +1959,11 @@ impl Render for ScreenshotsView {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(widgets::caption(plural(self.shots.len(), "screenshot"), cx))
-                    .child(div().flex_1())
+                    // A narrow page shortens the count, never the button.
+                    .child(widgets::caption(plural(self.shots.len(), "screenshot"), cx).flex_1().min_w_0().truncate())
                     .child(
                         Button::new("shots-folder")
+                            .flex_none()
                             .outline()
                             .small()
                             .icon(IconName::FolderOpen)

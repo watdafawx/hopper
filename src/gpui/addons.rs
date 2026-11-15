@@ -342,8 +342,9 @@ const NAME_MAX: f32 = 40.0;
 /// The toolbar's levels for a narrow page (`widgets::Fit`): 1 Profiles and
 /// Find sources as icons, 2 Sort as its icon and no "Up to date" or
 /// collapse hint, 3 Update all as its icon and count, 4 Add content as its
-/// icon, 5 a narrower search box.
-const BAR_FIT_MAX: usize = 5;
+/// icon, 5 a narrower search box, 6 the narrowest one (the 960 px window
+/// with the instance list as a rail still needs it).
+const BAR_FIT_MAX: usize = 6;
 
 /// Which optional columns the table shows, fitted to its room each frame.
 /// Header and rows read the same value so they line up.
@@ -3006,7 +3007,7 @@ impl AddonsView {
                     });
                 }
             }).into_any_element();
-        let search_el = div().flex_1().min_w(rems(if lv >= 5 { 7. } else { 12. })).max_w(rems(26.)).child(
+        let search_el = div().flex_1().min_w(rems(match lv { 0..=4 => 12., 5 => 7., _ => 4.5 })).max_w(rems(26.)).child(
             widgets::search_input(&self.search)
                 .small()
                 .prefix(Icon::new(IconName::Search).small())

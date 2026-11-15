@@ -90,6 +90,8 @@ pub struct CrashList {
     shared: HashMap<String, Option<Result<String, String>>>,
     /// Share with the user and player name left in.
     keep_names: bool,
+    /// The log pane's toolbar fitted to its room (see [`log_toolbar`]).
+    pub log_fit: widgets::Fit,
     /// How many times each list row's failure came, and the first time
     /// (for the card's header).
     times: HashMap<String, (usize, i64)>,
@@ -111,6 +113,7 @@ impl CrashList {
             old_focus: cx.focus_handle(),
             shared: HashMap::new(),
             keep_names: false,
+            log_fit: Default::default(),
             times: HashMap::new(),
             _list: None,
         }
@@ -925,6 +928,13 @@ fn share<V: Host>(this: &mut V, rel: String, cx: &mut Context<V>) {
 /// "Share on mclo.gs" with "Keep my user and player name" for file `rel`
 /// (under the folder), or its link once shared.
 pub fn share_row<V: Host>(this: &V, rel: &str, cx: &mut Context<V>) -> AnyElement {
+    share_row_at(this, rel, 0, cx)
+}
+
+/// [`share_row`] shortened for a narrow toolbar: `lv` 1 "Keep names", 2
+/// "Share", 3 the share button as its icon (each with the whole wording in
+/// its tooltip).
+fn share_row_at<V: Host>(this: &V, rel: &str, lv: usize, cx: &mut Context<V>) -> AnyElement {
     let theme = cx.theme();
     match this.list().shared.get(rel) {
         Some(None) => h_flex().gap_2().child(Spinner::new().small()).child(widgets::caption("Uploading to mclo.gs", cx)).into_any_element(),
@@ -954,13 +964,17 @@ pub fn share_row<V: Host>(this: &V, rel: &str, cx: &mut Context<V>) -> AnyElemen
                         .outline()
                         .small()
                         .icon(IconName::Share2)
-                        .label("Share on mclo.gs")
+                        .map(|b| match lv {
+                            0 | 1 => b.label("Share on mclo.gs"),
+                            2 => b.label("Share"),
+                            _ => b,
+                        })
                         .tooltip("Upload this file and get a link for Discord or a bug report. It becomes public. IPs and passwords are always hidden first.")
                         .on_click(cx.listener(move |this, _, _, cx| share(this, p.clone(), cx))),
                 )
                 .child(
                     Checkbox::new("keep-names")
-                        .label(this.keep_label())
+                        .label(if lv == 0 { this.keep_label() } else { "Keep names" })
                         .tooltip("Off: user folders and the folder it's in become <user> and <server>, and your player name <player>, before upload")
                         .checked(this.list().keep_names)
                         .on_change(cx.listener(|this, v: &bool, _, cx| {
@@ -971,6 +985,70 @@ pub fn share_row<V: Host>(this: &V, rel: &str, cx: &mut Context<V>) -> AnyElemen
                 .into_any_element()
         }
     }
+}
+
+/// A log pane's toolbar, the same for a game's and a server's logs: the
+/// search, "Errors and warnings only", how many lines show, the share row
+/// and the folder button. One line at any width: it gives way step by
+/// step (levels in [`LOG_BAR_FIT_MAX`]) instead of wrapping under itself.
+pub struct LogBar {
+    /// Element id prefix, so a game's and a server's panes stay apart.
+    pub id: &'static str,
+    pub query: Entity<gpui_kit::component::input::InputState>,
+    pub errors_only: bool,
+    /// "12 of 3,400 lines" while a filter hides some.
+    pub shown: Option<String>,
+    pub loading: bool,
+    /// The file shown, under the game's or server's folder.
+    pub rel: String,
+    pub folder_tip: String,
+    pub folder: PathBuf,
+}
+
+/// The log toolbar's levels for a narrow page (`widgets::Fit`): 1 "Errors
+/// only" and "Keep names", 2 "Share" and a narrower search, 3 the share
+/// button as its icon and the narrowest search.
+pub const LOG_BAR_FIT_MAX: usize = 3;
+
+pub fn log_toolbar<V: Host>(
+    this: &V,
+    bar: LogBar,
+    on_errors: impl Fn(&mut V, bool, &mut Context<V>) + 'static,
+    cx: &mut Context<V>,
+) -> AnyElement {
+    let lv = this.list().log_fit.level();
+    let share = share_row_at(this, &bar.rel, lv, cx);
+    let dir = bar.folder;
+    let key = widgets::fit_key([bar.rel.as_str(), bar.shown.as_deref().unwrap_or("")]);
+    let row = h_flex()
+        .w_full()
+        .items_center()
+        .gap_2()
+        .child(div().flex_none().w(rems(match lv {
+            0 | 1 => 16.,
+            2 => 12.,
+            _ => 9.,
+        })).child(widgets::search_input(&bar.query).small().cleanable(true)))
+        .child(
+            Checkbox::new(SharedString::from(format!("{}errors-only", bar.id)))
+                .label(if lv == 0 { "Errors and warnings only" } else { "Errors only" })
+                .when(lv > 0, |c| c.tooltip("Errors and warnings only"))
+                .checked(bar.errors_only)
+                .on_change(cx.listener(move |this, v: &bool, _, cx| on_errors(this, *v, cx))),
+        )
+        .when_some(bar.shown, |r, s| r.child(widgets::caption(s, cx).text_xs().flex_none()))
+        .when(bar.loading, |r| r.child(Spinner::new().xsmall()))
+        .child(div().flex_1())
+        .child(share)
+        .child(
+            Button::new(SharedString::from(format!("{}logs-folder", bar.id)))
+                .small()
+                .ghost()
+                .icon(IconName::FolderOpen)
+                .tooltip(bar.folder_tip)
+                .on_click(move |_, _, _| crate::store::open_path(&dir)),
+        );
+    this.list().log_fit.wrap(SharedString::from(format!("{}log-bar-fit", bar.id)), row, LOG_BAR_FIT_MAX, key, cx.entity_id()).into_any_element()
 }
 
 /// A crash card's share row plus "Report", which opens Hopper's bug form

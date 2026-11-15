@@ -163,16 +163,23 @@
 <div class="cfgp">
   <div class="tools">
     <label class="input find"><Search size={13} /><input use:rightClear placeholder={index ? `Search ${index.mods.length.toLocaleString()} mods` : 'Search mods'} bind:value={query} onkeydown={topKeys} title="Enter opens the first mod" />{#if searching}<span class="spinner"></span>{:else if query}<button class="clr" title="Clear" onclick={() => (query = '')}><X size={12} /></button>{/if}</label>
-    <button class="chip dchip" class:on={desc} aria-pressed={desc} title="Look in each setting's description too, in the open mod and in other mods" onclick={() => (desc = !desc)}>Also in descriptions</button>
+    <button class="chip dchip" class:on={desc} aria-pressed={desc} title="Look in each setting's description too, in the open mod and in other mods" onclick={() => (desc = !desc)}><span class="lb">Also in </span>descriptions</button>
     <div class="grow"></div>
     <div class="row fgroup">
-      <span class="glabel"><Funnel size={12} />Filter</span>
+      <span class="glabel"><Funnel size={12} /><span class="lb">Filter</span></span>
       <div class="utabs" role="tablist">
         <button role="tab" aria-selected={filter === 'all'} class:tab-sel={filter === 'all'} onclick={() => (filter = 'all')}>All</button>
         <button role="tab" aria-selected={filter === 'changed'} class:tab-sel={filter === 'changed'} onclick={() => (filter = 'changed')}>Changed {counts.changed}</button>
         <button role="tab" aria-selected={filter === 'unsaved'} class:tab-sel={filter === 'unsaved'} onclick={() => (filter = 'unsaved')}>Unsaved {counts.unsaved}</button>
         {#if players?.snapshot}<button role="tab" aria-selected={filter === 'players'} class:tab-sel={filter === 'players'} title="Settings where players' copy differs from the server's" onclick={() => (filter = 'players')}>Differs from players {players.differs}</button>{/if}
       </div>
+      <!-- Narrow, as desktop: the same choices as one menu. -->
+      <select class="input fsel" bind:value={filter} title="Filter">
+        <option value="all">All</option>
+        <option value="changed">Changed {counts.changed}</option>
+        <option value="unsaved">Unsaved {counts.unsaved}</option>
+        {#if players?.snapshot}<option value="players">Differs from players {players.differs}</option>{/if}
+      </select>
     </div>
     <label class="row small sidepick"><span class="glabel">Side</span>
       <select class="input sidesel" bind:value={side} title="Who reads the file">
@@ -271,8 +278,25 @@
 
 <style>
   .cfgp { display: flex; flex-direction: column; flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--base); overflow: hidden; }
-  .tools { flex: none; display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  /* One line at any width, as desktop's Configs toolbar: the search narrows
+     and labels shorten instead of the bar wrapping. */
+  .tools { flex: none; display: flex; align-items: center; gap: 10px 14px; flex-wrap: nowrap; min-width: 0; padding: 10px 12px; border-bottom: 1px solid var(--line); container: cbar / inline-size; }
+  .tools > :global(*) { flex: none; }
+  .tools > .grow { flex: 1; }
   .find { width: 340px; padding: 5px 9px; }
+  .tools > .find { flex: 0 1 340px; width: auto; min-width: 110px; }
+  @container cbar (max-width: 820px) {
+    .tools .lb { display: none; }
+    .tools { gap: 8px; }
+  }
+  .fsel { display: none; }
+  @container cbar (max-width: 700px) {
+    .tools .utabs { display: none; }
+    .tools .fsel { display: block; }
+  }
+  @container cbar (max-width: 560px) {
+    .tools > .find { min-width: 72px; }
+  }
   .find input { flex: 1; min-width: 0; }
   .clr { color: var(--muted); display: grid; place-items: center; }
   .dchip { cursor: pointer; height: 26px; padding: 0 10px 2px; font-size: 12px; }
