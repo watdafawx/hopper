@@ -18,7 +18,13 @@
 //! Test-only settings (never set by a release): `HOPPERD_VPS_TEST_BINARY`,
 //! a Linux hopperd to upload instead of the release download, and
 //! `HOPPERD_VPS_TEST_BIND`, the address the relay listens on (a test box
-//! that must not be reachable from the network uses 127.0.0.1).
+//! that must not be reachable from the network uses 127.0.0.1), and
+//! `HOPPERD_VPS_TEST_OFFLINE=1`, Velocity without account checks (a test
+//! box's logins have no Mojang account).
+//!
+//! B4 adds Velocity (design/vps-relay.md, "B4 as built"): Java 21 and the
+//! Velocity jar, both pinned with their SHA-256 in [`plan`], its own user
+//! and service, and the forwarding secret, sent on stdin.
 
 pub mod plan;
 pub mod ssh;
@@ -37,7 +43,7 @@ use hopper_core::hosting::relay_codec::CodecConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use self::plan::{BIN, DATA, Installed, OPT, Step, UNIT, USER, as_relay, as_root, sh_quote};
+use self::plan::{BACKEND_PORT, BIN, DATA, ETC, Installed, JAVA, JAVA_DIR, OPT, SECRET, Step, UNIT, USER, VELOCITY, VELOCITY_DATA, VELOCITY_DIR, VELOCITY_JAR, VELOCITY_PORT, VELOCITY_SERVICE, VELOCITY_TOML, VELOCITY_UNIT, VELOCITY_USER, as_relay, as_root, sh_quote};
 use self::ssh::{Auth, Out, Ssh};
 use super::home::{HomeConfig, TUNNEL_PORT, write_private};
 use super::link;
@@ -155,6 +161,8 @@ struct Ctx<'a> {
     log: Mutex<Vec<String>>,
     /// The relay's program or key changed: restart the service.
     restart: bool,
+    /// Java, Velocity or its settings changed: restart Velocity.
+    restart_velocity: bool,
 }
 
 impl Ctx<'_> {
@@ -188,11 +196,15 @@ async fn connect_saved(app: &Arc<App>) -> Result<Ctx<'_>, String> {
     }
     let ssh = Ssh::connect(&l.host, l.port, &l.user, Auth::Key(ssh::decode(&l.private_key)?), &l.host_key).await?;
     let root = ssh.run("id -u", None, SHORT).await.map(|o| o.out.trim() == "0").unwrap_or(false);
-    Ok(Ctx { app, ssh, root, log: Mutex::new(Vec::new()), restart: false })
+    Ok(Ctx { app, ssh, root, log: Mutex::new(Vec::new()), restart: false, restart_velocity: false })
 }
 
 fn bind_addr() -> String {
     std::env::var("HOPPERD_VPS_TEST_BIND").ok().filter(|b| b.parse::<std::net::IpAddr>().is_ok()).unwrap_or_else(|| "0.0.0.0".into())
+}
+
+fn offline_test() -> bool {
+    std::env::var("HOPPERD_VPS_TEST_OFFLINE").is_ok_and(|v| v == "1")
 }
 
 fn test_binary() -> Option<PathBuf> {
@@ -273,7 +285,8 @@ async fn run_check(app: &Arc<App>, ports: (u16, u16)) -> Result<Value, String> {
             rows.push(row("tools", false, "This VPS doesn't run systemd, which the relay service needs."));
         } else if !t.runuser {
             rows.push(row("tools", false, "useradd or runuser is missing on the VPS."));
-        } else if test_binary().is_none() && !t.curl && !t.wget {
+        } else if !t.curl && !t.wget {
+            // Java and Velocity are downloaded on the VPS.
             rows.push(row("tools", false, "Neither curl nor wget is on the VPS. Install one (sudo apt install curl), then check again."));
         }
         // Ports: free, or already the relay's own.
@@ -281,7 +294,16 @@ async fn run_check(app: &Arc<App>, ports: (u16, u16)) -> Result<Value, String> {
         let ours = c.root(&format!("systemctl is-active {}", plan::SERVICE)).await?.out.trim() == "active";
         let mut theirs = Vec::new();
         if ours && let Some(s) = plan::last_json::<plan::RelayStatus>(&c.root(&as_relay(&format!("{BIN} relay status --data {DATA}"))).await?.out) {
-            theirs = vec![s.game_port, s.tunnel_port];
+            theirs = vec![s.game_port, s.tunnel_port, s.backend_port];
+        }
+        if c.root(&format!("systemctl is-active {VELOCITY_SERVICE}")).await?.out.trim() == "active" {
+            theirs.push(VELOCITY_PORT);
+        }
+        // Velocity's two ports on the VPS's own loopback (another Velocity
+        // there would take them).
+        let inner: Vec<String> = [VELOCITY_PORT, BACKEND_PORT].into_iter().filter(|p| listening.contains(p) && !theirs.contains(p)).map(|p| p.to_string()).collect();
+        if !inner.is_empty() {
+            rows.push(row("inner-ports", false, format!("Port {} is in use by another program on the VPS, maybe another Velocity. The relay runs its own Velocity there: stop that program, then check again.", inner.join(" and "))));
         }
         let busy: Vec<u16> = [ports.0, ports.1].into_iter().filter(|p| listening.contains(p) && !theirs.contains(p)).collect();
         rows.push(if ports.0 == ports.1 {
@@ -465,7 +487,7 @@ async fn step_keys(c: &mut Ctx<'_>, host: &str, ports: (u16, u16)) -> StepResult
         return Ok(("ok", "key matches this panel's".into()));
     }
     let key = if key_ok { home.key.clone() } else { link::new_key() };
-    let init = format!("{BIN} relay init --data {DATA} --key-stdin --bind {bind} --game-port {} --tunnel-port {}", ports.0, ports.1);
+    let init = format!("{BIN} relay init --data {DATA} --key-stdin --bind {bind} --game-port {} --tunnel-port {} --velocity-port {VELOCITY_PORT} --backend-port {BACKEND_PORT}", ports.0, ports.1);
     let o = c.root_in(&as_relay(&init), format!("{key}\n").as_bytes(), SHORT).await?;
     let got: Option<Value> = plan::last_json(&o.out);
     let fp = got.as_ref().and_then(|v| v["fingerprint"].as_str()).map(str::to_string);
@@ -479,6 +501,142 @@ async fn step_keys(c: &mut Ctx<'_>, host: &str, ports: (u16, u16)) -> StepResult
     c.app.vps.set_config(cfg).map_err(|e| format!("Saving the relay key here: {e:#}"))?;
     c.restart = true;
     Ok(("done", if key_ok { "settings updated".into() } else { "new key, saved here".into() }))
+}
+
+/// Downloads `p` to `dest` on the VPS and checks it against its pinned
+/// SHA-256 there; a file that doesn't match is deleted.
+async fn fetch(c: &Ctx<'_>, p: &plan::Pinned, dest: &str) -> Result<(), String> {
+    let t = tools(c).await?;
+    let get = if t.curl {
+        format!("curl -fsSL --proto =https -o {dest} {}", sh_quote(p.url))
+    } else if t.wget {
+        format!("wget -q -O {dest} {}", sh_quote(p.url))
+    } else {
+        return Err("Neither curl nor wget is on the VPS. Install one (sudo apt install curl), then run the setup again.".into());
+    };
+    let cmd = format!("{get} && echo {} | sha256sum -c --quiet", sh_quote(&format!("{}  {dest}", p.sha256)));
+    let o = c.exec(&as_root(c.root, &cmd), None, LONG).await?;
+    if o.ok() {
+        return Ok(());
+    }
+    let _ = c.root(&format!("rm -f {dest}")).await;
+    Err(if o.err.contains("FAILED") || o.out.contains("FAILED") { format!("The {} download doesn't match its checksum, so it wasn't installed.", p.name) } else { format!("Downloading {}: {}", p.name, o.why()) })
+}
+
+async fn step_java(c: &mut Ctx<'_>, inst: &mut Installed, arch: &str) -> StepResult {
+    let p = plan::java(arch).ok_or("There's no Java for this VPS's CPU.")?;
+    let ran = c.root(&format!("{JAVA} -version 2>&1")).await?;
+    if inst.java_sha256 == p.sha256 && ran.ok() {
+        return Ok(("ok", format!("{}, already there", p.name)));
+    }
+    let tmp = format!("{OPT}/.java");
+    c.must(&format!("rm -rf {tmp} && mkdir -m 0700 {tmp} {tmp}/x"), "Making a folder for Java").await?;
+    fetch(c, &p, &format!("{tmp}/java.tar.gz")).await?;
+    c.must(
+        &format!("tar -xzf {tmp}/java.tar.gz -C {tmp}/x --strip-components=1 && chown -R root:root {tmp}/x && chmod -R go-w,a+rX {tmp}/x && rm -rf {JAVA_DIR}.old && if [ -d {JAVA_DIR} ]; then mv {JAVA_DIR} {JAVA_DIR}.old; fi && mv {tmp}/x {JAVA_DIR} && rm -rf {JAVA_DIR}.old {tmp}"),
+        "Unpacking Java",
+    )
+    .await?;
+    let ran = c.root(&format!("{JAVA} -version 2>&1")).await?;
+    if !ran.ok() {
+        return Err(format!("Java doesn't run on this VPS: {}", ran.why()));
+    }
+    inst.java_sha256 = p.sha256.to_string();
+    c.restart_velocity = true;
+    Ok(("done", "downloaded, checksum ok".into()))
+}
+
+async fn step_velocity(c: &mut Ctx<'_>, inst: &mut Installed) -> StepResult {
+    let mut did = Vec::new();
+    if !c.root(&format!("id -u {VELOCITY_USER}")).await?.ok() {
+        c.must(&format!("useradd --system --user-group --no-create-home --home-dir {VELOCITY_DATA} --shell /usr/sbin/nologin {VELOCITY_USER}"), "Making Velocity's user").await?;
+        inst.made_velocity_user = true;
+        did.push("its user");
+    }
+    c.must(&format!("install -d -o root -g root -m 0755 {VELOCITY_DIR} && install -d -o root -g {VELOCITY_USER} -m 0750 {ETC} && install -d -o {VELOCITY_USER} -g {VELOCITY_USER} -m 0700 {VELOCITY_DATA}"), "Making Velocity's folders").await?;
+    let jar_sha = c.root(&format!("sha256sum {VELOCITY_JAR} 2>/dev/null")).await?.out.split_whitespace().next().unwrap_or("").to_string();
+    if jar_sha != VELOCITY.sha256 {
+        let tmp = format!("{VELOCITY_DIR}/.download.jar");
+        fetch(c, &VELOCITY, &tmp).await?;
+        c.must(&format!("chown root:root {tmp} && chmod 0644 {tmp} && mv -f {tmp} {VELOCITY_JAR}"), "Putting Velocity in place").await?;
+        did.push("downloaded, checksum ok");
+    }
+    // The secret only ever goes on stdin; only its checksum is compared.
+    let secret = c.app.vps_forward.ensure_secret().map_err(|e| format!("Making the forwarding secret: {e:#}"))?;
+    let have = c.root(&format!("sha256sum {SECRET} 2>/dev/null")).await?.out.split_whitespace().next().unwrap_or("").to_string();
+    if have != sha256_hex(secret.as_bytes()) {
+        let o = c.root_in(&format!("umask 027 && cat > {SECRET}.tmp && chown root:{VELOCITY_USER} {SECRET}.tmp && chmod 0640 {SECRET}.tmp && mv -f {SECRET}.tmp {SECRET}"), secret.as_bytes(), SHORT).await?;
+        if !o.ok() {
+            return Err(format!("Writing the forwarding secret: {}", o.why()));
+        }
+        did.push("forwarding secret");
+    }
+    let toml = plan::velocity_toml(!offline_test());
+    if c.root(&format!("cat {VELOCITY_TOML} 2>/dev/null")).await?.out != toml {
+        let o = c.root_in(&format!("umask 027 && cat > {VELOCITY_TOML}.tmp && chown root:{VELOCITY_USER} {VELOCITY_TOML}.tmp && chmod 0640 {VELOCITY_TOML}.tmp && mv -f {VELOCITY_TOML}.tmp {VELOCITY_TOML}"), toml.as_bytes(), SHORT).await?;
+        if !o.ok() {
+            return Err(format!("Writing Velocity's settings: {}", o.why()));
+        }
+        did.push("settings");
+    }
+    // Velocity sends usage numbers to bStats unless its file says no; a
+    // relay set up for a player doesn't. Written as Velocity's user, since
+    // its own folder could hold a link a root write would follow.
+    let bstats = format!("{VELOCITY_DATA}/plugins/bStats/config.txt");
+    if !c.root(&format!("grep -qx enabled=false {bstats}")).await?.ok() {
+        let o = c.root_in(&format!("runuser -u {VELOCITY_USER} -- mkdir -p {VELOCITY_DATA}/plugins/bStats && runuser -u {VELOCITY_USER} -- tee {bstats} >/dev/null"), b"enabled=false\n", SHORT).await?;
+        if !o.ok() {
+            return Err(format!("Turning off Velocity's usage reports: {}", o.why()));
+        }
+        did.push("usage reports off");
+    }
+    let stat = c.root(&format!("stat -c '%n %U %G %a' {ETC} {SECRET} {VELOCITY_TOML} {VELOCITY_DATA} {VELOCITY_JAR}")).await?.out;
+    if !plan::velocity_files_right(&stat) {
+        c.must(
+            &format!("chown root:{VELOCITY_USER} {ETC} {SECRET} {VELOCITY_TOML} && chmod 0750 {ETC} && chmod 0640 {SECRET} {VELOCITY_TOML} && chown {VELOCITY_USER}:{VELOCITY_USER} {VELOCITY_DATA} && chmod 0700 {VELOCITY_DATA} && chown root:root {VELOCITY_JAR} && chmod 0644 {VELOCITY_JAR}"),
+            "Locking Velocity's files",
+        )
+        .await?;
+        did.push("file rights");
+    }
+    if did.is_empty() {
+        return Ok(("ok", format!("{}, already there", VELOCITY.name)));
+    }
+    c.restart_velocity = true;
+    Ok(("done", did.join(", ")))
+}
+
+async fn step_velocity_service(c: &Ctx<'_>) -> StepResult {
+    let unit = plan::velocity_unit();
+    let svc = VELOCITY_SERVICE;
+    let now = c.root(&format!("cat {VELOCITY_UNIT} 2>/dev/null")).await?.out;
+    let enabled = c.root(&format!("systemctl is-enabled {svc}")).await?.out;
+    let active = c.root(&format!("systemctl is-active {svc}")).await?.out;
+    let acts = plan::service_acts_for(&unit, &now, &enabled, &active, c.restart_velocity);
+    let changed = !acts.is_empty();
+    for a in acts {
+        match a {
+            plan::ServiceAct::WriteUnit => {
+                let o = c.root_in(&format!("umask 022 && cat > {VELOCITY_UNIT}.tmp && mv -f {VELOCITY_UNIT}.tmp {VELOCITY_UNIT} && systemctl daemon-reload"), unit.as_bytes(), SHORT).await?;
+                if !o.ok() {
+                    return Err(format!("Writing Velocity's service: {}", o.why()));
+                }
+            }
+            plan::ServiceAct::Enable => _ = c.must(&format!("systemctl enable {svc}"), "Turning Velocity's service on").await?,
+            plan::ServiceAct::Restart => _ = c.must(&format!("systemctl restart {svc}"), "Starting Velocity").await?,
+        }
+    }
+    // Java takes a few seconds; up once it listens.
+    for _ in 0..120 {
+        let l = plan::parse_listening(&c.root("ss -Hltn").await?.out);
+        if l.contains(&VELOCITY_PORT) && c.root(&format!("systemctl is-active {svc}")).await?.out.trim() == "active" {
+            return Ok((if changed { "done" } else { "ok" }, if changed { "started".into() } else { "running".into() }));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let j = c.root(&format!("journalctl -u {svc} -n 8 --no-pager -o cat")).await.map(|o| o.out).unwrap_or_default();
+    let last = j.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no log").trim().to_string();
+    Err(format!("Velocity didn't start: {}", hopper_core::applog::redact(&last)))
 }
 
 async fn step_service(c: &Ctx<'_>, ports: (u16, u16)) -> StepResult {
@@ -620,8 +778,13 @@ async fn install(app: &Arc<App>, a: &InstallArgs) -> Result<(), String> {
     save_installed(&c, &inst).await?;
     step!("binary", step_binary(&mut c, &mut inst, arch).await);
     save_installed(&c, &inst).await?;
+    step!("java", step_java(&mut c, &mut inst, arch).await);
+    save_installed(&c, &inst).await?;
+    step!("velocity", step_velocity(&mut c, &mut inst).await);
+    save_installed(&c, &inst).await?;
     step!("keys", step_keys(&mut c, &host, a.ports).await);
     step!("service", step_service(&c, a.ports).await);
+    step!("velocity-service", step_velocity_service(&c).await);
     step!("firewall", step_firewall(&c, &mut inst, a.ports).await);
     save_installed(&c, &inst).await?;
     c.ssh.close().await;
@@ -652,12 +815,14 @@ async fn remove(app: &Arc<App>) -> Result<(), String> {
         }};
     }
     step!("service", async {
-        let there = c.root(&format!("test -e {UNIT} || systemctl cat {svc} >/dev/null 2>&1")).await?.ok();
-        if !there {
-            return Ok(("ok", "not there".into()));
+        let mut did = 0;
+        for (unit, svc) in [(VELOCITY_UNIT, VELOCITY_SERVICE), (UNIT, svc)] {
+            if c.root(&format!("test -e {unit} || systemctl cat {svc} >/dev/null 2>&1")).await?.ok() {
+                c.must(&format!("systemctl disable --now {svc} 2>/dev/null; rm -f {unit} && systemctl daemon-reload"), "Removing the service").await?;
+                did += 1;
+            }
         }
-        c.must(&format!("systemctl disable --now {svc} 2>/dev/null; rm -f {UNIT} && systemctl daemon-reload"), "Removing the service").await?;
-        Ok(("done", "stopped and removed".into()))
+        Ok(if did == 0 { ("ok", "not there".into()) } else { ("done", "stopped and removed".into()) })
     }
     .await);
     step!("firewall", async {
@@ -681,24 +846,30 @@ async fn remove(app: &Arc<App>) -> Result<(), String> {
     }
     .await);
     step!("files", async {
-        if !c.root(&format!("test -e {OPT} -o -e {DATA}")).await?.ok() {
+        if !c.root(&format!("test -e {OPT} -o -e {DATA} -o -e {ETC} -o -e {VELOCITY_DATA}")).await?.ok() {
             return Ok(("ok", "not there".into()));
         }
-        c.must(&format!("rm -rf {OPT} {DATA}"), "Deleting the files").await?;
-        Ok(("done", format!("{OPT}, {DATA}")))
+        c.must(&format!("rm -rf {OPT} {DATA} {ETC} {VELOCITY_DATA}"), "Deleting the files").await?;
+        Ok(("done", format!("{OPT}, {DATA}, {ETC}, {VELOCITY_DATA}")))
     }
     .await);
     step!("user", async {
-        let mut did = false;
-        if c.root(&format!("id -u {USER}")).await?.ok() {
-            c.must(&format!("userdel {USER}"), "Deleting the user").await?;
-            did = true;
+        let mut did = Vec::new();
+        for u in [USER, VELOCITY_USER] {
+            let mut gone = false;
+            if c.root(&format!("id -u {u}")).await?.ok() {
+                c.must(&format!("userdel {u}"), "Deleting the user").await?;
+                gone = true;
+            }
+            if c.root(&format!("getent group {u}")).await?.ok() {
+                c.must(&format!("groupdel {u}"), "Deleting the group").await?;
+                gone = true;
+            }
+            if gone {
+                did.push(u);
+            }
         }
-        if c.root(&format!("getent group {USER}")).await?.ok() {
-            c.must(&format!("groupdel {USER}"), "Deleting the group").await?;
-            did = true;
-        }
-        Ok(if did { ("done", USER.to_string()) } else { ("ok", "not there".into()) })
+        Ok(if did.is_empty() { ("ok", "not there".into()) } else { ("done", did.join(", ")) })
     }
     .await);
     step!("pair", async {
@@ -969,6 +1140,11 @@ async fn start_remove(State(app): State<Arc<App>>, headers: HeaderMap, method: M
     require_owner(&app, &headers, &method)?;
     if app.vps_setup.login().host.is_empty() {
         return Err(bad("There's no VPS login to remove the relay with. Use Forget instead."));
+    }
+    // Its account checks would go with it, and the server is set not to do its own.
+    if let Some(id) = app.vps_forward.first_changed() {
+        let name = app.servers.get(&id).map_or(id, |e| e.name.clone());
+        return Err(bad(format!("{name} checks accounts through the relay. Stop using the relay on it first.")));
     }
     start_run(&app, "remove", plan::remove_steps(), String::new(), None).map_err(bad)?;
     Ok(Json(setup_json(&app)))

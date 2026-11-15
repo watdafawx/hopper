@@ -260,7 +260,7 @@ async fn run_relay() -> RelayRun {
     let game = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let tunnel = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (gp, tp) = (game.local_addr().unwrap().port(), tunnel.local_addr().unwrap().port());
-    let task = tokio::spawn(relay_end::serve(relay.clone(), game, tunnel, tls));
+    let task = tokio::spawn(relay_end::serve(relay.clone(), game, tunnel, tls, None));
     RelayRun { relay, game: gp, tunnel: tp, fingerprint, task, dir }
 }
 
@@ -459,4 +459,22 @@ async fn whole_path_and_reconnect() {
     t.app.vps.tick();
     assert!(t.app.vps.server_status(&t.server)["total"]["streams"].as_u64().unwrap() >= 2);
     ptask.abort();
+}
+
+#[test]
+fn proxy_header_carries_the_players_address() {
+    let sig = [0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A];
+    let h = relay_end::proxy_v2("203.0.113.7:51234".parse().unwrap(), "127.0.0.1:25565".parse().unwrap());
+    assert_eq!(&h[..12], &sig);
+    assert_eq!(&h[12..16], &[0x21, 0x11, 0, 12]);
+    assert_eq!(&h[16..20], &[203, 0, 113, 7]);
+    assert_eq!(&h[20..24], &[127, 0, 0, 1]);
+    assert_eq!(&h[24..28], &[0xC8, 0x22, 0x63, 0xDD]);
+    assert_eq!(h.len(), 28);
+    // A v6 player on a v4 listener: both as IPv6, the v4 one mapped.
+    let h = relay_end::proxy_v2("[2001:db8::1]:40000".parse().unwrap(), "10.0.0.2:25565".parse().unwrap());
+    assert_eq!(&h[12..16], &[0x21, 0x21, 0, 36]);
+    assert_eq!(&h[16..18], &[0x20, 0x01]);
+    assert_eq!(&h[32..48], &"::ffff:10.0.0.2".parse::<std::net::Ipv6Addr>().unwrap().octets());
+    assert_eq!(h.len(), 16 + 36);
 }

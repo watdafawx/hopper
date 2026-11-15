@@ -16,6 +16,7 @@
 //! which servers it carries. Player bytes only ever go between a player's
 //! socket on the VPS and the paired home panel's router.
 
+pub mod forward;
 pub mod home;
 pub mod link;
 pub mod relay_end;
@@ -58,6 +59,10 @@ pub struct Route {
     pub server: String,
     #[serde(default)]
     pub name: String,
+    /// The server checks accounts through the relay's Velocity (B4): its
+    /// players go through Velocity, the rest straight home (B2).
+    #[serde(default)]
+    pub velocity: bool,
 }
 
 /// The longest control line either end reads.

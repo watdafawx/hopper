@@ -87,12 +87,18 @@
     ['white-list', 'Whitelist'],
   ];
   let props = $state({});
+  // Keys the relay through a VPS sets ("Off · checked by the relay").
+  let locked = $state({});
+  // Read again when the server starts or stops: the relay's buttons change
+  // the file and restart it, and the row should follow.
+  const runState = $derived(s?.state);
   $effect(() => {
     if (tab !== 'console' || !id) return;
+    runState;
     const want = id;
     api(`/servers/${encodeURIComponent(want)}/properties`).then(
-      (r) => want === id && (props = r.values || {}),
-      () => (props = {}),
+      (r) => want === id && ((props = r.values || {}), (locked = r.locked || {})),
+      () => ((props = {}), (locked = {})),
     );
   });
   const facts = $derived(
@@ -104,7 +110,7 @@
         : k === 'online-mode' || k === 'white-list' ? (v === 'true' ? 'On' : 'Off')
         : k === 'level-name' || k === 'max-players' ? v
         : v[0].toUpperCase() + v.slice(1);
-      return [label, shown];
+      return [label, k === 'online-mode' && locked[k] ? `${shown} · checked by the relay` : shown];
     }).filter(Boolean),
   );
 

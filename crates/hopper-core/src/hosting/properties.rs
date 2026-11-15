@@ -23,6 +23,9 @@ enum Line {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Properties {
     lines: Vec<Line>,
+    /// Windows line endings (Minecraft writes them on Windows), kept on
+    /// write so an edit and its undo leave the file as it was.
+    crlf: bool,
 }
 
 impl Properties {
@@ -44,7 +47,7 @@ impl Properties {
                 }
             })
             .collect();
-        Properties { lines }
+        Properties { lines, crlf: text.contains("\r\n") }
     }
 
     /// Reads `path`; a missing file is an empty set.
@@ -76,7 +79,7 @@ impl Properties {
                     out.push_str(&escape(value, false));
                 }
             }
-            out.push('\n');
+            out.push_str(if self.crlf { "\r\n" } else { "\n" });
         }
         out
     }
@@ -417,6 +420,16 @@ mod tests {
     use super::*;
 
     const FILE: &str = "#Minecraft server properties\n#Mon Oct 12 10:00:00 CEST 2026\nallow-flight=false\n\n# my note\nmotd=A \\u00E9 server\\: hi\nlevel-seed=\nserver-port = 25565\nweird line without equals\n";
+
+    #[test]
+    fn windows_line_endings_stay() {
+        let crlf = FILE.replace('\n', "\r\n");
+        let mut p = Properties::parse(&crlf);
+        assert_eq!(p.to_text(), crlf);
+        p.set("online-mode", "false");
+        assert!(p.to_text().ends_with("online-mode=false\r\n"));
+        assert!(!p.to_text().replace("\r\n", "").contains('\n'));
+    }
 
     #[test]
     fn round_trip_keeps_everything() {

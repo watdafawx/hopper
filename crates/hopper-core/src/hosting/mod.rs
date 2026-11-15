@@ -26,6 +26,7 @@ pub mod ports;
 pub mod process;
 pub mod progress;
 pub mod properties;
+pub mod proxy_forward;
 pub mod rcon;
 pub mod relay_codec;
 pub mod limbo;

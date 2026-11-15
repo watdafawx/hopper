@@ -673,6 +673,110 @@ and **Remove the relay**, from the done screen or from Check.
   panel; desktop must send them only over the paired TLS connection and
   never keep them.
 
+## B4 as built
+
+Code: the Velocity steps in `crates/hopperd/src/vps/setup/` (`plan.rs` pins,
+paths and `velocity.toml`; `mod.rs` the steps), the server side in
+`crates/hopperd/src/vps/forward.rs` (record, jobs, route, settings lock) and
+`crates/hopper-core/src/hosting/proxy_forward.rs` (which mod, its config,
+the four keys, the plan for each action; pure and tested). UI: the relay
+card (`RelayCard.svelte`), the Settings tab lock (`Settings.svelte`) and the
+Overview's "Online mode Off · checked by the relay" (`ServerPage.svelte`).
+
+### The chain, and why
+
+Player → VPS front port (the B2 relay, `0.0.0.0:<game port>`) → Velocity on
+`127.0.0.1:25577`, with a PROXY v2 header carrying the player's address →
+the relay's backend listener `127.0.0.1:25580` → the tunnel → home router →
+the server, which runs `online-mode=false` behind FabricProxy-Lite or PCF
+with Velocity's modern forwarding. Velocity does the Mojang login on the VPS,
+so a player's UUID, skin and address reach the server as with a direct
+join, and the server only accepts players Velocity forwarded (checked with
+the forwarding secret). The relay keeps its front listener so its own
+features (status, "Home server is offline", counters) still work; Velocity
+only sees players the relay passed on (`Route.velocity` is true in Relay
+mode).
+
+### VPS side (setup step "Velocity and the forwarding secret")
+
+| | |
+|---|---|
+| Velocity | 3.5.1 build 615, `/opt/hopper-relay/velocity/velocity.jar` (root 0644), sha256 `b4e3164df5377346854dc6cb9e6a78022b1946ff69e89676313f5f6f1c6f0fb3`, 18932366 bytes |
+| Java | Temurin 21.0.13+9 JRE in `/opt/hopper-relay/java`: x64 sha256 `a535a1df9c6284d9618872984e026ae0352d1f7e9e0605425c0e6114f47351dd`, aarch64 `b1734db7ade49c3f6acc6ae06233b8c2dd90e3e2f00f67000ae1c972aaa64d8c` |
+| User | `hopper-velocity` (system, no shell), separate from `hopper-relay` so neither can read the other's key |
+| Settings | `/etc/hopper-relay/velocity.toml` and `forwarding.secret`, root:hopper-velocity 0640 in a 0750 folder; data in `/var/lib/hopper-velocity` (0700) |
+| Service | `hopper-velocity.service`, hardened like the relay's; `bind = 127.0.0.1:25577`, `haproxy-protocol = true`, `player-info-forwarding-mode = "modern"`, `online-mode = true` |
+| Usage reports | bStats turned off (`plugins/bStats/config.txt`, `enabled=false`), written as the Velocity user |
+
+Each part checks before it acts (sha256, the unit text, the toml), so "Run
+again" repairs and changes only what differs; Remove takes out the service,
+both users and every folder above. The check fails with "maybe another
+Velocity" when 25577 or 25580 is taken by another program.
+
+### Server side (Use the relay / Stop / Play at home / Back to the relay)
+
+`POST /api/v1/servers/{id}/vps-relay/forward` `{action, restart}`, owner
+only (`require_owner`); answers 409 while the server runs and `restart` is
+false. The job stops the server, changes the files and starts it again; the
+web UI asks first and says players online are disconnected.
+
+- **Mod:** PCF (Modrinth `vDyrHl8l`) for Forge and NeoForge on 1.20.2 or
+  newer; FabricProxy-Lite (`8dI2tmqs`) for Fabric and Quilt on 1.17 or
+  newer, plus Fabric API (`P7dR8mSH`) when the server has none (it needs
+  fabric-networking-api). Vanilla, older versions and other loaders are
+  refused with a sentence why. A mod that was already there stays; only
+  what Hopper added is removed.
+- **Config:** `config/FabricProxy-Lite.toml` or
+  `config/proxy-compatible-forge.toml` with the secret; one that was there
+  before is put back.
+- **server.properties:** `online-mode=false`, `enforce-secure-profile=false`,
+  `network-compression-threshold=-1` (Velocity compresses),
+  `server-ip=127.0.0.1` (nothing but the router reaches it). The old values
+  (or "not set") are kept in the record; Stop puts them back exactly and
+  keeps the file's line endings (`Properties` now keeps CRLF).
+- **History:** every file goes through History: each mod as Added/Removed or
+  Turned on/off, the config, and `server.properties` with a settings note
+  per key. Rows carry the reason ("Turned on the relay through a VPS",
+  "Stopped using the relay through a VPS", "Playing at home while the relay
+  is down", "Back on the relay through a VPS"). Each change starts in a
+  History second of its own so two quick changes never share a folder.
+- **Play at home** turns the mod off and puts the four keys back (accounts
+  checked at home again); the config stays, so going back needs nothing new.
+  The card offers "Go back to the relay" once the relay is up.
+- **Lock:** while on the relay the four keys can't be changed in Settings
+  (the field is disabled with the reason and a link to the relay card) and
+  the properties API refuses a changed value for them.
+- **Record:** panel data `vps-relay-servers.json` (mode, mod, files added,
+  old values, folders made). `mods/` and `config/` that the relay made are
+  removed again when empty.
+
+### What differs from the plan above, and why
+
+- The forwarding secret is 64 hex characters (32 random bytes), not
+  base64: nothing in it needs escaping in a TOML string or a shell line.
+- PCF only on 1.20.2+: before that PCF also needs a Velocity plugin
+  (Ambassador), and the relay's Velocity runs no plugins. Forge and
+  NeoForge 1.20.1 and older can't use the relay's account checks yet.
+- Fabric API is added with FabricProxy-Lite (it won't load without it).
+- New config files the relay writes have no "before" in History (there was
+  none); Stop sets the relay's copy aside in History instead.
+- The web History list doesn't show the settings notes (`.settings.json`)
+  yet; desktop does. Older gap, not B4's.
+- Velocity 3.5.1 is marked deprecated (support ends 2026-09-30); Velocity
+  4 needs Java 25, so moving means new pins for both (a B5+ task).
+
+### Tested (WSL box, Fabric 1.20.1 scratch server)
+
+Install, repair (only "binary" and "usage reports off" changed), Use, an
+offline-mode login through the relay (UUID matches the offline UUID, the
+server log and Velocity log show the client's real address and port), a
+direct join refused ("This server requires you to connect with Velocity."),
+Play at home (mod off, keys back, unlocked), Back to the relay, Stop with
+every file byte for byte as before (History folder aside), and Remove (no
+units, users, folders or listeners left). The real Mojang login path is not
+tested here (the test box runs Velocity with `online-mode = false` via
+`HOPPERD_VPS_TEST_OFFLINE`).
+
 ## Open questions for the maintainer (answered: see Decisions)
 
 1. **Voice: built-in UDP relay instead of AmneziaWG?** AmneziaWG needs a

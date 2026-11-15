@@ -22,6 +22,169 @@ pub const SERVICE: &str = "hopper-relay";
 /// Marks the firewall rules the setup added, so removing takes out only those.
 pub const COMMENT: &str = "hopper-relay";
 
+// ---- Velocity (B4) ---------------------------------------------------------------------------
+//
+// The chain on the VPS: player → the relay's game port → Velocity on
+// 127.0.0.1:VELOCITY_PORT (it checks the account and ends the player's
+// encryption) → the relay's backend port 127.0.0.1:BACKEND_PORT → one
+// stream to home → the router → the server. Velocity runs as its own user:
+// it parses what players send, so it can't read the relay's key or CA.
+
+pub const VELOCITY_USER: &str = "hopper-velocity";
+pub const JAVA_DIR: &str = "/opt/hopper-relay/java";
+pub const JAVA: &str = "/opt/hopper-relay/java/bin/java";
+pub const VELOCITY_DIR: &str = "/opt/hopper-relay/velocity";
+pub const VELOCITY_JAR: &str = "/opt/hopper-relay/velocity/velocity.jar";
+/// Velocity's settings and the forwarding secret (root's; Velocity's group may read).
+pub const ETC: &str = "/etc/hopper-relay";
+pub const SECRET: &str = "/etc/hopper-relay/forwarding.secret";
+pub const VELOCITY_TOML: &str = "/etc/hopper-relay/velocity.toml";
+pub const VELOCITY_DATA: &str = "/var/lib/hopper-velocity";
+pub const VELOCITY_UNIT: &str = "/etc/systemd/system/hopper-velocity.service";
+pub const VELOCITY_SERVICE: &str = "hopper-velocity";
+pub const VELOCITY_PORT: u16 = 25577;
+pub const BACKEND_PORT: u16 = 25580;
+
+/// A download pinned in this release: where, its SHA-256 and size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pinned {
+    pub name: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+    pub size: u64,
+}
+
+/// Velocity 3.5.1 (build 615), from PaperMC's downloads. Needs Java 21.
+pub const VELOCITY: Pinned = Pinned {
+    name: "Velocity 3.5.1",
+    url: "https://fill-data.papermc.io/v1/objects/b4e3164df5377346854dc6cb9e6a78022b1946ff69e89676313f5f6f1c6f0fb3/velocity-3.5.1-615.jar",
+    sha256: "b4e3164df5377346854dc6cb9e6a78022b1946ff69e89676313f5f6f1c6f0fb3",
+    size: 18_932_366,
+};
+
+/// Eclipse Temurin 21.0.13+9 (the JRE), for the VPS's CPU.
+pub fn java(arch: &str) -> Option<Pinned> {
+    match arch {
+        "x64" => Some(Pinned {
+            name: "Java 21 (Temurin 21.0.13)",
+            url: "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jre_x64_linux_hotspot_21.0.13_9.tar.gz",
+            sha256: "a535a1df9c6284d9618872984e026ae0352d1f7e9e0605425c0e6114f47351dd",
+            size: 52_181_297,
+        }),
+        "arm64" => Some(Pinned {
+            name: "Java 21 (Temurin 21.0.13)",
+            url: "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jre_aarch64_linux_hotspot_21.0.13_9.tar.gz",
+            sha256: "b1734db7ade49c3f6acc6ae06233b8c2dd90e3e2f00f67000ae1c972aaa64d8c",
+            size: 51_266_660,
+        }),
+        _ => None,
+    }
+}
+
+/// Velocity's `velocity.toml`. `online` is false only on a test box
+/// (`HOPPERD_VPS_TEST_OFFLINE`), where test logins have no Mojang account.
+pub fn velocity_toml(online: bool) -> String {
+    format!(
+        "# Made by Hopper Server's relay setup. Velocity starts from this copy each time.
+config-version = \"2.7\"
+bind = \"127.0.0.1:{VELOCITY_PORT}\"
+motd = \"Hopper relay\"
+show-max-players = 500
+online-mode = {online}
+force-key-authentication = {online}
+prevent-client-proxy-connections = false
+player-info-forwarding-mode = \"modern\"
+forwarding-secret-file = \"{SECRET}\"
+announce-forge = false
+kick-existing-players = false
+ping-passthrough = \"all\"
+enable-player-address-logging = true
+
+[servers]
+home = \"127.0.0.1:{BACKEND_PORT}\"
+try = [\"home\"]
+
+[forced-hosts]
+
+[advanced]
+compression-threshold = 256
+compression-level = -1
+login-ratelimit = 3000
+connection-timeout = 5000
+read-timeout = 30000
+haproxy-protocol = true
+tcp-fast-open = false
+bungee-plugin-message-channel = true
+show-ping-requests = false
+failover-on-unexpected-server-disconnect = true
+announce-proxy-commands = true
+log-command-executions = false
+log-player-connections = true
+accepts-transfers = false
+
+[query]
+enabled = false
+port = {VELOCITY_PORT}
+map = \"Velocity\"
+show-plugins = false
+"
+    )
+}
+
+/// Velocity's systemd unit: its own user, the payload limits big modpacks
+/// need, and nothing writable but its data folder.
+pub fn velocity_unit() -> String {
+    format!(
+        "# Made by Hopper Server's relay setup. Remove the relay from the panel to take it out.
+[Unit]
+Description=Velocity for the Hopper relay (Relay through a VPS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User={VELOCITY_USER}
+Group={VELOCITY_USER}
+WorkingDirectory={VELOCITY_DATA}
+ExecStartPre=/bin/cp -f {VELOCITY_TOML} {VELOCITY_DATA}/velocity.toml
+ExecStart={JAVA} -Xms128M -Xmx512M -XX:+UseG1GC -Dvelocity.max-plugin-message-payload-size.clientbound=16777216 -Dvelocity.max-plugin-message-payload-size.serverbound=16777216 -Dvelocity.max-known-packs=1024 -jar {VELOCITY_JAR}
+Restart=always
+RestartSec=5
+SuccessExitStatus=143
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths={VELOCITY_DATA}
+UMask=0077
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+"
+    )
+}
+
+/// `stat -c '%n %U %G %a'` of Velocity's folders and files, as the setup leaves them.
+pub fn velocity_files_right(stat: &str) -> bool {
+    let want = [
+        format!("{ETC} root {VELOCITY_USER} 750"),
+        format!("{SECRET} root {VELOCITY_USER} 640"),
+        format!("{VELOCITY_TOML} root {VELOCITY_USER} 640"),
+        format!("{VELOCITY_DATA} {VELOCITY_USER} {VELOCITY_USER} 700"),
+        format!("{VELOCITY_JAR} root root 644"),
+    ];
+    let got: Vec<&str> = stat.lines().map(str::trim).collect();
+    want.iter().all(|w| got.contains(&w.as_str()))
+}
+
 /// Least memory and free disk the relay is set up on.
 pub const MIN_MEMORY: u64 = 1800 << 20; // a "2 GB" VPS reports a little under 2 GiB
 pub const MIN_DISK: u64 = 2 << 30;
@@ -158,6 +321,8 @@ pub struct RelayStatus {
     pub bind: String,
     pub game_port: u16,
     pub tunnel_port: u16,
+    pub velocity_port: u16,
+    pub backend_port: u16,
 }
 
 /// The last line of `out` that reads as JSON (the program's log goes to
@@ -441,6 +606,10 @@ pub struct Installed {
     /// The program in place, and the version it said it was.
     pub binary_sha256: String,
     pub binary_version: String,
+    /// Velocity's user didn't exist before.
+    pub made_velocity_user: bool,
+    /// The Java archive the setup unpacked (its pinned SHA-256).
+    pub java_sha256: String,
 }
 
 /// One step of a run, as the dialog shows it.
@@ -465,8 +634,11 @@ pub fn install_steps(version: &str, ports: (u16, u16)) -> Vec<Step> {
     vec![
         Step::new("user", "Relay user and folders"),
         Step::new("binary", format!("Hopper relay {version}")),
+        Step::new("java", "Java 21 for Velocity"),
+        Step::new("velocity", format!("{} and the forwarding secret", VELOCITY.name)),
         Step::new("keys", "Relay key and certificate"),
         Step::new("service", "Relay service"),
+        Step::new("velocity-service", "Velocity service"),
         Step::new("firewall", format!("Firewall on the VPS: {} and {}", ports.0, ports.1)),
         Step::new("reach", "Ports open from the internet"),
         Step::new("pair", "Connect this panel to the relay"),
@@ -475,10 +647,10 @@ pub fn install_steps(version: &str, ports: (u16, u16)) -> Vec<Step> {
 
 pub fn remove_steps() -> Vec<Step> {
     vec![
-        Step::new("service", "Stop and remove the relay service"),
+        Step::new("service", "Stop and remove the relay and Velocity services"),
         Step::new("firewall", "Take out the firewall rules it added"),
         Step::new("files", "Delete the relay's program and data"),
-        Step::new("user", "Delete the relay user"),
+        Step::new("user", "Delete the relay and Velocity users"),
         Step::new("pair", "Disconnect this panel"),
         Step::new("login", "Forget the ssh login"),
     ]
@@ -537,7 +709,7 @@ pub fn binary_right(current_sha: &str, recorded_sha: &str, says: &str, version: 
 pub fn keys_right(st: Option<&RelayStatus>, home_key: &str, home_fp: &str, home_addr: &str, addr: &str, bind: &str, ports: (u16, u16), private: bool) -> (bool, bool) {
     let Some(s) = st else { return (false, false) };
     let key = !home_key.is_empty() && s.key_sha256 == super::super::link::hash_hex(&super::super::link::key_hash(home_key)) && home_fp == s.fingerprint;
-    let settings = s.bind == bind && s.game_port == ports.0 && s.tunnel_port == ports.1;
+    let settings = s.bind == bind && s.game_port == ports.0 && s.tunnel_port == ports.1 && s.velocity_port == VELOCITY_PORT && s.backend_port == BACKEND_PORT;
     (key, key && settings && private && home_addr == addr)
 }
 
@@ -550,8 +722,13 @@ pub enum ServiceAct {
 }
 
 pub fn service_acts(unit_now: &str, enabled: &str, active: &str, restart: bool) -> Vec<ServiceAct> {
+    service_acts_for(&unit(), unit_now, enabled, active, restart)
+}
+
+/// [`service_acts`] for any unit (`want` is what it should say).
+pub fn service_acts_for(want: &str, unit_now: &str, enabled: &str, active: &str, restart: bool) -> Vec<ServiceAct> {
     let mut v = Vec::new();
-    let write = unit_now != unit();
+    let write = unit_now != want;
     if write {
         v.push(ServiceAct::WriteUnit);
     }

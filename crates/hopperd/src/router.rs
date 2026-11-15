@@ -471,6 +471,7 @@ async fn route<S: PlayerConn>(app: &Arc<App>, sock: &mut S, peer: SocketAddr, pi
     })
     .await?;
 
+    let direct = matches!(pick, Pick::Address);
     let entry = match pick {
         Pick::Address => {
             // The setup check's own address: always answered here.
@@ -491,6 +492,13 @@ async fn route<S: PlayerConn>(app: &Arc<App>, sock: &mut S, peer: SocketAddr, pi
         log::debug!("router: {peer} asked for {:?}, which no server has", hs.host);
         return standin(app, sock, &buf, used, &hs, Standin::Unknown, None).await;
     };
+    // Behind the relay's Velocity the server doesn't check accounts itself,
+    // so a join that didn't come through the relay is turned away (the
+    // forwarding mod would refuse it too, with a less helpful message).
+    if direct && hs.is_login() && app.vps_forward.mode(&e.id) == hopper_core::hosting::proxy_forward::Mode::Relay {
+        let text = json!({ "text": format!("Join this server through {}.", app.vps.players_address()) });
+        return kick(sock, &text).await;
+    }
     let state = e.server.state();
     if state == ServerState::Running {
         let port = port_of(&e);
