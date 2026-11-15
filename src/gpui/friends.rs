@@ -7,6 +7,7 @@
 use crate::drag_pick;
 use crate::store::{FollowReq, FollowTarget, Store, SyncStatus};
 use crate::widgets::{self, Clickable as _};
+use crate::widgets::ToastAction as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -3604,7 +3605,7 @@ impl FriendsPanel {
         let done = Rc::new(std::cell::Cell::new(false));
         let undo = Rc::new(undo);
         let note = Notification::success(msg)
-            .action(move |_, _, cx| {
+            .action_below(move |_, _, cx| {
                 let (view, done, undo) = (view.clone(), done.clone(), undo.clone());
                 Button::new("friends-undo").label("Undo").disabled(done.get()).on_click(cx.listener(move |note, _, window, cx| {
                     if !done.replace(true) {

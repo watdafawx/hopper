@@ -8,6 +8,7 @@ use crate::settings_page::SettingsPage;
 use crate::store::{Store, StoreEvent};
 use crate::widgets;
 use crate::widgets::Clickable as _;
+use crate::widgets::ToastAction as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
@@ -234,14 +235,18 @@ impl AppView {
                 }
                 StoreEvent::SettingsArrived { root, wrote, group } => {
                     let what = if wrote.n == 1 { "1".to_string() } else { wrote.n.to_string() };
-                    let title = format!("{} changed {what} {} setting{}", wrote.who, wrote.mod_name, if wrote.n == 1 { "" } else { "s" });
+                    let who = widgets::short_label(&wrote.who, 32);
+                    let title = format!("{who} changed {what} {} setting{}", wrote.mod_name, if wrote.n == 1 { "" } else { "s" });
                     let inst = this.store.read(cx).instance(root).map(|i| i.name.clone()).unwrap_or_else(|| group.clone());
-                    let body = format!("They're in {inst} now. Your other settings stayed the same.");
+                    // "They're in…" read as the friend, not the settings.
+                    let change = if wrote.n == 1 { "Their change is" } else { "Their changes are" };
+                    let body = format!("{change} in {} now. Your other settings stayed the same.", widgets::short_label(&inst, 40));
+                    let tip = format!("Puts your {} settings back as they were", wrote.mod_name);
                     let (store, root, wrote) = (this.store.clone(), root.clone(), wrote.clone());
                     let done = std::rc::Rc::new(std::cell::Cell::new(false));
-                    let n = gpui_kit::component::notification::Notification::info(body).title(title).action(move |_, _, cx| {
+                    let n = gpui_kit::component::notification::Notification::info(body).title(title).action_below(move |_, _, cx| {
                         let (store, root, wrote, done) = (store.clone(), root.clone(), wrote.clone(), done.clone());
-                        Button::new("settings-undo").label("Undo").small().outline().disabled(done.get()).on_click(cx.listener(
+                        Button::new("settings-undo").label("Undo").tooltip(tip.clone()).small().outline().disabled(done.get()).on_click(cx.listener(
                             move |note, _, window, cx| {
                                 if !done.replace(true) {
                                     store.update(cx, |s, cx| s.undo_settings(&root, &wrote, cx));
@@ -255,51 +260,21 @@ impl AppView {
                 // The open settings views read their files again themselves.
                 StoreEvent::SettingsWritten(_) => {}
                 StoreEvent::SettingsShared { root, m, mod_name, who } => {
-                    let title = format!("{who} now shares {mod_name} settings");
-                    let body = "Changes to them reach everyone in the group. Keep yours, and theirs wait until you sync again.".to_string();
+                    // Players asked whether closing this stops the sharing:
+                    // say it doesn't, and that the button is the way out.
+                    let title = format!("{} shares their {mod_name} settings with your group", widgets::short_label(who, 32));
+                    let body = "You'll get their changes to these settings. Closing this keeps it that way.".to_string();
+                    let tip = format!("Your {mod_name} settings stay yours; friends' changes wait until you sync again. You can change this later on the Configs tab, on {mod_name}'s page.");
                     let (store, root, m) = (this.store.clone(), root.clone(), m.clone());
-                    let n = gpui_kit::component::notification::Notification::info(body).title(title).action(move |_, _, cx| {
+                    let n = gpui_kit::component::notification::Notification::info(body).title(title).action_below(move |_, _, cx| {
                         let (store, root, m) = (store.clone(), root.clone(), m.clone());
-                        Button::new("settings-keep").label("Keep mine for this mod").small().outline().on_click(cx.listener(
+                        Button::new("settings-keep").label("Keep my own settings").tooltip(tip.clone()).small().outline().on_click(cx.listener(
                             move |note, _, window, cx| {
                                 store.update(cx, |s, cx| s.keep_settings(&root, &m, true, cx));
                                 note.dismiss(window, cx);
                             },
                         ))
                     });
-                    window.push_notification(n, cx);
-                }
-                StoreEvent::ServerOffer(offer) => {
-                    // One offer per server: a later install's replaces it and
-                    // names these mods too (the store keeps them).
-                    struct ServerOfferNote;
-                    let offer = (**offer).clone();
-                    let name = offer.server.name.clone();
-                    let running = crate::rigsync::server_online(this.store.read(cx), None, &offer.server.root);
-                    let body = if running {
-                        format!("{name} is running: restart it after adding to load them.")
-                    } else {
-                        "Copies just these mods there. Nothing is removed.".to_string()
-                    };
-                    let key = offer.server.root.to_string_lossy().into_owned();
-                    let store = this.store.clone();
-                    let n = gpui_kit::component::notification::Notification::info(body)
-                        .title(offer.title())
-                        .id1::<ServerOfferNote>(key)
-                        .action(move |_, _, cx| {
-                            let (store, offer) = (store.clone(), offer.clone());
-                            Button::new("server-offer-add")
-                                .label(format!("Add to {}", offer.server.name))
-                                .small()
-                                .primary()
-                                .on_click(cx.listener(move |note, _, window, cx| {
-                                    store.update(cx, |s, cx| {
-                                        s.add_to_server(&offer);
-                                        cx.notify();
-                                    });
-                                    note.dismiss(window, cx);
-                                }))
-                        });
                     window.push_notification(n, cx);
                 }
                 StoreEvent::Schedule(msg, bad) | StoreEvent::Notice(msg, bad) => {
@@ -322,7 +297,7 @@ impl AppView {
                     let mut n = gpui_kit::component::notification::Notification::warning(text).id::<GitHubLimit>();
                     if !token {
                         let app = cx.entity().downgrade();
-                        n = n.action(move |_, _, cx| {
+                        n = n.action_below(move |_, _, cx| {
                             let app = app.clone();
                             gpui_kit::component::button::Button::new("gh-limit-token")
                                 .label("Add a GitHub token")
@@ -720,6 +695,22 @@ impl AppView {
             let m = value("--mod").unwrap_or_default().to_lowercase();
             cx.defer_in(window, move |this, window, cx| match d.as_str() {
                 "new" => crate::dialogs::open_create(this.store.clone(), window, cx),
+                // The toasts with a button, with sample words, to check
+                // their layout without a friend or GitHub to set them off.
+                "toast-shared" | "toast-arrived" | "toast-github" => {
+                    let root = this.store.read(cx).instances().first().map(|i| i.root.clone()).unwrap_or_default();
+                    let (m, mod_name, who) = ("watermedia".to_string(), "WATERMeDIA: Multimedia API".to_string(), "McFawx".to_string());
+                    let event = match d.as_str() {
+                        "toast-shared" => StoreEvent::SettingsShared { root, m, mod_name, who },
+                        "toast-arrived" => StoreEvent::SettingsArrived {
+                            root,
+                            wrote: hopper::configsync::Wrote1 { m, mod_name, n: 3, who, keys: Vec::new() },
+                            group: "Weekend crew".to_string(),
+                        },
+                        _ => StoreEvent::GitHubLimited("GitHub won't answer this PC for the next 40 minutes.".to_string()),
+                    };
+                    this.store.update(cx, |_, cx| cx.emit(event));
+                }
                 // After the server comparison has had time to finish.
                 "side" => cx
                     .spawn_in(window, async move |this, cx| {

@@ -1,54 +1,34 @@
-//! Mods added to a pack that runs on servers. Adding a mod only ever writes
-//! into the instance, so a mod the server needs stayed missing there until
-//! the next full sync, without a word. After an install Hopper compares
-//! each paired server and offers to copy just the new mods it lacks.
+//! Mods in a pack that its paired server lacks. Adding a mod only ever
+//! writes into the instance, so the instance page's "has other mods than
+//! this pack" notice names them and offers to copy just those to the server
+//! (see `join_help::pre_join_bar`). It used to be a toast after each
+//! install too, which said the same thing as the notice beside it.
 
-use super::{Msg, Store, StoreEvent};
-use gpui_kit::*;
+use super::{Msg, Store};
 use hopper::model::DiffEntry;
 use hopper::server::ServerInfo;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// What an instance had before an install: the website-only pages waiting
-/// and the jars in its mods folder (lower case).
+/// What an instance had before an install: the website-only pages waiting.
 #[derive(Default)]
 pub struct Before {
     pages: Vec<String>,
-    jars: HashSet<String>,
 }
 
 impl Before {
     pub fn at(root: &Path) -> Before {
-        Before {
-            pages: hopper::modpack::pending_urls_at(root),
-            jars: jars(root),
-        }
+        Before { pages: hopper::modpack::pending_urls_at(root) }
     }
-}
-
-/// The jar files in an instance's mods folder, lower case.
-fn jars(root: &Path) -> HashSet<String> {
-    std::fs::read_dir(root.join("mods"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().to_lowercase())
-        .filter(|n| n.ends_with(".jar"))
-        .collect()
 }
 
 impl Msg {
-    /// Like [`Msg::installed`], and when the install put new jars in the
-    /// mods folder, the paired servers are checked for them.
+    /// [`Msg::installed`] with the pages that were waiting before.
     pub fn added(root: PathBuf, before: &Before, by: Option<u64>) -> Msg {
-        let inner = Msg::installed(root.clone(), &before.pages, by);
-        let new: HashSet<String> = jars(&root).difference(&before.jars).cloned().collect();
-        if new.is_empty() { inner } else { Msg::Added(root, new, by, Box::new(inner)) }
+        Msg::installed(root, &before.pages, by)
     }
 }
 
-/// A server's offer: the instance, the server, and the new mods it lacks.
+/// Mods to copy to a server: the instance, the server, and the mods it lacks.
 #[derive(Clone)]
 pub struct ServerOffer {
     pub inst: PathBuf,
@@ -56,80 +36,10 @@ pub struct ServerOffer {
     pub rows: Vec<DiffEntry>,
 }
 
-impl ServerOffer {
-    /// "Hands-On Delight and 1 more aren't on dg".
-    pub fn title(&self) -> String {
-        let first = self.rows.first().map(|d| d.mod_name.clone()).unwrap_or_default();
-        match self.rows.len() {
-            1 => format!("{first} isn't on {}", self.server.name),
-            2 => format!("{first} and 1 more aren't on {}", self.server.name),
-            n => format!("{first} and {} more aren't on {}", n - 1, self.server.name),
-        }
-    }
-}
-
 impl Store {
-    /// Compares each server paired with `root` off the UI thread; a server
-    /// that lacks any of `added` (jar names) gets an offer.
-    pub(super) fn check_added(&self, root: &Path, added: HashSet<String>, by: Option<u64>) {
-        let Some(inst) = self.instance(root).cloned() else { return };
-        // The mod the player picked leads the offer, not its dependencies.
-        let picked: Option<String> = by
-            .and_then(|p| inst.addons.iter().find(|a| a.project_id == p))
-            .map(|a| a.file_name.to_lowercase());
-        let servers: Vec<ServerInfo> = self.servers_of(root).into_iter().cloned().collect();
-        if servers.is_empty() {
-            return;
-        }
-        let anyway = self.settings.sync_anyway.clone();
-        let hidden = self.settings.sync_blacklist.clone();
-        // Mods an earlier offer named and the player hasn't added yet are
-        // looked for again, so the new offer (which replaces it) has them.
-        let servers: Vec<(ServerInfo, HashSet<String>)> = servers
-            .into_iter()
-            .map(|s| {
-                let mut look = added.clone();
-                if let Some(old) = self.server_offers.get(&(root.to_path_buf(), s.root.clone())) {
-                    look.extend(old.iter().cloned());
-                }
-                (s, look)
-            })
-            .collect();
-        let (tx, wake) = (self.tx.clone(), self.wake.clone());
-        std::thread::spawn(move || {
-            for (server, look) in servers {
-                let rows = match hopper::rigsync::compare(&inst, &server, &anyway) {
-                    Ok((diff, _)) => {
-                        let mut rows = hopper::rigsync::to_offer(&diff, &look, &hidden);
-                        rows.sort_by_key(|d| d.client.as_ref().map(|c| c.file_name.to_lowercase()) != picked);
-                        rows
-                    }
-                    Err(e) => {
-                        log::warn!("checking {} for new mods: {e}", server.name);
-                        continue;
-                    }
-                };
-                if !rows.is_empty() {
-                    let _ = tx.send(Msg::ServerOffer(Box::new(ServerOffer { inst: inst.root.clone(), server, rows })));
-                    wake();
-                }
-            }
-        });
-    }
-
-    pub(super) fn on_server_offer(&mut self, offer: ServerOffer, cx: &mut Context<Self>) {
-        // Still paired: the pairing may have changed while it compared.
-        if self.servers_of(&offer.inst).iter().any(|s| s.root == offer.server.root) {
-            let jars = offer.rows.iter().filter_map(|d| Some(d.client.as_ref()?.file_name.to_lowercase())).collect();
-            self.server_offers.insert((offer.inst.clone(), offer.server.root.clone()), jars);
-            cx.emit(StoreEvent::ServerOffer(Box::new(offer)));
-        }
-    }
-
     /// Copies just the offered mods to the server, as a task. Nothing is
     /// removed there; the copies go in the server's History like a sync's.
     pub fn add_to_server(&mut self, offer: &ServerOffer) -> Option<u64> {
-        self.server_offers.remove(&(offer.inst.clone(), offer.server.root.clone()));
         let inst = self.instance(&offer.inst)?.clone();
         let server = offer.server.clone();
         let rows = offer.rows.clone();

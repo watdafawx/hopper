@@ -9,6 +9,7 @@
 use crate::store::{Store, StoreEvent};
 use crate::switch::Switch;
 use crate::widgets::{self, Clickable as _};
+use crate::widgets::ToastAction as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -2205,7 +2206,7 @@ fn watch_moved_back(store: Entity<Store>, root: PathBuf, files: Vec<(String, Vec
                     });
                     window.push_notification(
                         Notification::warning(format!("The game changed {} back as it closed: {}.", if lines.len() == 1 { "a setting" } else { "some settings" }, lines.join("; ")))
-                            .action(move |_, _, _| {
+                            .action_below(move |_, _, _| {
                                 let reapply = reapply.clone();
                                 Button::new("cfg-reapply").small().outline().label("Re-apply").on_click(move |_, window, cx| reapply(window, cx))
                             }),

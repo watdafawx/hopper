@@ -10,7 +10,7 @@ use crate::store::{Msg, Store, StoreEvent};
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::joinfail::{JoinKind, JoinProblem};
@@ -29,6 +29,9 @@ pub struct PreJoin {
     pub server_root: PathBuf,
     pub server: String,
     pub check: JoinCheck,
+    /// The pack's mods the server lacks that "Add to <server>" copies
+    /// there (client-only and "Never sync" mods left out).
+    pub add: Vec<hopper::model::DiffEntry>,
 }
 
 #[derive(Default)]
@@ -41,6 +44,8 @@ pub struct Joins {
     server_files: HashMap<PathBuf, u64>,
     /// The last "Update server" job of each server (by server root).
     updating: HashMap<PathBuf, u64>,
+    /// The last "Add to <server>" job of each server (by server root).
+    adding: HashMap<PathBuf, u64>,
 }
 
 impl Store {
@@ -80,6 +85,25 @@ impl Store {
     /// The last "Update server" job of `server_root`, while it runs or after.
     pub fn server_update_job(&self, server_root: &Path) -> Option<hopper::jobs::JobState> {
         self.job_state(*self.joins.updating.get(server_root)?)
+    }
+
+    /// Copies the pack's mods the server lacks there ("Add to <server>" on
+    /// the notice), and remembers the job so the notice shows it.
+    pub fn add_missing_to_server(&mut self, root: &Path, server_root: &Path) {
+        let Some(p) = self.pre_join_with(root, server_root).cloned() else { return };
+        let Some(server) = self.servers_of(root).into_iter().find(|s| s.root == server_root).cloned() else { return };
+        if p.add.is_empty() {
+            return;
+        }
+        let offer = crate::store::ServerOffer { inst: root.to_path_buf(), server, rows: p.add };
+        if let Some(job) = self.add_to_server(&offer) {
+            self.joins.adding.insert(server_root.to_path_buf(), job);
+        }
+    }
+
+    /// The last "Add to <server>" job of `server_root`, while it runs or after.
+    pub fn server_add_job(&self, server_root: &Path) -> Option<hopper::jobs::JobState> {
+        self.job_state(*self.joins.adding.get(server_root)?)
     }
 
     /// The pack compared with one of its servers, when something differs.
@@ -184,7 +208,8 @@ impl Store {
                 let server_nf = hopper::server_update::server_neoforge(&server.root);
                 let pack_nf = inst.loader.strip_prefix("neoforge-");
                 let check = hopper::rigsync::join_check(&diff, &hidden, pack_nf, server_nf.as_deref());
-                PreJoin { server_root: server.root.clone(), server: server.name.clone(), check }
+                let add = hopper::rigsync::to_add(&diff, &hidden);
+                PreJoin { server_root: server.root.clone(), server: server.name.clone(), check, add }
             });
             Msg::PreJoin(root, server.root.clone(), key, found)
         });
@@ -460,6 +485,8 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
     // The pack or server changed since: its old numbers would mislead.
     let checking = s.pre_join_checking(root, &p.server_root);
     let job = s.server_update_job(&p.server_root);
+    let add_job = s.server_add_job(&p.server_root);
+    let online = crate::rigsync::server_online(s, None, &p.server_root);
     let pack_nf = s.instance(root).and_then(|i| i.loader.strip_prefix("neoforge-").map(str::to_string));
     let theme = cx.theme().clone();
     let color = theme.warning;
@@ -480,7 +507,11 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
         if let Some((mine, theirs)) = &c.loader {
             lines.push(format!("NeoForge: {mine} in this pack, {theirs} on the server"));
         }
+        // Drawn as its own row (mod links and "Add to <server>"); the text
+        // stays for while it's checked again.
+        let mut only_at = None;
         if !c.only_pack.is_empty() {
+            only_at = Some(lines.len());
             lines.push(format!("Only in the pack: {}", list(&c.only_pack)));
         }
         if !c.only_server.is_empty() {
@@ -498,9 +529,23 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
         }
         if checking {
             lines = vec![format!("Checking {} again…", p.server)];
+            only_at = None;
+        }
+        match &add_job {
+            Some(j) if j.error.is_some() => {
+                lines.push(format!("Adding to {} didn't finish: {}", p.server, j.error.clone().unwrap_or_default()));
+            }
+            // The server runs the mods it had when it started.
+            Some(j) if j.done && online && s.live_sync(&p.server_root).is_some() => {
+                lines.push(format!("Added while {} runs: restart it to load them.", p.server));
+            }
+            _ => {}
         }
         match &job {
-            Some(j) if !j.done => lines = vec![format!("Updating {}…", p.server)],
+            Some(j) if !j.done => {
+                lines = vec![format!("Updating {}…", p.server)];
+                only_at = None;
+            }
             Some(j) if j.error.is_some() => {
                 lines.push(format!("The update didn't finish: {}", j.error.clone().unwrap_or_default()));
             }
@@ -511,9 +556,66 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
         if !others.is_empty() {
             lines.push(format!("{} differ{} from this pack too.", others.join(" and "), if others.len() == 1 { "s" } else { "" }));
         }
-        lines
+        (lines, only_at)
     };
+    let (detail, only_at) = detail;
     let updating = job.as_ref().is_some_and(|j| !j.done);
+    let adding = add_job.as_ref().is_some_and(|j| !j.done);
+    // "Only in the pack" with each mod's icon (a click opens its page
+    // beside), then the button that copies them to the server. Outlined:
+    // "Update server" is this notice's filled button.
+    let only_row = only_at.map(|_| {
+        let s = store.read(cx);
+        let c = &p.check;
+        let mut parts = vec![widgets::caption("Only in the pack:", cx).text_xs().into_any_element()];
+        let more = c.only_pack.len().saturating_sub(4);
+        let shown = c.only_pack.len().min(4);
+        for (i, n) in c.only_pack.iter().take(4).enumerate() {
+            let jar = s
+                .instance(root)
+                .and_then(|inst| inst.addons.iter().find(|a| a.name.eq_ignore_ascii_case(n)))
+                .map(|a| a.file_name.clone())
+                .unwrap_or_default();
+            let chip = mod_chip(store, root, n, &jar, 100 + i, cx);
+            // The comma hugs the name before it.
+            let last = i + 1 == shown && more == 0;
+            parts.push(if last { chip } else { h_flex().items_center().child(chip).child(words(",")).into_any_element() });
+        }
+        if more > 0 {
+            parts.push(widgets::caption(format!("and {more} more"), cx).text_xs().into_any_element());
+        }
+        if !p.add.is_empty() {
+            let n = p.add.len();
+            let what = if n == 1 { "this mod".to_string() } else { format!("these {n} mods") };
+            let mut tip = format!("Copies {what} to {}. Nothing there is removed.", p.server);
+            if online {
+                tip.push_str(&format!(" {} is running: restart it after adding to load them.", p.server));
+            }
+            let (st, r, sr) = (store.clone(), root.to_path_buf(), p.server_root.clone());
+            parts.push(
+                div()
+                    .pl_1()
+                    .child(
+                        Button::new("prejoin-add")
+                            .xsmall()
+                            .outline()
+                            .icon(IconName::Plus)
+                            .label(if adding { "Adding…".to_string() } else { format!("Add to {}", widgets::short_label(&p.server, 24)) })
+                            .loading(adding)
+                            .disabled(adding || updating)
+                            .tooltip(tip)
+                            .on_click(move |_, _, cx| {
+                                st.update(cx, |s, cx| {
+                                    s.add_missing_to_server(&r, &sr);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .into_any_element(),
+            );
+        }
+        sentence(parts).into_any_element()
+    });
     let (st, r, sr) = (store.clone(), root.to_path_buf(), p.server_root.clone());
     let update = Button::new("prejoin-update")
         .small()
@@ -547,13 +649,21 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
             let root = sr.clone();
             st.update(cx, |_, cx| cx.emit(StoreEvent::ShowServer { root, compare: true }));
         });
+    // The lines above and below the "Only in the pack" row.
+    let (head, tail) = match only_at {
+        Some(at) => (detail[..at].to_vec(), detail[at + 1..].to_vec()),
+        None => (detail, Vec::new()),
+    };
+    let lines = |v: Vec<String>| v.into_iter().map(|l| widgets::caption(l, cx).text_xs().whitespace_normal()).collect::<Vec<_>>();
     let body = widgets::notice_bar(color, IconName::TriangleAlert, cx)
         .child(
             v_flex()
                 .flex_1()
                 .min_w_0()
                 .child(div().text_sm().font_medium().child(title.clone()))
-                .children(detail.into_iter().map(|l| widgets::caption(l, cx).text_xs().whitespace_normal())),
+                .children(lines(head))
+                .when_some(only_row, |d, row| d.child(row))
+                .children(lines(tail)),
         )
         .child(h_flex().flex_none().gap_2().child(update).children(matcher).child(details));
     widgets::closable_notice(body, key, widgets::Closed::Chip, title, color, store, cx).map(|e| {
