@@ -1631,23 +1631,18 @@ impl FriendsPanel {
             .map(|(mi, m)| {
                 let you = m.id == me;
                 let name = if you { "You".to_string() } else { name_or(&m.name, "A friend") };
-                let status = if !m.joined {
-                    String::new()
-                } else if you {
-                    String::new()
-                } else if m.online && !down {
-                    "Online".to_string()
-                } else if m.last_seen > 0 {
-                    format!("Last online {}", ago(m.last_seen))
-                } else {
-                    "Offline".to_string()
-                };
+                let friend = self.store.read(cx).mailbox_friends().iter().find(|f| f.id == m.id).cloned();
+                // The relay hides a non-friend's online status and face, so
+                // they'd always read "Offline": show neither.
+                let hidden = !you && friend.is_none();
+                let status = member_status(m, you, friend.as_ref(), down);
                 let status = match (m.id == g.owner, status.is_empty()) {
                     (true, true) => "Made the group".to_string(),
                     (true, false) => format!("Made the group · {status}"),
                     _ => status,
                 };
-                let f = face(&self.store, &m.mc_id, &m.name, rems(1.25), cx);
+                let mc_id = friend.as_ref().map(|f| f.mc_id.as_str()).filter(|id| !id.is_empty()).unwrap_or(&m.mc_id).to_string();
+                let f = face(&self.store, &mc_id, &m.name, rems(1.25), cx);
                 let row_id = SharedString::from(format!("gm:{mi}"));
                 // Dragged off a group this PC made, they move; off another
                 // group, they're added where they land.
@@ -1666,6 +1661,11 @@ impl FriendsPanel {
                 let row = match drag {
                     Some(d) if !down => self.start_drag(row, d, cx),
                     _ => row,
+                };
+                let row = if hidden && m.joined {
+                    row.tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Not your friend: status hidden").build(w, cx))
+                } else {
+                    row
                 };
                 row.child(f)
                     .child(div().flex_1().min_w_0().truncate().text_sm().child(name))
@@ -2747,6 +2747,20 @@ fn status(f: Option<&Friend>, down: bool) -> String {
         Some(f) if f.last_seen > 0 => format!("Last online {}", ago(f.last_seen)),
         Some(_) => "Offline".to_string(),
         None => "In a group with you".to_string(),
+    }
+}
+
+/// A group member's status line. Friends show whether they're online, from
+/// their friend record. The relay never tells you about anyone else (not
+/// online, not a face), so a non-friend gets no status at all rather than an
+/// "Offline" that's always wrong. You and the invited get none either.
+fn member_status(m: &hopper::mailbox::GroupMember, you: bool, friend: Option<&Friend>, down: bool) -> String {
+    if !m.joined || you {
+        return String::new();
+    }
+    match friend {
+        Some(f) => status(Some(f), down),
+        None => String::new(),
     }
 }
 
@@ -3874,6 +3888,23 @@ mod tests {
         assert_eq!(ago(t - 86400), "1 day ago");
         assert_eq!(ago(t - 3 * 86400), "3 days ago");
         assert_eq!(ago(t - 4 * 2_592_000), "4 months ago");
+    }
+
+    #[::core::prelude::v1::test]
+    fn non_friend_members_show_no_status() {
+        let m = hopper::mailbox::GroupMember { id: "b".into(), joined: true, online: false, last_seen: 0, ..Default::default() };
+        // Not a friend: the relay hides them, so nothing rather than "Offline".
+        assert_eq!(member_status(&m, false, None, false), "");
+        let mut f = Friend { id: "b".into(), online: true, ..Default::default() };
+        assert_eq!(member_status(&m, false, Some(&f), false), "Online");
+        assert_eq!(member_status(&m, false, Some(&f), true), "Online status unknown");
+        f.online = false;
+        f.last_seen = now() - 2 * 3600;
+        assert_eq!(member_status(&m, false, Some(&f), false), "Last online 2 h ago");
+        // You, and someone not joined yet, have no status line.
+        assert_eq!(member_status(&m, true, Some(&f), false), "");
+        let invited = hopper::mailbox::GroupMember { joined: false, ..m.clone() };
+        assert_eq!(member_status(&invited, false, Some(&f), false), "");
     }
 
     #[::core::prelude::v1::test]
