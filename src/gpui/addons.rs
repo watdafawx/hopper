@@ -339,6 +339,12 @@ impl Render for ColDrag {
 const NAME_MIN: f32 = 16.0;
 const NAME_MAX: f32 = 40.0;
 
+/// The toolbar's levels for a narrow page (`widgets::Fit`): 1 Profiles and
+/// Find sources as icons, 2 Sort as its icon and no "Up to date" or
+/// collapse hint, 3 Update all as its icon and count, 4 Add content as its
+/// icon, 5 a narrower search box.
+const BAR_FIT_MAX: usize = 5;
+
 /// Which optional columns the table shows, fitted to its room each frame.
 /// Header and rows read the same value so they line up.
 #[derive(Clone, Copy, PartialEq)]
@@ -854,6 +860,12 @@ pub struct AddonsView {
     pub(crate) col_order: Vec<Col>,
     /// The work area's width in rem, from the Library (None: the window's).
     pub(crate) room: Option<f32>,
+    /// The toolbar fitted to the room the page has (`widgets::Fit`; levels
+    /// in [`BAR_FIT_MAX`]).
+    bar_fit: widgets::Fit,
+    /// The name column's width in rem, from the last fit (its tag line
+    /// folds chips that don't fit into "+n").
+    name_w: f32,
     /// The Library's instance list is open (not the rail).
     pub(crate) list_open: bool,
     /// "Collapse the list for more room" was dismissed this session.
@@ -992,6 +1004,8 @@ impl AddonsView {
             cols: Cols::default(),
             col_order: Col::ALL.to_vec(),
             room: None,
+            bar_fit: Default::default(),
+            name_w: NAME_MAX,
             list_open: false,
             hint_gone: false,
             compact: false,
@@ -2728,7 +2742,7 @@ impl AddonsView {
 
     /// The toolbar's Sort button: shows the current order and opens a menu
     /// that sets the same order the column headers do.
-    fn sort_button(&self, has_pack: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn sort_button(&self, has_pack: bool, icon_only: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (sort, asc) = self.sort;
         let first = self.updates_first;
         // Only a list with a pack has mods to tell apart.
@@ -2747,7 +2761,7 @@ impl AddonsView {
         let view = cx.entity();
         // Icon only while the order is the default; it names itself once
         // changed, so a different order is never a surprise.
-        let is_default = first && !yours && (sort, asc) == (SortCol::Added, false);
+        let is_default = icon_only || (first && !yours && (sort, asc) == (SortCol::Added, false));
         Button::new("sort")
             .small()
             .outline()
@@ -2827,9 +2841,10 @@ impl AddonsView {
         inst: &Instance,
         updates: &HashMap<u64, Update>,
         hint: bool,
-        narrow: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        // How far the bar has given way to a narrow page (BAR_FIT_MAX).
+        let lv = self.bar_fit.level();
         let pending: HashMap<u64, Update> = updates
             .iter()
             .filter(|(k, _)| !self.recent.contains_key(k))
@@ -2942,7 +2957,7 @@ impl AddonsView {
                     .small()
                     .primary()
                     .icon(IconName::Download)
-                    .label(format!("Update all ({n})"))
+                    .label(if lv >= 3 { n.to_string() } else { format!("Update all ({n})") })
                     .loading(all.is_empty() || busy)
                     .disabled(hold.is_some())
                     .tooltip(hold.map(|w| w.to_string()).unwrap_or_else(|| {
@@ -2991,18 +3006,17 @@ impl AddonsView {
                     });
                 }
             }).into_any_element();
-        let search_el = div().flex_1().min_w(rems(12.)).max_w(rems(26.)).child(
+        let search_el = div().flex_1().min_w(rems(if lv >= 5 { 7. } else { 12. })).max_w(rems(26.)).child(
             widgets::search_input(&self.search)
                 .small()
                 .prefix(Icon::new(IconName::Search).small())
                 .cleanable(true),
         ).into_any_element();
-        let (first, second) = if narrow { (search_el, rail_el) } else { (rail_el, search_el) };
         let root = inst.root.clone();
-        h_flex()
-            .px_6()
+        let key = widgets::fit_key([format!("{}{}{}{}", self.class, n_up, hint, (self.show == Show::All) as u8).as_str()]);
+        let bar = h_flex()
+            .w_full()
             .gap_3()
-            .flex_wrap()
             .child({
                 // A click browses, as it always did. With mods from links on,
                 // the arrow and a right-click offer the other way to add;
@@ -3017,7 +3031,7 @@ impl AddonsView {
                     let m2 = menu.clone();
                     widgets::split_menu(
                         div().id("add-content-wrap").flex_none().context_menu(move |m, w, cx| m2(m, w, cx)).child(
-                            widgets::split_lead(Button::new("add-content").small().outline().icon(IconName::Plus).label("Add content"))
+                            widgets::split_lead(Button::new("add-content").small().outline().icon(IconName::Plus).map(|b| if lv >= 4 { b.tooltip("Add content") } else { b.label("Add content") }))
                                 .on_click(cx.listener(|this, _, _, cx| this.add_content(cx))),
                         ),
                         "add-content-more",
@@ -3031,7 +3045,7 @@ impl AddonsView {
                         .small()
                         .outline()
                         .icon(IconName::Plus)
-                        .label("Add content")
+                        .map(|b| if lv >= 4 { b.tooltip("Add content") } else { b.label("Add content") })
                         .on_click(cx.listener(|this, _, _, cx| this.add_content(cx)))
                         .into_any_element()
                 }
@@ -3052,7 +3066,7 @@ impl AddonsView {
                             .small()
                             .ghost()
                             .icon(IconName::Link)
-                            .label(format!("Find sources ({n})"))
+                            .label(if lv >= 1 { n.to_string() } else { format!("Find sources ({n})") })
                             .tooltip(if n == 1 { "Find a source for 1 unknown mod".to_string() } else { format!("Find sources for {n} unknown mods") })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if let Some(root) = this.root.clone() {
@@ -3104,7 +3118,7 @@ impl AddonsView {
                         .flex_none()
                         .gap_2()
                         .child(match listed {
-                            true if !quiet => h_flex()
+                            true if !quiet && lv < 2 => h_flex()
                                 .gap_1p5()
                                 .text_sm()
                                 .text_color(cx.theme().success)
@@ -3119,15 +3133,15 @@ impl AddonsView {
                 }
             })
             .child(div().w_px().h_5().flex_none().bg(cx.theme().border))
-            // Narrow: the search goes first and the rail wraps under it.
-            .child(first)
-            .child(second)
-            // No divider before Sort: when the bar wraps, it would be left
-            // hanging at the end of a line.
-            .child(self.sort_button(inst.pack.is_some(), cx))
-            .when(hint, |r| r.child(self.collapse_hint(cx)))
+            .child(rail_el)
+            .child(search_el)
+            .child(self.sort_button(inst.pack.is_some(), lv >= 2, cx))
+            .when(hint && lv < 2, |r| r.child(self.collapse_hint(cx)))
             .child(div().flex_1())
-            .when(self.class == cf::CLASS_MODS, |r| r.child(self.profiles_button(inst, cx)))
+            .when(self.class == cf::CLASS_MODS, |r| r.child(self.profiles_button(inst, lv >= 1, cx)));
+        // One line at any width: the bar gives way step by step (see
+        // BAR_FIT_MAX) instead of wrapping under itself.
+        div().px_6().child(self.bar_fit.wrap("content-bar-fit", bar, BAR_FIT_MAX, key, cx.entity_id()))
     }
 
     /// "Collapse the list for more room": collapses the instance list, or
@@ -4121,6 +4135,15 @@ impl AddonsView {
                 max_categories: if lock_line { Some(0) } else { (changed_by.is_some() || kept).then_some(1) },
                 source: a.source.as_ref().map(|s| s.kind.label()),
                 source_changed: update.is_some_and(|u| u.file.source.as_ref().is_some_and(|s| s.changed)),
+                // The name column less its right padding, the gap and the
+                // version chip beside the tags (at most 16 rem wide).
+                room: Some(self.name_w - 1.0 - 0.5 - {
+                    let est = match update.map(|u| u.versions()) {
+                        Some((old, new)) => widgets::chip_w(&old) + widgets::chip_w(&new) + 0.5,
+                        None => widgets::chip_w(&hopper::scan::short_version(&a.file_name)),
+                    };
+                    est.min(16.)
+                }),
             },
             cx,
         );
@@ -5389,6 +5412,7 @@ Change version", a.file_name).into()
             compact = true;
         }
         c.cap = self.name_room(room, &c, compact) > NAME_MAX;
+        self.name_w = self.name_room(room, &c, compact).min(NAME_MAX);
         self.cols = c;
         self.compact = compact;
     }
@@ -6150,7 +6174,7 @@ impl Render for AddonsView {
             && !self.hint_gone
             && self.room.is_some()
             && window.viewport_size().width < px(1100.);
-        let toolbar = self.toolbar(&inst, &updates, hint, window.viewport_size().width < px(1000.), cx);
+        let toolbar = self.toolbar(&inst, &updates, hint, cx);
         let bulk = self.bulk_bar(&inst, &updates, cx);
         let header = self.header(&rows, &inst, cx);
         let count = rows.len();

@@ -379,6 +379,15 @@ pub struct ModTags<'a> {
     /// Its source replaced the installed release's file (same name, other
     /// contents): flagged, not installed.
     pub source_changed: bool,
+    /// The line's width in rem, when known: chips past it fold into "+n"
+    /// instead of being cut off mid-word.
+    pub room: Option<f32>,
+}
+
+/// A chip's width in rem at `text_xs`, from its label: a little generous,
+/// so a chip that is kept is never clipped.
+pub fn chip_w(label: &str) -> f32 {
+    label.chars().count() as f32 * 0.43 + 1.0
 }
 
 /// Categories shown before the rest fold into "+n".
@@ -392,9 +401,9 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         (theme.warning, theme.info, theme.success, theme.danger, theme.muted_foreground);
     let tag = |c: Hsla, text: SharedString| chip(c).child(text);
     let env = match t.env {
-        "client" => Some(tag(warn, "Client only".into())),
-        "server" => Some(tag(info, "Server only".into())),
-        "both" => Some(tag(muted, "Client + server".into())),
+        "client" => Some(("Client only", tag(warn, "Client only".into()))),
+        "server" => Some(("Server only", tag(info, "Server only".into()))),
+        "both" => Some(("Client + server", tag(muted, "Client + server".into()))),
         _ => None,
     };
     let shown = t.max_categories.unwrap_or(MOD_TAG_CATEGORIES).min(t.categories.len());
@@ -407,17 +416,28 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
             .child(chip(bad).child("Crashed"))
             .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(why.clone()).build(w, cx))
     });
-    h_flex_row()
-        .gap_1()
-        .min_w_0()
-        .overflow_hidden()
-        .children(crashed)
-        .when(t.in_use, |r| r.child(tag(info, "In use".into())))
-        .when(t.new, |r| r.child(tag(ok, "New".into())))
-        .when(t.added, |r| r.child(tag(warn, "Added by you".into())))
-        .when_some(t.changed_by, |r, by| r.child(tag(info, by.to_string().into())))
-        .when(t.only_here, |r| {
-            r.child(
+    // Each chip with its label, in the order they show; the ones that
+    // don't fit `room` fold into "+n" from the end.
+    let mut items: Vec<(SharedString, AnyElement)> = Vec::new();
+    let mut put = |label: &str, el: AnyElement| items.push((label.to_string().into(), el));
+    if let Some(c) = crashed {
+        put("Crashed", c.into_any_element());
+    }
+    if t.in_use {
+        put("In use", tag(info, "In use".into()).into_any_element());
+    }
+    if t.new {
+        put("New", tag(ok, "New".into()).into_any_element());
+    }
+    if t.added {
+        put("Added by you", tag(warn, "Added by you".into()).into_any_element());
+    }
+    if let Some(by) = t.changed_by {
+        put(by, tag(info, by.to_string().into()).into_any_element());
+    }
+    if t.only_here {
+        put(
+            "Only on this PC",
                 div()
                     .id(ElementId::Name(format!("only-here:{}", t.key).into()))
                     .flex_none()
@@ -425,43 +445,72 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
                     .tooltip(|w, cx| {
                         gpui_kit::component::tooltip::Tooltip::new("Friends' changes skip it here, and yours stay here. Right-click to sync it again.")
                             .build(w, cx)
-                    }),
-            )
-        })
-        .children(env)
-        .children(
-            t.categories
-                .iter()
-                .take(shown)
-                .map(|c| chip(muted).child(c.clone())),
-        )
-        .when(more > 0, |r| {
-            let rest: SharedString = t.categories[shown..].join(", ").into();
+                    })
+                    .into_any_element(),
+        );
+    }
+    if let Some((label, el)) = env {
+        put(label, el.into_any_element());
+    }
+    for c in t.categories.iter().take(shown) {
+        put(c, chip(muted).child(c.clone()).into_any_element());
+    }
+    // Categories past the first few are only named in "+n".
+    let mut hidden: Vec<SharedString> = t.categories[shown..].iter().map(|c| c.clone().into()).collect();
+    if t.modrinth {
+        put("Modrinth", site_tag(true).into_any_element());
+    }
+    if let Some(s) = t.source {
+        put(s, chip(info).child(s).into_any_element());
+    }
+    if t.source_changed {
+        let key = t.key.to_string();
+        put(
+            "Changed at source",
+            div()
+                .id(ElementId::Name(format!("src-changed:{key}").into()))
+                .flex_none()
+                .child(chip(bad).child("Changed at source"))
+                .tooltip(|w, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(
+                        "The file of the installed release was replaced at its source without a new release. Hopper won't install it on its own; install it from Versions if you trust the change.",
+                    )
+                    .build(w, cx)
+                })
+                .into_any_element(),
+        );
+    }
+    let _ = more;
+    // Keep what fits, leaving room for "+n" when anything folds.
+    let mut keep = items.len();
+    if let Some(room) = t.room {
+        let gap = 0.25;
+        let total = |n: usize, items: &[(SharedString, AnyElement)]| -> f32 {
+            items[..n].iter().map(|(l, _)| chip_w(l) + gap).sum()
+        };
+        let plus = 1.75;
+        while keep > 0 && total(keep, &items) + if keep < items.len() || !hidden.is_empty() { plus } else { 0. } > room {
+            keep -= 1;
+        }
+    }
+    let folded: Vec<SharedString> = items.drain(keep..).map(|(l, _)| l).collect();
+    hidden.splice(0..0, folded);
+    let n_hidden = hidden.len();
+    h_flex_row()
+        .gap_1()
+        .min_w_0()
+        .overflow_hidden()
+        .children(items.into_iter().map(|(_, el)| el))
+        .when(n_hidden > 0, |r| {
+            let rest: SharedString = hidden.join(", ").into();
             r.child(
                 div()
                     .id(ElementId::Name(format!("more-tags:{}", t.key).into()))
                     .flex_none()
                     .text_xs()
                     .text_color(muted)
-                    .child(format!("+{more}"))
+                    .child(format!("+{n_hidden}"))
                     .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(rest.clone()).build(w, cx)),
-            )
-        })
-        .when(t.modrinth, |r| r.child(site_tag(true)))
-        .when_some(t.source, |r, s| r.child(chip(info).child(s)))
-        .when(t.source_changed, |r| {
-            let key = t.key.to_string();
-            r.child(
-                div()
-                    .id(ElementId::Name(format!("src-changed:{key}").into()))
-                    .flex_none()
-                    .child(chip(bad).child("Changed at source"))
-                    .tooltip(|w, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(
-                            "The file of the installed release was replaced at its source without a new release. Hopper won't install it on its own; install it from Versions if you trust the change.",
-                        )
-                        .build(w, cx)
-                    }),
             )
         })
 }
@@ -3171,4 +3220,137 @@ pub fn clear_search(
 /// amber for problems the game will hit at loading.
 pub fn tab_dot(color: Hsla) -> Div {
     div().flex_none().size(px(7.)).rounded_full().bg(color)
+}
+
+/// Fits a row of controls to the room it really has, by stepping through
+/// levels the caller defines: level 0 is the full row, each level after it
+/// gives up a little more (a long label shortens, then a button goes icon
+/// only, then secondary buttons fold into the row's ⋯ menu). Both the room
+/// and the row are measured after layout, so a side panel opening, closing
+/// or being dragged re-lays the row out on the next frame; the window's
+/// width alone can't say what a docked panel leaves.
+///
+/// A row that doesn't fit steps up a level; one whose level below was seen
+/// to fit the room it has now steps back down. Widths seen at each level
+/// are kept until the row's `key` changes (different labels), so a stable
+/// room settles on one level without flickering between two.
+#[derive(Clone, Default)]
+pub struct Fit(Rc<std::cell::RefCell<FitState>>);
+
+#[derive(Default)]
+struct FitState {
+    level: usize,
+    /// The row's width last seen at each level.
+    need: Vec<Option<f32>>,
+    /// Room given from outside (`room_probe`), else measured around the row.
+    outer_room: Option<f32>,
+    room: f32,
+    key: u64,
+}
+
+impl Fit {
+    /// The level to render this frame.
+    pub fn level(&self) -> usize {
+        self.0.borrow().level
+    }
+
+    /// Wraps `row` (laid out at its natural width, never squeezed) in a box
+    /// that takes whatever room its parent gives, clipped. `max` is the
+    /// highest level the caller has; `key` changes when the row's content
+    /// does (it forgets the widths it saw).
+    pub fn wrap(&self, id: impl Into<SharedString>, row: impl IntoElement, max: usize, key: u64, view: EntityId) -> Stateful<Div> {
+        {
+            let mut st = self.0.borrow_mut();
+            if st.key != key {
+                st.key = key;
+                st.need.clear();
+            }
+            st.level = st.level.min(max);
+        }
+        let fit = self.clone();
+        let id: SharedString = id.into();
+        // At the last level the row takes the room it's given and copes
+        // itself (a tab bar scrolls); before it, it keeps its natural width
+        // so it can be measured against the room.
+        let last = self.level() >= max;
+        h_flex()
+            .relative()
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .flex_grow(1.)
+                    .map(|d| if last { d.flex_shrink(1.).min_w_0() } else { d.flex_shrink_0() })
+                    .child(row),
+            )
+            .child(canvas(|_, _, _| {}, |_, _, _, _| {}).absolute().inset_0())
+            .on_children_prepainted(move |b, _, cx| {
+                let (Some(inner), Some(outer)) = (b.first(), b.get(1)) else { return };
+                if fit.measured(f32::from(inner.size.width), f32::from(outer.size.width), max) {
+                    cx.notify(view);
+                }
+            })
+            .id(ElementId::Name(id))
+    }
+
+    /// For a row whose room isn't its box (a column that hugs its content):
+    /// an invisible element filling the region the row may use; `minus` is
+    /// what else in that region (in rem) the row must leave room for.
+    pub fn room_probe(&self, minus: f32, max: usize, view: EntityId) -> impl IntoElement {
+        let fit = self.clone();
+        canvas(
+            move |bounds, window, cx| {
+                let room = f32::from(bounds.size.width - window.rem_size() * minus).max(0.);
+                let changed = {
+                    let mut st = fit.0.borrow_mut();
+                    let was = st.outer_room.replace(room);
+                    was.is_none_or(|w| (w - room).abs() > 0.5)
+                };
+                if changed {
+                    let need = fit.0.borrow().need.get(fit.level()).copied().flatten();
+                    if let Some(n) = need
+                        && fit.measured(n, room, max)
+                    {
+                        cx.notify(view);
+                    }
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+    }
+
+    /// Records this frame's widths; true when the level changed.
+    fn measured(&self, need: f32, room: f32, max: usize) -> bool {
+        let mut st = self.0.borrow_mut();
+        let room = st.outer_room.unwrap_or(room);
+        st.room = room;
+        let l = st.level;
+        if st.need.len() <= max {
+            st.need.resize(max + 1, None);
+        }
+        st.need[l] = Some(need);
+        let next = if need > room + 0.5 && l < max {
+            l + 1
+        } else if l > 0 && st.need[l - 1].is_none_or(|n| n <= room + 0.5) {
+            l - 1
+        } else {
+            l
+        };
+        st.level = next;
+        next != l
+    }
+}
+
+/// A key for [`Fit::wrap`] from the texts a row shows.
+pub fn fit_key<'a>(parts: impl IntoIterator<Item = &'a str>) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for p in parts {
+        p.hash(&mut h);
+    }
+    h.finish()
 }

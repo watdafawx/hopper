@@ -1162,8 +1162,18 @@ pub struct ServersView {
     blurs: HashMap<PathBuf, Option<PathBuf>>,
     /// The detail area's width in rem, for the header's figures.
     detail_w: f32,
+    /// The header's pills and actions, and the tab bar, fitted to the room
+    /// the page has (see `widgets::Fit`).
+    hero_pills: widgets::Fit,
+    hero_actions: widgets::Fit,
+    tabs_fit: widgets::Fit,
     _subscriptions: Vec<Subscription>,
 }
+
+/// The header's levels for a narrow page (`widgets::Fit`): 1 the open
+/// button without how it reaches the panel, 2 that button as its icon,
+/// 3 Stop and Restart as icons.
+const HEADER_FIT_MAX: usize = 3;
 
 /// The Sync tab's code (see [`tabs_for`]).
 pub const TAB_SYNC: usize = 5;
@@ -1391,6 +1401,9 @@ impl ServersView {
             icons: HashMap::new(),
             blurs: HashMap::new(),
             detail_w: 80.0,
+            hero_pills: Default::default(),
+            hero_actions: Default::default(),
+            tabs_fit: Default::default(),
             _subscriptions: subs,
         };
         v.ensure_pick(cx);
@@ -2103,11 +2116,13 @@ impl ServersView {
         let theme = cx.theme().clone();
         // The header: like an instance's, with the server's picture.
         let light = status_color(status, pstats.as_ref(), cx);
+        let mut pill_names: Vec<SharedString> = vec![short_state(status, pstats.as_ref()).into(), manager.into()];
         let mut pills: Vec<AnyElement> = vec![
             widgets::pill(short_state(status, pstats.as_ref()), light, true).into_any_element(),
             widgets::pill(manager, theme.muted_foreground, false).into_any_element(),
         ];
         if also {
+            pill_names.push(if matches!(s.manager, Manager::Mcss) { "Also in MCSS" } else { "Also in Crafty" }.into());
             pills.push(
                 widgets::pill(
                     if matches!(s.manager, Manager::Mcss) { "Also in MCSS" } else { "Also in Crafty" },
@@ -2120,8 +2135,17 @@ impl ServersView {
         // A panel that says it is stopped won't answer a ping: no chip that
         // can only say so.
         if !pstats.as_ref().is_some_and(|p| !p.running && !p.starting) && self.store.read(cx).pingable(&server) {
+            pill_names.push("Ping".into());
             pills.push(ping_pill(&self.store, &server, cx));
         }
+        let fact_texts: Vec<String> = [
+            minecraft.as_ref().map(|v| format!("Minecraft {v}")),
+            loader_label.as_ref().map(|l| l.to_string()),
+            pack_version.as_ref().map(|v| format!("v{v}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         let facts = crate::hero::facts_row(cx)
             .when_some(minecraft, |r, v| r.child(crate::hero::fact(IconName::Box, theme.success, format!("Minecraft {v}"))))
             .when_some(loader_label, |r, l| r.child(crate::hero::fact(IconName::Blocks, theme.warning, l)))
@@ -2174,20 +2198,26 @@ impl ServersView {
         }
         stats.truncate(crate::library::hero_room(self.detail_w));
         let blur = art.as_ref().and_then(|a| self.blurs.get(a).cloned().flatten());
+        let lv = self.hero_actions.level();
+        let mut key_parts: Vec<String> = Vec::new();
         let open = {
             // How this PC reaches the panel, as the panel sees it (the web
             // panel's status bar says the same).
             let via = pstats.as_ref().and_then(|p| p.via).filter(|_| remote);
             let tls = s.remote.as_ref().is_some_and(|r| r.base.starts_with("https:"));
+            let word = if remote { "Open in browser" } else { "Folder" };
+            key_parts.push(format!("{word}{via:?}"));
             let b = Button::new("open-server")
                 .outline()
                 .icon(if remote { IconName::ExternalLink } else { IconName::FolderOpen })
-                .label(match via {
-                    Some(v) => format!("Open in browser · {v}"),
-                    None if remote => "Open in browser".to_string(),
-                    None => "Folder".to_string(),
+                // Narrow: without how it's reached, then the icon alone.
+                .map(|b| match (lv, via) {
+                    (0, Some(v)) => b.label(format!("{word} · {v}")),
+                    (0 | 1, _) => b.label(word),
+                    _ => b.when(via.is_none(), |b| b.tooltip(word)),
                 })
                 .on_click(move |_, _, _| crate::store::open_path(&root));
+            let via = via.filter(|_| lv == 0 || lv >= 2);
             match via {
                 Some(v) => b
                     .when(tls, |b| b.child(Icon::new(IconName::Lock).xsmall().text_color(theme.muted_foreground)))
@@ -2208,7 +2238,7 @@ impl ServersView {
             .flex_none()
             .flex_nowrap()
             .gap_2()
-            .child(self.control.update(cx, |c, cx| c.controls_hero(cx)))
+            .child(self.control.update(cx, |c, cx| if lv >= 3 { c.controls_hero_compact(cx) } else { c.controls_hero(cx) }))
             .child(open)
             .children(self.history_button(cx))
             .children(self.control.update(cx, |c, cx| c.more_button(cx)));
@@ -2225,6 +2255,15 @@ impl ServersView {
                 summary: motd,
                 stats,
                 actions,
+                fit: Some(crate::hero::HeroFit {
+                    pills: self.hero_pills.clone(),
+                    pill_names,
+                    actions: self.hero_actions.clone(),
+                    actions_max: HEADER_FIT_MAX,
+                    actions_key: widgets::fit_key(key_parts.iter().map(|s| s.as_str())),
+                    facts: fact_texts,
+                    view: cx.entity_id(),
+                }),
             },
             cx,
         );
@@ -2240,25 +2279,45 @@ impl ServersView {
                 let danger = cx.theme().danger;
                 let logs_dot = self.strip.read(cx).unseen_key().is_some_and(|k| !self.store.read(cx).notice_hidden(&k));
                 let online = pstats.as_ref().filter(|p| p.running).map(|p| p.online);
-                TabBar::new("server-tabs")
+                // Narrow: the tabs other than the open one show their icon
+                // (named on hover), then the bar gets the kit's menu of all
+                // tabs and scrolls.
+                let lt = self.tabs_fit.level();
+                let labels: Vec<String> = codes
+                    .iter()
+                    .map(|&code| match code {
+                        TAB_MODS if !remote => format!("Mods {n_jars}"),
+                        TAB_PLAYERS => online.map_or("Players".to_string(), |n| format!("Players {n}")),
+                        _ => tab_name(code).to_string(),
+                    })
+                    .collect();
+                let key = widgets::fit_key(labels.iter().map(|s| s.as_str()).chain([tab_name(self.tab)]));
+                let bar = TabBar::new("server-tabs")
                     .underline()
+                    .menu(lt >= 2)
                     .selected_index(codes.iter().position(|c| *c == self.tab).unwrap_or(0))
-                    .children(codes.iter().map(|&code| {
-                        let label = match code {
-                            TAB_MODS if !remote => format!("Mods {n_jars}"),
-                            TAB_PLAYERS => online.map_or("Players".to_string(), |n| format!("Players {n}")),
-                            _ => tab_name(code).to_string(),
-                        };
+                    .children(codes.iter().zip(labels).map(|(&code, label)| {
+                        let short = lt >= 1 && code != self.tab;
                         Tab::new()
                             .prefix(Icon::new(tab_icon(code)).small())
-                            .label(label)
+                            .map(|t| {
+                                if short {
+                                    let tip: SharedString = label.clone().into();
+                                    t.aria_label(label).tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                                } else {
+                                    t.label(label)
+                                }
+                            })
                             .when(code == TAB_LOGS && logs_dot && self.tab != TAB_LOGS, |t| t.suffix(widgets::tab_dot(danger)))
                     }))
                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                         if let Some(code) = codes.get(*ix) {
                             this.set_tab(*code, cx)
                         }
-                    }))
+                    }));
+                // At the last level the bar takes the room it's given and
+                // scrolls, so it isn't measured against it.
+                self.tabs_fit.wrap("server-tabs-fit", bar, 2, key, cx.entity_id())
             })
             .when(self.tab != TAB_LOGS, |c| {
                 self.strip.update(cx, |st, cx| st.show(s.root.clone(), cx));
@@ -2616,8 +2675,10 @@ impl Render for ServersView {
         let view2 = view.clone();
         let layout = self.list_panel.layout(self.store.read(cx).settings(), window);
         let collapsed = layout.collapsed;
-        // The Sync tab fits its rows to the room beside the list.
-        let room = window.viewport_size().width / window.rem_size() - layout.width;
+        // The Sync tab fits its rows to the room beside the list and a
+        // docked mod page.
+        let peek_w = self.mods_peek(cx).map_or(0.0, |p| p.read(cx).panel_width(window, cx));
+        let room = window.viewport_size().width / window.rem_size() - layout.width - peek_w;
         self.sync.update(cx, |p, _| p.room = Some(room));
         self.detail_w = room;
         let arts = self.arts(cx);
@@ -2687,7 +2748,7 @@ impl Render for ServersView {
         let peek = self.mods_peek(cx);
         let peek_w = peek.as_ref().map_or(0.0, |p| p.read(cx).panel_width(window, cx));
         self.mods_table.update(cx, |a, _| {
-            a.room = Some(room - peek_w);
+            a.room = Some(room);
             a.list_open = !collapsed;
         });
         let peek = peek.map(|p| div().w(rems(peek_w)).flex_none().h_full().child(p));

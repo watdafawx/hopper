@@ -258,6 +258,18 @@ const SIDEBAR_MAX: f32 = 36.0;
 const SIDEBAR_COLLAPSE: f32 = 10.0;
 const RAIL: f32 = 4.5;
 
+/// The header's levels for a narrow page (`widgets::Fit`): 1 "Update pack",
+/// 2 its icon only, 3 Folder and the pack's page into ⋯, 4 Settings into ⋯,
+/// 5 the paired server as its state dot, 6 Play as its icon.
+const HEADER_FIT_MAX: usize = 6;
+
+/// Header buttons folded into its ⋯ menu for room.
+#[derive(Clone, Copy)]
+struct HeaderFold {
+    folder: bool,
+    settings: bool,
+}
+
 pub struct LibraryView {
     /// The list's width while its edge is being dragged.
     drag_width: Option<f32>,
@@ -295,6 +307,11 @@ pub struct LibraryView {
     crashes: HashMap<PathBuf, Option<hopper::crashdetect::Crash>>,
     /// The work area's width in rem, as of the last render.
     detail_w: f32,
+    /// The header's pills and actions, and the tab bar, fitted to the room
+    /// the page has (see `widgets::Fit`).
+    hero_pills: widgets::Fit,
+    hero_actions: widgets::Fit,
+    tabs_fit: widgets::Fit,
     addons: Entity<AddonsView>,
     server: Entity<SyncPanel>,
     worlds: Entity<WorldsView>,
@@ -541,6 +558,9 @@ impl LibraryView {
             sizes: HashMap::new(),
             crashes: HashMap::new(),
             detail_w: 80.0,
+            hero_pills: Default::default(),
+            hero_actions: Default::default(),
+            tabs_fit: Default::default(),
             addons,
             server,
             worlds,
@@ -1170,7 +1190,7 @@ impl LibraryView {
                         .on_click(cx.listener(move |this, _, _, cx| this.select(r.clone(), cx)))
                         .context_menu({
                             let (view, root) = (view.clone(), root.clone());
-                            move |menu, window, cx| instance_menu(menu, &view, &root, false, window, cx)
+                            move |menu, window, cx| instance_menu(menu, &view, &root, None, window, cx)
                         })
                         .child(widgets::thumb(icon.as_deref(), rems(2.5), cx))
                         .when(playing, |d| {
@@ -1621,7 +1641,7 @@ impl LibraryView {
                             }),
                     ),
             )
-            .context_menu(move |menu, window, cx| instance_menu(menu, &menu_view, &menu_root, false, window, cx))
+            .context_menu(move |menu, window, cx| instance_menu(menu, &menu_view, &menu_root, None, window, cx))
             .into_any_element()
     }
 
@@ -1962,17 +1982,28 @@ impl LibraryView {
         let busy = store.is_busy(&root);
         let starting = store.is_launching(&root);
         let primary = cx.theme().primary;
+        // How far the header has given way to a narrow page (HEADER_FIT_MAX).
+        let lv = self.hero_actions.level();
+        let fold = HeaderFold { folder: lv >= 3, settings: lv >= 4 };
+        let mut key_parts: Vec<String> = Vec::new();
         let pack_update = store.pack_update(inst).cloned().map(|f| {
+            let full = format!("Update pack to {}", f.display_name);
+            key_parts.push(full.clone());
+            let lead = Button::new("update-pack")
+                .outline()
+                .icon(Icon::new(IconName::Download).text_color(primary));
+            let lead = match lv {
+                0 => lead.label(full),
+                1 => lead.label("Update pack").tooltip(full),
+                _ => lead.tooltip(full),
+            };
             let (r1, r2, f1, f2) = (root.clone(), root.clone(), f.clone(), f.clone());
             h_flex()
                 .gap_1()
                 .child(widgets::split(
                     // Outline: Play is the one filled button. The icon keeps
                     // the update color.
-                    widgets::split_lead(Button::new("update-pack")
-                        .outline()
-                        .icon(Icon::new(IconName::Download).text_color(primary))
-                        .label(format!("Update pack to {}", f.display_name))
+                    widgets::split_lead(lead
                         .disabled(hold.is_some())
                         .when_some(hold, |b, why| b.tooltip(why))
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -2025,6 +2056,7 @@ impl LibraryView {
         let can_pair = can_pair && store.server_tools();
         let sync_to: Option<AnyElement> = match paired {
             Some((sroot, name, players)) => {
+                key_parts.push(name.clone());
                 let (dot, word, reason) = self.server_state(&sroot, cx);
                 let tip = match (&reason, word) {
                     (Some(r), "unreachable") => r.clone(),
@@ -2035,7 +2067,8 @@ impl LibraryView {
                 let lead = Button::new("sync-to")
                     .outline()
                     .selected(on_server_tab)
-                    .child(h_flex().gap_2().items_center().child(widgets::status_dot(dot)).child(name))
+                    // Narrow: the state dot alone; the tooltip names it.
+                    .child(h_flex().gap_2().items_center().child(widgets::status_dot(dot)).when(lv < 5, |r| r.child(name)))
                     .tooltip(tip)
                     .on_click(cx.listener(|this, _, _, cx| this.set_tab(InstTab::Server, cx)));
                 let view = cx.entity();
@@ -2084,7 +2117,10 @@ impl LibraryView {
             Button::new("play")
                 .success()
                 .icon(IconName::Play)
-                .label(if starting { "Starting…" } else if busy { "Working…" } else { "Play" })
+                .map(|b| {
+                    let word = if starting { "Starting…" } else if busy { "Working…" } else { "Play" };
+                    if lv >= 6 { b.tooltip(word) } else { b.label(word) }
+                })
                 .loading(busy || starting)
                 .disabled(busy || starting)
                 .when(busy, |b| b.tooltip("A task is changing this instance"))
@@ -2094,7 +2130,7 @@ impl LibraryView {
         let theme = cx.theme();
         let play_color = if playing { theme.danger } else { theme.success };
         // First in the row on every tab, so it never moves.
-        let play_small = Some(widgets::glow(play.min_w_24(), play_color, cx));
+        let play_small = Some(widgets::glow(if lv >= 6 { play } else { play.min_w_24() }, play_color, cx));
         let history = self.history_button(&root, cx);
         let site = self.pack_facts(inst, cx).map(|(_, _, _, url, mr)| (url, mr));
         let actions = h_flex()
@@ -2104,14 +2140,16 @@ impl LibraryView {
                             .children(play_small)
                             .children(pack_update)
                             .children(sync_to)
-                            .child(
-                                Button::new("folder")
-                                    .outline()
-                                    .icon(IconName::FolderOpen)
-                                    .label("Folder")
-                                    .on_click(move |_, _, _| store::open_path(&r_folder)),
-                            )
-                            .when_some(site, |r, (url, mr)| {
+                            .when(!fold.folder, |r| {
+                                r.child(
+                                    Button::new("folder")
+                                        .outline()
+                                        .icon(IconName::FolderOpen)
+                                        .label("Folder")
+                                        .on_click(move |_, _, _| store::open_path(&r_folder)),
+                                )
+                            })
+                            .when_some(site.clone().filter(|_| !fold.folder), |r, (url, mr)| {
                                 r.child(
                                     Button::new("pack-site")
                                         .outline()
@@ -2122,14 +2160,16 @@ impl LibraryView {
                                 )
                             })
                             // Named, here beside Folder, so it's easy to find.
-                            .child(
-                                Button::new("inst-settings")
-                                    .outline()
-                                    .selected(self.tab == InstTab::Settings)
-                                    .icon(IconName::SlidersHorizontal)
-                                    .label("Settings")
-                                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(InstTab::Settings, cx))),
-                            )
+                            .when(!fold.settings, |r| {
+                                r.child(
+                                    Button::new("inst-settings")
+                                        .outline()
+                                        .selected(self.tab == InstTab::Settings)
+                                        .icon(IconName::SlidersHorizontal)
+                                        .label("Settings")
+                                        .on_click(cx.listener(|this, _, _, cx| this.set_tab(InstTab::Settings, cx))),
+                                )
+                            })
                             .child(history)
                             .child(
                                 Button::new("more")
@@ -2138,10 +2178,12 @@ impl LibraryView {
                                     .tooltip("More")
                                     // Right-aligned to the button, off the window edge.
                                     .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
-                                        instance_menu(menu, &view, &r_more, true, window, cx)
+                                        instance_menu(menu, &view, &r_more, Some((fold, site.clone())), window, cx)
                                     }),
                             );
-        self.hero(inst, icon, actions, cx)
+        key_parts.push(format!("{playing}{starting}{busy}"));
+        let key = widgets::fit_key(key_parts.iter().map(|s| s.as_str()));
+        self.hero(inst, icon, actions, key, cx)
     }
 
     /// On Overview, the pack's page facts the banner shows in place of the
@@ -2171,9 +2213,11 @@ impl LibraryView {
         inst: &Instance,
         icon: Option<PathBuf>,
         actions: Div,
+        actions_key: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let page = self.pack_facts(inst, cx);
+        let mut pill_names: Vec<SharedString> = Vec::new();
         let store = self.store.read(cx);
         let theme = cx.theme();
 
@@ -2189,15 +2233,18 @@ impl LibraryView {
             } else {
                 format!("{mins}m")
             };
+            pill_names.push(format!("Running · {up}").into());
             pills.push(widgets::pill(format!("Running · {up}"), theme.success, true).into_any_element());
         }
         if store.is_busy(&inst.root) {
+            pill_names.push("Working".into());
             pills.push(widgets::pill("Working", theme.warning, true).into_any_element());
         }
         // The update pills open what they're about.
         if let Some(f) = store.pack_update(inst).cloned() {
             let root = inst.root.clone();
             let hover = theme.primary.opacity(0.2);
+            pill_names.push("Pack update".into());
             pills.push(
                 widgets::pill("Pack update", theme.primary, false)
                     .id("pill-pack-update")
@@ -2222,6 +2269,7 @@ impl LibraryView {
             } else {
                 format!("Show them in {}", tab.label())
             });
+            pill_names.push(updates_label(&counts).into());
             pills.push(
                 widgets::pill(updates_label(&counts), theme.info, false)
                     .id("pill-mod-updates")
@@ -2236,8 +2284,14 @@ impl LibraryView {
         }
         // Another launcher's instance says whose it is.
         if let Some(k) = hopper::launchers::Kind::from_key(&inst.source) {
+            pill_names.push(k.name().into());
             pills.push(widgets::pill(k.name(), theme.accent_foreground, false).into_any_element());
         }
+        pill_names.push(match &inst.pack {
+            Some(p) if hopper::modrinth::is_mr(p.project_id) => "Modrinth".into(),
+            Some(_) => "CurseForge".into(),
+            None => "Custom".into(),
+        });
         pills.push(
             match &inst.pack {
                 Some(p) => {
@@ -2260,6 +2314,10 @@ impl LibraryView {
             };
             crate::hero::fact(icon, color, text)
         };
+        let fact_texts: Vec<String> = [format!("Minecraft {}", inst.game_version), store::loader_label(&inst.loader)]
+            .into_iter()
+            .chain(inst.pack.as_ref().filter(|p| !p.version.is_empty()).map(|p| format!("v{}", p.version)))
+            .collect();
         let facts = crate::hero::facts_row(cx)
             .child(fact(IconName::Box, format!("Minecraft {}", inst.game_version)))
             .child({
@@ -2356,6 +2414,15 @@ impl LibraryView {
                 summary: summary.map(IntoElement::into_any_element),
                 stats,
                 actions,
+                fit: Some(crate::hero::HeroFit {
+                    pills: self.hero_pills.clone(),
+                    pill_names,
+                    actions: self.hero_actions.clone(),
+                    actions_max: HEADER_FIT_MAX,
+                    actions_key,
+                    facts: fact_texts,
+                    view: cx.entity_id(),
+                }),
             },
             cx,
         )
@@ -2370,24 +2437,13 @@ impl LibraryView {
         let news = self.logs_news(inst, cx).filter(|(key, _)| !self.store.read(cx).notice_hidden(key));
         let theme = cx.theme();
         let slot = |tab: InstTab| if tab.is_pack() { InstTab::ResourcePacks } else { tab };
-        // Which bar tabs fit: a rough width per tab from its label, against
-        // the room the window leaves beside the instance list.
-        let settings = self.store.read(cx).settings();
-        let side = if settings.sidebar_collapsed { RAIL } else { settings.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX) };
-        let room = self.view_w - self.rem * (side + 3.5);
-        let want = |t: InstTab| px(40. + Self::bar_label(t).len() as f32 * 6.8 + if t == InstTab::Mods { 30. } else { 0. });
-        let mut used = px(0.);
-        let mut shown: Vec<InstTab> = Vec::new();
-        let mut folded: Vec<InstTab> = Vec::new();
-        for (i, t) in BAR.iter().enumerate() {
-            let more = if i + 1 < BAR.len() { px(84.) } else { px(0.) };
-            if folded.is_empty() && used + want(*t) + more <= room {
-                used += want(*t);
-                shown.push(*t);
-            } else {
-                folded.push(*t);
-            }
-        }
+        // Which bar tabs fit: the bar is measured against the room the page
+        // really has (side panels and the instance list taken out), and the
+        // last tabs fold into "More" one at a time until it fits.
+        let max = BAR.len() - 1;
+        let n_show = BAR.len() - self.tabs_fit.level().min(max);
+        let mut shown: Vec<InstTab> = BAR[..n_show].to_vec();
+        let mut folded: Vec<InstTab> = BAR[n_show..].to_vec();
         // The open tab always shows.
         if let Some(i) = folded.iter().position(|t| *t == slot(self.tab)) {
             let t = folded.remove(i);
@@ -2489,12 +2545,14 @@ impl LibraryView {
                     })
                 })
         });
+        let key = widgets::fit_key(BAR.iter().map(|t| Self::bar_label(*t)).chain([Self::bar_label(slot(self.tab))]));
         div()
             .flex_none()
             .px_6()
             .border_b_1()
             .border_color(theme.border)
-            .child(
+            .child(self.tabs_fit.wrap(
+                "inst-tabs-fit",
                 h_flex()
                     .gap_2()
                     .child(
@@ -2505,8 +2563,11 @@ impl LibraryView {
                             .overflow_x_scroll()
                             .child(div().relative().child(strip).children(underline)),
                     )
-                    .children(more)
-            )
+                    .children(more),
+                max,
+                key,
+                cx.entity_id(),
+            ))
             .into_any_element()
     }
 
@@ -3341,10 +3402,16 @@ fn instance_menu(
     menu: PopupMenu,
     view: &Entity<LibraryView>,
     root: &Path,
-    header: bool,
+    // From the header: what it folded away for room, and the pack's page.
+    header: Option<(HeaderFold, Option<(String, bool)>)>,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
+    let (fold, site) = match header.clone() {
+        Some((f, site)) => (f, site),
+        None => (HeaderFold { folder: true, settings: true }, None),
+    };
+    let header = header.is_some();
     let store = view.read(cx).store.clone();
     let s = store.read(cx);
     let Some(inst) = s.instance(root) else { return menu };
@@ -3371,21 +3438,31 @@ fn instance_menu(
 
     let menu = menu.when(!header, |m| {
         let (v1, r1) = vr();
-        let r2 = r.clone();
         m.item(
             PopupMenuItem::new("Play")
                 .icon(IconName::Play)
                 .disabled(playing)
                 .on_click(move |_, window, cx| v1.update(cx, |this, cx| this.play(&r1, window, cx))),
         )
-        .item(
+    })
+    // The header's own Folder and Settings buttons, unless it folded them
+    // in here for room.
+    .when(fold.folder, |m| {
+        let r2 = r.clone();
+        m.item(
             PopupMenuItem::new("Open folder")
                 .icon(IconName::FolderOpen)
                 .on_click(move |_, _, _| store::open_path(&r2)),
         )
     })
-    // The header has its own Settings button.
-    .when(!header, |m| {
+    .when_some(site.filter(|_| fold.folder), |m, (url, mr)| {
+        m.item(
+            PopupMenuItem::new(if mr { "Open on Modrinth" } else { "Open on CurseForge" })
+                .icon(IconName::ExternalLink)
+                .on_click(move |_, _, cx| cx.open_url(&url)),
+        )
+    })
+    .when(fold.settings, |m| {
         let (v, r) = vr();
         m.item(PopupMenuItem::new("Settings").icon(IconName::SlidersHorizontal).on_click(move |_, _, cx| {
             v.update(cx, |this, cx| {

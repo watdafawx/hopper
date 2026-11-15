@@ -2838,6 +2838,12 @@ impl Store {
 
     /// Looks for newer versions of every installed modpack.
     pub fn check_pack_updates(&self) {
+        if let Some(seed) = test_seed() {
+            let u: Vec<(u64, hopper::cf::File)> =
+                seed.packs.into_iter().filter_map(|(k, f)| Some((k.parse().ok()?, f))).collect();
+            self.spawn(move || Msg::PackUpdates(u));
+            return;
+        }
         if hopper::cf::api_key().is_none() {
             return;
         }
@@ -3005,6 +3011,14 @@ impl Store {
             if force || self.updates_stale(root) {
                 self.check_remote_updates(root, r, force);
             }
+            return;
+        }
+        // A test build's made-up updates, keyed by the instance folder's name.
+        if let Some(list) = test_seed().and_then(|mut s| s.mods.remove(&*root.file_name().unwrap_or_default().to_string_lossy())) {
+            self.updates_at.insert(root.to_path_buf(), Instant::now());
+            self.updates.entry(root.to_path_buf()).or_default().begin();
+            let root = root.to_path_buf();
+            self.spawn(move || Msg::Updates { result: Ok(list), root, prev: Vec::new() });
             return;
         }
         if hopper::cf::api_key().is_none() || (!force && !self.updates_stale(root)) {
@@ -5022,4 +5036,30 @@ mod anim_key_tests {
         assert_eq!(anim_parts("https://x/a.gif#w=128").2.max_width, crate::anim::LOGO.max_width);
         assert_eq!(anim_parts("https://x/a.gif#w=400").2.max_width, crate::anim::PAGE.max_width);
     }
+}
+
+/// Made-up pack and mod updates for a test build (`HOPPER_TEST_WINDOW=1`
+/// plus `HOPPER_TEST_SEED=<json file>`), so layouts with updates can be
+/// checked on a machine without a CurseForge key. Ignored otherwise. The
+/// file: `{"packs": {"<project id>": File}, "mods": {"<instance folder>": [Update]}}`.
+#[derive(Default)]
+struct TestSeed {
+    packs: HashMap<String, hopper::cf::File>,
+    mods: HashMap<String, Vec<Update>>,
+}
+
+fn test_seed() -> Option<TestSeed> {
+    if !crate::test_window() {
+        return None;
+    }
+    let path = std::env::var_os("HOPPER_TEST_SEED")?;
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let mut seed = TestSeed::default();
+    for (k, f) in v.get("packs").and_then(|p| p.as_object()).into_iter().flatten() {
+        seed.packs.insert(k.clone(), serde_json::from_value(f.clone()).ok()?);
+    }
+    for (k, l) in v.get("mods").and_then(|p| p.as_object()).into_iter().flatten() {
+        seed.mods.insert(k.clone(), serde_json::from_value(l.clone()).ok()?);
+    }
+    Some(seed)
 }
