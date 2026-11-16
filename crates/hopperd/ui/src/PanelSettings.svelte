@@ -1,6 +1,6 @@
 <script module>
   import { FolderCog, Shield, Globe, Compass, Lock, Users as UsersIcon, Webhook, BellRing, CloudUpload, UserRound, Download, Zap, ServerCog } from '@lucide/svelte';
-  import { NODES_SHOWN } from './lib/nodes.js';
+  import { keepsPanels } from './lib/machines.js';
 
   // The panel's settings, by category, like Hopper desktop's Settings page
   // (src/gpui/settings_page.rs): a list of categories on the left, the
@@ -15,15 +15,21 @@
     { id: 'webhooks', label: 'Webhooks', icon: Webhook, owner: true, blurb: 'Tell Discord or another app when servers start, stop, crash, back up or run low.', words: 'discord notify hooks' },
     { id: 'alerts', label: 'Alerts', icon: BellRing, owner: true, blurb: 'When the panel warns you: crashes, low TPS, a nearly full drive, PC memory.', words: 'warnings crash disk memory notify' },
     { id: 'automations', label: 'Automations', icon: Zap, owner: true, blurb: 'When a server does something, the panel acts: run a command, back up, restart, or call a URL.', words: 'rules automation trigger when then if restart lag tps players schedule timer cron command' },
-    { id: 'nodes', label: 'Nodes', icon: ServerCog, owner: true, trueOwner: true, blurb: 'Other machines that run servers for this panel. They connect to it, so they need no open port.', words: 'node nodes join vm machine remote agent main tunnel' },
+    // Everyone with a password keeps their own list of signed-in panels, so
+    // this one shows for owners and for everyone else; its node parts are
+    // the real owner's only (Machines.svelte).
+    { id: 'machines', label: 'Other machines', icon: ServerCog, owner: 'any', blurb: "Servers on other machines, in this panel's list. Add one as a node, or sign in to its panel.", words: 'node nodes join vm machine machines remote agent main tunnel panel panels several sign in friend hopper server other' },
     { id: 'backups', label: 'Backup copies', icon: CloudUpload, owner: true, blurb: 'Copy backups off this PC: a NAS or USB disk, SFTP, S3 / B2 / R2, or another Hopper Server.', words: 'offsite off-site s3 copies backups' },
     { id: 'updates', label: 'Updates', icon: Download, owner: true, blurb: 'Hopper Server’s version, and updating it by itself.', words: 'update version auto-update upgrade release modpack pack rollback roll back switch compare' },
     { id: 'account', label: 'Account', icon: UserRound, owner: false, blurb: 'Your sign-in: two-factor and your password.', words: 'password 2fa me' },
   ];
 
-  /** The categories this person sees. Nodes is the real owner's only:
-   * a node runs code for this panel, so managers don't add or remove them. */
-  export const catsFor = (owner, trueOwner = false) => CATS.filter((c) => c.owner === owner && (!c.trueOwner || trueOwner) && (c.id !== 'nodes' || NODES_SHOWN));
+  /** The categories this person sees. Other machines needs an account to
+   * keep the list on (`role`: not a paired device or an API token). */
+  export const catsFor = (owner, trueOwner = false, role = '') => CATS.filter((c) => (c.owner === 'any' ? keepsPanels(role) : c.owner === owner) && (!c.trueOwner || trueOwner));
+
+  /** Older links: Settings › Nodes is part of Other machines now. */
+  export const catAlias = (id) => (id === 'nodes' ? 'machines' : id);
 </script>
 
 <script>
@@ -44,12 +50,14 @@
   import Automations from './Automations.svelte';
   import BackupTargets from './BackupTargets.svelte';
   import BackupRetention from './BackupRetention.svelte';
-  import Nodes from './Nodes.svelte';
+  import Machines from './Machines.svelte';
 
   let { cat = '', hello, me, pending = $bindable([]) } = $props();
   const owner = $derived(ownerLike(me));
-  const cats = $derived(catsFor(owner, session.trueOwner));
-  const c = $derived(cats.find((x) => x.id === cat) || cats[0]);
+  const cats = $derived(catsFor(owner, session.trueOwner, me?.role));
+  // Plain Settings opens the first page of the player's own kind: Panel folder
+  // for the owner, Account for everyone else (not Other machines, which both see).
+  const c = $derived(cats.find((x) => x.id === catAlias(cat)) || cats.find((x) => x.owner !== 'any') || cats[0]);
   let query = $state('');
   const hits = $derived.by(() => {
     const q = query.trim().toLowerCase();
@@ -94,7 +102,7 @@
         {:else if c.id === 'webhooks'}<Webhooks />
         {:else if c.id === 'alerts'}<Alerts />
         {:else if c.id === 'automations'}<Automations />
-        {:else if c.id === 'nodes'}<Nodes {hello} />
+        {:else if c.id === 'machines'}<Machines {hello} />
         {:else if c.id === 'backups'}<BackupTargets />
         {:else if c.id === 'updates'}<PanelUpdate /><PackSwitchSetting />
         {/if}
