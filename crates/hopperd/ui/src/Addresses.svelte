@@ -63,6 +63,7 @@
   {#if cfg}
     <p class="small subtle">Players join <span class="mono">survival.{cfg.domain || 'example.com'}</span> instead of an IP and port. One Minecraft port is shared by every server; each server's address is set in its Settings tab.</p>
     {#if r.status.error}<div class="warn small"><TriangleAlert size={13} /><span>{r.status.error}{#if r.clash} <a href="#/server/{r.clash.id}/settings">Open {r.clash.name}</a>{/if}</span></div>{/if}
+    {#if r.edge?.firewall}<div class="warn small"><TriangleAlert size={13} /><span>{r.edge.firewall}</span></div>{/if}
     <label class="row small"><input type="checkbox" bind:checked={cfg.enabled} />Route players by the address they join</label>
     <div class="f"><div><div>Port players join on</div><div class="tiny muted">25565 means nobody has to type a port.</div></div>
       <div class="input w"><input type="number" min="1" max="65535" bind:value={cfg.port} /></div></div>

@@ -680,6 +680,10 @@ fn group_head(
             (Some(light), line.map(|(t, tone)| (t, if tone == Tone::Trouble { theme.danger } else { theme.muted_foreground })))
         }
         (GroupKind::Panel(id) | GroupKind::Node(id, _), _) => match s.panel_error(id) {
+            // Busy, not down: the servers stay listed and it's asked again by itself.
+            _ if let Some(n) = s.panel_slowed(id) => {
+                (Some(theme.warning), Some((format!("Hopper Server asked to slow down. Trying again in {n} s."), theme.muted_foreground)))
+            }
             _ if slow.is_some() => (Some(theme.warning), slow.map(|w| (format!("Waiting for {}… ({} s)", g.name, w.as_secs()), theme.muted_foreground))),
             Some(e) => (Some(theme.danger), Some((e.to_string(), theme.danger))),
             None if s.panel_listed(id) => (Some(theme.success), None),
@@ -777,7 +781,7 @@ fn group_head(
         GroupKind::Node(..) | GroupKind::Folder | GroupKind::Site(_) => None,
     };
     let retry: Option<AnyElement> = match &g.kind {
-        GroupKind::Panel(id) if slow.is_some() || s.panel_error(id).is_some() => {
+        GroupKind::Panel(id) if s.panel_slowed(id).is_none() && (slow.is_some() || s.panel_error(id).is_some()) => {
             let (store, id) = (store.clone(), id.clone());
             Some(
                 Button::new(ElementId::Name(format!("group-retry:{}", g.key).into()))
@@ -1763,9 +1767,10 @@ impl ServersView {
             return Some(b.clone());
         }
         let (store, t2) = (self.store.clone(), t.clone());
+        let store_for_button = self.store.clone();
         let open: std::rc::Rc<dyn Fn(&mut Window, &mut App)> =
             std::rc::Rc::new(move |window, cx| crate::backups_view::open_panel(store.clone(), root.clone(), t2.clone(), window, cx));
-        let b = cx.new(|cx| crate::history_button::HistoryButton::for_panel(t, open, cx));
+        let b = cx.new(|cx| crate::history_button::HistoryButton::for_panel(store_for_button, t, open, cx));
         *slot = Some(b.clone());
         Some(b)
     }

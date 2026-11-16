@@ -21,7 +21,7 @@ use std::time::Duration;
 pub struct SideCard {
     pub view: Entity<AddonsView>,
     pub name: String,
-    pub env: String,
+    pub side: Option<hopper::modsides::Side>,
     pub project_id: u64,
     pub from_pack: bool,
     /// The paired server's name, when there is one.
@@ -33,14 +33,17 @@ pub struct SideCard {
     pub anyway: bool,
 }
 
-/// The side icon and what it means.
-pub fn side_of(env: &str) -> Option<(IconName, &'static str)> {
-    match env {
-        "client" => Some((IconName::Monitor, "Client only")),
-        "server" => Some((IconName::Server, "Server only")),
-        "both" => Some((IconName::ArrowLeftRight, "Client and server")),
-        _ => None,
-    }
+/// The side icon and what it means, saying when only Modrinth tags it
+/// ("Client only (from Modrinth)").
+pub fn side_of(s: Option<&hopper::modsides::Side>) -> Option<(IconName, String)> {
+    let s = s?;
+    let icon = match s.side.as_str() {
+        "client" => IconName::Monitor,
+        "server" => IconName::Server,
+        "both" => IconName::ArrowLeftRight,
+        _ => return None,
+    };
+    Some((icon, s.words()))
 }
 
 /// What the Side cell shows when a mod doesn't say where it runs: a dimmed
@@ -66,7 +69,7 @@ fn body(c: &SideCard, _: &mut Window, cx: &mut App) -> AnyElement {
             .text_color(theme.muted_foreground)
             .child(text)
     };
-    let (icon, side) = side_of(&c.env).unwrap_or(SIDE_UNKNOWN);
+    let (icon, side) = side_of(c.side.as_ref()).unwrap_or((SIDE_UNKNOWN.0, SIDE_UNKNOWN.1.to_string()));
     let origin = if c.from_pack { "From the pack" } else { "Added by you" };
     let mut card = v_flex()
         .w(rems(21.))
@@ -228,7 +231,7 @@ impl AddonsView {
         SideCard {
             view: cx.entity(),
             name: a.name.clone(),
-            env: a.env.clone(),
+            side: hopper::modsides::side_of(a),
             project_id: a.project_id,
             from_pack: a.from_pack,
             server: self.root.as_ref().and_then(|r| store.server_of(r)).map(|s| s.name.clone()),

@@ -23,6 +23,7 @@ mod friends;
 mod only_here;
 mod node_heads;
 mod panel_events;
+mod panel_slow;
 mod server_mods;
 mod server_offer;
 // Invite and SyncStatus are for the Friends screen being rebuilt on top.
@@ -247,6 +248,9 @@ pub enum StoreEvent {
     /// A friend started sharing a mod's settings: the notice offers Keep
     /// mine.
     SettingsShared { root: PathBuf, m: String, mod_name: String, who: String },
+    /// A group kept in step has a pack this PC never followed: the notice
+    /// asks Get (the Follow dialog) or Not now (`group`: the group's id).
+    PackOffer { e: Box<hopper::mailbox::Event>, group: String, text: String },
     /// Open Browse on modpacks to host one (New server's Modpack tab):
     /// None on this PC, else on that paired Hopper Server.
     BrowsePacksFor(Option<String>),
@@ -385,6 +389,31 @@ fn small_anim(key: &str) -> bool {
 /// Marks the key of a clip decoded big for the image viewer (see
 /// [`Store::want_anim_view`]), apart from the page's copy of the same image.
 const VIEW_SUFFIX: &str = "#view";
+
+thread_local! {
+    /// Set on a job's thread when the job waited for another one on the
+    /// same instance (see [`fresh`]).
+    static WAITED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// What a [`Store::queue_work`] job handed back, once its thread let go of
+/// it: `None` when it ended without running (cancelled while it waited).
+pub async fn work_done<T>(exec: gpui::BackgroundExecutor, slot: Arc<std::sync::Mutex<Option<T>>>) -> Option<T> {
+    // The job holds the other handle until its work ran or was dropped.
+    while Arc::strong_count(&slot) > 1 {
+        exec.timer(Duration::from_millis(150)).await;
+    }
+    slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// A job's copy of its instance, read again from disk when the job waited
+/// its turn behind another: it was taken when the job was asked for, and
+/// the job before it has changed the instance since.
+pub fn fresh(inst: &mut Instance) {
+    if WAITED.with(|w| w.get()) {
+        hopper::instances::reload(inst);
+    }
+}
 
 /// The key of image `url`'s big clip for the image viewer.
 pub fn view_key(url: &str) -> String {
@@ -527,8 +556,9 @@ pub struct Store {
     /// started then (the panel's word; empty when unknown). Gone once it
     /// stops or restarts.
     live_syncs: HashMap<PathBuf, String>,
-    /// Instances jobs are changing, with how many jobs.
-    busy: Arc<std::sync::Mutex<HashMap<PathBuf, u32>>>,
+    /// Instances jobs are changing: each one's line of jobs, the running
+    /// one first and the rest waiting their turn.
+    lanes: Arc<hopper::lanes::Lanes>,
     /// Instances whose game is being launched (the Play button says so).
     launching: Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
     /// Mod updates of instances an update job is running on: the batch
@@ -593,6 +623,18 @@ pub struct Store {
     mailbox_sig: u64,
     /// A publish failed then; waits a minute before trying again.
     publish_failed_at: Option<Instant>,
+    /// Each shared pack's look (by instance id) when it last went out, or
+    /// when this run first saw it; a pack that differs has changes waiting.
+    sent_sigs: HashMap<String, u64>,
+    /// Whether `sent_sigs` has its first look at every shared pack.
+    sent_seeded: bool,
+    /// Names of the shared packs whose changes haven't gone out yet.
+    unsent: Vec<String>,
+    /// A publish is on its way to the mailbox.
+    publishing: bool,
+    /// The last failed send the player was told about, so a retry that
+    /// fails the same way doesn't say it again.
+    publish_said: Option<String>,
     /// Where each instance (by id) was last seen, to check a shared pack
     /// missing from the list is really gone before taking it back.
     instance_homes: HashMap<String, PathBuf>,
@@ -601,6 +643,14 @@ pub struct Store {
     stale_held_at: Option<Instant>,
     /// Group packs ("from/inst") being installed to keep a group in step.
     auto_following: HashSet<String>,
+    /// Members' changes left out here that the player was told about
+    /// ("<local>|<what it says>"), so each is said once.
+    kept_said: HashSet<String>,
+    /// New group packs ("from/inst") offered this run with Get / Not now,
+    /// so the offer isn't shown again while it's up or after it's closed.
+    pack_offered: HashSet<String>,
+    /// `--dialog given-up`'s sample line (empty otherwise).
+    given_up_preview: Vec<(PathBuf, String)>,
     _mailbox_watch: Option<Task<()>>,
     _mailbox_publish: Option<Task<()>>,
     /// The player's answer about mods from other sources for a follow
@@ -775,7 +825,7 @@ impl Store {
             site_servers: HashMap::new(),
             started_with: HashMap::new(),
             live_syncs: HashMap::new(),
-            busy: Default::default(),
+            lanes: Default::default(),
             launching: Default::default(),
             update_queue: Default::default(),
             recent_updates: Default::default(),
@@ -822,9 +872,17 @@ impl Store {
             mailbox_invites: Vec::new(),
             mailbox_sig: 0,
             publish_failed_at: None,
+            sent_sigs: HashMap::new(),
+            sent_seeded: false,
+            unsent: Vec::new(),
+            publishing: false,
+            publish_said: None,
             instance_homes: HashMap::new(),
             stale_held_at: None,
             auto_following: HashSet::new(),
+            kept_said: HashSet::new(),
+            pack_offered: HashSet::new(),
+            given_up_preview: Vec::new(),
             _mailbox_watch: None,
             _mailbox_publish: None,
             pending_follow: Default::default(),
@@ -855,8 +913,11 @@ impl Store {
         hopper::sources::set_enabled(store.settings.allow_sources);
         hopper::retention::check_all_later(store.instances.iter().map(|i| i.root.clone()).collect());
         hopper::time::timed("start-up: accounts", || store.reload_accounts());
-        store._panel_poll = Some(Self::panel_poll(cx));
-        store._download_watch = Some(Self::download_watch(cx));
+        // The panel poll and the Downloads watch run only while something
+        // needs them; each store update re-checks (see `sync_timers`).
+        store.sync_timers(cx);
+        let me = cx.entity();
+        cx.observe(&me, |this, _, cx| this.sync_timers(cx)).detach();
         store._update_watch = Some(Self::update_watch(cx));
         store._ping_watch = Some(Self::ping_watch(cx));
         // Hosted servers were found by refresh(): start their scheduler.
@@ -952,7 +1013,27 @@ impl Store {
         }))
     }
 
-    /// Asks the server panel for every server's state every few seconds.
+    /// Starts the timers that only some setups need, when they are needed.
+    /// Each stops itself once nothing needs it, so an idle Hopper wakes for
+    /// neither: the panel poll runs with a paired panel, a Hopper Server or a
+    /// hosted server; the Downloads watch with files to download by hand.
+    /// Called on every store update, so turning one on starts it at once.
+    fn sync_timers(&mut self, cx: &mut Context<Self>) {
+        if self._panel_poll.is_none() && self.wants_panel_poll() {
+            self._panel_poll = Some(Self::panel_poll(cx));
+        }
+        if self._download_watch.is_none() && !self.pending.is_empty() {
+            self._download_watch = Some(Self::download_watch(cx));
+        }
+    }
+
+    /// Whether anything is there for the panel poll to ask.
+    fn wants_panel_poll(&self) -> bool {
+        !hopper::panel::panels(&self.settings).is_empty()
+            || self.settings.hopper_panels_on().next().is_some()
+            || self.servers.iter().any(|x| x.remote.is_some() || self.is_hosted(&x.root))
+    }
+
     /// While any instance waits on files to download by hand, looks in
     /// Downloads every few seconds and puts each one in place as it lands
     /// (like Prism), then deletes it from Downloads.
@@ -960,7 +1041,14 @@ impl Store {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(3)).await;
+                crate::wakes::hit(&crate::wakes::DOWNLOADS);
                 let Ok(roots) = this.update(cx, |s, _| {
+                    if s.pending.is_empty() {
+                        // Nothing waits any more: stop (sync_timers starts
+                        // it again when something does).
+                        s._download_watch = None;
+                        return Vec::new();
+                    }
                     s.pending
                         .keys()
                         .filter(|r| s.hold_reason(r).is_none() && !s.is_busy(r))
@@ -970,6 +1058,9 @@ impl Store {
                     return;
                 };
                 if roots.is_empty() {
+                    if this.update(cx, |s, _| s._download_watch.is_none()).unwrap_or(true) {
+                        return;
+                    }
                     continue;
                 }
                 let ready = cx
@@ -988,6 +1079,7 @@ impl Store {
                     for root in ready {
                         let Some(mut inst) = s.instance(&root).cloned() else { continue };
                         s.spawn_instance_job(&root, format!("Adding downloaded files to {}", inst.name), move |job| {
+                            fresh(&mut inst);
                             let mut placed = Vec::new();
                             for d in hopper::modpack::landing_dirs() {
                                 placed.extend(hopper::modpack::place_downloads(&mut inst, &d)?);
@@ -1016,6 +1108,7 @@ impl Store {
             // settings change (by panel id: setup key, when, list).
             let mut listed: HashMap<String, (String, std::time::Instant, Vec<PanelServer>)> = HashMap::new();
             loop {
+                crate::wakes::hit(&crate::wakes::PANEL);
                 let Ok(setup) = this.update(cx, |s, _| {
                     let panels: Vec<(String, String, Arc<dyn ServerPanel>)> = hopper::panel::panels(&s.settings)
                         .iter()
@@ -1155,6 +1248,20 @@ impl Store {
                 if alive.is_err() {
                     return;
                 }
+                // Nothing left to ask (the panel was removed): that last
+                // pass cleared its stats; stop until something needs it.
+                let keep = this
+                    .update(cx, |s, _| {
+                        let keep = s.wants_panel_poll();
+                        if !keep {
+                            s._panel_poll = None;
+                        }
+                        keep
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    return;
+                }
                 cx.background_executor()
                     .timer(Duration::from_secs(5))
                     .await;
@@ -1169,6 +1276,7 @@ impl Store {
                 cx.background_executor()
                     .timer(Duration::from_millis(50))
                     .await;
+                crate::wakes::hit(&crate::wakes::STORE_POLL);
                 let msgs: Vec<Msg> = rx.try_iter().collect();
                 if msgs.is_empty() && !dirty.swap(false, Ordering::Relaxed) {
                     if ticked.swap(false, Ordering::Relaxed) {
@@ -2595,14 +2703,37 @@ impl Store {
         quiet: bool,
         work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
     ) -> u64 {
-        let job = if quiet { self.jobs.start_quiet(title) } else { self.jobs.start(title) };
+        let job = if quiet { self.jobs.start_quiet(title.clone()) } else { self.jobs.start(title.clone()) };
         let id = job.id();
         crate::hero_drift::job_started();
-        if let Some(r) = &root {
-            *self.busy.lock().unwrap_or_else(|e| e.into_inner()).entry(r.clone()).or_default() += 1;
+        // Another job is changing this instance: this one waits its turn
+        // (in the task list, where it can be cancelled), in order.
+        let queued = root.as_ref().and_then(|r| self.lanes.join(r, id, &title));
+        if let Some(ahead) = &queued {
+            job.queued(true);
+            job.detail(hopper::lanes::waiting_text(ahead));
+            job.show();
         }
-        let (tx, wake, busy) = (self.tx.clone(), self.wake.clone(), self.busy.clone());
+        let (tx, wake, lanes) = (self.tx.clone(), self.wake.clone(), self.lanes.clone());
         std::thread::spawn(move || {
+            if queued.is_some()
+                && let Some(r) = &root
+            {
+                let w = wake.clone();
+                let turn = lanes.wait_turn(r, id, || job.is_cancelled(), |ahead| {
+                    job.detail(hopper::lanes::waiting_text(ahead));
+                    w();
+                });
+                if !turn {
+                    job.finish::<()>(&Err(anyhow::anyhow!("Cancelled")));
+                    crate::hero_drift::job_ended();
+                    wake();
+                    return;
+                }
+                job.queued(false);
+                job.detail(String::new());
+                WAITED.with(|w| w.set(true));
+            }
             // A bug in the work must still end the job, not leave it spinning.
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&job)))
                 .unwrap_or_else(|p| {
@@ -2621,14 +2752,9 @@ impl Store {
             }
             job.finish(&r);
             crate::hero_drift::job_ended();
+            // Fine or failed, the next job in line may start.
             if let Some(r) = &root {
-                let mut b = busy.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(n) = b.get_mut(r) {
-                    *n = n.saturating_sub(1);
-                    if *n == 0 {
-                        b.remove(r);
-                    }
-                }
+                lanes.leave(r, id);
             }
             if let Ok(msg) = r {
                 let _ = tx.send(msg);
@@ -2667,6 +2793,7 @@ impl Store {
         let Some(mut inst) = self.instance(root).cloned() else { return };
         let Some(pack) = inst.pack.clone() else { return };
         self.spawn_instance_job(root, format!("Finishing {}", inst.name), move |job| {
+            fresh(&mut inst);
             let file = hopper::cf::file(pack.project_id, pack.file_id)?;
             hopper::modpack::update_any(&mut inst, pack.project_id, &file, None, job)?;
             let left = hopper::modpack::pending_downloads(&inst).len();
@@ -2710,26 +2837,34 @@ impl Store {
         });
     }
 
+    /// Whether a job is changing this instance or waits to.
     pub fn is_busy(&self, root: &Path) -> bool {
-        self.busy.lock().unwrap_or_else(|e| e.into_inner()).contains_key(root)
+        self.lanes.busy(root)
     }
 
-    /// Why mods, packs and shaders can't be added, updated or removed right
-    /// now, if they can't. A running game doesn't stop that (as in
-    /// CurseForge): the changes apply on its next start.
-    pub fn edit_hold_reason(&self, root: &Path) -> Option<&'static str> {
-        self.is_busy(root).then_some("Another task is changing this instance")
-    }
-
-    /// Why the instance can't be changed right now, if it can't.
+    /// Why the instance can't be changed right now, if it can't. Another
+    /// job on it is no reason: the change waits its turn behind it.
     pub fn hold_reason(&self, root: &Path) -> Option<&'static str> {
-        if self.running(root).is_some() {
-            Some("Close the game first")
-        } else if self.is_busy(root) {
-            Some("Another task is changing this instance")
-        } else {
-            None
-        }
+        self.running(root).is_some().then_some("Close the game first")
+    }
+
+    /// Runs `work` as a quiet instance job (in the task list only while it
+    /// waits for another job on the instance, or when it fails) and hands
+    /// back what it returned, for a view to pick up with [`work_done`].
+    pub fn queue_work<T: Send + 'static>(
+        &self,
+        root: &Path,
+        title: impl Into<String>,
+        work: impl FnOnce(&Job) -> T + Send + 'static,
+    ) -> Arc<std::sync::Mutex<Option<T>>> {
+        let slot = Arc::new(std::sync::Mutex::new(None));
+        let out = slot.clone();
+        self.run_job(Some(root.to_path_buf()), title.into(), true, move |job| {
+            let v = work(job);
+            *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+            Ok(Msg::Nothing)
+        });
+        slot
     }
 
     fn launch_defaults(&self) -> hopper::launch::Defaults {
@@ -2846,6 +2981,7 @@ impl Store {
         self.spawn_instance_job(&root, title, move |job| {
             prepare_loader(&inst, &dir, &defaults, native, job)?;
             let mut inst = inst;
+            crate::store::fresh(&mut inst);
             sync_cf_loader(&mut inst, job);
             job.detail("Ready to play");
             Ok(Msg::InstanceChanged(inst.root.clone()))
@@ -2921,7 +3057,7 @@ impl Store {
         backup_worlds: bool,
         kept: String,
     ) -> Option<u64> {
-        let Some(mut full) = self.instance(root).cloned() else {
+        let Some(full) = self.instance(root).cloned() else {
             return None;
         };
         let Some(pid) = full.pack.as_ref().map(|p| p.project_id) else {
@@ -2953,6 +3089,8 @@ impl Store {
         let native = self.settings.launch_native;
         let (fetching, wake) = (self.fetching.clone(), self.wake.clone());
         let id = self.spawn_instance_job_id(&full.root.clone(), format!("{} → {}", full.name, file.display_name), move |job| {
+            let mut full = full;
+            fresh(&mut full);
             job.announce();
             job.presence(full.name.clone(), true);
             let name = full.name.clone();
@@ -2979,6 +3117,8 @@ impl Store {
                 .is_some_and(|o| o.clean)
                 .then(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()));
             let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            // What the instance records now, for Undo all in History to put back.
+            let pack_before = hopper::backups::PackBefore::of_instance(&full);
             let updated = hopper::modpack::update_any(&mut full, pid, &file, overrides.as_ref(), job);
             if let Some(since) = clean_since {
                 hopper::backups::mark_reason(&full.root, since, "Clean update");
@@ -2986,7 +3126,12 @@ impl Store {
             // Everything it set aside is one History entry.
             if updated.is_ok() {
                 let pack_name = full.pack.as_ref().map(|p| p.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| name.clone());
-                hopper::backups::mark_pack(&full.root, started, &hopper::backups::PackMark { name: pack_name, version: shown.clone() });
+                let mark = hopper::backups::PackMark {
+                    before: Some(pack_before),
+                    file_id: full.pack.as_ref().map_or(file.id, |p| p.file_id),
+                    ..hopper::backups::PackMark::new(pack_name, shown.clone())
+                };
+                hopper::backups::mark_pack(&full.root, started, &mark);
             }
             if let Err(e) = updated {
                 // Offer the update again.
@@ -3120,8 +3265,11 @@ impl Store {
                 Msg::Archived(root2, Default::default())
             }
         });
+        // A look the player asked for (or that follows a change they made)
+        // asks GitHub again; the automatic ones may use a recent answer.
+        let check = if force { hopper::sources::Check::Manual } else { hopper::sources::Check::Auto };
         self.spawn(move || Msg::Updates {
-            result: install::check_updates(&inst).map_err(|e| format!("{e:#}")),
+            result: install::check_updates(&inst, check).map_err(|e| format!("{e:#}")),
             root,
             prev,
         });
@@ -3197,6 +3345,7 @@ impl Store {
         let recent = self.recent_updates.clone();
         let wake = self.wake.clone();
         self.spawn_instance_job(&inst.root.clone(), format!("Updating mods in {}", inst.name), move |job| {
+            fresh(&mut inst);
             // No snapshot first: backups are the player's to make. The
             // old jars still go to .hopper-backups, so Undo works.
             let mut clear = ClearQueue(queue.clone(), Some(inst.root.clone()));
@@ -3644,6 +3793,7 @@ impl Store {
         }
         if let Some(mut inst) = self.instance(root).cloned() {
             self.spawn_instance_job(&inst.root.clone(), format!("Identifying jars in {}", inst.name), move |job| {
+                fresh(&mut inst);
                 let n = install::identify_loose(&mut inst, job)?;
                 // A CurseForge pack's mods named on Modrinth earlier move to
                 // CurseForge where it has them (updates follow the pack's site).
@@ -3664,6 +3814,7 @@ impl Store {
         }
         if let Some(mut inst) = self.instance(root).cloned() {
             self.spawn_instance_job(&inst.root.clone(), format!("Identifying {}", jars.join(", ")), move |job| {
+                fresh(&mut inst);
                 let n = install::identify_jars(&mut inst, &jars, job)?;
                 job.detail(format!("Identified {n} jars"));
                 Ok(Msg::Reidentified(inst.root.clone()))
@@ -3680,6 +3831,7 @@ impl Store {
         }
         if let Some(mut inst) = self.instance(root).cloned() {
             self.spawn_instance_job(&inst.root.clone(), format!("Switching source of {file}"), move |job| {
+                fresh(&mut inst);
                 let done = install::switch_source(&mut inst, &file, job)?;
                 job.detail(done);
                 Ok(Msg::InstanceChanged(inst.root.clone()))
@@ -3934,7 +4086,7 @@ impl Store {
             match hopper::hopperd::Client::for_panel(&p) {
                 Some(client) => {
                     self.panel_asked.insert(id.clone(), std::time::Instant::now());
-                    self.spawn(move || Msg::PanelServers(id, client.server_infos().map_err(|e| format!("{e:#}"))))
+                    self.spawn(move || panel_slow::list_servers(id, &client))
                 }
                 None => {
                     self.panel_servers.insert(id, Err("Not paired. Pair it again in Settings â€º Servers.".into()));
@@ -4046,7 +4198,7 @@ impl Store {
         }
         self.panel_asked.insert(p.id.clone(), std::time::Instant::now());
         let id = p.id.clone();
-        self.spawn(move || Msg::PanelServers(id, client.server_infos().map_err(|e| format!("{e:#}"))));
+        self.spawn(move || panel_slow::list_servers(id, &client));
         cx.notify();
     }
 

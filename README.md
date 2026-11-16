@@ -81,7 +81,7 @@ Hopper checks its latest release at start and updates itself from it.
 - **Folders**: Settings → Library & folders points at your instances (CurseForge's `Instances` folder works) and Mojang's launcher; Settings → Servers at the folder your servers live in (see [Your servers](#your-servers)). Folders save as you leave the field, and the library refreshes.
 - **Other launchers**: Settings → Other launchers lists the ones found on this PC; switch each on to see its instances in your Library. "Add a launcher folder…" covers a portable MultiMC or a moved instances folder.
 - **Server panel** (optional): Settings → Servers takes the panel's address (e.g. `https://myserver:8443`) and an API key. For Crafty: your user → API Keys, with the Commands permission. Servers match by folder name, game port or name.
-- **Playing without the launcher** (optional): needs `MS_CLIENT_ID` in `.env`, an Azure app id approved for the Minecraft API.
+- **Playing without Mojang's launcher**: works out of the box. Hopper's releases include Hopper's own Microsoft app id: sign in with your Microsoft account (Settings → Accounts) and Play starts the game from Hopper itself, with no launcher. Only if you build Hopper from source: put an Azure app id approved for the Minecraft API in `.env` as `MS_CLIENT_ID` (see `.env.example`); without it that build keeps starting games through Mojang's launcher.
 
 ## CurseForge key
 

@@ -163,7 +163,7 @@ async fn deps(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Q
     let have = Have::of(&app, &who, &q)?;
     let v = blocking(move || {
         let files = source::files(project, &mc, loader)?;
-        let list = files.iter().find(|f| f.release_type == 1).or(files.first()).map(browse::dependencies).unwrap_or_default();
+        let list = install::pick_best(&files, &mc).map(browse::dependencies).unwrap_or_default();
         Ok(list
             .into_iter()
             .map(|(d, rel)| {

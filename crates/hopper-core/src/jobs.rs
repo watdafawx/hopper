@@ -36,6 +36,9 @@ pub struct JobState {
     /// Stopped because the user cancelled it: `error` is just "Cancelled",
     /// and lists show it as a quiet grey line, not a failure.
     pub cancelled: bool,
+    /// Waiting its turn behind another job on the same instance (see
+    /// [`crate::lanes`]); its detail says which.
+    pub queued: bool,
     /// What a running job is on right now, shown on a line of its own
     /// under the detail: a mod by name (with its icon) and how far it is.
     pub item: Option<JobItem>,
@@ -206,6 +209,7 @@ impl Jobs {
             held: false,
             presence: None,
             cancelled: false,
+            queued: false,
             item: None,
             toast: None,
         });
@@ -389,6 +393,11 @@ impl Job {
     pub fn detail(&self, d: impl Into<String>) {
         let d = d.into();
         self.jobs.tick(self.id, |j| j.detail = d);
+    }
+
+    /// Waiting its turn behind another job (`true`), or started (`false`).
+    pub fn queued(&self, waiting: bool) {
+        self.jobs.update(self.id, |j| j.queued = waiting);
     }
 
     pub fn progress(&self, done: usize, total: usize) {

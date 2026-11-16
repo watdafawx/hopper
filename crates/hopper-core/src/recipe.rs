@@ -258,6 +258,30 @@ pub fn retry_after(failures: u32) -> Duration {
     Duration::from_secs(STEPS[i])
 }
 
+/// Quick tries of one code before Hopper stops trying it by itself (about a
+/// minute and a half of [`retry_after`]'s waits). A failure that comes back
+/// that often won't pass by itself: trying on every 15 seconds only fills
+/// the log and keeps the instance busy. A newer code, a restart or the
+/// player trying again starts over.
+pub const GIVE_UP_AFTER: u32 = 10;
+
+/// Past [`GIVE_UP_AFTER`], how long a failure that passes by itself (the
+/// internet, a mod site down, a file another program holds) waits between
+/// tries. Those are still tried: they end without the player doing anything.
+pub const SLOW_RETRY: Duration = Duration::from_secs(300);
+
+/// Whether `e` is the kind of failure that ends by itself.
+fn passes(e: &anyhow::Error) -> bool {
+    // The friends service down for a moment, or it couldn't save: its
+    // message doesn't carry the status, so ask the error itself.
+    if crate::mailbox::retryable(e) {
+        return true;
+    }
+    let all = format!("{e:#}").to_lowercase();
+    let words = ["dns", "connect", "timed out", "timeout", "network", "unreachable", "connection", "files open", "503", "502", "504", "500 "];
+    words.iter().any(|w| all.contains(w))
+}
+
 /// A followed pack whose automatic apply failed, until a try works.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Retry {
@@ -280,6 +304,11 @@ pub struct Retry {
     /// retry, a newer code failing the same way) stays quiet; the row
     /// still says it.
     pub tell: bool,
+    /// Hopper stopped trying this code by itself: it failed
+    /// [`GIVE_UP_AFTER`] times in a row for a reason that won't pass on
+    /// its own. `next` is `None`; `error` says why. A newer code is still
+    /// tried at once.
+    pub gave_up: bool,
 }
 
 impl Retry {
@@ -293,15 +322,29 @@ impl Retry {
         // A limit's text names its end time, which may move; it's the same
         // failure all the same.
         let same = prev.is_some_and(|p| if limited.is_some() { p.limited.is_some() } else { p.limited.is_none() && p.error == error });
+        let many = failures >= GIVE_UP_AFTER && limited.is_none();
+        let passes = passes(e);
+        let gave_up = many && !stuck && !passes;
+        let next = if stuck || gave_up {
+            None
+        } else if let Some(t) = limited {
+            // Back when GitHub resets, not every few seconds.
+            Some(t)
+        } else if many {
+            Some(now + SLOW_RETRY)
+        } else {
+            Some(now + retry_after(failures))
+        };
         Retry {
             code: code.to_string(),
             failures,
-            // Back when GitHub resets, not every few seconds.
-            next: (!stuck).then(|| limited.unwrap_or_else(|| now + retry_after(failures))),
+            next,
             error,
             job,
             limited,
-            tell: !same,
+            // Stopping is news even when the reason is the same as before.
+            tell: !same || (gave_up && !prev.is_some_and(|p| p.gave_up)),
+            gave_up,
         }
     }
 
@@ -598,6 +641,46 @@ mod tests {
         let r3 = Retry::failed(Some(&r2), "HOP-2", &net, 12, t0);
         assert_eq!(r3.failures, 1);
         assert_eq!(r3.error, "Couldn't reach CurseForge or Modrinth. Check your internet connection.");
+    }
+
+    #[test]
+    fn an_apply_that_always_fails_stops_after_ten_tries_and_says_so() {
+        use crate::settings::FollowedRecipe;
+        let t0 = Instant::now();
+        let e = anyhow::anyhow!("CurseForge has no file 123");
+        let mut r = Retry::failed(None, "HOP-1", &e, 1, t0);
+        assert!(r.tell && !r.gave_up);
+        for n in 2..GIVE_UP_AFTER {
+            r = Retry::failed(Some(&r), "HOP-1", &e, n as u64, t0);
+            assert!(!r.gave_up && !r.tell && r.next.is_some(), "try {n}");
+        }
+        let last = Retry::failed(Some(&r), "HOP-1", &e, 99, t0);
+        assert_eq!((last.failures, last.gave_up, last.next), (GIVE_UP_AFTER, true, None));
+        assert!(last.tell, "stopping is said once");
+        assert_eq!(last.error, "CurseForge has no file 123.");
+        let f = FollowedRecipe { code: "HOP-0".into(), seen: "HOP-1".into(), ..Default::default() };
+        assert!(!due(&f, Some(&last), false, t0 + Duration::from_secs(86_400)), "not tried again by itself");
+        // A newer code goes at once, and counts from one again.
+        let newer = FollowedRecipe { seen: "HOP-2".into(), ..f.clone() };
+        assert!(due(&newer, Some(&last), false, t0));
+        let again = Retry::failed(Some(&last), "HOP-2", &e, 100, t0);
+        assert!(!again.gave_up && again.failures == 1 && !again.tell);
+    }
+
+    #[test]
+    fn a_failure_that_passes_by_itself_is_tried_slowly_not_given_up() {
+        let t0 = Instant::now();
+        let unsaved = || -> anyhow::Error {
+            crate::mailbox::MailboxError { status: 503, code: "save_failed".into(), message: "could not save that; try again".into() }.into()
+        };
+        for e in [anyhow::anyhow!("dns error: no such host"), anyhow::anyhow!("Another program has this instance's files open."), unsaved()] {
+            let mut r = Retry::failed(None, "HOP-1", &e, 1, t0);
+            for n in 2..=GIVE_UP_AFTER + 3 {
+                r = Retry::failed(Some(&r), "HOP-1", &e, n as u64, t0);
+            }
+            assert!(!r.gave_up, "{e}");
+            assert_eq!(r.next, Some(t0 + SLOW_RETRY), "{e}");
+        }
     }
 
     #[test]

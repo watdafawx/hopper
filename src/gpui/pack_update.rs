@@ -560,10 +560,9 @@ impl UpdatePreview {
         let yours = plan.your_mods.len();
         let stays = if server {
             "Stays: the server's own mods and their files, worlds, server.properties.".to_string()
-        } else if yours == 1 {
-            "Stays: the mod you added and its files, worlds, screenshots, options.txt, servers.".to_string()
-        } else if yours > 1 {
-            format!("Stays: the {yours} mods you added and their files, worlds, screenshots, options.txt, servers.")
+        } else if yours > 0 {
+            let its = if yours == 1 { "its" } else { "their" };
+            format!("Stays: {} you added and {its} files, worlds, screenshots, options.txt, servers.", hopper::packdiff::added_phrase(&plan.your_mods))
         } else {
             "Stays: worlds, screenshots, options.txt, servers.".to_string()
         };
@@ -1702,7 +1701,7 @@ impl UpdatePreview {
                     .py_0p5()
                     .border_b_1()
                     .border_color(border.opacity(0.5))
-                    .child(self.mod_cell(format!("{id}:{}:{}:{}", m.name, m.from, m.to), &m.name, &m.icon, m.project, cx))
+                    .child(self.mod_cell(format!("{id}:{}:{}:{}", m.name, m.from, m.to), &m.name, &m.icon, m.project, &m.folder, cx))
                     .child(widgets::caption(detail, cx).text_xs().flex_1().min_w_0().truncate())
                     .child(widgets::chip(color).xsmall().child(label))
             }))
@@ -1903,7 +1902,11 @@ impl UpdatePreview {
         let mut out = v_flex().gap_0p5().child(div().font_semibold().child("What stays"));
         let mut parts = Vec::new();
         if m > 0 {
-            parts.push(if server { format!("{} not in the server pack", hopper::words::count(m, "mod")) } else { format!("{} you added", hopper::words::count(m, "mod")) });
+            parts.push(if server {
+                format!("{} not in the server pack", hopper::words::count(m, "mod"))
+            } else {
+                format!("{} you added", hopper::packdiff::added_kinds(&plan.your_mods))
+            });
         }
         if f > 0 {
             parts.push(if server {
@@ -1921,7 +1924,7 @@ impl UpdatePreview {
                 div().when(!any, |d| d.text_color(muted)).child(if any {
                     parts.join(" · ")
                 } else {
-                    "Nothing of yours in the mods folder or the pack's folders".to_string()
+                    "Nothing you added, and no files of your own".to_string()
                 }),
                 any.then_some(open == Some(Section::Stays)),
                 cx,
@@ -1934,7 +1937,8 @@ impl UpdatePreview {
         );
         if open == Some(Section::Stays) {
             let by: HashMap<String, String> = plan.needed.iter().map(|n| (n.by.to_lowercase(), n.name.clone())).collect();
-            let tabs = vec![("Your mods".into(), Some(m)), ("Your files".into(), Some(f))];
+            let mods_tab = if hopper::packdiff::added_packs(&plan.your_mods) { "Your mods and packs" } else { "Your mods" };
+            let tabs = vec![(mods_tab.into(), Some(m)), ("Your files".into(), Some(f))];
             let list = if self.filter == 0 {
                 let mut rows: Vec<_> = plan
                     .your_mods
@@ -2084,16 +2088,40 @@ impl UpdatePreview {
     }
 
     /// A mod's icon and name; a click opens its page beside the lists.
-    fn mod_cell(&self, id: String, name: &str, icon: &str, project: u64, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// `folder` is where the file lives ("mods", "resourcepacks", "shaderpacks",
+    /// or "" when unknown). A real icon wins; without one, packs and shaders
+    /// show the icon of their tab (same as the instance page), not the cube.
+    fn mod_cell(&self, id: String, name: &str, icon: &str, project: u64, folder: &str, cx: &mut Context<Self>) -> Stateful<Div> {
         let path = self.store.read(cx).image(icon).map(|p| p.to_path_buf());
         let theme = cx.theme();
+        let kind_icon = match folder {
+            "resourcepacks" => Some(IconName::Paintbrush),
+            "shaderpacks" => Some(IconName::Sun),
+            "datapacks" => Some(IconName::Database),
+            _ => None,
+        };
+        let thumb = match (path.as_deref(), kind_icon) {
+            (None, Some(k)) => div()
+                .size(rems(1.25))
+                .flex_none()
+                .rounded(theme.radius)
+                .overflow_hidden()
+                .bg(theme.muted)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme.muted_foreground)
+                .child(Icon::new(k).small())
+                .into_any_element(),
+            (p, _) => widgets::thumb(p, rems(1.25), cx),
+        };
         h_flex()
             .id(SharedString::from(id))
             .w_56()
             .flex_none()
             .min_w_0()
             .gap_2()
-            .child(widgets::thumb(path.as_deref(), rems(1.25), cx))
+            .child(thumb)
             .child(div().min_w_0().text_sm().truncate().child(name.to_string()))
             .when(project != 0, |d| {
                 d.clickable(cx)
@@ -2191,7 +2219,7 @@ impl UpdatePreview {
                         .hover(|s| widgets::row_hover(s, cx))
                         .gap_3()
                         .py_0p5()
-                        .child(this.mod_cell(format!("cell:{}", m.key), &m.name, &m.icon, m.project, cx))
+                        .child(this.mod_cell(format!("cell:{}", m.key), &m.name, &m.icon, m.project, "", cx))
                         .child(widgets::caption(detail, cx).text_xs().flex_1().min_w_0())
                         .child(
                             widgets::Segmented::new(SharedString::from(format!("pick:{}", m.key)))

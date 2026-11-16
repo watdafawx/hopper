@@ -53,7 +53,7 @@
 <aside class="peek card col">
   <div class="row top">
     {#if mod.icon}<img src={mod.icon} alt="" width="40" height="40" />{:else}<span class="ph"></span>{/if}
-    <div class="grow"><div class="nm">{mod.name}</div><div class="tiny muted">{mod.author ? `by ${mod.author}` : mod.source || (shown ? 'from the pack' : 'unknown source')}{shown && mod.author ? ' · from the pack' : ''}{linked && mod.src_publisher && mod.src_publisher !== mod.author ? ` · ${mod.src_publisher}` : ''}{mod.side ? ` · ${sideText[mod.side] || mod.side}` : ''}</div></div>
+    <div class="grow"><div class="nm">{mod.name}</div><div class="tiny muted">{mod.author ? `by ${mod.author}` : mod.source || (shown ? 'from the pack' : 'unknown source')}{shown && mod.author ? ' · from the pack' : ''}{linked && mod.src_publisher && mod.src_publisher !== mod.author ? ` · ${mod.src_publisher}` : ''}{mod.side ? ` · ${sideText[mod.side] || mod.side}${mod.side_from === 'modrinth' ? ' (from Modrinth)' : ''}` : ''}</div></div>
     <button class="btn sm ghost icon" title="Close" onclick={onClose}><X size={14} /></button>
   </div>
   <div class="row wrap">

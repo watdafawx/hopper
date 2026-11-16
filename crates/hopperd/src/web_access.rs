@@ -149,6 +149,7 @@ fn manages_access(path: &str) -> bool {
         || under("/api/v1/auth/sessions")
         || under("/api/v1/nodes")
         || path == "/api/v1/this-node"
+        || path == crate::sftp_setting::PATH
         || path == SETTINGS_PATH
 }
 
@@ -500,6 +501,8 @@ mod tests {
             ("/api/v1/auth/2fa/disable", Method::POST),
             ("/api/v1/auth/password", Method::POST),
             ("/api/v1/settings/certificate", Method::PUT),
+            // SFTP is a way in too.
+            ("/api/v1/settings/sftp", Method::PUT),
         ];
         for (p, m) in &guarded {
             // Switch off: refused from a listed other page.

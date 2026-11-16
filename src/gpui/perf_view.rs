@@ -228,9 +228,18 @@ impl PerfView {
     /// Saves new memory and arguments the way the Settings page does.
     fn save_settings(&self, root: &PathBuf, c: &Change, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let store = self.store.read(cx);
-        if let Some(why) = store.edit_hold_reason(root) {
-            window.push_notification(Notification::error(format!("Can't change settings now: {why}.")), cx);
-            return false;
+        // Another task is changing the instance: saving now would be lost
+        // when it saves its own copy, so this waits its turn behind it.
+        if store.is_busy(root) {
+            let (r, memory_mb, java_args) = (root.clone(), c.memory_mb, c.java_args.clone());
+            store.spawn_instance_job_quiet(root, "Saving memory settings", move |_| {
+                let mut inst = hopper::instances::load(&r).ok_or_else(|| anyhow::anyhow!("That instance is gone."))?;
+                inst.settings.memory_mb = memory_mb;
+                inst.settings.java_args = java_args;
+                inst.save()?;
+                Ok(Msg::InstanceChanged(r))
+            });
+            return true;
         }
         let Some(mut inst) = store.instance(root).cloned() else {
             window.push_notification(Notification::error("That instance is gone."), cx);

@@ -110,6 +110,119 @@ fn unchanged_answers_come_from_the_cache() {
     set_test_base(None);
 }
 
+/// A fake GitHub whose answer the test changes between requests: one
+/// (etag, body) at a time. Records each request's If-None-Match and what it
+/// answered (200 or 304).
+type Seen = Arc<Mutex<Vec<(Option<String>, u16)>>>;
+
+fn changing(first: (&str, &str)) -> (Fake, Arc<Mutex<(String, String)>>, Seen) {
+    let now = Arc::new(Mutex::new((first.0.to_string(), first.1.to_string())));
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let (n2, s2) = (now.clone(), seen.clone());
+    let f = fake(move |_, inm| {
+        let (etag, body) = n2.lock().unwrap().clone();
+        let status = if inm == Some(etag.as_str()) { 304 } else { 200 };
+        s2.lock().unwrap().push((inm.map(str::to_string), status));
+        (status, vec![("etag", etag)], if status == 304 { Vec::new() } else { body.into_bytes() })
+    });
+    (f, now, seen)
+}
+
+#[test]
+fn a_check_by_hand_asks_github_inside_the_fresh_window() {
+    let _g = locked();
+    let (f, now_answer, seen) = changing(("\"v1\"", "[]"));
+    let url = "https://api.github.com/repos/o/manual/releases?per_page=30";
+    let auto = |u| get_text_fresh(u, true, Check::Auto.fresh(LIST_FRESH)).unwrap();
+    let hand = |u| get_text_fresh(u, true, Check::Manual.fresh(LIST_FRESH)).unwrap();
+    assert_eq!(auto(url), "[]");
+    // A new release lands; the app's own look a moment later still uses the
+    // answer it has (nothing goes out)...
+    *now_answer.lock().unwrap() = ("\"v2\"".into(), "[1]".into());
+    assert_eq!(auto(url), "[]");
+    assert_eq!(f.api.load(Ordering::SeqCst), 1);
+    // ...but the player's own check asks, with the cached ETag, and gets it.
+    assert_eq!(hand(url), "[1]");
+    assert_eq!(f.api.load(Ordering::SeqCst), 2);
+    assert_eq!(seen.lock().unwrap()[1], (Some("\"v1\"".to_string()), 200));
+    // The new answer is what the next automatic look uses too.
+    assert_eq!(auto(url), "[1]");
+    assert_eq!(f.api.load(Ordering::SeqCst), 2);
+    set_test_base(None);
+}
+
+#[test]
+fn a_check_by_hand_that_gets_304_keeps_the_cached_answer() {
+    let _g = locked();
+    let (f, _, seen) = changing(("\"v1\"", "[1]"));
+    let url = "https://api.github.com/repos/o/same/releases?per_page=30";
+    let hand = || get_text_fresh(url, true, Check::Manual.fresh(LIST_FRESH)).unwrap();
+    assert_eq!(hand(), "[1]");
+    for _ in 0..3 {
+        assert_eq!(hand(), "[1]");
+    }
+    // Every look went out, and all but the first were answered 304: free.
+    assert_eq!(f.api.load(Ordering::SeqCst), 4);
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0], (None, 200));
+    assert!(seen[1..].iter().all(|s| *s == (Some("\"v1\"".to_string()), 304)), "{seen:?}");
+    set_test_base(None);
+}
+
+#[test]
+fn a_pause_holds_back_a_check_by_hand_and_says_so() {
+    let _g = locked();
+    let reset = now() + 600;
+    let f = fake(move |url, _| {
+        if url.contains("/limited/") {
+            return (403, vec![("x-ratelimit-remaining", "0".into()), ("x-ratelimit-reset", reset.to_string())], b"{}".to_vec());
+        }
+        (200, vec![("etag", "\"v1\"".into())], b"[]".to_vec())
+    });
+    let url = "https://api.github.com/repos/o/cached/releases?per_page=30";
+    assert_eq!(get_text(url, true).unwrap(), "[]");
+    assert!(pause().is_none());
+    // GitHub says stop (another repo's check hit the limit).
+    assert!(get_text("https://api.github.com/repos/o/limited/releases?per_page=30", true).is_err());
+    let calls = f.api.load(Ordering::SeqCst);
+    let p = pause().expect("paused");
+    assert_eq!(p.until, reset);
+    assert!(p.paused_note().starts_with("GitHub is limiting checks for now. Mods from GitHub are checked again at "), "{}", p.paused_note());
+    // The player's check can't ask: the cached answer stands in, nothing goes out.
+    assert_eq!(get_text_fresh(url, true, Check::Manual.fresh(LIST_FRESH)).unwrap(), "[]");
+    assert_eq!(f.api.load(Ordering::SeqCst), calls);
+    set_test_base(None);
+}
+
+/// The reported bug end to end: a release made after the last look was
+/// hidden from "check for updates" for ten minutes.
+#[test]
+fn a_new_release_shows_in_a_check_by_hand_right_away() {
+    let _g = locked();
+    let list = |tags: &[&str]| {
+        serde_json::Value::Array(
+            tags.iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "tag_name": t, "html_url": format!("https://github.com/o/mc-mcp/releases/tag/{t}"),
+                        "assets": [{ "name": format!("mc-mcp-{t}.jar"), "size": 4, "browser_download_url": format!("https://github.com/o/mc-mcp/releases/download/{t}/mc-mcp-{t}.jar") }]
+                    })
+                })
+                .collect(),
+        )
+        .to_string()
+    };
+    let (f, now_answer, _) = changing(("\"a\"", &list(&["v0.1.1"])));
+    let src = ModSource { kind: Kind::GitHub, url: "o/mc-mcp".into(), ..Default::default() };
+    let newest = |check| crate::sources::github::candidates(&src, check).unwrap()[0].version.clone();
+    assert_eq!(newest(Check::Auto), "v0.1.1");
+    *now_answer.lock().unwrap() = ("\"b\"".into(), list(&["v0.2.0", "v0.1.1"]));
+    assert_eq!(newest(Check::Auto), "v0.1.1", "an automatic look inside the window uses the cache");
+    assert_eq!(newest(Check::Manual), "v0.2.0");
+    assert_eq!(f.api.load(Ordering::SeqCst), 2);
+    set_test_base(None);
+}
+
 #[test]
 fn the_token_goes_only_to_githubs_api() {
     // A fake server under a test isn't GitHub's API: no token header.

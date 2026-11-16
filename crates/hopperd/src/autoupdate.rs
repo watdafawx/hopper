@@ -757,8 +757,14 @@ pub fn start(app: Arc<App>) {
         let first = if std::env::var_os("HOPPERD_TEST_VERSION").is_some() { 15 } else { 120 };
         std::thread::sleep(Duration::from_secs(first));
         loop {
-            let auto = app.cfg.read().unwrap().auto_update;
-            run_once(&app, auto, false);
+            let (auto, look) = {
+                let c = app.cfg.read().unwrap();
+                (c.auto_update, c.check_updates)
+            };
+            // Off in Settings › Updates: the panel doesn't ask GitHub by itself.
+            if look {
+                run_once(&app, auto, false);
+            }
             std::thread::sleep(EVERY);
         }
     });
@@ -782,6 +788,7 @@ async fn get_status(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
         "state": s.state, "error": s.error, "target": s.target, "waiting_for": s.waiting_for,
         "running_servers": running_servers(&app),
         "auto": app.cfg.read().unwrap().auto_update,
+        "check": app.cfg.read().unwrap().check_updates,
         "skip": app.cfg.read().unwrap().skip_auto_up_to,
         "why_not": why_not(), "os": std::env::consts::OS,
     })))
@@ -849,17 +856,37 @@ async fn install_one(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
 
 #[derive(Deserialize)]
 struct AutoBody {
-    auto: bool,
+    /// Install new versions by itself.
+    auto: Option<bool>,
+    /// Look for new versions by itself.
+    check: Option<bool>,
 }
 
 async fn put_auto(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<AutoBody>) -> ApiResult<Json<Value>> {
     require_owner(&app, &headers, &method)?;
-    {
+    let turned_on = {
         let mut cfg = app.cfg.write().unwrap();
-        cfg.auto_update = b.auto;
+        let was = cfg.check_updates;
+        if let Some(a) = b.auto {
+            cfg.auto_update = a;
+        }
+        if let Some(c) = b.check {
+            cfg.check_updates = c;
+        }
         cfg.save(&app.data_dir).map_err(|e| bad(format!("{e:#}")))?;
+        !was && cfg.check_updates
+    };
+    if let Some(a) = b.auto {
+        log::info!("auto-update {}", if a { "on" } else { "off" });
     }
-    log::info!("auto-update {}", if b.auto { "on" } else { "off" });
+    if let Some(c) = b.check {
+        log::info!("update check {}", if c { "on" } else { "off" });
+    }
+    // Looking again was just asked for: show what's out now, not in half an hour.
+    if turned_on {
+        let a = app.clone();
+        std::thread::spawn(move || check(&a, false));
+    }
     Ok(Json(json!({ "ok": true })))
 }
 

@@ -16,10 +16,16 @@ Cloudflare Tunnel as `https://sync.kyuubi.dev`.
   and revokes 180 days; no files).
 
 State is `/var/lib/hopper-mailbox/state.json`, owned by the
-`hopper-mailbox` user, mode 600. It is written by one background thread
-about every 1.5 s after a change, and once more when the service stops
-(SIGTERM). A crash can lose the last second or two, except for a new
-sign-up, which is saved before it is answered. At start:
+`hopper-mailbox` user, mode 600. Every request that changes anything (a
+publish or revoke, a sign-up, pairing, a group change, a profile edit) is
+written to it, with fsync and an atomic rename, **before the answer goes
+out**: a desktop counts a change as sent once it is answered, so a crash
+right after an answer loses nothing. Requests that arrive together share
+one write. Nobody's feed shows an event until it is in the file, so no PC
+can be ahead of the mailbox after a crash. A background thread still writes
+about every 1.5 s for what no request covers (idle clean-up), and once more
+when the service stops (SIGTERM). The state format did not change. At
+start:
 
 - a file that is there but not valid (bad JSON or encoding, wrong shape) is
   renamed to `state.json.corrupt-<time>` and the service exits with status 78;
@@ -227,7 +233,13 @@ directory 700, both owned by `ubuntu` (the tunnel's user).
   loopback; if it ever listens publicly the header is ignored and everyone
   counts as their peer address.
 - A save that fails (disk full, bad rights) is logged as `state save
-  failed` and tried again every second or so; requests still answer from
-  memory meanwhile. Watch the journal for it.
-- A request that fails with a non-2xx status changed nothing (a 500 from a
-  bug may have changed part of it in memory).
+  failed` and tried again every second or so. A request that changes
+  something is then answered `503 save_failed` (the desktop retries it), and
+  what it changed stays in memory but out of every feed until the retry
+  works. Reads and polls still answer. Watch the journal for it.
+- A request that fails with a non-2xx status changed nothing, except `503
+  save_failed` (above) and a 500 from a bug, which may have changed part of
+  it in memory.
+- Saving every change writes the whole file, so a request that changes
+  something costs about 10 ms with a 1 MB file and about 65 ms at the
+  24 MB the service accepts new share codes up to (measured on a desktop PC).
