@@ -1,10 +1,13 @@
 <script>
   // "Relay through a VPS" setup (design/vps-relay.md, B3; option A of
-  // design/mocks/vps-relay.html): one dialog, three steps. Connect signs in
-  // to the VPS over ssh, Check reads what it is and whether the ports are
-  // free, Install runs the steps on it. Each install step checks before it
-  // acts, so the same list is the repair view later ("Run again"), and
-  // Remove takes out what it put there. Owner only, like the API.
+  // design/mocks/vps-relay.html): one dialog, five steps. Before you start
+  // says what VPS to rent (only Debian and Ubuntu work), Connect signs in
+  // to it over ssh, Check reads what it is and whether the ports are free
+  // (another system stops it there, with what to do), Install runs the
+  // steps on it, and Test checks the whole way in like the relay card's
+  // "Test again". Each install step checks before it acts, so the same
+  // list is the repair view later ("Run again"), and Remove takes out what
+  // it put there. Owner only, like the API.
   import { tick } from 'svelte';
   import { Check, X, Copy, LoaderCircle, Circle, TriangleAlert, Minus, KeyRound } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
@@ -67,10 +70,24 @@
     gamePort = st.check?.ports?.game ?? st.ports?.game ?? 25565;
     tunnelPort = st.check?.ports?.tunnel ?? st.ports?.tunnel ?? 25566;
     publicAddress = st.paired?.public_address || '';
-    stage = st.run ? 'run' : l ? 'check' : 'connect';
+    // The first time, what to rent before anything else.
+    stage = st.run ? 'run' : l ? 'check' : 'before';
     if (stage === 'check' && !st.check) runCheck();
-    if (stage === 'connect') tick().then(() => field?.focus());
   });
+
+  function toConnect() {
+    stage = 'connect';
+    tick().then(() => field?.focus());
+  }
+
+  // The last step: the same health check as the relay card's "Test again".
+  let test = $state(null);
+  const runTest = () =>
+    act('test', async () => {
+      stage = 'test';
+      test = null;
+      test = await post(`/servers/${encodeURIComponent(server.id)}/vps-relay/test`, {}, { timeout: 60000 });
+    });
 
   // Follows a run while it goes.
   $effect(() => {
@@ -203,8 +220,11 @@
   const commands = $derived(stage === 'run' ? run?.commands ?? [] : check?.commands ?? []);
 
   // The stepper: what is done, what is open.
-  const at = $derived(stage === 'connect' ? 1 : stage === 'check' ? 2 : 3);
-  const third = $derived(stage === 'run' && remove_ ? 'Remove' : 'Install');
+  const at = $derived({ before: 1, connect: 2, check: 3, run: 4, test: 5 }[stage] ?? 1);
+  const fourth = $derived(stage === 'run' && remove_ ? 'Remove' : 'Install');
+  const STEPS = ['Before you start', 'Connect', 'Check', '', 'Test'];
+  // The check stopped at the first row: another system than the relay runs on.
+  const stopped = $derived(!!check?.stop);
 
   const canConnect = $derived(host.trim() && user.trim() && (mode === 'key' ? keyText.trim() : mode === 'password' ? password : mode === 'new' ? !!st?.new_public : false));
 
@@ -244,13 +264,33 @@
     </div>
 
     <div class="stepper" aria-label="Steps">
-      <span class:on={at === 1} class:done={at > 1}><i>{#if at > 1}<Check size={10} strokeWidth={3} />{:else}1{/if}</i>Connect</span>
-      <span class:on={at === 2} class:done={at > 2}><i>{#if at > 2}<Check size={10} strokeWidth={3} />{:else}2{/if}</i>Check</span>
-      <span class:on={at === 3 && !finished} class:done={finished}><i>{#if finished}<Check size={10} strokeWidth={3} />{:else}3{/if}</i>{third}</span>
+      {#each STEPS as name, i (i)}
+        {@const n = i + 1}
+        {@const done = n < at || (n === 4 && at === 4 && finished) || (n === 5 && test?.ok)}
+        {@const bad = n === 3 && at === 3 && stopped}
+        <span class:on={n === at && !done} class:done class:bad aria-current={n === at ? 'step' : undefined}><i>{#if done}<Check size={10} strokeWidth={3} />{:else if bad}!{:else}{n}{/if}</i>{n === 4 ? fourth : name}</span>
+      {/each}
     </div>
 
     {#if !st && !err}
       <div class="loading tiny muted"><LoaderCircle size={13} class="spin" />Loading…</div>
+    {:else if stage === 'before'}
+      <div class="f">
+        <p class="small subtle">Players join a small rented server (a VPS) instead of this PC. This panel sends the game to it over one connection it opens itself, so nothing needs opening at home.</p>
+        <dl class="need">
+          <dt>System</dt><dd>Debian 12 or 13, or Ubuntu 22.04 or 24.04. Nothing else works yet.</dd>
+          <dt>Size</dt><dd>2 GB memory or more (4 GB keeps a bigger cache), 2 GB free disk, x64 or arm64</dd>
+          <dt>Address</dt><dd>A public IPv4 address</dd>
+          <dt>Ports</dt><dd>Open in the provider's firewall: <span class="mono">25565 TCP</span> players, <span class="mono">25566 TCP</span> this panel, <span class="mono">24454 UDP</span> voice chat (only with a voice mod)</dd>
+          <dt>Login</dt><dd>ssh as a user with sudo (cloud images' default user, or root)</dd>
+        </dl>
+        <div class="tiny muted">Any provider works. Pick one near your players: their ping goes to the VPS, then on to this PC.</div>
+        <div class="row end">
+          <span class="sp"></span>
+          <button class="btn" onclick={onClose}>Cancel</button>
+          <button class="btn pri" onclick={toConnect}>I have one: connect</button>
+        </div>
+      </div>
     {:else if stage === 'connect'}
       <form class="f" onsubmit={connect}>
         <p class="small subtle">Players join the VPS; this panel sends the game to it over one connection it opens itself, so nothing needs opening at home. Hopper signs in to the VPS over ssh to set it up.</p>
@@ -308,7 +348,8 @@
         </div>
         {#if err}<div class="fix" role="alert">{err}</div>{/if}
         <div class="row end">
-          {#if login}<button type="button" class="btn ghost" disabled={!!busy} onclick={() => ((stage = 'check'), (mode = 'saved'))}>Back</button>{/if}
+          {#if login}<button type="button" class="btn ghost" disabled={!!busy} onclick={() => ((stage = 'check'), (mode = 'saved'))}>Back</button>
+          {:else}<button type="button" class="btn ghost" disabled={!!busy} onclick={() => (stage = 'before')}>Back</button>{/if}
           <span class="sp"></span>
           <button type="button" class="btn" disabled={!!busy} onclick={onClose}>Cancel</button>
           <button class="btn pri" disabled={!!busy || !canConnect}>{#if busy === 'connect'}<LoaderCircle size={13} class="spin" />Connecting…{:else}Connect{/if}</button>
@@ -325,8 +366,14 @@
             {#each check.rows as r (r.id)}
               <li class:bad={r.state === 'fail'}>{@render mark(r.state)}<span class="tx">{r.text}</span></li>
             {/each}
+            {#if stopped}<li class="wait">{@render mark('skip')}<span class="tx">Memory, disk, sudo and ports: not checked</span></li>{/if}
           </ul>
+          {#if stopped}
+            <!-- Another system: the check stopped after reading it (the row above says which), and this says what to do instead. -->
+            <div class="fix" role="alert">Reinstall the VPS with Debian 12 or 13, or Ubuntu 22.04 or 24.04 (on the provider's page this is often called Rebuild or Reinstall), then connect again. Nothing was changed on the VPS.</div>
+          {/if}
         {/if}
+        {#if !stopped}
         <div class="frow">
           <label class="small" for="vr-game">Players' port</label>
           <div class="pair">
@@ -338,6 +385,7 @@
           <div class="input"><input id="vr-pub" bind:value={publicAddress} placeholder={login ? `${login.host} (optional: a name like play.example.com)` : ''} spellcheck="false" autocomplete="off" /></div>
         </div>
         <div class="tiny muted">Installs Hopper Server {st.version} in relay mode on the VPS, as its own service and user, and opens the two ports in its firewall. {st.source === 'file' ? 'Test build: the program comes from this PC.' : 'The program comes from the Hopper Server release on GitHub, checked against its checksum.'}</div>
+        {/if}
         {#if err}<div class="fix" role="alert">{err}</div>{/if}
         {#if commands.length}<button class="linkish tiny" onclick={() => (showCmds = !showCmds)}>{showCmds ? 'Hide the commands' : 'Show the commands'}</button>{/if}
         {#if showCmds}<pre class="cmds mono">{commands.join('\n')}</pre>{/if}
@@ -347,7 +395,7 @@
           {#if login}<button class="btn ghost" disabled={!!busy} onclick={forget} title="Forget the VPS here without connecting to it (it was deleted)">Forget this VPS</button>{/if}
           <span class="sp"></span>
           <button class="btn" disabled={!!busy} onclick={runCheck}>{#if busy === 'check'}<LoaderCircle size={13} class="spin" />Checking…{:else}Check again{/if}</button>
-          <button class="btn pri" disabled={!!busy || !okToInstall} title={okToInstall ? '' : check?.ok ? 'The ports changed: check again first' : 'Fix what the check found first'} onclick={install}>{#if busy === 'install'}<LoaderCircle size={13} class="spin" />Starting…{:else}Install{/if}</button>
+          {#if !stopped}<button class="btn pri" disabled={!!busy || !okToInstall} title={okToInstall ? '' : check?.ok ? 'The ports changed: check again first' : 'Fix what the check found first'} onclick={install}>{#if busy === 'install'}<LoaderCircle size={13} class="spin" />Starting…{:else}{st.paired?.address ? 'Run again' : 'Install'}{/if}</button>{/if}
         </div>
       </div>
     {:else if stage === 'run' && run}
@@ -366,7 +414,7 @@
         {:else if finished && run.changed === 0}
           <div class="note good">Everything was already right. Nothing changed.</div>
         {:else if finished}
-          <div class="note good">The relay is running. Players join <span class="mono">{joinAt}</span>; the server's Overview shows the connection.</div>
+          <div class="note good">The relay is running. Players join <span class="mono">{joinAt}</span>. Test it next: Hopper checks the connection and asks the VPS for this server the way a player's game does.</div>
         {:else}
           <div class="tiny muted">You can close this: it keeps going, and the panel's task list shows how far it got.</div>
         {/if}
@@ -379,7 +427,37 @@
           <span class="sp"></span>
           {#if !running && !remove_ && login}<button class="btn" disabled={!!busy} onclick={again}>Run again</button>{/if}
           {#if !running && remove_ && !login}<button class="btn" disabled={!!busy} onclick={() => ((stage = 'connect'), (mode = 'key'))}>Set up again</button>{/if}
-          <button class="btn" class:pri={!running} onclick={onClose}>{running ? 'Close' : 'Done'}</button>
+          {#if finished && !remove_}
+            <button class="btn" onclick={onClose}>Close</button>
+            <button class="btn pri" disabled={!!busy} onclick={runTest}>Test</button>
+          {:else}
+            <button class="btn" class:pri={!running} onclick={onClose}>{running ? 'Close' : 'Done'}</button>
+          {/if}
+        </div>
+      </div>
+    {:else if stage === 'test'}
+      <div class="f">
+        <div class="who small"><span>Testing the relay for <b>{server.name || server.id}</b></span></div>
+        {#if !test}
+          <div class="loading tiny muted"><LoaderCircle size={13} class="spin" />Connecting to the relay and asking the VPS like a player's game would…</div>
+        {:else}
+          <ul class="steps" class:stale={busy === 'test'}>
+            {#each test.rows as r (r.id)}
+              <li class:bad={r.state === 'fail'}>{@render mark(r.state)}<span class="tx">{r.text}</span></li>
+            {/each}
+          </ul>
+          {#if test.ok}
+            <div class="note good">It works. Players join <span class="mono">{joinAt}</span>; the server's Overview shows the relay and can test it again any time.</div>
+          {:else}
+            <div class="fix" role="alert">Something on the way doesn't work yet: the rows above say what and what to do. Fix it, then test again.</div>
+          {/if}
+        {/if}
+        {#if err}<div class="fix" role="alert">{err}</div>{/if}
+        <div class="row end">
+          {#if login}<button class="btn ghost" disabled={!!busy} onclick={again}>Run the setup again</button>{/if}
+          <span class="sp"></span>
+          <button class="btn" disabled={!!busy} onclick={runTest}>{#if busy === 'test'}<LoaderCircle size={13} class="spin" />Testing…{:else}Test again{/if}</button>
+          <button class="btn" class:pri={test?.ok} disabled={busy === 'test'} onclick={onClose}>Done</button>
         </div>
       </div>
     {:else}
@@ -403,7 +481,14 @@
   .stepper span.on { color: var(--text); }
   .stepper span.on i { background: var(--acc); color: #1c0d02; }
   .stepper span.done { color: var(--subtle); }
-  .stepper span.done i { background: var(--green-dim); color: var(--green); }
+  .stepper span.done i { background: var(--green-dim); color: var(--ink-green); }
+  .stepper span.bad { color: var(--text); }
+  .stepper span.bad i { background: var(--red-dim); color: var(--ink-red); }
+  .stepper { flex-wrap: wrap; row-gap: 6px; }
+  .need { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px 12px; margin: 0; font-size: 12.5px; }
+  .need dt { color: var(--muted); }
+  .need dd { margin: 0; min-width: 0; }
+  .need .mono { font-size: 12px; white-space: nowrap; }
   .frow { display: grid; grid-template-columns: 104px minmax(0, 1fr); align-items: center; gap: 10px; }
   .frow .top { align-self: start; padding-top: 7px; }
   .pair { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -448,10 +533,10 @@
   .steps li.long { flex-wrap: wrap; row-gap: 2px; }
   .steps li.long .d { flex-basis: 100%; margin-left: 26px; padding-left: 0; white-space: normal; overflow-wrap: anywhere; color: var(--subtle); font-size: 12px; }
   .st { width: 18px; height: 18px; display: grid; place-items: center; flex: none; border-radius: 50%; color: var(--muted); }
-  .st.ok, .st.done { background: var(--green-dim); color: var(--green); }
-  .st.fail { background: var(--red-dim); color: var(--red-text); }
-  .st.warn { background: var(--gold-dim); color: var(--gold); }
-  .st.run { color: var(--acc); }
+  .st.ok, .st.done { background: var(--green-dim); color: var(--ink-green); }
+  .st.fail { background: var(--red-dim); color: var(--ink-red); }
+  .st.warn { background: var(--gold-dim); color: var(--ink-gold); }
+  .st.run { color: var(--ink-acc); }
   .note { font-size: 12px; color: var(--subtle); background: var(--hover); border-radius: var(--radius); padding: 8px 10px; }
   .note.good { background: var(--green-dim); color: var(--text); }
   .fix { font-size: 12.5px; border-radius: var(--radius); background: var(--red-dim); color: var(--text); padding: 8px 10px; overflow-wrap: anywhere; }

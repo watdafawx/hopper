@@ -17,6 +17,7 @@
 //! socket on the VPS and the paired home panel's router.
 
 pub mod forward;
+pub mod health;
 pub mod home;
 pub mod link;
 pub mod relay_end;
