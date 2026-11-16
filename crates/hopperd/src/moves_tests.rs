@@ -462,9 +462,18 @@ async fn the_target_caps_what_a_source_may_send() {
 #[tokio::test]
 async fn a_move_is_refused_during_a_restore() {
     let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
-    let src = main_srv(&p);
-    let base = |t: &str| format!("/api/v1/servers/{}/transfer/{t}", p.main.server);
-    let guard = crate::backups_api::restoring_for_test(&p.main.server);
+    // The restoring mark is one global keyed by server id, and the shared
+    // "Test Server" has the same id in every test: marking that one would
+    // refuse other tests' starts and moves. This server is only ours.
+    let name = format!("Restore Probe {}", crate::auth::random_hex(4));
+    let src = p.main.dir.join("servers").join(&name);
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("server.properties"), "motd=restore
+").unwrap();
+    p.main.app.rescan();
+    let id = p.main.app.servers.list().iter().find(|e| e.name == name).expect("the probe server").id.clone();
+    let base = |t: &str| format!("/api/v1/servers/{id}/transfer/{t}");
+    let guard = crate::backups_api::restoring_for_test(&id);
     let (s, b) = step(&p, None, Method::POST, &format!("{}/prepare", base("r1")), json!({})).await;
     assert_eq!(s, StatusCode::CONFLICT, "{b}");
     assert!(b.contains("is being restored from a backup"), "{b}");

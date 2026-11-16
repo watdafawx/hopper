@@ -154,6 +154,13 @@ impl Edge {
         }
     }
 
+    /// Whether a hopperd is on the channel now (tests wait on this instead
+    /// of guessing how long the edge takes to notice one go).
+    #[cfg(test)]
+    pub(super) fn hopperd_connected(&self) -> bool {
+        self.ctl.lock().unwrap().is_some()
+    }
+
     pub fn pipes(&self) -> Vec<PipeInfo> {
         self.conns.lock().unwrap().values().filter_map(|c| c.pipe.clone()).collect()
     }

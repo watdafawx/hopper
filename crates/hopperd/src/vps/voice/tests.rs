@@ -425,10 +425,20 @@ async fn forged_garbage_and_floods_are_dropped() {
     // One player sending far over its rate: the rest is dropped.
     let flood = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     flood.connect(("127.0.0.1", p.relay.port)).await.unwrap();
-    for i in 0..2000u32 {
-        let _ = flood.send(&svc(&i.to_be_bytes())).await;
+    // Sent in bursts until the limit shows, not as one fixed run: a loaded
+    // machine can drop a whole run at the OS queue before the relay reads
+    // it, or read it so slowly that the player's bucket refills meanwhile.
+    // Either way, what the relay does see far over its rate is limited.
+    let end = Instant::now() + Duration::from_secs(20);
+    let mut i = 0u32;
+    while p.relay.counts.limited.load(Ordering::Relaxed) < 100 {
+        assert!(Instant::now() < end, "timed out waiting for the limit");
+        for _ in 0..200 {
+            let _ = flood.send(&svc(&i.to_be_bytes())).await;
+            i = i.wrapping_add(1);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    wait_for("the limit", 5, || p.relay.counts.limited.load(Ordering::Relaxed) >= 100).await;
     // Whatever of the flood is still queued at the relay's port goes first:
     // talking into a full queue loses packets to the OS, not to the relay.
     drained(p.relay.port).await;

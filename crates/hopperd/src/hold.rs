@@ -269,10 +269,15 @@ mod tests {
 
     #[tokio::test]
     async fn client_leaves() {
-        let (mut server_side, client) = duplex(4096);
+        let (mut server_side, mut client) = duplex(4096);
         let s = state(0);
-        let task = tokio::spawn(async move { hold(&mut server_side, vec![], FAST, look(&s)).await.unwrap() });
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // A loaded machine can stall this test past FAST's short answer window,
+        // which would end the hold as NoAnswer instead of Left.
+        let t = Timing { answer_within: Duration::from_secs(30), ..FAST };
+        let task = tokio::spawn(async move { hold(&mut server_side, vec![], t, look(&s)).await.unwrap() });
+        // Leave only after the request went out, so the server's write can't hit a closed pipe.
+        let mut cb = Vec::new();
+        client_read(&mut client, &mut cb).await;
         drop(client);
         assert_eq!(task.await.unwrap(), Ended::Left);
     }

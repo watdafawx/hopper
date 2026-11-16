@@ -123,6 +123,17 @@ impl Ctl {
     }
 }
 
+/// Waits until the edge has noticed hopperd go. A join before that would be
+/// sent down the dead channel instead of waiting for the next hopperd, and
+/// how long the edge takes depends on how busy the machine is.
+async fn hopperd_gone(rig: &Rig) {
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while rig.edge.hopperd_connected() {
+        assert!(std::time::Instant::now() < end, "the edge never noticed hopperd go");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 fn login(name: &str, port: u16) -> Vec<u8> {
     let mut b = core::handshake_packet(767, "srv.mc.test", port, 2);
     let mut body = Vec::new();
@@ -249,7 +260,7 @@ async fn players_stay_on_while_hopperd_restarts() {
 
     // hopperd is killed.
     drop(ctl);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    hopperd_gone(&rig).await;
     w1.write_all(b"still here\n").await.unwrap();
     read_numbers(&mut r1, 25, &mut last, &mut echoes).await;
     assert!(echoes.contains(&"still here".to_string()));
@@ -284,7 +295,7 @@ async fn a_held_join_is_told_to_come_back_when_hopperd_stays_away() {
     let (mut ctl, _) = Ctl::connect(&rig, &rig.token).await.unwrap();
     ctl.listen(rig.port).await;
     drop(ctl);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    hopperd_gone(&rig).await;
     let mut p = TcpStream::connect(("127.0.0.1", rig.port)).await.unwrap();
     p.write_all(&login("Alex", rig.port)).await.unwrap();
     let mut got = Vec::new();
@@ -301,7 +312,7 @@ async fn the_server_list_is_answered_while_hopperd_is_away() {
     ctl.send(Msg::Answers { list: vec![Answer { addresses: vec!["srv.mc.test".into()], status: kept }], unknown: json!({}) }).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     drop(ctl);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    hopperd_gone(&rig).await;
     let mut p = TcpStream::connect(("127.0.0.1", rig.port)).await.unwrap();
     let mut out = core::handshake_packet(767, "srv.mc.test", rig.port, 1);
     out.extend_from_slice(&[1, 0]);
