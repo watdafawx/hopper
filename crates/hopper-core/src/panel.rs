@@ -447,21 +447,178 @@ pub fn open(p: &crate::settings::OtherPanel) -> Option<Box<dyn ServerPanel>> {
         return None;
     }
     let token = token_for(&p.id)?;
-    let (url, ss) = (p.url.trim(), p.self_signed);
+    let url = p.url.trim();
     if url.is_empty() {
         return None;
     }
+    let tls = PanelTls::of(p);
     Some(match p.kind.as_str() {
-        "mcss" => Box::new(Mcss::new(url, &token, ss)),
-        "pterodactyl" => Box::new(Pterodactyl::new(url, &token, ss)),
-        _ => Box::new(Crafty::new(url, &token, ss)),
+        "mcss" => Box::new(Mcss::new(url, &token, tls)),
+        "pterodactyl" => Box::new(Pterodactyl::new(url, &token, tls)),
+        _ => Box::new(Crafty::new(url, &token, tls)),
     })
 }
 
 /// What a panel's client is made from, to tell when it must be made again
 /// (the key's length stands in for the key).
 pub fn setup_key(p: &crate::settings::OtherPanel) -> String {
-    format!("{}|{}|{}|{}|{}", p.id, p.kind, p.url.trim(), p.self_signed, token_for(&p.id).map_or(0, |t| t.len()))
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        p.id,
+        p.kind,
+        p.url.trim(),
+        p.self_signed,
+        p.cert_pin,
+        p.cert_ask,
+        token_for(&p.id).map_or(0, |t| t.len())
+    )
+}
+
+// ---- Certificates of panels that make their own -----------------------------
+
+/// How a panel's connections check its certificate.
+#[derive(Clone)]
+pub struct PanelTls(Option<std::sync::Arc<rustls::ClientConfig>>);
+
+impl PanelTls {
+    /// The usual check against the web's authorities.
+    pub fn web() -> Self {
+        PanelTls(None)
+    }
+
+    /// For panel `p`: the usual check, or (when it makes its own
+    /// certificate) only the certificate the user trusted. A panel saved
+    /// before pinning trusts the first one it's shown, like SFTP sites.
+    pub fn of(p: &crate::settings::OtherPanel) -> Self {
+        if !p.self_signed {
+            return Self::web();
+        }
+        let (id, pin, ask) = (p.id.clone(), p.cert_pin.trim().to_string(), p.cert_ask);
+        PanelTls(Some(crate::tls::pinned_config(std::sync::Arc::new(move |fp: &str, vouched| check_cert(&id, &pin, ask, fp, vouched)))))
+    }
+
+    /// The same check for a socket opened outside ureq (Pterodactyl's
+    /// console).
+    pub(crate) fn rustls(&self) -> std::sync::Arc<rustls::ClientConfig> {
+        self.0.clone().unwrap_or_else(|| crate::tls::client_config(false))
+    }
+}
+
+/// What Hopper saw of a panel's certificate this run.
+#[derive(Clone, Debug, Default)]
+struct CertSeen {
+    /// Pinned on this run (a panel saved before pinning), not yet in the
+    /// settings; it holds from the moment it's seen.
+    learned: Option<String>,
+    /// A panel saved before pinning answered with a certificate an
+    /// authority signs: it needs no pin, and shouldn't learn one later.
+    vouched: bool,
+    /// `learned` or `vouched` was handed to [`take_learned`].
+    told: bool,
+    /// The certificate changed: (was, now).
+    changed: Option<(String, String)>,
+}
+
+type Certs = std::collections::HashMap<String, CertSeen>;
+static CERTS: std::sync::LazyLock<std::sync::Mutex<Certs>> = std::sync::LazyLock::new(Default::default);
+
+fn certs() -> std::sync::MutexGuard<'static, Certs> {
+    CERTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether panel `id` may go on with certificate `fp`, given its saved pin
+/// and whether the user is still to trust one. `vouched`: an authority
+/// signs it, so it passes anyway.
+fn check_cert(id: &str, pin: &str, ask: bool, fp: &str, vouched: bool) -> Result<(), String> {
+    let mut all = certs();
+    let c = all.entry(id.to_string()).or_default();
+    if vouched {
+        // Learning stops here: a self-made certificate showing up later
+        // has to be trusted by the user, never picked up quietly.
+        if pin.is_empty() && !ask && c.learned.is_none() {
+            c.vouched = true;
+        }
+        c.changed = None;
+        return Ok(());
+    }
+    let want = if pin.is_empty() { c.learned.clone() } else { Some(pin.to_string()) };
+    match want {
+        Some(w) if crate::tls::same_fingerprint(&w, fp) => {
+            c.changed = None;
+            Ok(())
+        }
+        Some(w) => {
+            c.changed = Some((w.clone(), fp.to_string()));
+            Err(format!(
+                "The panel's certificate changed (now {fp}, was {w}), so Hopper didn't connect or send its API key. If you expect that (a reinstall or a new certificate), trust the new one in Settings → Servers."
+            ))
+        }
+        None if ask || c.vouched => Err("Trust the panel's certificate first: Settings → Servers, Edit, Save and test.".into()),
+        None => {
+            c.learned = Some(fp.to_string());
+            Ok(())
+        }
+    }
+}
+
+/// Panel `id`'s certificate changed since the user trusted it: (was, now).
+pub fn cert_changed(id: &str) -> Option<(String, String)> {
+    certs().get(id).and_then(|c| c.changed.clone())
+}
+
+/// What this run found out about panels saved before pinning, each handed
+/// out once, as (panel id, fingerprint): Some = pin that certificate (and
+/// tell the user); None = an authority signs its certificate, so it
+/// stops learning (`cert_ask`).
+pub fn take_learned() -> Vec<(String, Option<String>)> {
+    take_learned_of(|_| true)
+}
+
+fn take_learned_of(of: impl Fn(&str) -> bool) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    for (id, c) in certs().iter_mut() {
+        if c.told || !of(id) {
+            continue;
+        }
+        if let Some(fp) = &c.learned {
+            out.push((id.clone(), Some(fp.clone())));
+        } else if c.vouched {
+            out.push((id.clone(), None));
+        } else {
+            continue;
+        }
+        c.told = true;
+    }
+    out
+}
+
+/// Forgets what was seen of panel `id`'s certificate (its address changed,
+/// or the user trusted a new one).
+pub fn forget_cert(id: &str) {
+    certs().remove(id);
+}
+
+/// The certificate `url` answers with, found without sending anything (the
+/// handshake stops at the certificate). None: an authority signs it for
+/// that address, or it's plain http, so there's nothing to trust.
+pub fn probe_cert(url: &str) -> anyhow::Result<Option<String>> {
+    let base = base_url(url);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let seen2 = seen.clone();
+    let tls = crate::tls::pinned_config(std::sync::Arc::new(move |fp: &str, vouched| {
+        if vouched {
+            return Ok(());
+        }
+        *seen2.lock().unwrap_or_else(|e| e.into_inner()) = fp.to_string();
+        Err("only looking at the certificate".to_string())
+    }));
+    let r = crate::tls::pinned_agent(agent_config(), tls).head(&base).call();
+    let fp = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if !fp.is_empty() {
+        return Ok(Some(fp));
+    }
+    r.with_context(|| format!("Couldn't reach {base}"))?;
+    Ok(None)
 }
 
 /// The first panel set up in Settings, if any (for code with no server
@@ -527,19 +684,20 @@ pub fn base_url(url: &str) -> String {
     }
 }
 
-/// An HTTP client for a panel: short timeouts, HTTP errors as replies (the
-/// panels explain them in JSON), and optionally a self-signed certificate.
-pub(crate) fn agent(self_signed: bool) -> ureq::Agent {
+fn agent_config() -> ureq::config::Config {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(15)))
         .http_status_as_error(false)
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .disable_verification(self_signed)
-                .build(),
-        )
         .build()
-        .into()
+}
+
+/// An HTTP client for a panel: short timeouts, HTTP errors as replies (the
+/// panels explain them in JSON), and its certificate checked by `tls`.
+pub(crate) fn agent(tls: &PanelTls) -> ureq::Agent {
+    match &tls.0 {
+        None => agent_config().into(),
+        Some(c) => crate::tls::pinned_agent(agent_config(), c.clone()),
+    }
 }
 
 fn env(name: &str) -> Option<String> {
@@ -668,13 +826,13 @@ pub struct Crafty {
 }
 
 impl Crafty {
-    /// `self_signed` accepts the certificate Crafty makes for itself, which
-    /// no authority signs.
-    pub fn new(url: &str, token: &str, self_signed: bool) -> Self {
+    /// `tls`: how to check its certificate (Crafty makes its own, which no
+    /// authority signs).
+    pub fn new(url: &str, token: &str, tls: PanelTls) -> Self {
         Crafty {
             base: base_url(url),
             token: token.to_string(),
-            agent: agent(self_signed),
+            agent: agent(&tls),
         }
     }
 
@@ -1334,5 +1492,168 @@ mod tests {
         assert!(back.off);
         let old: crate::settings::OtherPanel = serde_json::from_str(r#"{"id":"a","kind":"mcss","url":"https://rig"}"#).unwrap();
         assert!(!old.off);
+    }
+
+    /// A Crafty on 127.0.0.1 behind a certificate it made itself (as Crafty
+    /// does), answering every request with an empty server list. Returns
+    /// its address, its certificate's fingerprint and the Authorization
+    /// headers it was sent.
+    fn self_signed_crafty() -> (String, String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::sync::{Arc, Mutex};
+        let made = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let fp = crate::tls::fingerprint(made.cert.der());
+        let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![made.cert.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(made.key_pair.serialize_der().into()),
+            )
+            .unwrap();
+        let cfg = Arc::new(cfg);
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://{}", l.local_addr().unwrap());
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let keys2 = keys.clone();
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                let (cfg, keys) = (cfg.clone(), keys2.clone());
+                std::thread::spawn(move || {
+                    let _ = c.set_read_timeout(Some(Duration::from_secs(5)));
+                    let Ok(conn) = rustls::ServerConnection::new(cfg) else { return };
+                    let mut r = BufReader::new(rustls::StreamOwned::new(conn, c));
+                    let mut line = String::new();
+                    let mut auth = None;
+                    loop {
+                        line.clear();
+                        if r.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if line == "\r\n" {
+                            break;
+                        }
+                        if let Some(v) = line.strip_prefix("authorization: ").or_else(|| line.strip_prefix("Authorization: ")) {
+                            auth = Some(v.trim().to_string());
+                        }
+                    }
+                    keys.lock().unwrap().extend(auth);
+                    let body = r#"{"status":"ok","data":[]}"#;
+                    let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let s = r.get_mut();
+                    let _ = s.write_all(reply.as_bytes());
+                    let _ = s.flush();
+                    s.conn.send_close_notify();
+                    let _ = s.flush();
+                });
+            }
+        });
+        (url, fp, keys)
+    }
+
+    use crate::settings::OtherPanel;
+
+    fn self_signed_panel(id: &str, url: &str) -> OtherPanel {
+        OtherPanel { id: id.into(), url: url.into(), self_signed: true, ..Default::default() }
+    }
+
+    #[test]
+    fn fingerprints_compare_however_written() {
+        let fp = crate::tls::fingerprint(b"cert");
+        assert_eq!(fp.len(), 32 * 3 - 1);
+        assert!(fp.chars().all(|c| c == ':' || c.is_ascii_digit() || c.is_ascii_uppercase()));
+        assert!(crate::tls::same_fingerprint(&fp, &fp.to_lowercase().replace(':', "")));
+        assert!(crate::tls::same_fingerprint(&fp, &format!(" SHA256:{} ", fp.replace(':', " "))));
+        assert!(!crate::tls::same_fingerprint(&fp, &crate::tls::fingerprint(b"other")));
+        assert!(!crate::tls::same_fingerprint("", ""));
+    }
+
+    #[test]
+    fn a_new_self_signed_panel_sends_no_key_until_its_certificate_is_trusted() {
+        let (url, fp, keys) = self_signed_crafty();
+        let mut p = OtherPanel { cert_ask: true, ..self_signed_panel("t-cert-ask", &url) };
+        let e = Crafty::new(&url, "secret", PanelTls::of(&p)).servers().unwrap_err();
+        assert!(format!("{e:#}").contains("Trust the panel's certificate first"), "{e:#}");
+        // The form's look at the certificate sends nothing either.
+        assert_eq!(probe_cert(&url).unwrap().as_deref(), Some(fp.as_str()));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(keys.lock().unwrap().is_empty(), "no request reached the panel");
+        // Trusted: it connects.
+        p.cert_pin = fp.clone();
+        p.cert_ask = false;
+        assert!(Crafty::new(&url, "secret", PanelTls::of(&p)).servers().unwrap().is_empty());
+        assert_eq!(*keys.lock().unwrap(), vec!["Bearer secret".to_string()]);
+        assert!(cert_changed(&p.id).is_none());
+        assert!(take_learned_of(|i| i == p.id).is_empty(), "a trusted pin isn't learned");
+    }
+
+    #[test]
+    fn a_pinned_panel_with_a_new_certificate_is_refused() {
+        let (url, fp, keys) = self_signed_crafty();
+        let was = crate::tls::fingerprint(b"the certificate it had");
+        let p = OtherPanel { cert_pin: was.clone(), ..self_signed_panel("t-cert-changed", &url) };
+        let e = Crafty::new(&url, "secret", PanelTls::of(&p)).servers().unwrap_err();
+        let e = format!("{e:#}");
+        assert!(e.contains("certificate changed") && e.contains(&fp) && e.contains(&was), "{e}");
+        assert_eq!(cert_changed(&p.id), Some((was, fp.clone())));
+        assert!(keys.lock().unwrap().is_empty(), "the key wasn't sent");
+        // Trusting the new one works and clears the warning.
+        let p = OtherPanel { cert_pin: fp.to_lowercase(), ..p };
+        assert!(Crafty::new(&url, "secret", PanelTls::of(&p)).servers().is_ok());
+        assert!(cert_changed(&p.id).is_none());
+    }
+
+    #[test]
+    fn a_panel_saved_before_pinning_pins_on_its_next_connect() {
+        let (url, fp, keys) = self_signed_crafty();
+        // As read from settings.json of an older build: no pin, not asking.
+        let p: OtherPanel = serde_json::from_value(serde_json::json!({"id": "t-cert-old", "kind": "crafty", "url": url, "self_signed": true})).unwrap();
+        assert!(p.cert_pin.is_empty() && !p.cert_ask);
+        assert!(Crafty::new(&url, "secret", PanelTls::of(&p)).servers().is_ok(), "a working setup keeps working");
+        assert_eq!(keys.lock().unwrap().len(), 1);
+        assert_eq!(take_learned_of(|i| i == p.id), vec![(p.id.clone(), Some(fp.clone()))]);
+        assert!(take_learned_of(|i| i == p.id).is_empty(), "told once");
+        // From then on, even before the settings are saved, only that one.
+        let (url2, fp2, keys2) = self_signed_crafty();
+        let e = Crafty::new(&url2, "secret", PanelTls::of(&OtherPanel { url: url2.clone(), ..p.clone() })).servers().unwrap_err();
+        assert!(format!("{e:#}").contains("certificate changed"), "{e:#}");
+        assert_eq!(cert_changed(&p.id), Some((fp.clone(), fp2)));
+        assert!(keys2.lock().unwrap().is_empty());
+        assert!(Crafty::new(&url, "secret", PanelTls::of(&p)).servers().is_ok());
+        forget_cert(&p.id);
+        assert!(cert_changed(&p.id).is_none());
+    }
+
+    #[test]
+    fn an_old_panel_with_a_real_certificate_stops_learning() {
+        let (id, fp) = ("t-cert-vouched", crate::tls::fingerprint(b"self-made"));
+        assert!(check_cert(id, "", false, &crate::tls::fingerprint(b"lets-encrypt"), true).is_ok());
+        assert_eq!(take_learned_of(|i| i == id), vec![(id.to_string(), None)], "saved as asking, nothing to tell");
+        // A self-made certificate later isn't picked up quietly.
+        let e = check_cert(id, "", false, &fp, false).unwrap_err();
+        assert!(e.contains("Trust the panel's certificate first"), "{e}");
+        forget_cert(id);
+    }
+
+    #[test]
+    fn a_panel_not_marked_self_signed_keeps_the_usual_check() {
+        let (url, _, keys) = self_signed_crafty();
+        let p = OtherPanel { self_signed: false, ..self_signed_panel("t-cert-web", &url) };
+        assert!(Crafty::new(&url, "secret", PanelTls::of(&p)).servers().is_err());
+        assert!(keys.lock().unwrap().is_empty());
+        assert!(take_learned_of(|i| i == p.id).is_empty());
+        // Plain http has no certificate to trust.
+        let (plain, _) = counting_panel();
+        assert!(probe_cert(&plain).is_err() || probe_cert(&plain).unwrap().is_none());
+    }
+
+    #[test]
+    fn pin_fields_are_saved_only_when_set() {
+        let v = serde_json::to_value(OtherPanel::default()).unwrap();
+        assert!(v.get("cert_pin").is_none() && v.get("cert_ask").is_none());
+        let p = OtherPanel { cert_pin: "AB".into(), cert_ask: true, ..Default::default() };
+        let back: OtherPanel = serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+        assert_eq!((back.cert_pin.as_str(), back.cert_ask), ("AB", true));
     }
 }

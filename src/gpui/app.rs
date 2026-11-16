@@ -226,7 +226,16 @@ impl AppView {
             cx.observe(&settings, |this, _, cx| this.track(cx)),
             cx.observe(&store, |_, _, cx| cx.notify()),
             // The hero drift stops while unfocused; a redraw starts it again.
-            cx.observe_window_activation(window, |_, _, cx| cx.notify()),
+            // Coming back also reads the friend list if it is getting old.
+            {
+                let store = store.clone();
+                cx.observe_window_activation(window, move |_, window, cx| {
+                    if window.is_window_active() {
+                        store.update(cx, |s, _| s.window_focused());
+                    }
+                    cx.notify()
+                })
+            },
             cx.observe(&tasks, |_, _, cx| cx.notify()),
             cx.subscribe_in(&store, window, |this, _, event, window, cx| match event {
                 StoreEvent::BrowsePacksFor(place) => {
@@ -1248,6 +1257,13 @@ impl AppView {
                             None if j.announce => crate::tray::notify(&j.title, "Done.", false),
                             None => {}
                         }
+                    }
+                }
+                // Quiet ones (a game start) only ever show a toast.
+                for j in store.jobs().quiet_toasts() {
+                    store.jobs().dismiss(j.id);
+                    if this.told_jobs.insert(j.id) {
+                        ended.push(j);
                     }
                 }
                 let waits = store.fetches_waiting_on_player();

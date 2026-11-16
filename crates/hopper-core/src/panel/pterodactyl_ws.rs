@@ -38,7 +38,7 @@ static FEEDS: std::sync::LazyLock<Feeds> = std::sync::LazyLock::new(Default::def
 pub(super) struct Access {
     pub base: String,
     pub key: String,
-    pub self_signed: bool,
+    pub tls: super::PanelTls,
 }
 
 /// The server's latest console lines, oldest first. The first call starts
@@ -98,7 +98,7 @@ fn run(a: Access, id: String, feed: Arc<Mutex<Feed>>) {
 
 /// `{token, socket}` for the server.
 fn token(a: &Access, id: &str) -> anyhow::Result<(String, String)> {
-    let p = super::Pterodactyl::new(&a.base, &a.key, a.self_signed);
+    let p = super::Pterodactyl::new(&a.base, &a.key, a.tls.clone());
     let v = p.call("GET", &format!("/servers/{id}/websocket"), None)?;
     let d = &v["data"];
     match (d["token"].as_str(), d["socket"].as_str()) {
@@ -113,7 +113,7 @@ impl<T: Read + Write + Send> Stream for T {}
 /// One connection, until it drops or nobody reads any more.
 fn session(a: &Access, id: &str, feed: &Mutex<Feed>) -> anyhow::Result<()> {
     let (tok, socket) = token(a, id)?;
-    let mut ws = connect(&socket, &origin(&a.base), a.self_signed)?;
+    let mut ws = connect(&socket, &origin(&a.base), &a.tls)?;
     let send = |ws: &mut tungstenite::WebSocket<Box<dyn Stream>>, event: &str, args: Value| {
         ws.send(tungstenite::Message::text(json!({ "event": event, "args": args }).to_string()))
     };
@@ -173,7 +173,7 @@ pub(super) fn origin(base: &str) -> String {
 
 /// Opens `socket` (ws:// or wss://), with a read timeout so the loop can
 /// notice nobody reads any more.
-fn connect(socket: &str, origin: &str, self_signed: bool) -> anyhow::Result<tungstenite::WebSocket<Box<dyn Stream>>> {
+fn connect(socket: &str, origin: &str, check: &super::PanelTls) -> anyhow::Result<tungstenite::WebSocket<Box<dyn Stream>>> {
     use tungstenite::client::IntoClientRequest as _;
     let (tls, rest) = match socket.split_once("://") {
         Some(("wss", r)) => (true, r),
@@ -194,7 +194,7 @@ fn connect(socket: &str, origin: &str, self_signed: bool) -> anyhow::Result<tung
     tcp.set_read_timeout(Some(Duration::from_secs(1)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(10)))?;
     let stream: Box<dyn Stream> = if tls {
-        let config = crate::tls::client_config(self_signed);
+        let config = check.rustls();
         let name = rustls::pki_types::ServerName::try_from(host.to_string())?;
         let conn = rustls::ClientConnection::new(config, name)?;
         Box::new(rustls::StreamOwned::new(conn, tcp))
@@ -311,7 +311,7 @@ mod tests {
                 }
             }
         });
-        let a = Access { base, key: "ptlc_x".into(), self_signed: false };
+        let a = Access { base, key: "ptlc_x".into(), tls: crate::panel::PanelTls::web() };
         let _ = lines(&a, "abc");
         let mut got = Vec::new();
         for _ in 0..100 {

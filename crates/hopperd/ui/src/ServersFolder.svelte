@@ -187,8 +187,8 @@
     <div class="card col">
       <div class="row wrapx">
         <div class="seg" role="group" aria-label="When deleting a server">
-          <button class:on={!info.delete_permanently} aria-pressed={!info.delete_permanently} onclick={() => setDeleteDefault(false)}>Move to .hopper-deleted for 30 days</button>
-          <button class:on={!!info.delete_permanently} aria-pressed={!!info.delete_permanently} onclick={() => setDeleteDefault(true)}>Delete permanently</button>
+          <button class:on={!info.delete_permanently} aria-pressed={!info.delete_permanently} onclick={() => setDeleteDefault(false)}>Move to Recently deleted for 30 days</button>
+          <button class:on={!!info.delete_permanently} aria-pressed={!!info.delete_permanently} onclick={() => setDeleteDefault(true)}>Delete for good</button>
         </div>
       </div>
       <div class="small muted">Which choice the delete dialog starts on. You can switch it for each delete. Deleting for good is a tick box in that dialog.</div>
@@ -196,9 +196,9 @@
   {/if}
 
   {#if info?.deleted?.length}
-    <h2 class="lbl">Deleted servers</h2>
+    <h2 class="lbl">Recently deleted</h2>
     <div class="card col">
-      <div class="small muted">Kept 30 days in .hopper-deleted, then removed.</div>
+      <div class="small muted">Deleted servers wait here for 30 days, on the drive they were on, then go for good.</div>
       {#each info.deleted as d (d.name)}
         <div class="row it">
           <b class="ell">{d.server || d.name}</b><span class="tiny muted">deleted {when(d.at)} · goes {when(d.expires)}</span><span class="sp"></span>
