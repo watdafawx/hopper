@@ -62,7 +62,7 @@
   .go:hover { background: #fb8a3c; }
   .nt { padding: 0 6px; background: var(--surface); color: var(--acc); }
   .nt:hover { background: var(--raise); }
-  .vstate { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: var(--radius); font-size: 11.5px; font-weight: 600; white-space: nowrap; color: var(--blue); background: var(--blue-dim); border: 1px solid #38bdf84d; }
+  .vstate { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: var(--radius); font-size: 11.5px; font-weight: 600; white-space: nowrap; color: var(--ink-blue); background: var(--blue-dim); border: 1px solid #38bdf84d; }
   .vstate:hover { background: #38bdf833; }
-  .vstate.ok { color: var(--green); background: var(--green-dim); border-color: #22c55e4d; }
+  .vstate.ok { color: var(--ink-green); background: var(--green-dim); border-color: #22c55e4d; }
 </style>

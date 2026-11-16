@@ -452,6 +452,8 @@ fn fingerprint(store: &Store, root: &Path, class: u32) -> Option<u64> {
         (a.enabled, a.from_pack, a.locked, a.class_id, &a.env, &a.date_added).hash(&mut h);
         (&a.mr_project, &a.page, &a.locked_version).hash(&mut h);
     }
+    // Modrinth's word on untagged mods' sides landed.
+    hopper::modsides::generation().hash(&mut h);
     // Switches waiting for the game show on the switch and in the notice.
     let mut waiting: Vec<_> = store.waiting_switches(root).into_iter().flatten().collect();
     waiting.sort();
@@ -721,15 +723,12 @@ impl Breaks {
 /// Moves removed files back and puts their entries back in the instance.
 pub(crate) fn undo_remove(store: &Entity<Store>, root: PathBuf, items: Vec<Removed>, window: &mut Window, cx: &mut App) {
     let s = store.read(cx);
-    if let Some(why) = s.edit_hold_reason(&root) {
-        window.push_notification(Notification::error(format!("Can't undo now: {why}.")), cx);
-        return;
-    }
     let Some(mut inst) = s.instance(&root).cloned() else {
         window.push_notification(Notification::error("That instance is gone."), cx);
         return;
     };
     s.spawn_instance_job(&root, "Undoing remove", move |job| {
+        crate::store::fresh(&mut inst);
         let mut back = 0;
         for it in &items {
             if it.original.exists() {
@@ -907,6 +906,8 @@ pub struct AddonsView {
     /// Notices whose whole row list shows (else the first two).
     pub(crate) rows_open: std::collections::HashSet<&'static str>,
     pub(crate) crash_stop: Option<(hopper::crashdetect::Stopped, Option<hopper::crashdetect::Changed>)>,
+    /// Modrinth is being asked where untagged mods run (one ask at a time).
+    pub(crate) sides_busy: bool,
     /// Clicks and pointer, for when Updated rows may go.
     pub(crate) settle: widgets::Settle,
     /// Missing mods installing from the banner: mod id → its job.
@@ -1033,6 +1034,7 @@ impl AddonsView {
             crashed: HashMap::new(),
             rows_open: Default::default(),
             crash_stop: None,
+            sides_busy: false,
             dep_jobs: HashMap::new(),
             dep_done: HashSet::new(),
             dep_projects: Default::default(),
@@ -1141,7 +1143,7 @@ impl AddonsView {
     /// Rebuilds the table when what it shows changed in the store (or
     /// always, with `force`). All the disk reads the table needs happen
     /// here, never while rendering.
-    fn sync(&mut self, force: bool, cx: &mut Context<Self>) {
+    pub(crate) fn sync(&mut self, force: bool, cx: &mut Context<Self>) {
         let _t = crate::frame_log::span("addons.sync");
         // The last crash's mods, for their tag (read once, then cached). A
         // server's crash has its own strip on the Servers page.
@@ -1234,6 +1236,7 @@ impl AddonsView {
         self.waiting = self.store.read(cx).waiting_switches(&root).cloned().unwrap_or_default();
         if class == cf::CLASS_MODS {
             self.want_missing(&inst, cx);
+            self.want_sides(&inst, cx);
         }
         let archived = self.store.read(cx).archived(&root).cloned().unwrap_or_default();
         let extra = if class == cf::CLASS_MODS { hopper::install::off_copies(&inst.addons) } else { HashMap::new() };
@@ -1321,7 +1324,7 @@ impl AddonsView {
         self.table.has_side = self.class == cf::CLASS_MODS
             || self.table.inst.as_ref().is_some_and(|inst| {
                 rows.iter().any(|r| match r {
-                    Row::Addon(i) => inst.addons.get(*i).is_some_and(|a| crate::side_card::side_of(&a.env).is_some()),
+                    Row::Addon(i) => inst.addons.get(*i).is_some_and(|a| hopper::modsides::side_of(a).is_some()),
                     _ => false,
                 })
             });
@@ -1673,7 +1676,7 @@ impl AddonsView {
                 ),
                 Show::AlwaysOn => matches!(self.where_group(&a.file_name), hopper::pack_where::Group::Global(_)),
                 Show::Archived => self.table.archived.contains(&a.project_id),
-                Show::ClientOnly => a.env == "client",
+                Show::ClientOnly => hopper::modsides::side_of(a).is_some_and(|s| s.is("client")),
                 Show::Unknown => a.shown_project() == 0 && a.source.is_none(),
                 Show::All => true,
             })
@@ -1697,7 +1700,7 @@ impl AddonsView {
             let ord = match col {
                 SortCol::Name => na.cmp(nb),
                 SortCol::Author => a.author.to_lowercase().cmp(&b.author.to_lowercase()),
-                SortCol::Env => a.env.cmp(&b.env),
+                SortCol::Env => hopper::modsides::env_of(a).cmp(&hopper::modsides::env_of(b)),
                 SortCol::Active => a.enabled.cmp(&b.enabled),
                 SortCol::Added => a.date_added.cmp(&b.date_added),
             };
@@ -2546,11 +2549,9 @@ impl AddonsView {
         }
         let Some(root) = &self.root else { return };
         let store = self.store.read(cx);
-        // A running update job queues these; any other job holds the
-        // instance.
-        if store.queues_updates(root) || store.edit_hold_reason(root).is_none() {
-            store.run_updates(root, updates);
-        }
+        // A running update job takes these into its batch; behind any other
+        // job they wait their turn.
+        store.run_updates(root, updates);
         cx.notify();
     }
 
@@ -2909,7 +2910,7 @@ impl AddonsView {
             if n_unknown > 0 || self.show == Show::Unknown {
                 rail.push(RailItem::show(Show::Unknown, "Unknown", IconName::Info, Some(n_unknown)));
             }
-            let n_client = of_class().filter(|a| a.env == "client").count();
+            let n_client = of_class().filter(|a| hopper::modsides::side_of(a).is_some_and(|s| s.is("client"))).count();
             if self.server && (n_client > 0 || self.show == Show::ClientOnly) {
                 rail.push(RailItem::show(Show::ClientOnly, "Client-only", IconName::Monitor, Some(n_client)));
             }
@@ -2935,6 +2936,14 @@ impl AddonsView {
             .map_or((false, None, false), |u| (u.checking, u.error.clone(), u.list.is_some()));
         // With results on screen the refresh icon spins instead, so nothing
         // moves; the caption shows only where the list says nothing yet.
+        // GitHub told this PC to wait: a check can't ask it, so the GitHub mods
+        // show what Hopper saw earlier, and "Up to date" would be a guess.
+        let paused: Option<String> = hopper::sources::http::pause()
+            .filter(|_| {
+                crate::store::on_hopper_server(&inst.root).is_none()
+                    && inst.addons.iter().any(|a| a.source.as_ref().is_some_and(|s| s.kind == hopper::sources::Kind::GitHub))
+            })
+            .map(|p| p.paused_note());
         let note: Option<AnyElement> = if checking && (!listed || updates.is_empty()) {
             Some(
                 h_flex()
@@ -2945,17 +2954,19 @@ impl AddonsView {
             )
         } else if checking {
             None
-        } else {
-            error.as_ref().map(|e| {
+        } else if let Some(e) = error.as_ref() {
+            Some(
                 h_flex()
                     .gap_2()
                     .min_w_0()
                     .child(div().min_w_0().text_sm().text_color(cx.theme().danger).truncate().child(e.clone()))
                     .children(widgets::cf_key_fix("updates-cf-key", e))
-                    .into_any_element()
-            })
+                    .into_any_element(),
+            )
+        } else {
+            paused.as_ref().map(|p| div().min_w_0().truncate().child(widgets::caption(p.clone(), cx)).into_any_element())
         };
-        let quiet = checking || error.is_some();
+        let quiet = checking || error.is_some() || paused.is_some();
         let result: Option<AnyElement> = match listed {
             true if updates.is_empty() => None,
             true => {
@@ -2966,9 +2977,6 @@ impl AddonsView {
                     .filter(|u| store.update_state(&inst.root, u.project_id).is_none())
                     .cloned()
                     .collect();
-                let queues = store.queues_updates(&inst.root);
-                let hold = if queues { None } else { store.edit_hold_reason(&inst.root) };
-                let busy = !queues && store.is_busy(&inst.root);
                 // The toolbar's one filled button: opens the review first.
                 let n = all.len();
                 Button::new("update-all")
@@ -2976,15 +2984,12 @@ impl AddonsView {
                     .primary()
                     .icon(IconName::Download)
                     .label(if lv >= 3 { n.to_string() } else { format!("Update all ({n})") })
-                    .loading(all.is_empty() || busy)
-                    .disabled(hold.is_some())
-                    .tooltip(hold.map(|w| w.to_string()).unwrap_or_else(|| {
-                        if n == 1 {
-                            "Review 1 update, then update".to_string()
-                        } else {
-                            format!("Review {n} updates, then update")
-                        }
-                    }))
+                    .loading(all.is_empty())
+                    .tooltip(if n == 1 {
+                        "Review 1 update, then update".to_string()
+                    } else {
+                        format!("Review {n} updates, then update")
+                    })
                     .rounded_tr(px(0.))
                     .rounded_br(px(0.))
                     .on_click(cx.listener(move |this, _, window, cx| this.review_updates(all.clone(), window, cx)))
@@ -3878,10 +3883,9 @@ impl AddonsView {
             if !store.update_breaks(r, a.project_id).is_empty() || store.update_needs(r, a.project_id).is_some() {
                 return None;
             }
-            let hold = !store.queues_updates(r) && store.edit_hold_reason(r).is_some();
             let busy = store.update_state(r, a.project_id).is_some();
             let from_web = a.project_id != 0 && store.pending(r).iter().any(|p| p.project_id == a.project_id);
-            if hold || busy || from_web {
+            if busy || from_web {
                 return None;
             }
         }
@@ -4044,11 +4048,6 @@ impl AddonsView {
         });
         let store = self.store.read(cx);
         let theme = cx.theme();
-        let hold = self
-            .root
-            .as_ref()
-            .filter(|r| !store.queues_updates(r))
-            .and_then(|r| store.edit_hold_reason(r));
         // `Some(true)` downloading now, `Some(false)` queued.
         let updating = self.root.as_ref().and_then(|r| store.update_state(r, a.project_id));
         // Its new file is with the download window (the author allows
@@ -4087,9 +4086,10 @@ impl AddonsView {
                 };
                 (color, SharedString::from(format!("Server: {text}")))
             });
-        let side = crate::side_card::side_of(&a.env);
+        let resolved = hopper::modsides::side_of(a);
+        let side = crate::side_card::side_of(resolved.as_ref());
         let side_known = side.is_some();
-        let side = side.unwrap_or(crate::side_card::SIDE_UNKNOWN);
+        let side = side.map_or(crate::side_card::SIDE_UNKNOWN.0, |s| s.0);
         // The Side cell, in its column or (narrow) by the name.
         let side_el = (self.cols.side || self.cols.side_inline).then(|| {
             let card = self.side_card(a, cx);
@@ -4111,7 +4111,7 @@ impl AddonsView {
                             .size_4()
                             .flex_none()
                             .text_color(if side_known { theme.muted_foreground } else { theme.muted_foreground.opacity(0.75) })
-                            .child(Icon::new(side.0).small()),
+                            .child(Icon::new(side).small()),
                     )
                     .when_some(mark, |c, (color, _)| {
                         c.child(div().size_2().rounded_full().bg(color))
@@ -4154,7 +4154,8 @@ impl AddonsView {
                 added: flags.added,
                 changed_by: changed_by.as_deref(),
                 only_here: kept,
-                env: &a.env,
+                env: resolved.as_ref().map_or("", |s| s.side.as_str()),
+                env_from_modrinth: resolved.as_ref().is_some_and(|s| s.from == hopper::modsides::From::Modrinth),
                 // Narrow, the categories give the version chip room.
                 categories: if self.compact { &[] } else { store.categories(a) },
                 modrinth: !a.mr_project.is_empty(),
@@ -4323,13 +4324,13 @@ Details").into()),
             let (pid, file) = (u.project_id, u.file.clone());
             let view = cx.entity();
             let f_sweep = a.file_name.clone();
-            let can_run = hold.is_none() && updating.is_none() && !from_web;
+            let can_run = updating.is_none() && !from_web;
             // Its new file waits for the website but no window is on it (Hopper
             // restarted, or the player picked it by hand): a click starts one.
             let web_url = self
                 .root
                 .as_ref()
-                .filter(|_| from_web && fetch.is_none() && hold.is_none())
+                .filter(|_| from_web && fetch.is_none())
                 .and_then(|r| store.pending(r).iter().find(|p| p.project_id == a.project_id && !p.url.is_empty()))
                 .map(|p| p.url.clone());
             let (fetch, fetch_tip) = (fetch.clone(), fetch.as_ref().map(|v| {
@@ -4387,8 +4388,6 @@ Details").into()),
                                 t
                             } else if from_web && updating.is_none() {
                                 "The author only allows downloads from CurseForge's website. Click to get it through Hopper's download window; a file you download yourself is picked up from Downloads too".to_string()
-                            } else if let Some(h) = hold {
-                                h.to_string()
                             } else if vlocked {
                                 let (old, new) = u.versions();
                                 format!("{new} is locked: you keep {old}.\nShift+click to update anyway, or click the lock tag to unlock.")
@@ -4511,7 +4510,7 @@ It stays disabled after updating: turn it on in the On column.")
             // Only a plain update: locked, breaking, held or website-only
             // ones need the column's tooltip and its extra steps.
             update
-                .filter(|_| !self.cols.action && !vlocked && !breaking && hold.is_none() && updating.is_none() && !from_web && !done)
+                .filter(|_| !self.cols.action && !vlocked && !breaking && updating.is_none() && !from_web && !done)
                 .cloned(),
         );
         h_flex()
@@ -4608,7 +4607,7 @@ It stays disabled after updating: turn it on in the On column.")
                                         div()
                                             .min_w_0()
                                             .truncate()
-                                            .text_color(theme.muted_foreground)
+                                            .text_color(crate::theme::chip_ink(theme.muted_foreground))
                                             .child(old),
                                     )
                                     .child(
@@ -4622,7 +4621,7 @@ It stays disabled after updating: turn it on in the On column.")
                                             .min_w_0()
                                             .truncate()
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(primary)
+                                            .text_color(crate::theme::chip_ink(primary))
                                             .child(new),
                                     ),
                             ),
@@ -4639,9 +4638,9 @@ It stays disabled after updating: turn it on in the On column.")
                                 }
                                 (!v.is_empty()).then(|| {
                                     chip.bg(theme.muted)
-                                        .text_color(theme.muted_foreground)
+                                        .text_color(crate::theme::chip_ink(theme.muted_foreground))
                                         .group_hover("file", move |s| {
-                                            s.bg(primary.opacity(widgets::alpha::TINT)).text_color(crate::theme::ink(primary))
+                                            s.bg(primary.opacity(widgets::alpha::TINT)).text_color(crate::theme::chip_ink(primary))
                                         })
                                         .child(div().min_w_0().truncate().child(v))
                                 })
@@ -4962,7 +4961,7 @@ Change version", a.file_name).into()
         let client: Vec<&Addon> = inst
             .addons
             .iter()
-            .filter(|a| in_class(a, cf::CLASS_MODS) && a.env == "client" && !hidden_copy(&self.table.extra, &a.file_name))
+            .filter(|a| in_class(a, cf::CLASS_MODS) && hopper::modsides::side_of(a).is_some_and(|s| s.is("client")) && !hidden_copy(&self.table.extra, &a.file_name))
             .filter(|a| !marked(a))
             .collect();
         if client.is_empty() || store.synced_with(&inst.root).is_none() {
@@ -5003,7 +5002,7 @@ Change version", a.file_name).into()
         let n = inst
             .addons
             .iter()
-            .filter(|a| in_class(a, cf::CLASS_MODS) && a.enabled && a.env == "client" && !hidden_copy(&self.table.extra, &a.file_name))
+            .filter(|a| in_class(a, cf::CLASS_MODS) && a.enabled && hopper::modsides::side_of(a).is_some_and(|s| s.is("client")) && !hidden_copy(&self.table.extra, &a.file_name))
             .count();
         if n == 0 {
             return None;
@@ -5106,7 +5105,7 @@ Change version", a.file_name).into()
                     .rounded(crate::theme::radius_sm())
                     .text_xs()
                     .bg(warn.opacity(widgets::alpha::TINT))
-                    .text_color(warn)
+                    .text_color(crate::theme::chip_ink(warn))
                     .child(Icon::new(IconName::TriangleAlert).xsmall())
                     .child(format!("needs {n}"))
                     .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
@@ -5139,7 +5138,7 @@ Change version", a.file_name).into()
                     .rounded(crate::theme::radius_sm())
                     .text_xs()
                     .bg(warn.opacity(widgets::alpha::TINT))
-                    .text_color(warn)
+                    .text_color(crate::theme::chip_ink(warn))
                     .child(Icon::new(IconName::TriangleAlert).xsmall())
                     .child("breaks")
                     .child(widgets::thumb(icon.as_deref(), rems(0.85), cx))
@@ -5910,9 +5909,9 @@ impl Render for UpdateReview {
                                 .rounded(crate::theme::radius_sm())
                                 .bg(theme.primary.opacity(widgets::alpha::TINT))
                                 .text_xs()
-                                .child(div().min_w_0().truncate().text_color(theme.muted_foreground).child(r.from.clone()))
+                                .child(div().min_w_0().truncate().text_color(crate::theme::chip_ink(theme.muted_foreground)).child(r.from.clone()))
                                 .child(Icon::new(IconName::ArrowRight).xsmall().flex_none().text_color(theme.primary))
-                                .child(div().min_w_0().truncate().text_color(crate::theme::ink(theme.primary)).child(r.to.clone())),
+                                .child(div().min_w_0().truncate().text_color(crate::theme::chip_ink(theme.primary)).child(r.to.clone())),
                         ))
                 }))
         });
@@ -6021,15 +6020,12 @@ impl BulkSum {
 /// too, so nothing is lost either way.
 fn undo_update(store: &Entity<Store>, root: PathBuf, items: Vec<Replaced>, window: &mut Window, cx: &mut App) {
     let s = store.read(cx);
-    if let Some(why) = s.edit_hold_reason(&root) {
-        window.push_notification(Notification::error(format!("Can't undo now: {why}.")), cx);
-        return;
-    }
     let Some(mut inst) = s.instance(&root).cloned() else {
         window.push_notification(Notification::error("That instance is gone."), cx);
         return;
     };
     s.spawn_instance_job(&root, "Undoing update", move |job| {
+        crate::store::fresh(&mut inst);
         let mut back = 0;
         for it in &items {
             if !hopper::backups::exists(&it.backup) {

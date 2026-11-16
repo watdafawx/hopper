@@ -185,7 +185,7 @@
               </button>
             {/each}
           </div>
-          {#if !places.some((p) => p.ok && !p.here)}<div class="small muted">No other place can take it. Add a node in Settings › Nodes, with Manage.</div>{/if}
+          {#if !places.some((p) => p.ok && !p.here)}<div class="small muted">No other place can take it. Add a node in Settings › Other machines, with Manage.</div>{/if}
         {/if}
         <div class="row wrap opts">
           <div class="seg"><button class:on={mode === 'move'} onclick={() => (mode = 'move')}>Move</button><button class:on={mode === 'copy'} onclick={() => (mode = 'copy')}>Copy</button></div>

@@ -1518,7 +1518,7 @@ impl SettingsPage {
                 )
                 .when(s.launch_native && hopper::msauth::client_id().is_none(), |r| {
                     r.child(warning(
-                        "Needs MS_CLIENT_ID in .env: an Azure app id approved for the Minecraft API.",
+                        "This build has no Microsoft app id (releases do). Building from source: set MS_CLIENT_ID in .env.",
                         cx,
                     ))
                 }),

@@ -3,10 +3,15 @@
 //! last opened for that instance, and a short turn of the icon when a new
 //! entry lands.
 //!
-//! It is its own small view, so the polling and the animation redraw only
+//! It is its own small view, so the recount and the animation redraw only
 //! this button, never the whole header.
+//!
+//! Nothing polls: the count is read when the button is made and again after
+//! the store changes (an instance's folder) or the server panel reports a
+//! change to the server's mods (a Hopper Server), so an idle Hopper never
+//! looks at the folder.
 
-use crate::store::Store;
+use crate::store::{Store, StoreEvent};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::ActiveTheme as _;
@@ -16,9 +21,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// How often the instance's History folder is looked at while its page is
-/// open. A directory listing, so cheap.
-const POLL: Duration = Duration::from_secs(3);
+/// How long after a store change the History folder is counted again, so a
+/// burst of changes (a long download) counts once, not on every update.
+const SETTLE: Duration = Duration::from_secs(2);
 /// The turn of the icon and the ring when something lands.
 const PULSE: Duration = Duration::from_millis(550);
 
@@ -115,49 +120,87 @@ pub struct HistoryButton {
     count: usize,
     /// Bumped when the count grows, to run the animation once.
     pulse: u64,
-    _poll: Task<()>,
+    /// The first read has happened (it sets the count without a pulse).
+    read: bool,
+    /// A count is waiting or running.
+    job: Option<Task<()>>,
+    /// The store changed while a count was waiting: count once more after.
+    again: bool,
+    _subs: Vec<Subscription>,
 }
 
 impl HistoryButton {
     /// An instance's button: opens its History dialog.
     pub fn new(store: Entity<Store>, root: PathBuf, cx: &mut Context<Self>) -> Self {
         let r = root.clone();
-        let open: OnOpen = std::rc::Rc::new(move |window, cx| crate::backups_view::open(store.clone(), r.clone(), window, cx));
-        Self::with(Source::Folder(root), open, cx)
+        let s = store.clone();
+        let open: OnOpen = std::rc::Rc::new(move |window, cx| crate::backups_view::open(s.clone(), r.clone(), window, cx));
+        Self::with(store, Source::Folder(root), open, cx)
     }
 
     /// A server's button: `on_open` shows its Mods › History.
-    pub fn for_panel(t: crate::panel_tabs::Target, on_open: OnOpen, cx: &mut Context<Self>) -> Self {
-        Self::with(Source::Panel(t), on_open, cx)
+    pub fn for_panel(store: Entity<Store>, t: crate::panel_tabs::Target, on_open: OnOpen, cx: &mut Context<Self>) -> Self {
+        Self::with(store, Source::Panel(t), on_open, cx)
     }
 
-    fn with(source: Source, on_open: OnOpen, cx: &mut Context<Self>) -> Self {
-        let r = source.clone();
-        let poll = cx.spawn(async move |this, cx| {
-            let mut first = true;
-            loop {
-                let r2 = r.clone();
-                let n = cx.background_spawn(async move { r2.new_entries() }).await;
-                let alive = this
-                    .update(cx, |t, cx| {
-                        // The first read sets the count without a pulse.
-                        if !first && n > t.count && !cx.reduce_motion() {
-                            t.pulse += 1;
-                        }
-                        first = false;
-                        if n != t.count {
-                            t.count = n;
-                            cx.notify();
-                        }
-                    })
-                    .is_ok();
-                if !alive {
-                    break;
-                }
-                cx.background_executor().timer(POLL).await;
+    fn with(store: Entity<Store>, source: Source, on_open: OnOpen, cx: &mut Context<Self>) -> Self {
+        let subs = match &source {
+            // Anything the store reports may have written an entry (an
+            // update, a switch, a restore, files changed on disk).
+            Source::Folder(_) => vec![cx.observe(&store, |this, _, cx| this.recount(SETTLE, cx))],
+            // A server on a Hopper Server says when its mods changed, which
+            // is where its History entries come from.
+            Source::Panel(t) => {
+                let (panel, id) = (t.remote.panel.clone(), t.remote.id.clone());
+                vec![cx.subscribe(&store, move |this, store, e: &StoreEvent, cx| {
+                    let StoreEvent::PanelChanged(root, areas) = e else { return };
+                    let mine = store
+                        .read(cx)
+                        .server(root)
+                        .and_then(|s| s.remote.as_ref())
+                        .is_some_and(|r| r.panel == panel && r.id == id);
+                    if mine && touches_mods(areas) {
+                        this.recount(SETTLE, cx);
+                    }
+                })]
             }
-        });
-        Self { source, on_open, count: 0, pulse: 0, _poll: poll }
+        };
+        let mut this = Self { source, on_open, count: 0, pulse: 0, read: false, job: None, again: false, _subs: subs };
+        this.recount(Duration::ZERO, cx);
+        this
+    }
+
+    /// Reads the count (off the UI thread) after `wait`. Changes that come
+    /// while one is waiting or running share it, plus one more after.
+    fn recount(&mut self, wait: Duration, cx: &mut Context<Self>) {
+        if self.job.is_some() {
+            self.again = true;
+            return;
+        }
+        let source = self.source.clone();
+        self.job = Some(cx.spawn(async move |this, cx| {
+            if !wait.is_zero() {
+                cx.background_executor().timer(wait).await;
+            }
+            crate::wakes::hit(&crate::wakes::HISTORY);
+            let n = cx.background_spawn(async move { source.new_entries() }).await;
+            this.update(cx, |t, cx| {
+                // The first read sets the count without a pulse.
+                if t.read && n > t.count && !cx.reduce_motion() {
+                    t.pulse += 1;
+                }
+                t.read = true;
+                if n != t.count {
+                    t.count = n;
+                    cx.notify();
+                }
+                t.job = None;
+                if std::mem::take(&mut t.again) {
+                    t.recount(SETTLE, cx);
+                }
+            })
+            .ok();
+        }));
     }
 
     pub fn is_for(&self, root: &Path) -> bool {
@@ -222,5 +265,25 @@ impl Render for HistoryButton {
                         ),
                 )
             })
+    }
+}
+
+/// A Hopper Server reports which areas changed; History entries come from the
+/// mods area ("*" means everything).
+fn touches_mods(areas: &[String]) -> bool {
+    areas.iter().any(|a| a == "mods" || a == "*")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::touches_mods;
+
+    #[test]
+    fn only_mod_changes_recount_the_badge() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(touches_mods(&a(&["mods"])));
+        assert!(touches_mods(&a(&["players", "*"])));
+        assert!(!touches_mods(&a(&["players", "console"])));
+        assert!(!touches_mods(&[]));
     }
 }

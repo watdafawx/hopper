@@ -566,11 +566,7 @@ impl PeersView {
                 .when(!f.left_out.is_empty(), |c| {
                     c.child(
                         widgets::caption(
-                            format!(
-                                "{} file{} can't be downloaded from any site. Ask them to send those.",
-                                f.left_out.len(),
-                                if f.left_out.len() == 1 { "" } else { "s" }
-                            ),
+                            crate::friends::hand_added_line(&f.left_out, if f.peer_name.is_empty() { "them" } else { &f.peer_name }),
                             cx,
                         )
                         .text_xs(),

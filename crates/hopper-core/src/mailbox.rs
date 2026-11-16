@@ -277,6 +277,15 @@ pub fn unauthorized(e: &anyhow::Error) -> bool {
 /// server words, and what to do next.
 pub fn says(e: &anyhow::Error) -> String {
     let theirs = e.downcast_ref::<MailboxError>();
+    // Full means two things: too much still waiting for friends who are
+    // away, or too many packs kept in groups. Both say what makes room.
+    if let Some(m) = theirs.filter(|m| m.code == "storage_full") {
+        return if m.message.contains("group") {
+            "Your groups already hold as many of your packs as they can. Stop sharing a pack in a group you don't need, then try again.".into()
+        } else {
+            "Too many of your packs are waiting for friends who are offline. They get them when they come online, and then there's room to share more. Stopping a share you don't need also makes room.".into()
+        };
+    }
     if let Some(t) = theirs.and_then(|m| says_code(&m.code)) {
         return t.into();
     }
@@ -306,18 +315,33 @@ pub fn says(e: &anyhow::Error) -> String {
 /// Said while Hopper can't reach the friends service at all.
 pub const CANT_CONNECT: &str = "Can't connect right now. We'll keep trying.";
 
+/// Said when the service took a change but couldn't save it.
+pub const SAVE_FAILED: &str = "Friends couldn't save your change just now. Hopper sends it again by itself.";
+
+/// Whether a failed call is worth trying again by itself: no answer, the
+/// service busy or down for a moment, or it couldn't save the change.
+/// Anything else (full, not allowed, a used-up code) fails the same way
+/// again.
+pub fn retryable(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<MailboxError>()
+        .is_some_and(|m| m.status == 0 || (500..600).contains(&m.status) || matches!(m.code.as_str(), "save_failed" | "busy" | "internal"))
+}
+
 const SOMETHING_WRONG: &str = "Something went wrong with Friends. Try again in a few minutes.";
 
 /// Plain sentences for the service's other answers.
 fn says_code(code: &str) -> Option<&'static str> {
     Some(match code {
-        "busy" | "internal" | "storage_full" => SOMETHING_WRONG,
+        "busy" | "internal" => SOMETHING_WRONG,
         "rate_limited" => "Too many tries. Wait a minute, then try again.",
         "too_large" => "This pack has too many mods to share with friends.",
         "group_full" => "That group is full.",
         "groups_full" => "You're in as many groups as Hopper allows. Leave or delete one first.",
         "group_packs_full" => "This group has as many packs as it can hold. Stop sharing one first.",
         "owner_leaves" => "You made this group, so you can't leave it. Delete it instead.",
+        // The change reached the service but its disk said no; that passes
+        // by itself, and Hopper sends the change again.
+        "save_failed" => SAVE_FAILED,
         _ => return None,
     })
 }
@@ -786,6 +810,74 @@ fn answer(
     Ok(v)
 }
 
+/// How someone got onto the Everyone list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Met {
+    /// A friend.
+    Friend,
+    /// Not a friend, but said yes in a group you joined.
+    Group,
+    /// Not a friend and in none of your groups; shares a pack with you directly.
+    Pack,
+}
+
+/// One person on the Friends panel's Everyone list.
+#[derive(Clone, Debug)]
+pub struct Listed {
+    pub id: String,
+    pub name: String,
+    /// None for someone who isn't your friend: met through a group or a pack.
+    pub friend: Option<Friend>,
+    pub met: Met,
+    /// Their packs shown on the list (not the ones only shared with groups
+    /// you're in: those are on the group's page).
+    pub packs: Vec<Event>,
+}
+
+/// Everyone on the Friends panel's list: friends (online first, then the
+/// most recently seen), then people who aren't your friends: anyone who
+/// shares a pack outside your groups (so it doesn't vanish), and every
+/// member of a group you joined. Each person once, never you. `met` says
+/// which of the three they are; a group member who also shares a pack
+/// directly counts as a group member. `recipes` are the packs to show
+/// (hidden ones already left out).
+pub fn everyone(me: &str, friends: &[Friend], recipes: &[Event], groups: &[Group], down: bool) -> Vec<Listed> {
+    let joined: Vec<&Group> = groups.iter().filter(|g| g.me.joined).collect();
+    // A pack that came only through groups you're in is on the group's page.
+    let in_groups = |e: &Event| !e.direct && !e.groups.is_empty() && e.groups.iter().all(|g| joined.iter().any(|x| &x.id == g));
+    let theirs: Vec<&Event> = recipes.iter().filter(|e| !in_groups(e)).collect();
+    let mut friends: Vec<Friend> = friends.to_vec();
+    friends.sort_by_key(|f| (std::cmp::Reverse(f.online && !down), std::cmp::Reverse(f.last_seen)));
+    let mut people: Vec<Listed> = Vec::new();
+    let add = |people: &mut Vec<Listed>, id: &str, name: &str, friend: Option<Friend>| {
+        if id.is_empty() || id == me || people.iter().any(|p| p.id == id) {
+            return;
+        }
+        let met = if friend.is_some() { Met::Friend } else { Met::Group };
+        people.push(Listed { id: id.to_string(), name: name.to_string(), friend, met, packs: Vec::new() });
+    };
+    for f in friends {
+        let (id, name) = (f.id.clone(), f.name.clone());
+        add(&mut people, &id, &name, Some(f));
+    }
+    for e in &theirs {
+        add(&mut people, &e.from, &e.from_name, None);
+    }
+    // Only members who said yes: the invited aren't in the group yet.
+    for m in joined.iter().flat_map(|g| g.members.iter()).filter(|m| m.joined) {
+        add(&mut people, &m.id, &m.name, None);
+    }
+    for p in &mut people {
+        p.packs = theirs.iter().filter(|e| e.from == p.id).map(|e| (*e).clone()).collect();
+        // Someone in a group with you stays under groups even if they also
+        // share a pack directly; only the rest are met through a pack.
+        if p.friend.is_none() && !joined.iter().flat_map(|g| g.members.iter()).any(|m| m.joined && m.id == p.id) {
+            p.met = Met::Pack;
+        }
+    }
+    people
+}
+
 fn account_path() -> PathBuf {
     crate::paths::dirs()
         .map(|d| d.data_dir().join("mailbox.json"))
@@ -795,6 +887,114 @@ fn account_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn friend(id: &str, name: &str) -> Friend {
+        Friend { id: id.into(), name: name.into(), ..Default::default() }
+    }
+
+    fn member(id: &str, name: &str, joined: bool) -> GroupMember {
+        GroupMember { id: id.into(), name: name.into(), joined, ..Default::default() }
+    }
+
+    fn group(id: &str, joined: bool, members: Vec<GroupMember>) -> Group {
+        Group { id: id.into(), name: id.into(), owner: "me".into(), me: GroupMe { joined, in_step: false }, members, ..Default::default() }
+    }
+
+    fn ids(list: &[Listed]) -> Vec<&str> {
+        list.iter().map(|p| p.id.as_str()).collect()
+    }
+
+    #[test]
+    fn group_members_who_arent_friends_are_listed() {
+        // Mia is a friend; Robin is only in the group, and shares nothing.
+        let friends = [friend("mia", "Mia")];
+        let groups = [group("g1", true, vec![member("me", "Me", true), member("mia", "Mia", true), member("robin", "Robin", true)])];
+        let list = everyone("me", &friends, &[], &groups, false);
+        assert_eq!(ids(&list), ["mia", "robin"]);
+        assert!(list[0].friend.is_some());
+        assert_eq!((list[1].name.as_str(), list[1].friend.is_none()), ("Robin", true));
+    }
+
+    #[test]
+    fn group_members_once_never_you_never_the_invited() {
+        let groups = [
+            group("g1", true, vec![member("me", "Me", true), member("robin", "Robin", true), member("sam", "Sam", false)]),
+            group("g2", true, vec![member("robin", "Robin", true), member("me", "Me", true)]),
+            // An invitation you haven't said yes to: not your group yet.
+            group("g3", false, vec![member("kai", "Kai", true)]),
+        ];
+        let list = everyone("me", &[], &[], &groups, false);
+        assert_eq!(ids(&list), ["robin"]);
+    }
+
+    #[test]
+    fn a_friend_in_a_group_is_listed_as_a_friend() {
+        let friends = [friend("robin", "Robin")];
+        let groups = [group("g1", true, vec![member("robin", "Robin", true)])];
+        let list = everyone("me", &friends, &[], &groups, false);
+        assert_eq!(ids(&list), ["robin"]);
+        assert!(list[0].friend.is_some());
+    }
+
+    #[test]
+    fn group_only_packs_stay_on_the_group_page() {
+        let direct = Event { from: "zoe".into(), from_name: "Zoe".into(), inst: "a".into(), ..Default::default() };
+        let via_group = Event { from: "robin".into(), from_name: "Robin".into(), inst: "b".into(), direct: false, groups: vec!["g1".into()], ..Default::default() };
+        let groups = [group("g1", true, vec![member("robin", "Robin", true)])];
+        let list = everyone("me", &[], &[direct, via_group], &groups, false);
+        // Zoe shares outside a group, Robin is in it; Robin's group pack isn't
+        // repeated on the list.
+        assert_eq!(ids(&list), ["zoe", "robin"]);
+        assert_eq!((list[0].packs.len(), list[1].packs.len()), (1, 0));
+    }
+
+    fn met_of<'a>(list: &'a [Listed], id: &str) -> Met {
+        list.iter().find(|p| p.id == id).unwrap().met
+    }
+
+    #[test]
+    fn a_direct_sharer_who_isnt_in_a_group_is_met_by_pack() {
+        let direct = Event { from: "zoe".into(), from_name: "Zoe".into(), inst: "a".into(), ..Default::default() };
+        let groups = [group("g1", true, vec![member("robin", "Robin", true)])];
+        let list = everyone("me", &[friend("mia", "Mia")], &[direct], &groups, false);
+        assert_eq!(met_of(&list, "mia"), Met::Friend);
+        assert_eq!(met_of(&list, "zoe"), Met::Pack);
+        assert_eq!(met_of(&list, "robin"), Met::Group);
+    }
+
+    #[test]
+    fn a_group_member_who_also_shares_directly_stays_under_groups() {
+        let direct = Event { from: "robin".into(), from_name: "Robin".into(), inst: "a".into(), ..Default::default() };
+        let groups = [group("g1", true, vec![member("robin", "Robin", true)])];
+        let list = everyone("me", &[], &[direct], &groups, false);
+        assert_eq!(ids(&list), ["robin"]);
+        assert_eq!(met_of(&list, "robin"), Met::Group);
+        assert_eq!(list[0].packs.len(), 1);
+    }
+
+    #[test]
+    fn someone_only_invited_to_a_group_who_shares_directly_is_met_by_pack() {
+        // Sam hasn't said yes to the group, so he isn't "in a group with you".
+        let direct = Event { from: "sam".into(), from_name: "Sam".into(), inst: "a".into(), ..Default::default() };
+        let groups = [group("g1", true, vec![member("sam", "Sam", false)])];
+        let list = everyone("me", &[], &[direct], &groups, false);
+        assert_eq!(met_of(&list, "sam"), Met::Pack);
+    }
+
+    #[test]
+    fn friends_online_first_then_last_seen() {
+        let mut a = friend("a", "A");
+        a.last_seen = 5;
+        let mut b = friend("b", "B");
+        b.online = true;
+        let mut c = friend("c", "C");
+        c.last_seen = 9;
+        let list = everyone("me", &[a.clone(), b.clone(), c.clone()], &[], &[], false);
+        assert_eq!(ids(&list), ["b", "c", "a"]);
+        // Mailbox down: nobody is known to be online.
+        let list = everyone("me", &[a, b, c], &[], &[], true);
+        assert_eq!(ids(&list), ["c", "a", "b"]);
+    }
 
     #[test]
     fn an_account_round_trips() {
@@ -981,6 +1181,10 @@ mod tests {
         assert_eq!(says(&err(403, "")), SOMETHING_WRONG);
         assert_eq!(says(&err(503, "busy")), SOMETHING_WRONG);
         assert_eq!(says(&err(429, "rate_limited")), "Too many tries. Wait a minute, then try again.");
+        // Couldn't save: said plainly, and worth trying again by itself.
+        assert_eq!(says(&err(503, "save_failed")), SAVE_FAILED);
+        assert!(retryable(&err(503, "save_failed")) && retryable(&err(0, "")) && retryable(&err(502, "")));
+        assert!(!retryable(&err(409, "storage_full")) && !retryable(&err(403, "")) && !retryable(&anyhow::anyhow!("x")));
         assert_eq!(
             says(&err(409, "owner_leaves")),
             "You made this group, so you can't leave it. Delete it instead."
@@ -988,9 +1192,23 @@ mod tests {
         // Hopper's own errors already read as sentences.
         assert_eq!(says(&anyhow::anyhow!("The pack folder is gone")), "The pack folder is gone");
         let words = ["relay", "mailbox", "sync service", "token", "429", "409"];
-        for code in ["busy", "internal", "storage_full", "rate_limited", "too_large", "group_full", "groups_full", "group_packs_full", "owner_leaves", "friends_full", "their_friends_full", "invite_unknown", "needs_update", "invites_full", ""] {
+        for code in ["busy", "internal", "storage_full", "rate_limited", "too_large", "group_full", "groups_full", "group_packs_full", "owner_leaves", "friends_full", "their_friends_full", "invite_unknown", "needs_update", "invites_full", "save_failed", ""] {
             let said = says(&err(409, code)).to_lowercase();
             assert!(!words.iter().any(|w| said.contains(w)), "{code}: {said}");
+        }
+    }
+
+    #[test]
+    fn full_says_what_makes_room() {
+        let full = |message: &str| -> anyhow::Error {
+            MailboxError { status: 409, code: "storage_full".into(), message: message.into() }.into()
+        };
+        let waiting = says(&full("you have shared too much with your friends at once"));
+        assert!(waiting.contains("waiting for friends who are offline") && waiting.contains("come online"), "{waiting}");
+        let groups = says(&full("you share too much through groups already"));
+        assert!(groups.contains("Stop sharing a pack in a group"), "{groups}");
+        for said in [waiting, groups] {
+            assert!(!said.contains("Try again in a few minutes"), "{said}");
         }
     }
 

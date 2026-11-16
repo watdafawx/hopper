@@ -111,6 +111,44 @@ async fn gets_no_secret(t: &T, who: As<'_>, label: &str) {
     // Ordinary files still open.
     let (s, _) = send(t, &who, "GET", &format!("/api/v1/fs/{id}/text?path=hello.txt"), None).await;
     assert_eq!(s, StatusCode::OK, "{label}");
+    // Many files at once: the paths are in the body, the check the same.
+    let (s, raw) = send(t, &who, "POST", &format!("/api/v1/fs/{id}/texts"), Some(json!({ "paths": ["hello.txt", "server.properties"] }))).await;
+    assert_ne!(s, StatusCode::OK, "{label}: texts");
+    assert!(!has_secret(&raw), "{label}: texts");
+}
+
+/// Many files' text in one request (Hopper's configs compare): what reads
+/// comes back, what doesn't is named, and it's capped.
+#[tokio::test]
+async fn texts_reads_many_files_at_once() {
+    let t = panel();
+    let owner = sign_in(&t, None, PASSWORD).await;
+    let id = t.server.clone();
+    let srv = t.dir.join("servers").join("Test Server");
+    std::fs::create_dir_all(srv.join("config")).unwrap();
+    std::fs::write(srv.join("config").join("a.toml"), "a = 1\n").unwrap();
+    std::fs::write(srv.join("config").join("b.json"), "{}").unwrap();
+    let url = format!("/api/v1/fs/{id}/texts");
+    let paths = json!({ "paths": ["config/a.toml", "config/b.json", "config/missing.toml", "../outside.txt"] });
+    let (s, raw) = send(&t, &As::Cookie(&owner), "POST", &url, Some(paths)).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&raw));
+    let v = body(&raw);
+    assert_eq!(v["texts"]["config/a.toml"], "a = 1\n");
+    assert_eq!(v["texts"]["config/b.json"], "{}");
+    assert!(v["errors"]["config/missing.toml"].is_string(), "{v}");
+    assert!(v["errors"]["../outside.txt"].is_string(), "{v}");
+    assert_eq!(v["texts"].as_object().unwrap().len(), 2);
+    // The owner sees server.properties here as with `text`.
+    let (s, raw) = send(&t, &As::Cookie(&owner), "POST", &url, Some(json!({ "paths": ["server.properties"] }))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(has_secret(&raw));
+    // Too many files in one ask is refused, not read.
+    let many: Vec<String> = (0..401).map(|i| format!("config/{i}.toml")).collect();
+    let (s, _) = send(&t, &As::Cookie(&owner), "POST", &url, Some(json!({ "paths": many }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // Someone signed out gets nothing.
+    let (s, _, _) = call("POST", &url).origin(OWN).h("x-hopperd", "1").json(json!({ "paths": ["config/a.toml"] })).send(&t).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
 /// The owner saves server.properties once, so a saved-over copy with the

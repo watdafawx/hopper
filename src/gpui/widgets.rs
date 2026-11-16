@@ -404,6 +404,9 @@ pub struct ModTags<'a> {
     pub only_here: bool,
     /// "client" | "server" | "both" | "".
     pub env: &'a str,
+    /// Only Modrinth says where it runs (CurseForge doesn't): its chip's
+    /// tooltip says so.
+    pub env_from_modrinth: bool,
     pub categories: &'a [String],
     pub modrinth: bool,
     /// Named in the instance's last game crash: why.
@@ -439,11 +442,22 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         (theme.warning, theme.info, theme.success, theme.danger, theme.muted_foreground);
     let tag = |c: Hsla, text: SharedString| chip(c).child(text);
     let env = match t.env {
-        "client" => Some(("Client only", tag(warn, "Client only".into()))),
-        "server" => Some(("Server only", tag(info, "Server only".into()))),
-        "both" => Some(("Client + server", tag(muted, "Client + server".into()))),
+        "client" => Some(("Client only", warn)),
+        "server" => Some(("Server only", info)),
+        "both" => Some(("Client + server", muted)),
         _ => None,
-    };
+    }
+    .map(|(label, color)| {
+        let el = div()
+            .id(ElementId::Name(format!("side-tag:{}", t.key).into()))
+            .flex_none()
+            .child(chip(color).child(label))
+            .when(t.env_from_modrinth, |d| {
+                let tip = SharedString::from(format!("{} (from Modrinth)", hopper::modsides::label(t.env)));
+                d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+            });
+        (label, el)
+    });
     let shown = t.max_categories.unwrap_or(MOD_TAG_CATEGORIES).min(t.categories.len());
     let more = t.categories.len() - shown;
     let crashed = t.crashed.map(|why| {
@@ -581,8 +595,9 @@ pub fn glass(cx: &App) -> bool {
     cx.theme().background.a < 0.99
 }
 
-/// A rounded status pill: `color` text on a tinted fill, no border, with a
-/// small glowing dot when `dot`.
+/// A rounded status pill: `color` text (darkened on light themes, see
+/// `theme::chip_ink`) on a tinted fill, no border, with a small glowing dot
+/// in the plain colour when `dot`.
 pub fn pill(text: impl Into<SharedString>, color: Hsla, dot: bool) -> Div {
     div()
         .flex()
@@ -595,7 +610,7 @@ pub fn pill(text: impl Into<SharedString>, color: Hsla, dot: bool) -> Div {
         // The small radius, like every chip.
         .rounded(crate::theme::radius_sm())
         .bg(color.opacity(alpha::TINT))
-        .text_color(color)
+        .text_color(crate::theme::chip_ink(color))
         .text_xs()
         // The UI font's tall ascent leaves centred capitals about a pixel
         // low; a little more room below lifts them to the middle.
@@ -1252,10 +1267,10 @@ pub trait Clickable: InteractiveElement + Styled + Sized {
 
 impl<E: InteractiveElement + Styled> Clickable for E {}
 
-/// A chip: `color` text (darkened on light themes, see `theme::ink`) on a
+/// A chip: `color` text (darkened on light themes, see `theme::chip_ink`) on a
 /// faint fill of it, no border, the small radius. gpui_kit's xsmall tag size; `.small()` still works.
 pub fn chip(color: Hsla) -> gpui_kit::component::tag::Tag {
-    gpui_kit::component::tag::Tag::custom(color.opacity(alpha::TINT), crate::theme::ink(color), gpui_kit::transparent_black())
+    gpui_kit::component::tag::Tag::custom(color.opacity(alpha::TINT), crate::theme::chip_ink(color), gpui_kit::transparent_black())
         .xsmall()
         .flex_none()
         // A count or label in a chip stays on one line, however long.
@@ -1371,7 +1386,7 @@ where
                             .rounded(crate::theme::radius_sm())
                             .bg(color.opacity(alpha::TINT))
                             .text_xs()
-                            .text_color(color)
+                            .text_color(crate::theme::chip_ink(color))
                             .child(Icon::new(IconName::TriangleAlert).xsmall())
                             .child(title.into())
                             .child(div().opacity(0.6).child("·"))

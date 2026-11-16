@@ -24,7 +24,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::groupsync::Kind;
 use hopper::instances::Instance;
-use hopper::mailbox::{Event, Friend, Group};
+use hopper::mailbox::{Event, Friend, Group, Met};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -83,11 +83,12 @@ enum Page {
     Packs,
 }
 
-/// Someone in the Friends list: a friend, or someone who shares a pack
-/// through a group without being one. `packs` leaves out what's listed
-/// under a group.
+/// Someone in the Friends list: a friend, a member of a group you joined, or
+/// someone who shares a pack with you directly. `packs` leaves out what's
+/// listed under a group.
 struct Person {
     friend: Option<Friend>,
+    met: Met,
     id: String,
     name: String,
     packs: Vec<Event>,
@@ -953,32 +954,22 @@ impl FriendsPanel {
             .into_any_element()
     }
 
-    /// Everyone in the list: friends (online first, then the most recently
-    /// seen), then anyone who shares a pack outside a group without being a
-    /// friend, so their pack doesn't vanish.
+    /// Everyone in the list ([`hopper::mailbox::everyone`]): friends, then
+    /// people who aren't: members of your groups and anyone sharing a pack
+    /// outside them.
     fn people(&self, recipes: &[Event], groups: &[Group], down: bool, cx: &App) -> Vec<Person> {
         let s = self.store.read(cx);
-        // A pack that came only through groups shown in the list is on the
-        // group's page.
-        let in_groups = |e: &Event| {
-            !e.direct && !e.groups.is_empty() && e.groups.iter().all(|g| groups.iter().any(|x| &x.id == g && x.me.joined))
-        };
-        let theirs: Vec<&Event> = recipes.iter().filter(|e| !in_groups(e)).collect();
-        let mut friends: Vec<Friend> = s.mailbox_friends().to_vec();
-        friends.sort_by_key(|f| (std::cmp::Reverse(f.online && !down), std::cmp::Reverse(f.last_seen)));
-        let mut people: Vec<Person> = friends
+        hopper::mailbox::everyone(&s.mailbox_id(), s.mailbox_friends(), recipes, groups, down)
             .into_iter()
-            .map(|f| Person { id: f.id.clone(), name: name_or(&f.name, "A friend"), friend: Some(f), packs: Vec::new() })
-            .collect();
-        for e in &theirs {
-            if !people.iter().any(|p| p.id == e.from) {
-                people.push(Person { friend: None, id: e.from.clone(), name: name_or(&e.from_name, "A friend"), packs: Vec::new() });
-            }
-        }
-        for p in &mut people {
-            p.packs = theirs.iter().filter(|e| e.from == p.id).map(|e| (*e).clone()).collect();
-        }
-        people
+            .map(|p| {
+                let or = match p.met {
+                    Met::Friend => "A friend",
+                    Met::Group => "A group member",
+                    Met::Pack => "Someone",
+                };
+                Person { name: name_or(&p.name, or), id: p.id, friend: p.friend, met: p.met, packs: p.packs }
+            })
+            .collect()
     }
 
     /// How many of this PC's packs `id` gets.
@@ -1035,7 +1026,7 @@ impl FriendsPanel {
             1 => "1 pack".to_string(),
             n => format!("{n} packs"),
         };
-        let sub = format!("{} · {packs}", status(p.friend.as_ref(), down));
+        let sub = format!("{} · {packs}", status(p.friend.as_ref(), p.met, down));
         // As their page's New section counts: changed since the page was
         // last open, and not followed (those show under Following).
         let s = self.store.read(cx);
@@ -1072,7 +1063,7 @@ impl FriendsPanel {
                     .child(div().text_sm().font_medium().truncate().child(widgets::marked(p.name.clone(), words, cx)))
                     .child(widgets::caption(sub, cx).text_xs().truncate()),
             )
-            .when(news > 0, |r| r.child(widgets::chip(chip_ink(theme.primary, cx)).child(format!("{news} new"))))
+            .when(news > 0, |r| r.child(widgets::chip(theme.primary).child(format!("{news} new"))))
             .children(menu)
             .child(Icon::new(IconName::ChevronRight).small().flex_none().text_color(theme.muted_foreground))
             .into_any_element()
@@ -1103,7 +1094,7 @@ impl FriendsPanel {
     fn friend_page(&mut self, p: &Person, down: bool, window: &mut Window, cx: &mut Context<Self>) -> (Option<AnyElement>, AnyElement) {
         let theme = cx.theme().clone();
         let n = p.packs.len();
-        let mut sub = status(p.friend.as_ref(), down);
+        let mut sub = status(p.friend.as_ref(), p.met, down);
         if p.friend.is_some() {
             sub += &match self.gets(&p.id, cx) {
                 0 => " · gets none of your packs".to_string(),
@@ -1261,13 +1252,22 @@ impl FriendsPanel {
             cx,
         )
         .text_sm();
+        // Through a group the pack is kept the same both ways.
+        let two_way = !e.groups.is_empty();
         let action: AnyElement = match (&waiting, follows.is_empty()) {
             (Some(root), _) => self.update_button(format!("their-update:{key}").into(), e, root.clone(), down, cx).into_any_element(),
             (None, false) => div()
                 .id(SharedString::from(format!("following:{key}")))
                 .flex_none()
-                .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("You follow this pack. Your copy updates when they change theirs.").build(w, cx))
-                .child(widgets::chip(chip_ink(theme.success, cx)).child("Following"))
+                .tooltip(move |w, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(if two_way {
+                        "You follow this pack. It stays the same for everyone in the group: changes go both ways."
+                    } else {
+                        "You follow this pack. Your copy updates when they change theirs."
+                    })
+                    .build(w, cx)
+                })
+                .child(widgets::chip(theme.success).child("Following"))
                 .into_any_element(),
             (None, true) => {
                 let e = e.clone();
@@ -1276,7 +1276,13 @@ impl FriendsPanel {
                     .outline()
                     .label("Follow")
                     .disabled(down)
-                    .tooltip(if down { CANT_CONNECT } else { "Follow: your copy updates when they change theirs." })
+                    .tooltip(if down {
+                        CANT_CONNECT
+                    } else if two_way {
+                        "Follow: this pack stays the same for everyone in the group. Changes go both ways."
+                    } else {
+                        "Follow: your copy updates when they change theirs."
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| this.follow(e.clone(), window, cx)));
                 widgets::reveal_on_hover(row_id.clone(), SharedString::from(format!("follow-at:{key}")), b, window, cx).into_any_element()
             }
@@ -1320,16 +1326,7 @@ impl FriendsPanel {
                     })
                     .when_some(changed, |c, t| c.child(widgets::caption(t, cx).text_xs().truncate().pl(rems(1.625))))
                     .when_some(copy_note, |c, t| c.child(warn_line(t, cx)))
-                    .when(missing > 0, |c| {
-                        c.child(warn_line(
-                            format!(
-                                "{missing} file{} can't be downloaded from any site. Ask {sender} to send {}.",
-                                if missing == 1 { "" } else { "s" },
-                                if missing == 1 { "it" } else { "them" }
-                            ),
-                            cx,
-                        ))
-                    }),
+                    .when(missing > 0, |c| c.child(warn_line(hand_added_line(&e.left_out, &sender), cx))),
             )
             .child(action)
             .children(hide)
@@ -1760,7 +1757,7 @@ impl FriendsPanel {
                         .gap_0p5()
                         .child(div().text_sm().font_medium().child("Keep my packs the same as the group"))
                         .child(widgets::fine_print(
-                            "This PC gets the group's packs, and when anyone changes a mod in one, your copy changes too. Your other instances don't change.",
+                            "Hopper asks before getting a pack someone shares with the group. Once you have one, when anyone changes a mod in it, your copy changes too. Your other instances don't change.",
                             cx,
                         )),
                 )
@@ -2387,8 +2384,8 @@ impl FriendsPanel {
         (Some(top), self.everyone(&people, &recipes, down, window, cx))
     }
 
-    /// Everyone: online friends, then offline ones, then people met only
-    /// through a group. Searching narrows them and adds the packs that match.
+    /// Everyone: online friends, then offline ones, then members of your
+    /// groups, then people who only share a pack with you. Searching narrows them and adds the packs that match.
     fn everyone(&mut self, people: &[Person], recipes: &[Event], down: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let s = self.store.read(cx);
         let has_friends = people.iter().any(|p| p.friend.is_some());
@@ -2401,11 +2398,13 @@ impl FriendsPanel {
         let mut on_rows = Vec::new();
         let mut off_rows = Vec::new();
         let mut other_rows = Vec::new();
+        let mut sharer_rows = Vec::new();
         for (i, p) in people.iter().enumerate().filter(|(_, p)| hits(&p.name, &words)) {
             let row = self.friend_row(i, p, &words, down, window, cx);
             match &p.friend {
                 Some(f) if f.online && !down => on_rows.push(row),
                 Some(_) => off_rows.push(row),
+                None if p.met == Met::Pack => sharer_rows.push(row),
                 None => other_rows.push(row),
             }
         }
@@ -2422,7 +2421,7 @@ impl FriendsPanel {
             }
         }
         let _ = recipes;
-        let nothing = !words.is_empty() && on_rows.is_empty() && off_rows.is_empty() && other_rows.is_empty() && pack_hits.is_empty();
+        let nothing = !words.is_empty() && on_rows.is_empty() && off_rows.is_empty() && other_rows.is_empty() && sharer_rows.is_empty() && pack_hits.is_empty();
         let groups_here = self.store.read(cx).mailbox_groups().iter().any(|g| g.me.joined);
         v_flex()
             .pb_2()
@@ -2432,6 +2431,7 @@ impl FriendsPanel {
             .when(!on_rows.is_empty(), |c| c.child(cap("Online", Some(on_rows.len()), None, cx)).children(on_rows))
             .when(!off_rows.is_empty(), |c| c.child(cap("Offline", Some(off_rows.len()), None, cx)).children(off_rows))
             .when(!other_rows.is_empty(), |c| c.child(cap("In your groups", Some(other_rows.len()), None, cx)).children(other_rows))
+            .when(!sharer_rows.is_empty(), |c| c.child(cap("Sharing with you", Some(sharer_rows.len()), None, cx)).children(sharer_rows))
             .when(!pack_hits.is_empty(), |c| c.child(cap("Packs", Some(pack_hits.len()), None, cx)).children(pack_hits))
             .when(nothing, |c| c.child(div().px_3().py_3().child(widgets::fine_print(format!("Nothing matches \u{201c}{q}\u{201d}."), cx))))
             .when(words.is_empty() && has_friends, |c| {
@@ -2491,7 +2491,7 @@ impl FriendsPanel {
                 h_flex()
                     .gap_2()
                     .items_start()
-                    .child(Icon::new(icon.0).xsmall().flex_none().mt(px(3.)).text_color(chip_ink(icon.1, cx)))
+                    .child(Icon::new(icon.0).xsmall().flex_none().mt(px(3.)).text_color(crate::theme::chip_ink(icon.1)))
                     .child(
                         v_flex()
                             .flex_1()
@@ -2642,6 +2642,8 @@ impl Render for FriendsPanel {
         let heard = !s.mailbox_friends().is_empty() || !s.mailbox_recipes().is_empty() || !s.mailbox_groups().is_empty();
         let groups: Vec<Group> = s.mailbox_groups().to_vec();
         let down = matches!(status, SyncStatus::Down(_));
+        let unsent = s.unsent_line();
+        let given_up = s.given_up();
         let body: AnyElement = match &status {
             SyncStatus::Off => self.off(cx),
             SyncStatus::Connecting if !heard => {
@@ -2686,11 +2688,51 @@ impl Render for FriendsPanel {
                                                 (true, false) => format!("Showing what you had last time. {e}"),
                                             },
                                             cx,
-                                        )),
+                                        ))
+                                        // Changes made here wait for the connection.
+                                        .when_some(unsent.clone(), |c, t| {
+                                            c.child(div().pt_1().text_xs().text_color(theme.foreground).child(t))
+                                        }),
                                 ),
                             ),
                         )
                     })
+                    // Connected, but changes still wait: on their way, or
+                    // the last send failed and Hopper tries again.
+                    .when_some(unsent.filter(|_| !down), |c, t| {
+                        c.child(
+                            div().p_3().flex_none().child(
+                                widgets::notice_bar(theme.primary, IconName::CloudUpload, cx)
+                                    .px_3()
+                                    .items_start()
+                                    .child(div().flex_1().min_w_0().text_sm().child(t)),
+                            ),
+                        )
+                    })
+                    // Packs Hopper stopped updating by itself: the player
+                    // can start it again. The button sits under the words so
+                    // they keep the panel's width.
+                    .children(given_up.into_iter().enumerate().map(|(i, (root, t))| {
+                        let store = self.store.clone();
+                        div().p_3().flex_none().child(
+                            widgets::notice_bar(theme.warning, IconName::TriangleAlert, cx).px_3().items_start().child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .child(div().text_sm().child(t))
+                                    .child(
+                                        h_flex().justify_end().child(
+                                            Button::new(("friends-try-again", i))
+                                                .small()
+                                                .outline()
+                                                .label("Try again")
+                                                .on_click(move |_, _, cx| store.update(cx, |s, cx| s.try_follow_again(&root, cx))),
+                                        ),
+                                    ),
+                            ),
+                        )
+                    }))
                     .children(top)
                     .child(div().id(scroll_id).flex_1().min_h_0().overflow_y_scrollbar().child(content));
                 h_flex().size_full().items_start().child(self.rail(&groups, cx)).child(main).into_any_element()
@@ -2727,13 +2769,6 @@ impl Render for FriendsPanel {
     }
 }
 
-/// A chip's text colour. On a light theme orange and green text on their
-/// own faint tint is too pale to read (2.8:1 for the orange), so it is
-/// darkened there until the 12px text reads at 4.5:1 on the tint.
-fn chip_ink(c: Hsla, cx: &App) -> Hsla {
-    if cx.theme().mode.is_dark() { c } else { hsla(c.h, c.s, (c.l - 0.13).max(0.), c.a) }
-}
-
 /// "or" between two ways in, with a line either side.
 fn or_line(cx: &App) -> Div {
     let line = cx.theme().border;
@@ -2746,13 +2781,16 @@ fn or_line(cx: &App) -> Div {
 
 /// Whether a friend is online. With the service out of reach "online" is
 /// stale, so it says when they were last seen instead.
-fn status(f: Option<&Friend>, down: bool) -> String {
+/// For someone who isn't a friend it says how they got on the list: in a
+/// group with you, or just sharing a pack (they're not in any group of yours).
+fn status(f: Option<&Friend>, met: Met, down: bool) -> String {
     match f {
         Some(f) if f.online && !down => "Online".to_string(),
         Some(f) if down && f.last_seen == 0 => "Online status unknown".to_string(),
         Some(f) if f.last_seen > 0 => format!("Last online {}", ago(f.last_seen)),
         Some(_) => "Offline".to_string(),
-        None => "In a group with you".to_string(),
+        None if met == Met::Group => "In a group with you".to_string(),
+        None => "Not a friend yet".to_string(),
     }
 }
 
@@ -2765,7 +2803,7 @@ fn member_status(m: &hopper::mailbox::GroupMember, you: bool, friend: Option<&Fr
         return String::new();
     }
     match friend {
-        Some(f) => status(Some(f), down),
+        Some(f) => status(Some(f), Met::Friend, down),
         None => String::new(),
     }
 }
@@ -3003,11 +3041,17 @@ impl Render for FollowChooser {
             FollowPick::Existing(ix) => rows.get(ix).map(|r| r.1.clone()),
             FollowPick::New => None,
         };
+        // A group's pack is kept the same both ways; a friend's own share
+        // only comes from them.
+        let group = !self.req.groups.is_empty();
+        let intro = if group {
+            "Follow: this pack stays the same for everyone in the group. When anyone changes it, you included, the change reaches everyone. Only the mod list is shared. The mods download from their own sites.".to_string()
+        } else {
+            format!("Follow: your copy updates when {who} changes theirs. Your changes stay on this PC. Only the mod list comes from {who}. The mods download from their own sites.")
+        };
         v_flex()
             .gap_3()
-            .child(div().text_sm().child(format!(
-                "Follow: your copy updates when {who} changes theirs. Only the mod list comes from {who}. The mods download from their own sites."
-            )))
+            .child(div().text_sm().child(intro))
             .child(widgets::caption("Where should it go?", cx).text_xs().font_medium())
             .child(list)
             .when_some(over, |c, inst| {
@@ -3019,22 +3063,14 @@ impl Render for FollowChooser {
                         .rounded(theme.radius)
                         .bg(theme.warning.opacity(widgets::alpha::TINT))
                         .child(Icon::new(IconName::TriangleAlert).small().flex_none().text_color(theme.warning))
-                        .child(div().flex_1().min_w_0().text_sm().child(format!(
-                            "{inst} gets {who}'s mods and settings now, and again each time {who} changes the pack. Your own changes there are replaced. You can undo each change in History."
-                        ))),
+                        .child(div().flex_1().min_w_0().text_sm().child(if group {
+                            format!("{inst} gets the group's mods and settings now. After that, what you change there goes to the group, and what others change comes to you. You can undo each change in History.")
+                        } else {
+                            format!("{inst} gets {who}'s mods and settings now, and again each time {who} changes the pack. Your own changes there are replaced. You can undo each change in History.")
+                        })),
                 )
             })
-            .when(!self.req.left_out.is_empty(), |c| {
-                let n = self.req.left_out.len();
-                c.child(widgets::fine_print(
-                    format!(
-                        "{n} file{} can't be downloaded from any site. Ask {who} to send {}.",
-                        if n == 1 { "" } else { "s" },
-                        if n == 1 { "it" } else { "them" }
-                    ),
-                    cx,
-                ))
-            })
+            .when(!self.req.left_out.is_empty(), |c| c.child(widgets::fine_print(hand_added_line(&self.req.left_out, &who), cx)))
     }
 }
 
@@ -3233,7 +3269,7 @@ impl Render for GroupForm {
                     .gap_1()
                     .when(matches!(self.mode, GroupMode::New), |c| {
                         c.child(widgets::fine_print(
-                            "A group shares packs with several friends at once. Turn on \u{201c}Keep my packs the same as the group\u{201d} and this PC follows every pack someone in the group follows.",
+                            "A group shares packs with several friends at once. Turn on \u{201c}Keep my packs the same as the group\u{201d} and Hopper offers you every pack someone in the group shares.",
                             cx,
                         ))
                     })
@@ -3860,13 +3896,34 @@ fn group_submenu(
     })
 }
 
+/// The files a friend added by hand (on no mod site), by name, and who to
+/// ask for them. Long lists name the first few.
+pub fn hand_added_line(names: &[String], who: &str) -> String {
+    const SHOWN: usize = 3;
+    let n = names.len();
+    let mut list = names.iter().take(SHOWN).cloned().collect::<Vec<_>>();
+    if n > SHOWN {
+        list.push(format!("{} more", n - SHOWN));
+    }
+    let listed = match list.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    if n == 1 {
+        format!("{listed} isn't on any mod site, so Hopper can't download it. Ask {who} to send it.")
+    } else {
+        format!("{listed} aren't on any mod site, so Hopper can't download them. Ask {who} to send them.")
+    }
+}
+
 fn name_or(name: &str, or: &str) -> String {
     if name.trim().is_empty() { or.to_string() } else { name.to_string() }
 }
 
 /// A friend's pack's icon and CurseForge project, when an instance here is
 /// the same pack (the code names the pack; its icon isn't sent).
-fn pack_look(s: &Store, code: &str) -> (Option<PathBuf>, u64) {
+pub(crate) fn pack_look(s: &Store, code: &str) -> (Option<PathBuf>, u64) {
     let Ok(share) = hopper::sharecode::decode(code) else { return (None, 0) };
     let hopper::sharecode::Base::Curse { project, .. } = share.base else { return (None, 0) };
     let icon = s
@@ -3911,6 +3968,14 @@ mod tests {
         assert_eq!(member_status(&m, true, Some(&f), false), "");
         let invited = hopper::mailbox::GroupMember { joined: false, ..m.clone() };
         assert_eq!(member_status(&invited, false, Some(&f), false), "");
+    }
+
+    #[::core::prelude::v1::test]
+    fn non_friends_say_how_you_met() {
+        assert_eq!(status(None, Met::Group, false), "In a group with you");
+        assert_eq!(status(None, Met::Pack, false), "Not a friend yet");
+        let f = Friend { id: "b".into(), online: true, ..Default::default() };
+        assert_eq!(status(Some(&f), Met::Friend, false), "Online");
     }
 
     #[::core::prelude::v1::test]

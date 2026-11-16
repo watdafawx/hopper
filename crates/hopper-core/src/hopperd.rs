@@ -556,12 +556,49 @@ impl PanelChange {
 fn reply(resp: anyhow::Result<ureq::http::Response<ureq::Body>>) -> anyhow::Result<Value> {
     let mut resp = resp?;
     let status = resp.status().as_u16();
+    let retry_after = resp.headers().get("retry-after").and_then(|h| h.to_str().ok()).and_then(|s| s.trim().parse().ok());
     let text = resp.body_mut().read_to_string().unwrap_or_default();
     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     match status {
         200..=299 => Ok(v),
         401 => bail!("Hopper Server doesn't know this PC any more. Pair again in Settings → Server panel."),
-        _ => bail!("{}", v["error"].as_str().map(str::to_string).unwrap_or_else(|| format!("Hopper Server answered {status}"))),
+        _ => Err(Refused {
+            status,
+            retry_after,
+            msg: v["error"].as_str().map(str::to_string).unwrap_or_else(|| format!("Hopper Server answered {status}")),
+        }
+        .into()),
+    }
+}
+
+/// A Hopper Server's refusal, with its status: callers tell "slow down"
+/// (429, with how long to wait) and "no such route" (404, an older panel)
+/// from other failures. It reads as the panel's own message.
+#[derive(Debug)]
+pub struct Refused {
+    pub status: u16,
+    /// Seconds to wait, from the reply's Retry-After.
+    pub retry_after: Option<u64>,
+    pub msg: String,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+impl Refused {
+    /// The refusal in `e`, when it is one.
+    pub fn of(e: &anyhow::Error) -> Option<&Refused> {
+        e.chain().find_map(|c| c.downcast_ref::<Refused>())
+    }
+
+    /// Seconds to wait when `e` is the panel asking to slow down (429).
+    pub fn slow_down(e: &anyhow::Error) -> Option<u64> {
+        Refused::of(e).filter(|r| r.status == 429).map(|r| r.retry_after.unwrap_or(60).clamp(1, 120))
     }
 }
 
@@ -878,6 +915,40 @@ impl Client {
     pub fn hashes(&self, id: &str, rels: &[String]) -> anyhow::Result<std::collections::HashMap<String, String>> {
         let v = self.post(&format!("/fs/{}/hashes", enc(id)), json!({ "paths": rels }))?;
         Ok(serde_json::from_value(v["hashes"].clone())?)
+    }
+
+    /// Many text files' content in as few requests as the panel allows
+    /// (400 a request); files it can't read are left out. A Hopper Server
+    /// older than the `texts` route is asked one file at a time, as before.
+    pub fn read_texts(&self, id: &str, rels: &[String]) -> std::collections::HashMap<String, String> {
+        let mut out = std::collections::HashMap::new();
+        let mut left: Vec<String> = rels.to_vec();
+        left.sort();
+        left.dedup();
+        while !left.is_empty() {
+            let part: Vec<String> = left.drain(..left.len().min(400)).collect();
+            match self.post(&format!("/fs/{}/texts", enc(id)), json!({ "paths": part })) {
+                Ok(v) => {
+                    if let Some(t) = v["texts"].as_object() {
+                        out.extend(t.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))));
+                    }
+                    // Past the panel's byte cap: those go in the next ask.
+                    let skipped: Vec<String> = v["skipped"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_string)).collect();
+                    if !skipped.is_empty() && skipped.len() < part.len() {
+                        left.extend(skipped);
+                    }
+                }
+                Err(e) if Refused::of(&e).is_some_and(|r| r.status == 404 || r.status == 405) => {
+                    for rel in part {
+                        if let Ok(t) = self.read_text(id, &rel) {
+                            out.insert(rel, t);
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        out
     }
 
     /// A text file's content.

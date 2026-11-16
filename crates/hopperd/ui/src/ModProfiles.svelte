@@ -1,7 +1,6 @@
 <script>
   // Profiles ▾, as in Hopper desktop's Mods toolbar: switch to a saved set
-  // of mods that are off, save the current one, delete one, or start
-  // finding the mod that breaks the server.
+  // of mods that are off, save the current one, or delete one.
   import { Layers, ChevronDown, Plus, Trash2 } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';

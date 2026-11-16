@@ -80,9 +80,9 @@
   .hd { gap: 8px; align-items: center; min-width: 0; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .txt { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
-  .pin { display: inline-flex; align-items: center; gap: 3px; color: var(--acc); background: var(--acc-dim); flex: none; }
+  .pin { display: inline-flex; align-items: center; gap: 3px; color: var(--ink-acc); background: var(--acc-dim); flex: none; }
   /* The blue mixed toward the text colour: readable on the light tint too. */
-  .maker { color: color-mix(in srgb, var(--blue) 60%, var(--text)); background: var(--blue-dim); flex: none; }
+  .maker { color: var(--ink-blue); background: var(--blue-dim); flex: none; }
   .hd .tiny { flex: none; }
   .foot { gap: 8px; margin-top: 8px; align-items: center; }
   .sp { flex: 1; }

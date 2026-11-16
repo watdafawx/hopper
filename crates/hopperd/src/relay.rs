@@ -138,7 +138,7 @@ const SERVER_PARTS: &[&str] = &[
 /// main issues its own one-use links) and not `fetch` (it makes the node
 /// download from a URL, so from the node's own network).
 const FS_PARTS: &[&str] = &[
-    "list", "file", "zip", "text", "ops", "walk", "hashes", "dirs", "trash", "history", "diff", "search", "uploads", "version-text", "zip-entry", "zip-list",
+    "list", "file", "zip", "text", "ops", "walk", "hashes", "texts", "dirs", "trash", "history", "diff", "search", "uploads", "version-text", "zip-entry", "zip-list",
     "config-owners", "config",
 ];
 

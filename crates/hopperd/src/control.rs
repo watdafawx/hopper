@@ -159,6 +159,8 @@ async fn status(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Sock
         "port": cfg.port,
         "servers_up": up,
         "servers": app.servers.list().len(),
+        // Players the router process pipes: quitting disconnects them.
+        "router_players": app.edge.players(),
         "setup_code": app.auth.setup_code(),
         "lan": lan,
         "home": cfg.home,
@@ -224,13 +226,44 @@ struct QuitBody {
     /// Quit the tray too (another copy is taking over).
     #[serde(default)]
     tray: bool,
+    /// The copy taking over is an update: the router process keeps running
+    /// so players stay connected (see `crate::edge`).
+    #[serde(default)]
+    keep_router: bool,
+}
+
+static KEEP_ROUTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The quit was asked for by an update, which keeps the router process.
+pub fn keep_router() -> bool {
+    KEEP_ROUTER.load(Ordering::Relaxed)
 }
 
 async fn quit_now(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Option<Json<QuitBody>>) -> Result<Json<Value>, StatusCode> {
     check(&addr, &headers)?;
-    let tray = body.is_some_and(|b| b.tray);
-    EXIT.store(if tray { EXIT_TRAY_TOO } else { 0 }, Ordering::Relaxed);
+    let body = body.map(|b| b.0).unwrap_or_default();
+    KEEP_ROUTER.store(body.keep_router, Ordering::Relaxed);
+    EXIT.store(if body.tray { EXIT_TRAY_TOO } else { 0 }, Ordering::Relaxed);
     log::info!("quitting (asked by the tray)");
     quit().notify_one();
     Ok(Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    /// "Update to vX" from the launcher quits the tray's panel asking it to
+    /// keep the router (players stay on); Uninstall and older launchers
+    /// don't, so that's a real stop.
+    #[test]
+    fn an_update_quit_keeps_the_router() {
+        let b: super::QuitBody = serde_json::from_str(r#"{ "tray": true, "keep_router": true }"#).unwrap();
+        assert!(b.tray && b.keep_router);
+        assert!(crate::edge::keeps_running(super::EXIT_TRAY_TOO, false, b.keep_router));
+        let b: super::QuitBody = serde_json::from_str(r#"{ "tray": true }"#).unwrap();
+        assert!(!b.keep_router);
+        assert!(!crate::edge::keeps_running(super::EXIT_TRAY_TOO, false, b.keep_router));
+        assert!(!crate::edge::keeps_running(0, false, false));
+        assert!(crate::edge::keeps_running(super::EXIT_UPDATED, false, false));
+        assert!(crate::edge::keeps_running(0, true, false));
+    }
 }
