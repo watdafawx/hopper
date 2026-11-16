@@ -9,6 +9,10 @@
   --gold: #facc15; --gold-dim: #facc151a; --blue: #38bdf8; --blue-dim: #38bdf81a;
   --red: #ef4444; --red-dim: #ef44441a; --violet: #a78bfa; --violet-dim: #a78bfa1a;
   --danger: #dc2626;
+  /* Red as small text: the theme red with its lightness moved until it reads (>= 5:1) on every surface and on its own tint.
+     lib/theme.svelte.js sets it per theme from lib/ink.js; this is the Hopper Dark value for before that runs
+     (tests/ink.test.mjs checks they agree). Use it, not var(--red), for any red text or icon; --red stays for fills, dots and borders. */
+  --red-text: #f47a7a;
   /* Chip text. A tint is only ~10% of its colour, so the plain colour on its own tint is faint on a
      light theme (green on Catppuccin Latte: 2.5:1). On light themes the colour is pulled 50% toward
      black (4.5:1 or better on all six); dark themes keep the plain colour. Use these (or .ink with
@@ -18,7 +22,7 @@
   --ink-green: light-dark(color-mix(in srgb, var(--green) 50%, #000), var(--green));
   --ink-gold: light-dark(color-mix(in srgb, var(--gold) 50%, #000), var(--gold));
   --ink-blue: light-dark(color-mix(in srgb, var(--blue) 50%, #000), var(--blue));
-  --ink-red: light-dark(color-mix(in srgb, var(--red) 50%, #000), var(--red));
+  --ink-red: var(--red-text);
   --ink-violet: light-dark(color-mix(in srgb, var(--violet) 50%, #000), var(--violet));
   --ink-subtle: light-dark(color-mix(in srgb, var(--subtle) 50%, #000), var(--subtle));
   --ink-muted: light-dark(color-mix(in srgb, var(--muted) 50%, #000), var(--muted));
@@ -71,7 +75,7 @@ a.btn { color: var(--text); }
 .btn.go { background: var(--green); border-color: var(--green); color: #04210f; font-weight: 600; }
 .btn.go:hover:not(:disabled) { background: #34d36d; }
 .btn.go:active:not(:disabled) { background: #16a34a; }
-.btn.bad { color: var(--red); border-color: #ef444455; }
+.btn.bad { color: var(--red-text); border-color: #ef444455; }
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; }
 .btn.danger:hover:not(:disabled) { background: #d42020; }
 .btn.danger:active:not(:disabled) { background: #b91c1c; }
@@ -79,8 +83,8 @@ a.btn { color: var(--text); }
 .btn.ghost:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .btn.ghost.on { background: var(--hover); color: var(--text); }
 /* Destructive icon buttons stay red without an outline. */
-.btn.ghost.bad { color: var(--red); }
-.btn.ghost.bad:hover:not(:disabled) { background: var(--red-dim); color: var(--red); }
+.btn.ghost.bad { color: var(--red-text); }
+.btn.ghost.bad:hover:not(:disabled) { background: var(--red-dim); color: var(--red-text); }
 .btn.sm { padding: 3px 8px; font-size: 12px; }
 .btn.icon { padding: 5px 6px; }
 /* Tinted, no border, the small radius: the same rule as Hopper desktop's chips. A set height, a line
@@ -165,7 +169,7 @@ mark.hit { background: color-mix(in srgb, var(--acc) 30%, transparent); color: v
 /* A bar with no known total: a sliding stripe. */
 .bar.busy i { width: 35% !important; animation: bar-slide 1.2s ease-in-out infinite; }
 @keyframes bar-slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
-.err { color: var(--red); font-size: 12.5px; }
+.err { color: var(--red-text); font-size: 12.5px; }
 .kbd { font: 11px var(--mono); border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: var(--radius-sm); padding: 0 5px; color: var(--subtle); background: var(--surface); }
 .ic { width: 34px; height: 34px; border-radius: var(--radius); display: grid; place-items: center; font-weight: 800; color: #1a1a1f; flex: none; }
 .sic { width: 20px; height: 20px; border-radius: var(--radius-sm); flex: none; display: grid; place-items: center; font-size: 10px; font-weight: 700; color: #1a1a1f; }

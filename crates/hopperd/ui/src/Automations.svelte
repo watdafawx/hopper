@@ -169,9 +169,9 @@
   .rule.off { opacity: 0.55; }
   .grow { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .last { display: inline-flex; align-items: center; gap: 4px; color: var(--green); align-self: flex-start; text-align: left; }
-  .last.bad { color: var(--red); }
+  .last.bad { color: var(--red-text); }
   .log { font: 11px/1.6 var(--mono); color: var(--subtle); background: var(--term); border-radius: var(--radius); padding: 6px 8px; margin-top: 4px; max-height: 160px; overflow-y: auto; }
-  .log .bad { color: var(--red); }
+  .log .bad { color: var(--red-text); }
   .pick { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 4px; }
   .pick .chip { cursor: pointer; }
   .foot { margin-top: 10px; }

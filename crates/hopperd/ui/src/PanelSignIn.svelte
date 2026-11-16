@@ -53,5 +53,5 @@
   .si { display: flex; flex-direction: column; gap: 6px; padding: 6px 10px 10px 30px; }
   .si .btn { align-self: flex-start; }
   .row { gap: 6px; }
-  .err { color: var(--red); }
+  .err { color: var(--red-text); }
 </style>

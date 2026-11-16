@@ -449,7 +449,7 @@
   .steps li.long .d { flex-basis: 100%; margin-left: 26px; padding-left: 0; white-space: normal; overflow-wrap: anywhere; color: var(--subtle); font-size: 12px; }
   .st { width: 18px; height: 18px; display: grid; place-items: center; flex: none; border-radius: 50%; color: var(--muted); }
   .st.ok, .st.done { background: var(--green-dim); color: var(--green); }
-  .st.fail { background: var(--red-dim); color: var(--red); }
+  .st.fail { background: var(--red-dim); color: var(--red-text); }
   .st.warn { background: var(--gold-dim); color: var(--gold); }
   .st.run { color: var(--acc); }
   .note { font-size: 12px; color: var(--subtle); background: var(--hover); border-radius: var(--radius); padding: 8px 10px; }

@@ -100,6 +100,6 @@
   .f { display: flex; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); }
   .f:last-child { border: 0; }
   .l { width: 92px; flex: none; color: var(--muted); font-size: 12.5px; }
-  .err { color: var(--red); }
+  .err { color: var(--red-text); }
   .warn { color: var(--gold); }
 </style>

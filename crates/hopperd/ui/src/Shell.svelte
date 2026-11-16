@@ -461,7 +461,7 @@
   {#if toast.text}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="toast" class:bad={toast.bad} onclick={hush}>
-      {#if toast.bad}<CircleAlert size={15} color="var(--red)" />{:else}<CircleCheck size={15} color="var(--green)" />{/if}
+      {#if toast.bad}<CircleAlert size={15} color="var(--red-text)" />{:else}<CircleCheck size={15} color="var(--green)" />{/if}
       <span>{toast.text}</span>
     </div>
   {/if}

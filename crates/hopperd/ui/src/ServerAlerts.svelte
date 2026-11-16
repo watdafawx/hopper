@@ -100,13 +100,13 @@
   .ban { display: flex; align-items: center; gap: 10px; margin: 0 18px 10px; padding: 7px 12px; border-radius: var(--radius-lg); background: var(--gold-dim); border: 1px solid #eab30840; color: var(--text); font-size: 12.5px; }
   .ban.red { background: var(--red-dim); border-color: #ef444440; }
   .ban :global(svg) { color: var(--gold); flex: none; }
-  .ban.red :global(svg) { color: var(--red); }
+  .ban.red :global(svg) { color: var(--red-text); }
   .ban.info { background: var(--blue-dim); border-color: #38bdf840; }
   .ban.info :global(svg) { color: var(--blue); }
   .grow { flex: 1; min-width: 0; }
   .t { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); }
   .t b { color: var(--text); font-weight: 500; }
-  .t b.w { color: var(--gold); } .t b.r { color: var(--red); }
+  .t b.w { color: var(--gold); } .t b.r { color: var(--red-text); }
   .gap { margin-top: 10px; }
   .lnk { color: var(--acc); font-size: inherit; padding: 0; }
 </style>

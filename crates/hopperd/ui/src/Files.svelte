@@ -1096,7 +1096,7 @@
   .drop > div { display: flex; flex-direction: column; align-items: center; gap: 8px; background: var(--surface); padding: 16px 22px; border-radius: var(--radius-lg); }
   .ctx { position: fixed; z-index: 80; width: 240px; }
   .ctx .menu-item:disabled { opacity: 0.45; cursor: default; background: none; }
-  .ctx .menu-item.bad { color: var(--red); }
+  .ctx .menu-item.bad { color: var(--red-text); }
   .ctx kbd { color: var(--muted); font: 11px var(--mono); }
   .pbox { width: min(480px, 100%); gap: 10px; padding: 16px 18px; }
   .pbox h3 { margin: 0; font-size: 14px; font-weight: 600; gap: 7px; }

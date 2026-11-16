@@ -581,7 +581,8 @@ struct Group {
     /// For `collapsed_groups`.
     key: String,
     name: String,
-    /// What it is ("Hopper Server", "Crafty").
+    /// What it is ("Crafty", "SFTP"). Empty for a Hopper Server and its
+    /// nodes: they get the web UI's chip (`machine_chip`) and "N servers".
     what: String,
 }
 
@@ -603,7 +604,7 @@ fn groups(s: &Store) -> Vec<Group> {
     let st = s.settings();
     let mut out: Vec<Group> = Vec::new();
     for p in st.hopper_panels_on() {
-        out.push(Group { kind: GroupKind::Panel(p.id.clone()), key: format!("panel:{}", p.id), name: p.name.clone(), what: "Hopper Server".into() });
+        out.push(Group { kind: GroupKind::Panel(p.id.clone()), key: format!("panel:{}", p.id), name: p.name.clone(), what: String::new() });
         let mut nodes: Vec<String> = s
             .servers()
             .iter()
@@ -620,7 +621,7 @@ fn groups(s: &Store) -> Vec<Group> {
             key: format!("node:{}:{n}", p.id),
             kind: GroupKind::Node(p.id.clone(), n),
             name,
-            what: format!("node · via {}", p.name),
+            what: String::new(),
         }));
     }
     let folder = st.servers_root.trim();
@@ -713,7 +714,16 @@ fn group_head(
             })
         }
     };
-    let what = if g.what.is_empty() { format!("{n}") } else { format!("{} · {n}", g.what) };
+    // A Hopper Server and its nodes read as in the web UI: a tinted chip
+    // for how it's connected, then "N servers". The rest keep their kind.
+    let chip = machine_chip(g, s, cx);
+    let what = if chip.is_some() {
+        if n == 1 { "1 server".to_string() } else { format!("{n} servers") }
+    } else if g.what.is_empty() {
+        format!("{n}")
+    } else {
+        format!("{} · {n}", g.what)
+    };
     let browse: Option<AnyElement> = match &g.kind {
         GroupKind::Panel(_) | GroupKind::Local => {
             let place = if let GroupKind::Panel(id) = &g.kind { Some(id.clone()) } else { None };
@@ -861,6 +871,7 @@ fn group_head(
                         .text_color(theme.foreground)
                         .child(g.name.clone()),
                 )
+                .children(chip)
                 .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(what))
                 .children(retry)
                 .children(browse)
@@ -870,6 +881,33 @@ fn group_head(
             c.child(div().px_3().pb_1().text_xs().text_color(color).child(e))
         })
         .into_any_element()
+}
+
+/// The chip after a group's name for a paired Hopper Server ("This panel")
+/// or one of its nodes ("Node"): the same words, tint and tooltip as the
+/// web UI's list (`lib/machines.js`). Desktop pairs as a device, so it has
+/// no "Signed in" kind. None for the folder, sites and this PC.
+fn machine_chip(g: &Group, s: &Store, cx: &App) -> Option<AnyElement> {
+    let (label, tip) = match &g.kind {
+        GroupKind::Panel(_) => ("This panel", "This panel.".to_string()),
+        GroupKind::Node(panel, node) => {
+            let via = s.settings().hopper_panels.iter().find(|p| &p.id == panel).map(|p| p.name.clone()).unwrap_or_default();
+            let ceiling = s.node_head(panel, node).map(|h| h.ceiling.clone()).unwrap_or_default();
+            let mut c = ceiling.chars();
+            let limit = c.next().map(|f| format!(" This panel may: {}{}.", f.to_uppercase(), c.as_str())).unwrap_or_default();
+            ("Node", format!("A node of {via}: it connects there by itself.{limit}"))
+        }
+        _ => return None,
+    };
+    let color = cx.theme().muted_foreground;
+    Some(
+        div()
+            .id(ElementId::Name(format!("group-chip:{}", g.key).into()))
+            .flex_none()
+            .child(widgets::chip(color).child(label))
+            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+            .into_any_element(),
+    )
 }
 
 fn now_secs() -> u64 {

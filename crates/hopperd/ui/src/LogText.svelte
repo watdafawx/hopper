@@ -276,7 +276,7 @@
   /* The number is drawn, not text: picking and copying leave it out. */
   .ln::before { content: attr(data-n); position: absolute; left: 0; width: calc(var(--gw) - 2ch); text-align: right; color: var(--muted); opacity: .6; user-select: none; }
   .ln::selection { background: #f9731659; }
-  .ln.e { color: var(--red); } .ln.w { color: var(--gold); }
+  .ln.e { color: var(--red-text); } .ln.w { color: var(--gold); }
   .ln.tr { opacity: .75; }
   .jump { position: absolute; right: 16px; bottom: 14px; box-shadow: 0 6px 20px #0008; }
 </style>

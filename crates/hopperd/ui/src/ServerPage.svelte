@@ -465,7 +465,7 @@
   .tabs button.tab-sel :global(svg) { color: var(--acc); }
   .morewrap { position: relative; }
   .drop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 40; }
-  .menu-item.bad { color: var(--red); }
+  .menu-item.bad { color: var(--red-text); }
   .menu-item:disabled { opacity: .45; cursor: default; background: none; }
   .pmenu { position: fixed; z-index: 80; }
   .tabs .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--red); margin-left: 6px; }

@@ -113,7 +113,7 @@
 {/if}
 
 <style>
-  .strip { display: flex; align-items: center; gap: 8px; margin: 0 18px 10px; padding: 6px 8px 6px 12px; border: 1px solid #ef444499; border-radius: var(--radius-lg); background: #ef44440f; color: var(--red); font-size: 13px; }
+  .strip { display: flex; align-items: center; gap: 8px; margin: 0 18px 10px; padding: 6px 8px 6px 12px; border: 1px solid #ef444499; border-radius: var(--radius-lg); background: #ef44440f; color: var(--red-text); font-size: 13px; }
   .t { font-weight: 600; flex: none; }
   .what { color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mod { display: inline-flex; align-items: center; gap: 6px; margin-right: 4px; vertical-align: middle; }

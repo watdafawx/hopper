@@ -205,7 +205,7 @@
   .seg button { padding: 3px 10px; font-size: 12px; color: var(--subtle); }
   .seg button + button { border-left: 1px solid var(--line2); }
   .seg button.on { background: var(--acc-dim); color: var(--acc); }
-  .bad { display: flex; gap: 8px; align-items: flex-start; color: var(--red); background: var(--red-dim); border: 1px solid #ef444455; border-radius: var(--radius-lg); padding: 8px 10px; }
+  .bad { display: flex; gap: 8px; align-items: flex-start; color: var(--red-text); background: var(--red-dim); border: 1px solid #ef444455; border-radius: var(--radius-lg); padding: 8px 10px; }
   .bad span { color: var(--text); }
   .mc { background: #1d1813; border: 1px solid #ffffff1f; border-radius: var(--radius); padding: 8px 10px; font-family: var(--mono); font-size: 12px; line-height: 1.5; color: #fff; }
   .mc-top { display: flex; }
