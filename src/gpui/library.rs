@@ -781,6 +781,18 @@ impl LibraryView {
 
     fn select(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let _t = crate::frame_log::span("lib.select");
+        // The docked panels belong to the instance they were opened on: a
+        // config file or mod page left up would show the old instance's data.
+        if self.selected.as_ref().is_some_and(|s| *s != root) {
+            if self.config_panel.is_some() {
+                self.close_config_panel(cx);
+            }
+            self.pending_config = None;
+            let peek = self.addons.read(cx).peek().clone();
+            if peek.read(cx).is_open() {
+                peek.update(cx, |p, cx| p.peek_project(root.clone(), None, cx));
+            }
+        }
         self.selected = Some(root.clone());
         // "On this network" in the Friends panel follows the open instance.
         self.friends.update(cx, |f, cx| f.set_instance(Some(root.clone()), cx));

@@ -482,7 +482,7 @@
   .full { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 18px 18px; }
   .full.scroll { overflow: auto; display: block; }
   .split { flex: 1; min-height: 0; display: flex; gap: 14px; padding: 0 18px 18px; }
-  .main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  .main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
   .rail { width: 290px; flex: none; display: flex; flex-direction: column; gap: 12px; overflow: auto; }
   .t { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); }
   .t b { color: var(--text); font-weight: 500; }
@@ -494,5 +494,13 @@
   .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 12.5px; }
   .kv span:nth-child(odd) { color: var(--muted); }
-  @media (max-width: 900px) { .split { flex-direction: column; } .rail { width: auto; } .main :global(.term) { min-height: 60vh; } }
+  /* Stacked: the page scrolls as one column. Without this, .main and .rail
+     keep their shrunk flex heights and the console and relay card spill over
+     the rail below them. */
+  @media (max-width: 900px) {
+    .split { flex-direction: column; overflow-y: auto; }
+    .main { flex: none; min-height: auto; overflow: visible; }
+    .rail { width: auto; flex: none; overflow: visible; }
+    .main :global(.term) { min-height: 60vh; }
+  }
 </style>
