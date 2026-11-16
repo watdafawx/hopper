@@ -434,10 +434,10 @@ async fn forged_garbage_and_floods_are_dropped() {
     while p.relay.counts.limited.load(Ordering::Relaxed) < 100 {
         assert!(Instant::now() < end, "timed out waiting for the limit");
         for _ in 0..200 {
-            let _ = flood.send(&svc(&i.to_be_bytes())).await;
+            flood.send(&svc(&i.to_be_bytes())).await.unwrap();
             i = i.wrapping_add(1);
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
     }
     // Whatever of the flood is still queued at the relay's port goes first:
     // talking into a full queue loses packets to the OS, not to the relay.
