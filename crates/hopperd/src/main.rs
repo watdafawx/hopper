@@ -77,6 +77,7 @@ mod server_ops;
 mod servers_admin;
 mod service;
 mod sftp;
+mod sftp_setting;
 mod sources_api;
 mod tls;
 mod transfer;

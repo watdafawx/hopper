@@ -680,7 +680,10 @@ fn run_service_tray(boot: PathBuf) -> anyhow::Result<()> {
         std::thread::Builder::new().name("update-check".into()).spawn(move || {
             std::thread::sleep(first_check());
             loop {
-                service_check(&boot, false);
+                // Off in the panel's Settings › Updates: no looks by itself.
+                if service::real_data(&boot).1.check_updates {
+                    service_check(&boot, false);
+                }
                 std::thread::sleep(UPDATE_EVERY);
             }
         })?;
