@@ -439,11 +439,17 @@ async fn a_node_lists_a_bounded_number_of_servers() {
 
 // ---- a node's TPS and alerts on the main ----
 
+/// The alert tracker is one global keyed by server id, and every fake node
+/// names its server "test-server": these tests take turns so one's reading
+/// never shows up in the other's answer.
+static NODE_ALERTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A node server's TPS reading and its low-TPS alert show in the main's
 /// `/alerts` under the namespaced id, like a local server's; Look is
 /// enough for the main to read them.
 #[tokio::test]
 async fn a_nodes_tps_and_alerts_show_on_the_main() {
+    let _turn = NODE_ALERTS.lock().await;
     for (main_copy, node_has) in [(Ceiling::Manage, Role::Admin), (Ceiling::Look, Role::Viewer)] {
         let p = pair(main_copy, Some(node_has)).await;
         let ns = p.ns();
@@ -463,6 +469,7 @@ async fn a_nodes_tps_and_alerts_show_on_the_main() {
 /// node's own alert stays up for the node's people.
 #[tokio::test]
 async fn dismissing_a_node_alert_hides_it_on_the_main_only() {
+    let _turn = NODE_ALERTS.lock().await;
     let p = pair(Ceiling::Manage, Some(Role::Admin)).await;
     let ns = p.ns();
     crate::alerts::low_tps_for_test(&p.node.server, "dg", 9.0, 110.0);
