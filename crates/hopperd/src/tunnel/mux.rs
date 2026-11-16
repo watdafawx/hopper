@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, Notify};
 
-use super::frame::{code, Frame, Hello, MAX_DATA, MAX_HEAD, TUNNEL_VERSION};
+use super::frame::{code, Frame, Hello, MAX_DATA, MAX_HEAD};
 
 /// Sends one whole frame.
 pub trait FrameTx: Send + 'static {
@@ -63,8 +63,8 @@ pub struct Config {
     pub hello_timeout: Duration,
     pub version: String,
     pub capabilities: Vec<String>,
-    /// The tunnel version this side speaks ([`TUNNEL_VERSION`]; tests set
-    /// another to act as an older or newer peer).
+    /// The tunnel version this side speaks ([`super::frame::TUNNEL_VERSION`];
+    /// tests set another to act as an older or newer peer).
     pub tunnel: u16,
 }
 
@@ -820,6 +820,7 @@ pub mod mem {
 mod tests {
     use super::mem::*;
     use super::*;
+    use super::super::frame::TUNNEL_VERSION;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn cfg(window: u32) -> Config {
