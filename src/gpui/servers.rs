@@ -2437,6 +2437,7 @@ impl ServersView {
             .when(self.tab == TAB_OVERVIEW, |c| {
                 let players = self.control.update(cx, |ctl, cx| ctl.players_view(cx));
                 let rcon = self.control.update(cx, |ctl, cx| ctl.rcon_notice(cx));
+                let relay = self.control.update(cx, |ctl, cx| ctl.relay_card(cx));
                 // Stopped, the cards would be all dashes: the header's
                 // figures say what there is.
                 let cards = pstats
@@ -2491,6 +2492,7 @@ impl ServersView {
                         .gap_5()
                         .children(rcon)
                         .children(cards)
+                        .children(relay)
                         .child(div().text_sm().child(info))
                         .children(players)
                         .children(pack)

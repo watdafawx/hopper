@@ -3974,3 +3974,34 @@ mod short_label_tests {
         assert_eq!(short_label("ÄÖÜäöüßÄÖÜ!", 10), "ÄÖÜäöüßÄÖ…");
     }
 }
+
+/// One of the Overview's stat cards: icon and small caps label on top, the
+/// caller adds the figure. Shared by the server stat cards and the relay
+/// card.
+pub fn stat_card(id: &'static str, icon: IconName, label: &str, cx: &App) -> Stateful<Div> {
+    let theme = cx.theme();
+    v_flex()
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .gap_1()
+        .px_4()
+        .py_3()
+        .rounded(theme.radius_lg)
+        .bg(theme.foreground.opacity(0.03))
+        .border_1()
+        .border_color(theme.border)
+        .hover(|st| {
+            st.border_color(theme.muted_foreground.opacity(0.45))
+                .shadow(vec![BoxShadow::new(px(0.), px(8.), black().opacity(0.25)).blur_radius(px(24.))])
+        })
+        .child(
+            h_flex()
+                .gap_1p5()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.muted_foreground)
+                .child(Icon::new(icon).xsmall())
+                .child(label.to_uppercase()),
+        )
+}

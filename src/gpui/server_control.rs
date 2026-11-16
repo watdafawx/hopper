@@ -106,6 +106,8 @@ pub struct ServerControl {
     stop_input: Entity<InputState>,
     delay_input: Entity<InputState>,
     log_days_input: Entity<InputState>,
+    /// The server's relay status, from the panel it runs on (None: no relay).
+    relay: Option<hopper::relay_view::RelayView>,
     _poll: Option<Task<()>>,
     /// A page about the server shows: poll at [`POLL`], else [`POLL_IDLE`].
     active: bool,
@@ -191,6 +193,7 @@ impl ServerControl {
             stop_input,
             delay_input,
             log_days_input,
+            relay: None,
             _poll: None,
             active: false,
             polled: std::time::Instant::now(),
@@ -298,6 +301,7 @@ impl ServerControl {
         self.lines.clear();
         self.options = None;
         self.opts_loading = false;
+        self.relay = None;
         self._poll = None;
         let Some(panel) = self.the_panel(cx) else {
             cx.notify();
@@ -342,6 +346,11 @@ impl ServerControl {
             if !found {
                 return;
             }
+            // A Hopper Server also says whether the server uses its relay.
+            let client = this
+                .update(cx, |this, cx| this.remote(cx).and_then(|r| hopper::hopperd::Client::for_remote(&r).ok()).map(Arc::new))
+                .ok()
+                .flatten();
             loop {
                 let Ok(Some((id, console, full))) = this.update(cx, |this, _| {
                     this.id.clone().map(|id| (id, this.console_open, this.console_full))
@@ -349,16 +358,21 @@ impl ServerControl {
                     return;
                 };
                 let p = panel.clone();
+                let c = client.clone();
                 this.update(cx, |this, _| this.polled = std::time::Instant::now()).ok();
-                let (stats, lines) = cx
+                let (stats, lines, relay) = cx
                     .background_spawn(async move {
                         let stats = p.stats(&id).map_err(|e| format!("{e:#}"));
                         let lines = console.then(|| read_console(&*p, &id, full)).flatten();
-                        (stats, lines)
+                        let relay = c.and_then(|c| c.vps_relay(&id));
+                        (stats, lines, relay)
                     })
                     .await;
                 if this
-                    .update(cx, |this, cx| this.got(stats, lines, cx))
+                    .update(cx, |this, cx| {
+                        this.relay = relay;
+                        this.got(stats, lines, cx)
+                    })
                     .is_err()
                 {
                     return;
@@ -1100,33 +1114,7 @@ impl ServerControl {
         let Some(Ok(s)) = &self.stats else { return None };
         let theme = cx.theme();
         let live = s.running && !s.starting;
-        let card = |id: &'static str, icon: IconName, label: &str| {
-            v_flex()
-                .id(id)
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .px_4()
-                .py_3()
-                .rounded(theme.radius_lg)
-                .bg(theme.foreground.opacity(0.03))
-                .border_1()
-                .border_color(theme.border)
-                .hover(|st| {
-                    st.border_color(theme.muted_foreground.opacity(0.45)).shadow(vec![
-                        BoxShadow::new(px(0.), px(8.), black().opacity(0.25)).blur_radius(px(24.)),
-                    ])
-                })
-                .child(
-                    h_flex()
-                        .gap_1p5()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.muted_foreground)
-                        .child(gpui_kit::component::Icon::new(icon).xsmall())
-                        .child(label.to_uppercase()),
-                )
-        };
+        let card = |id: &'static str, icon: IconName, label: &str| widgets::stat_card(id, icon, label, cx);
         let value = |v: String, unit: String| {
             h_flex()
                 .items_baseline()
@@ -1248,6 +1236,12 @@ impl ServerControl {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The read-only relay card, for a server that uses its Hopper Server's
+    /// "Relay through a VPS".
+    pub fn relay_card(&self, cx: &App) -> Option<AnyElement> {
+        self.relay.as_ref().map(|r| crate::relay_card::relay_card(r, cx))
     }
 
     /// Online players, each with a menu of moderator commands.
