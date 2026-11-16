@@ -862,23 +862,36 @@ fn group_head(
                         .text_color(theme.muted_foreground),
                 )
                 .when_some(light, |r, c| r.child(div().size_1p5().flex_none().rounded_full().bg(c)))
-                .child(
+                .child({
+                    // Gets the room the fixed bits leave and ends in an ellipsis;
+                    // the whole name is in the tooltip. "Try again" sits on
+                    // the line below with the error, so it can't squeeze it.
+                    let full: SharedString = g.name.clone().into();
                     div()
+                        .id(ElementId::Name(format!("group-name:{}", g.key).into()))
                         .min_w_0()
                         .truncate()
                         .text_xs()
                         .font_semibold()
                         .text_color(theme.foreground)
-                        .child(g.name.clone()),
-                )
+                        .child(g.name.clone())
+                        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(w, cx))
+                })
                 .children(chip)
                 .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(what))
-                .children(retry)
                 .children(browse)
                 .children(add),
         )
         .when_some(error.filter(|_| !folded), |c, (e, color)| {
-            c.child(div().px_3().pb_1().text_xs().text_color(color).child(e))
+            c.child(
+                h_flex()
+                    .px_3()
+                    .pb_1()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1().min_w_0().text_xs().text_color(color).child(e))
+                    .children(retry),
+            )
         })
         .into_any_element()
 }

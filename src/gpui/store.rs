@@ -2854,8 +2854,14 @@ impl Store {
 
     /// Forgets the images found so far (the cache was cleared): lists ask
     /// for them again and they download anew.
-    pub fn forget_images(&mut self) {
+    pub fn forget_images(&mut self, cx: &mut App) {
         self.images.retain(|_, v| matches!(v, Image::Loading));
+        // Clips hold decoded frames and GPU copies of them: free those too,
+        // or every GIF seen stays in the atlas until the app closes.
+        let keys: Vec<String> = self.anims.keys().cloned().collect();
+        for key in keys {
+            self.forget_anim(&key, cx);
+        }
         self.anims.clear();
         // Packs' logos and account heads show everywhere and are asked for
         // once, when read: ask again. Lists ask again when they show.
