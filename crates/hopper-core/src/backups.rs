@@ -191,11 +191,63 @@ pub fn mark_reason(root: &Path, since: u64, reason: &str) {
 const PACK: &str = ".pack-update.json";
 
 /// The pack update a History entry came from: "All the Mods 10", "1.80.0".
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PackMark {
     pub name: String,
+    /// The version it is about: what the update went to, or, for an update
+    /// put back ([`PackMark::undone`]), what it went back to.
     pub version: String,
+    /// What the instance or server recorded before this change, to put
+    /// back with the mods. Empty in marks made before Hopper kept it.
+    pub before: Option<PackBefore>,
+    /// The pack file the record named after this change: if it names
+    /// another one by the time of Undo, the pack moved on and stays.
+    pub file_id: u64,
+    /// This entry is an update put back; it reads as put back.
+    pub undone: bool,
+}
+
+impl PackMark {
+    pub fn new(name: String, version: String) -> Self {
+        PackMark { name, version, ..Default::default() }
+    }
+}
+
+/// An instance's or server's own pack record before a pack update: what
+/// Undo all puts back so its header and the update offer match the files.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PackBefore {
+    /// The pack: project, file, version and server pack file.
+    pub pack: Option<crate::instances::PackRef>,
+    /// The loader with its version ("neoforge-21.1.256"), when the update
+    /// can change it (an instance's).
+    pub loader: String,
+    pub game_version: String,
+    /// A server's own pack record (`.hopper-server-pack.json`).
+    pub server: Option<crate::server_pack_update::Marker>,
+    /// A server's pack link (`.hopper-pack.json`).
+    pub link: Option<crate::hosting::pack_link::PackLink>,
+}
+
+impl PackBefore {
+    /// What an instance records now.
+    pub fn of_instance(inst: &crate::instances::Instance) -> Self {
+        PackBefore { pack: inst.pack.clone(), loader: inst.loader.clone(), game_version: inst.game_version.clone(), ..Default::default() }
+    }
+
+    /// What the server in `root` records now: its server pack record, its
+    /// link and the pack its hopper.json names. Its loader isn't in it: a
+    /// server's loader is files, which History puts back on its own.
+    pub fn of_server(root: &Path) -> Self {
+        PackBefore {
+            pack: crate::instances::load(root).and_then(|i| i.pack),
+            server: crate::server_pack_update::recorded(root),
+            link: crate::hosting::pack_link::read(root),
+            ..Default::default()
+        }
+    }
 }
 
 /// Marks every History folder made since `since` (unix seconds) as part of
@@ -2019,7 +2071,7 @@ mod tests {
         // A mod it removed, set aside in the middle of it.
         fs::create_dir_all(base.join("1003").join("mods")).unwrap();
         fs::write(base.join("1003").join("mods").join("zzz-1.0.jar"), "j").unwrap();
-        let atm = PackMark { name: "All the Mods 10".into(), version: "1.80.0".into() };
+        let atm = PackMark::new("All the Mods 10".into(), "1.80.0".into());
         mark_pack(&root, 1000, &atm);
         // The later change isn't part of it.
         fs::remove_file(base.join("1100").join(PACK)).unwrap();
@@ -2041,6 +2093,30 @@ mod tests {
         assert_eq!(j["parts"]["rest_label"], "3 configs");
         assert_eq!(j["counts"][0]["verb"], "removed");
         assert!(sets[0].to_json()["parts"].is_null());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_pack_mark_keeps_the_record_before_and_old_marks_still_load() {
+        let root = std::env::temp_dir().join(format!("hopper-backups-pack-mark-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (a, b) = (root.join(crate::sync::BACKUP_DIR).join("1000"), root.join(crate::sync::BACKUP_DIR).join("1001"));
+        fs::create_dir_all(a.join("config")).unwrap();
+        fs::create_dir_all(b.join("config")).unwrap();
+        let before = PackBefore {
+            pack: Some(crate::instances::PackRef { project_id: 7, file_id: 100, version: "1.80.0".into(), ..Default::default() }),
+            loader: "neoforge-21.1.256".into(),
+            game_version: "1.21.1".into(),
+            ..Default::default()
+        };
+        let m = PackMark { before: Some(before), file_id: 200, ..PackMark::new("ATM".into(), "1.81.0".into()) };
+        mark_pack(&root, 1000, &m);
+        assert_eq!(read_pack(&a), Some(m.clone()));
+        // A mark an older Hopper wrote has only a name and a version.
+        fs::write(b.join(PACK), br#"{"name":"ATM","version":"1.79.0"}"#).unwrap();
+        let old = read_pack(&b).unwrap();
+        assert_eq!((old.name.as_str(), old.version.as_str()), ("ATM", "1.79.0"));
+        assert!(old.before.is_none() && old.file_id == 0 && !old.undone);
         fs::remove_dir_all(&root).unwrap();
     }
 

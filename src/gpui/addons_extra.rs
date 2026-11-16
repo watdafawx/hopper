@@ -1421,7 +1421,7 @@ impl AddonsView {
 
     /// Undoes the update that put `file` in, as History's Undo does.
     fn roll_back(&mut self, root: &std::path::Path, file: &str, saved: hopper::backups::Saved, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(slot) = crate::history_view::queue_undo(self.store.read(cx), root, vec![saved]) else { return };
+        let Some(slot) = crate::history_view::queue_undo(self.store.read(cx), root, vec![saved], None) else { return };
         self.missing.rolling.insert(file.to_string());
         cx.notify();
         let (root, file) = (root.to_path_buf(), file.to_string());
@@ -1429,7 +1429,7 @@ impl AddonsView {
             let got = crate::store::work_done(cx.background_executor().clone(), slot).await;
             this.update_in(cx, |this, window, cx| {
                 this.missing.rolling.remove(&file);
-                if let Some(crate::history_view::UndoDone { done, gone, website, errors }) = got {
+                if let Some(crate::history_view::UndoDone { done, gone, website, errors, .. }) = got {
                     crate::history_view::undone(&this.store, &root, &done, cx);
                     // Only the CurseForge website has the old file: the
                     // download window gets it, as History's Undo does.

@@ -3052,6 +3052,8 @@ impl Store {
                 .is_some_and(|o| o.clean)
                 .then(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()));
             let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            // What the instance records now, for Undo all in History to put back.
+            let pack_before = hopper::backups::PackBefore::of_instance(&full);
             let updated = hopper::modpack::update_any(&mut full, pid, &file, overrides.as_ref(), job);
             if let Some(since) = clean_since {
                 hopper::backups::mark_reason(&full.root, since, "Clean update");
@@ -3059,7 +3061,12 @@ impl Store {
             // Everything it set aside is one History entry.
             if updated.is_ok() {
                 let pack_name = full.pack.as_ref().map(|p| p.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| name.clone());
-                hopper::backups::mark_pack(&full.root, started, &hopper::backups::PackMark { name: pack_name, version: shown.clone() });
+                let mark = hopper::backups::PackMark {
+                    before: Some(pack_before),
+                    file_id: full.pack.as_ref().map_or(file.id, |p| p.file_id),
+                    ..hopper::backups::PackMark::new(pack_name, shown.clone())
+                };
+                hopper::backups::mark_pack(&full.root, started, &mark);
             }
             if let Err(e) = updated {
                 // Offer the update again.

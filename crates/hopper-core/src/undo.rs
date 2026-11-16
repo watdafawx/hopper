@@ -361,6 +361,119 @@ fn forget(f: &Saved) {
     }
 }
 
+/// What [`restore_pack`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackRestore {
+    /// The record is what it was before the update. `version`: the pack
+    /// version it names again (empty when History doesn't know it).
+    Restored { version: String },
+    /// Another update came after this one: the record stays. `version`: what
+    /// it names now (empty when unknown).
+    Moved { version: String },
+    /// The entry was made before Hopper kept the old record: nothing to put
+    /// back.
+    Unknown,
+}
+
+impl PackRestore {
+    /// How Hopper Server tells it (`POST /servers/{id}/mod-backups/undo`).
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            PackRestore::Restored { version } => serde_json::json!({ "state": "restored", "version": version }),
+            PackRestore::Moved { version } => serde_json::json!({ "state": "moved", "version": version }),
+            PackRestore::Unknown => serde_json::json!({ "state": "unknown" }),
+        }
+    }
+
+    /// Reads [`PackRestore::to_json`] back; none for a panel that doesn't
+    /// say (an older one, or the entry wasn't undone whole).
+    pub fn from_json(v: &serde_json::Value) -> Option<PackRestore> {
+        let version = v["version"].as_str().unwrap_or_default().to_string();
+        match v["state"].as_str()? {
+            "restored" => Some(PackRestore::Restored { version }),
+            "moved" => Some(PackRestore::Moved { version }),
+            _ => None,
+        }
+    }
+}
+
+/// The pack version a record shows to the player.
+fn shown_version(p: &crate::instances::PackRef) -> String {
+    if !p.version.is_empty() {
+        p.version.clone()
+    } else {
+        version_of(&p.file_name)
+    }
+}
+
+/// After Undo all put back everything a pack update changed (mods, configs):
+/// also puts back the pack record the update replaced (pack version and
+/// file, loader and its version, Minecraft version; a server's pack record
+/// and link), so the header names the old version and the update is offered
+/// again. Only for the whole entry: one mod put back is no reason to move
+/// the pack. When the pack was updated again since (the record no longer
+/// names the file `m` went to), nothing is changed. What the undo set aside
+/// from `since` (unix seconds) is marked as the update put back, which can
+/// itself be undone.
+pub fn restore_pack(inst: &mut Instance, m: &crate::backups::PackMark, since: u64) -> anyhow::Result<PackRestore> {
+    use crate::backups::{PackBefore, PackMark};
+    use crate::server_pack_update as spu;
+    let Some(b) = &m.before else { return Ok(PackRestore::Unknown) };
+    let root = inst.root.clone();
+    let server = b.server.is_some();
+    let now = if server { spu::recorded(&root).map_or(0, |r| r.pack_file_id) } else { inst.pack.as_ref().map_or(0, |p| p.file_id) };
+    if m.file_id != 0 && now != m.file_id {
+        return Ok(PackRestore::Moved { version: inst.pack.as_ref().map(shown_version).unwrap_or_default() });
+    }
+    // What this undo replaces, to put back if the undo is undone.
+    let was = if server { PackBefore::of_server(&root) } else { PackBefore::of_instance(inst) };
+    if let Some(p) = &b.pack {
+        inst.pack = Some(p.clone());
+    }
+    if !b.loader.is_empty() {
+        inst.loader = b.loader.clone();
+    }
+    if !b.game_version.is_empty() {
+        inst.game_version = b.game_version.clone();
+    }
+    // A server without a hopper.json has none made for it here.
+    if !server || root.join(crate::instances::HOPPER_FILE).is_file() {
+        inst.save()?;
+    }
+    if let Some(mk) = &b.server {
+        if *mk == spu::Marker::default() {
+            let _ = fs::remove_file(root.join(spu::MARKER));
+        } else {
+            spu::record(&root, mk)?;
+        }
+    }
+    if let Some(l) = &b.link {
+        crate::hosting::pack_link::write(&root, l);
+    }
+    if !server {
+        // CurseForge's own file names the new version too: told, unless
+        // CurseForge is open (Settings has "Update CurseForge" for that).
+        if let Err(e) = crate::cf_instance::write_pack(inst) {
+            log::warn!("{}: CurseForge's pack version after Undo: {e:#}", inst.name);
+        }
+        if let Err(e) = crate::cf_instance::write_loader(inst) {
+            log::warn!("{}: CurseForge's loader after Undo: {e:#}", inst.name);
+        }
+        let _ = inst.save();
+    }
+    let version = b.pack.as_ref().map(shown_version).unwrap_or_default();
+    let file_id = match &b.server {
+        Some(mk) => mk.pack_file_id,
+        None => b.pack.as_ref().map_or(0, |p| p.file_id),
+    };
+    crate::backups::mark_pack(
+        &root,
+        since,
+        &PackMark { name: m.name.clone(), version: version.clone(), before: Some(was), file_id, undone: true },
+    );
+    Ok(PackRestore::Restored { version })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,6 +571,119 @@ mod tests {
 
     fn file(id: u64, date: &str) -> cf::File {
         cf::File { id, file_date: date.into(), ..Default::default() }
+    }
+
+    fn pack_ref(file_id: u64, version: &str) -> crate::instances::PackRef {
+        crate::instances::PackRef { project_id: 77, file_id, name: "TNP Limitless 8".into(), version: version.into(), ..Default::default() }
+    }
+
+    /// An instance on pack version 1.81.0 (file 200) that was on 1.80.0
+    /// (file 100) before the update, with the mark the update left.
+    fn updated_instance(tag: &str) -> (Instance, crate::backups::PackMark, PathBuf) {
+        use crate::backups::{PackBefore, PackMark};
+        let dir = std::env::temp_dir().join(format!("hopper-undo-pack-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // One set-aside config, so there is a History folder to mark.
+        let cfg = dir.join(crate::sync::BACKUP_DIR).join("5000").join("config");
+        fs::create_dir_all(&cfg).unwrap();
+        fs::write(cfg.join("a.toml"), "x").unwrap();
+        let mut inst = Instance {
+            name: "TNP".into(),
+            root: dir.clone(),
+            game_version: "1.21.1".into(),
+            loader: "neoforge-21.1.256".into(),
+            pack: Some(pack_ref(100, "1.80.0")),
+            ..Default::default()
+        };
+        let before = PackBefore::of_instance(&inst);
+        inst.pack = Some(pack_ref(200, "1.81.0"));
+        inst.loader = "neoforge-21.1.300".into();
+        inst.game_version = "1.21.4".into();
+        inst.save().unwrap();
+        let mark = PackMark { before: Some(before), file_id: 200, ..PackMark::new("TNP Limitless 8".into(), "1.81.0".into()) };
+        (inst, mark, dir)
+    }
+
+    #[test]
+    fn undo_all_puts_the_pack_record_back() {
+        let (mut inst, mark, dir) = updated_instance("back");
+        let r = restore_pack(&mut inst, &mark, 5000).unwrap();
+        assert_eq!(r, PackRestore::Restored { version: "1.80.0".into() });
+        // On disk, not only in memory: the header and the update offer read it.
+        let now = crate::instances::load(&dir).unwrap();
+        let p = now.pack.unwrap();
+        assert_eq!((p.file_id, p.version.as_str(), p.project_id), (100, "1.80.0", 77));
+        assert_eq!(now.loader, "neoforge-21.1.256");
+        assert_eq!(now.game_version, "1.21.1");
+        // What the undo set aside reads as the update put back, and undoing
+        // that moves the pack on again.
+        let sets = crate::backups::list(&dir);
+        let put = sets[0].pack.clone().unwrap();
+        assert!(put.undone);
+        assert_eq!((put.version.as_str(), put.file_id), ("1.80.0", 100));
+        let mut inst = crate::instances::load(&dir).unwrap();
+        assert_eq!(restore_pack(&mut inst, &put, 5000).unwrap(), PackRestore::Restored { version: "1.81.0".into() });
+        let now = crate::instances::load(&dir).unwrap();
+        assert_eq!((now.pack.unwrap().file_id, now.loader.as_str(), now.game_version.as_str()), (200, "neoforge-21.1.300", "1.21.4"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pack_updated_again_is_left_alone() {
+        let (mut inst, mark, dir) = updated_instance("moved");
+        inst.pack = Some(pack_ref(300, "1.82.0"));
+        inst.save().unwrap();
+        let r = restore_pack(&mut inst, &mark, 5000).unwrap();
+        assert_eq!(r, PackRestore::Moved { version: "1.82.0".into() });
+        let now = crate::instances::load(&dir).unwrap();
+        assert_eq!(now.pack.unwrap().file_id, 300);
+        assert_eq!(now.loader, "neoforge-21.1.300");
+        // Nothing was marked as put back.
+        assert!(crate::backups::list(&dir)[0].pack.is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mark_from_before_the_record_was_kept_changes_nothing() {
+        let (mut inst, mut mark, dir) = updated_instance("old");
+        mark.before = None;
+        assert_eq!(restore_pack(&mut inst, &mark, 5000).unwrap(), PackRestore::Unknown);
+        assert_eq!(crate::instances::load(&dir).unwrap().pack.unwrap().file_id, 200);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_server_gets_its_pack_record_and_link_back() {
+        use crate::backups::{PackBefore, PackMark};
+        use crate::hosting::pack_link::{self, PackLink};
+        use crate::server_pack_update as spu;
+        let dir = std::env::temp_dir().join(format!("hopper-undo-pack-server-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let cfg = dir.join(crate::sync::BACKUP_DIR).join("5000").join("config");
+        fs::create_dir_all(&cfg).unwrap();
+        fs::write(cfg.join("a.toml"), "x").unwrap();
+        let link = |f: &str| PackLink { source: "curseforge".into(), project: "77".into(), file: f.into() };
+        let marker = |pack: u64| spu::Marker { project_id: 77, pack_file_id: pack, server_pack_file_id: pack + 1, server_pack: "server.zip".into() };
+        spu::record(&dir, &marker(100)).unwrap();
+        pack_link::write(&dir, &link("100"));
+        let before = PackBefore::of_server(&dir);
+        spu::record(&dir, &marker(200)).unwrap();
+        pack_link::write(&dir, &link("200"));
+        let mark = PackMark { before: Some(before), file_id: 200, ..PackMark::new("TNP".into(), "1.81.0".into()) };
+        let mut inst = Instance { name: "TNP".into(), root: dir.clone(), ..Default::default() };
+        restore_pack(&mut inst, &mark, 5000).unwrap();
+        assert_eq!(spu::recorded(&dir), Some(marker(100)));
+        assert_eq!(pack_link::read(&dir), Some(link("100")));
+        // The server had no hopper.json and none is made for it.
+        assert!(!dir.join(crate::instances::HOPPER_FILE).exists());
+
+        // A server that had no pack record: it is gone again.
+        let blank = PackBefore { server: Some(spu::Marker::default()), ..Default::default() };
+        spu::record(&dir, &marker(200)).unwrap();
+        let mark = PackMark { before: Some(blank), file_id: 200, ..PackMark::new("TNP".into(), "1.81.0".into()) };
+        restore_pack(&mut inst, &mark, 5000).unwrap();
+        assert!(spu::recorded(&dir).is_none());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

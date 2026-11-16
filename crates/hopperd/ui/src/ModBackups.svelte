@@ -43,11 +43,14 @@
   async function undo(set, file = null) {
     busy = true;
     try {
-      const r = await post(`${base}/mod-backups/undo`, { when: set.when, name: file?.name ?? (set.files.length === 1 ? set.files[0].name : null) });
+      const r = await post(`${base}/mod-backups/undo`, { when: set.when, name: file?.name ?? (set.files.length === 1 && !set.pack ? set.files[0].name : null) });
       // A whole pack update is hundreds of files: counted, not listed.
       const what = r.restored.length > 3 ? `${r.restored.length} files` : r.restored.join(', ');
       if (r.restored.length) say(`Put back ${what}.${r.restart_needed ? ' Restart the server to load it.' : ''}`);
       for (const e of r.errors) say(e, true);
+      // A whole pack update put back also puts back the pack's own record.
+      if (r.pack?.state === 'restored') say(`${set.pack.name} is back at ${r.pack.version || 'its old version'}.`);
+      else if (r.pack?.state === 'moved') say(`${set.pack.name} was updated again after this; its version stays ${r.pack.version || 'as it is'}.`);
       if (r.gone) {
         if (!r.gone.choices.length) say(`${r.gone.title}: ${r.gone.message}. It has no other version for this Minecraft and loader, so it can't be put back.`, true);
         else {
@@ -388,7 +391,7 @@
                 {:else if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
                 <span class="col grow pk">
                   <span class="row t">
-                    <span class="ch blue">Updated pack</span><b class="ell">{s.pack.name}</b>{#if s.pack.version}<span class="nw">to {s.pack.version}</span>{/if}
+                    <span class="ch" class:blue={!s.pack.undone} class:muted={s.pack.undone}>{s.pack.undone ? 'Put back pack' : 'Updated pack'}</span><b class="ell">{s.pack.name}</b>{#if s.pack.version}<span class="nw">to {s.pack.version}</span>{/if}
                     {#if faces}<span class="chev">{#if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}</span>{/if}
                   </span>
                   <span class="row cnts">
