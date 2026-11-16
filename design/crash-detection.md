@@ -21,7 +21,7 @@ Phase 1 as built differs from the draft in three places:
 
 ## Root cause first (2026-10-26: built; logic in `crashdetect.rs`, card is option D of `mockups/features/crash-root-cause.html`, in `src/gpui/logs/crash_story.rs`)
 
-The card: "<mod> stopped the game from loading", a fix box (**Put <old> back**
+The card: "<mod> stopped the game from loading", a fix box (**Roll back to <old>**
 swaps the jar with its copy in backups, the newer one goes to Backups; plus
 **Turn off <mod>**), then "What happened" in order: the update, the mod's
 error, mods skipped because of it (`debug.log`'s "Skipping … task for mod
@@ -52,7 +52,7 @@ named in code:
    display name) and that mod has an older copy in `.hopper-backups`, or its
    jar changed after the last good start (`deps::loaded_fine`), the suspect
    carries a hint: "Forbidden & Arcanus was updated on Oct 24 (2.6.1 →
-   2.6.2)", with a way to put the old one back.
+   2.6.2)", with a way to roll back to the old one.
 
 Also: these lines sit early in the log (1.2 MB into a 3.2 MB one here), so
 step 1–2 scan the whole `latest.log` line by line for these markers instead
@@ -99,8 +99,8 @@ Hopper Server (`ServerCrash.svelte`) and on desktop's server banner
   error is a client class, which names the first mod in its trace) are
   Certain, marked `client_only`, and offered **Remove from server** instead
   of Turn off.
-- **Fixes on the server:** Put back (`POST /servers/{id}/crash/put-back`,
-  read again on the server so only a change the crash names can be put
+- **Fixes on the server:** Roll back (`POST /servers/{id}/crash/put-back`,
+  read again on the server so only a change the crash names can be rolled
   back; the newer jar goes to `.hopper-backups`), Turn off (the Mods tab's
   toggle), Remove from server (to backups, with Undo).
 - **Configs that differ from the pack** (`crashdetect::config_differs`,

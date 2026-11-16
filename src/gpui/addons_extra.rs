@@ -1560,10 +1560,10 @@ impl AddonsView {
                         crate::history_view::get_from_website(&this.store, &root, f, w, window, cx);
                     }
                     if let Some(p) = done.first().and_then(|p| p.file_name()) {
-                        window.push_notification(Notification::success(format!("Put back {}", p.to_string_lossy())), cx);
+                        window.push_notification(Notification::success(format!("Rolled back {}", p.to_string_lossy())), cx);
                     }
                     if let Some((f, g)) = gone {
-                        window.push_notification(Notification::error(format!("{}: {g}. History can put back another version.", f.name)), cx);
+                        window.push_notification(Notification::error(format!("{}: {g}. History can roll back to another version.", f.name)), cx);
                     }
                     for e in errors {
                         window.push_notification(Notification::error(e), cx);

@@ -6151,7 +6151,7 @@ fn undo_update(store: &Entity<Store>, root: PathBuf, items: Vec<Replaced>, windo
             back += 1;
         }
         inst.save()?;
-        job.detail(format!("Put back {back} files"));
+        job.detail(format!("Rolled back {back} files"));
         Ok(crate::store::Msg::InstanceChanged(inst.root.clone()))
     });
     // Once it's done, look for updates again so the undone ones are offered.

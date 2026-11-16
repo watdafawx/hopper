@@ -563,9 +563,9 @@ impl BackupsView {
         let chevron = gpui_kit::component::Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small();
         let lead = self.set_lead(set, faces, chevron.clone(), cx);
         let muted = cx.theme().muted_foreground;
-        // "Updated pack All the Mods 10 to 1.80.0" ("Put back pack ..." once
-        // Undo all put it back, in the muted colour of put-back rows), the
-        // pack's name cut short first when the row is narrow.
+        // "Updated pack All the Mods 10 to 1.80.0" ("Rolled back pack ..."
+        // once Undo all put it back, in the muted colour of put-back rows),
+        // the pack's name cut short first when the row is narrow.
         let title = h_flex()
             .gap_1()
             .min_w_0()
@@ -575,7 +575,7 @@ impl BackupsView {
                     .flex_none()
                     .whitespace_nowrap()
                     .text_color(change_color(Change::Updated, !pack.undone, cx))
-                    .child(if pack.undone { "Put back pack" } else { "Updated pack" }),
+                    .child(if pack.undone { "Rolled back pack" } else { "Updated pack" }),
             )
             .child(div().min_w_0().truncate().whitespace_nowrap().font_semibold().child(pack.name.clone()))
             .when(!pack.version.is_empty(), |r| r.child(div().flex_none().whitespace_nowrap().child(format!("to {}", pack.version))))
@@ -886,11 +886,12 @@ impl BackupsView {
         }
         let root = self.root.clone();
         let downloads = files.iter().any(|f| f.download);
+        let roll_back = all_updates(&files);
         let Some(slot) = queue_undo(self.store.read(cx), &root, files, pack) else {
             window.push_notification(Notification::error("That instance is gone."), cx);
             return;
         };
-        self.busy = Some(if downloads { "Downloading to put it back…".into() } else { "Putting it back…".into() });
+        self.busy = Some(undo_busy(downloads, roll_back));
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let got = crate::store::work_done(cx.background_executor().clone(), slot).await;
@@ -901,7 +902,7 @@ impl BackupsView {
                     cx.notify();
                     return;
                 };
-                this.after_undo(&done, window, cx);
+                this.after_undo(&done, roll_back, window, cx);
                 if let Some((name, r)) = pack_said {
                     this.say_pack(&name, &r, window, cx);
                 }
@@ -934,9 +935,10 @@ impl BackupsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let roll_back = all_updates(&files);
         let picked: Vec<(i64, Saved)> = files.into_iter().filter_map(|f| Some((self.when_of(&f)?, f))).collect();
         let downloads = picked.iter().any(|(_, f)| f.download);
-        self.busy = Some(if downloads { "Downloading to put it back…".into() } else { "Putting it back…".into() });
+        self.busy = Some(undo_busy(downloads, roll_back));
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let (done, gone, errors, restart, pack_said) = cx
@@ -977,7 +979,7 @@ impl BackupsView {
             this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 let paths: Vec<std::path::PathBuf> = done.iter().map(std::path::PathBuf::from).collect();
-                this.say_put_back(&paths, restart, window, cx);
+                this.say_put_back(&paths, restart, roll_back, window, cx);
                 if let Some((name, r)) = pack_said {
                     this.say_pack(&name, &r, window, cx);
                 }
@@ -994,17 +996,19 @@ impl BackupsView {
         .detach();
     }
 
-    /// "Put back X" / "Put back 3 files", with a restart hint for a running
+    /// "Rolled back X" for an undone update, "Put back X" for a removal or a
+    /// config edit, "3 files" counted; with a restart hint for a running
     /// server.
-    fn say_put_back(&self, done: &[std::path::PathBuf], restart: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn say_put_back(&self, done: &[std::path::PathBuf], restart: bool, roll_back: bool, window: &mut Window, cx: &mut Context<Self>) {
         let hint = if restart { ". Restart the server to load it." } else { "" };
+        let verb = if roll_back { "Rolled back" } else { "Put back" };
         match done {
             [] => {}
             [one] => {
                 let n = one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                window.push_notification(Notification::success(format!("Put back {n}{hint}")), cx)
+                window.push_notification(Notification::success(format!("{verb} {n}{hint}")), cx)
             }
-            many => window.push_notification(Notification::success(format!("Put back {} files{hint}", many.len())), cx),
+            many => window.push_notification(Notification::success(format!("{verb} {} files{hint}", many.len())), cx),
         }
     }
 
@@ -1033,9 +1037,9 @@ impl BackupsView {
     }
 
     /// Tells the store and the user what came back.
-    fn after_undo(&mut self, done: &[std::path::PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+    fn after_undo(&mut self, done: &[std::path::PathBuf], roll_back: bool, window: &mut Window, cx: &mut Context<Self>) {
         undone(&self.store, &self.root, done, cx);
-        self.say_put_back(done, false, window, cx);
+        self.say_put_back(done, false, roll_back, window, cx);
         self.changed(cx);
     }
 
@@ -1043,7 +1047,7 @@ impl BackupsView {
     /// has, the closest picked.
     fn pick_version(&mut self, f: Saved, g: Gone, window: &mut Window, cx: &mut Context<Self>) {
         if g.choices.is_empty() {
-            let msg = format!("{}. It has no other version for this Minecraft and loader, so it can't be put back.", g);
+            let msg = format!("{}. It has no other version for this Minecraft and loader, so it can't be rolled back.", g);
             window.push_notification(Notification::error(format!("{}: {msg}", g.name)), cx);
             return;
         }
@@ -1055,12 +1059,12 @@ impl BackupsView {
             let theme = cx.theme().clone();
             let now = picked.get();
             let label = |file: &hopper::cf::File| hopper::undo::version_of(&file.file_name);
-            let ok_label = format!("Put back {}", g.choices.get(now).map(label).unwrap_or_default());
+            let ok_label = format!("Roll back to {}", g.choices.get(now).map(label).unwrap_or_default());
             let (view2, f2, files, p2) = (view.clone(), f.clone(), g.choices.clone(), picked.clone());
             let title = view.update(cx, |v, cx| {
                 h_flex()
                     .gap_1p5()
-                    .child("Put back")
+                    .child("Roll back")
                     .child(v.mod_cell("pick-title".into(), g.name.clone(), pid, &icon, false, cx))
             });
             dialog
@@ -1120,14 +1124,14 @@ impl BackupsView {
         });
     }
 
-    /// Puts another version back in place of a gone one.
+    /// Puts another version in place of a gone one: a roll back to it.
     fn put_back_as(&mut self, f: Saved, file: hopper::cf::File, cx: &mut Context<Self>) {
         if let Some(t) = self.panel.clone() {
             let Some(when) = self.when_of(&f) else { return };
             let name = f.title();
-            self.store.read(cx).spawn_job(format!("Putting back {name}"), move |job| {
+            self.store.read(cx).spawn_job(format!("Rolling back {name}"), move |job| {
                 t.client.post(&t.sp("/mod-backups/put-back"), serde_json::json!({ "when": when, "name": f.name, "file_id": file.id }))?;
-                job.detail(format!("Put back {}", file.file_name));
+                job.detail(format!("Rolled back {}", file.file_name));
                 Ok(crate::store::Msg::Nothing)
             });
         } else {
@@ -1136,10 +1140,10 @@ impl BackupsView {
             let Some(mut inst) = s.instance(&root).cloned() else { return };
             let name = f.src.as_ref().map(|r| r.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| f.name.clone());
             let r2 = root.clone();
-            s.spawn_instance_job(&root, format!("Putting back {name}"), move |job| {
+            s.spawn_instance_job(&root, format!("Rolling back {name}"), move |job| {
                 crate::store::fresh(&mut inst);
                 hopper::undo::put_back_as(&mut inst, &f, &file, Some(job))?;
-                job.detail(format!("Put back {}", file.file_name));
+                job.detail(format!("Rolled back {}", file.file_name));
                 Ok(crate::store::Msg::InstanceChanged(r2))
             });
         }
@@ -1364,6 +1368,25 @@ pub(crate) fn get_from_website(
     window.push_notification(Notification::info(hopper::undo::website_message(&w, true)), cx);
 }
 
+/// Whether Undo is a roll back: updates, with the configs a pack update
+/// changed among them. A removal or a plain config edit is put back instead,
+/// so a mixed set keeps that wording.
+fn all_updates(files: &[Saved]) -> bool {
+    files.iter().any(|f| matches!(f.change, Change::Updated))
+        && files.iter().all(|f| matches!(f.change, Change::Updated | Change::Edited))
+}
+
+/// The History tab's busy line while an Undo runs.
+fn undo_busy(downloads: bool, roll_back: bool) -> String {
+    match (downloads, roll_back) {
+        (true, true) => "Downloading to roll back…",
+        (true, false) => "Downloading to put it back…",
+        (false, true) => "Rolling back…",
+        (false, false) => "Putting it back…",
+    }
+    .into()
+}
+
 /// History's Undo of `files` in an instance, as a task: it waits its turn
 /// behind another task on the instance, then works on what that one left.
 /// Pick the result up with [`crate::store::work_done`], then call
@@ -1376,9 +1399,10 @@ pub(crate) fn queue_undo(
     pack: Option<hopper::backups::PackMark>,
 ) -> Option<std::sync::Arc<std::sync::Mutex<Option<UndoDone>>>> {
     let mut inst = s.instance(root).cloned()?;
+    let verb = if all_updates(&files) { "Rolling back" } else { "Putting back" };
     let title = match files.as_slice() {
-        [one] => format!("Putting back {}", one.name),
-        many => format!("Putting back {}", hopper::words::count(many.len(), "file")),
+        [one] => format!("{verb} {}", one.name),
+        many => format!("{verb} {}", hopper::words::count(many.len(), "file")),
     };
     Some(s.queue_work(root, title, move |_| {
         crate::store::fresh(&mut inst);
@@ -1411,7 +1435,7 @@ pub(crate) fn queue_undo(
         {
             match hopper::undo::restore_pack(&mut inst, m, since) {
                 Ok(r) => pack_said = Some((m.name.clone(), r)),
-                Err(e) => errors.push(format!("{}'s pack version wasn't put back: {e:#}", m.name)),
+                Err(e) => errors.push(format!("{}'s pack version wasn't rolled back: {e:#}", m.name)),
             }
         }
         UndoDone { done, gone, website, errors, pack_said }

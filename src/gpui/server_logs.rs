@@ -566,7 +566,7 @@ impl ServerLogsView {
                             .small()
                             .primary()
                             .icon(IconName::Undo2)
-                            .label(if ch.from.is_empty() { "Put the older version back".to_string() } else { format!("Put {} back", ch.from) })
+                            .label(if ch.from.is_empty() { "Roll back to the older version".to_string() } else { format!("Roll back to {}", ch.from) })
                             .tooltip("Swaps in the older copy. The newer one goes to backups.")
                             .disabled(blocked)
                             .on_click(cx.listener(move |this, _, window, cx| {

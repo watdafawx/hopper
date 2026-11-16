@@ -88,7 +88,7 @@ impl LogsView {
                         .into_any_element()
                 } else {
                     let (root_p, ch_p) = (root.to_path_buf(), ch.clone());
-                    let label = if ch.from.is_empty() { "Put the older version back".to_string() } else { format!("Put {} back", ch.from) };
+                    let label = if ch.from.is_empty() { "Roll back to the older version".to_string() } else { format!("Roll back to {}", ch.from) };
                     h_flex()
                         .gap_2()
                         .flex_wrap()

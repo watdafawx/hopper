@@ -40,19 +40,26 @@
     }
   }
 
+  // Undoing an update reads "Roll back" (with the configs a pack update
+  // changed); a removal or a plain config edit is put back, as desktop's
+  // History words it.
+  const rollsBack = (files) =>
+    files.some((f) => f.verb === 'updated') && files.every((f) => f.verb === 'updated' || f.verb === 'changed');
+
   async function undo(set, file = null) {
     busy = true;
     try {
+      const undone = file ? [file] : set.files.filter((f) => f.undo !== false);
       const r = await post(`${base}/mod-backups/undo`, { when: set.when, name: file?.name ?? (set.files.length === 1 && !set.pack ? set.files[0].name : null) });
       // A whole pack update is hundreds of files: counted, not listed.
       const what = r.restored.length > 3 ? `${r.restored.length} files` : r.restored.join(', ');
-      if (r.restored.length) say(`Put back ${what}.${r.restart_needed ? ' Restart the server to load it.' : ''}`);
+      if (r.restored.length) say(`${rollsBack(undone) ? 'Rolled back' : 'Put back'} ${what}.${r.restart_needed ? ' Restart the server to load it.' : ''}`);
       for (const e of r.errors) say(e, true);
       // A whole pack update put back also puts back the pack's own record.
       if (r.pack?.state === 'restored') say(`${set.pack.name} is back at ${r.pack.version || 'its old version'}.`);
       else if (r.pack?.state === 'moved') say(`${set.pack.name} was updated again after this; its version stays ${r.pack.version || 'as it is'}.`);
       if (r.gone) {
-        if (!r.gone.choices.length) say(`${r.gone.title}: ${r.gone.message}. It has no other version for this Minecraft and loader, so it can't be put back.`, true);
+        if (!r.gone.choices.length) say(`${r.gone.title}: ${r.gone.message}. It has no other version for this Minecraft and loader, so it can't be rolled back.`, true);
         else {
           picked = r.gone.closest;
           pick = { when: set.when, ...r.gone };
@@ -221,7 +228,7 @@
         restart ||= r.restart_needed;
         for (const e of r.errors) say(e, true);
         if (r.gone) {
-          if (!r.gone.choices.length) say(`${r.gone.title}: ${r.gone.message}. It has no other version for this Minecraft and loader, so it can't be put back.`, true);
+          if (!r.gone.choices.length) say(`${r.gone.title}: ${r.gone.message}. It has no other version for this Minecraft and loader, so it can't be rolled back.`, true);
           else {
             picked = r.gone.closest;
             pick = { when: s.when, ...r.gone };
@@ -229,7 +236,7 @@
           }
         }
       }
-      if (restored.length) say(`Put back ${restored.length} file${restored.length === 1 ? '' : 's'}.${restart ? ' Restart the server to load it.' : ''}`);
+      if (restored.length) say(`${rollsBack(rows.map(([, f]) => f)) ? 'Rolled back' : 'Put back'} ${restored.length} file${restored.length === 1 ? '' : 's'}.${restart ? ' Restart the server to load it.' : ''}`);
       await load();
       if (restored.length) onChanged();
     } catch (e) {
@@ -247,7 +254,7 @@
     busy = true;
     try {
       const r = await post(`${base}/mod-backups/put-back`, { when: p.when, name: p.name, file_id: c.id });
-      say(`Put back ${r.restored.join(', ')}.${r.restart_needed ? ' Restart the server to load it.' : ''}`);
+      say(`Rolled back ${r.restored.join(', ')}.${r.restart_needed ? ' Restart the server to load it.' : ''}`);
       await load();
       onChanged();
     } catch (e) {
@@ -391,7 +398,7 @@
                 {:else if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
                 <span class="col grow pk">
                   <span class="row t">
-                    <span class="ch" class:blue={!s.pack.undone} class:muted={s.pack.undone}>{s.pack.undone ? 'Put back pack' : 'Updated pack'}</span><b class="ell">{s.pack.name}</b>{#if s.pack.version}<span class="nw">to {s.pack.version}</span>{/if}
+                    <span class="ch" class:blue={!s.pack.undone} class:muted={s.pack.undone}>{s.pack.undone ? 'Rolled back pack' : 'Updated pack'}</span><b class="ell">{s.pack.name}</b>{#if s.pack.version}<span class="nw">to {s.pack.version}</span>{/if}
                     {#if faces}<span class="chev">{#if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}</span>{/if}
                   </span>
                   <span class="row cnts">
@@ -473,7 +480,7 @@
 {#if pick}
   <div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && (pick = null)} onkeydown={(e) => e.key === 'Escape' && (pick = null)}>
     <form class="box popover" onsubmit={(e) => { e.preventDefault(); putBack(); }}>
-      <h3>Put back {pick.title}</h3>
+      <h3>Roll back {pick.title}</h3>
       <p class="small">{pick.message}. Pick another for this server:</p>
       <div class="ol">
         {#each pick.choices as c, i (c.id)}
@@ -485,7 +492,7 @@
       </div>
       <div class="row end">
         <button type="button" class="btn" onclick={() => (pick = null)}>Cancel</button>
-        <button class="btn pri">Put back {pick.choices[picked]?.version}</button>
+        <button class="btn pri">Roll back to {pick.choices[picked]?.version}</button>
       </div>
     </form>
   </div>

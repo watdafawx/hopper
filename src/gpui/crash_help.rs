@@ -58,7 +58,7 @@ pub fn undo_changed(store: &Entity<Store>, root: &Path, ch: &hopper::crashdetect
     };
     // Another task on the instance: this waits its turn behind it.
     let (r2, ch2) = (root.to_path_buf(), ch.clone());
-    let slot = s.queue_work(root, format!("Putting back the older {}", ch.name), move |_| {
+    let slot = s.queue_work(root, format!("Rolling back {}", ch.name), move |_| {
         crate::store::fresh(&mut inst);
         // A kept copy with no site file behind it: History's own undo would
         // put it beside the newer jar, so swap the two instead.
@@ -70,6 +70,7 @@ pub fn undo_changed(store: &Entity<Store>, root: &Path, ch: &hopper::crashdetect
         .map_err(|e| format!("{e:#}"))
     });
     let (store, root, name) = (store.clone(), root.to_path_buf(), ch.name.clone());
+    let from = ch.from.clone();
     window
         .spawn(cx, async move |cx| {
             let Some(done) = crate::store::work_done(cx.background_executor().clone(), slot).await else { return };
@@ -80,7 +81,8 @@ pub fn undo_changed(store: &Entity<Store>, root: &Path, ch: &hopper::crashdetect
                         s.reload_instance(&root, cx);
                         s.identify_jars(&root, jars);
                     });
-                    window.push_notification(Notification::success(format!("Put back the older {name}.")), cx);
+                    let to = if from.is_empty() { String::new() } else { format!(" to {from}") };
+                    window.push_notification(Notification::success(format!("Rolled back {name}{to}.")), cx);
                 }
                 Err(e) => window.push_notification(Notification::error(format!("{name}: {e}")), cx),
             })
