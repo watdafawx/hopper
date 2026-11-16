@@ -278,7 +278,7 @@
     busy = true;
     try {
       const r = await post(`${base}/mod-backups/clean`, {});
-      say(r.removed ? `Cleared ${r.removed} old History entr${r.removed === 1 ? 'y' : 'ies'} to the server's trash (${bytes(r.freed)})` : 'Nothing to clean up');
+      say(r.removed ? `Deleted ${r.removed} old History entr${r.removed === 1 ? 'y' : 'ies'} for good (${bytes(r.freed)})` : 'Nothing to clean up');
       await load();
     } catch (e) {
       say(e.message, true);
@@ -465,7 +465,7 @@
     <span class="sp"></span>
     {#if u}
       <span class="tiny muted">Keeps the last {u.keep_actions} actions and {u.keep_days} days</span>
-      <button class="btn sm" disabled={busy || !u.removes} title="Clears History older than the rules in Settings › Panel folder (to the server's trash, Files › Trash). The panel does this by itself as History grows, but leaves older entries for you. World backups stay." onclick={clean}>{u.frees ? `Clean up · frees ${bytes(u.frees)}` : 'Clean up'}</button>
+      <button class="btn sm" disabled={busy || !u.removes} title="Deletes History older than the rules in Settings › Panel folder, for good. The panel does this by itself as History grows, but leaves older entries for you. World backups stay." onclick={clean}>{u.frees ? `Clean up · frees ${bytes(u.frees)}` : 'Clean up'}</button>
     {/if}
   </div>
 </div>

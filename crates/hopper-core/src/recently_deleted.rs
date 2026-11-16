@@ -8,7 +8,9 @@
 //! so it is instant and never copies anything. Each entry is a folder named
 //! `<folder>-<seconds>` holding the moved folder's own files plus
 //! [`META`], which says what it was, where it came from and when it goes.
-//! A sweep removes entries past that time for good.
+//! A sweep removes entries past that time for good. Loose files (a
+//! screenshot, a mod, logs) deleted together make one entry holding them
+//! under their paths inside the instance or server they were in.
 //!
 //! Hopper Server keeps deleted servers the same way (30 days, in its
 //! servers folder); Hopper keeps them [`KEEP_DAYS`]. Entries written before
@@ -40,6 +42,11 @@ pub enum Kind {
     /// Hopper Server's entries say nothing: they are servers.
     #[default]
     Server,
+    /// Loose files: they go back under their paths in `from` (the instance
+    /// or server folder), beside what's there now.
+    Screenshot,
+    File,
+    Log,
 }
 
 impl Kind {
@@ -49,7 +56,25 @@ impl Kind {
             Kind::World => "World",
             Kind::Backup => "Backup",
             Kind::Server => "Server",
+            Kind::Screenshot => "Screenshots",
+            Kind::File => "Files",
+            Kind::Log => "Logs",
         }
+    }
+
+    /// Loose files, not one folder of its own.
+    pub fn is_files(self) -> bool {
+        matches!(self, Kind::Screenshot | Kind::File | Kind::Log)
+    }
+
+    /// What `n` of this kind are called: "3 screenshots".
+    fn count(self, n: usize) -> String {
+        let word = match self {
+            Kind::Screenshot => "screenshot",
+            Kind::Log => "log",
+            _ => "file",
+        };
+        format!("{n} {word}{}", if n == 1 { "" } else { "s" })
     }
 }
 
@@ -72,6 +97,10 @@ pub struct Meta {
     /// The instance or server a world or backup was in.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub owner: String,
+    /// What Hopper's settings held for a deleted instance (its group and
+    /// the like, [`crate::settings::InstanceSettings`]), put back with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<serde_json::Value>,
 }
 
 impl Meta {
@@ -82,6 +111,12 @@ impl Meta {
 
     pub fn owner(mut self, owner: impl Into<String>) -> Self {
         self.owner = owner.into();
+        self
+    }
+
+    /// Keeps `settings` with it, to put back on restore.
+    pub fn settings(mut self, settings: Option<serde_json::Value>) -> Self {
+        self.settings = settings;
         self
     }
 
@@ -252,6 +287,95 @@ pub fn move_in(item: &Path, places: &[PathBuf], mut meta: Meta) -> anyhow::Resul
     )
 }
 
+/// Moves loose files from inside `root` (an instance or server folder) into
+/// one new entry in the first of `places` on their drive, each under its
+/// path inside `root`. All or none: when one can't move, the ones already
+/// moved go back. A file something has open is refused with its error kept
+/// (so a caller can wait for the game to let go of it).
+pub fn move_files_in(root: &Path, files: &[PathBuf], places: &[PathBuf], mut meta: Meta) -> anyhow::Result<Entry> {
+    let what = if meta.name.is_empty() { root.display().to_string() } else { meta.name.clone() };
+    let rels = files
+        .iter()
+        .map(|f| f.strip_prefix(root).map(Path::to_path_buf).map_err(|_| anyhow::anyhow!("{} isn't in {}", f.display(), root.display())))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if rels.is_empty() {
+        anyhow::bail!("Nothing to delete.");
+    }
+    let folder = match files {
+        [one] => one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        _ => meta.kind.label().to_lowercase(),
+    };
+    for place in places {
+        if !same_volume(root, place) {
+            continue;
+        }
+        fs::create_dir_all(place).with_context(|| format!("creating {}", place.display()))?;
+        let dest = free_entry(place, &folder, meta.at);
+        fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
+        let mut moved: Vec<(&PathBuf, PathBuf)> = Vec::new();
+        let mut failed = None;
+        for (f, rel) in files.iter().zip(&rels) {
+            let to = dest.join(rel);
+            if let Some(p) = to.parent() {
+                let _ = fs::create_dir_all(p);
+            }
+            match fs::rename(f, &to) {
+                Ok(()) => moved.push((f, to)),
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+        if let Some(e) = failed {
+            for (f, to) in moved.iter().rev() {
+                let _ = fs::rename(to, f);
+            }
+            let _ = crate::hosting::fsmove::remove_tree(&dest);
+            let _ = fs::remove_dir(place);
+            if other_device(&e) && moved.is_empty() {
+                continue;
+            }
+            return Err(anyhow::Error::from(e).context(format!("Couldn't move {what} to Recently deleted. Nothing was deleted")));
+        }
+        meta.size = Some(crate::instance_ops::folder_size(&dest));
+        if let Err(e) = write_meta(&dest, &meta) {
+            for (f, to) in moved.iter().rev() {
+                let _ = fs::rename(to, f);
+            }
+            let _ = crate::hosting::fsmove::remove_tree(&dest);
+            return Err(e.context(format!("Couldn't move {what} to Recently deleted. Nothing was deleted")));
+        }
+        remember(place);
+        return Ok(Entry { dir: dest, meta });
+    }
+    anyhow::bail!("Couldn't move {what} to Recently deleted: there's no room for it on its own drive.")
+}
+
+/// Deletes files the player picked inside `root` (an instance or server
+/// folder) to Recently deleted, as one entry named for them ("3
+/// screenshots", or the file's name) from the folder's owner.
+pub fn delete_files(root: &Path, files: &[PathBuf], kind: Kind) -> anyhow::Result<Entry> {
+    let name = match files {
+        [one] => one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        _ => kind.count(files.len()),
+    };
+    let owner = owner_name(root);
+    move_files_in(root, files, &places_for(root), Meta::new(kind, name, root).owner(owner))
+}
+
+/// The instance's name for the list (its folder's name when it has no
+/// Hopper file, as a server's folder doesn't).
+fn owner_name(root: &Path) -> String {
+    let folder = || root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    fs::read(root.join(crate::instances::HOPPER_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(folder)
+}
+
 /// Writes an entry's note (Hopper Server writes its own entries with it).
 pub fn write_meta(entry_dir: &Path, meta: &Meta) -> anyhow::Result<()> {
     fs::write(entry_dir.join(META), serde_json::to_vec_pretty(meta)?).with_context(|| format!("writing {}", entry_dir.join(META).display()))
@@ -321,6 +445,16 @@ pub fn restore(entry: &Entry) -> anyhow::Result<PathBuf> {
     if from.as_os_str().is_empty() {
         anyhow::bail!("Hopper doesn't know where {name} came from.");
     }
+    if entry.meta.kind.is_files() {
+        // The files go back into their instance or server, which must
+        // still be there.
+        if !from.is_dir() {
+            anyhow::bail!("{name} was in {}, which is gone. Restore that first.", gone_name(entry, from));
+        }
+        files_back(&entry.dir, from, true)?;
+        crate::hosting::fsmove::remove_tree(&entry.dir).map_err(anyhow::Error::msg)?;
+        return Ok(from.clone());
+    }
     let parent = from.parent().context("it has no folder to go back to")?;
     if entry.meta.kind == Kind::Backup {
         // The store's folder may be gone with its last snapshot; the
@@ -364,6 +498,40 @@ fn merge_into(src: &Path, dest: &Path, top: bool) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Moves the files under `src` back to the same place under `dest`. One
+/// whose name was taken since comes back beside it as "name (restored).ext".
+fn files_back(src: &Path, dest: &Path, top: bool) -> anyhow::Result<()> {
+    for e in fs::read_dir(src)?.flatten() {
+        let name = e.file_name();
+        if top && name == META {
+            continue;
+        }
+        let (from, to) = (e.path(), dest.join(&name));
+        if e.file_type()?.is_dir() {
+            fs::create_dir_all(&to)?;
+            files_back(&from, &to, false)?;
+        } else {
+            let to = free_file(&to);
+            fs::rename(&from, &to).with_context(|| format!("moving {} back", to.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// `p` when it's free, else "name (restored).ext", "name (restored 2).ext"...
+fn free_file(p: &Path) -> PathBuf {
+    if !p.exists() {
+        return p.to_path_buf();
+    }
+    let parent = p.parent().unwrap_or(Path::new(""));
+    let stem = p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    (1..)
+        .map(|n| parent.join(if n == 1 { format!("{stem} (restored){ext}") } else { format!("{stem} (restored {n}){ext}") }))
+        .find(|c| !c.exists())
+        .unwrap_or_else(|| p.to_path_buf())
 }
 
 /// Deletes an entry for good; returns the bytes freed. Renamed first, so a
@@ -643,6 +811,79 @@ mod tests {
         folder(&inner, "b.jar");
         let e = move_in(&inner, &[inner.join(DIR), root.join(DIR)], Meta::new(Kind::Instance, "Inner", &inner)).unwrap();
         assert_eq!(e.dir.parent().unwrap(), root.join(DIR));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Screenshots deleted together are one entry, from their instance;
+    /// restoring puts them back under their paths, and one whose name was
+    /// taken since comes back beside the new one.
+    #[test]
+    fn files_move_and_come_back() {
+        let root = scratch("files");
+        let inst = root.join("Pack");
+        let shots = inst.join("screenshots");
+        fs::create_dir_all(&shots).unwrap();
+        fs::write(inst.join(crate::instances::HOPPER_FILE), r#"{"name":"My Pack"}"#).unwrap();
+        let (a, b) = (shots.join("a.png"), shots.join("b.png"));
+        fs::write(&a, "a").unwrap();
+        fs::write(&b, "b").unwrap();
+        let e = delete_files(&inst, &[a.clone(), b.clone()], Kind::Screenshot).unwrap();
+        assert!(!a.exists() && !b.exists());
+        assert_eq!(e.dir.parent().unwrap(), root.join(DIR));
+        assert_eq!((e.meta.name.as_str(), e.meta.owner.as_str(), e.meta.size), ("2 screenshots", "My Pack", Some(2)));
+        assert!(e.dir.join("screenshots/a.png").is_file());
+        let listed = &list(&root.join(DIR))[0];
+        assert_eq!(listed.meta.kind, Kind::Screenshot);
+        assert!(caption(listed, now()).starts_with("Screenshots from My Pack"));
+        // A new a.png meanwhile: the old one comes back beside it.
+        fs::write(&a, "new").unwrap();
+        assert_eq!(restore(listed).unwrap(), inst);
+        assert_eq!(fs::read_to_string(&a).unwrap(), "new");
+        assert_eq!(fs::read_to_string(shots.join("a (restored).png")).unwrap(), "a");
+        assert_eq!(fs::read_to_string(&b).unwrap(), "b");
+        assert!(!inst.join(META).exists() && !shots.join(META).exists());
+        assert!(list(&root.join(DIR)).is_empty());
+        // One file: named for itself.
+        let e = delete_files(&inst, &[b.clone()], Kind::File).unwrap();
+        assert_eq!(e.meta.name, "b.png");
+        // Its instance gone: refused, nothing lost.
+        let _ = fs::rename(&inst, root.join("Away"));
+        let err = restore(&e).unwrap_err().to_string();
+        assert!(err.contains("My Pack, which is gone"), "{err}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// One file that can't move undoes the rest: nothing is half deleted.
+    #[test]
+    fn files_all_or_none() {
+        let root = scratch("allnone");
+        let inst = root.join("Pack");
+        fs::create_dir_all(inst.join("logs")).unwrap();
+        let a = inst.join("logs/a.log");
+        fs::write(&a, "a").unwrap();
+        let missing = inst.join("logs/gone.log");
+        assert!(delete_files(&inst, &[a.clone(), missing], Kind::Log).is_err());
+        assert_eq!(fs::read_to_string(&a).unwrap(), "a");
+        assert!(list(&root.join(DIR)).is_empty());
+        // Outside the folder: refused before anything moves.
+        let out = root.join("elsewhere.txt");
+        fs::write(&out, "x").unwrap();
+        assert!(delete_files(&inst, &[out.clone()], Kind::File).is_err());
+        assert!(out.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A deleted instance's settings ride in its note and come back out.
+    #[test]
+    fn settings_ride_along() {
+        let root = scratch("settings");
+        let inst = root.join("Pack");
+        folder(&inst, "a.jar");
+        let kept = serde_json::json!({ "group": "Friends" });
+        let e = move_in(&inst, &places_for(&inst), Meta::new(Kind::Instance, "Pack", &inst).settings(Some(kept.clone()))).unwrap();
+        assert_eq!(list(&root.join(DIR))[0].meta.settings, Some(kept));
+        restore(&e).unwrap();
+        assert!(!inst.join(META).exists());
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -75,24 +75,27 @@ pub enum DeleteOutcome {
     Deleted,
 }
 
-/// Folder beside instances that History clean-up on network drives moves
-/// old backups to (they have no Recycle Bin).
+/// Folder older builds moved deleted things on network drives to; the
+/// Library still skips it.
 pub const HOPPER_TRASH: &str = ".hopper-trash";
 
 /// Moves the instance folder to Recently deleted.
 pub fn delete(inst: &Instance) -> anyhow::Result<()> {
-    delete_instance(inst, false).map(|_| ())
+    delete_instance(inst, false, None).map(|_| ())
 }
 
 /// [`delete`], saying where the folder went so the UI can word it.
-/// `permanent` deletes it for good instead.
-pub fn delete_instance(inst: &Instance, permanent: bool) -> anyhow::Result<DeleteOutcome> {
+/// `permanent` deletes it for good instead. `settings` (what Hopper's
+/// settings held for it: its group, paired servers) waits with it, to be
+/// put back on restore.
+pub fn delete_instance(inst: &Instance, permanent: bool, settings: Option<serde_json::Value>) -> anyhow::Result<DeleteOutcome> {
     if permanent {
         remove_for_good(&inst.root)?;
         return Ok(DeleteOutcome::Deleted);
     }
     use crate::recently_deleted as rd;
-    let e = rd::move_in(&inst.root, &rd::places_for(&inst.root), rd::Meta::new(rd::Kind::Instance, &inst.name, &inst.root))?;
+    let meta = rd::Meta::new(rd::Kind::Instance, &inst.name, &inst.root).settings(settings);
+    let e = rd::move_in(&inst.root, &rd::places_for(&inst.root), meta)?;
     Ok(DeleteOutcome::RecentlyDeleted(e.dir))
 }
 
@@ -128,31 +131,6 @@ fn clear_readonly(path: &Path) {
             clear_readonly(&e.path());
         }
     }
-}
-
-/// Moves `dir` to `<parent>\.hopper-trash\<name>-<timestamp>` (same volume,
-/// so it is a rename). Returns the new path.
-pub fn move_to_hopper_trash(dir: &Path) -> anyhow::Result<PathBuf> {
-    let parent = dir.parent().context("the folder has no parent")?;
-    let name = dir
-        .file_name()
-        .context("the folder has no name")?
-        .to_string_lossy()
-        .into_owned();
-    let trash = parent.join(HOPPER_TRASH);
-    fs::create_dir_all(&trash).with_context(|| format!("creating {}", trash.display()))?;
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let mut dest = trash.join(format!("{name}-{ts}"));
-    let mut n = 2;
-    while dest.exists() {
-        dest = trash.join(format!("{name}-{ts}-{n}"));
-        n += 1;
-    }
-    fs::rename(dir, &dest)
-        .with_context(|| format!("moving {} to {}", dir.display(), dest.display()))?;
-    Ok(dest)
 }
 
 /// Whether `path` is on a network drive (a mapped drive or a UNC path).
@@ -1193,33 +1171,11 @@ mod tests {
     }
 
     #[test]
-    fn remote_drives_and_moving_aside() {
-        let root = std::env::temp_dir().join(format!("hopper-trash-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let dir = root.join("Pack");
-        fs::create_dir_all(dir.join("mods")).unwrap();
-        fs::write(dir.join("mods/a.jar"), "a").unwrap();
+    fn remote_drives() {
         // The temp folder is local.
-        assert!(!is_remote_drive(&dir));
+        assert!(!is_remote_drive(&std::env::temp_dir()));
         #[cfg(windows)]
         assert!(is_remote_drive(Path::new(r"\\server\share\Instances\Pack")));
-
-        let moved = move_to_hopper_trash(&dir).unwrap();
-        assert!(!dir.exists());
-        assert_eq!(moved.parent().unwrap(), root.join(HOPPER_TRASH));
-        assert!(
-            moved
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("Pack-")
-        );
-        assert_eq!(fs::read_to_string(moved.join("mods/a.jar")).unwrap(), "a");
-        // A second delete of the same name in the same second doesn't collide.
-        fs::create_dir_all(&dir).unwrap();
-        let again = move_to_hopper_trash(&dir).unwrap();
-        assert_ne!(again, moved);
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

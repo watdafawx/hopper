@@ -206,10 +206,10 @@ const ENTRIES: &[Entry] = &[
     e(C::Accounts, "account", "Microsoft accounts", "Switch which one starts your games, add another, or sign one out.", "sign in login microsoft profile skin"),
     e(C::Folders, "instances-root", "Instances folder", "Where your instances live. CurseForge's Instances folder works.", "path directory library"),
     e(C::Folders, "launcher-dir", "Launcher folder", "The folder with minecraft.exe. CurseForge keeps one in Curse\\Install.", "minecraft.exe mojang path directory"),
-    e(C::Folders, "keep-actions", "Keep the last", "Old files from updates, removals and syncs are kept so you can undo. The last this many actions always stay, however old. After each new backup, older ones go to the Recycle Bin; backups from before wait for Clean up in an instance's Backups.", "backups undo hopper-backups disk space clean up retention keep"),
+    e(C::Folders, "keep-actions", "Keep the last", "Old files from updates, removals and syncs are kept so you can undo. The last this many actions always stay, however old. After each new backup, older ones are deleted for good; backups from before wait for Clean up in an instance's Backups.", "backups undo hopper-backups disk space clean up retention keep"),
     e(C::Folders, "keep-days", "And anything newer than", "Actions from these last days stay, however many.", "backups undo hopper-backups disk space clean up retention days"),
     e(C::Folders, "keep-gb", "Up to", "Per instance. Past this the oldest go first; 0 is no limit. Snapshots you take and world backups stay until you delete them.", "backups undo hopper-backups disk space clean up retention size limit gb"),
-    e(C::Folders, "recently-deleted", "Recently deleted", "Deleted instances, worlds, backups and servers wait here for 7 days, on the drive they were on, then go for good.", "recently deleted trash recycle bin restore undo undelete delete permanent skip disk space empty"),
+    e(C::Folders, "recently-deleted", "Recently deleted", "Deleted instances, worlds, backups, servers, screenshots, mods and logs wait here for 7 days, on the drive they were on, then go for good.", "recently deleted trash recycle bin restore undo undelete delete permanent skip disk space empty"),
     e(C::Launchers, "launchers", "Other launchers", "Found on this PC, and folders you add. Each one's instances can be managed in Hopper.", "modrinth prism multimc atlauncher gdlauncher ftb import manage"),
     e(C::Java, "launch-with", "Launch with", "Hopper starts games itself with your Microsoft sign-in, like CurseForge. Mojang's launcher opens instead and you press Play there.", "launcher native mojang direct"),
     e(C::Java, "minimize", "Minimize while playing", "Hide Hopper while a game runs, and bring it back when it closes.", "minimize window hide"),
@@ -1562,7 +1562,14 @@ impl SettingsPage {
                 match r {
                     Ok(done) => {
                         store.update(cx, |s, cx| match done.kind {
-                            hopper::recently_deleted::Kind::Instance => s.reload_instance(&done.to, cx),
+                            hopper::recently_deleted::Kind::Instance => {
+                                // Back in its group, paired with its servers.
+                                if let Some(kept) = &done.settings {
+                                    s.update_settings(|st| st.restore_instance_settings(&done.to, kept), cx);
+                                }
+                                s.reload_instance(&done.to, cx)
+                            }
+                            hopper::recently_deleted::Kind::File if s.instance(&done.to).is_some() => s.reload_instance(&done.to, cx),
                             hopper::recently_deleted::Kind::Server => s.rediscover_servers(),
                             _ => {}
                         });

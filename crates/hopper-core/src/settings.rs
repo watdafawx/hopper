@@ -12,6 +12,30 @@ fn set_load_error(msg: String) {
     *LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg);
 }
 
+/// What Settings holds for one instance, kept with it in Recently deleted
+/// so a restored instance comes back in its group, paired with its servers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InstanceSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub datapack_dest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pack_update_clean: Option<bool>,
+    /// Server folders paired with it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shown_server: Option<String>,
+}
+
+impl InstanceSettings {
+    pub fn is_empty(&self) -> bool {
+        *self == InstanceSettings::default()
+    }
+}
+
 /// A named set of Java arguments the user saved.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JavaPreset {
@@ -1002,6 +1026,48 @@ impl Settings {
             .collect()
     }
 
+    /// What these settings hold for the instance at `root`, to keep with it
+    /// while it's in Recently deleted.
+    pub fn instance_settings(&self, root: &Path) -> InstanceSettings {
+        let key = root.to_string_lossy().into_owned();
+        InstanceSettings {
+            group: self.groups.get(&key).cloned(),
+            datapack_dest: self.datapack_dest.get(&key).cloned(),
+            pack_update_clean: self.pack_update_clean.get(&key).copied(),
+            servers: {
+                let mut v: Vec<String> = self.pairings.iter().filter(|(_, i)| **i == key).map(|(s, _)| s.clone()).collect();
+                v.sort();
+                v
+            },
+            shown_server: self.shown_server.get(&key).cloned(),
+        }
+    }
+
+    /// Puts back what [`instance_settings`](Self::instance_settings) kept,
+    /// for the instance now at `root` (another folder when it came back
+    /// under a new name). A server paired with something else since stays
+    /// with that.
+    pub fn restore_instance_settings(&mut self, root: &Path, s: &InstanceSettings) {
+        let key = root.to_string_lossy().into_owned();
+        if let Some(g) = &s.group {
+            self.groups.insert(key.clone(), g.clone());
+        }
+        if let Some(d) = &s.datapack_dest {
+            self.datapack_dest.insert(key.clone(), d.clone());
+        }
+        if let Some(c) = s.pack_update_clean {
+            self.pack_update_clean.insert(key.clone(), c);
+        }
+        for srv in &s.servers {
+            self.pairings.entry(srv.clone()).or_insert_with(|| key.clone());
+        }
+        if let Some(srv) = &s.shown_server
+            && self.pairings.get(srv) == Some(&key)
+        {
+            self.shown_server.insert(key, srv.clone());
+        }
+    }
+
     /// Stops following at the instance `root`. The instance stays as it
     /// is. A pack that came through a group is remembered, so keeping the
     /// group in step doesn't follow it again. Returns whether it followed.
@@ -1382,6 +1448,36 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An instance's group, data pack folder and server pairings are kept
+    /// on delete and put back on restore, also under a new folder name; a
+    /// server paired with something else meanwhile stays with it.
+    #[test]
+    fn instance_settings_come_back() {
+        let (old, new) = (Path::new(r"C:\i\Pack"), Path::new(r"C:\i\Pack (restored)"));
+        let k = |p: &Path| p.to_string_lossy().into_owned();
+        let mut s = Settings::default();
+        s.groups.insert(k(old), "Friends".into());
+        s.datapack_dest.insert(k(old), "dp".into());
+        s.pairings.insert(r"C:\srv\a".into(), k(old));
+        s.pairings.insert(r"C:\srv\b".into(), k(old));
+        s.shown_server.insert(k(old), r"C:\srv\b".into());
+        let kept = s.instance_settings(old);
+        assert_eq!(kept.group.as_deref(), Some("Friends"));
+        assert_eq!(kept.servers, [r"C:\srv\a", r"C:\srv\b"]);
+        assert!(Settings::default().instance_settings(old).is_empty());
+        // Round trip through the note's JSON.
+        let kept: InstanceSettings = serde_json::from_value(serde_json::to_value(&kept).unwrap()).unwrap();
+
+        let mut s = Settings::default();
+        s.pairings.insert(r"C:\srv\a".into(), r"C:\i\Other".into());
+        s.restore_instance_settings(new, &kept);
+        assert_eq!(s.groups.get(&k(new)).map(String::as_str), Some("Friends"));
+        assert_eq!(s.datapack_dest.get(&k(new)).map(String::as_str), Some("dp"));
+        assert_eq!(s.pairings.get(r"C:\srv\a").map(String::as_str), Some(r"C:\i\Other"));
+        assert_eq!(s.pairings.get(r"C:\srv\b"), Some(&k(new)));
+        assert_eq!(s.shown_server.get(&k(new)).map(String::as_str), Some(r"C:\srv\b"));
+    }
 
     fn temp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("hopper-settings-{tag}-{}", std::process::id()));

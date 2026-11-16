@@ -468,10 +468,19 @@ pub fn confirm_delete(store: Entity<Store>, root: PathBuf, window: &mut Window, 
         // Big folders take a while (counting, or deleting for good): off
         // the UI thread.
         let inst = inst.clone();
+        // Its group and paired servers wait with it, to come back on restore.
+        let kept = store.read(cx).settings().instance_settings(&inst.root);
+        let kept = if for_good || kept.is_empty() { None } else { serde_json::to_value(&kept).ok() };
         // The open instance's watched folders would block the move.
-        store.read(cx).unwatch(&inst.root);
+        let disk = store.read(cx).unwatch(&inst.root);
         store.read(cx).spawn_instance_job(&inst.root.clone(), format!("Deleting {}", inst.name), move |job| {
-            match hopper::instance_ops::delete_instance(&inst, for_good)? {
+            let done = hopper::instance_ops::delete_instance(&inst, for_good, kept);
+            if done.is_err() {
+                // Still there: watch it again, or changes made outside
+                // Hopper go unseen until it's selected again.
+                disk.reclaim(&inst.root);
+            }
+            match done? {
                 hopper::instance_ops::DeleteOutcome::Deleted => job.detail("Deleted for good"),
                 hopper::instance_ops::DeleteOutcome::RecentlyDeleted(_) => job.detail(format!(
                     "In Recently deleted for {} days (Settings › Library & folders)",

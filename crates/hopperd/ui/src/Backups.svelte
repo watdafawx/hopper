@@ -162,7 +162,7 @@
   }
 
   async function remove(b) {
-    if (!(await confirmIt(`Delete "${title(b)}"?`, { body: `${whenLabel(b.at)}. Files only this backup keeps are deleted for good. The server itself isn't touched. Off-site copies of it go once a newer backup is copied.`, ok: 'Delete', danger: true }))) return;
+    if (!(await confirmIt(`Delete "${title(b)}"?`, { body: `${whenLabel(b.at)}. It moves to the server's trash (Files › Trash) for 30 days, where you can restore it. The server itself isn't touched. Off-site copies of it go once a newer backup is copied.`, ok: 'Delete', danger: true }))) return;
     try {
       await del(`${base}/backups/${encodeURIComponent(b.name)}`);
       load();
@@ -177,7 +177,7 @@
     const list = (data?.backups || []).filter((b) => names.includes(b.name));
     if (busy || !list.length) return;
     if (list.length === 1) return remove(list[0]);
-    if (!(await confirmIt(`Delete these ${list.length} backups?`, { body: "Files only these backups keep are deleted for good. The server itself isn't touched. Off-site copies of them go once a newer backup is copied.", ok: `Delete ${list.length} backups`, danger: true }))) return;
+    if (!(await confirmIt(`Delete these ${list.length} backups?`, { body: "They move to the server's trash (Files › Trash) for 30 days, where you can restore them. The server itself isn't touched. Off-site copies of them go once a newer backup is copied.", ok: `Delete ${list.length} backups`, danger: true }))) return;
     busy = `Deleting ${list.length} backups`;
     let n = 0;
     try {
