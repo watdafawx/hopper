@@ -169,7 +169,7 @@ pub fn worlds(root: &Path) -> Vec<String> {
 /// Left out of every backup: other backups, Hopper's folders, logs.
 fn skipped(rel: &str) -> bool {
     let first = rel.split('/').next().unwrap_or("");
-    matches!(first, DIR | ".hopper-trash" | ".hopper-uploads" | ".hopper-backups" | "logs" | "crash-reports" | "debug")
+    matches!(first, DIR | ".hopper-trash" | crate::recently_deleted::DIR | ".hopper-uploads" | ".hopper-backups" | "logs" | "crash-reports" | "debug")
         || rel.ends_with("session.lock")
         || rel == super::process::CONSOLE_FILE
 }

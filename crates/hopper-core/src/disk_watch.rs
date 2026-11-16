@@ -312,6 +312,7 @@ pub const LOCAL_POLL: Duration = Duration::from_secs(60);
 enum Cmd {
     Roots(Vec<PathBuf>),
     Open(Option<PathBuf>),
+    Release(PathBuf),
     Check,
     Event(notify::Result<notify::Event>),
 }
@@ -342,6 +343,13 @@ impl DiskWatch {
     /// The instance open in the Library, whose content folders are watched.
     pub fn set_open(&self, root: Option<PathBuf>) {
         let _ = self.tx.send(Cmd::Open(root));
+    }
+
+    /// Stops watching `root` if it's the open instance: the watch holds its
+    /// content folders open, and Windows won't rename (move to Recently
+    /// deleted) a folder while something holds a folder inside it.
+    pub fn release(&self, root: &Path) {
+        let _ = self.tx.send(Cmd::Release(root.to_path_buf()));
     }
 
     /// Looks for changes now (the window came back into focus).
@@ -467,6 +475,13 @@ fn run(rx: Receiver<Cmd>, events: Sender<Cmd>, on_change: impl Fn(Vec<Change>)) 
                     st.rewatch();
                 }
             }
+            Ok(Cmd::Release(r)) => {
+                if st.open.as_deref() == Some(r.as_path()) {
+                    st.open = None;
+                    st.snap = Snapshot::take(&st.roots, None);
+                    st.rewatch();
+                }
+            }
             Ok(Cmd::Check) => st.poll(Instant::now()),
             Ok(Cmd::Event(Ok(ev))) => {
                 if ev.need_rescan() {
@@ -580,6 +595,7 @@ mod tests {
         for n in [
             ".hopper-backups",
             ".hopper-trash",
+            ".hopper-deleted",
             ".hopper-pending.json",
             "hopper.json",
             "hopper.json.1234-0.tmp",

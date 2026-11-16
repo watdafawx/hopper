@@ -349,9 +349,6 @@ pub struct Settings {
     /// How many website-only CurseForge files Hopper's download window
     /// gets at once (1 to 8), each in its own page.
     pub web_downloads: u8,
-    /// Deleted instances, worlds and backups are removed outright instead
-    /// of filling the Recycle Bin (on C:) with gigabytes.
-    pub delete_permanently: bool,
     /// Mods may be added from GitHub, Maven, Jenkins and download links
     /// (they skip CurseForge's and Modrinth's review). Off by default.
     pub allow_sources: bool,
@@ -743,7 +740,6 @@ impl Default for Settings {
             pack_keep_days: 30,
             image_cache_gb: crate::imgcache::DEFAULT_GB,
             web_downloads: 4,
-            delete_permanently: true,
             allow_sources: false,
             // A new user: Hopper shows its setup on the first start.
             setup_done: false,
@@ -1654,8 +1650,10 @@ mod tests {
         assert!(!old.needs_setup());
         let empty: Settings = serde_json::from_str("{}").unwrap();
         assert!(empty.setup_done);
-        // Deletes skip the Recycle Bin unless turned off.
-        assert!(empty.delete_permanently);
+        // The old "Skip the Recycle Bin" setting is dropped quietly: deletes
+        // go to Recently deleted, with "Delete for good now" in each dialog.
+        let skipped: Settings = serde_json::from_str(r#"{"delete_permanently":true}"#).unwrap();
+        assert!(!serde_json::to_string(&skipped).unwrap().contains("delete_permanently"));
         // No settings file: a new user, who sees the setup.
         assert!(Settings::default().needs_setup());
         // Saved either way, it reads back the same.

@@ -3,7 +3,7 @@
 use crate::java_form::settings_form;
 use crate::store::{Msg, Store};
 use crate::widgets;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::form::Field;
@@ -451,39 +451,24 @@ pub fn confirm_delete(store: Entity<Store>, root: PathBuf, window: &mut Window, 
         );
         return;
     }
-    // A network drive has no Recycle Bin: Hopper moves the folder aside.
-    let remote = hopper::instance_ops::is_remote_drive(&inst.root);
-    let permanent = store.read(cx).settings().delete_permanently;
-    let whereto = if permanent {
-        "is deleted for good (Settings > General sends deletes to the Recycle Bin instead)"
-    } else if remote {
-        "moves to .hopper-trash next to it (network drives have no Recycle Bin)"
-    } else {
-        "moves to the Recycle Bin"
-    };
-    window.open_alert_dialog(cx, move |alert, _, _| {
-        let (store, inst) = (store.clone(), inst.clone());
-        alert
-            .title(format!("Delete {}?", inst.name))
-            .description(format!("{}, worlds and all, {whereto}.", inst.root.display()))
-            .confirm()
-            .ok_text("Delete instance")
-            .ok_variant(ButtonVariant::Danger)
-            .on_ok(move |_, _, cx| {
-                // Big folders take a while: off the UI thread.
-                let inst = inst.clone();
-                store.read(cx).spawn_instance_job(&inst.root.clone(), format!("Deleting {}", inst.name), move |job| {
-                    match hopper::instance_ops::delete_instance(&inst, permanent)? {
-                        hopper::instance_ops::DeleteOutcome::Deleted => job.detail("Deleted"),
-                        hopper::instance_ops::DeleteOutcome::RecycleBin => job.detail("In the Recycle Bin"),
-                        hopper::instance_ops::DeleteOutcome::MovedAside(p) => {
-                            job.detail(format!("Moved to {}", p.display()))
-                        }
-                    }
-                    Ok(Msg::Forget(inst.root.clone()))
-                });
-                true
-            })
+    let title = format!("Delete {}?", inst.name);
+    let what = format!("{}, worlds and all.", inst.root.display());
+    crate::delete_ask::open(title, what, false, "Delete instance", window, cx, move |for_good, _, cx| {
+        // Big folders take a while (counting, or deleting for good): off
+        // the UI thread.
+        let inst = inst.clone();
+        // The open instance's watched folders would block the move.
+        store.read(cx).unwatch(&inst.root);
+        store.read(cx).spawn_instance_job(&inst.root.clone(), format!("Deleting {}", inst.name), move |job| {
+            match hopper::instance_ops::delete_instance(&inst, for_good)? {
+                hopper::instance_ops::DeleteOutcome::Deleted => job.detail("Deleted for good"),
+                hopper::instance_ops::DeleteOutcome::RecentlyDeleted(_) => job.detail(format!(
+                    "In Recently deleted for {} days (Settings › Library & folders)",
+                    hopper::recently_deleted::KEEP_DAYS
+                )),
+            }
+            Ok(Msg::Forget(inst.root.clone()))
+        });
     });
 }
 

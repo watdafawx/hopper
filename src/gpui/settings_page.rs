@@ -201,7 +201,6 @@ const ENTRIES: &[Entry] = &[
     e(C::General, "instance-tab", "Instances open on", "The tab an instance shows first when Hopper starts. Last used opens the tab you had open.", "overview mods tab start resume continue last"),
     e(C::General, "browse-sort", "Browse sorts by", "How Browse orders results when it opens. Last used keeps the sort you picked last.", "sort order popularity downloads newest updated name featured last"),
     e(C::General, "dependents", "Mods others need", "Turning off a mod that others need, or turning on one that needs mods that are off.", "dependencies deps required library"),
-    e(C::General, "delete-permanently", "Skip the Recycle Bin", "Deleted instances, worlds and backups are removed for good, so they don't fill up your C: drive. Off sends them to the Recycle Bin.", "delete recycle bin trash permanent disk space"),
     e(C::General, "translate", "Translate mod text", "Offer to translate changelogs and descriptions that aren't in English. It runs on this PC: a language's model downloads only when you first translate from it (about 300 MB, 150 MB once stored), and no text is sent anywhere.", "translate translation language english chinese russian japanese korean changelog description offline"),
     e(C::General, "translate-langs", "Translation models", "Languages downloaded for translation. Remove one to free its space.", "translate translation language model download disk space remove"),
     e(C::Accounts, "account", "Microsoft accounts", "Switch which one starts your games, add another, or sign one out.", "sign in login microsoft profile skin"),
@@ -210,6 +209,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Folders, "keep-actions", "Keep the last", "Old files from updates, removals and syncs are kept so you can undo. The last this many actions always stay, however old. After each new backup, older ones go to the Recycle Bin; backups from before wait for Clean up in an instance's Backups.", "backups undo hopper-backups disk space clean up retention keep"),
     e(C::Folders, "keep-days", "And anything newer than", "Actions from these last days stay, however many.", "backups undo hopper-backups disk space clean up retention days"),
     e(C::Folders, "keep-gb", "Up to", "Per instance. Past this the oldest go first; 0 is no limit. Snapshots you take and world backups stay until you delete them.", "backups undo hopper-backups disk space clean up retention size limit gb"),
+    e(C::Folders, "recently-deleted", "Recently deleted", "Deleted instances, worlds, backups and servers wait here for 7 days, on the drive they were on, then go for good.", "recently deleted trash recycle bin restore undo undelete delete permanent skip disk space empty"),
     e(C::Launchers, "launchers", "Other launchers", "Found on this PC, and folders you add. Each one's instances can be managed in Hopper.", "modrinth prism multimc atlauncher gdlauncher ftb import manage"),
     e(C::Java, "launch-with", "Launch with", "Hopper starts games itself with your Microsoft sign-in, like CurseForge. Mojang's launcher opens instead and you press Play there.", "launcher native mojang direct"),
     e(C::Java, "minimize", "Minimize while playing", "Hide Hopper while a game runs, and bring it back when it closes.", "minimize window hide"),
@@ -536,6 +536,9 @@ pub struct SettingsPage {
     /// The image cache's files and bytes, and when they were counted.
     img_usage: Option<(usize, u64, std::time::Instant)>,
     img_counting: std::rc::Rc<std::cell::Cell<bool>>,
+    /// What waits in Recently deleted (with sizes), and when it was read.
+    rd_list: Option<(Vec<(hopper::recently_deleted::Entry, u64)>, std::time::Instant)>,
+    rd_counting: std::rc::Rc<std::cell::Cell<bool>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -765,6 +768,8 @@ impl SettingsPage {
             mc: minecraft::Mc::new(&s, cx),
             img_usage: None,
             img_counting: Default::default(),
+            rd_list: None,
+            rd_counting: Default::default(),
             _subscriptions: subs,
         }
     }
@@ -1247,12 +1252,6 @@ impl SettingsPage {
                         })
                     },
                 ))),
-                Row::new("delete-permanently").control(self.switch(
-                    "delete-permanently",
-                    s.delete_permanently,
-                    |st, v| st.delete_permanently = v,
-                    cx,
-                )),
                 Row::new("translate").control(self.switch("translate", s.translate, |st, v| st.translate = v, cx)),
                 Row::new("translate-langs").below(self.translate_models(cx)),
             ],
@@ -1460,7 +1459,181 @@ impl SettingsPage {
                     .control(self.folder(Text::Launcher, cx))
                     .note(self.note(Text::Launcher, cx)),
             ],
-        ), backups]
+        ), backups, Block::card(Some("Recently deleted"), vec![self.recently_deleted_row(cx)])]
+    }
+
+    /// Recently deleted: how much waits there, Empty now, and each entry
+    /// with Restore and delete for good.
+    fn recently_deleted_row(&self, cx: &mut Context<Self>) -> Row {
+        use crate::recently_deleted_ui as rdui;
+        // Read off the UI thread, again once it's half a minute old.
+        let stale = self.rd_list.as_ref().is_none_or(|l| l.1.elapsed() > Duration::from_secs(30));
+        if stale && !self.rd_counting.replace(true) {
+            let (counting, beside) = (self.rd_counting.clone(), self.store.read(cx).deleted_beside());
+            cx.spawn(async move |this, cx| {
+                let list = cx.background_spawn(async move { rdui::load(&beside) }).await;
+                counting.set(false);
+                this.update(cx, |this, cx| {
+                    this.rd_list = Some((list, std::time::Instant::now()));
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        let list: Option<Vec<(hopper::recently_deleted::Entry, u64)>> = self.rd_list.as_ref().map(|l| l.0.clone());
+        let summary = rdui::summary(list.as_deref());
+        let empty = list.as_ref().is_none_or(|l| l.is_empty());
+        let all = list.clone().unwrap_or_default();
+        let now = hopper::recently_deleted::now();
+        let theme = cx.theme().clone();
+        let rows: Vec<AnyElement> = list
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(i, (e, bytes))| {
+                let (e1, e2) = (e.clone(), (e.clone(), bytes));
+                h_flex()
+                    .id(("rd-row", i))
+                    .gap_3()
+                    .px_2()
+                    .py_1p5()
+                    .rounded(theme.radius)
+                    .hover(|s| widgets::row_hover(s, cx))
+                    .child(
+                        div()
+                            .size_8()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(theme.radius)
+                            .bg(theme.muted)
+                            .text_color(theme.muted_foreground)
+                            .child(Icon::new(rdui::icon(e.meta.kind)).small()),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(div().text_sm().font_medium().truncate().child(e.meta.name.clone()))
+                            .child(widgets::caption(hopper::recently_deleted::caption(&e, now), cx).truncate()),
+                    )
+                    .child(widgets::caption(hopper::instance_ops::human_bytes(bytes), cx).flex_none())
+                    .child(
+                        Button::new(("rd-restore", i))
+                            .small()
+                            .outline()
+                            .label("Restore")
+                            .tooltip("Puts it back where it was")
+                            .on_click(cx.listener(move |this, _, window, cx| this.rd_restore(e1.clone(), window, cx))),
+                    )
+                    .child(
+                        Button::new(("rd-purge", i))
+                            .small()
+                            .ghost()
+                            .icon(IconName::Trash)
+                            .tooltip("Delete for good now")
+                            .on_click(cx.listener(move |this, _, window, cx| this.rd_ask_purge(vec![e2.clone()], window, cx))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        Row::new("recently-deleted")
+            .desc(format!("{} {summary}", entry("recently-deleted").desc))
+            .control(
+                Button::new("rd-empty")
+                    .small()
+                    .outline()
+                    .label("Empty now")
+                    .disabled(empty)
+                    .tooltip("Deletes everything here for good now, to free the space")
+                    .on_click(cx.listener(move |this, _, window, cx| this.rd_ask_purge(all.clone(), window, cx))),
+            )
+            .when(!empty, |r| r.below(v_flex().gap_0p5().children(rows)))
+    }
+
+    fn rd_restore(&mut self, e: hopper::recently_deleted::Entry, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let r = cx.background_spawn(async move { crate::recently_deleted_ui::restore(&e) }).await;
+            this.update_in(cx, |this, window, cx| {
+                match r {
+                    Ok(done) => {
+                        store.update(cx, |s, cx| match done.kind {
+                            hopper::recently_deleted::Kind::Instance => s.reload_instance(&done.to, cx),
+                            hopper::recently_deleted::Kind::Server => s.rediscover_servers(),
+                            _ => {}
+                        });
+                        window.push_notification(Notification::success(done.notice()), cx);
+                    }
+                    Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
+                }
+                this.rd_list = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks, then deletes `entries` for good (one, or Empty now's all).
+    fn rd_ask_purge(&mut self, entries: Vec<(hopper::recently_deleted::Entry, u64)>, window: &mut Window, cx: &mut Context<Self>) {
+        let n = entries.len();
+        if n == 0 {
+            return;
+        }
+        let bytes = hopper::instance_ops::human_bytes(entries.iter().map(|(_, b)| b).sum());
+        let (title, desc, ok) = if n == 1 {
+            (format!("Delete {} for good?", entries[0].0.meta.name), format!("It frees {bytes} and can't be restored."), "Delete for good")
+        } else {
+            ("Empty Recently deleted?".to_string(), format!("All {n} items are deleted for good. It frees {bytes} and can't be undone."), "Empty now")
+        };
+        let view = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (view, entries) = (view.clone(), entries.clone());
+            alert
+                .title(title.clone())
+                .description(desc.clone())
+                .confirm()
+                .ok_text(ok)
+                .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    let entries = entries.clone();
+                    view.update(cx, |_, cx| {
+                        cx.spawn_in(window, async move |this, cx| {
+                            let (freed, errs) = cx
+                                .background_spawn(async move {
+                                    let mut freed = 0;
+                                    let mut errs = Vec::new();
+                                    for (e, _) in &entries {
+                                        match hopper::recently_deleted::purge(e) {
+                                            Ok(b) => freed += b,
+                                            Err(err) => errs.push(format!("{err:#}")),
+                                        }
+                                    }
+                                    (freed, errs)
+                                })
+                                .await;
+                            this.update_in(cx, |this, window, cx| {
+                                for e in errs {
+                                    window.push_notification(Notification::error(e), cx);
+                                }
+                                if freed > 0 {
+                                    let freed = hopper::instance_ops::human_bytes(freed);
+                                    window.push_notification(Notification::success(format!("Freed {freed}")), cx);
+                                }
+                                this.rd_list = None;
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    });
+                    true
+                })
+        });
     }
 
     fn launchers(&self, cx: &mut Context<Self>) -> Vec<Block> {
@@ -3572,6 +3745,14 @@ mod tests {
         for c in Category::ALL {
             assert!(ENTRIES.iter().any(|e| e.cat == c), "{c:?} is empty");
         }
+    }
+
+    #[test]
+    fn recently_deleted_says_its_time() {
+        let days = format!("{} days", hopper::recently_deleted::KEEP_DAYS);
+        assert!(super::entry("recently-deleted").desc.contains(&days));
+        let ids = |q: &str| matches(q).iter().map(|e| e.id).collect::<Vec<_>>();
+        assert!(ids("recycle bin").contains(&"recently-deleted"));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Delete server (the server header's ⋯ menu): a dialog that names what
 //! goes (its worlds, mods, configs, backups), can keep the worlds, and asks
-//! for the server's name. A server on this PC goes to the Recycle Bin; one
-//! on a Hopper Server goes to the panel's deleted servers, kept 30 days.
+//! for no typing: a "Delete for good now" tick box is the deliberate step.
+//! A server on this PC goes to Recently deleted (beside it, kept a week);
+//! one on a Hopper Server goes to the panel's deleted servers, kept 30 days.
 
 use crate::store::Store;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -34,7 +35,7 @@ struct DeleteForm {
     may: Option<bool>,
     /// The server's Settings › General page in the panel, where its owner deletes it.
     web: Option<String>,
-    /// Delete for good instead of the Recycle Bin / the panel's 30 days.
+    /// Delete for good instead of Recently deleted / the panel's 30 days.
     permanent: bool,
 }
 
@@ -43,7 +44,7 @@ impl DeleteForm {
         let _ = cx;
         // No typing the name: the tick box is the deliberate step for
         // deleting for good; otherwise a deleted server can be restored
-        // (panel: 30 days in its deleted servers; this PC: the Recycle Bin).
+        // (panel: 30 days in its deleted servers; this PC: Recently deleted).
         self.may != Some(false)
     }
 }
@@ -126,20 +127,26 @@ impl Render for DeleteForm {
                         ),
                 )
             })
-            .child(div().text_xs().text_color(if self.permanent { theme.danger } else { theme.muted_foreground }).child(match (&self.panel, self.permanent) {
-                (_, true) => "The folder is deleted for good and can't be restored.".to_string(),
-                (Some(p), _) => format!("{p} keeps deleted servers for 30 days: restore one from the panel's Settings › Panel folder."),
-                (None, _) => "The rest of the folder goes to the Recycle Bin, where you can restore it.".into(),
-            }))
-            .child(
-                Checkbox::new("delete-permanent")
-                    .label("Delete permanently (can't be undone)")
-                    .checked(self.permanent)
-                    .on_change(cx.listener(|this, v: &bool, _, cx| {
-                        this.permanent = *v;
-                        cx.notify();
-                    })),
-            )
+            .child(match &self.panel {
+                // The panel keeps its own deleted servers.
+                Some(p) => v_flex()
+                    .gap_3()
+                    .child(div().text_xs().text_color(if self.permanent { theme.danger } else { theme.muted_foreground }).child(if self.permanent {
+                        "It's deleted for good now and can't be restored.".to_string()
+                    } else {
+                        format!("It moves to {p}'s Recently deleted (its Settings › Panel folder) for 30 days, then goes for good.")
+                    }))
+                    .child(
+                        Checkbox::new("delete-for-good")
+                            .label(crate::delete_ask::FOR_GOOD)
+                            .checked(self.permanent)
+                            .on_change(cx.listener(|this, v: &bool, _, cx| {
+                                this.permanent = *v;
+                                cx.notify();
+                            })),
+                    ),
+                None => crate::delete_ask::for_good_rows(self.permanent, false, cx, |this: &mut Self, v, _| this.permanent = v),
+            })
             .into_any_element()
     }
 }
@@ -206,7 +213,10 @@ pub fn open(store: Entity<Store>, root: PathBuf, running: bool, window: &mut Win
                     .child(DialogClose::new().child(Button::new("dialog-cancel").outline().label("Cancel")))
                     .child(
                         DialogAction::new().child(
-                            Button::new("dialog-ok").danger().label(if permanent { "Delete permanently" } else { "Delete server" }).disabled(!ready),
+                            Button::new("dialog-ok")
+                                .danger()
+                                .label(if permanent { crate::delete_ask::FOR_GOOD_OK } else { "Delete server" })
+                                .disabled(!ready),
                         ),
                     ),
             )
@@ -214,21 +224,16 @@ pub fn open(store: Entity<Store>, root: PathBuf, running: bool, window: &mut Win
     });
 }
 
-/// Takes the folder of a server on this PC to the Recycle Bin, or deletes
-/// it for good. A folder somebody has open is refused with the program's
-/// name; for good, the folder is renamed away first so a locked one fails
-/// before anything is removed.
+/// Moves the folder of a server on this PC to Recently deleted (beside it,
+/// in its servers folder, as Hopper Server does), or deletes it for good.
+/// A folder somebody has open is refused with the program's name; for
+/// good, the folder is renamed away first so a locked one fails before
+/// anything is removed.
 fn delete_local(name: &str, root: &std::path::Path, permanent: bool) -> anyhow::Result<()> {
     use hopper::hosting::fsmove;
+    use hopper::recently_deleted as rd;
     if !permanent {
-        return trash::delete(root).map_err(|e| {
-            let who = fsmove::holders(root);
-            if who.is_empty() {
-                anyhow::anyhow!("Couldn't move {name} to the Recycle Bin: {e}. Nothing was deleted.")
-            } else {
-                anyhow::anyhow!(fsmove::locked_message(name, &who, &std::io::Error::from_raw_os_error(5)))
-            }
-        });
+        return rd::move_in(root, &rd::places_for(root), rd::Meta::new(rd::Kind::Server, name, root)).map(|_| ());
     }
     let parent = root.parent().ok_or_else(|| anyhow::anyhow!("{} has no parent folder", root.display()))?;
     let meta = std::fs::symlink_metadata(root)?;
@@ -282,7 +287,7 @@ fn delete(form: &Entity<DeleteForm>, window: &mut Window, cx: &mut App) -> bool 
                         _ => {
                             local.remove(&root)?;
                             let kept = if keep { hopper::hosting::worlds::keep_worlds(&root)? } else { None };
-                            job.detail(if permanent { "Deleting the folder" } else { "Moving the folder to the Recycle Bin" });
+                            job.detail(if permanent { "Deleting the folder" } else { "Moving the folder to Recently deleted" });
                             if let Err(err) = delete_local(&name, &root, permanent) {
                                 // Nothing is deleted: the worlds go back.
                                 if let Some(k) = &kept {

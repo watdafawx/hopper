@@ -71,6 +71,8 @@ mod revert_ui;
 mod rigsync;
 mod server_control;
 mod server_delete;
+mod delete_ask;
+mod recently_deleted_ui;
 mod server_crash;
 mod log_files;
 mod crash_list;

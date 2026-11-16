@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 pub const NOT_COPIED: &[&str] = &[
     backup::DIR,
     ".hopper-trash",
+    crate::recently_deleted::DIR,
     ".hopper-uploads",
     ".hopper-backups",
     ".hopper-staging",

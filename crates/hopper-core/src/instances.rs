@@ -522,7 +522,7 @@ pub fn discover(root: &Path) -> Vec<Instance> {
     };
     let mut out: Vec<Instance> = entries
         .flatten()
-        .filter(|e| e.file_name() != crate::instance_ops::HOPPER_TRASH)
+        .filter(|e| e.file_name() != crate::instance_ops::HOPPER_TRASH && e.file_name() != crate::recently_deleted::DIR)
         .filter_map(|e| load_managed(&e.path()))
         .collect();
     out.sort_by_key(|i| i.name.to_lowercase());
