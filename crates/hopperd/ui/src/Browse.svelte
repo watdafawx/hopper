@@ -21,7 +21,7 @@
   import { live } from './lib/live.svelte.js';
   import { say } from './lib/toast.svelte.js';
   import { followJob } from './lib/jobs.js';
-  import { SITE, TYPES, count, ago, preset, store, browseHash, andList } from './lib/browse.js';
+  import { SITE, TYPES, count, ago, preset, store, browseHash, andList, takeBrowseSeed } from './lib/browse.js';
   import { rightClear } from './lib/rightclear.js';
   import BrowsePack from './BrowsePack.svelte';
   import { packQuery, packPage, warm } from './lib/prefetch.js';
@@ -260,6 +260,14 @@
         into = i;
         if (i) store('browse.into', i);
         await loadTarget(i);
+      }
+      // "Find Paxi" and the like open the list with a search already typed, as desktop's Find.
+      const seeded = takeBrowseSeed();
+      if (seeded) {
+        query = seeded;
+        category = null;
+        run(false, 'replace');
+        return;
       }
       // Back to an entry that had filters of its own: those come back too.
       const b = navGet('browse');
