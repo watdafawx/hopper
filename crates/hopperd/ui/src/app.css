@@ -15,17 +15,18 @@
   --red-text: #f47a7a;
   /* Chip text. A tint is only ~10% of its colour, so the plain colour on its own tint is faint on a
      light theme (green on Catppuccin Latte: 2.5:1). On light themes the colour is pulled 50% toward
-     black (4.5:1 or better on all six); dark themes keep the plain colour. Use these (or .ink with
+     black (4.5:1 or better on all six); dark themes mix it 65% toward the theme's own text colour,
+     because Nord's or Everforest's blue and violet are only 3.5:1 on their own tints. Use these (or .ink with
      --k) for the text of every coloured chip, tag, pill and badge, never var(--green) etc. directly. */
   color-scheme: dark;
-  --ink-acc: light-dark(color-mix(in srgb, var(--acc) 50%, #000), var(--acc));
-  --ink-green: light-dark(color-mix(in srgb, var(--green) 50%, #000), var(--green));
-  --ink-gold: light-dark(color-mix(in srgb, var(--gold) 50%, #000), var(--gold));
-  --ink-blue: light-dark(color-mix(in srgb, var(--blue) 50%, #000), var(--blue));
+  --ink-acc: light-dark(color-mix(in srgb, var(--acc) 50%, #000), color-mix(in srgb, var(--acc) 35%, var(--text)));
+  --ink-green: light-dark(color-mix(in srgb, var(--green) 50%, #000), color-mix(in srgb, var(--green) 35%, var(--text)));
+  --ink-gold: light-dark(color-mix(in srgb, var(--gold) 50%, #000), color-mix(in srgb, var(--gold) 35%, var(--text)));
+  --ink-blue: light-dark(color-mix(in srgb, var(--blue) 50%, #000), color-mix(in srgb, var(--blue) 35%, var(--text)));
   --ink-red: var(--red-text);
-  --ink-violet: light-dark(color-mix(in srgb, var(--violet) 50%, #000), var(--violet));
-  --ink-subtle: light-dark(color-mix(in srgb, var(--subtle) 50%, #000), var(--subtle));
-  --ink-muted: light-dark(color-mix(in srgb, var(--muted) 50%, #000), var(--muted));
+  --ink-violet: light-dark(color-mix(in srgb, var(--violet) 50%, #000), color-mix(in srgb, var(--violet) 35%, var(--text)));
+  --ink-subtle: light-dark(color-mix(in srgb, var(--subtle) 50%, #000), color-mix(in srgb, var(--subtle) 35%, var(--text)));
+  --ink-muted: light-dark(color-mix(in srgb, var(--muted) 50%, #000), color-mix(in srgb, var(--muted) 35%, var(--text)));
   /* input.border, and the title bar / side bar edge (title_bar.border). */
   --input-line: #64646e; --side-line: #202024;
   /* widgets::alpha: hovered rows (foreground at 6%), selected rows (primary at 12%). */

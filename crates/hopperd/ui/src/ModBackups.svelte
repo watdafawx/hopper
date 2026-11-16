@@ -509,11 +509,11 @@
   .t { gap: 6px; min-width: 0; }
   .ch { flex: none; font-weight: 500; }
   .ch.red { color: var(--red-text); }
-  .ch.blue { color: var(--blue, #7fc3e8); }
-  .ch.warn { color: var(--amber, #e0b04a); }
-  .ch.pri { color: var(--accent); }
-  .ch.muted { color: var(--subtle); }
-  .ch.green { color: var(--green, #6cc788); }
+  .ch.blue { color: var(--ink-blue); }
+  .ch.warn { color: var(--ink-gold); }
+  .ch.pri { color: var(--ink-acc); }
+  .ch.muted { color: var(--ink-subtle); }
+  .ch.green { color: var(--ink-green); }
   .nm { display: flex; align-items: center; gap: 10px; text-align: left; min-width: 0; }
   .who { font-weight: 600; }
   .verb { color: var(--subtle); flex: none; }
