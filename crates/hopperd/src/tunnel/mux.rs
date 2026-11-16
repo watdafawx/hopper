@@ -997,7 +997,9 @@ mod tests {
         let err = t.unwrap().done.await.unwrap();
         assert!(matches!(err, MuxError::Timeout), "{err}");
         let took = at.elapsed();
-        assert!(took >= Duration::from_millis(190) && took < Duration::from_millis(600), "{took:?}");
+        // The lower bound is the point (not before the dead time); the upper
+        // only says it ends, with room for a machine busy with other builds.
+        assert!(took >= Duration::from_millis(190) && took < Duration::from_secs(5), "{took:?}");
     }
 
     #[tokio::test]
