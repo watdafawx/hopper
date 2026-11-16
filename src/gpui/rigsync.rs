@@ -3426,7 +3426,8 @@ impl Render for SyncPanel {
         } else {
             let root = server.root.clone();
             self.strip.update(cx, |st, cx| st.show(root, cx));
-            self.strip.read(cx).crash().is_some().then(|| self.strip.clone().into_any_element())
+            let crash = self.strip.update(cx, |st, cx| st.notice(cx));
+            crate::notice_slot::slot("sync-crash", crash.into_iter().collect(), window, cx)
         };
         let drift = self.drift_banner(cx);
         let drift_chip = self.drift_chip(cx);

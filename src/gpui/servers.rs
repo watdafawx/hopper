@@ -1169,6 +1169,9 @@ pub struct ServersView {
     mods_table: Entity<crate::addons::AddonsView>,
     /// The server the Mods table was last pointed at.
     mods_shown: Option<PathBuf>,
+    /// The Mods table's notices as last drawn: the page redraws when they
+    /// change ([`crate::addons::AddonsView::notice_sig`]).
+    notice_sig: u64,
     /// The Worlds tab: the instance's Worlds view, on the server.
     worlds: Entity<crate::content::WorldsView>,
     /// The Data packs tab: the instance's data pack table, on the server's
@@ -1377,9 +1380,18 @@ impl ServersView {
         let peek = mods_table.read(cx).peek().clone();
         let mut subs = subs;
         subs.push(crate::browse::observe_peek(&peek, cx, |_, cx| cx.notify()));
-        subs.push(cx.subscribe(&mods_table, |_, _, e: &crate::addons::AddonsEvent, cx| {
+        subs.push(cx.observe(&mods_table, |this, t, cx| {
+            let sig = t.read(cx).notice_sig(cx);
+            if sig != this.notice_sig {
+                this.notice_sig = sig;
+                cx.notify();
+            }
+        }));
+        subs.push(cx.subscribe(&mods_table, |this, _, e: &crate::addons::AddonsEvent, cx| {
             use crate::addons::AddonsEvent as E;
             match e {
+                // A notice's button for the Mods list, clicked on another tab.
+                E::ShowMods if this.tab != TAB_MODS => this.set_tab(TAB_MODS, cx),
                 E::AddContent { root, class } | E::AddTo { root, class, .. } => {
                     cx.emit(ServersEvent::Browse { root: root.clone(), class: *class })
                 }
@@ -1430,6 +1442,7 @@ impl ServersView {
             strip,
             p_files,
             mods_table,
+            notice_sig: 0,
             worlds,
             dp_table,
             dp_shown: None,
@@ -1898,11 +1911,13 @@ impl ServersView {
     }
 
     /// Points the Mods table at the picked server when its Mods tab opens.
+    /// A server on this PC: on every tab, for the notice slot above them (a
+    /// Hopper Server's list is fetched, so only once its Mods tab opens).
     fn show_mods_table(&mut self, cx: &mut Context<Self>) {
-        if self.tab != TAB_MODS {
+        let Some(s) = self.picked.as_ref().and_then(|p| self.store.read(cx).server(p)).cloned() else { return };
+        if self.tab != TAB_MODS && s.remote.is_some() {
             return;
         }
-        let Some(s) = self.picked.as_ref().and_then(|p| self.store.read(cx).server(p)).cloned() else { return };
         if self.mods_shown.as_ref() == Some(&s.root) || !self.mods_table_for(&s, cx) {
             return;
         }
@@ -2320,6 +2335,23 @@ impl ServersView {
             },
             cx,
         );
+        let slot = {
+            // One slot above the tabs for every notice the server has,
+            // as on an instance: the crash (not on Logs & crashes, which
+            // shows it in full), a stuck start, the Mods table's.
+            let mut notices: Vec<crate::notice_slot::Notice> = Vec::new();
+            if self.tab != TAB_LOGS {
+                self.strip.update(cx, |st, cx| st.show(s.root.clone(), cx));
+                notices.extend(self.strip.update(cx, |st, cx| st.notice(cx)));
+            }
+            let view = cx.entity().downgrade();
+            notices.extend(crate::stuck::server_stuck_bar(&self.store, &s.root, pstats.as_ref(), &self.control, move |rel, _, cx| {
+                view.update(cx, |this, cx| this.see_crash(rel, cx)).ok();
+            }, cx));
+            let root = s.root.clone();
+            notices.extend(self.mods_table.update(cx, |a, cx| a.notices(&root, cx)));
+            crate::notice_slot::slot("server", notices, window, cx)
+        };
         let body = v_flex()
             .flex_1()
             .min_h_0()
@@ -2327,6 +2359,7 @@ impl ServersView {
             .pt_2()
             .pb_5()
             .map(|c| if self.tab == TAB_OVERVIEW { c.gap_5() } else { c.gap_3() })
+            .children(slot)
             .child({
                 let codes = tabs_for(remote, self.store.read(cx).site_of(&s.root).is_some(), self.store.read(cx).is_hosted(&s.root));
                 let danger = cx.theme().danger;
@@ -2372,16 +2405,7 @@ impl ServersView {
                 // scrolls, so it isn't measured against it.
                 self.tabs_fit.wrap("server-tabs-fit", bar, 2, key, cx.entity_id())
             })
-            .when(self.tab != TAB_LOGS, |c| {
-                self.strip.update(cx, |st, cx| st.show(s.root.clone(), cx));
-                if self.strip.read(cx).crash().is_some() { c.child(self.strip.clone()) } else { c }
-            })
-            .children({
-                let view = cx.entity().downgrade();
-                crate::stuck::server_stuck_bar(&self.store, &s.root, pstats.as_ref(), &self.control, move |rel, _, cx| {
-                    view.update(cx, |this, cx| this.see_crash(rel, cx)).ok();
-                }, cx)
-            })
+
             .when(remote && matches!(self.tab, TAB_FILES | TAB_MODS | TAB_PLAYERS | TAB_BACKUPS | TAB_SCHEDULE | TAB_SETTINGS), |c| {
                 let body: AnyElement = match &self.target {
                     Some(Err(e)) => widgets::empty_state(IconName::TriangleAlert, "Can't reach this panel", Some(e.clone().into()), cx)

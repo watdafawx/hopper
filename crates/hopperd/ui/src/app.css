@@ -223,3 +223,39 @@ body.picking, body.picking * { user-select: none !important; cursor: grabbing !i
 .switch input:focus-visible + span { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--acc); }
 .switch input:disabled + span { opacity: .5; }
 .switch:has(input:disabled) { cursor: default; }
+
+/* The notice slot above a page's tabs (lib/NoticeSlot.svelte), as desktop's
+   notice_slot.rs: one-line strips tinted by tier (stops play red, needs a
+   choice amber, news blue), the rest under "N more". */
+.nslot { display: flex; flex-direction: column; gap: 6px; margin: 0 18px 10px; }
+/* No overflow clip: the "N more" list hangs out of its strip; title and
+   subject cut themselves short. */
+.nstrip { --tone: var(--blue); --ink: var(--ink-blue); position: relative; display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 6px 0 12px; border: 1px solid color-mix(in srgb, var(--tone) 45%, transparent); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--tone) 8%, transparent); font-size: 13px; }
+.nstrip.stop, .ndetails.stop { --tone: var(--red); --ink: var(--ink-red); }
+.nstrip.choice, .ndetails.choice { --tone: var(--gold); --ink: var(--ink-gold); }
+.nstrip > svg { color: var(--ink); flex: none; }
+.nstrip .nt { flex: 0 1 auto; min-width: 0; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nstrip .nt.grow { flex: 1 1 auto; }
+.nstrip .ns { flex: 1 1 0; min-width: 0; color: var(--subtle); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nacts { display: flex; align-items: center; gap: 6px; flex: none; }
+.nacts.wrap { flex-wrap: wrap; }
+.nacts .btn { white-space: nowrap; }
+.nprog { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--tone); border-bottom-left-radius: var(--radius-lg); }
+.ndetails { --tone: var(--blue); margin-top: -2px; padding: 8px 12px; max-height: 16rem; overflow: auto; border: 1px solid color-mix(in srgb, var(--tone) 25%, transparent); border-radius: var(--radius-lg); background: var(--base); display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; }
+.ndetails.in-list { margin: 0 0 4px 22px; }
+/* The list hangs from the strip, not the button, so it never runs past a
+   narrow window's left edge: right-aligned under the button (the strip's 6px
+   padding), no wider than the strip. */
+.nmore-wrap { display: inline-flex; }
+.nmore { gap: 6px; }
+.ndots { display: inline-flex; gap: 3px; }
+.ndots i, .ndot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); display: inline-block; flex: none; }
+.ndots i.stop, .ndot.stop { background: var(--red); }
+.ndots i.choice, .ndot.choice { background: var(--gold); }
+.nlist { position: absolute; right: 6px; top: calc(100% + 1px); z-index: 30; width: min(32rem, calc(100% - 12px)); max-height: 28rem; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 2px; }
+.nlist .nhead { padding: 2px 8px 6px; font-weight: 600; }
+.nlist .ngroup { padding: 6px 8px 2px; font-size: 11.5px; font-weight: 600; color: var(--muted); }
+.nrow { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: var(--radius); }
+.nrow:hover { background: var(--hover); }
+.nrow .nrt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.nrow .nrt > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
