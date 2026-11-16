@@ -466,7 +466,12 @@ async fn history_undo(State(app): State<Arc<App>>, headers: HeaderMap, method: M
                         }))
                     }
                     Ok(g) => errors.push(format!("{}: {g}", f.name)),
-                    Err(err) => errors.push(format!("{}: {err:#}", f.name)),
+                    // Only the CurseForge website has the file. A panel has no
+                    // download window: it says where to get it.
+                    Err(err) => match err.downcast::<hopper_core::cf::WebsiteOnly>() {
+                        Ok(w) => errors.push(hopper_core::undo::website_message(&w, false)),
+                        Err(err) => errors.push(format!("{}: {err:#}", f.name)),
+                    },
                 },
             }
         }

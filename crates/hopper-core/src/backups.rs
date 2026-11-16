@@ -105,13 +105,45 @@ fn mr_file_of(mut v: crate::modrinth::Version, sha1: &str) -> crate::cf::File {
 
 fn check_online(r: &Ref) -> bool {
     let Ok(f) = remote_file(r) else { return false };
-    f.sha1().is_some_and(|h| h == r.sha1) && f.file_length == r.size && crate::cf::download_url(&f).is_ok()
+    can_stand_in(r, &f, |f| crate::cf::download_url(f).is_ok())
+}
+
+/// A note may stand in for the jar only when the site's `f` is the very file
+/// `r` was and `hands_out` says Hopper can download it through the API. The
+/// second part is not a given: an author can turn third-party downloads off
+/// per file, and then only the website has it, so History must keep the jar.
+/// `hands_out` is asked last: a file with no URL of its own costs a request.
+fn can_stand_in(r: &Ref, f: &crate::cf::File, hands_out: impl FnOnce(&crate::cf::File) -> bool) -> bool {
+    f.sha1().is_some_and(|h| h == r.sha1) && f.file_length == r.size && hands_out(f)
 }
 
 fn fetch_online(r: &Ref, dest: &Path) -> anyhow::Result<()> {
     let f = remote_file(r)?;
+    // Not downloadable through the API: say so as the typed error, so Undo
+    // can send the player to the file's page instead of failing.
+    if crate::cf::website_only(&f)? {
+        return Err(website_only_of(r, &f).into());
+    }
     let url = crate::cf::download_url(&f)?;
     crate::cf::download_checked(&url, dest, &crate::cf::Expect { len: r.size, sha1: r.sha1.clone() }, None, |_| {})
+}
+
+/// The error for a note whose file only the CurseForge website hands out.
+pub(crate) fn website_only_of(r: &Ref, f: &crate::cf::File) -> crate::cf::WebsiteOnly {
+    // The project's page is known from the entry the note kept; else the
+    // site is asked, and a failure leaves the page out (the message copes).
+    let page = r
+        .addon
+        .as_ref()
+        .map(|a| a.page.clone())
+        .filter(|p| !p.is_empty())
+        .or_else(|| crate::source::get_mod(r.project_id).ok().map(|m| m.page()))
+        .unwrap_or_default();
+    crate::cf::WebsiteOnly {
+        name: if r.name.is_empty() { f.display_name.clone() } else { r.name.clone() },
+        file_name: r.file_name.clone(),
+        url: if page.is_empty() { String::new() } else { crate::cf::file_page(&page, r.file_id) },
+    }
 }
 
 fn offline_check(_: &Ref) -> bool {
@@ -240,20 +272,40 @@ pub(crate) fn ids_for(root: &Path, path: &Path) -> Option<Cand> {
     })
 }
 
+/// Notes beside the kept copy `dest` which file it was, so History still
+/// says "Updated 1.2 → 1.3" and Undo puts its entry back, as for a note.
+fn keep_ids(dest: &Path, c: &Cand) {
+    let (Some(dir), Some(name)) = (dest.parent(), dest.file_name()) else { return };
+    let p = dir.join(IDS);
+    let mut map: std::collections::BTreeMap<String, Cand> =
+        fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    map.insert(name.to_string_lossy().into_owned(), Cand { keep: true, ..c.clone() });
+    let _ = fs::write(&p, serde_json::to_vec_pretty(&map).unwrap_or_default());
+}
+
 /// Deletes `path` (a jar CurseForge or Modrinth knows, per `c`) and leaves
 /// only a note of which file it was at `dest`, its place in a History
 /// folder: Undo downloads it again. The note is written first, so there's
 /// never neither.
-pub(crate) fn note_instead(path: &Path, dest: &Path, c: &Cand) -> anyhow::Result<()> {
+///
+/// `false`, with nothing touched, when the site wouldn't hand the file out
+/// again byte for byte (a CurseForge file only its website has, a file it
+/// no longer lists, no connection): the caller keeps the jar as a copy.
+pub(crate) fn note_instead(path: &Path, dest: &Path, c: &Cand) -> anyhow::Result<bool> {
     let size = fs::metadata(path)?.len();
     let r = c.to_ref(sha1_of(path)?, size);
+    let (check, _) = hooks();
+    if !check(&r) {
+        keep_ids(dest, c);
+        return Ok(false);
+    }
     let note = ref_path(dest);
     fs::write(&note, serde_json::to_vec_pretty(&r)?)?;
     if let Err(e) = fs::remove_file(path) {
         let _ = fs::remove_file(&note);
         return Err(e.into());
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Notes in History that the mod at `path` (one CurseForge or Modrinth
@@ -269,7 +321,15 @@ pub fn note_before_switch(root: &Path, path: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(&dir)?;
     let dest = dir.join(&c.file_name);
     let r = c.to_ref(sha1_of(path)?, fs::metadata(path)?.len());
-    fs::write(ref_path(&dest), serde_json::to_vec_pretty(&r)?)?;
+    let (check, _) = hooks();
+    if check(&r) {
+        fs::write(ref_path(&dest), serde_json::to_vec_pretty(&r)?)?;
+    } else {
+        // Only the website has it (or the site can't be asked): Undo would
+        // have nothing to download, so History keeps a copy.
+        fs::copy(path, &dest)?;
+        keep_ids(&dest, &c);
+    }
     // Undo reads "off" from the place it goes back to.
     if let Some(a) = &c.addon {
         let off = if a.enabled { "" } else { ".disabled" };
@@ -344,7 +404,11 @@ pub fn materialize(jar: &Path) -> anyhow::Result<()> {
     }
     let r = read_ref(jar).ok_or_else(|| anyhow::anyhow!("{}: its backup note can't be read", jar.display()))?;
     let (_, fetch) = hooks();
-    fetch(&r, jar).map_err(|e| anyhow::anyhow!("{}: History keeps only where to download it, and downloading it again failed: {e:#}", r.file_name))?;
+    fetch(&r, jar).map_err(|e| match e.downcast::<crate::cf::WebsiteOnly>() {
+        // Kept typed, for callers that send the player to the page.
+        Ok(w) => w.into(),
+        Err(e) => anyhow::anyhow!("{}: History keeps only where to download it, and downloading it again failed: {e:#}", r.file_name),
+    })?;
     let _ = fs::remove_file(ref_path(jar));
     Ok(())
 }
@@ -1637,6 +1701,138 @@ mod tests {
         // Nothing changed: the note stays, nothing half-downloaded.
         assert!(is_ref(&a) && !root.join("mods/a.jar.hopper-tmp").exists());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// What the site lists for project 5 file 9: the jar as it was, with
+    /// or without the download URL (an author who turned off third-party
+    /// downloads leaves it out).
+    fn listed(url: Option<&str>) -> crate::cf::File {
+        crate::cf::File {
+            id: 9,
+            mod_id: 5,
+            file_name: "a.jar".into(),
+            file_length: REMOTE.len() as u64,
+            hashes: vec![crate::cf::FileHash { value: sha(REMOTE), algo: 1 }],
+            download_url: url.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// The real check's rule on a file with a URL (no network: a file
+    /// without one would ask the API).
+    fn check_downloadable(r: &Ref) -> bool {
+        can_stand_in(r, &listed(Some("https://edge.forgecdn.net/files/1/2/a.jar")), crate::cf::carries_url)
+    }
+
+    /// The real check's rule on a website-only file.
+    fn check_website_only(r: &Ref) -> bool {
+        can_stand_in(r, &listed(None), crate::cf::carries_url)
+    }
+
+    fn website_only_fetch(r: &Ref, _: &Path) -> anyhow::Result<()> {
+        // The page is on the entry, so no lookup (tests are offline).
+        let mut r = r.clone();
+        let a = r.addon.get_or_insert_with(Default::default);
+        a.page = "https://www.curseforge.com/minecraft/mc-mods/a".into();
+        Err(website_only_of(&r, &listed(None)).into())
+    }
+
+    fn a_ref() -> Ref {
+        Ref { project_id: 5, file_id: 9, file_name: "a.jar".into(), sha1: sha(REMOTE), size: REMOTE.len() as u64, mr_version: String::new(), mr_project: String::new(), name: "A".into(), addon: None }
+    }
+
+    #[test]
+    fn a_note_needs_a_file_the_site_hands_out() {
+        let r = a_ref();
+        assert!(check_downloadable(&r), "a normal file is still slimmed");
+        assert!(!check_website_only(&r), "a website-only file never is");
+        let mut other = r.clone();
+        other.sha1 = sha(b"changed");
+        assert!(!check_downloadable(&other), "a different file never is");
+        other = r;
+        other.size += 1;
+        assert!(!check_downloadable(&other));
+    }
+
+    #[test]
+    fn a_website_only_jar_stays_a_copy_and_undo_puts_it_back() {
+        set_test_hooks(check_website_only, website_only_fetch);
+        let root = instance("website-copy");
+        fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
+        let mut inst = crate::instances::load(&root).unwrap();
+        crate::install::remove(&mut inst, 0).unwrap();
+        let a = find(&root, &root.join("mods/a.jar"), 0).unwrap();
+        assert!(a.is_file() && !is_ref(&a), "the real jar is in History");
+        assert_eq!(fs::read(&a).unwrap(), REMOTE);
+        let f = list(&root).remove(0).files.remove(0);
+        // Undo needs no download: the fetch hook would fail it.
+        let back = crate::undo::undo(&mut inst, &f).unwrap();
+        assert_eq!(fs::read(back).unwrap(), REMOTE);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_downloadable_jar_is_still_a_note() {
+        set_test_hooks(check_downloadable, fake_fetch);
+        let root = instance("website-note");
+        fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
+        let a = crate::sync::backup_into(&root, &root.join("mods/a.jar")).unwrap().unwrap();
+        assert!(is_ref(&a) && !root.join("mods/a.jar").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A switch leaves the jar where it is; History's note of it follows the
+    /// same rule as a removal's.
+    #[test]
+    fn a_switch_keeps_a_copy_of_a_website_only_jar() {
+        for (check, note) in [(check_downloadable as Check, true), (check_website_only as Check, false)] {
+            set_test_hooks(check, website_only_fetch);
+            let root = instance(if note { "switch-note" } else { "switch-copy" });
+            let jar = root.join("mods/a.jar");
+            fs::write(&jar, REMOTE).unwrap();
+            note_before_switch(&root, &jar).unwrap();
+            assert!(jar.is_file(), "the jar stays where it is");
+            let a = find(&root, &jar, 0).unwrap();
+            assert_eq!((is_ref(&a), a.is_file()), (note, !note));
+            fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    /// A History folder made before this fix: only the note is left of a
+    /// website-only jar. Undo says what it is, as the typed error the app
+    /// turns into the download window; the note stays for another try.
+    #[test]
+    fn undo_with_only_a_note_for_a_website_only_file_is_the_typed_error() {
+        set_test_hooks(check_downloadable, website_only_fetch);
+        let root = instance("website-note-undo");
+        fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
+        let mut inst = crate::instances::load(&root).unwrap();
+        crate::install::remove(&mut inst, 0).unwrap();
+        let a = find(&root, &root.join("mods/a.jar"), 0).unwrap();
+        assert!(is_ref(&a), "the old kind of entry: only a note");
+        let f = list(&root).remove(0).files.remove(0);
+        let e = crate::undo::undo(&mut inst, &f).unwrap_err();
+        assert!(e.downcast_ref::<crate::undo::Gone>().is_none(), "not 'gone from the site'");
+        let w = e.downcast_ref::<crate::cf::WebsiteOnly>().expect("the typed website-only error, not a generic one");
+        assert_eq!((w.name.as_str(), w.file_name.as_str()), ("A", "a.jar"));
+        assert_eq!(
+            crate::undo::website_message(w, true),
+            "A a can only be downloaded from the CurseForge website. Download it there and Hopper puts it back."
+        );
+        assert!(is_ref(&a) && inst.addons.is_empty(), "nothing changed");
+        // materialize (Undo of a removal toast, panels) keeps it typed too.
+        assert!(materialize(&a).unwrap_err().downcast_ref::<crate::cf::WebsiteOnly>().is_some());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_website_page_comes_from_the_kept_entry() {
+        let mut r = a_ref();
+        r.addon = Some(crate::instances::Addon { page: "https://www.curseforge.com/minecraft/mc-mods/structory-towers/".into(), ..Default::default() });
+        let w = website_only_of(&r, &listed(None));
+        assert_eq!(w.url, "https://www.curseforge.com/minecraft/mc-mods/structory-towers/files/9");
+        let msg = crate::undo::website_message(&w, false);
+        assert!(msg.contains(&w.url) && msg.contains("add it to the server's mods"), "{msg}");
     }
 
     #[test]

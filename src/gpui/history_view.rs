@@ -882,10 +882,11 @@ impl BackupsView {
         self.busy = Some(if downloads { "Downloading to put it back…".into() } else { "Putting it back…".into() });
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let (done, gone, errors) = cx
+            let (done, gone, website, errors) = cx
                 .background_spawn(async move {
                     let mut done = Vec::new();
                     let mut gone: Option<(Saved, Gone)> = None;
+                    let mut website: Vec<(Saved, hopper::cf::WebsiteOnly)> = Vec::new();
                     let mut errors = Vec::new();
                     for f in &files {
                         match hopper::undo::undo(&mut inst, f) {
@@ -893,11 +894,16 @@ impl BackupsView {
                             Err(e) => match e.downcast::<Gone>() {
                                 Ok(g) if gone.is_none() => gone = Some((f.clone(), g)),
                                 Ok(g) => errors.push(format!("{}: {g}", f.name)),
-                                Err(e) => errors.push(format!("{}: {e:#}", f.name)),
+                                // Only the CurseForge website has the file: the
+                                // download window gets it, as from the mod's page.
+                                Err(e) => match e.downcast::<hopper::cf::WebsiteOnly>() {
+                                    Ok(w) => website.push((f.clone(), w)),
+                                    Err(e) => errors.push(format!("{}: {e:#}", f.name)),
+                                },
                             },
                         }
                     }
-                    (done, gone, errors)
+                    (done, gone, website, errors)
                 })
                 .await;
             this.update_in(cx, |this, window, cx| {
@@ -906,6 +912,9 @@ impl BackupsView {
                 for e in errors {
                     window.push_notification(Notification::error(e), cx);
                 }
+                for (f, w) in website {
+                    this.get_from_website(f, w, window, cx);
+                }
                 if let Some((f, g)) = gone {
                     this.pick_version(f, g, window, cx);
                 }
@@ -913,6 +922,36 @@ impl BackupsView {
             .ok();
         })
         .detach();
+    }
+
+    /// The entry's file only the CurseForge website hands out, and History
+    /// kept just a note of it: installs it the way the mod page's Files tab
+    /// does ("Roll back to…"), which opens the download window for its page
+    /// and adds the file, hash-checked, when it arrives in Downloads.
+    fn get_from_website(&mut self, f: Saved, w: hopper::cf::WebsiteOnly, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = f.src.clone() else {
+            window.push_notification(Notification::error(hopper::undo::website_message(&w, false)), cx);
+            return;
+        };
+        let root = self.root.clone();
+        let s = self.store.read(cx);
+        let Some(inst) = s.instance(&root).cloned() else {
+            window.push_notification(Notification::error("That instance is gone."), cx);
+            return;
+        };
+        let instances_root = std::path::PathBuf::from(&s.settings().instances_root);
+        let title = format!("Putting back {}", f.title());
+        let at = root.clone();
+        s.spawn_instance_job(&root, title, move |job| {
+            let (m, file) = hopper::undo::website_file(&r)?;
+            let before = crate::store::Before::at(&at);
+            let class = m.class_id.unwrap_or(hopper::cf::CLASS_MODS);
+            let place = hopper::browse::Placement { instances_root: &instances_root, target: Some(inst), dest: None };
+            let (changed, line) = hopper::browse::install_project(&m, Some(file), class, place, job)?;
+            job.detail(line);
+            Ok(crate::store::Msg::added(changed, &before, Some(m.id)))
+        });
+        window.push_notification(Notification::info(hopper::undo::website_message(&w, true)), cx);
     }
 
     /// The time of the History entry a file is in (how a panel names it).

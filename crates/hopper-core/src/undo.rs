@@ -38,6 +38,32 @@ impl std::fmt::Display for Gone {
 
 impl std::error::Error for Gone {}
 
+/// What Undo says when the file only the CurseForge website hands out
+/// ([`cf::WebsiteOnly`]) has to be downloaded by hand. `picks_up`: Hopper
+/// opens the download window and puts it back itself (the desktop app);
+/// else the player adds it (a server panel).
+pub fn website_message(w: &cf::WebsiteOnly, picks_up: bool) -> String {
+    let what = format!("{} {}", w.name, version_of(&w.file_name));
+    if picks_up {
+        format!("{what} can only be downloaded from the CurseForge website. Download it there and Hopper puts it back.")
+    } else if w.url.is_empty() {
+        format!("{what} can only be downloaded from the CurseForge website. Download {} there, then add it to the server's mods.", w.file_name)
+    } else {
+        format!("{what} can only be downloaded from the CurseForge website. Download {} from {}, then add it to the server's mods.", w.file_name, w.url)
+    }
+}
+
+/// The project and file a website-only note stands for, to put through the
+/// same install as the mod page's Files tab: it opens the download window and
+/// adds the file when it arrives.
+pub fn website_file(r: &Ref) -> anyhow::Result<(cf::Mod, cf::File)> {
+    let m = match &r.addon {
+        Some(a) => crate::install::addon_as_mod(a),
+        None => crate::source::get_mod(r.project_id)?,
+    };
+    Ok((m, crate::backups::remote_file(r)?))
+}
+
 fn site(r: &Ref) -> &'static str {
     if r.mr_version.is_empty() { "CurseForge" } else { "Modrinth" }
 }
@@ -123,7 +149,8 @@ fn closest(r: &Ref, files: &[cf::File]) -> usize {
 
 /// Gets `r`'s exact file to `dest`: from History's copy when it kept one,
 /// else downloaded (hash-checked). When the site no longer has it, the
-/// error is a [`Gone`].
+/// error is a [`Gone`]; when only the CurseForge website hands it out, a
+/// [`cf::WebsiteOnly`].
 fn fetch(inst: &Instance, f: &Saved, r: &Ref, dest: &Path) -> anyhow::Result<()> {
     if f.path.is_file() {
         if fs::rename(&f.path, dest).is_err() {
@@ -134,6 +161,12 @@ fn fetch(inst: &Instance, f: &Saved, r: &Ref, dest: &Path) -> anyhow::Result<()>
     let (_, fetch) = crate::backups::hooks();
     let Err(e) = fetch(r, dest) else { return Ok(()) };
     let _ = fs::remove_file(dest);
+    // Only the CurseForge website has this file (the author turned off
+    // downloads elsewhere): not gone, and not a failure to retry. The caller
+    // gets the typed error and opens the download window for it.
+    if e.downcast_ref::<cf::WebsiteOnly>().is_some() {
+        return Err(e);
+    }
     // Gone, or just offline? Gone only when the site lists the project's
     // files and this one isn't among them.
     match choices(inst, r) {
