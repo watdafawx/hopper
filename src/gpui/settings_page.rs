@@ -1113,7 +1113,11 @@ impl SettingsPage {
                         .servers()
                         .map(|list| {
                             let names: Vec<String> = list.iter().map(|s| s.name.clone()).collect();
-                            format!("Connected: {} ({})", if list.len() == 1 { "1 server".to_string() } else { format!("{} servers", list.len()) }, names.join(", "))
+                            match list.len() {
+                                0 => "Connected, but this panel has no servers yet.".to_string(),
+                                1 => format!("Connected: 1 server ({})", names.join(", ")),
+                                n => format!("Connected: {n} servers ({})", names.join(", ")),
+                            }
                         })
                         .map_err(|e| format!("{e:#}"))
                 })
