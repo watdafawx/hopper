@@ -463,22 +463,27 @@ impl AddonsView {
         widgets::closable_notice(body, key, widgets::Closed::Gone, "", info, &self.store, cx)
     }
 
-    /// Data packs with no folder at all: no loader and no world yet.
-    pub(crate) fn no_datapack_folders(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(root) = self.root.clone() else { return div().into_any_element() };
-        v_flex()
-            .size_full()
-            .gap_3()
-            .children(self.paxi_callout(&root, cx).map(|n| div().px_6().child(n)))
-            .child(
-                v_flex().flex_1().items_center().justify_center().child(widgets::empty_state(
-                    IconName::Database,
-                    "No data pack folders",
-                    Some("Install Paxi, or play once to make a world.".into()),
-                    cx,
-                )),
+    /// Data packs with no folder at all: no loader and no world yet. The
+    /// content tabs' empty state, saying what makes one.
+    pub(crate) fn no_datapack_folders(&self, cx: &mut Context<Self>) -> Div {
+        let root = self.root.clone();
+        let body = if self.server {
+            "Data packs go into a world. Start the server once to make one, or install Paxi to load them in every world."
+        } else {
+            "Data packs go into a world. Play once to make one, or install Paxi to load them in every world."
+        };
+        widgets::empty_state(IconName::Globe, "No world yet", Some(body.into()), cx).when_some(root, |d, root| {
+            d.child(
+                Button::new("dp-empty-paxi")
+                    .small()
+                    .outline()
+                    .icon(IconName::Search)
+                    .label("Find Paxi")
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(AddonsEvent::Find { root: root.clone(), text: "paxi".into() })
+                    })),
             )
-            .into_any_element()
+        })
     }
 
     /// The empty table of a global folder or world: Add.

@@ -365,6 +365,18 @@ pub fn empty_state(icon: IconName, title: impl Into<SharedString>, body: Option<
         })
 }
 
+/// How far an empty tab's message sits under the tabs above it, in rem
+/// (with the page's own top padding and `empty_state`'s, its icon is 64 px
+/// under the tabs).
+pub const EMPTY_TOP: f32 = 1.25;
+
+/// An empty tab's message (`empty_state`), a fixed way under the tabs
+/// rather than centred in what's left, so it is at the same height on
+/// every tab whatever the window's size.
+pub fn empty_top(state: impl IntoElement) -> Div {
+    v_flex().w_full().flex_1().min_h_0().items_center().pt(rems(EMPTY_TOP)).child(state)
+}
+
 /// `n` placeholder rows of `height` while a list loads.
 pub fn skeleton_rows(n: usize, height: Rems, cx: &App) -> Div {
     let theme = cx.theme();
