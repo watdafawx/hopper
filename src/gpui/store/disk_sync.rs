@@ -1,18 +1,16 @@
 //! The store's side of [`hopper::disk_watch`]: instances added, removed or
 //! changed outside Hopper show up without a manual refresh.
 
-use super::{Msg, Store, StoreEvent};
+use super::{Msg, MsgTx, Store, StoreEvent};
 use gpui_kit::*;
 use hopper::disk_watch::{Area, Change, DiskWatch};
 use hopper::instances;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 
 /// Starts the watcher; its changes come back as [`Msg::Disk`].
-pub(super) fn start(tx: Sender<Msg>, wake: hopper::waker::Waker) -> DiskWatch {
+pub(super) fn start(tx: MsgTx) -> DiskWatch {
     DiskWatch::start(move |changes| {
         let _ = tx.send(Msg::Disk(changes));
-        wake();
     })
 }
 

@@ -446,6 +446,9 @@ fn state(app: &AppView, window: &Window, cx: &App) -> Value {
             "loader": s.loader,
         })).collect::<Vec<_>>(),
         "nav_timing": probe::report(),
+        // Idle timer wake-up counts (see wakes.rs), to check that an idle
+        // Hopper isn't ticking.
+        "wakes": crate::wakes::report(),
         "jobs": store.jobs().snapshot().iter().map(|j| json!({
             "title": j.title, "detail": j.detail, "done": j.done, "error": j.error,
         })).collect::<Vec<_>>(),

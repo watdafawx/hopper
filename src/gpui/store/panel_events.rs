@@ -7,12 +7,11 @@
 //! hopperd's `changes.rs`). A panel too old to have it, or one that's down,
 //! is tried again later; the regular five-second poll still runs meanwhile.
 
-use super::{Msg, Store, StoreEvent, panel_slow};
+use super::{Msg, MsgTx, Store, StoreEvent, panel_slow};
 use gpui_kit::*;
 use hopper::hopperd::{Client, PanelChange};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -60,10 +59,10 @@ impl Store {
             }
             let Some(client) = Client::for_panel(&p) else { continue };
             on.insert(p.id.clone(), generation);
-            let (tx, wake, id) = (self.tx.clone(), self.wake.clone(), p.id.clone());
+            let (tx, id) = (self.tx.clone(), p.id.clone());
             let _ = std::thread::Builder::new()
                 .name("panel-events".into())
-                .spawn(move || follow(client, id, generation, tx, wake));
+                .spawn(move || follow(client, id, generation, tx));
         }
     }
 
@@ -109,10 +108,9 @@ impl Store {
 }
 
 /// One panel's long-poll, until its pairing changes.
-fn follow(client: Client, panel: String, generation: u64, tx: Sender<Msg>, wake: hopper::waker::Waker) {
+fn follow(client: Client, panel: String, generation: u64, tx: MsgTx) {
     let send = |changes: Vec<PanelChange>| {
         let _ = tx.send(Msg::PanelEvents(panel.clone(), changes));
-        wake();
     };
     let mut at: Option<(String, u64)> = None;
     let mut wait = Duration::from_secs(5);

@@ -10,7 +10,8 @@ pub static PANEL: AtomicU64 = AtomicU64::new(0);
 pub static HISTORY: AtomicU64 = AtomicU64::new(0);
 /// Browse's Minecraft version list loads.
 pub static VERSIONS: AtomicU64 = AtomicU64::new(0);
-/// The store's own 50 ms message poll (not changed here).
+/// The store's own poll loop, woken by a message, a dirty flag or a job tick
+/// (see `store::poll`); near zero while Hopper sits idle.
 pub static STORE_POLL: AtomicU64 = AtomicU64::new(0);
 
 pub fn hit(counter: &AtomicU64) {
