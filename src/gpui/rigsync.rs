@@ -30,6 +30,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 const ROW_H: f32 = 3.5;
+/// How long after a sync the server's changes are taken as its echo: a
+/// little over Hopper Server's five-second poll, so its next mods
+/// fingerprint lands inside it.
+const SYNC_ECHO: std::time::Duration = std::time::Duration::from_secs(7);
 /// The mod name's least width in rem: other cells give way first.
 const NAME_MIN: f32 = 14.0;
 /// The action cell: "Update server", its changelog half, the ⋯ slot and
@@ -135,6 +139,114 @@ const HEAD_FIT_MAX: usize = 2;
 /// beside its side column).
 const BAR_FIT_MAX: usize = 6;
 
+/// One ticked row of a push: its key, the word once it's done, its files.
+#[derive(Clone)]
+struct PushRow {
+    key: String,
+    /// "Uploading" while its jar goes, "Removing" and so on otherwise.
+    busy: &'static str,
+    done: &'static str,
+    ops: Ops,
+}
+
+impl PushRow {
+    /// The ticked rows as push rows (rows with nothing to do left out).
+    fn of(picked: &[DiffEntry], inst: &Instance, srv: &ServerInfo) -> Vec<PushRow> {
+        picked
+            .iter()
+            .filter_map(|d| {
+                let ops = rigsync::apply_ops(std::slice::from_ref(d), inst, srv);
+                let (busy, done) = push_words(Group::of(d));
+                (!ops.is_empty()).then(|| PushRow { key: row_key(d), busy, done, ops })
+            })
+            .collect()
+    }
+
+    /// `rows` with only the files still in `kept` (a source the person
+    /// chose not to bring along drops its files); rows left empty go.
+    fn kept(rows: &[PushRow], kept: &Ops) -> Vec<PushRow> {
+        let keys: HashSet<String> = kept.up.iter().chain(&kept.down).map(|o| format!("{o:?}")).collect();
+        rows.iter()
+            .cloned()
+            .filter_map(|mut r| {
+                r.ops.up.retain(|o| keys.contains(&format!("{o:?}")));
+                r.ops.down.retain(|o| keys.contains(&format!("{o:?}")));
+                (!r.ops.is_empty()).then_some(r)
+            })
+            .collect()
+    }
+}
+
+/// A pushed row's words: (while it runs, once it's done).
+fn push_words(g: Group) -> (&'static str, &'static str) {
+    match g {
+        Group::Add | Group::KeptOff => ("Uploading", "Added"),
+        Group::Update => ("Uploading", "Updated"),
+        Group::ServerOnly => ("Removing", "Removed"),
+        Group::TurnOff => ("Turning off", "Turned off"),
+        Group::TurnOn => ("Turning on", "Turned on"),
+        _ => ("Syncing", "Done"),
+    }
+}
+
+/// Where one row of a push is.
+#[derive(Clone, PartialEq, Debug)]
+enum RowRun {
+    Waiting,
+    /// Under way; how far (0..=1) when its size is known.
+    Moving(Option<f32>),
+    Done,
+    Failed(String),
+}
+
+/// A push under way: its rows, and their states (the push writes them,
+/// the ticker draws them).
+struct Push {
+    rows: Vec<PushRow>,
+    state: std::sync::Arc<std::sync::Mutex<Vec<RowRun>>>,
+    /// The states last drawn, whole percents, so the ticker only redraws
+    /// when a row moved on.
+    drawn: Vec<RowRun>,
+}
+
+impl Push {
+    fn new(rows: &[PushRow]) -> Self {
+        let state = vec![RowRun::Waiting; rows.len()];
+        Push { rows: rows.to_vec(), drawn: state.clone(), state: std::sync::Arc::new(std::sync::Mutex::new(state)) }
+    }
+
+    fn snapshot(&self) -> Vec<RowRun> {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.iter()
+            .map(|r| match r {
+                RowRun::Moving(Some(p)) => RowRun::Moving(Some((p * 100.0).floor() / 100.0)),
+                r => r.clone(),
+            })
+            .collect()
+    }
+
+    /// Whether a row moved on since the last call.
+    fn changed(&mut self) -> bool {
+        let now = self.snapshot();
+        let changed = now != self.drawn;
+        self.drawn = now;
+        changed
+    }
+
+    /// Row `key`'s state, with its words: (state, busy word, done word).
+    fn of(&self, key: &str) -> Option<(RowRun, &'static str, &'static str)> {
+        let i = self.rows.iter().position(|r| r.key == key)?;
+        Some((self.drawn.get(i)?.clone(), self.rows[i].busy, self.rows[i].done))
+    }
+
+    /// (rows through, rows in all, the one under way from 1).
+    fn count(&self) -> (usize, usize, usize) {
+        let through = self.drawn.iter().filter(|r| matches!(r, RowRun::Done | RowRun::Failed(_))).count();
+        let n = self.rows.len();
+        (through, n, (through + 1).min(n))
+    }
+}
+
 pub struct SyncPanel {
     store: Entity<Store>,
     /// The side column's width (inside an instance), resizable.
@@ -217,6 +329,22 @@ pub struct SyncPanel {
     acted: HashMap<String, &'static str>,
     /// Done rows fading out now: (since, keys).
     leaving: Option<(std::time::Instant, HashSet<String>)>,
+    /// The ticked rows' push under way: each row's own state, written by
+    /// the push as it goes and drawn by the ticker.
+    push: Option<Push>,
+    /// Rows whose push failed, with why, until they're tried again.
+    failed: HashMap<String, String>,
+    /// The server changed while a sync ran: compare once it's over.
+    rescan_held: bool,
+    /// Until then, changes are the echo of the sync that just ended (its
+    /// change events, the panel's next mods poll), already in the compare
+    /// it ended with: comparing again for each read the panel once more
+    /// per echo.
+    echo_until: Option<std::time::Instant>,
+    /// Hopper Server asked to slow down (429): the last list stays and it
+    /// is compared again by itself at this time.
+    slowed: Option<std::time::Instant>,
+    _slow_task: Option<Task<()>>,
     /// A comparison that came in while rows were acting or done: shown once
     /// they've gone, so rows don't jump under the pointer.
     diff_next: Option<(Result<Vec<DiffEntry>, String>, Option<Annotation>)>,
@@ -250,7 +378,16 @@ impl SyncPanel {
                 let rev = this.compare_key(cx);
                 if rev != this.seen_rev {
                     this.seen_rev = rev;
+                    // Mid-sync each copied jar changes the server: the sync
+                    // compares once when it ends, not once per jar.
+                    if this.syncing(cx) {
+                        this.rescan_held = true;
+                    } else if !this.echo_until.is_some_and(|t| std::time::Instant::now() < t) {
+                        this.rescan(cx);
+                    }
+                } else if this.rescan_held && !this.syncing(cx) {
                     this.rescan(cx);
+                    this.echo_until = Some(std::time::Instant::now() + SYNC_ECHO);
                 }
                 this.check_restarted(cx);
                 cx.notify();
@@ -286,6 +423,7 @@ impl SyncPanel {
         subs.push(cx.subscribe(&history, |this, _, _: &crate::configs::HistoryApplied, cx| {
             this.files_changed(cx);
             this.rescan(cx);
+            this.echo_until = Some(std::time::Instant::now() + SYNC_ECHO);
         }));
         subs.push(cx.observe(&control, |this, _, cx| {
             this.check_restarted(cx);
@@ -349,6 +487,12 @@ impl SyncPanel {
             acting: HashMap::new(),
             acted: HashMap::new(),
             leaving: None,
+            push: None,
+            failed: HashMap::new(),
+            rescan_held: false,
+            echo_until: None,
+            slowed: None,
+            _slow_task: None,
             diff_next: None,
             settle: Default::default(),
             _ticker: None,
@@ -550,6 +694,10 @@ impl SyncPanel {
             // Another server's crash isn't this one's.
             self.crash = None;
             self.crash_configs.clear();
+            self.failed.clear();
+            self.echo_until = None;
+            self.slowed = None;
+            self._slow_task = None;
             self.drift = None;
             self.server_nf = None;
             self.show = None;
@@ -610,7 +758,59 @@ impl SyncPanel {
         Some((s.clone(), inst))
     }
 
+    /// A sync of this server runs: this tab's push, or Sync to server's job.
+    fn syncing(&self, cx: &App) -> bool {
+        self.running
+            || self
+                .server
+                .as_ref()
+                .and_then(|r| self.store.read(cx).server_update_job(r))
+                .is_some_and(|j| !j.done)
+    }
+
+    /// Hopper Server answered 429: the list stays as it was, says so with a
+    /// countdown, and compares again by itself when the wait is over.
+    fn slow_down(&mut self, scan: u64, secs: u64, cx: &mut Context<Self>) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        self.slowed = Some(until);
+        self._slow_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let go = this
+                    .update(cx, |this, cx| {
+                        cx.notify();
+                        this.scan_gen == scan && std::time::Instant::now() >= until
+                    })
+                    .unwrap_or(false);
+                if go {
+                    this.update(cx, |this, cx| this.rescan(cx)).ok();
+                    return;
+                }
+                if this.update(cx, |this, _| this.scan_gen != scan).unwrap_or(true) {
+                    return;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    /// The "asked to slow down" line, while waiting out the panel's pause.
+    fn slow_note(&self, cx: &App) -> Option<AnyElement> {
+        let until = self.slowed?;
+        let n = until.saturating_duration_since(std::time::Instant::now()).as_secs().max(1);
+        Some(
+            h_flex()
+                .gap_2()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(Icon::new(IconName::Clock).small().text_color(cx.theme().warning))
+                .child(format!("Hopper Server asked to slow down. Trying again in {n} s."))
+                .into_any_element(),
+        )
+    }
+
     fn rescan(&mut self, cx: &mut Context<Self>) {
+        self.rescan_held = false;
         let Some((server, inst)) = self.pair(cx) else {
             self.checking_crash = false;
             cx.notify();
@@ -657,11 +857,13 @@ impl SyncPanel {
                         use hopper::synctiming::time;
                         let nf = s.spawn(move || time("NeoForge read", "", 0, || hopper::server_update::server_neoforge(&server.root)));
                         let marker = s.spawn(move || time("pack marker read", "", 0, || hopper::server_pack_update::recorded_on(server)));
-                        let diff = rigsync::compare(inst, server, anyway);
+                        let diff = rigsync::compare_full(inst, server, anyway);
                         (diff, nf.join().ok().flatten(), marker.join().ok().flatten())
                     })
                 })
                 .await;
+            let slow = diff.as_ref().err().and_then(hopper::hopperd::Refused::slow_down);
+            let diff = diff.map_err(|e| format!("{e:#}"));
             this.update(cx, |this, cx| {
                 if this.scan_gen != scan || this.server.as_ref() != Some(&root) {
                     return;
@@ -670,6 +872,14 @@ impl SyncPanel {
                 hopper::synctiming::first_result();
                 this.scan_read_done();
                 this.comparing = false;
+                // Busy, not down: keep the list and ask again when the panel
+                // said to (the server list does the same).
+                if let Some(secs) = slow {
+                    this.slow_down(scan, secs, cx);
+                    return;
+                }
+                this.slowed = None;
+                this._slow_task = None;
                 if let Ok((d, _)) = &diff {
                     this.check_drift(d, cx);
                 }
@@ -858,35 +1068,69 @@ impl SyncPanel {
         None
     }
 
-    fn run(&mut self, ops: Ops, cx: &mut Context<Self>) {
-        if let Some(ops) = self.ask_sources(ops, cx, |this, ops, cx| this.run_now(ops, cx)) {
-            self.run_now(ops, cx);
+    /// Pushes the ticked rows (Push N to server), one after another, each
+    /// row showing its own state; the lists compare again once at the end.
+    fn run_rows(&mut self, rows: Vec<PushRow>, cx: &mut Context<Self>) {
+        let all = Ops { up: rows.iter().flat_map(|r| r.ops.up.clone()).collect(), down: rows.iter().flat_map(|r| r.ops.down.clone()).collect() };
+        let keep = rows.clone();
+        if let Some(all) = self.ask_sources(all, cx, move |this, kept, cx| this.run_rows_now(PushRow::kept(&keep, &kept), cx)) {
+            self.run_rows_now(PushRow::kept(&rows, &all), cx);
         }
     }
 
-    fn run_now(&mut self, ops: Ops, cx: &mut Context<Self>) {
-        let Some((server, inst)) = self.pair(cx) else {
-            return;
-        };
-        if ops.is_empty() {
+    fn run_rows_now(&mut self, rows: Vec<PushRow>, cx: &mut Context<Self>) {
+        let Some((server, inst)) = self.pair(cx) else { return };
+        if rows.is_empty() || self.running {
             return;
         }
+        for r in &rows {
+            self.failed.remove(&r.key);
+        }
+        let push = Push::new(&rows);
+        let shared = push.state.clone();
+        self.push = Some(push);
         self.running = true;
         self.result = None;
         self.carry = None;
+        self.ensure_ticker(cx);
+        let ops: Vec<Ops> = rows.iter().map(|r| r.ops.clone()).collect();
         self._task = Some(cx.spawn(async move |this, cx| {
             let (results, carry) = cx
-                .background_spawn(async move { rigsync::run_on_report(ops, &server, &inst.root) })
+                .background_spawn(async move {
+                    rigsync::run_rows(ops, &server, &inst.root, &|i, step| {
+                        let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+                        s[i] = match step {
+                            hopper::rigsync::RowStep::Moving { done, total } => RowRun::Moving((total > 1).then(|| done as f32 / total as f32)),
+                            hopper::rigsync::RowStep::Finished(Ok(())) => RowRun::Done,
+                            hopper::rigsync::RowStep::Finished(Err(e)) => RowRun::Failed(e),
+                        };
+                    })
+                })
                 .await;
             this.update(cx, |this, cx| {
                 this.running = false;
+                // Done rows show their check, then fade out with the other
+                // done rows; failed ones keep their reason and Try again.
+                if let Some(p) = this.push.take() {
+                    for (row, state) in p.rows.iter().zip(p.state.lock().unwrap_or_else(|e| e.into_inner()).iter()) {
+                        match state {
+                            RowRun::Failed(e) => {
+                                this.failed.insert(row.key.clone(), e.clone());
+                            }
+                            _ => {
+                                this.acted.insert(row.key.clone(), row.done);
+                            }
+                        }
+                    }
+                }
                 this.result = Some(rigsync::summary(&results));
-                this.carry = carry.note().is_some().then_some(carry);
                 if matches!(this.result, Some(Ok(_))) {
                     this.mark_live_sync(cx);
                 }
+                this.carry = carry.note().is_some().then_some(carry);
                 this.files_changed(cx);
                 this.rescan(cx);
+                this.echo_until = Some(std::time::Instant::now() + SYNC_ECHO);
             })
             .ok();
         }));
@@ -928,9 +1172,9 @@ impl SyncPanel {
         self.seen_rev = self.compare_key(cx);
     }
 
-    /// Rows are acting, done, or leaving: a new comparison waits.
+    /// Rows are acting, pushing, done, or leaving: a new comparison waits.
     fn holding(&self) -> bool {
-        !self.acting.is_empty() || !self.acted.is_empty() || self.leaving.is_some()
+        !self.acting.is_empty() || !self.acted.is_empty() || self.leaving.is_some() || self.push.is_some()
     }
 
     /// One row's action: runs beside other rows' (no waiting on them), then
@@ -949,6 +1193,7 @@ impl SyncPanel {
             return;
         }
         self.settle.clicked();
+        self.failed.remove(&key);
         self.acting.insert(key.clone(), words);
         self.result = None;
         self.carry = None;
@@ -976,6 +1221,7 @@ impl SyncPanel {
                 }
                 this.files_changed(cx);
                 this.rescan(cx);
+                this.echo_until = Some(std::time::Instant::now() + SYNC_ECHO);
             })
             .ok();
         })
@@ -1000,6 +1246,12 @@ impl SyncPanel {
     /// Lets done rows go once the user is done clicking: they fade, then the
     /// comparison that waited is shown.
     fn tick(&mut self, cx: &mut Context<Self>) -> bool {
+        // The push's rows moved on: draw them (only when something changed).
+        if let Some(p) = &mut self.push
+            && p.changed()
+        {
+            cx.notify();
+        }
         if let Some((since, _)) = &self.leaving {
             if since.elapsed() >= widgets::FADE && !self.comparing {
                 self.leaving = None;
@@ -1081,17 +1333,15 @@ impl SyncPanel {
     }
 
     /// A sync that removes jars from the server says so first.
-    fn confirm_sync(&mut self, ops: Ops, n_push: usize, n_remove: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn confirm_sync(&mut self, rows: Vec<PushRow>, n_push: usize, n_remove: usize, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.entity();
-        let up = ops.up.clone();
-        let down = ops.down.clone();
         let undo = if self.kept_in() == ".hopper-backups" {
             "Removed and replaced jars can be put back from History."
         } else {
             "Removed jars go to Hopper Server's trash, where you can restore them."
         };
         window.open_alert_dialog(cx, move |alert, _, _| {
-            let (view, up, down) = (view.clone(), up.clone(), down.clone());
+            let (view, rows) = (view.clone(), rows.clone());
             let mods = |n: usize| if n == 1 { "mod" } else { "mods" };
             let (title, ok) = if n_push == 0 {
                 (format!("Remove {n_remove} {} from the server?", mods(n_remove)), "Remove from server")
@@ -1111,7 +1361,7 @@ impl SyncPanel {
                 .on_ok(move |_, _, cx| {
                     view.update(cx, |this, cx| {
                         this.selected.clear();
-                        this.run(Ops { up: up.clone(), down: down.clone() }, cx)
+                        this.run_rows(rows.clone(), cx)
                     });
                     true
                 })
@@ -1835,7 +2085,7 @@ impl SyncPanel {
                     .bg(warn.opacity(widgets::alpha::TINT))
                     .text_xs()
                     .font_semibold()
-                    .text_color(warn)
+                    .text_color(crate::theme::chip_ink(warn))
                     .child(Icon::new(IconName::TriangleAlert).xsmall())
                     .child(format!("Also differs: {}", d.summary()))
                     .child(Icon::new(IconName::ChevronRight).xsmall()),
@@ -2225,7 +2475,10 @@ impl SyncPanel {
         let parts = action_line(picked.iter());
         let todo = action_line(self.visible(cx).into_iter());
         let theme = cx.theme();
-        let text = if !parts.is_empty() {
+        let pushing = self.push.as_ref().map(Push::count);
+        let text = if let Some((_, n, at)) = pushing {
+            format!("Pushing {at} of {n}…")
+        } else if !parts.is_empty() {
             format!("{parts} on {}", server.name)
         } else if !todo.is_empty() {
             format!("{todo} · tick mods to choose")
@@ -2247,14 +2500,22 @@ impl SyncPanel {
                     .min_w_0()
                     .text_sm()
                     .truncate()
-                    .text_color(if parts.is_empty() {
+                    .text_color(if parts.is_empty() && pushing.is_none() {
                         theme.muted_foreground
                     } else {
                         theme.foreground
                     })
                     .child(text),
             )
-            .when(self.running, |r| r.child(Spinner::new().small()))
+            // The rows say how each goes; the bar how many are through.
+            .when_some(pushing.filter(|(_, n, _)| *n > 0), |r, (through, n, _)| {
+                r.child(
+                    div().w(rems(6.)).flex_none().child(
+                        gpui_kit::component::progress::Progress::new("push-bar").xsmall().value(through as f32 * 100. / n as f32),
+                    ),
+                )
+            })
+            .when(self.running && pushing.is_none(), |r| r.child(Spinner::new().small()))
             .when(online, |r| {
                 r.child(
                     Checkbox::new("allow-online")
@@ -2290,16 +2551,13 @@ impl SyncPanel {
                     .tooltip(rigsync::sync_help(n_add, n_update, n_remove, self.kept_in()))
                     .disabled(ops.is_empty() || blocked)
                     .on_click(cx.listener(move |this, _, w, cx| {
-                        let ops = Ops {
-                            up: ops.up.clone(),
-                            down: ops.down.clone(),
-                        };
+                        let rows = PushRow::of(&picked, &inst, &srv);
                         // Removing asks first; adding and updating are backed up.
                         if n_remove > 0 {
-                            this.confirm_sync(ops, n_push, n_remove, w, cx);
+                            this.confirm_sync(rows, n_push, n_remove, w, cx);
                         } else {
                             this.selected.clear();
-                            this.run(ops, cx)
+                            this.run_rows(rows, cx)
                         }
                     })),
             )
@@ -2795,8 +3053,75 @@ impl SyncPanel {
             .text_xs()
             .into_any_element(),
         };
-        let action: AnyElement = if let Some(w) = self.acted.get(&key) {
+        // A failed push's row: its reason on the mark, and Try again.
+        let failed_cell = |why: &str, busy: &'static str, done: &'static str, cx: &mut Context<Self>| -> AnyElement {
+            let (d2, pair2, key2, why2) = (d.clone(), pair.clone(), key.clone(), SharedString::from(why.to_string()));
+            let danger = cx.theme().danger;
+            h_flex()
+                .flex_none()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .id(id("push-failed"))
+                        .gap_1()
+                        .text_sm()
+                        // Red on the icon only: red text measured 3.8:1 on
+                        // the dark theme.
+                        .child(Icon::new(IconName::TriangleAlert).small().text_color(danger))
+                        .when(!compact, |r| r.child("Failed"))
+                        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(why2.clone()).build(w, cx)),
+                )
+                .child(
+                    Button::new(id("push-retry"))
+                        .small()
+                        .outline()
+                        .icon(IconName::RotateCcw)
+                        .map(|b| if compact { b.tooltip("Try again") } else { b.label("Try again") })
+                        .disabled(blocked)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if let Some((s, i)) = &pair2 {
+                                let ops = rigsync::apply_ops(std::slice::from_ref(&d2), i, s);
+                                this.act_row(key2.clone(), (busy, done), ops, cx);
+                            }
+                        })),
+                )
+                .into_any_element()
+        };
+        let pushing = self.push.as_ref().and_then(|p| p.of(&key));
+        let action: AnyElement = if let Some((state, busy, done)) = pushing {
+            match state {
+                // A plain muted mark, not a disabled button: a disabled
+                // button's text measured 2.6:1 on the dark theme.
+                RowRun::Waiting => h_flex()
+                    .id(id("push-wait"))
+                    .flex_none()
+                    .h_6()
+                    .px_2()
+                    .gap_1()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Icon::new(IconName::Clock).small())
+                    .when(!compact, |r| r.child("Waiting"))
+                    .when(compact, |r| r.tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Waiting").build(w, cx)))
+                    .into_any_element(),
+                RowRun::Moving(p) => {
+                    let pct = p.map(|p| format!("{}%", (p.clamp(0.0, 1.0) * 100.0).floor() as u32));
+                    let label = match (&pct, compact) {
+                        (Some(pct), true) => pct.clone(),
+                        (Some(pct), false) => format!("{busy} {pct}"),
+                        (None, _) => format!("{busy}…"),
+                    };
+                    widgets::busy_button(Button::new(id("push-busy")).small().outline().label(label), p, cx).into_any_element()
+                }
+                RowRun::Done => widgets::done_mark(id("done"), done, false, cx).into_any_element(),
+                RowRun::Failed(why) => failed_cell(&why, busy, done, cx),
+            }
+        } else if let Some(w) = self.acted.get(&key) {
             widgets::done_mark(id("done"), *w, false, cx).into_any_element()
+        } else if let Some(why) = self.failed.get(&key).cloned() {
+            let (busy, done) = push_words(g);
+            failed_cell(&why, busy, done, cx)
         } else if let Some((busy, _)) = self.acting.get(&key) {
             Button::new(id("acting"))
                 .small()
@@ -2844,8 +3169,9 @@ impl SyncPanel {
         let fit = self.fit;
         // (icon and words, whether the mod says its side); unknown is a dimmed question mark.
         let side_icon = fit.tags.is_none().then(|| {
-            let side = crate::side_card::side_of(&tags.env);
-            (side.unwrap_or(crate::side_card::SIDE_UNKNOWN), side.is_some())
+            let side = crate::side_card::side_of(tags.side.as_ref());
+            let known = side.is_some();
+            (side.unwrap_or((crate::side_card::SIDE_UNKNOWN.0, crate::side_card::SIDE_UNKNOWN.1.to_string())), known)
         });
         let k2 = key.clone();
         let pickable = g.pickable();
@@ -2902,7 +3228,7 @@ cx.listener(move |this, e: &ClickEvent, window, cx| {
                                         .text_color(if known { theme.muted_foreground } else { theme.muted_foreground.opacity(0.75) })
                                         .child(Icon::new(icon).xsmall())
                                         .tooltip(move |w, cx| {
-                                            gpui_kit::component::tooltip::Tooltip::new(what).build(w, cx)
+                                            gpui_kit::component::tooltip::Tooltip::new(what.clone()).build(w, cx)
                                         }),
                                 )
                             }),
@@ -2924,8 +3250,9 @@ cx.listener(move |this, e: &ClickEvent, window, cx| {
                         env: if why.as_deref().is_some_and(|w| w.to_lowercase().contains("client-only")) {
                             ""
                         } else {
-                            &tags.env
+                            tags.side.as_ref().map_or("", |s| s.side.as_str())
                         },
+                        env_from_modrinth: tags.side.as_ref().is_some_and(|s| s.from == hopper::modsides::From::Modrinth),
                         categories: &tags.categories,
                         modrinth: tags.modrinth,
                         ..Default::default()
@@ -2967,7 +3294,7 @@ enum Item {
 /// What one side of a row shows as badges, read from the pack's addon.
 #[derive(Clone, Default)]
 struct RowTags {
-    env: String,
+    side: Option<hopper::modsides::Side>,
     categories: Vec<String>,
     new: bool,
     added: bool,
@@ -2979,11 +3306,8 @@ impl RowTags {
         let a = inst.and_then(|i| i.addon_by_file(&m.file_name));
         RowTags {
             // The jar's own word first, then the site's tags.
-            env: if m.side.is_empty() {
-                a.map(|a| a.env.clone()).unwrap_or_default()
-            } else {
-                m.side.clone()
-            },
+            // (Then Modrinth's, when CurseForge doesn't tag it.)
+            side: hopper::modsides::resolve(&m.side, None).or_else(|| a.and_then(hopper::modsides::side_of)),
             categories: a.map(|a| store.categories(a).to_vec()).unwrap_or_default(),
             new: a
                 .and_then(|a| hopper::time::parse_iso(&a.date_added))
@@ -3168,11 +3492,13 @@ impl Render for SyncPanel {
             (Section::History, _) => self.history.clone().into_any_element(),
             (Section::Console, _) => self.control.update(cx, |c, cx| c.console_view(window, cx)),
             (Section::Mods, d) => match d {
+            None if let Some(note) = self.slow_note(cx) => note,
             None => h_flex()
                 .gap_2()
                 .child(Spinner::new().small())
                 .child(widgets::caption("Scanning mod folders", cx))
                 .into_any_element(),
+            Some(Err(_)) if let Some(note) = self.slow_note(cx) => note,
             // The server's folder couldn't be read (often its share is offline).
             Some(Err(e)) => widgets::empty_state(
                 IconName::TriangleAlert,
@@ -3196,6 +3522,7 @@ impl Render for SyncPanel {
                 let columns = self.column_header(cx);
                 // Beside the sidebar, the apply bar shows once something is picked.
                 let footer = (!side || !self.selected_rows(cx).is_empty()).then(|| self.footer(&server, cx));
+                let slow = self.slow_note(cx);
                 let theme = cx.theme();
                 let result: Option<AnyElement> = self.result.as_ref().map(|r| match r {
                     Ok(line) => h_flex()
@@ -3262,6 +3589,7 @@ impl Render for SyncPanel {
                             .vertical_scrollbar(&self.scroll),
                     ))
                     .children(footer)
+                    .children(slow)
                     .children(result)
                     .children(self.carry_notice(&server, cx))
                     .into_any_element()
@@ -3396,11 +3724,11 @@ fn read_crash(inst: &Instance, server: &ServerInfo) -> (Option<ServerCrash>, Vec
             Some((client, id, _)) => client.hashes(id, rels).unwrap_or_default(),
             None => Default::default(),
         },
-        |rel| {
-            reads.set(reads.get() + 1);
+        |rels| {
+            reads.set(reads.get() + rels.len() as u64);
             match &panel {
-                Some((client, id, _)) => client.read_text(id, rel).ok(),
-                None => std::fs::read_to_string(server.root.join(rel)).ok(),
+                Some((client, id, _)) => client.read_texts(id, rels),
+                None => rels.iter().filter_map(|r| std::fs::read_to_string(server.root.join(r)).ok().map(|t| (r.clone(), t))).collect(),
             }
         },
     );

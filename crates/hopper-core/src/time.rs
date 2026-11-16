@@ -96,6 +96,13 @@ pub fn date(t: i64) -> String {
     format!("{d:02}/{m:02}/{y}")
 }
 
+/// A short local date for a sentence, "16 Nov".
+pub fn day_month(t: i64) -> String {
+    let (_, m, d) = civil_from_days((t + crate::hosting::schedule::utc_offset_secs()).div_euclid(86_400));
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    format!("{d} {}", MONTHS[(m as usize).clamp(1, 12) - 1])
+}
+
 /// This PC's local time, 24-hour, "14:54:12".
 pub fn clock(t: i64) -> String {
     let local = t + crate::hosting::schedule::utc_offset_secs();
@@ -194,6 +201,14 @@ mod tests {
         assert_eq!(stamp(utc, 7, 0), "2026-11-14 23:30:00.007");
         assert_eq!(stamp(utc, 123, 2 * 3600), "2026-11-15 01:30:00.123");
         assert_eq!(log_stamp().len(), "2026-11-14 23:30:00.007".len());
+    }
+
+    #[test]
+    fn day_month_is_short() {
+        // Noon UTC stays on the same day in every time zone a PC uses.
+        let noon = days_from_civil(2026, 11, 16) * 86_400 + 12 * 3600;
+        assert_eq!(day_month(noon), "16 Nov");
+        assert_eq!(day_month(days_from_civil(2026, 1, 3) * 86_400 + 12 * 3600), "3 Jan");
     }
 
     #[test]

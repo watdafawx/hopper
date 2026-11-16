@@ -1484,7 +1484,11 @@ mod tests {
         // A recipe is a share code, not files.
         let recipe = a.recipe(&b.id, "TNP").unwrap();
         assert_eq!((recipe.inst.as_str(), recipe.name.as_str()), ("TNP", "TNP"));
-        assert!(recipe.left_out.is_empty());
+        // B's jars were dropped in by hand: no code carries them, but their
+        // names go along so A knows what to ask for.
+        let mut named = recipe.left_out.clone();
+        named.sort();
+        assert_eq!(named, ["only-b.jar", "shared.jar"]);
         assert!(matches!(
             crate::sharecode::decode(&recipe.code).unwrap().base,
             crate::sharecode::Base::Plain { .. }

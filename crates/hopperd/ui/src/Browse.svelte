@@ -636,8 +636,8 @@
   .catlink:hover { color: var(--text); text-decoration: underline; }
   .deps { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border: 1px solid var(--line2); border-radius: var(--radius); background: var(--raise); font-size: 11px; color: var(--text); white-space: nowrap; }
   .deps :global(svg) { color: var(--muted); }
-  .chip.curseforge { color: var(--acc); background: var(--acc-dim); }
-  .chip.modrinth { color: #1bd96a; background: #1bd96a1a; }
+  .chip.curseforge { color: var(--ink-acc); background: var(--acc-dim); }
+  .chip.modrinth { --k: #1bd96a; color: light-dark(color-mix(in srgb, var(--k) 50%, #000), var(--k)); background: #1bd96a1a; }
   .act { display: flex; align-items: center; gap: 8px; }
   .busy { display: inline-flex; align-items: center; gap: 6px; color: var(--gold); max-width: 220px; min-width: 0; }
   /* Loading cards: the shared skeleton row (app.css .skel) at a card's size. */

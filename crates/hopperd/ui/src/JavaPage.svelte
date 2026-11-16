@@ -180,7 +180,7 @@
   .seg button:hover { background: var(--hover, #ffffff0d); }
   .seg button.on { background: var(--acc-dim); color: var(--text); }
   .chip { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: var(--radius-sm); font-size: 11px; text-transform: none; letter-spacing: 0; font-weight: 500; }
-  .chip.warn { background: #eab30822; color: #eab308; }
+  .chip.warn { background: #eab30822; color: var(--ink-gold); }
   .tools { gap: 10px; margin-top: 6px; }
   .toks { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
   .tok { font-size: 11px; padding: 2px 7px; border-radius: var(--radius-sm); color: var(--muted); }
@@ -199,8 +199,8 @@
   .fhead.flash { background: var(--acc-dim); }
   .start .fhead + .cmd + .fhead { margin-top: 10px; }
   .args { word-break: break-all; }
-  .chip.new { background: #f9731622; color: #f97316; margin-left: 0; }
-  .argref { font: inherit; color: var(--acc); background: var(--acc-dim); border-radius: var(--radius-sm); padding: 0 4px; cursor: pointer; }
+  .chip.new { background: #f9731622; color: var(--ink-acc); margin-left: 0; }
+  .argref { font: inherit; color: var(--ink-acc); background: var(--acc-dim); border-radius: var(--radius-sm); padding: 0 4px; cursor: pointer; }
   .argref:hover { text-decoration: underline; }
   @media (max-width: 900px) { .fl { grid-template-columns: 1fr; } .ctl { justify-content: flex-start; flex-wrap: wrap; } }
 </style>

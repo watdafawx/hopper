@@ -167,7 +167,7 @@ fn keep(id: &str, link: &PackLink, v: &Value) {
     CHECKS.lock().unwrap().get_or_insert_with(HashMap::new).insert(id.to_string(), (now_secs(), link.file.clone(), v.clone()));
 }
 
-fn forget(id: &str) {
+pub(crate) fn forget(id: &str) {
     if let Some(m) = CHECKS.lock().unwrap().as_mut() {
         m.remove(id);
     }

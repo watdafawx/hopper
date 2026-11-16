@@ -43,11 +43,14 @@
   async function undo(set, file = null) {
     busy = true;
     try {
-      const r = await post(`${base}/mod-backups/undo`, { when: set.when, name: file?.name ?? (set.files.length === 1 ? set.files[0].name : null) });
+      const r = await post(`${base}/mod-backups/undo`, { when: set.when, name: file?.name ?? (set.files.length === 1 && !set.pack ? set.files[0].name : null) });
       // A whole pack update is hundreds of files: counted, not listed.
       const what = r.restored.length > 3 ? `${r.restored.length} files` : r.restored.join(', ');
       if (r.restored.length) say(`Put back ${what}.${r.restart_needed ? ' Restart the server to load it.' : ''}`);
       for (const e of r.errors) say(e, true);
+      // A whole pack update put back also puts back the pack's own record.
+      if (r.pack?.state === 'restored') say(`${set.pack.name} is back at ${r.pack.version || 'its old version'}.`);
+      else if (r.pack?.state === 'moved') say(`${set.pack.name} was updated again after this; its version stays ${r.pack.version || 'as it is'}.`);
       if (r.gone) {
         if (!r.gone.choices.length) say(`${r.gone.title}: ${r.gone.message}. It has no other version for this Minecraft and loader, so it can't be put back.`, true);
         else {
@@ -87,10 +90,15 @@
     sel.clear();
     whoPick = k;
   }
-  // How far a set's own rows sit in: under the head's text, past its
-  // faces (side by side, up to three) and the gap, as desktop's History.
-  function indent(s) {
-    const n = faces ? Math.min(Math.max(setPeople(s).length, 1), 3) : 1;
+  // The face column, as desktop's History: room for two faces side by
+  // side, the same width on every row so every row's text lines up.
+  const FACE_SLOTS = 2;
+  // How many faces a row shows, and how many people "+n" stands for.
+  const faceSplit = (n) => (n <= FACE_SLOTS ? [n, 0] : [FACE_SLOTS - 1, n - (FACE_SLOTS - 1)]);
+  // How far a set's own rows sit in: under the head's text, past the face
+  // column (or chevron) and the gap.
+  function indent() {
+    const n = faces ? FACE_SLOTS : 1;
     return `${8 + n * 24 + (n - 1) * 2 + 10}px`;
   }
   // Everyone in a set, once each.
@@ -320,12 +328,19 @@
   {#if w}<span class="face" class:small class:you={!w.name} aria-hidden="true">{label(w).slice(0, 1).toUpperCase()}</span>{:else}<span class="face blank" class:small aria-hidden="true"></span>{/if}
 {/snippet}
 
+<!-- Whoever made a change, in a column of one width on every row: up to two
+     faces, or the first and "+n" for the rest. -->
+{#snippet lead(ps)}
+  {@const [shown, more] = faceSplit(ps.length)}
+  <span class="faces">{#each ps.slice(0, shown) as w, j (j)}{@render face(w, false)}{/each}{#if more}<span class="face more" title={ps.slice(shown).map(label).join(', ')}>+{more}</span>{/if}</span>
+{/snippet}
+
 {#snippet entry(s, f, nested)}
   {@const k = keyOf(s, f)}
   {@const i = order.indexOf(k)}
   {@const w = nested ? null : f.who}
   <div class="row ent row-hover" class:nested class:row-sel={sel.has(k)} style:padding-left={nested ? indent(s) : null} role="presentation" onpointerdown={(e) => down(e, i)} onpointerenter={(e) => paintOver(e, 'hist', i, setAt)} onclick={(e) => rowClick(e, k)}>
-    {#if faces && !nested}{@render face(w, false)}{/if}
+    {#if faces && !nested}{@render lead(w ? [w] : [])}{/if}
     <div class="col grow">
       <div class="row t">
         {#if w}<b class="who">{label(w)}</b><span class="verb">{f.verb}</span>{:else}<span class="ch {tone(f.change)}">{f.change}</span>{/if}
@@ -372,16 +387,16 @@
             <div class="row ent row-hover" class:row-sel={headPicked(s)} role="presentation" onpointerdown={headDown} onpointerenter={(e) => headEnter(e, s)}>
               <button class="nm grow" onclick={(e) => headClick(e, s)}>
                 {#if faces}
-                  {#if ps.length > 1}<span class="faces">{#each ps.slice(0, 3) as w, j (j)}{@render face(w, false)}{/each}</span>{:else}{@render face(ps[0], false)}{/if}
+                  {@render lead(ps)}
                 {:else if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
                 <span class="col grow pk">
                   <span class="row t">
-                    <span class="ch blue">Updated pack</span><b class="ell">{s.pack.name}</b>{#if s.pack.version}<span class="nw">to {s.pack.version}</span>{/if}
+                    <span class="ch" class:blue={!s.pack.undone} class:muted={s.pack.undone}>{s.pack.undone ? 'Put back pack' : 'Updated pack'}</span><b class="ell">{s.pack.name}</b>{#if s.pack.version}<span class="nw">to {s.pack.version}</span>{/if}
                     {#if faces}<span class="chev">{#if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}</span>{/if}
                   </span>
                   <span class="row cnts">
-                    {#each s.counts ?? [] as c (c.change)}<span class="chip cnt {tone(c.change)}">{c.n} {c.verb}</span>{/each}
-                    {#if rest.length}<span class="chip cnt pri">{s.parts.rest_label}</span>{/if}
+                    {#each s.counts ?? [] as c (c.change)}<span class="chip cnt ink {tone(c.change)}">{c.n} {c.verb}</span>{/each}
+                    {#if rest.length}<span class="chip cnt ink pri">{s.parts.rest_label}</span>{/if}
                   </span>
                 </span>
               </button>
@@ -413,7 +428,7 @@
             <div class="row ent row-hover" class:row-sel={headPicked(s)} role="presentation" onpointerdown={(e) => { if (e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey) { held = true; start = null; window.addEventListener('pointerup', () => { held = false; start = null; }, { once: true, capture: true }); } }} onpointerenter={(e) => headEnter(e, s)}>
               <button class="nm grow" onclick={(e) => headClick(e, s)}>
                 {#if faces}
-                  {#if ps.length > 1}<span class="faces">{#each ps.slice(0, 3) as w, j (j)}{@render face(w, false)}{/each}</span>{:else}{@render face(ps[0], false)}{/if}
+                  {@render lead(ps)}
                 {:else if open.has(setKey(s))}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
                 <span class="col grow">
                   {#if faces && s.head}
@@ -502,7 +517,7 @@
   .cnts { gap: 4px; min-width: 0; flex-wrap: wrap; }
   /* A pack update's counts, tinted like the change they count. The text leans
      toward the page's text colour: raw yellow or red on a pale tint is too faint to read. */
-  .cnt { flex: none; --k: var(--subtle); color: color-mix(in srgb, var(--k) 60%, var(--text)); }
+  .cnt { flex: none; --k: var(--subtle); }
   .cnt.red { --k: var(--red); background: var(--red-dim); }
   .cnt.blue { --k: var(--blue); background: var(--blue-dim); }
   .cnt.warn { --k: var(--gold); background: var(--gold-dim); }
@@ -513,12 +528,13 @@
   .wchip:first-child { padding-left: 10px; }
   /* Who made a change: a panel user's initial (desktop shows a friend's head). */
   .face { flex: none; width: 24px; height: 24px; border-radius: var(--radius-sm); display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: var(--muted); background: #9a9aa333; }
-  .face.you { color: var(--acc); background: var(--acc-dim); }
+  .face.you { color: var(--ink-acc); background: var(--acc-dim); }
   .face.blank { background: none; }
   .face.small { width: 16px; height: 16px; font-size: 10px; border-radius: 4px; }
   /* Several people: their faces side by side at full size. Overlapped,
      the see-through tiles hid one initial under the next. */
-  .faces { display: inline-flex; gap: 2px; flex: none; }
+  .faces { display: inline-flex; gap: 2px; flex: none; width: 50px; }
+  .face.more { font-size: 11px; white-space: nowrap; }
   .grow { flex: 1; min-width: 0; }
   .col { display: flex; flex-direction: column; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

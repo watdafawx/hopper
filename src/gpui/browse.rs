@@ -491,6 +491,9 @@ pub struct BrowseView {
     logo_layer: Option<Entity<crate::logos::LogoLayer>>,
     /// Open the first result when it arrives (`--detail`, for scripted runs).
     open_first: bool,
+    /// The Minecraft version list was asked for (on first showing, not at
+    /// start: most sessions never open Browse).
+    versions_asked: bool,
     /// Only the project panel, docked beside an instance's mod list.
     peek: bool,
     /// Counts [`Self::peek_project`] calls, so a click outside the peek
@@ -520,7 +523,6 @@ impl BrowseView {
         let slots = view.logos.clone();
         view.logo_layer = Some(cx.new(|cx| crate::logos::LogoLayer::new(store, slots, window, cx)));
         view.open_first = std::env::args().any(|a| a == "--detail");
-        view.load_versions(cx);
         view
     }
 
@@ -656,6 +658,7 @@ impl BrowseView {
             pending_query: None,
             link_file: None,
             open_first: false,
+            versions_asked: false,
             peek: false,
             peeks: 0,
             blur_armed: None,
@@ -1251,6 +1254,7 @@ impl BrowseView {
     // ---- loading -------------------------------------------------------
 
     fn load_versions(&mut self, cx: &mut Context<Self>) {
+        crate::wakes::hit(&crate::wakes::VERSIONS);
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_spawn(async move { cf::minecraft_versions() })
@@ -1962,7 +1966,9 @@ impl BrowseView {
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_spawn(async move {
-                    let files = hopper::source::files(id, &gv, loader)?;
+                    // The player opened this page: a GitHub mod's files are
+                    // asked for again, not taken from a recent answer.
+                    let files = hopper::source::files_checked(id, &gv, loader, hopper::sources::Check::Manual)?;
                     // Dependencies of the newest release that fits, like
                     // CurseForge's Relations tab.
                     let deps = files
@@ -2341,14 +2347,14 @@ impl BrowseView {
         let browsing = m.class_id.unwrap_or(self.class);
         let pack = hopper::browse::is_modpack(&m, browsing);
         let picked = file.as_ref().map(|f| f.id);
-        let (pending, hold, _, fetch) = self.install_state(m.id, pack, cx);
+        let (pending, _, fetch) = self.install_state(m.id, pack, cx);
         // The download window is on it (or it failed there): show the
         // window, or try again.
         if let Some(v) = fetch {
             crate::fetch_progress::click(&self.store, &v, cx);
             return;
         }
-        if pending || hold.is_some() {
+        if pending {
             return;
         }
         let target = self.target(cx);
@@ -2461,7 +2467,7 @@ impl BrowseView {
         }
     }
 
-    fn install_state(&self, project: u64, pack: bool, cx: &App) -> (bool, Option<&'static str>, Option<f32>, Option<crate::fetch_progress::FetchView>) {
+    fn install_state(&self, project: u64, pack: bool, cx: &App) -> (bool, Option<f32>, Option<crate::fetch_progress::FetchView>) {
         let into = if pack { None } else { self.target.as_ref() };
         // Website-only files of this install, in the download window. A
         // pack's are in the instance it made.
@@ -2483,8 +2489,7 @@ impl BrowseView {
             .and_then(|j| self.store.read(cx).job_state(j))
             .filter(|j| !j.done)
             .and_then(|j| j.progress);
-        let hold = into.and_then(|r| self.store.read(cx).edit_hold_reason(r));
-        (pending, hold, progress, fetch)
+        (pending, progress, fetch)
     }
 
     /// Lets go of installs that ended: at once when they failed or the
@@ -3001,7 +3006,7 @@ impl BrowseView {
             .filter(|_| tracked && installed.is_some())
             .is_some_and(|t| t.addons.iter().any(|a| a.project_id == m.id && !a.enabled));
         let id = |p: &str| ElementId::Name(format!("{p}:{}", m.id).into());
-        let (pending, hold, progress, fetch) = self.install_state(m.id, is_pack, cx);
+        let (pending, progress, fetch) = self.install_state(m.id, is_pack, cx);
 
         let action: AnyElement = if let Some(root) = have_pack {
             let (m1, m2) = (m.clone(), root);
@@ -3020,7 +3025,6 @@ impl BrowseView {
                                 .icon(IconName::Download)
                                 .label("Update")
                                 .tooltip(format!("Update the pack to {}", f.display_name))
-                                .disabled(hold.is_some())
                                 .on_click(move |_, window, cx| {
                                     cx.stop_propagation();
                                     crate::pack_update::open(s1.clone(), r1.clone(), f1.clone(), window, cx)
@@ -3055,7 +3059,7 @@ impl BrowseView {
                 .child({
                     // Rarely needed: kept out of the row, behind a menu.
                     let view = cx.entity();
-                    let busy = pending || hold.is_some();
+                    let busy = pending;
                     Button::new(id("pack-more"))
                         .small()
                         .ghost()
@@ -3087,7 +3091,6 @@ impl BrowseView {
                 "Update",
                 pending,
                 progress,
-                hold,
                 fetch.as_ref(),
                 cx,
             )
@@ -3192,12 +3195,11 @@ impl BrowseView {
                         "Install",
                         pending,
                         progress,
-                        hold,
                         fetch.as_ref(),
                         cx,
                     )
                     .when(!is_pack && target.is_none(), |b| b.disabled(true))
-                    .when(!extra.is_empty() && hold.is_none(), |b| b.tooltip(tip))
+                    .when(!extra.is_empty(), |b| b.tooltip(tip))
                     .on_click(cx.listener(move |this, _, w, cx| {
                         // Not a click on the card: no peek.
                         cx.stop_propagation();
@@ -3704,8 +3706,8 @@ impl BrowseView {
         let tracked = !matches!(m.class_id, Some(cf::CLASS_WORLDS | cf::CLASS_DATAPACKS));
         let installed = target.filter(|_| tracked).and_then(|t| installed_as(t, m)).is_some()
             || target.and_then(|t| self.global.get(&t.root)).is_some_and(|g| g.contains_key(&m.id));
-        let (pending, hold, _, _) = self.install_state(m.id, is_pack, cx);
-        !installed && !pending && hold.is_none() && (is_pack || target.is_some())
+        let (pending, _, _) = self.install_state(m.id, is_pack, cx);
+        !installed && !pending && (is_pack || target.is_some())
     }
 
     /// Splices the list's rows to match `shown`, so only rows that changed
@@ -4100,7 +4102,7 @@ impl BrowseView {
                 let locked = installed.is_some_and(|a| a.locked);
                 let is_pack = hopper::browse::is_modpack(m, self.class);
                 let can = is_pack || target.is_some();
-                let (pending, hold, progress, fetch) = self.install_state(m.id, is_pack, cx);
+                let (pending, progress, fetch) = self.install_state(m.id, is_pack, cx);
                 let fits_target = |f: &hopper::cf::File| {
                     target
                         .as_ref()
@@ -4166,7 +4168,6 @@ impl BrowseView {
                                 &label,
                                 this_file,
                                 progress.filter(|_| this_file),
-                                hold,
                                 fetch.as_ref().filter(|v| v.file_ids.contains(&f.id)),
                                 cx,
                             )
@@ -5091,7 +5092,7 @@ impl BrowseView {
         if hopper::browse::is_modpack(m, self.class) {
             return None;
         }
-        let (pending, hold, progress, fetch) = self.install_state(m.id, false, cx);
+        let (pending, progress, fetch) = self.install_state(m.id, false, cx);
         let installed = t.addons.iter().find(|a| a.project_id == m.id);
         let m1 = m.clone();
         let locked = installed.is_some_and(|a| a.locked);
@@ -5101,7 +5102,6 @@ impl BrowseView {
                 label,
                 pending,
                 progress,
-                hold,
                 fetch.as_ref(),
                 cx,
             )
@@ -5224,7 +5224,7 @@ impl BrowseView {
         }
         let store = self.store.read(cx);
         let theme = cx.theme();
-        let (pending, hold, progress, fetch) = self.install_state(m.id, false, cx);
+        let (pending, progress, fetch) = self.install_state(m.id, false, cx);
         // A no-break space: "127 MB" never splits over two lines.
         let size = |b: u64| hopper::instance_ops::human_bytes(b).replace(' ', "\u{a0}");
 
@@ -5290,7 +5290,6 @@ impl BrowseView {
                     "Install",
                     pending,
                     progress,
-                    hold,
                     fetch.as_ref(),
                     cx,
                 )
@@ -5494,7 +5493,7 @@ impl BrowseView {
                 .any(|a| a.file_id == f.id && a.project_id == m.id)
         });
         let ready = pack || target.is_some();
-        let (pending, hold, progress, fetch) = self.install_state(m.id, pack, cx);
+        let (pending, progress, fetch) = self.install_state(m.id, pack, cx);
         let theme = cx.theme();
         let m2 = m.clone();
         let key = hopper::settings::notice_key("browse", "opened-link", &f.id.to_string());
@@ -5523,7 +5522,6 @@ impl BrowseView {
                                 if pack { "Install as a new instance" } else { "Install this file" },
                                 pending,
                                 progress,
-                                hold,
                                 fetch.as_ref(),
                                 cx,
                             )
@@ -5562,7 +5560,6 @@ fn install_button(
     label: &str,
     pending: bool,
     progress: Option<f32>,
-    hold: Option<&'static str>,
     fetch: Option<&crate::fetch_progress::FetchView>,
     cx: &App,
 ) -> Button {
@@ -5577,7 +5574,7 @@ fn install_button(
     if pending {
         return widgets::busy_button(b.icon(IconName::Hourglass), progress, cx);
     }
-    b.disabled(hold.is_some()).when_some(hold, |b, why| b.tooltip(why))
+    b
 }
 
 /// The project panel's compact bar (name, Install and the tabs), pinned
@@ -5815,11 +5812,9 @@ fn facts(m: &cf::Mod, target: Option<&Instance>, cx: &App) -> Option<Div> {
     let loaders = m.loaders();
     // For an instance: the installed file's tags, else the newest file for
     // its version and loader. Authors tag each build separately.
-    let installed = target
-        .and_then(|i| i.addons.iter().find(|a| a.project_id == m.id && m.modrinth.is_none()))
-        .map(|a| a.env.as_str())
-        .filter(|e| !e.is_empty());
-    let env = match (installed, target) {
+    let addon = target.and_then(|i| i.addons.iter().find(|a| a.project_id == m.id && m.modrinth.is_none()));
+    let installed = addon.map(|a| a.env.as_str()).filter(|e| !e.is_empty());
+    let mut env = match (installed, target) {
         (Some(e), _) => Some(match e {
             "client" => "client",
             "server" => "server",
@@ -5831,6 +5826,18 @@ fn facts(m: &cf::Mod, target: Option<&Instance>, cx: &App) -> Option<Div> {
         }
         (None, None) => m.side(),
     };
+    // CurseForge doesn't say: what Modrinth says about the installed mod.
+    let mut from_modrinth = None;
+    if env.is_none()
+        && let Some(s) = addon.and_then(hopper::modsides::side_of)
+    {
+        env = Some(match s.side.as_str() {
+            "client" => "client",
+            "server" => "server",
+            _ => "both",
+        });
+        from_modrinth = Some(SharedString::from(s.words()));
+    }
     let side = match env {
         Some("client") => Some("Client"),
         Some("server") => Some("Server"),
@@ -5894,7 +5901,11 @@ fn facts(m: &cf::Mod, target: Option<&Instance>, cx: &App) -> Option<Div> {
         ));
     }
     if let Some(s) = side {
-        row = row.child(group(IconName::Monitor, vec![tag(s.to_string())]));
+        let g = group(IconName::Monitor, vec![tag(s.to_string())]).id("fact-side");
+        row = row.child(match from_modrinth {
+            Some(tip) => g.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)),
+            None => g,
+        });
     }
     if let Some(l) = license {
         row = row.child(
@@ -5966,6 +5977,10 @@ fn placeholder(modrinth: bool) -> &'static str {
 
 impl Render for BrowseView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.peek && !self.versions_asked {
+            self.versions_asked = true;
+            self.load_versions(cx);
+        }
         // An open peek warms its full-size pictures; a closed one lets go
         // of what it hadn't fetched yet.
         if self.selected.is_some() {

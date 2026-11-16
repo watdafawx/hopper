@@ -2611,7 +2611,7 @@ fn real_end_to_end() {
     inst.settings.release_channel = 2;
     inst.addons[0].file_id = older.id;
     inst.addons[0].release_type = older.release_type;
-    let ups = crate::install::check_updates(&inst).unwrap();
+    let ups = crate::install::check_updates(&inst, crate::sources::Check::Auto).unwrap();
     println!(
         "updates: {:?}",
         ups.iter().map(|u| &u.file.file_name).collect::<Vec<_>>()

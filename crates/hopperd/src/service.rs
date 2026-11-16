@@ -91,6 +91,8 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
             let exe = imp::uninstall()?;
             if remove_files && let Some(exe) = exe.filter(|e| e.parent() == Some(install_dir().as_path())) {
                 let _ = std::fs::remove_file(&exe);
+                // The router's copy beside it (Windows; see crate::edge).
+                let _ = std::fs::remove_file(exe.with_file_name(crate::edge::PROGRAM));
                 let _ = std::fs::remove_dir(install_dir());
             }
             println!("Removed the {} service. Its data folder is still there.", display());
@@ -114,6 +116,14 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
         }
         _ => bail!("{USAGE}"),
     }
+}
+
+/// Whether `netsh … show rule … verbose` output names program `prog` (the
+/// path is printed as is, whatever the language, so it's matched by that).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn rule_names(out: &str, prog: &Path) -> bool {
+    let want = prog.to_string_lossy().to_lowercase();
+    out.lines().any(|l| l.trim_end().to_lowercase().ends_with(&want))
 }
 
 /// Copies the running exe to [`install_dir`] (if it isn't there already).
@@ -234,8 +244,49 @@ mod imp {
                 delay: Duration::from_secs(10),
             }]),
         });
+        allow_router(exe);
         s.start::<&str>(&[]).context("starting the service")?;
         Ok(())
+    }
+
+    const ROUTER_RULE: &str = "Hopper Server router";
+
+    /// Lets players reach the router process: a firewall rule for its one
+    /// fixed program file, beside the service's exe (see `crate::edge`). As
+    /// a service nothing can ask Windows' "allow access" question.
+    fn allow_router(exe: &Path) {
+        let prog = exe.with_file_name(crate::edge::PROGRAM);
+        let _ = std::process::Command::new("netsh").args(["advfirewall", "firewall", "delete", "rule", &format!("name={ROUTER_RULE}")]).output();
+        let r = std::process::Command::new("netsh")
+            .args(["advfirewall", "firewall", "add", "rule", &format!("name={ROUTER_RULE}"), "dir=in", "action=allow", "enable=yes"])
+            .arg(format!("program={}", prog.display()))
+            .output();
+        if !r.is_ok_and(|o| o.status.success()) {
+            log::warn!("couldn't add the firewall rule for {}; players outside this PC may not reach the router", prog.display());
+        }
+    }
+
+    /// At every service start: services installed before the router had its
+    /// own process have no rule for it, and an exe moved by an update needs
+    /// the rule to name the new path. The service runs as SYSTEM, so it may.
+    pub fn ensure_router_rule() {
+        let Ok(exe) = std::env::current_exe() else { return };
+        let prog = exe.with_file_name(crate::edge::PROGRAM);
+        let shown = std::process::Command::new("netsh").args(["advfirewall", "firewall", "show", "rule", &format!("name={ROUTER_RULE}"), "verbose"]).output();
+        let ok = shown.is_ok_and(|o| o.status.success() && rule_names(&String::from_utf8_lossy(&o.stdout), &prog));
+        if !ok {
+            log::info!("adding the firewall rule for the router ({})", prog.display());
+            allow_router(&exe);
+        }
+    }
+
+    fn remove_router_rule() {
+        let _ = std::process::Command::new("netsh").args(["advfirewall", "firewall", "delete", "rule", &format!("name={ROUTER_RULE}")]).output();
+    }
+
+    /// The service's `--data` folder (its command line has it).
+    fn data_of(s: &windows_service::service::Service) -> Option<PathBuf> {
+        split_command(&s.query_config().ok()?.executable_path.to_string_lossy()).1
     }
 
     fn stop_and_wait(s: &windows_service::service::Service) -> anyhow::Result<()> {
@@ -259,8 +310,18 @@ mod imp {
             .open_service(name(), ServiceAccess::STOP | ServiceAccess::DELETE | ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG)
             .context("the service isn't installed")?;
         let exe = s.query_config().ok().map(|c| split_command(&c.executable_path.to_string_lossy()).0);
+        let data = data_of(&s);
+        // A real stop: the service stops its router process as it goes. One
+        // that's still there (the stop didn't reach it) is ended here, before
+        // its firewall rule goes, so nothing listens without a rule.
         stop_and_wait(&s)?;
+        if let Some(d) = &data
+            && !crate::edge::end_for(d, Duration::from_secs(5))
+        {
+            log::warn!("the router process for {} didn't end", d.display());
+        }
         s.delete().context("removing the service")?;
+        remove_router_rule();
         Ok(exe)
     }
 
@@ -280,8 +341,12 @@ mod imp {
     pub fn restart() -> anyhow::Result<()> {
         let m = manager(ServiceManagerAccess::CONNECT)?;
         let s = m
-            .open_service(name(), ServiceAccess::STOP | ServiceAccess::START | ServiceAccess::QUERY_STATUS)
+            .open_service(name(), ServiceAccess::STOP | ServiceAccess::START | ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG)
             .context("the service isn't installed")?;
+        // A restart: players on the router stay connected.
+        if let Some(d) = data_of(&s) {
+            crate::edge::keep_through_restart(&d);
+        }
         stop_and_wait(&s)?;
         s.start::<&str>(&[]).context("starting the service")
     }
@@ -296,6 +361,9 @@ mod imp {
         let exe = split_command(&s.query_config()?.executable_path.to_string_lossy()).0;
         if crate::absolute(&exe) == crate::absolute(new) {
             bail!("That's the copy the service runs already.");
+        }
+        if let Some(d) = data_of(&s) {
+            crate::edge::keep_through_restart(&d);
         }
         stop_and_wait(&s)?;
         let copied = super::copy_retrying(new, &exe);
@@ -388,6 +456,7 @@ mod imp {
             process_id: None,
         };
         let _ = handle.set_service_status(status(ServiceState::Running, ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN));
+        std::thread::spawn(ensure_router_rule);
         // The process's own arguments carry --data (the service's are empty).
         if let Err(e) = crate::run_main(Box::pin(async { stop().notified().await })) {
             log::error!("hopperd stopped: {e:#}");
@@ -454,7 +523,17 @@ mod imp {
     }
 
     pub fn uninstall() -> anyhow::Result<Option<PathBuf>> {
+        let data = std::fs::read_to_string(UNIT).ok().and_then(|u| {
+            let line = u.lines().find(|l| l.starts_with("ExecStart="))?.to_string();
+            line.split_once("--data \"").and_then(|(_, d)| d.split_once('"')).map(|(d, _)| PathBuf::from(d))
+        });
         let _ = systemctl(&["disable", "--now", "hopperd"]);
+        // systemd stops only hopperd's own process (KillMode=process, so
+        // servers and the router outlive restarts); uninstalling ends the
+        // router too.
+        if let Some(r) = data.as_deref().and_then(crate::edge::read_run) {
+            crate::edge::kill(&r);
+        }
         std::fs::remove_file(UNIT).with_context(|| format!("removing {UNIT} (run with sudo)"))?;
         systemctl(&["daemon-reload"])?;
         Ok(None)
@@ -511,5 +590,22 @@ mod tests {
     fn unit_file() {
         let u = super::imp::unit(std::path::Path::new("/opt/hopperd/hopperd"), std::path::Path::new("/home/mc/.local/share/hopperd"), "mc");
         assert!(u.contains("User=mc") && u.contains("KillMode=process") && u.contains("--data \"/home/mc/.local/share/hopperd\""));
+    }
+}
+
+#[cfg(test)]
+mod router_rule_tests {
+    /// The firewall rule is matched by the program path netsh prints, in any
+    /// language and letter case; a rule for another file doesn't count.
+    #[test]
+    fn the_router_rule_is_found_by_its_program() {
+        let prog = std::path::Path::new(r"C:\Program Files\Hopper Server\hopperd-edge.exe");
+        let en = "Rule Name:      Hopper Server router\r\n----\r\nEnabled:        Yes\r\nProgram:        C:\\Program Files\\Hopper Server\\hopperd-edge.exe\r\nOk.\r\n";
+        let de = "Regelname:      Hopper Server router\r\nProgramm:       c:\\program files\\hopper server\\HOPPERD-EDGE.EXE  \r\n";
+        let moved = "Program:        D:\\old\\hopperd-edge.exe\r\n";
+        assert!(super::rule_names(en, prog));
+        assert!(super::rule_names(de, prog));
+        assert!(!super::rule_names(moved, prog));
+        assert!(!super::rule_names("No rules match the specified criteria.", prog));
     }
 }

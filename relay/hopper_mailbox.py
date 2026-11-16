@@ -229,6 +229,8 @@ def reset(path=None):
         register_limit.clear()
         join_limit.clear()
         _writer["dirty"] = False
+        _writer["saving"] = False
+        _writer["durable_seq"] = 0
         _writer["size"] = 0
         _writer["added"] = 0
         _sender_bytes.clear()
@@ -296,11 +298,20 @@ def load():
         gone = prune_accounts()
         if gone:
             print(f"removed {gone} idle accounts with no friends or groups", file=sys.stderr)
+        # Everything just read is on disk already.
+        _writer["durable_seq"] = state["seq"]
 
 
 # The saver: requests only flip `dirty`; one thread writes the file.
 # `size` is how big the last state file was, for the service-wide cap.
-_writer = {"dirty": False, "size": 0, "added": 0, "thread": None, "stop": threading.Event(), "wake": threading.Event()}
+#
+# `saving` is set from the moment a snapshot is taken until it is on disk, and
+# `durable_seq` is the newest event number that is in the file. While anything
+# is unsaved (`dirty` or `saving`) a long-poll only hands out events up to
+# `durable_seq`, so a PC never hears of a change the mailbox could still lose
+# in a crash (see visible_seq).
+_writer = {"dirty": False, "size": 0, "added": 0, "thread": None, "stop": threading.Event(), "wake": threading.Event(),
+           "saving": False, "durable_seq": 0}
 write_lock = threading.Lock()
 # Set when the service is stopping: new requests are turned away.
 _closing = threading.Event()
@@ -377,23 +388,50 @@ def _write_file(data):
 def flush():
     """Writes the state if it changed. The JSON is made holding the lock; the
     slow part (disk) happens after it is let go. Returns False if the write
-    failed (it is tried again on the next round)."""
+    failed (it is tried again on the next round).
+
+    Requests that must be on disk before they are answered call this too.
+    Callers queue on `write_lock`, so the one that gets in saves every change
+    made so far and the others, finding nothing dirty, return at once: a
+    crowd of requests costs one write, not one each."""
     with write_lock:
         with lock:
             if not _writer["dirty"]:
                 return True
             _writer["dirty"] = False
+            _writer["saving"] = True
+            seq = state["seq"]
             data = json.dumps(state, separators=(",", ":")).encode("utf-8")
             _writer["size"] = len(data)
             _writer["added"] = 0
         try:
             _write_file(data)
-            return True
         except Exception as e:
-            _writer["dirty"] = True
+            with lock:
+                _writer["saving"] = False
+                _writer["dirty"] = True
             _writer["wake"].set()
             print(f"state save failed: {e}", file=sys.stderr)
             return False
+        with lock:
+            _writer["saving"] = False
+            _writer["durable_seq"] = max(_writer["durable_seq"], seq)
+            # Events held back until now can go out.
+            for c in list(wakers.values()):
+                c.notify_all()
+        return True
+
+
+def visible_seq():
+    """The newest event number a long-poll may hand out (call holding the
+    lock). With nothing unsaved it is all of them. Otherwise it is only what
+    is in the state file: an event is queued in memory before the request that
+    made it is saved and answered, and a PC that heard of it then could be
+    ahead of the mailbox after a crash (it would never ask for the number the
+    mailbox gives the sender's retry)."""
+    if _writer["dirty"] or _writer["saving"]:
+        return _writer["durable_seq"]
+    return state["seq"]
 
 
 def _writer_loop():
@@ -1134,11 +1172,14 @@ class Handler(BaseHTTPRequestHandler):
             status = 200
             try:
                 while True:
+                    # Nothing newer than what is saved (see visible_seq); the
+                    # saver wakes this poll when more is.
+                    top = visible_seq()
                     evs = [
                         e for e in state["events"].get(uid, [])
-                        if e["seq"] > after and (v >= 2 or e.get("kind", "recipe") in V1_KINDS)
+                        if after < e["seq"] <= top and (v >= 2 or e.get("kind", "recipe") in V1_KINDS)
                     ]
-                    evs += group_pack_events(uid, after)
+                    evs += [e for e in group_pack_events(uid, after) if e["seq"] <= top]
                     evs.sort(key=lambda e: e["seq"])
                     if poll["stop"]:
                         # Pushed out by a newer poll from the same account.
@@ -1155,7 +1196,7 @@ class Handler(BaseHTTPRequestHandler):
                             x.setdefault("kind", "recipe")
                             x["from_name"] = state["users"].get(e["from"], {}).get("name", "")
                             out.append(x)
-                        data = self.encode({"seq": state["seq"], "events": out})
+                        data = self.encode({"seq": top, "events": out})
                         break
                     cond.wait(timeout=max(0.1, deadline - time.time()))
             finally:
@@ -1221,16 +1262,25 @@ class Handler(BaseHTTPRequestHandler):
             return self.fail(400, "bad body")
         with lock:
             r = self.route(uid, path, body)
-            if r is not None and r[0] < 400:
+            changed = r is not None and r[0] < 400
+            if changed:
                 mark_dirty()
         if r is None:
             return self.fail(404, "not found")
+        # A desktop counts a change as delivered once it is answered 2xx (it
+        # never sends it again), so the answer waits until the change is in
+        # the state file, not just in memory. Requests that come in meanwhile
+        # share one write (see flush).
+        if changed and not flush():
+            return self.fail(503, "could not save that; try again", "save_failed")
         status, obj = r
         return self.send(status, obj)
 
     # Every POST below runs holding the lock; it returns (status, body).
     # Each one checks everything first and changes things after, so an
-    # answer other than 2xx means nothing changed.
+    # answer other than 2xx means nothing changed (except 503 `save_failed`,
+    # where the change is in memory, hidden from every feed, and saved by the
+    # background saver when the disk allows).
     def route(self, uid, path, body):
         if path == "/v1/profile":
             me = state["users"].get(uid)

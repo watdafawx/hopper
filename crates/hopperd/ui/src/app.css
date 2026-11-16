@@ -9,6 +9,19 @@
   --gold: #facc15; --gold-dim: #facc151a; --blue: #38bdf8; --blue-dim: #38bdf81a;
   --red: #ef4444; --red-dim: #ef44441a; --violet: #a78bfa; --violet-dim: #a78bfa1a;
   --danger: #dc2626;
+  /* Chip text. A tint is only ~10% of its colour, so the plain colour on its own tint is faint on a
+     light theme (green on Catppuccin Latte: 2.5:1). On light themes the colour is pulled 50% toward
+     black (4.5:1 or better on all six); dark themes keep the plain colour. Use these (or .ink with
+     --k) for the text of every coloured chip, tag, pill and badge, never var(--green) etc. directly. */
+  color-scheme: dark;
+  --ink-acc: light-dark(color-mix(in srgb, var(--acc) 50%, #000), var(--acc));
+  --ink-green: light-dark(color-mix(in srgb, var(--green) 50%, #000), var(--green));
+  --ink-gold: light-dark(color-mix(in srgb, var(--gold) 50%, #000), var(--gold));
+  --ink-blue: light-dark(color-mix(in srgb, var(--blue) 50%, #000), var(--blue));
+  --ink-red: light-dark(color-mix(in srgb, var(--red) 50%, #000), var(--red));
+  --ink-violet: light-dark(color-mix(in srgb, var(--violet) 50%, #000), var(--violet));
+  --ink-subtle: light-dark(color-mix(in srgb, var(--subtle) 50%, #000), var(--subtle));
+  --ink-muted: light-dark(color-mix(in srgb, var(--muted) 50%, #000), var(--muted));
   /* input.border, and the title bar / side bar edge (title_bar.border). */
   --input-line: #64646e; --side-line: #202024;
   /* widgets::alpha: hovered rows (foreground at 6%), selected rows (primary at 12%). */
@@ -73,23 +86,25 @@ a.btn { color: var(--text); }
 /* Tinted, no border, the small radius: the same rule as Hopper desktop's chips. A set height, a line
    box no taller than the text, and 2px more padding below than above: centred as laid out, the UI
    font's tall ascent leaves capitals a pixel low (desktop's widgets::chip_pad). */
-.chip { display: inline-flex; align-items: center; gap: 5px; box-sizing: border-box; height: 20px; line-height: 1; font-size: 11.5px; padding: 0 8px 2px; border-radius: var(--radius-sm); border: 1px solid transparent; background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--subtle); white-space: nowrap; }
-.chip.running { color: var(--green); border-color: transparent; background: var(--green-dim); }
-.chip.starting, .chip.stopping, .chip.warn { color: var(--gold); border-color: transparent; background: var(--gold-dim); }
-.chip.crashed, .chip.wake_failed { color: var(--red); border-color: transparent; background: var(--red-dim); }
-.chip.sleeping { color: var(--gold); border-color: transparent; background: var(--gold-dim); }
-.chip.lan { color: var(--blue); border-color: transparent; background: var(--blue-dim); }
-.chip.ts { color: var(--violet); border-color: transparent; background: var(--violet-dim); }
+.chip { display: inline-flex; align-items: center; gap: 5px; box-sizing: border-box; height: 20px; line-height: 1; font-size: 11.5px; padding: 0 8px 2px; border-radius: var(--radius-sm); border: 1px solid transparent; background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--ink-subtle); white-space: nowrap; }
+.chip.running { color: var(--ink-green); border-color: transparent; background: var(--green-dim); }
+.chip.starting, .chip.stopping, .chip.warn { color: var(--ink-gold); border-color: transparent; background: var(--gold-dim); }
+.chip.crashed, .chip.wake_failed { color: var(--ink-red); border-color: transparent; background: var(--red-dim); }
+.chip.sleeping { color: var(--ink-gold); border-color: transparent; background: var(--gold-dim); }
+.chip.lan { color: var(--ink-blue); border-color: transparent; background: var(--blue-dim); }
+.chip.ts { color: var(--ink-violet); border-color: transparent; background: var(--violet-dim); }
 /* A search word inside a hit (lib/mark.js), as desktop tints it. */
 mark.hit { background: color-mix(in srgb, var(--acc) 30%, transparent); color: var(--text); border-radius: 2px; }
-.chip.acc, .chip.on { color: var(--acc); border-color: transparent; background: var(--acc-dim); }
+.chip.acc, .chip.on { color: var(--ink-acc); border-color: transparent; background: var(--acc-dim); }
+/* The same chip text for a colour that is only known per element: set --k to it (ModBackups' counts). */
+.ink { color: light-dark(color-mix(in srgb, var(--k) 50%, #000), var(--k)); }
 /* A status pill (widgets::pill): coloured text on its tint, semibold, with a glowing dot. */
-.pill { display: inline-flex; align-items: center; gap: 6px; flex: none; box-sizing: border-box; height: 20px; line-height: 1; padding: 0 9px 2px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--muted); background: #9a9aa31a; }
-.pill.running { color: var(--green); background: var(--green-dim); }
-.pill.starting, .pill.stopping { color: var(--gold); background: var(--gold-dim); }
-.pill.crashed, .pill.wake_failed { color: var(--red); background: var(--red-dim); }
-.pill.sleeping { color: var(--gold); background: var(--gold-dim); }
-.pill.acc { color: var(--acc); background: var(--acc-dim); }
+.pill { display: inline-flex; align-items: center; gap: 6px; flex: none; box-sizing: border-box; height: 20px; line-height: 1; padding: 0 9px 2px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--ink-muted); background: #9a9aa31a; }
+.pill.running { color: var(--ink-green); background: var(--green-dim); }
+.pill.starting, .pill.stopping { color: var(--ink-gold); background: var(--gold-dim); }
+.pill.crashed, .pill.wake_failed { color: var(--ink-red); background: var(--red-dim); }
+.pill.sleeping { color: var(--ink-gold); background: var(--gold-dim); }
+.pill.acc { color: var(--ink-acc); background: var(--acc-dim); }
 .pill .glow { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; flex: none; }
 /* A server's state light (widgets::status_dot). */
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted); }
@@ -206,11 +221,11 @@ body.picking, body.picking * { user-select: none !important; cursor: grabbing !i
    notice_slot.rs: one-line strips tinted by tier (stops play red, needs a
    choice amber, news blue), the rest under "N more". */
 .nslot { display: flex; flex-direction: column; gap: 6px; margin: 0 18px 10px; }
-.nstrip { --tone: var(--blue); position: relative; display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 6px 0 12px; border: 1px solid color-mix(in srgb, var(--tone) 45%, transparent); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--tone) 8%, transparent); font-size: 13px; overflow: hidden; }
-.nstrip.stop, .ndetails.stop { --tone: var(--red); }
-.nstrip.choice, .ndetails.choice { --tone: var(--gold); }
-.nstrip > svg { color: var(--tone); flex: none; }
-.nstrip .nt { flex: 0 1 auto; min-width: 0; font-weight: 600; color: var(--tone); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nstrip { --tone: var(--blue); --ink: var(--ink-blue); position: relative; display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 6px 0 12px; border: 1px solid color-mix(in srgb, var(--tone) 45%, transparent); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--tone) 8%, transparent); font-size: 13px; overflow: hidden; }
+.nstrip.stop, .ndetails.stop { --tone: var(--red); --ink: var(--ink-red); }
+.nstrip.choice, .ndetails.choice { --tone: var(--gold); --ink: var(--ink-gold); }
+.nstrip > svg { color: var(--ink); flex: none; }
+.nstrip .nt { flex: 0 1 auto; min-width: 0; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nstrip .nt.grow { flex: 1 1 auto; }
 .nstrip .ns { flex: 1 1 0; min-width: 0; color: var(--subtle); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nacts { display: flex; align-items: center; gap: 6px; flex: none; }

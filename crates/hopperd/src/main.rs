@@ -11,6 +11,7 @@
 //! hopperd service install         run in the background with the machine
 //! hopperd service uninstall|status
 //! hopperd relay init|run          the VPS end of "Relay through a VPS" (vps::relay_end)
+//! hopperd edge run --data <dir>   the router process (Hopper Server starts it)
 //! hopperd --version
 //! ```
 //!
@@ -32,6 +33,7 @@ mod config_sync;
 mod configs;
 mod control;
 mod discovery;
+mod edge;
 mod files;
 mod fs_api;
 mod fs_zip;
@@ -77,6 +79,7 @@ mod server_ops;
 mod servers_admin;
 mod service;
 mod sftp;
+mod sftp_setting;
 mod sources_api;
 mod tls;
 mod transfer;
@@ -155,6 +158,9 @@ pub struct App {
     pub sftp_fingerprint: Option<String>,
     /// Server addresses (the Minecraft port shared by every server).
     pub router: router::Router,
+    /// The router process that holds the Minecraft port and players'
+    /// connections across restarts (see [`edge`]).
+    pub edge: edge::client::Client,
     /// Finished jobs' results, until fetched.
     pub results: std::sync::Mutex<std::collections::HashMap<u64, serde_json::Value>>,
     /// Which server each job is for (`pack_api::JobServers`).
@@ -341,6 +347,10 @@ fn main() -> anyhow::Result<()> {
         log.init();
         return vps::relay_end::command(&argv[1..]);
     }
+    // The router process hopperd starts for itself (see `edge`).
+    if argv.first().map(String::as_str) == Some("edge") {
+        return edge::command(&argv[1..], log);
+    }
     let Some(args) = parse_args()? else { return Ok(()) };
     if args.service {
         // No console as a service: log to hopperd.log in the data folder.
@@ -463,6 +473,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         changes: Default::default(),
         grants: Default::default(),
         router: Default::default(),
+        edge: Default::default(),
         scheduler: Default::default(),
         limiter: Default::default(),
         audit: security::Audit::new(&data_dir),
@@ -635,11 +646,13 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: tls::OwnCert, shutdown: Shu
 
     let first = app.addresses.read().unwrap().first().cloned();
     log::info!("hopperd {} on {}", env!("CARGO_PKG_VERSION"), first.unwrap_or_else(|| format!("https://{addr}")));
+    let a = app.clone();
     net::serve(listener, api::router(app), tls, async {
         shutdown.await;
         log::info!("stopping the panel; servers keep running");
     })
     .await;
+    edge::on_panel_stop(&a).await;
     Ok(())
 }
 

@@ -1,5 +1,8 @@
 <script>
-  import { session, outside } from './lib/me.svelte.js';
+  import { session, outside, roleLabel } from './lib/me.svelte.js';
+  import { panels } from './lib/panels.svelte.js';
+  import { onOnly } from './lib/panelOff.js';
+  import { KIND, kindTip, nodeLight, panelLight, serverCount } from './lib/machines.js';
   import Avatar from './Avatar.svelte';
   import { Play, Square, RotateCw, Terminal, Plus, Server, Compass } from '@lucide/svelte';
   import { live, history } from './lib/live.svelte.js';
@@ -14,7 +17,7 @@
   import NoticeSlot from './lib/NoticeSlot.svelte';
   import { provideNotices } from './lib/notices.svelte.js';
 
-  let { onNew = () => {} } = $props();
+  let { onNew = () => {}, homeName = '' } = $props();
 
   // Alerts about the PC itself (drive nearly full, memory): the server
   // pages show them too, but this is where they belong.
@@ -27,17 +30,38 @@
   const serverMem = $derived(live.servers.reduce((n, s) => n + s.mem_bytes, 0));
   const alive = (s) => s.state === 'running' || s.state === 'starting' || s.state === 'stopping';
   // Running servers first, as in the server list.
-  const servers = $derived([...live.servers].sort((a, b) => Number(alive(b)) - Number(alive(a))));
+  const sorted = (list) => [...list].sort((a, b) => Number(alive(b)) - Number(alive(a)));
+  const servers = $derived(sorted(live.servers));
   const loading = $derived(!live.connected && !live.servers.length);
+  // The servers by machine, as the server list groups them: this panel's,
+  // each node's, then each signed-in panel's. A machine with nothing to show
+  // is left out here; the server list and Other machines say why.
+  const groups = $derived.by(() => {
+    const out = [{ key: 'home', kind: 'home', name: homeName || 'This panel', light: live.connected ? 'running' : 'starting', tip: kindTip('home', { role: roleLabel(session.role) }), servers: servers.filter((s) => !s.node), panel: null }];
+    for (const n of live.nodes || []) {
+      out.push({ key: `node:${n.id}`, kind: 'node', name: n.name, light: nodeLight(n), tip: kindTip('node', { ceiling: n.ceiling }), servers: servers.filter((s) => s.node === n.id), panel: null, node: n });
+    }
+    for (const p of onOnly(panels.list)) {
+      if (p.state === 'signin') continue;
+      out.push({ key: p.id, kind: 'panel', name: p.name, light: panelLight(p), tip: kindTip('panel', { role: p.me ? roleLabel(p.role) : '' }), servers: sorted(p.servers), panel: p });
+    }
+    return out.filter((g) => g.kind === 'home' || g.servers.length);
+  });
+  const grouped = $derived(groups.length > 1);
+  const anyServers = $derived(groups.some((g) => g.servers.length));
   // Two names, then "+N": the rest are in the tooltip.
   const names = (p) => (p.length > 2 ? `${p.slice(0, 2).join(', ')} +${p.length - 2}` : p.join(', '));
-  const href = (s) => `#/server/${encodeURIComponent(s.id)}`;
+  const href = (s, p = null) => `#${p ? `/p/${encodeURIComponent(p.id)}` : ''}/server/${encodeURIComponent(s.id)}`;
+  /** Whether the card may start, stop and restart server `s` of group `g`:
+   * not as a viewer there, not on a node this panel may only look at, not
+   * while its machine can't be reached. */
+  const canAct = (s, g) => !s.stale && (g.panel ? g.panel.state === 'ok' && g.panel.role !== 'viewer' : g.node?.ceiling !== 'look');
 </script>
 
-{#snippet chips(s, up)}
+{#snippet chips(s, up, p)}
   {#if up}<a class="chip acc" href={href(s)} title="Pack update: {up.from} → {up.to}">Pack update · {up.to}</a>{/if}
   {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder">Also in {s.managed_by}</span>{/if}
-  {#if outside(s)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}
+  {#if !p && outside(s)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}
 {/snippet}
 
 <div class="pad">
@@ -72,29 +96,41 @@
     </div>
   </div>
 
-  <div class="servers">
-    {#if loading}
+  {#if loading}
+    <div class="servers">
       {#each [0, 1] as i (i)}<div class="scard"><div class="skel"><i></i></div><div class="skel"><i></i></div></div>{/each}
+    </div>
+  {/if}
+  {#each groups as g (g.key)}
+    {#if grouped}
+      <div class="mh">
+        <span class="dot {g.light}"></span>
+        <b class="mnm" title={g.name}>{g.name}</b>
+        <span class="chip" title={g.tip}>{KIND[g.kind]}</span>
+        <span class="tiny muted">{serverCount(g.servers.length)}</span>
+      </div>
     {/if}
-    {#each servers as s (s.id)}
+    <div class="servers" class:dim={g.panel && g.panel.state !== 'ok'}>
+    {#each g.servers as s (s.id)}
+      {@const p = g.panel}
       {@const cap = xmx(s.max_memory)}
-      {@const up = packUpdates.byId[s.id]}
+      {@const up = p ? null : packUpdates.byId[s.id]}
       {@const on = alive(s)}
       {@const mem = on ? s.mem_bytes : 0}
       <!-- The figure is the whole Java process and -Xmx only caps its heap, so the bar is out of this PC's memory, with a tick at the heap limit: never "10 GB of 8 GB". -->
-      {@const span = Math.max(h?.mem_total || 0, mem, cap)}
-      {@const nchips = Number(!!up) + Number(!!s.managed_by) + Number(outside(s))}
+      {@const span = Math.max(p ? 0 : h?.mem_total || 0, mem, cap)}
+      {@const nchips = Number(!!up) + Number(!!s.managed_by) + Number(!p && outside(s))}
       <div class="scard">
         <div class="row">
-          <a class="icl" href={href(s)}><Avatar server={s} cls="ic" /></a>
-          <a class="nmw" href={href(s)}>
+          <a class="icl" href={href(s, p)}><Avatar server={s} cls="ic" panel={p} /></a>
+          <a class="nmw" href={href(s, p)}>
             <div class="nm">{s.name}</div>
             <div class="tiny muted cap" title={[loaderText(s.loader), s.version].filter(Boolean).join(' · ')}>
               {loaderText(s.loader, true) || 'Minecraft'}{s.version ? ` ${s.version}` : ''} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{:else}:{s.port}{/if}{on ? ` · up ${uptime(s.uptime_secs)}` : ''}
             </div>
           </a>
           {#if s.state === 'running'}
-            <ServerAlerts server={s} part="chip" />
+            {#if !p}<ServerAlerts server={s} part="chip" />{/if}
             <span class="pill running" title="Players online"><span class="glow"></span>{s.players.length} / {s.max_players}</span>
           {:else if s.state === 'stopped'}
             <span class="stopped"><span class="dot"></span>Stopped</span>
@@ -104,7 +140,7 @@
         </div>
         {#if s.progress}<Progress server={s} />{/if}
         <!-- Status chips get their own row, so they never crowd the buttons. -->
-        {#if nchips}<div class="row chips">{@render chips(s, up)}</div>{/if}
+        {#if nchips}<div class="row chips">{@render chips(s, up, p)}</div>{/if}
         <!-- Players show once, in the header pill; the two meters get half the card each. -->
         <div class="meters">
           <div>
@@ -123,17 +159,20 @@
           <span class="left">
             <span class="small subtle ell" title={s.players.join(', ')}>{names(s.players) || (on ? 'Nobody online' : '')}</span>
           </span>
-          {#if !on}
-            <button class="btn sm go" disabled={!!startBlocked(s)} title={startBlocked(s)} onclick={() => power(s, 'start')}><Play size={13} />Start</button>
+          {#if !canAct(s, g)}
+            <!-- Nothing to press: a viewer, a look-only node or a machine out of reach. -->
+          {:else if !on}
+            {@const why = g.node?.maintenance ? `${g.node.name} is under maintenance` : startBlocked(s)}
+            <button class="btn sm go" disabled={!!why} title={why} onclick={() => power(s, 'start', p)}><Play size={13} />Start</button>
           {:else}
-            <button class="btn sm icon ghost" title="Restart" onclick={() => power(s, 'restart')}><RotateCw size={14} /></button>
-            <button class="btn sm icon ghost bad" title="Stop" onclick={() => power(s, 'stop')}><Square size={14} /></button>
+            <button class="btn sm icon ghost" title="Restart" onclick={() => power(s, 'restart', p)}><RotateCw size={14} /></button>
+            <button class="btn sm icon ghost bad" title="Stop" onclick={() => power(s, 'stop', p)}><Square size={14} /></button>
           {/if}
-          <a class="btn sm" href={href(s)}><Terminal size={13} />Console</a>
+          <a class="btn sm" href={href(s, p)}><Terminal size={13} />Console</a>
         </div>
       </div>
     {:else}
-      {#if !loading}
+      {#if !loading && !anyServers && g.kind === 'home'}
         <div class="card empty">
           <div class="empty-state">
             <span class="es-ic"><Server size={18} /></span>
@@ -143,9 +182,12 @@
             <a class="btn sm" href="#/browse"><Compass size={13} />Browse modpacks</a>
           </div>
         </div>
+      {:else if !loading && g.kind === 'home'}
+        <div class="small muted none">No servers on this panel itself.</div>
       {/if}
     {/each}
-  </div>
+    </div>
+  {/each}
 </div>
 
 <style>
@@ -160,6 +202,12 @@
   .stat .s { font-size: 12px; color: var(--muted); }
   .dbar { margin-top: 16px; }
   .servers { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; margin-top: 12px; }
+  .servers.dim { opacity: .55; }
+  /* A machine's servers: its light, name, how it's connected and its count, like its group in the server list. */
+  .mh { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 22px 2px 0; }
+  .mnm { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mh .tiny { flex: none; }
+  .none { grid-column: 1 / -1; }
   .scard { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 14px; display: flex; flex-direction: column; gap: 12px; }
   .scard:hover { border-color: var(--line2); }
   .nmw { flex: 1; min-width: 0; color: inherit; }

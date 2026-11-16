@@ -4,11 +4,13 @@
 //!
 //! Nothing is written until the user acts: a step's choices are saved on
 //! Next, only when they differ from the settings, and the theme previews
-//! live but is only kept on Next (Skip puts the old one back).
+//! live but is only kept on Next (Skip puts the old one back). The Discord
+//! switch on the Look step is the exception: it saves when clicked.
 
 use crate::app::{AppView, Page};
 use crate::launchers_list::LaunchersList;
 use crate::store::Store;
+use crate::switch::Switch;
 use crate::widgets;
 use crate::widgets::Clickable as _;
 use gpui_kit::assets::IconName;
@@ -974,14 +976,48 @@ impl SetupWizard {
     }
 
     fn look(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let discord_on = self.store.read(cx).settings().discord.enabled;
         let current = self.current_theme();
         let names: Vec<String> = std::iter::once(String::new())
             .chain(crate::theme::names())
             .collect();
         v_flex()
             .gap_3()
+            // On unless it was turned off before; only a click here changes it
+            // (the full set of Discord choices stays in Settings › Discord).
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .p_3()
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(theme.foreground.opacity(0.1))
+                    .bg(theme.foreground.opacity(0.035))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(label("Show what I'm playing on Discord"))
+                            .child(note(
+                                "Friends see the modpack you're playing and what you're browsing in Hopper, and nothing else. Turn it off here or any time in Settings.",
+                                cx,
+                            )),
+                    )
+                    .child(
+                        Switch::new("setup-discord")
+                            .checked(discord_on)
+                            .on_click(cx.listener(|this, v: &bool, _, cx| {
+                                let v = *v;
+                                this.store.update(cx, |st, cx| st.update_settings(|s| s.discord.enabled = v, cx));
+                                cx.notify();
+                            })),
+                    ),
+            )
             .child(note(
-                "Pick one to see it right away. Change it any time in Settings or Ctrl+K.",
+                "Pick a theme to see it right away. Change it any time in Settings or Ctrl+K.",
                 cx,
             ).whitespace_normal())
             .child(
@@ -1128,7 +1164,7 @@ impl SetupWizard {
             "CurseForge" => (IconName::Lock, "Your CurseForge key (optional)", "Skip it to use Modrinth only; add it later in Settings."),
             "Instances" => (IconName::LibraryBig, "Your instances", "Where Hopper finds what you play."),
             "Servers" => (IconName::Server, "Servers", "Optional. Skip it if you just play."),
-            "Look" => (IconName::Palette, "Make it yours", "A theme for Hopper."),
+            "Look" => (IconName::Palette, "Make it yours", "A theme for Hopper, and whether friends see what you play."),
             _ => (IconName::CircleCheck, "Done", "Here's what's set."),
         };
         h_flex()

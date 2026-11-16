@@ -1,11 +1,12 @@
 <script>
   import { onMount } from 'svelte';
-  import { Link, Check, X, Network, Wifi, Globe, Waypoints, Lock, MonitorSmartphone, Trash2, FolderTree } from '@lucide/svelte';
+  import { Link, Check, X, Network, Wifi, Globe, Waypoints, Lock, MonitorSmartphone, Trash2 } from '@lucide/svelte';
   // Settings › Access & devices (owner), or Settings › Account. The other
   // panel settings have their own categories (PanelSettings.svelte).
   import Security from './Security.svelte';
   import Certificate from './Certificate.svelte';
   import WebAccess from './WebAccess.svelte';
+  import SftpSwitch from './SftpSwitch.svelte';
   import { confirmIt } from './lib/dialog.svelte.js';
   import { pathKind } from './lib/format.js';
 
@@ -113,14 +114,12 @@
         <div class="fp"><Lock size={13} /><div><div class="tiny muted">Certificate fingerprint (Hopper desktop shows the same when pairing)</div>
           <div class="mono tiny">{hello.tls.fingerprint}</div></div></div>
       {/if}
-      {#if hello.sftp}
-        <div class="fp sftp"><FolderTree size={13} /><div><div class="tiny muted">SFTP (FileZilla, WinSCP) on port <b class="txt">{hello.sftp.port}</b>: your name and password from the LAN or Tailscale, or an API token as the password from anywhere. Host key</div>
-          <div class="mono tiny">{hello.sftp.fingerprint}</div></div></div>
-      {/if}
       <p class="tiny muted note">Plain HTTP works from this PC, the LAN and Tailscale; from the internet only HTTPS, and signing in needs two-factor. Browsers warn about the panel's own certificate; turn on a trusted one below. Announced on the LAN as <span class="mono">_hopperd._tcp</span>.</p>
     </div>
 
     <Certificate port={hello.port} />
+
+    <SftpSwitch />
 
     <WebAccess />
 
@@ -161,7 +160,6 @@
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .fp { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; color: var(--green); word-break: break-all; }
   .note { margin-top: 10px; }
-  .fp.sftp { color: var(--blue); }
   .manage { margin: 10px 0 0; justify-content: center; }
   .mg { gap: 8px; margin-right: 12px; }
   .dev { padding: 8px 0; border-bottom: 1px solid var(--line); }

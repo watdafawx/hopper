@@ -99,9 +99,9 @@
 
 <style>
   .chip.tps { flex: none; font-variant-numeric: tabular-nums; }
-  .chip.good { color: var(--green); background: var(--green-dim); }
-  .chip.warn { color: var(--gold); background: var(--gold-dim); }
-  .chip.bad { color: var(--red); background: var(--red-dim); }
+  .chip.good { color: var(--ink-green); background: var(--green-dim); }
+  .chip.warn { color: var(--ink-gold); background: var(--gold-dim); }
+  .chip.bad { color: var(--ink-red); background: var(--red-dim); }
   .t { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); }
   .t b { color: var(--text); font-weight: 500; }
   .t b.w { color: var(--gold); } .t b.r { color: var(--red); }

@@ -119,7 +119,7 @@ fn github(src: &ModSource) -> (Origin, String) {
         Ok(Err(e)) => log::warn!("{api}: {e}"),
         Err(e) => log::warn!("{api}: {e:#}"),
     }
-    if let Ok(c) = super::github::candidates(src) {
+    if let Ok(c) = super::github::candidates(src, super::Check::Auto) {
         o.released = c.iter().find(|c| !c.prerelease).or(c.first()).map(|c| c.date.clone()).unwrap_or_default();
     }
     let md = match super::http::get_text(&format!("{api}/readme"), true)
@@ -250,7 +250,7 @@ fn other(src: &ModSource, name: &str) -> (Origin, String) {
         _ => "a download link",
     };
     let mut md = format!("Hopper gets **{name}** from {what}:\n\n[{0}]({0})", src.url);
-    match super::list_all(src, "", crate::cf::Loader::Any) {
+    match super::list_all(src, "", crate::cf::Loader::Any, super::Check::Auto) {
         Ok(all) => {
             o.released = all.first().map(|c| c.date.clone()).unwrap_or_default();
             let label = match src.kind {

@@ -10,7 +10,6 @@ use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
     v_flex,
@@ -120,6 +119,8 @@ enum RollBack {
     Crash { name: String, ch: hopper::crashdetect::Changed },
     /// An older version that works with what the mod needs.
     Offer(crate::revert_ui::Offer),
+    /// History's Undo of the update that put the blocked jar in.
+    Undo { name: String, file: String, saved: hopper::backups::Saved, when: i64 },
 }
 
 /// A notice's subject from a list of names: "A, B, C" or "A, B and 4 more".
@@ -161,6 +162,11 @@ pub struct MissingDeps {
     /// Wrong-version rows whose asked-for version nobody published (mod
     /// id and range → a version that does exist, as an example).
     pub ghosts: std::collections::HashMap<(String, String), String>,
+    /// Blocked jars an update put in, by file name: History's entry for the
+    /// file it replaced and when ("Roll back" undoes it).
+    pub rollbacks: std::collections::HashMap<String, (i64, hopper::backups::Saved)>,
+    /// Roll backs running now, by file name.
+    pub rolling: std::collections::HashSet<String>,
 }
 
 impl AddonsView {
@@ -236,6 +242,30 @@ impl AddonsView {
         .detach();
     }
 
+    /// Asks Modrinth where the mods CurseForge doesn't tag run, off the UI
+    /// thread. The answers are cached (disk and memory), so the table only
+    /// waits on mods never asked before; it redraws when they land.
+    pub(crate) fn want_sides(&mut self, inst: &Instance, cx: &mut Context<Self>) {
+        // A Hopper Server's list carries its own sides.
+        if self.remote || self.sides_busy || crate::store::on_hopper_server(&inst.root).is_some() || !hopper::modsides::needs_look_up(inst) {
+            return;
+        }
+        self.sides_busy = true;
+        let snapshot = inst.clone();
+        cx.spawn(async move |this, cx| {
+            let new = cx.background_spawn(async move { hopper::modsides::look_up(&snapshot) }).await;
+            this.update(cx, |this, cx| {
+                this.sides_busy = false;
+                if new {
+                    this.sync(false, cx);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Looks for missing required mods when the mods folder changed.
     pub(crate) fn want_missing(&mut self, inst: &Instance, cx: &mut Context<Self>) {
         // A Hopper Server's jars are read by its panel.
@@ -272,23 +302,40 @@ impl AddonsView {
             loaded_fine: if same { self.missing.loaded_fine } else { None },
             against: against.clone(),
             ghosts: if same { std::mem::take(&mut self.missing.ghosts) } else { Default::default() },
+            rollbacks: if same { std::mem::take(&mut self.missing.rollbacks) } else { Default::default() },
+            rolling: if same { std::mem::take(&mut self.missing.rolling) } else { Default::default() },
         };
         let root = inst.root.clone();
         let snapshot = inst.clone();
         cx.spawn(async move |this, cx| {
-            let hopper::deps::Problems { missing: list, dups, blockers, loaded_fine } = cx
+            let (hopper::deps::Problems { missing: list, dups, blockers, loaded_fine }, rollbacks) = cx
                 .background_spawn(async move {
                     match panel {
-                        Some(r) => remote_problems(&r).unwrap_or_else(|e| {
-                            log::warn!("mod problems of {}: {e:#}", snapshot.root.display());
-                            Default::default()
-                        }),
-                        None => hopper::deps::problems(&snapshot),
+                        Some(r) => (
+                            remote_problems(&r).unwrap_or_else(|e| {
+                                log::warn!("mod problems of {}: {e:#}", snapshot.root.display());
+                                Default::default()
+                            }),
+                            Default::default(),
+                        ),
+                        None => {
+                            let p = hopper::deps::problems(&snapshot);
+                            // An update that put a blocked jar in: its
+                            // History entry, for "Roll back".
+                            let sets = if p.blockers.is_empty() { Vec::new() } else { hopper::backups::list(&snapshot.root) };
+                            let rollbacks = p
+                                .blockers
+                                .iter()
+                                .filter_map(|b| Some((b.file_name.clone(), hopper::undo::brought_by(&sets, &b.file_name)?)))
+                                .collect();
+                            (p, rollbacks)
+                        }
                     }
                 })
                 .await;
             this.update(cx, |this, cx| {
                 if this.missing.root.as_ref() == Some(&root) && this.missing.mtime == mtime && this.missing.listed == listed && this.missing.against == against {
+                    this.missing.rollbacks = rollbacks;
                     this.missing.dups = dups;
                     this.want_ghosts(&blockers, cx);
                     this.missing.blockers = blockers;
@@ -927,6 +974,7 @@ impl AddonsView {
         self.settle.clicked();
         let for_chips = ids.clone();
         let job = store.spawn_instance_job_id(&root, title, move |job| {
+            crate::store::fresh(&mut inst);
             let mut got = 0;
             let before = crate::store::Before::at(&inst.root);
             for id in &ids {
@@ -1167,6 +1215,12 @@ impl AddonsView {
             {
                 roll = Some(RollBack::Offer(offer));
             }
+            // An update just put this jar in: undoing it is the main fix.
+            if roll.is_none()
+                && let Some((when, saved)) = self.missing.rollbacks.get(&b.file_name)
+            {
+                roll = Some(RollBack::Undo { name: self.jar_label(inst, &b.file_name), file: b.file_name.clone(), saved: saved.clone(), when: *when });
+            }
             match &b.kind {
                 BlockerKind::Loader { id, versions, .. } => {
                     // A newer loader fixes it, when it's this instance's
@@ -1245,6 +1299,17 @@ impl AddonsView {
                             .into_any_element(),
                     );
                 }
+            }
+            // An update just put this file in: undo that update, unless a
+            // Revert already offers an older version.
+            // (The notice's main button already does it for this jar.)
+            let main_undo = matches!(&roll, Some(RollBack::Undo { file, .. }) if file == &b.file_name);
+            if !main_undo
+                && self.store.read(cx).revert_offer(&inst.root, &b.file_name).is_none()
+                && let Some(el) = self.rollback_action(i, inst, &b.file_name, cx)
+            {
+                // Beside the Turn off for this jar (the first button).
+                actions.insert(actions.len().min(1), el);
             }
             let view = cx.entity();
             let link = |key: String, name: String, icon: Option<std::path::PathBuf>, pid: u64, mod_id: Option<String>, cx: &Context<Self>| {
@@ -1395,8 +1460,9 @@ impl AddonsView {
     }
 
     /// The load problem's main button: "Roll back Create to 6.0.4", from
-    /// the copy Hopper kept before an update (the crash's) or a revert offer
-    /// (a blocker an older version fixes). Narrow: "Roll back Create".
+    /// the copy Hopper kept before an update (the crash's), a revert offer
+    /// (a blocker an older version fixes) or History's Undo of the update
+    /// that put a blocked jar in. Narrow: "Roll back Create".
     fn roll_back_button(&self, inst: &Instance, roll: RollBack, cx: &mut Context<Self>) -> impl FnOnce(notice_slot::Fit) -> AnyElement + 'static {
         let root = inst.root.clone();
         let view = cx.entity().downgrade();
@@ -1410,13 +1476,21 @@ impl AddonsView {
                 let (label, tip) = o.label();
                 (label, format!("Roll back {}", o.name), tip)
             }
+            RollBack::Undo { name, saved, when, .. } => (
+                format!("Roll back {name} to {}", hopper::undo::version_of(&saved.name)),
+                format!("Roll back {name}"),
+                format!("Undoes the update on {}, as History's Undo does", hopper::time::day_month(*when)),
+            ),
         };
+        let busy = matches!(&roll, RollBack::Undo { file, .. } if self.missing.rolling.contains(file));
         move |fit| {
             let tooltip = if fit.narrow { format!("{label}. {tip}") } else { tip };
             notice_slot::main_button(Button::new("notice-roll-back").small(), fit)
                 .icon(IconName::Undo2)
                 .label(if fit.narrow { short } else { label })
                 .tooltip(tooltip)
+                .loading(busy)
+                .disabled(busy)
                 .on_click(move |_, window, cx| {
                     view.update(cx, |this, cx| {
                         let store = this.store.clone();
@@ -1429,6 +1503,11 @@ impl AddonsView {
                                 ok
                             }
                             RollBack::Offer(o) => crate::revert_ui::revert_instance(&store, &root, o, window, cx),
+                            RollBack::Undo { file, saved, .. } => {
+                                // Re-reads the folder itself when it's done.
+                                this.roll_back(&root, file, saved.clone(), window, cx);
+                                false
+                            }
                         };
                         if done {
                             // Untracked jars changed too: re-read the folder.
@@ -1440,6 +1519,62 @@ impl AddonsView {
                 })
                 .into_any_element()
         }
+    }
+
+    /// "Roll back" for a blocked jar an update put in: History's Undo of that
+    /// update ([`crate::history_view::queue_undo`]), then the notice checks
+    /// the folder again.
+    fn rollback_action(&self, i: usize, inst: &Instance, file: &str, cx: &Context<Self>) -> Option<AnyElement> {
+        let (when, saved) = self.missing.rollbacks.get(file)?.clone();
+        let version = hopper::undo::version_of(&saved.name);
+        let busy = self.missing.rolling.contains(file);
+        let (root, file) = (inst.root.clone(), file.to_string());
+        Some(
+            Button::new(SharedString::from(format!("blk-rollback:{i}")))
+                .xsmall()
+                .outline()
+                .label("Roll back")
+                .loading(busy)
+                .disabled(busy)
+                .tooltip(format!("Back to {version}, from before the update on {}", hopper::time::day_month(when)))
+                .on_click(cx.listener(move |this, _, window, cx| this.roll_back(&root, &file, saved.clone(), window, cx)))
+                .into_any_element(),
+        )
+    }
+
+    /// Undoes the update that put `file` in, as History's Undo does.
+    fn roll_back(&mut self, root: &std::path::Path, file: &str, saved: hopper::backups::Saved, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(slot) = crate::history_view::queue_undo(self.store.read(cx), root, vec![saved], None) else { return };
+        self.missing.rolling.insert(file.to_string());
+        cx.notify();
+        let (root, file) = (root.to_path_buf(), file.to_string());
+        cx.spawn_in(window, async move |this, cx| {
+            let got = crate::store::work_done(cx.background_executor().clone(), slot).await;
+            this.update_in(cx, |this, window, cx| {
+                this.missing.rolling.remove(&file);
+                if let Some(crate::history_view::UndoDone { done, gone, website, errors, .. }) = got {
+                    crate::history_view::undone(&this.store, &root, &done, cx);
+                    // Only the CurseForge website has the old file: the
+                    // download window gets it, as History's Undo does.
+                    for (f, w) in website {
+                        crate::history_view::get_from_website(&this.store, &root, f, w, window, cx);
+                    }
+                    if let Some(p) = done.first().and_then(|p| p.file_name()) {
+                        window.push_notification(Notification::success(format!("Put back {}", p.to_string_lossy())), cx);
+                    }
+                    if let Some((f, g)) = gone {
+                        window.push_notification(Notification::error(format!("{}: {g}. History can put back another version.", f.name)), cx);
+                    }
+                    for e in errors {
+                        window.push_notification(Notification::error(e), cx);
+                    }
+                }
+                // The notice checks the folder again.
+                this.resync(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// "Roll back X to 1.6.3" for a problem an older version of the mod fixes

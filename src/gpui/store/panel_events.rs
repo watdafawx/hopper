@@ -7,7 +7,7 @@
 //! hopperd's `changes.rs`). A panel too old to have it, or one that's down,
 //! is tried again later; the regular five-second poll still runs meanwhile.
 
-use super::{Msg, Store, StoreEvent};
+use super::{Msg, Store, StoreEvent, panel_slow};
 use gpui_kit::*;
 use hopper::hopperd::{Client, PanelChange};
 use std::collections::HashMap;
@@ -18,6 +18,9 @@ use std::time::Duration;
 
 /// How long one ask waits for a change (under the client's reply limit).
 const WAIT: u64 = 15;
+
+/// Least time between two answers that changed something.
+const GATHER: Duration = Duration::from_secs(2);
 
 /// The panels being followed: id -> generation. A thread whose panel left,
 /// or was paired again, sees its generation gone and ends.
@@ -72,7 +75,7 @@ impl Store {
             if let Some(client) = Client::for_panel(&p) {
                 let id = p.id.clone();
                 self.list_node_heads(id.clone(), &p);
-                self.spawn(move || Msg::PanelServers(id, client.server_infos().map_err(|e| format!("{e:#}"))));
+                self.spawn(move || panel_slow::list_servers(id, &client));
             }
         }
         // Each change for the servers it's about (no server: all of them).
@@ -120,19 +123,32 @@ fn follow(client: Client, panel: String, generation: u64, tx: Sender<Msg>, wake:
                 // Back after a failure, a panel restart or too long away:
                 // what changed meanwhile wasn't heard.
                 let restarted = at.as_ref().is_some_and(|(b, _)| *b != c.boot);
+                let mut heard = true;
                 if (failed || restarted || c.reset) && at.is_some() {
                     send(everything());
                 } else if !c.changes.is_empty() {
                     send(c.changes);
+                } else {
+                    heard = false;
                 }
                 at = Some((c.boot, c.rev));
                 failed = false;
                 wait = Duration::from_secs(5);
+                // A burst (a sync copying jar after jar sends one change per
+                // file) is heard as one: what comes in the next moment waits
+                // for the next ask. Each answer made the open views read the
+                // server again, and a big pack's sync ran into the panel's
+                // rate limit.
+                if heard {
+                    std::thread::sleep(GATHER);
+                }
             }
             Err(e) => {
                 log::debug!("panel {panel} changes: {e:#}");
                 failed = true;
-                std::thread::sleep(wait);
+                // Asked to slow down: wait as long as the panel said.
+                let pause = hopper::hopperd::Refused::slow_down(&e).map_or(wait, |s| wait.max(Duration::from_secs(s)));
+                std::thread::sleep(pause);
                 // An older Hopper Server without change events, or one
                 // that's off: ask less often.
                 wait = (wait * 2).min(Duration::from_secs(120));

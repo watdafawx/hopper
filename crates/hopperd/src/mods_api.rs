@@ -328,6 +328,9 @@ async fn list(
             HashMap::new()
         };
         let (cats, cats_pending) = crate::mods_table::categories(&inst);
+        // Where untagged mods run, from Modrinth: asked in the background,
+        // the list asks again while it runs.
+        let sides_pending = hopper_core::modsides::look_up_in_background(&inst);
         let pack = PackMods::of(&inst);
         // A pack whose mod list can't be had (no CurseForge key, pack file
         // gone): nothing tells the pack's mods from yours, so none show as
@@ -367,10 +370,19 @@ async fn list(
             }
             known.insert(a.file_name.to_lowercase());
             let s = scanned.get(&a.file_name.to_lowercase());
+            // CurseForge's tag, else the jar's own word, else Modrinth's.
+            let (side, side_from) = match (side_label(&a.env), s.map(|s| s.side.as_str()).filter(|v| !v.is_empty())) {
+                ("", Some(own)) => (own.to_string(), ""),
+                ("", None) => match hopper_core::modsides::side_of(a) {
+                    Some(r) if r.from == hopper_core::modsides::From::Modrinth => (r.side, "modrinth"),
+                    _ => (String::new(), ""),
+                },
+                (cf, _) => (cf.to_string(), ""),
+            };
             rows.push(json!({
                 "file": a.file_name, "name": if a.name.is_empty() { s.map(|s| s.mod_name.clone()).unwrap_or_default() } else { a.name.clone() },
                 "version": s.map(|s| s.version.clone()).unwrap_or_default(), "icon": icon_url(&a.icon), "enabled": a.enabled,
-                "side": if a.env.is_empty() { s.map(|s| s.side.clone()).unwrap_or_default() } else { side_label(&a.env).to_string() },
+                "side": side, "side_from": side_from,
                 "project_id": id_str(a.project_id), "source": if a.source.is_some() { "link" } else if a.project_id == 0 { "" } else if modrinth::is_mr(a.project_id) { "modrinth" } else { "curseforge" },
                 // From GitHub or another link: its chip and page.
                 "src_label": a.source.as_ref().map(|s| s.kind.label()), "src_page": a.source.as_ref().map(|s| s.page()),
@@ -426,6 +438,7 @@ async fn list(
             "pack": inst.pack.as_ref().map(|p| p.name.clone()),
             "curseforge": cf::api_key().is_some(),
             "categories_pending": cats_pending,
+            "sides_pending": sides_pending,
             "mods": rows,
         }))
     })
@@ -772,13 +785,16 @@ async fn updates(
                 a
             }
         };
-        return Ok(Json(json!({ "updates": v, "archived": archived, "cached": true, "curseforge": cf::api_key().is_some() })));
+        return Ok(Json(json!({ "updates": v, "archived": archived, "cached": true, "curseforge": cf::api_key().is_some(), "github_paused": hopper_core::sources::http::pause().map(|p| p.paused_note()) })));
     }
     let (v, archived) = blocking(move || {
         let inst = instance(&e)?;
         let archived = archived_ids(&inst);
         let pack = PackMods::of(&inst);
-        let ups = install::check_updates(&inst)?;
+        // `force=1` is the player pressing the check button (or a change they
+        // just made): GitHub is asked again. Without it, an answer from the
+        // last few minutes may stand.
+        let ups = install::check_updates(&inst, if force { hopper_core::sources::Check::Manual } else { hopper_core::sources::Check::Auto })?;
         // Names of required mods the server lacks, looked up once; `None`
         // is one that's installed after all (from the other site).
         let mut names: HashMap<u64, Option<String>> = HashMap::new();
@@ -826,7 +842,7 @@ async fn updates(
     .await?;
     keep_updates(&id, v.clone());
     archived_cache().insert(id.clone(), (now_secs(), archived.clone()));
-    Ok(Json(json!({ "updates": v, "archived": archived, "cached": false, "curseforge": cf::api_key().is_some() })))
+    Ok(Json(json!({ "updates": v, "archived": archived, "cached": false, "curseforge": cf::api_key().is_some(), "github_paused": hopper_core::sources::http::pause().map(|p| p.paused_note()) })))
 }
 
 #[derive(Deserialize)]
@@ -868,7 +884,7 @@ async fn update(
             }
         }
         if !unknown.is_empty() {
-            ups.extend(install::check_updates(&inst)?.into_iter().filter(|u| {
+            ups.extend(install::check_updates(&inst, hopper_core::sources::Check::Auto)?.into_iter().filter(|u| {
                 unknown.contains(&u.project_id) && !u.same_file() && inst.addons.iter().any(|a| a.file_name == u.from && !pack_mod(&pack, a))
             }));
         }
