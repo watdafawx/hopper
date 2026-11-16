@@ -535,6 +535,7 @@ impl BackupsView {
         let dir = set.dir.clone();
         let all: Vec<Saved> = set.files.iter().filter(|f| f.change.undoable()).cloned().collect();
         let undoable = !all.is_empty();
+        let mark = pack.clone();
         let busy = self.busy.is_some();
         let kids: Vec<String> = (0..set.files.len()).map(|j| (i * 10_000 + j + 1).to_string()).collect();
         let all_picked = kids.iter().all(|k| self.sel.contains(k));
@@ -562,13 +563,20 @@ impl BackupsView {
         let chevron = gpui_kit::component::Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small();
         let lead = self.set_lead(set, faces, chevron.clone(), cx);
         let muted = cx.theme().muted_foreground;
-        // "Updated pack All the Mods 10 to 1.80.0", the pack's name cut
-        // short first when the row is narrow.
+        // "Updated pack All the Mods 10 to 1.80.0" ("Put back pack ..." once
+        // Undo all put it back, in the muted colour of put-back rows), the
+        // pack's name cut short first when the row is narrow.
         let title = h_flex()
             .gap_1()
             .min_w_0()
             .text_sm()
-            .child(div().flex_none().whitespace_nowrap().text_color(change_color(Change::Updated, true, cx)).child("Updated pack"))
+            .child(
+                div()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_color(change_color(Change::Updated, !pack.undone, cx))
+                    .child(if pack.undone { "Put back pack" } else { "Updated pack" }),
+            )
             .child(div().min_w_0().truncate().whitespace_nowrap().font_semibold().child(pack.name.clone()))
             .when(!pack.version.is_empty(), |r| r.child(div().flex_none().whitespace_nowrap().child(format!("to {}", pack.version))))
             .when(faces, |r| r.child(div().flex_none().text_color(muted).child(chevron)));
@@ -600,7 +608,7 @@ impl BackupsView {
                             .outline()
                             .label("Undo all")
                             .disabled(busy)
-                            .on_click(cx.listener(move |this, _, window, cx| this.undo(all.clone(), window, cx))),
+                            .on_click(cx.listener(move |this, _, window, cx| this.undo_set(all.clone(), Some(mark.clone()), window, cx))),
                     )
                 }),
             )
@@ -865,8 +873,16 @@ impl BackupsView {
     /// Undoes entries, newest set first. A mod whose version its site no
     /// longer has opens the version picker.
     pub(crate) fn undo(&mut self, files: Vec<Saved>, window: &mut Window, cx: &mut Context<Self>) {
+        self.undo_set(files, None, window, cx)
+    }
+
+    /// [`Self::undo`]; with `pack`, the whole pack update is being undone
+    /// (Undo all on its row): when everything in it came back, the pack's own
+    /// record goes back too (pack version, loader, Minecraft version), so
+    /// the update is offered again.
+    fn undo_set(&mut self, files: Vec<Saved>, pack: Option<hopper::backups::PackMark>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(t) = self.panel.clone() {
-            return self.undo_panel(t, files, window, cx);
+            return self.undo_panel(t, files, pack, window, cx);
         }
         let root = self.root.clone();
         let s = self.store.read(cx);
@@ -882,8 +898,9 @@ impl BackupsView {
         self.busy = Some(if downloads { "Downloading to put it back…".into() } else { "Putting it back…".into() });
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let (done, gone, website, errors) = cx
+            let (done, gone, website, errors, pack_said) = cx
                 .background_spawn(async move {
+                    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
                     let mut done = Vec::new();
                     let mut gone: Option<(Saved, Gone)> = None;
                     let mut website: Vec<(Saved, hopper::cf::WebsiteOnly)> = Vec::new();
@@ -903,12 +920,27 @@ impl BackupsView {
                             },
                         }
                     }
-                    (done, gone, website, errors)
+                    // Only when all of it came back.
+                    let mut pack_said = None;
+                    if let Some(m) = &pack
+                        && gone.is_none()
+                        && website.is_empty()
+                        && errors.is_empty()
+                    {
+                        match hopper::undo::restore_pack(&mut inst, m, since) {
+                            Ok(r) => pack_said = Some((m.name.clone(), r)),
+                            Err(e) => errors.push(format!("{}'s pack version wasn't put back: {e:#}", m.name)),
+                        }
+                    }
+                    (done, gone, website, errors, pack_said)
                 })
                 .await;
             this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 this.after_undo(&done, window, cx);
+                if let Some((name, r)) = pack_said {
+                    this.say_pack(&name, &r, window, cx);
+                }
                 for e in errors {
                     window.push_notification(Notification::error(e), cx);
                 }
@@ -960,21 +992,39 @@ impl BackupsView {
     }
 
     /// Undo on a panel server: the panel does the same per file.
-    fn undo_panel(&mut self, t: crate::panel_tabs::Target, files: Vec<Saved>, window: &mut Window, cx: &mut Context<Self>) {
+    fn undo_panel(
+        &mut self,
+        t: crate::panel_tabs::Target,
+        files: Vec<Saved>,
+        pack: Option<hopper::backups::PackMark>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let picked: Vec<(i64, Saved)> = files.into_iter().filter_map(|f| Some((self.when_of(&f)?, f))).collect();
         let downloads = picked.iter().any(|(_, f)| f.download);
         self.busy = Some(if downloads { "Downloading to put it back…".into() } else { "Putting it back…".into() });
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let (done, gone, errors, restart) = cx
+            let (done, gone, errors, restart, pack_said) = cx
                 .background_spawn(async move {
                     let mut done: Vec<String> = Vec::new();
                     let mut gone: Option<(Saved, Gone)> = None;
                     let mut errors = Vec::new();
                     let mut restart = false;
-                    for (when, f) in &picked {
-                        match t.client.post(&t.sp("/mod-backups/undo"), serde_json::json!({ "when": when, "name": f.name })) {
+                    let mut pack_said = None;
+                    // A whole pack update is one request without a name: the
+                    // panel undoes the entry and, when all of it came back,
+                    // puts the pack's record back too.
+                    let requests: Vec<(Saved, serde_json::Value)> = match (&pack, picked.first()) {
+                        (Some(_), Some((when, f))) => vec![(f.clone(), serde_json::json!({ "when": when }))],
+                        _ => picked.iter().map(|(when, f)| (f.clone(), serde_json::json!({ "when": when, "name": f.name }))).collect(),
+                    };
+                    for (f, body) in &requests {
+                        match t.client.post(&t.sp("/mod-backups/undo"), body.clone()) {
                             Ok(v) => {
+                                if let Some(m) = &pack {
+                                    pack_said = hopper::undo::PackRestore::from_json(&v["pack"]).map(|r| (m.name.clone(), r));
+                                }
                                 restart |= v["restart_needed"].as_bool().unwrap_or(false);
                                 done.extend(v["restored"].as_array().into_iter().flatten().filter_map(|n| n.as_str().map(str::to_string)));
                                 errors.extend(v["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(str::to_string)));
@@ -987,13 +1037,16 @@ impl BackupsView {
                             Err(e) => errors.push(format!("{}: {e:#}", f.name)),
                         }
                     }
-                    (done, gone, errors, restart)
+                    (done, gone, errors, restart, pack_said)
                 })
                 .await;
             this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 let paths: Vec<std::path::PathBuf> = done.iter().map(std::path::PathBuf::from).collect();
                 this.say_put_back(&paths, restart, window, cx);
+                if let Some((name, r)) = pack_said {
+                    this.say_pack(&name, &r, window, cx);
+                }
                 this.changed(cx);
                 for e in errors {
                     window.push_notification(Notification::error(e), cx);
@@ -1018,6 +1071,30 @@ impl BackupsView {
                 window.push_notification(Notification::success(format!("Put back {n}{hint}")), cx)
             }
             many => window.push_notification(Notification::success(format!("Put back {} files{hint}", many.len())), cx),
+        }
+    }
+
+    /// What happened to the pack's own record after Undo all on its update.
+    fn say_pack(&self, name: &str, r: &hopper::undo::PackRestore, window: &mut Window, cx: &mut Context<Self>) {
+        use hopper::undo::PackRestore;
+        match r {
+            PackRestore::Restored { version } if !version.is_empty() => {
+                window.push_notification(Notification::success(format!("{name} is back at {version}.")), cx)
+            }
+            PackRestore::Restored { .. } => window.push_notification(Notification::success(format!("{name} is back at its old version.")), cx),
+            PackRestore::Moved { version } if !version.is_empty() => window.push_notification(
+                Notification::warning(format!("{name} was updated again after this; its version stays {version}.")),
+                cx,
+            ),
+            PackRestore::Moved { .. } => window.push_notification(
+                Notification::warning(format!("{name} was updated again after this; its version stays as it is.")),
+                cx,
+            ),
+            PackRestore::Unknown => {}
+        }
+        // The pack is at its old version again, so its update is offered again.
+        if matches!(r, PackRestore::Restored { .. }) {
+            self.store.read(cx).check_pack_updates();
         }
     }
 
