@@ -29,3 +29,19 @@ pub fn report() -> String {
     ];
     all.iter().map(|(n, c)| format!("{n}={}", c.load(Relaxed))).collect::<Vec<_>>().join(" ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_lists_every_counter_and_hit_counts() {
+        let before = VERSIONS.load(Relaxed);
+        hit(&VERSIONS);
+        let line = report();
+        for name in ["mcp=", "downloads=", "panel=", "history=", "versions=", "store_poll="] {
+            assert!(line.contains(name), "{name} missing in {line}");
+        }
+        assert!(VERSIONS.load(Relaxed) > before);
+    }
+}

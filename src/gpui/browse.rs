@@ -491,6 +491,9 @@ pub struct BrowseView {
     logo_layer: Option<Entity<crate::logos::LogoLayer>>,
     /// Open the first result when it arrives (`--detail`, for scripted runs).
     open_first: bool,
+    /// The Minecraft version list was asked for (on first showing, not at
+    /// start: most sessions never open Browse).
+    versions_asked: bool,
     /// Only the project panel, docked beside an instance's mod list.
     peek: bool,
     /// Counts [`Self::peek_project`] calls, so a click outside the peek
@@ -520,7 +523,6 @@ impl BrowseView {
         let slots = view.logos.clone();
         view.logo_layer = Some(cx.new(|cx| crate::logos::LogoLayer::new(store, slots, window, cx)));
         view.open_first = std::env::args().any(|a| a == "--detail");
-        view.load_versions(cx);
         view
     }
 
@@ -656,6 +658,7 @@ impl BrowseView {
             pending_query: None,
             link_file: None,
             open_first: false,
+            versions_asked: false,
             peek: false,
             peeks: 0,
             blur_armed: None,
@@ -5967,6 +5970,10 @@ fn placeholder(modrinth: bool) -> &'static str {
 
 impl Render for BrowseView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.peek && !self.versions_asked {
+            self.versions_asked = true;
+            self.load_versions(cx);
+        }
         // An open peek warms its full-size pictures; a closed one lets go
         // of what it hadn't fetched yet.
         if self.selected.is_some() {

@@ -1763,9 +1763,10 @@ impl ServersView {
             return Some(b.clone());
         }
         let (store, t2) = (self.store.clone(), t.clone());
+        let store_for_button = self.store.clone();
         let open: std::rc::Rc<dyn Fn(&mut Window, &mut App)> =
             std::rc::Rc::new(move |window, cx| crate::backups_view::open_panel(store.clone(), root.clone(), t2.clone(), window, cx));
-        let b = cx.new(|cx| crate::history_button::HistoryButton::for_panel(t, open, cx));
+        let b = cx.new(|cx| crate::history_button::HistoryButton::for_panel(store_for_button, t, open, cx));
         *slot = Some(b.clone());
         Some(b)
     }
