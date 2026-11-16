@@ -66,13 +66,43 @@ fn apply(on: bool, port: u16, changes: bool, window: bool) {
     }
 }
 
-/// Runs the MCP server while Settings has it on (or Hopper started with
-/// `--mcp`, or `HOPPER_MCP=1`, which also allows window control), and
-/// answers its requests on the UI thread.
-pub fn start(window: &mut Window, cx: &mut Context<AppView>) {
+/// What Settings (or `--mcp`, or `HOPPER_MCP=1`, which also allows window
+/// control) asks of the server: (on, port, changes, window control).
+pub type Wanted = (bool, u16, bool, bool);
+
+/// Follows the MCP settings: the server and its 30 ms request loop run
+/// only while MCP is on. With it off nothing ticks; a settings change
+/// (any store update) turns it on at once.
+pub fn start(view: &mut AppView, window: &mut Window, cx: &mut Context<AppView>) {
+    let store = view.store.clone();
+    cx.observe_in(&store, window, |this, _, window, cx| sync(this, window, cx)).detach();
+    sync(view, window, cx);
+}
+
+fn sync(this: &mut AppView, window: &mut Window, cx: &mut Context<AppView>) {
     let dev = std::env::args().any(|a| a == "--mcp") || std::env::var_os("HOPPER_MCP").is_some();
+    let s = this.store.read(cx).settings();
+    let want: Wanted = (s.mcp_enabled || dev, port_of(s), s.mcp_changes, s.mcp_window || dev);
+    if this.mcp_applied == Some(want) {
+        return;
+    }
+    let first = this.mcp_applied.is_none();
+    this.mcp_applied = Some(want);
+    apply(want.0, want.1, want.2, want.3);
+    if !want.0 {
+        this._mcp = None;
+    } else if this._mcp.is_none() {
+        this._mcp = Some(serve(window, cx));
+    }
+    if !first {
+        // Settings shows whether it started.
+        this.store.update(cx, |_, cx| cx.notify());
+    }
+}
+
+/// Answers the server's requests on the UI thread, every 30 ms.
+fn serve(window: &mut Window, cx: &mut Context<AppView>) -> Task<()> {
     cx.spawn_in(window, async move |this, cx| {
-        let mut applied: Option<(bool, u16, bool, bool)> = None;
         loop {
             let slept = std::time::Instant::now();
             cx.background_executor()
@@ -80,20 +110,8 @@ pub fn start(window: &mut Window, cx: &mut Context<AppView>) {
                 .await;
             // How late the timer fired is how long the UI thread was busy
             // (drawing, loading) since the last tick: see `probe`.
+            crate::wakes::hit(&crate::wakes::MCP);
             probe::tick(slept.elapsed().saturating_sub(Duration::from_millis(30)));
-            // Settings changes take effect within a tick.
-            let Ok(want) = this.update(cx, |this, cx| {
-                let s = this.store.read(cx).settings();
-                (s.mcp_enabled || dev, port_of(s), s.mcp_changes, s.mcp_window || dev)
-            }) else {
-                return;
-            };
-            if applied != Some(want) {
-                apply(want.0, want.1, want.2, want.3);
-                applied = Some(want);
-                // Settings shows whether it started.
-                let _ = this.update(cx, |this, cx| this.store.update(cx, |_, cx| cx.notify()));
-            }
             let requests: Vec<Request> = RX
                 .lock()
                 .ok()
@@ -124,7 +142,6 @@ pub fn start(window: &mut Window, cx: &mut Context<AppView>) {
             }
         }
     })
-    .detach();
 }
 
 fn answer(app: &mut AppView, cmd: Command, window: &mut Window, cx: &mut Context<AppView>) -> Reply {

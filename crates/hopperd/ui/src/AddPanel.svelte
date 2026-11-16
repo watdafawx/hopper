@@ -1,16 +1,16 @@
 <script>
-  // Add another Hopper Server to this page's server list. The address is
-  // checked first, step by step (it answers, its certificate is trusted, it
-  // lists this page), and whatever fails says how to fix it, in order. It
-  // is then signed in to from its group in the list.
+  // Sign in to another Hopper Server: add it to this page's list of other
+  // machines. The address is checked first, step by step (it answers, its
+  // certificate is trusted, it lists this page), and whatever fails says how
+  // to fix it, in order. It is then signed in to from its group in the list.
+  // Opened from Add a machine (AddMachine.svelte), which offers a node
+  // first; `onBack` goes back to that when this panel can have nodes.
   import { tick } from 'svelte';
-  import { Check, X, Copy, ExternalLink, LoaderCircle, Download } from '@lucide/svelte';
-  import { hello } from './lib/boot.svelte.js';
+  import { Check, X, Copy, ExternalLink, LoaderCircle, Download, ChevronLeft } from '@lucide/svelte';
   import { check, addPanel } from './lib/panels.svelte.js';
   import { say } from './lib/toast.svelte.js';
-  import { NODES_SHOWN } from './lib/nodes.js';
 
-  let { onClose } = $props();
+  let { onClose, onBack = null } = $props();
 
   let typed = $state('');
   let busy = $state(false);
@@ -31,11 +31,6 @@
       return `${url}/api/v1/ca.crt`;
     }
   };
-
-  // "Add it as a node instead" (design/multi-panel.md, A) only shows once
-  // this panel can have nodes; until then nothing points at it.
-  let nodes = $state(false);
-  hello().then((h) => (nodes = NODES_SHOWN && !!h.capabilities?.includes('nodes')), () => {});
 
   $effect(() => {
     tick().then(() => field?.focus());
@@ -95,16 +90,17 @@
 {/snippet}
 
 {#snippet asNode()}
-  {#if nodes}
-    <p class="small subtle">Or add it as a node of this panel instead: it connects to this panel itself, so its certificate and address don't matter. Settings › Nodes.</p>
+  {#if onBack}
+    <p class="small subtle">Or, if it's yours, <button type="button" class="lnk" onclick={onBack}>make it a node instead</button>: it connects to this panel itself, so its certificate and address don't matter.</p>
   {/if}
 {/snippet}
 
 <div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && onClose()}>
   <div class="box popover" role="dialog" aria-modal="true" aria-labelledby="ap-title">
     <form class="f" onsubmit={run}>
-      <h3 id="ap-title">Add a Hopper Server</h3>
-      <p class="small subtle">Its servers join this list, next to this panel's. You sign in to it once on this browser; this panel only keeps its address.</p>
+      {#if onBack}<button type="button" class="lnk back" onclick={onBack}><ChevronLeft size={13} />Make it a node instead</button>{/if}
+      <h3 id="ap-title">Sign in to a panel</h3>
+      <p class="small subtle">{onBack ? "For a Hopper Server you can't make a node, like a friend's. " : ''}Its servers join this list, next to this panel's. You sign in to it once on this browser; this panel only keeps its address.</p>
       <div class="frow">
         <label class="small" for="ap-addr">Address</label>
         <div class="input"><input id="ap-addr" bind:this={field} bind:value={typed} placeholder="rig:8790" spellcheck="false" autocomplete="off" oninput={() => (res = null)} /></div>
@@ -186,6 +182,10 @@
   /* Inline and unbroken, not inline-flex: on a phone the comma after a link
      stays with it, and its icon never sits on a line of its own. */
   .fix a { color: color-mix(in srgb, var(--acc) 60%, var(--text)); white-space: nowrap; }
+  /* Accent mixed toward the text colour: readable on light themes too (plain --acc is 3.4:1 there). */
+  .lnk { background: none; border: 0; padding: 0; font: inherit; color: color-mix(in srgb, var(--acc) 60%, var(--text)); cursor: pointer; }
+  .lnk:hover { text-decoration: underline; }
+  .back { display: inline-flex; align-items: center; gap: 2px; align-self: flex-start; font-size: 12px; margin-left: -3px; }
   .fix a :global(svg) { vertical-align: -1px; margin-left: 2px; }
   .orig { display: flex; align-items: center; gap: 4px; margin-top: 4px; padding: 2px 4px 2px 8px; border-radius: var(--radius); background: var(--base); border: 1px solid var(--line); width: fit-content; max-width: 100%; }
   .orig .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }

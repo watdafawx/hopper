@@ -916,8 +916,11 @@ impl Store {
         hopper::sources::set_enabled(store.settings.allow_sources);
         hopper::retention::check_all_later(store.instances.iter().map(|i| i.root.clone()).collect());
         hopper::time::timed("start-up: accounts", || store.reload_accounts());
-        store._panel_poll = Some(Self::panel_poll(cx));
-        store._download_watch = Some(Self::download_watch(cx));
+        // The panel poll and the Downloads watch run only while something
+        // needs them; each store update re-checks (see `sync_timers`).
+        store.sync_timers(cx);
+        let me = cx.entity();
+        cx.observe(&me, |this, _, cx| this.sync_timers(cx)).detach();
         store._update_watch = Some(Self::update_watch(cx));
         store._ping_watch = Some(Self::ping_watch(cx));
         // Hosted servers were found by refresh(): start their scheduler.
@@ -1013,7 +1016,27 @@ impl Store {
         }))
     }
 
-    /// Asks the server panel for every server's state every few seconds.
+    /// Starts the timers that only some setups need, when they are needed.
+    /// Each stops itself once nothing needs it, so an idle Hopper wakes for
+    /// neither: the panel poll runs with a paired panel, a Hopper Server or a
+    /// hosted server; the Downloads watch with files to download by hand.
+    /// Called on every store update, so turning one on starts it at once.
+    fn sync_timers(&mut self, cx: &mut Context<Self>) {
+        if self._panel_poll.is_none() && self.wants_panel_poll() {
+            self._panel_poll = Some(Self::panel_poll(cx));
+        }
+        if self._download_watch.is_none() && !self.pending.is_empty() {
+            self._download_watch = Some(Self::download_watch(cx));
+        }
+    }
+
+    /// Whether anything is there for the panel poll to ask.
+    fn wants_panel_poll(&self) -> bool {
+        !hopper::panel::panels(&self.settings).is_empty()
+            || self.settings.hopper_panels_on().next().is_some()
+            || self.servers.iter().any(|x| x.remote.is_some() || self.is_hosted(&x.root))
+    }
+
     /// While any instance waits on files to download by hand, looks in
     /// Downloads every few seconds and puts each one in place as it lands
     /// (like Prism), then deletes it from Downloads.
@@ -1021,7 +1044,14 @@ impl Store {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(3)).await;
+                crate::wakes::hit(&crate::wakes::DOWNLOADS);
                 let Ok(roots) = this.update(cx, |s, _| {
+                    if s.pending.is_empty() {
+                        // Nothing waits any more: stop (sync_timers starts
+                        // it again when something does).
+                        s._download_watch = None;
+                        return Vec::new();
+                    }
                     s.pending
                         .keys()
                         .filter(|r| s.hold_reason(r).is_none() && !s.is_busy(r))
@@ -1031,6 +1061,9 @@ impl Store {
                     return;
                 };
                 if roots.is_empty() {
+                    if this.update(cx, |s, _| s._download_watch.is_none()).unwrap_or(true) {
+                        return;
+                    }
                     continue;
                 }
                 let ready = cx
@@ -1078,6 +1111,7 @@ impl Store {
             // settings change (by panel id: setup key, when, list).
             let mut listed: HashMap<String, (String, std::time::Instant, Vec<PanelServer>)> = HashMap::new();
             loop {
+                crate::wakes::hit(&crate::wakes::PANEL);
                 let Ok(setup) = this.update(cx, |s, _| {
                     let panels: Vec<(String, String, Arc<dyn ServerPanel>)> = hopper::panel::panels(&s.settings)
                         .iter()
@@ -1217,6 +1251,20 @@ impl Store {
                 if alive.is_err() {
                     return;
                 }
+                // Nothing left to ask (the panel was removed): that last
+                // pass cleared its stats; stop until something needs it.
+                let keep = this
+                    .update(cx, |s, _| {
+                        let keep = s.wants_panel_poll();
+                        if !keep {
+                            s._panel_poll = None;
+                        }
+                        keep
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    return;
+                }
                 cx.background_executor()
                     .timer(Duration::from_secs(5))
                     .await;
@@ -1231,6 +1279,7 @@ impl Store {
                 cx.background_executor()
                     .timer(Duration::from_millis(50))
                     .await;
+                crate::wakes::hit(&crate::wakes::STORE_POLL);
                 let msgs: Vec<Msg> = rx.try_iter().collect();
                 if msgs.is_empty() && !dirty.swap(false, Ordering::Relaxed) {
                     if ticked.swap(false, Ordering::Relaxed) {

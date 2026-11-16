@@ -25,6 +25,17 @@
     }
   }
 
+  async function setCheck(on) {
+    try {
+      await api('/panel/update', { method: 'PUT', body: { check: on } });
+      st.check = on;
+      // Turning it on looks at once (the panel does); show what it finds.
+      if (on) setTimeout(loadUpdate, 1500);
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
+
   async function now() {
     try {
       const a = await askAboutServers(st);
@@ -81,10 +92,14 @@
       </div>
     {:else if st.state === 'error'}<div class="small red row"><TriangleAlert size={13} />{st.error}</div>
     {:else}<div class="tiny muted">Last checked {ago(st.checked)}.</div>{/if}
+    <label class="row sw-row">
+      <input type="checkbox" checked={st.check} disabled={!session.owner} onchange={(e) => setCheck(e.currentTarget.checked)} />
+      <span><span>Look for new versions</span><span class="tiny muted">Every half hour the panel asks GitHub whether a newer Hopper Server is out. Off: it never asks by itself; "Check now" and the versions window still work when you open them.</span></span>
+    </label>
     {#if st.why_not}<div class="tiny muted">{st.why_not}</div>
     {:else}
       <label class="row sw-row">
-        <input type="checkbox" checked={st.auto} disabled={!session.owner} onchange={(e) => setAuto(e.currentTarget.checked)} />
+        <input type="checkbox" checked={st.auto} disabled={!session.owner || !st.check} onchange={(e) => setAuto(e.currentTarget.checked)} />
         <span><span>Update by itself</span><span class="tiny muted">{#if st.os === 'windows'}Installs new versions when they're out and restarts the panel once nothing is running. Minecraft servers keep running, and the tray icon comes back on the new version.{:else}Installs new versions when they're out and restarts the panel once no job is running. Minecraft servers keep running. Servers started by an older version of the panel are waited for until they're stopped; it never stops one by itself.{/if}</span></span>
       </label>
       {#if st.skip}<div class="tiny muted">Rolled back: it won't install {st.skip} or older by itself. The next new release still installs.</div>{/if}
