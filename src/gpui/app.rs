@@ -1180,6 +1180,13 @@ impl AppView {
                         }
                     }
                 }
+                // Quiet ones (a game start) only ever show a toast.
+                for j in store.jobs().quiet_toasts() {
+                    store.jobs().dismiss(j.id);
+                    if this.told_jobs.insert(j.id) {
+                        ended.push(j);
+                    }
+                }
                 let waits = store.fetches_waiting_on_player();
                 let waits: Vec<(String, String, String)> = waits
                     .into_iter()

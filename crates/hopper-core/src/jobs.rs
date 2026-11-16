@@ -55,6 +55,8 @@ pub struct Toast {
     pub body: String,
     /// The instance whose website-only files a Retry gets again.
     pub root: Option<std::path::PathBuf>,
+    /// Something to know rather than a result: shown as information.
+    pub info: bool,
 }
 
 /// How a finished job's toast looks.
@@ -64,6 +66,8 @@ pub enum ToastKind {
     /// Done, but files from the CurseForge website are missing.
     Missing,
     Failed,
+    /// Worked, with something the player should know (see [`Job::toast_info`]).
+    Info,
 }
 
 /// The title of a pack update's "done" toast: "Pack updated to 2",
@@ -87,10 +91,15 @@ pub fn pack_done_title(name: &str, shown: &str, was: u64, now: u64) -> String {
 pub fn toast_of(j: &JobState) -> Option<(ToastKind, String, String)> {
     let t = j.toast.as_ref().filter(|_| j.done && !j.cancelled)?;
     if let Some(e) = &j.error {
+        // An information toast has no failure title: the error shows elsewhere.
+        if t.info && t.failed.is_empty() {
+            return None;
+        }
         return Some((ToastKind::Failed, t.failed.clone(), e.clone()));
     }
     let mut body = vec![t.body.clone()];
     let kind = match (j.waited, j.waits_failed) {
+        (0, _) if t.info => ToastKind::Info,
         (0, _) => ToastKind::Done,
         (1, 0) => {
             body.push("1 file came from the CurseForge website.".into());
@@ -243,6 +252,19 @@ impl Jobs {
             .1
             .iter()
             .filter(|j| !j.quiet)
+            .cloned()
+            .collect()
+    }
+
+    /// Quiet jobs that ended with a toast to show (a game start that says
+    /// how much memory it got): not in the task list, still in the corner.
+    pub fn quiet_toasts(&self) -> Vec<JobState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .1
+            .iter()
+            .filter(|j| j.quiet && j.done && j.toast.is_some())
             .cloned()
             .collect()
     }
@@ -427,6 +449,18 @@ impl Job {
         });
     }
 
+    /// Shows `title` and `body` as information when the job works (nothing
+    /// when it fails: its error says enough).
+    pub fn toast_info(&self, title: impl Into<String>, body: impl Into<String>) {
+        let (title, body) = (title.into(), body.into());
+        self.jobs.update(self.id, |j| {
+            let t = j.toast.get_or_insert_with(Toast::default);
+            t.done = title;
+            t.body = body;
+            t.info = true;
+        });
+    }
+
     pub fn note(&self, n: impl Into<String>) {
         let n = n.into();
         self.jobs.update(self.id, |j| j.notes.push(n));
@@ -492,8 +526,9 @@ impl Job {
                 j.quiet = false;
             }
         });
-        // One that went fine leaves no trace.
-        let gone = self.jobs.inner.lock().unwrap_or_else(|e| e.into_inner()).1.iter().any(|j| j.id == self.id && j.quiet && j.done);
+        // One that went fine leaves no trace, once its toast (if any) is
+        // shown: the app dismisses those ([`Jobs::quiet_toasts`]).
+        let gone = self.jobs.inner.lock().unwrap_or_else(|e| e.into_inner()).1.iter().any(|j| j.id == self.id && j.quiet && j.done && j.toast.is_none());
         if gone {
             self.jobs.dismiss(self.id);
         }
@@ -589,6 +624,23 @@ mod tests {
         stopped.cancel();
         stopped.finish::<()>(&Err(anyhow::anyhow!("Cancelled")));
         assert_eq!(toast_of(&jobs.snapshot()[4]), None, "the player stopped it");
+    }
+
+    #[test]
+    fn an_info_toast_shows_only_when_it_worked() {
+        let jobs = Jobs::default();
+        let ok = jobs.start_quiet("Starting A");
+        ok.toast_info("A starts with 11 GB", "This pack asks for 12 GB.");
+        assert!(jobs.quiet_toasts().is_empty(), "not while it runs");
+        ok.finish(&anyhow::Ok(()));
+        // Not in the task list, but its toast shows.
+        assert!(jobs.snapshot().is_empty());
+        assert_eq!(toast_of(&jobs.quiet_toasts()[0]), Some((ToastKind::Info, "A starts with 11 GB".into(), "This pack asks for 12 GB.".into())));
+        let bad = jobs.start_quiet("Starting B");
+        bad.toast_info("B starts with 11 GB", "This pack asks for 12 GB.");
+        bad.finish::<()>(&Err(anyhow::anyhow!("no Java")));
+        // A failed quiet job joins the list with its error; no toast from it.
+        assert_eq!(toast_of(&jobs.snapshot()[0]), None);
     }
 
     #[test]

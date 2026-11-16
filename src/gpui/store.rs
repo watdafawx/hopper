@@ -2747,7 +2747,7 @@ impl Store {
         let Some(base) = hopper::perf::sessions_dir() else { return };
         let Some(inst) = self.instances.iter().find(|i| i.root == root) else { return };
         let d = self.launch_defaults();
-        let mem = if inst.settings.memory_mb > 0 { inst.settings.memory_mb } else { d.memory_mb };
+        let mem = hopper::memory::effective_mb(inst, d.memory_mb);
         let xms = hopper::launch::initial_memory(&inst.settings.java_args, &d.java_args, mem);
         let custom = hopper::launch::custom_args(&inst.settings.java_args, &d.java_args);
         let start = hopper::perf::recorder::Start {
@@ -2789,6 +2789,15 @@ impl Store {
         let dir = PathBuf::from(&self.settings.launcher_dir);
         let defaults = self.launch_defaults();
         let mc = full.settings.use_my_options.then(|| self.settings.mc_options.clone());
+        // The first start of an instance this PC gives less memory than its
+        // pack wants says so, once.
+        let memory_note = hopper::memory::first_start_note(&full, hopper::memory::pc_mb()).map(|n| {
+            let given = hopper::memory::effective_mb(&full, defaults.memory_mb);
+            (format!("{} starts with {}", full.name, hopper::memory::gb(given)), format!("{n} Change it in the instance's settings."))
+        });
+        if memory_note.is_some() {
+            full.settings.memory_told = true;
+        }
         if self.settings.launch_native {
             if !hopper::msauth::has_saved_login() {
                 return Err("Sign in with Microsoft in Settings first.".into());
@@ -2800,6 +2809,9 @@ impl Store {
                 let player = hopper::launch_native::Player::from_session(&session);
                 let child = hopper::launch_native::launch(&full, &dir, &defaults, &player, job)?;
                 job.detail(format!("Minecraft is starting (process {})", child.id()));
+                if let Some((title, body)) = memory_note {
+                    job.toast_info(title, body);
+                }
                 full.last_played = Some(hopper::time::now_iso());
                 full.save()?;
                 Ok(Msg::InstanceChanged(full.root.clone()))
@@ -2808,6 +2820,9 @@ impl Store {
             self.spawn_launch(root.to_path_buf(), format!("Launching {}", full.name), move |job| {
                 apply_mc_options(&mut full, mc.as_ref(), defaults.window, job);
                 hopper::launch::launch(&full, &dir, &defaults, job)?;
+                if let Some((title, body)) = memory_note {
+                    job.toast_info(title, body);
+                }
                 full.last_played = Some(hopper::time::now_iso());
                 full.save()?;
                 Ok(Msg::InstanceChanged(full.root.clone()))

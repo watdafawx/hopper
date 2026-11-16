@@ -216,7 +216,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Java, "record", "Record how games run", "FPS, frame times, CPU, RAM, GPU and GC pauses of each run, to compare Java arguments. See an instance's Performance tab.", "performance fps stats gc record benchmark"),
     e(C::Java, "stuck", "Stuck start check", "When a game or server makes no progress and uses almost no CPU for this long while it starts, Hopper says so, reads what it's waiting on and names the mods.", "hang hung frozen freeze stuck loading deadlock thread dump jcmd"),
     e(C::Java, "window", "Window", "The window size new instances start with. An instance's own setting wins.", "size resolution width height fullscreen maximized screen"),
-    e(C::Java, "memory", "Memory", "For instances that don't set their own.", "ram xmx gb heap"),
+    e(C::Java, "memory", "Memory", "For older instances that don't set their own. Newer ones get what their pack asks for, fitted to this PC.", "ram xmx gb heap"),
     e(C::Java, "java", "Java", "The Java instances use unless they pick one.", "jdk jre runtime path"),
     e(C::Java, "java-args", "Java arguments", "Extra arguments for instances that leave theirs blank.", "jvm flags aikar g1 zgc generator presets xms xmx graalvm"),
     e(C::Java, "get-java", "Get Java", "Downloads into Hopper's own folder; they show in every Java list. GraalVM comes under Oracle's free terms (GraalVM Free Terms and Conditions).", "download temurin graalvm jdk"),

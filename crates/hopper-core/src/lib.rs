@@ -77,6 +77,7 @@ pub mod links;
 pub mod modlinks;
 pub mod logs;
 pub mod mclogs;
+pub mod memory;
 pub mod mcoptions;
 pub mod mcp;
 pub mod mcprofile;

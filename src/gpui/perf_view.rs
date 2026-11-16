@@ -212,7 +212,7 @@ impl PerfView {
     fn effective_mb(inst: &hopper::instances::Instance, default_mb: u32) -> u32 {
         hopper::jvm_args::memory(&inst.settings.java_args)
             .1
-            .unwrap_or(if inst.settings.memory_mb > 0 { inst.settings.memory_mb } else { default_mb })
+            .unwrap_or_else(|| hopper::memory::effective_mb(inst, default_mb))
     }
 
     fn setup(&self, cx: &App) -> Option<advisor::Setup> {

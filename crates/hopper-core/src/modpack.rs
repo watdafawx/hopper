@@ -1182,10 +1182,7 @@ pub fn install(
             loader: manifest.loader(),
             pack: None,
             icon: pack.icon().map(str::to_string),
-            settings: LaunchSettings {
-                memory_mb: manifest.minecraft.recommended_ram,
-                ..Default::default()
-            },
+            settings: LaunchSettings::new_instance(manifest.minecraft.recommended_ram),
             format: crate::instances::FORMAT,
             ..Default::default()
         };
@@ -1245,10 +1242,7 @@ pub fn import_zip(instances_root: &Path, zip_path: &Path, job: &Job) -> anyhow::
             root: root.clone(),
             game_version: manifest.minecraft.version.clone(),
             loader: manifest.loader(),
-            settings: LaunchSettings {
-                memory_mb: manifest.minecraft.recommended_ram,
-                ..Default::default()
-            },
+            settings: LaunchSettings::new_instance(manifest.minecraft.recommended_ram),
             format: crate::instances::FORMAT,
             ..Default::default()
         };
@@ -1463,6 +1457,8 @@ fn apply_pack(
     overrides: Option<&Overrides>,
     job: &Job,
 ) -> anyhow::Result<()> {
+    // A new pack version may ask for more (or less): Hopper's pick follows.
+    inst.settings.pack_memory_mb = manifest.minecraft.recommended_ram;
     let wanted: HashMap<u64, u64> = manifest
         .files
         .iter()
@@ -1707,7 +1703,8 @@ pub fn export(
         "minecraft": {
             "version": inst.game_version,
             "modLoaders": [{ "id": inst.loader, "primary": true }],
-            "recommendedRam": inst.settings.memory_mb,
+            // The player's own amount, else what the pack asked for.
+            "recommendedRam": if inst.settings.memory_mb > 0 { inst.settings.memory_mb } else { inst.settings.pack_memory_mb },
         },
         "manifestType": "minecraftModpack",
         "manifestVersion": 1,
@@ -2436,6 +2433,8 @@ pub fn create(
         root,
         game_version: game_version.to_string(),
         loader: loader.to_string(),
+        // Picked at each start from the mods it has by then.
+        settings: LaunchSettings::new_instance(0),
         format: crate::instances::FORMAT,
         ..Default::default()
     };
@@ -2745,6 +2744,8 @@ pub fn install_mrpack(
                 .unwrap_or_default(),
             loader: index.loader(),
             icon: pack.icon().map(str::to_string),
+            // Modrinth packs give no memory: Hopper picks by their size.
+            settings: LaunchSettings::new_instance(0),
             format: crate::instances::FORMAT,
             ..Default::default()
         };
@@ -2806,6 +2807,8 @@ pub fn import_mrpack(instances_root: &Path, path: &Path, job: &Job) -> anyhow::R
                 .unwrap_or_default(),
             loader: index.loader(),
             icon: pack.icon().map(str::to_string),
+            // Modrinth packs give no memory: Hopper picks by their size.
+            settings: LaunchSettings::new_instance(0),
             format: crate::instances::FORMAT,
             ..Default::default()
         };
