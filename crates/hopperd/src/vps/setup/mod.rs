@@ -257,10 +257,31 @@ async fn run_check(app: &Arc<App>, ports: (u16, u16)) -> Result<Value, String> {
     let os = plan::parse_os_release(&c.exec("cat /etc/os-release", None, SHORT).await?.out);
     let arch_raw = c.exec("uname -m", None, SHORT).await?.out;
     let arch = plan::parse_arch(&arch_raw);
-    match (plan::os_supported(&os), arch) {
-        (Ok(name), Some(a)) => rows.push(row("system", true, format!("{name} · {a}"))),
-        (Err(e), _) => rows.push(row("system", false, e)),
-        (Ok(name), None) => rows.push(row("system", false, format!("{name} on {} isn't supported: the relay runs on x86_64 (x64) and aarch64 (arm64).", arch_raw.trim()))),
+    let unsupported = match (plan::os_supported(&os), arch) {
+        (Ok(name), Some(a)) => {
+            rows.push(row("system", true, format!("{name} · {a}")));
+            false
+        }
+        (Err(e), _) => {
+            rows.push(row("system", false, e));
+            true
+        }
+        (Ok(name), None) => {
+            rows.push(row("system", false, format!("{name} on {} isn't supported: the relay runs on x86_64 (x64) and aarch64 (arm64).", arch_raw.trim())));
+            true
+        }
+    };
+    // Another system: nothing else is worth checking (or fixing) there, so
+    // the setup stops with that one row and says what to rent instead.
+    if unsupported {
+        c.ssh.close().await;
+        let commands = c.log.lock().unwrap().clone();
+        let res = json!({
+            "ok": false, "stop": true, "rows": rows, "os": os.pretty, "arch": arch,
+            "ports": { "game": ports.0, "tunnel": ports.1 }, "commands": commands, "at": unix(),
+        });
+        *app.vps_setup.check.lock().unwrap() = Some(res.clone());
+        return Ok(res);
     }
     let mem = plan::parse_meminfo(&c.exec("cat /proc/meminfo", None, SHORT).await?.out).unwrap_or(0);
     let cache = CodecConfig::for_memory(mem).cache_bytes;

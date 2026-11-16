@@ -6,7 +6,7 @@
   // to use the relay. B4: the owner turns the relay's account checks on
   // for this server (Use the relay), off again, or plays at home while the
   // relay is down; each one restarts the server only after asking.
-  import { Globe, Copy, Settings2 } from '@lucide/svelte';
+  import { Globe, Copy, Settings2, Check, X, TriangleAlert, LoaderCircle } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { bytes } from './lib/format.js';
   import { copyText } from './lib/browse.js';
@@ -147,11 +147,34 @@
     }
   });
 
-  async function retry() {
+  // Health (the card's four answers and "Test again"): the test starts a
+  // connection try when the relay is down and asks the VPS's game port, as
+  // a player would, from this PC. It takes a few seconds; the rows it
+  // returns say what failed and what to do.
+  const test = $derived(r?.test ?? null);
+  // When the test failed, every row (what worked helps place what didn't);
+  // the relay row is the note above while the relay is down.
+  const testRows = $derived(test && !test.ok ? test.rows.filter((x) => !(r.state === 'down' && x.id === 'link')) : []);
+  let clockNow = $state(Date.now() / 1000);
+  $effect(() => {
+    const t = setInterval(() => (clockNow = Date.now() / 1000), 5000);
+    return () => clearInterval(t);
+  });
+  function span(secs) {
+    const s = Math.max(0, Math.round(secs));
+    if (s < 60) return `${s} s`;
+    if (s < 3600) return `${Math.floor(s / 60)} min`;
+    if (s < 86400) return `${Math.floor(s / 3600)} h`;
+    return `${Math.floor(s / 86400)} d`;
+  }
+  const ago = (unix) => (clockNow - unix < 30 ? 'just now' : `${span(clockNow - unix)} ago`);
+  const linkState = $derived(up ? 'ok' : r?.state === 'connecting' ? 'warn' : 'fail');
+
+  async function runTest() {
     busy = true;
     try {
-      await post('/vps-relay/retry', {});
-      setTimeout(load, 1500);
+      await post(`/servers/${encodeURIComponent(sid)}/vps-relay/test`, {});
+      await load();
     } catch (e) {
       say(e.message, true);
     } finally {
@@ -159,6 +182,29 @@
     }
   }
 </script>
+
+{#snippet mark(state)}
+  <span class="mk {state}" aria-hidden="true">
+    {#if state === 'ok'}<Check size={12} />
+    {:else if state === 'warn'}<TriangleAlert size={11} />
+    {:else if state === 'run'}<LoaderCircle size={12} class="spin" />
+    {:else}<X size={12} />{/if}
+  </span>
+{/snippet}
+
+{#snippet health()}
+  <div class="health">
+    <div><div class="lbl">Relay</div><div class="hv">{@render mark(linkState)}{up ? 'Up' : r.state === 'connecting' ? 'Connecting' : 'Down'}{r.since && r.state !== 'connecting' ? ` · ${span(clockNow - r.since)}` : ''}</div></div>
+    <div><div class="lbl">Ping from here</div><div class="hv">{up && r.rtt_ms != null ? (r.rtt_ms < 1 ? 'under 1 ms' : `${r.rtt_ms} ms`) : '—'}</div></div>
+    <div><div class="lbl">Players through it</div><div class="hv">{up ? (r.players ?? 0) : 0}</div></div>
+    <div><div class="lbl">Last test</div><div class="hv">{#if busy}{@render mark('run')}Testing…{:else if test}{@render mark(test.ok ? 'ok' : 'fail')}{ago(test.at)}{:else}Not yet{/if}</div></div>
+  </div>
+  {#if testRows.length && !busy}
+    <ul class="checks" aria-label="Last test">
+      {#each testRows as row (row.id)}<li>{@render mark(row.state)}<span>{row.text}</span></li>{/each}
+    </ul>
+  {/if}
+{/snippet}
 
 {#if r?.relayed}
   <div class="card relay">
@@ -169,7 +215,7 @@
       {:else if r.state === 'off'}<span class="pill">Off</span>
       {:else}<span class="pill crashed"><span class="glow"></span>Not connected</span>{/if}
       <span class="sp"></span>
-      {#if up}{@const when = `since ${clock(r.since)}${r.rtt_ms != null ? ` · ${r.rtt_ms < 1 ? 'under 1' : r.rtt_ms} ms to the relay` : ''}`}<span class="tiny muted when" title={when}>{when}</span>
+      {#if up}<span class="tiny muted when">since {clock(r.since)}</span>
       {:else if r.state === 'down' && r.retry_in != null}<span class="tiny muted when">{r.retry_in > 0 ? `trying again in ${r.retry_in} s` : 'trying again now'}</span>{/if}
       {#if onSetup}<button class="btn ghost sm icon" title="Relay setup: check, repair or remove it" aria-label="Relay setup" onclick={onSetup}><Settings2 size={14} /></button>{/if}
     </h3>
@@ -188,16 +234,21 @@
           {#if doing}<span class="tiny muted">{doing}…</span>{/if}
         </div>
       {/if}
-    {:else if r.state === 'down'}
-      <div class="note">{sentence(r.error || "Can't reach the relay.")} The server keeps running here; players on the relay see "Home server is offline".</div>
+    {:else if r.state === 'down' || r.state === 'connecting'}
+      {@render health()}
+      {#if r.state === 'down'}<div class="note bad" role="alert">{sentence(r.error || "Can't reach the relay.")} The server keeps running here; players on the relay see "Home server is offline".</div>{/if}
       <div class="row acts">
-        {#if session.owner}<button class="btn" disabled={busy} onclick={retry}>Try now</button>{/if}
+        {#if session.owner}<button class="btn pri" disabled={busy} onclick={runTest}>{busy ? 'Testing…' : 'Test again'}</button>{/if}
         {#if session.owner && mode === 'relay'}<button class="btn" disabled={!!doing} onclick={() => change('play-at-home')}>Play at home until it's back</button>{/if}
         {#if doing}<span class="tiny muted">{doing}…</span>{/if}
       </div>
     {:else if r.state === 'off'}
       <div class="note">The relay is turned off in this panel's settings. Players can't join through it.</div>
     {:else}
+      {@render health()}
+      {#if session.owner}
+        <div class="row acts"><button class="btn sm" disabled={busy} onclick={runTest}>{busy ? 'Testing…' : 'Test again'}</button></div>
+      {/if}
       <div class="stats">
         <div class="stat"><div class="lbl">Upload saved</div><div class="v">{saved ?? '—'}{#if saved != null} <span class="u">%</span>{/if}</div><div class="s">{bytes(total.sent || 0)} sent · {bytes(total.vanilla || 0)} vanilla</div></div>
         <div class="stat"><div class="lbl">Upload now</div><div class="v">{now[0]} <span class="u">{now[1]}</span></div><div class="s">vanilla {nowVanilla}</div></div>
@@ -286,5 +337,22 @@
   .voice .vt { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .voice .sp { flex: 1 1 0; min-width: 0; }
   .voice .vr { white-space: nowrap; }
+  /* Four answers in a row; two by two when the card is narrow. Values stay
+     in the text colour (the light theme's green is too pale for text); the
+     marks carry the state. */
+  .health { display: grid; grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); gap: 8px 10px; margin-top: 12px; padding: 8px 10px; background: var(--base); border: 1px solid var(--line); border-radius: var(--radius); }
+  .health .lbl { margin-bottom: 2px; }
+  .hv { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mk { width: 16px; height: 16px; flex: none; display: grid; place-items: center; border-radius: 50%; color: var(--muted); }
+  .mk.ok { background: var(--green-dim); color: var(--green); }
+  .mk.fail { background: var(--red-dim); color: var(--red); }
+  .mk.warn { background: var(--gold-dim); color: var(--gold); }
+  .mk.run { color: var(--acc); }
+  .mk :global(.spin) { animation: spin .8s linear infinite; }
+  .checks { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .checks li { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 16px; }
+  .checks li span:last-child { min-width: 0; overflow-wrap: anywhere; }
+  .note.bad { color: var(--text); background: var(--red-dim); overflow-wrap: anywhere; }
+  .acts .btn.sm { margin-left: auto; }
   @media (max-width: 520px) { .stats { grid-template-columns: 1fr 1fr; } }
 </style>

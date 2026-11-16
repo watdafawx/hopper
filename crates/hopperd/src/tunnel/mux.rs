@@ -1001,9 +1001,12 @@ mod tests {
 
     #[tokio::test]
     async fn pings_keep_an_idle_connection_alive_and_measure_rtt() {
-        let c = Config { ping_every: Duration::from_millis(30), dead_after: Duration::from_millis(100), ..cfg(8192) };
+        // Quiet for more than twice the dead time: only the pings keep it up.
+        // The dead time is long enough that a test machine busy with other
+        // builds can't delay one ping past it (100 ms used to fail there).
+        let c = Config { ping_every: Duration::from_millis(50), dead_after: Duration::from_millis(1500), ..cfg(8192) };
         let (main, node) = connect(c.clone(), c, None).await;
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(3500)).await;
         assert!(!main.handle.is_dead() && !node.handle.is_dead());
         assert!(main.handle.rtt().is_some());
         // And once one side goes away, streams waiting on it fail.

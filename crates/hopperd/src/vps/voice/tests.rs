@@ -293,20 +293,54 @@ async fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
     }
 }
 
+/// Waits until the relay's port has read everything sent to it so far: a
+/// packet from a new player comes back echoed only after the ones queued
+/// before it (one socket reads them in order). Sent again until one does,
+/// since a queue that is still full drops it.
+async fn drained(relay_port: u16) {
+    let me = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    me.connect(("127.0.0.1", relay_port)).await.unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    let mut buf = vec![0u8; 4096];
+    loop {
+        assert!(Instant::now() < end, "the relay's port never got through its queue");
+        me.send(&svc(b"drained?")).await.unwrap();
+        if let Ok(Ok(k)) = tokio::time::timeout(Duration::from_millis(250), me.recv(&mut buf)).await
+            && buf[..k].starts_with(b"re:")
+        {
+            return;
+        }
+    }
+}
+
 /// Sends `n` packets about 20 ms apart (one voice frame each, as a talking
 /// player does) from a player socket while a reader takes the echoes:
 /// (received, median round trip in ms, worst in ms). Each packet carries
 /// its send time, so the round trip doesn't include the sender's sleeps.
+/// The reader keeps going while the sender does, however slow the machine,
+/// and stops once every echo is in or, after the last send, nothing came
+/// for a while (a lost packet never comes).
 async fn talk(relay_port: u16, n: u32) -> (u32, f64, f64) {
     let me = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     me.connect(("127.0.0.1", relay_port)).await.unwrap();
     let t0 = Instant::now();
     let rx = me.clone();
+    let sent_all = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done = sent_all.clone();
     let reader = tokio::spawn(async move {
         let mut rtts = Vec::new();
         let mut seen = Vec::new();
         let mut buf = vec![0u8; 4096];
-        while let Ok(Ok(k)) = tokio::time::timeout(Duration::from_millis(800), rx.recv(&mut buf)).await {
+        loop {
+            if seen.len() as u32 >= n {
+                break;
+            }
+            let k = match tokio::time::timeout(Duration::from_secs(2), rx.recv(&mut buf)).await {
+                Ok(Ok(k)) => k,
+                // Quiet for 2 s after the last send: the rest was lost.
+                Ok(Err(_)) | Err(_) if done.load(Ordering::Relaxed) => break,
+                Ok(Err(_)) | Err(_) => continue,
+            };
             let Some(p) = buf[..k].strip_prefix(b"re:") else { continue };
             assert!(player_packet_ok(p) && p.len() == 17 + 12, "the echo came back changed");
             seen.push(u32::from_be_bytes(p[17..21].try_into().unwrap()));
@@ -322,6 +356,7 @@ async fn talk(relay_port: u16, n: u32) -> (u32, f64, f64) {
         body.extend_from_slice(&(t0.elapsed().as_micros() as u64).to_be_bytes());
         me.send(&svc(&body)).await.unwrap();
     }
+    sent_all.store(true, Ordering::Relaxed);
     let (mut rtts, seen) = reader.await.unwrap();
     let lost: Vec<u32> = (0..n).filter(|i| !seen.contains(i)).collect();
     if !lost.is_empty() {
@@ -351,9 +386,10 @@ async fn voice_goes_both_ways_over_udp() {
 #[tokio::test(flavor = "multi_thread")]
 async fn voice_rides_the_tunnel_when_udp_is_blocked() {
     let p = path(true).await;
-    // Home's voice stream is there before any keepalive answer could be.
-    wait_for("the voice stream", 5, || p.slot.status().is_some()).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Home's voice stream is there before any keepalive answer could be,
+    // and the relay has taken it: players' packets have a way home. (Talking
+    // before the relay took it lost the first few under load.)
+    wait_for("the voice stream", 10, || p.slot.status().is_some() && p.relay.has_stream()).await;
     let (got, med, worst) = talk(p.relay.port, 200).await;
     eprintln!("voice over the tunnel: {got}/200 back, median {med:.2} ms, worst {worst:.2} ms");
     assert!(got >= 198, "lost {} of 200", 200 - got);
@@ -393,6 +429,9 @@ async fn forged_garbage_and_floods_are_dropped() {
         let _ = flood.send(&svc(&i.to_be_bytes())).await;
     }
     wait_for("the limit", 5, || p.relay.counts.limited.load(Ordering::Relaxed) >= 100).await;
+    // Whatever of the flood is still queued at the relay's port goes first:
+    // talking into a full queue loses packets to the OS, not to the relay.
+    drained(p.relay.port).await;
     let (got, _, _) = talk(p.relay.port, 100).await;
     assert!(got >= 98, "another player still gets through ({got}/100)");
 }
@@ -405,6 +444,11 @@ async fn forged_garbage_and_floods_are_dropped() {
 async fn a_flood_of_fakes_cant_crowd_out_home() {
     let p = path(false).await;
     wait_for("UDP both ways", 10, || p.relay.udp_up()).await;
+    // A budget the flood is sure to go over on any machine (the real one is
+    // 5000 a second, which a busy test machine's flood may never reach),
+    // and a flood paced so the port's queue never fills: what this checks
+    // is the budget, not how fast the OS drops packets.
+    p.relay.set_sealed_budget(50.0, 50.0);
     let port = p.relay.port;
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flooder = {
@@ -422,8 +466,8 @@ async fn a_flood_of_fakes_cant_crowd_out_home() {
                 f[5..9].copy_from_slice(&keys(11).session.to_be_bytes());
                 let _ = bad.send(&f).await;
                 n += 1;
-                if n % 64 == 0 {
-                    tokio::task::yield_now().await;
+                if n % 4 == 0 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
             }
             n

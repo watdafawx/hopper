@@ -134,6 +134,20 @@ impl RelayVoice {
         self.st.lock().unwrap().flows.len()
     }
 
+    /// Home's voice stream on the tunnel is taken: players' packets can go
+    /// home over it.
+    #[cfg(test)]
+    pub fn has_stream(&self) -> bool {
+        self.st.lock().unwrap().link.as_ref().is_some_and(|l| l.stream.is_some())
+    }
+
+    /// A smaller budget of tag checks, so a test's flood goes over it at any
+    /// machine speed.
+    #[cfg(test)]
+    pub fn set_sealed_budget(&self, per_sec: f64, burst: f64) {
+        self.st.lock().unwrap().sealed = Bucket::new(per_sec, burst);
+    }
+
     /// Home's voice stream on the TCP tunnel: packets both ways while UDP
     /// doesn't get through.
     pub async fn stream(self: Arc<Self>, epoch: u64, s: mux::Stream) {
