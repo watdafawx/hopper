@@ -689,6 +689,11 @@ impl SettingsPage {
             cx.observe_in(&store, window, |this, store, window, cx| {
                 let s = store.read(cx).settings().clone();
                 for t in Text::ALL {
+                    // The panel form's address belongs to the form, not to
+                    // one setting; a save must not blank it while it's open.
+                    if t == Text::PanelUrl {
+                        continue;
+                    }
                     let input = this.texts[&t].clone();
                     let saved = t.saved(&s).to_string();
                     let shown = input.read(cx).value().trim().to_string();
@@ -1666,12 +1671,14 @@ impl SettingsPage {
         let key_typed = !self.panel_token.read(cx).value().trim().is_empty();
         let card = if form_testing { None } else { self.panel_editing.as_ref().and_then(|id| self.cert_card(id, cx)) };
         let asking = self.panel_cert_offer.as_ref().is_some_and(|(o, _)| Some(o) == self.panel_editing.as_ref());
-        let result: AnyElement = match (card, self.panel_editing.as_ref().and_then(|id| self.panel_tests.get(id))) {
-            _ if form_testing => widgets::caption("Connecting…", cx).into_any_element(),
-            (Some(card), _) => card,
-            (None, Some(Ok(t))) => status_line(IconName::CircleCheck, t.clone(), theme.success),
-            (None, Some(Err(e))) => status_line(IconName::CircleX, e.clone(), theme.danger),
-            (None, None) => widgets::caption("Not tested yet.", cx).text_xs().into_any_element(),
+        // The certificate card spans the row under it; the note column is
+        // too narrow for it.
+        let result: Option<AnyElement> = match (&card, self.panel_editing.as_ref().and_then(|id| self.panel_tests.get(id))) {
+            _ if form_testing => Some(widgets::caption("Connecting…", cx).into_any_element()),
+            (Some(_), _) => None,
+            (None, Some(Ok(t))) => Some(status_line(IconName::CircleCheck, t.clone(), theme.success)),
+            (None, Some(Err(e))) => Some(status_line(IconName::CircleX, e.clone(), theme.danger)),
+            (None, None) => Some(widgets::caption("Not tested yet.", cx).text_xs().into_any_element()),
         };
         let url_typed = !self.texts[&Text::PanelUrl].read(cx).value().trim().is_empty();
         let can_save = url_typed && (key_typed || self.panel_key_saved);
@@ -1737,7 +1744,7 @@ impl SettingsPage {
                     );
                     rows.extend(self.key_rows(cx));
                     rows.push(
-                        Row::new("panel-test").note(Some(result)).control(
+                        Row::new("panel-test").note(result).when_some_below(card).control(
                             h_flex()
                                 .gap_2()
                                 .child(
@@ -1818,7 +1825,11 @@ impl SettingsPage {
                             key("offer"),
                             "The panel made its own certificate, so Hopper can't check it the usual way. If this matches the one your panel shows, trust it. Hopper then connects to this panel only while it has this certificate.",
                         )
-                        .title("Trust this panel's certificate?"),
+                        .title("Trust this panel's certificate?")
+                        // Same as the changed card: readable text, the
+                        // colour on the icon and the border.
+                        .text_color(cx.theme().foreground)
+                        .icon(Icon::new(IconName::TriangleAlert).text_color(cx.theme().warning)),
                     )
                     .child(fp_line(format!("SHA-256 {fp}"), cx))
                     .child(
@@ -1844,7 +1855,11 @@ impl SettingsPage {
                         key("changed"),
                         "Hopper stopped before sending the API key. If you didn't reinstall the panel or change its certificate, someone may be listening in.",
                     )
-                    .title("This panel's certificate changed"),
+                    .title("This panel's certificate changed")
+                    // The kit's red text on its red tint measures under
+                    // 4.5:1; the red stays on the icon and the border.
+                    .text_color(cx.theme().foreground)
+                    .icon(Icon::new(IconName::CircleX).text_color(cx.theme().danger)),
                 )
                 .child(fp_line(format!("Was {was}"), cx))
                 .child(fp_line(format!("Now {now}"), cx))
@@ -1887,6 +1902,8 @@ impl SettingsPage {
         let state = match test {
             _ if p.off => widgets::pill("Off", theme.muted_foreground, false),
             _ if testing => widgets::pill("Connecting", theme.muted_foreground, false),
+            // The background check can find it before any Test.
+            _ if hopper::panel::cert_changed(&p.id).is_some() => widgets::pill("Can't connect", theme.danger, false),
             Some(Ok(_)) => widgets::pill("Connected", theme.success, false),
             Some(Err(_)) => widgets::pill("Can't connect", theme.danger, false),
             None if !has_key => widgets::pill("No API key", theme.warning, false),
@@ -3530,6 +3547,13 @@ impl Row {
 
     fn below(mut self, b: impl IntoElement) -> Self {
         self.below = Some(b.into_any_element());
+        self
+    }
+
+    fn when_some_below(mut self, b: Option<AnyElement>) -> Self {
+        if b.is_some() {
+            self.below = b;
+        }
         self
     }
 
