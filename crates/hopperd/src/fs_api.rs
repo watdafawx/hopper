@@ -35,6 +35,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/fs/{id}/ops", post(ops))
         .route("/api/v1/fs/{id}/walk", get(walk).layer(CompressionLayer::new()))
         .route("/api/v1/fs/{id}/hashes", post(hashes).layer(CompressionLayer::new()))
+        .route("/api/v1/fs/{id}/texts", post(texts).layer(CompressionLayer::new()))
         .route("/api/v1/fs/{id}/dirs", get(dirs))
         .route("/api/v1/fs/{id}/trash", get(trash_list))
         .route("/api/v1/fs/{id}/history", get(history))
@@ -442,6 +443,56 @@ async fn hashes(
     })
     .await?;
     Ok(Json(json!({ "hashes": out })))
+}
+
+/// Most files one `texts` request reads, and most bytes of text it sends
+/// back: a big pack's differing configs fit, a whole server folder doesn't.
+const TEXTS_MAX_FILES: usize = 400;
+const TEXTS_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Many files' text in one request (the configs Hopper compares), instead
+/// of one `text` request per file: a big pack's compare made hundreds and
+/// ran into the rate limit. Every path gets the same checks as `text`; a
+/// file that can't be read is listed in `errors`, and files past the byte
+/// cap in `skipped`, so the caller can ask for those again.
+async fn texts(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<HashesBody>,
+) -> ApiResult<Json<Value>> {
+    let (e, who) = server_who(&app, &headers, &method, &id)?;
+    if b.paths.len() > TEXTS_MAX_FILES {
+        return Err(bad(format!("At most {TEXTS_MAX_FILES} files at a time.")));
+    }
+    // The guard's secret check reads a GET's query; these paths come in
+    // the body, so they get the same check here.
+    if let Some(msg) = crate::secrets::link_refusal(&who, &e.root, &b.paths, None, false) {
+        return Err(ApiError(StatusCode::FORBIDDEN, msg.into()));
+    }
+    let out = blocking(move || {
+        let (mut texts, mut errors, mut skipped) = (serde_json::Map::new(), serde_json::Map::new(), Vec::new());
+        let mut bytes = 0u64;
+        for rel in b.paths {
+            if texts.contains_key(&rel) || errors.contains_key(&rel) {
+                continue;
+            }
+            match files::read_text(&e.root, &rel) {
+                Ok(_) if bytes >= TEXTS_MAX_BYTES => skipped.push(Value::String(rel)),
+                Ok(t) => {
+                    bytes += t.size;
+                    texts.insert(rel, Value::String(t.content));
+                }
+                Err(err) => {
+                    errors.insert(rel, Value::String(format!("{err:#}")));
+                }
+            }
+        }
+        Ok(json!({ "texts": texts, "errors": errors, "skipped": skipped }))
+    })
+    .await?;
+    Ok(Json(out))
 }
 
 /// Which of the named folders exist in the server folder.

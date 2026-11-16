@@ -100,6 +100,12 @@ fn rtt_ms(_: Raw) -> Option<u32> {
     None
 }
 
+/// Every listed connection's reading: (server, name, ms). The router edge
+/// lists its pipes under their connection number (`edge::serve`).
+pub fn rtt_all() -> Vec<(String, String, Option<u32>)> {
+    conns().lock().unwrap().iter().map(|c| (c.server.clone(), c.name.clone(), rtt_ms(c.raw))).collect()
+}
+
 /// Router readings for a server's players: lowercase name -> (ms, since).
 /// With two connections under one name, the older one counts: a second
 /// login under a name already online is the one that hasn't been let in
@@ -114,6 +120,15 @@ fn router(server: &str) -> HashMap<String, (Option<u32>, SystemTime)> {
             continue;
         }
         out.insert(low, (rtt_ms(c.raw), c.since));
+    }
+    drop(g);
+    // Players the router edge pipes: their socket is in that process, which
+    // sends its readings over.
+    for (low, (ms, since)) in crate::edge::client::readings(server) {
+        if out.get(&low).is_some_and(|(_, s)| *s <= since) {
+            continue;
+        }
+        out.insert(low, (ms, since));
     }
     out
 }

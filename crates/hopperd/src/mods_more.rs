@@ -76,7 +76,8 @@ async fn versions(
     let v = blocking(move || {
         let inst = crate::mods_api::instance_of(&e)?;
         let a = inst.addons[addon_index(&inst, &file)?].clone();
-        let files = source::files(a.project_id, &inst.game_version, install::loader_of(&inst))?;
+        // The player opened Versions: a GitHub mod's list is asked for again.
+        let files = source::files_checked(a.project_id, &inst.game_version, install::loader_of(&inst), hopper_core::sources::Check::Manual)?;
         let rows: Vec<Value> = files
             .iter()
             .take(40)
@@ -441,9 +442,13 @@ async fn history_undo(State(app): State<Arc<App>>, headers: HeaderMap, method: M
     let e = entry(&app, &headers, &method, &id)?;
     let running = e.server.state().is_alive();
     let root = e.root.clone();
-    let (done, gone, errors) = blocking(move || {
+    let (done, gone, errors, pack) = blocking(move || {
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let sets: Vec<_> = backups::history(&e.root).into_iter().filter(|s| s.when == b.when).collect();
         anyhow::ensure!(!sets.is_empty(), "That History entry is gone.");
+        // The whole entry of a pack update (no names): its pack record goes
+        // back with it, once all of it came back.
+        let whole_pack = if b.name.is_none() && b.names.is_empty() { sets[0].pack.clone() } else { None };
         // A name picks that entry out of whichever set has it; no name is
         // the whole (first) set.
         let files: Vec<_> = match &b.name {
@@ -465,16 +470,32 @@ async fn history_undo(State(app): State<Arc<App>>, headers: HeaderMap, method: M
                         }))
                     }
                     Ok(g) => errors.push(format!("{}: {g}", f.name)),
-                    Err(err) => errors.push(format!("{}: {err:#}", f.name)),
+                    // Only the CurseForge website has the file. A panel has no
+                    // download window: it says where to get it.
+                    Err(err) => match err.downcast::<hopper_core::cf::WebsiteOnly>() {
+                        Ok(w) => errors.push(hopper_core::undo::website_message(&w, false)),
+                        Err(err) => errors.push(format!("{}: {err:#}", f.name)),
+                    },
                 },
             }
         }
-        Ok((done, gone, errors))
+        let mut pack = None;
+        if let Some(m) = whole_pack
+            && gone.is_none()
+            && errors.is_empty()
+        {
+            match hopper_core::undo::restore_pack(&mut inst, &m, since) {
+                Ok(r) => pack = Some(r.to_json()),
+                Err(err) => errors.push(format!("{}'s pack version wasn't put back: {err:#}", m.name)),
+            }
+        }
+        Ok((done, gone, errors, pack))
     })
     .await?;
     crate::mods_api::forget_updates(&id);
+    crate::pack_api::forget(&id);
     Sizes::forget(&root);
-    Ok(Json(json!({ "restored": done, "gone": gone, "errors": errors, "restart_needed": running })))
+    Ok(Json(json!({ "restored": done, "gone": gone, "errors": errors, "restart_needed": running, "pack": pack })))
 }
 
 #[derive(Deserialize)]

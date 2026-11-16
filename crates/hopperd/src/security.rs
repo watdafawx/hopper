@@ -111,6 +111,19 @@ impl Limiter {
         ok
     }
 
+    /// Seconds until `client`'s (and its proxy's) minute starts again: the
+    /// Retry-After of a refusal. Between 1 and 60.
+    pub fn retry_after(&self, peer: IpAddr, client: IpAddr) -> u64 {
+        let left = |m: &Mutex<HashMap<IpAddr, Count>>, ip: IpAddr| {
+            m.lock().unwrap().get(&ip).map_or(0, |(at, _, _)| 60u64.saturating_sub(at.elapsed().as_secs()))
+        };
+        let mut s = left(&self.seen, client);
+        if client != peer {
+            s = s.max(left(&self.proxies, peer));
+        }
+        s.clamp(1, 60)
+    }
+
     /// Notes an allowed API request; logs one warning per minute when this
     /// address is close to its limit.
     pub fn note(&self, client: IpAddr, path: &str) {
@@ -455,7 +468,11 @@ async fn checks(app: Arc<App>, mut req: Request, next: Next, origins: &[String],
     // A CORS preflight counts towards the address's limit but is never a
     // sign-in attempt, even when it's for the sign-in route.
     if api && !app.limiter.allow(ip, from, method != Method::OPTIONS && is_guessable(&path)) {
-        return deny(StatusCode::TOO_MANY_REQUESTS, "Too many requests. Wait a minute.");
+        // When the minute's count starts again, so a client can wait just
+        // that long and carry on by itself.
+        let mut res = deny(StatusCode::TOO_MANY_REQUESTS, "Too many requests. Wait a minute.");
+        res.headers_mut().insert(axum::http::header::RETRY_AFTER, app.limiter.retry_after(ip, from).into());
+        return res;
     }
     if api {
         app.limiter.note(from, &path);

@@ -94,6 +94,7 @@ mod store;
 mod stuck;
 mod theme;
 mod memlog;
+mod wakes;
 mod procinfo;
 #[cfg(feature = "memprof")]
 mod memprof;

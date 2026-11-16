@@ -212,6 +212,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::parity_browse::routes())
         .merge(crate::acme::routes())
         .merge(crate::web_access::routes())
+        .merge(crate::sftp_setting::routes())
         .merge(crate::nodes::routes())
         .merge(crate::transfer::routes())
         .merge(crate::moves::routes())

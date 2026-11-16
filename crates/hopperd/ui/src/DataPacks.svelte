@@ -249,13 +249,13 @@
   .dp.over { background: var(--blue-dim); }
   .dp.dim .dpn { opacity: 0.6; }
   .grip { color: var(--muted); cursor: grab; display: inline-flex; padding: 2px; border-radius: var(--radius-sm); }
-  .rank { width: 20px; height: 20px; border-radius: 10px; flex: none; display: grid; place-items: center; font-size: 11px; font-weight: 700; color: var(--blue); background: var(--blue-dim); }
+  .rank { width: 20px; height: 20px; border-radius: 10px; flex: none; display: grid; place-items: center; font-size: 11px; font-weight: 700; color: var(--ink-blue); background: var(--blue-dim); }
   .rank.none { background: none; }
   .dpn { min-width: 0; max-width: 38rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wrapp { position: relative; }
   .pill-w { width: 10.5rem; justify-content: space-between; border-color: transparent; background: #ededef14; }
-  .pill-w.lan { color: var(--blue); background: var(--blue-dim); }
-  .pill-w.running { color: var(--green); background: var(--green-dim); }
+  .pill-w.lan { color: var(--ink-blue); background: var(--blue-dim); }
+  .pill-w.running { color: var(--ink-green); background: var(--green-dim); }
   .pop { position: absolute; z-index: 70; top: calc(100% + 4px); right: 0; width: 290px; display: flex; flex-direction: column; }
   .d { display: block; }
   .skel { height: 40px; }

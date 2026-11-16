@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PORT: u16 = 8790;
+/// The port SFTP gets when the owner switches it on.
+pub const DEFAULT_SFTP_PORT: u16 = 8022;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -57,7 +59,9 @@ pub struct Config {
     pub allow_sources: bool,
     /// Optional GitHub token for those checks (raises GitHub's limit).
     pub github_token: String,
-    /// SFTP port; 0 turns SFTP off.
+    /// SFTP port; 0 turns SFTP off. Off on a new install until the owner
+    /// switches it on (Settings › Access & devices); a config that already
+    /// has a port keeps it (see [`Config::load_or_create`]).
     pub sftp_port: u16,
     /// Server addresses: one Minecraft port for every server.
     pub router: crate::router::RouterConfig,
@@ -67,6 +71,10 @@ pub struct Config {
     /// Update Hopper Server by itself when a new version is out (Windows;
     /// not in Docker, where the image is updated instead).
     pub auto_update: bool,
+    /// Look for new versions at all (every half hour, and the version beside
+    /// the logo). Off: the panel never asks GitHub by itself; "Check now" in
+    /// Settings › Updates still works, and turning this on again checks at once.
+    pub check_updates: bool,
     /// Set by rolling back: auto-update doesn't install this version or
     /// older ones again (a newer release still installs).
     pub skip_auto_up_to: Option<String>,
@@ -116,10 +124,11 @@ impl Default for Config {
             curseforge_key: String::new(),
             allow_sources: false,
             github_token: String::new(),
-            sftp_port: 8022,
+            sftp_port: 0,
             router: Default::default(),
             trust_local_setup: true,
             auto_update: true,
+            check_updates: true,
             skip_auto_up_to: None,
             compare_before_switch: false,
             clean_pack_updates: true,
@@ -146,6 +155,12 @@ impl Config {
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let mut c: Config = toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+                // Before SFTP became opt-in, every panel listened on 8022 and
+                // a config written then may not name the port. A config that
+                // exists is an install that had it: keep it on, as it was.
+                if !has_key(&text, "sftp_port") {
+                    c.sftp_port = DEFAULT_SFTP_PORT;
+                }
                 // A hand-edited list: written the way browsers send `Origin`,
                 // else it would never match. Bad entries are left out.
                 c.web_origins = c
@@ -169,6 +184,11 @@ impl Config {
         let path = dir.join(FILE);
         std::fs::write(&path, toml::to_string_pretty(self)?).with_context(|| format!("writing {}", path.display()))
     }
+}
+
+/// Whether the config text sets `key` at the top level.
+fn has_key(text: &str, key: &str) -> bool {
+    text.parse::<toml::Table>().is_ok_and(|t| t.contains_key(key))
 }
 
 /// Where hopperd keeps its config and accounts: `HOPPERD_DATA`, else the
@@ -208,6 +228,61 @@ mod tests {
         let partial = Config::load_or_create(&dir).unwrap();
         assert_eq!(partial.port, 9000);
         assert!(partial.discovery);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hopperd-cfg-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn new_install_has_sftp_off_and_update_checks_on() {
+        let d = Config::default();
+        assert_eq!(d.sftp_port, 0, "SFTP is off until the owner switches it on");
+        assert!(d.check_updates);
+        assert!(d.auto_update);
+        // The file a new install writes says so too, so it stays off after a restart.
+        let dir = temp("new");
+        let made = Config::load_or_create(&dir).unwrap();
+        assert_eq!(made.sftp_port, 0);
+        assert!(std::fs::read_to_string(dir.join(FILE)).unwrap().contains("sftp_port = 0"));
+        assert_eq!(Config::load_or_create(&dir).unwrap().sftp_port, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn existing_install_keeps_its_sftp_port() {
+        let dir = temp("keep");
+        for (text, want) in [
+            ("port = 9000\nsftp_port = 8022\n", 8022),
+            ("sftp_port = 2222\n", 2222),
+            // The owner turned it off: it stays off.
+            ("sftp_port = 0\n", 0),
+            // An older config that never named the port: SFTP was on (8022),
+            // so it stays on.
+            ("port = 9000\nname = \"rig\"\n", 8022),
+        ] {
+            std::fs::write(dir.join(FILE), text).unwrap();
+            assert_eq!(Config::load_or_create(&dir).unwrap().sftp_port, want, "{text:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_check_setting_defaults_on_and_reads_off() {
+        let dir = temp("check");
+        // A config from before the setting existed: checks stay on.
+        std::fs::write(dir.join(FILE), "auto_update = false\n").unwrap();
+        let c = Config::load_or_create(&dir).unwrap();
+        assert!(c.check_updates);
+        assert!(!c.auto_update);
+        std::fs::write(dir.join(FILE), "check_updates = false\n").unwrap();
+        let c = Config::load_or_create(&dir).unwrap();
+        assert!(!c.check_updates);
+        assert!(c.auto_update, "the two settings are separate");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

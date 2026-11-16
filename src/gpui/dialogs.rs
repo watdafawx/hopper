@@ -451,6 +451,17 @@ pub fn confirm_delete(store: Entity<Store>, root: PathBuf, window: &mut Window, 
         );
         return;
     }
+    // Other tasks on an instance wait their turn, but a delete would pull
+    // the folder out from under the one running.
+    if store.read(cx).is_busy(&root) {
+        window.push_notification(
+            gpui_kit::component::notification::Notification::error(
+                "Can't delete it now: a task is changing this instance. Wait for it to finish, or cancel it in Tasks.",
+            ),
+            cx,
+        );
+        return;
+    }
     let title = format!("Delete {}?", inst.name);
     let what = format!("{}, worlds and all.", inst.root.display());
     crate::delete_ask::open(title, what, false, "Delete instance", window, cx, move |for_good, _, cx| {
@@ -1269,8 +1280,8 @@ impl Render for SignIn {
         if hopper::msauth::client_id().is_none() {
             return v_flex()
                 .gap_2()
-                .child(div().font_semibold().child("Launching without Mojang's launcher needs a Microsoft app id."))
-                .child(widgets::caption("Register an app in Azure, get it approved for the Minecraft API, and put its id in .env as MS_CLIENT_ID. Until then, keep Launch with on Mojang's launcher.", cx))
+                .child(div().font_semibold().child("This copy of Hopper can't sign in to Microsoft."))
+                .child(widgets::caption("Hopper's releases can, so the downloaded app signs in as it is. A build from source needs an Azure app id approved for the Minecraft API in .env as MS_CLIENT_ID. Until then, keep Launch with on Mojang's launcher.", cx))
                 .into_any_element();
         }
         if let Some(name) = &self.done {

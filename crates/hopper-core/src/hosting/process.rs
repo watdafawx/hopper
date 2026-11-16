@@ -282,7 +282,7 @@ fn fifo_name(root: &Path) -> String {
 /// start time (field 22). The name in brackets may hold spaces and
 /// brackets itself, so the fields count from the last ')'.
 #[cfg_attr(not(unix), allow(dead_code))]
-fn parse_proc_stat(line: &str) -> Option<(char, u64)> {
+pub fn parse_proc_stat(line: &str) -> Option<(char, u64)> {
     let rest = &line[line.rfind(')')? + 1..];
     let mut f = rest.split_ascii_whitespace();
     let state = f.next()?.chars().next()?;

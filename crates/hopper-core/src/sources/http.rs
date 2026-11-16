@@ -39,6 +39,31 @@ pub const LIST_FRESH: u64 = 10 * 60;
 /// One release by its tag rarely changes once out.
 pub const TAG_FRESH: u64 = 24 * 3600;
 
+/// Who asked for a look at a source. A look the player asks for by hand
+/// always asks GitHub (with the cached ETag, so an unchanged answer is a
+/// free 304); one the app starts itself may use an answer from the last few
+/// minutes. Without this a release made after the last look stayed hidden
+/// for up to [`LIST_FRESH`] when the player pressed "check for updates".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Check {
+    /// The app on its own (start-up, a timer): a young cached answer stands.
+    #[default]
+    Auto,
+    /// The player asked: GitHub is asked, unless it has paused us.
+    Manual,
+}
+
+impl Check {
+    /// The `fresh` window for [`get_text_fresh`]: `window` seconds for an
+    /// automatic look, none (always ask) for one by hand.
+    pub fn fresh(self, window: u64) -> u64 {
+        match self {
+            Check::Auto => window,
+            Check::Manual => 0,
+        }
+    }
+}
+
 /// GitHub said its limit for this PC is used up: no GitHub calls before
 /// `until` (unix seconds).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,6 +241,21 @@ pub fn paused_until() -> Option<u64> {
     (t > now()).then_some(t)
 }
 
+/// The pause as a [`RateLimited`], for the line that says so. While it
+/// lasts, a check by hand can't ask GitHub either: the last answer stands in
+/// and "up to date" would be a guess.
+pub fn pause() -> Option<RateLimited> {
+    paused_until().map(|until| RateLimited { until })
+}
+
+impl RateLimited {
+    /// The line for a check that was held back (and shows what Hopper saw
+    /// earlier instead).
+    pub fn paused_note(&self) -> String {
+        format!("GitHub is limiting checks for now. Mods from GitHub are checked again at {}.", self.at())
+    }
+}
+
 /// GETs `url` as text. `github`: an API call (token, rate limit, cache).
 /// Other hosts are cached too, with their ETag when they send one.
 pub fn get_text(url: &str, github: bool) -> anyhow::Result<String> {
@@ -223,7 +263,8 @@ pub fn get_text(url: &str, github: bool) -> anyhow::Result<String> {
 }
 
 /// [`get_text`], taking a cached answer younger than `fresh` seconds as
-/// it is, without asking.
+/// it is, without asking. `fresh` 0 always asks (with the ETag, so an
+/// unchanged answer costs nothing); see [`Check`].
 pub fn get_text_fresh(url: &str, github: bool, fresh: u64) -> anyhow::Result<String> {
     let cached = with_cache(|m| m.get(url).cloned());
     if let Some(c) = cached.as_ref().filter(|c| fresh > 0 && c.at + fresh > now()) {

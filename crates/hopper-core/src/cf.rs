@@ -575,11 +575,41 @@ impl File {
         format!("{}/download/{}", m.page().trim_end_matches('/'), self.id)
     }
 
+    /// Whether the file is made for `game_version` and `loader`: it lists
+    /// both, and isn't a jar built for a year-named Minecraft that also
+    /// lists older versions (see [`Self::wrong_era`]). The one rule every
+    /// install, update and "fits this instance" check uses.
     pub fn fits(&self, game_version: &str, loader: Loader) -> bool {
         let has = |t: &str| self.game_versions.iter().any(|v| v.eq_ignore_ascii_case(t));
         (game_version.is_empty() || has(game_version))
             && (loader == Loader::Any || has(loader.name()))
+            && !self.wrong_era(game_version)
     }
+
+    /// A mod jar that lists a year-named Minecraft (26.1, 26.2...) can't run
+    /// on a 1.x instance, even when its author also tagged it with every
+    /// 1.21 version: the year-named game changed the jar format, and
+    /// NeoForge 21 rejects it ("no modLoader"). So such a jar counts as
+    /// made for the year-named versions only. On a year-named instance it
+    /// still fits, since that's what it was built for. Resource packs and
+    /// shaders (zips) often do work across both, so they're left alone.
+    pub fn wrong_era(&self, game_version: &str) -> bool {
+        is_old_mc(game_version)
+            && self.file_name.to_ascii_lowercase().ends_with(".jar")
+            && self.game_versions.iter().any(|v| is_year_mc(v))
+    }
+}
+
+/// A Minecraft version named the old way: 1.21.1, 1.20.
+pub fn is_old_mc(v: &str) -> bool {
+    v.starts_with("1.") && v.len() > 2 && v.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+/// A Minecraft version named after the year, as Mojang does from 2026 on:
+/// 26.1, 26.1.1, 26.2 (and their snapshots, "26.1-snapshot-1").
+pub fn is_year_mc(v: &str) -> bool {
+    let Some((year, rest)) = v.split_once('.') else { return false };
+    year.parse::<u32>().is_ok_and(|y| y >= 25) && rest.starts_with(|c: char| c.is_ascii_digit())
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
