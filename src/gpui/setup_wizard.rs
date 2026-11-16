@@ -20,7 +20,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::form::Field;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::scroll::{ScrollableElement as _, Scrollbar};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _,
     h_flex, v_flex,
@@ -93,6 +93,8 @@ pub struct SetupWizard {
     /// Copying them there (Hopper restarts after).
     files_moving: bool,
     files_error: Option<String>,
+    /// The body's scroll position, shared with its scrollbar.
+    body_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -150,6 +152,7 @@ impl SetupWizard {
             files_dest: None,
             files_moving: false,
             files_error: None,
+            body_scroll: ScrollHandle::new(),
             _subscriptions: subs,
         };
         this.detect(resumed, cx);
@@ -817,7 +820,10 @@ impl SetupWizard {
                 view.update(cx, |this, cx| this.preview_theme(n, cx)).ok();
             }
         });
+        // The menu takes what's left of the row so its right edge lines up
+        // with the other fields at any zoom.
         let look = h_flex()
+            .w_full()
             .gap_2()
             .child(
                 widgets::Segmented::new("setup-look")
@@ -828,7 +834,7 @@ impl SetupWizard {
                         this.preview_theme(n, cx)
                     })),
             )
-            .child(div().w(rems(12.)).child(widgets::field_picker(
+            .child(div().flex_1().min_w_0().child(widgets::field_picker(
                 "setup-look-more",
                 if picked.is_none() && !current.is_empty() { current.clone() } else { "More themes".into() },
                 others.iter().map(|n| (n.clone(), *n == current)).collect(),
@@ -891,6 +897,16 @@ impl SetupWizard {
                     )
                     .child("(API keys, then copy). It stays on this PC."),
             )
+            // Where to click, for players who haven't seen the console.
+            .children(crate::brand::cf_key_steps().into_iter().zip([1100. / 420., 1450. / 420.]).map(|(image, aspect)| {
+                const W: f32 = 18.;
+                img(image)
+                    .w(rems(W))
+                    .h(rems(W / aspect))
+                    .rounded(px(crate::theme::RADIUS))
+                    .border_1()
+                    .border_color(theme.border)
+            }))
             .when(self.cf_testing, |c| c.child(note("Asking CurseForge…", cx)))
             .when_some(self.cf_result.clone(), |c, r| c.child(result_line(r, cx)));
         let key_text = match source {
@@ -900,30 +916,33 @@ impl SetupWizard {
             _ if built_in => "Hopper's own key works for downloads.",
             _ => "Optional. Without a key, Hopper uses Modrinth only.",
         };
-        let own_open = self.cf_own_open || !built_in;
-        let key = v_flex()
+        // A key Hopper can use already: pasting another waits behind a
+        // button. No key at all: the field shows straight away.
+        let has_key = built_in || source.is_some();
+        let own_open = self.cf_own_open || !has_key;
+        let key = h_flex()
             .gap_2()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(note(key_text, cx).flex_1())
-                    .when(built_in, |r| {
-                        r.child(
-                            Button::new("setup-cf-own")
-                                .outline()
-                                .small()
-                                .label(if own_open { "Hide" } else { "Use my own key…" })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.cf_own_open = !this.cf_own_open;
-                                    cx.notify();
-                                })),
-                        )
-                    }),
-            )
-            .when(own_open, |c| c.child(key_field));
+            .items_center()
+            .child(note(key_text, cx).flex_1())
+            .when(has_key, |r| {
+                r.child(
+                    Button::new("setup-cf-own")
+                        .outline()
+                        .small()
+                        .label(match (own_open, source) {
+                            (true, _) => "Hide",
+                            (false, Some(KeySource::Saved)) => "Paste a different key…",
+                            _ => "Use my own key…",
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cf_own_open = !this.cf_own_open;
+                            cx.notify();
+                        })),
+                )
+            });
         // Installing.
         let installed_here = hopper::setup::running_installed();
+        let other = hopper::setup::installed_exe().is_some();
         let install: AnyElement = if installed_here {
             h_flex()
                 .gap_2()
@@ -932,91 +951,85 @@ impl SetupWizard {
                 .child(note("Hopper updates itself.", cx))
                 .into_any_element()
         } else {
-            let other = hopper::setup::installed_exe().is_some();
-            v_flex()
-                .gap_1p5()
+            h_flex()
+                .gap_2()
+                .items_center()
                 .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(
-                            Button::new("setup-install")
-                                .outline()
-                                .small()
-                                .icon(IconName::Download)
-                                .label(if other { "Install this version" } else { "Install Hopper" })
-                                .loading(self.installing)
-                                .disabled(self.installing)
-                                .on_click(cx.listener(|this, _, window, cx| this.install(window, cx))),
-                        )
-                        .child(note(
-                            if other { "Replaces the installed copy." } else { "Start menu shortcut, and it updates itself." },
-                            cx,
-                        )),
+                    Button::new("setup-install")
+                        .outline()
+                        .small()
+                        .icon(IconName::Download)
+                        .label(if other { "Install this version" } else { "Install Hopper" })
+                        .loading(self.installing)
+                        .disabled(self.installing)
+                        .on_click(cx.listener(|this, _, window, cx| this.install(window, cx))),
                 )
-                .child(note("Or keep it portable: it runs from where it is now.", cx))
-                .when_some(self.install_result.clone(), |c, r| c.child(result_line(r, cx)))
+                .child(note(
+                    if other { "Replaces the installed copy." } else { "Start menu shortcut, and it updates itself." },
+                    cx,
+                ))
                 .into_any_element()
         };
         // Where Hopper keeps its files.
         let files_now = hopper::paths::dirs()
             .map(|d| d.root().unwrap_or(d.data_dir()).display().to_string())
             .unwrap_or_default();
-        let files = v_flex()
-            .gap_1p5()
+        let files_tip = files_now.clone();
+        let files = h_flex()
+            .gap_2()
+            .items_center()
             .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().flex_1().min_w_0().text_sm().truncate().child(files_now))
-                    .child(
-                        Button::new("setup-files-pick")
-                            .outline()
-                            .small()
-                            .label("Move…")
-                            .disabled(self.files_moving)
-                            .on_click(cx.listener(|this, _, window, cx| this.pick_files_folder(window, cx))),
-                    ),
+                div()
+                    .id("setup-files-now")
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .truncate()
+                    .child(files_now)
+                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(files_tip.clone()).build(w, cx)),
             )
-            .when_some(self.files_dest.clone(), |c, d| {
-                c.child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(note(format!("Hopper restarts to move them to {}.", d.display()), cx).flex_1())
-                        .child(
-                            Button::new("setup-files-cancel")
-                                .ghost()
-                                .small()
-                                .label("Cancel")
-                                .disabled(self.files_moving)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.files_dest = None;
-                                    this.files_error = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("setup-files-move")
-                                .outline()
-                                .small()
-                                .label("Move and restart")
-                                .loading(self.files_moving)
-                                .disabled(self.files_moving || self.files_error.is_some())
-                                .on_click(cx.listener(|this, _, window, cx| this.move_files(window, cx))),
-                        ),
+            .child(
+                Button::new("setup-files-pick")
+                    .outline()
+                    .small()
+                    .label("Move…")
+                    .disabled(self.files_moving)
+                    .on_click(cx.listener(|this, _, window, cx| this.pick_files_folder(window, cx))),
+            );
+        let files_confirm = self.files_dest.clone().map(|d| {
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(note(format!("Hopper restarts to move them to {}.", d.display()), cx).flex_1())
+                .child(
+                    Button::new("setup-files-cancel")
+                        .ghost()
+                        .small()
+                        .label("Cancel")
+                        .disabled(self.files_moving)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.files_dest = None;
+                            this.files_error = None;
+                            cx.notify();
+                        })),
                 )
-            })
-            .when_some(self.files_error.clone(), |c, e| c.child(result_line(Err(e), cx)));
+                .child(
+                    Button::new("setup-files-move")
+                        .outline()
+                        .small()
+                        .label("Move and restart")
+                        .loading(self.files_moving)
+                        .disabled(self.files_moving || self.files_error.is_some())
+                        .on_click(cx.listener(|this, _, window, cx| this.move_files(window, cx))),
+                )
+        });
         let servers_root = self.servers_root.clone();
+        // A row under the one above it, in the field column (no label).
+        let more_row = |el: AnyElement| Field::new().label("").child(el);
         settings_form(rem)
             .when(folder_here, |f| f.child(Field::new().label("New instances go in").child(self.folder_field(cx))))
             .child(Field::new().label("Look").child(look))
-            .child(
-                Field::new()
-                    .label("Servers")
-                    .child(v_flex().gap_1p5().child(servers).child(note(srv_note, cx))),
-            )
+            .child(Field::new().label("Servers").child(servers).description(srv_note))
             .when(self.servers == Servers::OtherPc, |f| {
                 f.child(
                     Field::new().label("Servers folder").child(
@@ -1037,8 +1050,17 @@ impl SetupWizard {
                 .child(Field::new().label("Server host").child(div().w(rems(16.)).child(Input::new(&self.server_host))))
             })
             .child(Field::new().label("CurseForge key").child(key))
-            .child(Field::new().label("Install").child(install))
+            .when(own_open, |f| f.child(more_row(key_field.into_any_element())))
+            .child(
+                Field::new()
+                    .label("Install")
+                    .child(install)
+                    .when(!installed_here, |f| f.description("Or keep it portable: it runs from where it is now.")),
+            )
+            .when_some(self.install_result.clone(), |f, r| f.child(more_row(result_line(r, cx).into_any_element())))
             .child(Field::new().label("Hopper's files").child(files))
+            .when_some(files_confirm, |f, c| f.child(more_row(c.into_any_element())))
+            .when_some(self.files_error.clone(), |f, e| f.child(more_row(result_line(Err(e), cx).into_any_element())))
             .into_any_element()
     }
 }
@@ -1067,7 +1089,13 @@ fn launcher_tile(kind: Option<Kind>, path: &Path, on: bool, size: Rems, cx: &App
         Some(Kind::GDLauncher) => ("GD", 0xbe185d),
         Some(Kind::FtbApp) => ("FTB", 0x1d4ed8),
     };
-    let bg: Hsla = if on { rgb(color).into() } else { theme.muted_foreground.opacity(0.35) };
+    // Switched off: a quiet grey tile whose initials stay readable (white on
+    // a faded grey was too faint).
+    let (bg, fg): (Hsla, Hsla) = if on {
+        (rgb(color).into(), white())
+    } else {
+        (theme.foreground.opacity(0.08), theme.muted_foreground)
+    };
     let small = size.0 < 1.75;
     div()
         .flex_none()
@@ -1077,12 +1105,12 @@ fn launcher_tile(kind: Option<Kind>, path: &Path, on: bool, size: Rems, cx: &App
         .items_center()
         .justify_center()
         .bg(bg)
-        .text_color(white())
+        .text_color(fg)
         .font_bold()
         .map(|d| if small { d.text_size(rems(0.5625)) } else { d.text_xs() })
         .map(|d| {
             if text.is_empty() {
-                d.child(Icon::new(IconName::FolderOpen).small().text_color(white()))
+                d.child(Icon::new(IconName::FolderOpen).small().text_color(fg))
             } else {
                 d.child(text)
             }
@@ -1103,7 +1131,7 @@ impl Render for SetupWizard {
         let theme = cx.theme().clone();
         let found = self.found.is_none() || self.anything_found();
         let long = self.list_long();
-        let mut body = v_flex().gap_1p5().pr_3().py_1();
+        let mut body = v_flex().gap_1p5().pr_4().py_1();
         if found {
             body = body
                 .child(
@@ -1205,11 +1233,29 @@ impl Render for SetupWizard {
             .gap_3()
             .child(self.heading(cx))
             .child(
+                // The body keeps room on its right for the scrollbar; the
+                // negative margin moves that room into the dialog's padding so
+                // the content's edges line up with the heading and footer.
+                // A plain scroll area with the bar laid over it: the
+                // scrollbar wrapper needs a set height and never scrolls
+                // under a max height alone.
                 div()
-                    .id("setup-body")
-                    .max_h(room)
-                    .overflow_y_scrollbar()
-                    .child(body),
+                    .relative()
+                    .mr(rems(-1.))
+                    .child(
+                        v_flex()
+                            .id("setup-body")
+                            .max_h(room)
+                            .overflow_y_scroll()
+                            .track_scroll(&self.body_scroll)
+                            .child(body),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .child(Scrollbar::vertical(&self.body_scroll).id("setup-body-bar")),
+                    ),
             )
             .child(footer)
     }
