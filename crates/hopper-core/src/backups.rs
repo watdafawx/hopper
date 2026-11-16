@@ -204,7 +204,7 @@ pub struct PackMark {
     /// The pack file the record named after this change: if it names
     /// another one by the time of Undo, the pack moved on and stays.
     pub file_id: u64,
-    /// This entry is an update put back; it reads as put back.
+    /// This entry is an update put back; its mods read as rolled back.
     pub undone: bool,
 }
 

@@ -63,10 +63,6 @@ impl Relay {
         r
     }
 
-    fn url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
-    }
-
     fn script() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../relay/hopper_mailbox.py")
     }
