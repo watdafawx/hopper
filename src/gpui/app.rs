@@ -176,6 +176,10 @@ pub struct AppView {
     appearance: Entity<crate::appearance::AppearanceButton>,
     /// Saves the window's place once it settles.
     _save_bounds: Option<Task<()>>,
+    /// The MCP request loop, while MCP is on (see `mcp::start`), and what
+    /// the server was last set to.
+    pub(crate) _mcp: Option<Task<()>>,
+    pub(crate) mcp_applied: Option<crate::mcp::Wanted>,
     /// Restarts into a downloaded update once nothing is going on.
     _auto_restart: Option<Task<()>>,
     /// Jobs already reported, and servers already reported as crashed.
@@ -550,6 +554,8 @@ impl AppView {
             tasks,
             appearance,
             _save_bounds: None,
+            _mcp: None,
+            mcp_applied: None,
             told_jobs: Default::default(),
             told_crashes: Default::default(),
             told_waits: Default::default(),
@@ -635,7 +641,7 @@ impl AppView {
                     .update(cx, |s, cx| s.update_settings(|st| st.window = Some(saved), cx));
             }));
         }));
-        crate::mcp::start(window, cx);
+        crate::mcp::start(&mut view, window, cx);
         view
     }
 
