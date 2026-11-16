@@ -1,6 +1,7 @@
-//! An instance's Peers tab: other PCs running Hopper (LAN, Tailscale or by
-//! address), pairing with a code, and pulling or pushing the instance's
-//! files with a paired peer.
+//! The Friends panel's "On this network" page: other PCs running Hopper
+//! (LAN, Tailscale or by address), pairing with a code, and pulling or
+//! pushing the open instance's files with a paired PC. It is drawn inside
+//! `friends.rs`; the internet mailbox friends are a separate thing there.
 
 use crate::store::Store;
 use crate::widgets;
@@ -8,7 +9,6 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Selectable as _, 
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _,
@@ -78,6 +78,7 @@ impl PeersView {
         }
     }
 
+    /// The instance the page works on: the one open in the Library.
     pub fn show_for(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         if self.root.as_ref() == Some(&root) {
             return;
@@ -86,6 +87,11 @@ impl PeersView {
         self.picked.clear();
         self.remote_inst.clear();
         self.root = Some(root);
+        // The other PC's list is the same, but the pack to match it with
+        // changed.
+        if let Some(id) = self.selected.clone() {
+            self.select(id, cx);
+        }
         cx.notify();
     }
 
@@ -106,7 +112,7 @@ impl PeersView {
                 .await;
             this.update(cx, |this, cx| {
                 this.message = Some(
-                    r.map(|_| "Found their PC. Click Connect to share packs.".to_string())
+                    r.map(|_| "Added their PC to the list below.".to_string())
                         .map_err(|e| format!("{addr}: {e:#}")),
                 );
                 cx.notify();
@@ -125,6 +131,8 @@ impl PeersView {
                 match r {
                     Ok(code) => {
                         this.codes.insert(id, code);
+                        // The "found their PC" note is old news once they're connecting.
+                        this.message = None;
                     }
                     Err(e) => this.message = Some(Err(format!("Couldn't connect to their PC: {e:#}"))),
                 }
@@ -519,6 +527,7 @@ impl PeersView {
                 .child(
                     h_flex()
                         .gap_2()
+                        .flex_wrap()
                         .child(
                             div()
                                 .text_sm()
@@ -565,7 +574,7 @@ impl PeersView {
                 )
                 .when(!f.left_out.is_empty(), |c| {
                     c.child(
-                        widgets::caption(
+                        widgets::fine_print(
                             crate::friends::hand_added_line(&f.left_out, if f.peer_name.is_empty() { "them" } else { &f.peer_name }),
                             cx,
                         )
@@ -576,39 +585,31 @@ impl PeersView {
         )
     }
 
-    fn intro(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The hub didn't start (Friends is on, but the network part failed):
+    /// say why, with a way to try again.
+    fn unavailable(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
+            .w_full()
+            .items_start()
             .gap_3()
-            .px_6()
-            .child(Icon::new(IconName::Users).large().text_color(cx.theme().muted_foreground))
-            .child(div().text_lg().font_semibold().child("Friends nearby"))
+            .p_4()
+            .child(div().text_sm().font_semibold().child("Can't look for PCs on this network"))
+            .child(widgets::fine_print(
+                "Windows may ask to let Hopper use private networks. Say yes, so the other PC can find this one.",
+                cx,
+            ))
+            .when_some(self.store.read(cx).peer_error(), |c, e| {
+                c.child(div().text_sm().text_color(cx.theme().danger).child(e))
+            })
             .child(
-                div().max_w(rems(38.)).text_sm().text_center().child(
-                    "Get a friend's exact instance, or share yours, when your PCs are on the same network. Only the mod list is sent. The mods download from CurseForge, Modrinth and GitHub.",
-                ),
-            )
-            .child(
-                widgets::caption(
-                    "Nothing to sign up for. Windows may ask to let Hopper use private networks. Say yes, so the other PC can find this one.",
-                    cx,
-                )
-                .text_xs(),
-            )
-            .child(
-                Button::new("peers-on")
-                    .primary()
-                    .icon(IconName::Users)
-                    .label("Turn on Friends nearby")
+                Button::new("peers-retry")
+                    .small()
+                    .outline()
+                    .label("Try again")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.store.update(cx, |s, cx| s.set_peer_sync(true, cx))
                     })),
             )
-            .when_some(self.store.read(cx).peer_error(), |c, e| {
-                c.child(div().text_sm().text_color(cx.theme().danger).child(e))
-            })
             .into_any_element()
     }
 
@@ -624,7 +625,7 @@ impl PeersView {
             ),
             None => (
                 "No friend's PC here yet".to_string(),
-                "Turn on Friends nearby in their Hopper too. Both PCs need to be on the same home network, or on Tailscale."
+                "Open Hopper on their PC and turn on Friends there too. Both PCs need to be on the same home network, or on Tailscale."
                     .to_string(),
             ),
         };
@@ -640,88 +641,92 @@ impl PeersView {
                     "address" => "Added by address",
                     other => other,
                 };
-                h_flex()
-                    .gap_3()
+                // Two lines, so a long name or the code to compare still
+                // fits the dock's narrowest width.
+                v_flex()
+                    .gap_1p5()
                     .px_3()
                     .py_2()
                     .rounded(theme.radius)
                     .when(active, |r| widgets::row_selected(r, cx))
                     .child(
-                        div()
-                            .size_2()
-                            .rounded_full()
-                            .bg(if online { theme.success } else { theme.muted_foreground }),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_0p5()
+                        h_flex()
+                            .gap_2()
                             .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(div().text_sm().font_semibold().child(p.name.clone()))
-                                    .when(!source.is_empty(), |r| {
-                                        r.child(
-                                            widgets::chip(theme.muted_foreground)
-                                                .xsmall()
-                                                .child(source.to_string()),
-                                        )
-                                    }),
+                                div()
+                                    .flex_none()
+                                    .size_2()
+                                    .rounded_full()
+                                    .bg(if online { theme.success } else { theme.muted_foreground }),
                             )
-                            .when(self.show_advanced, |r| {
-                                r.child(widgets::caption(p.addr.clone(), cx).text_xs())
+                            .child(div().min_w_0().truncate().text_sm().font_semibold().child(p.name.clone()))
+                            .when(!source.is_empty(), |r| {
+                                r.child(
+                                    widgets::chip(theme.muted_foreground)
+                                        .xsmall()
+                                        .flex_none()
+                                        .child(source.to_string()),
+                                )
+                            })
+                            .child(div().flex_1())
+                            .map(|r| {
+                                if p.trusted {
+                                    r.child(widgets::chip(theme.success).flex_none().child("Connected"))
+                                } else {
+                                    r.child(
+                                        Button::new(SharedString::from(format!("pair:{id3}")))
+                                            .small()
+                                            .outline()
+                                            .label("Connect")
+                                            .tooltip("Connect once. Then check their screen shows the same 6-digit code.")
+                                            .disabled(!online)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.pair(id3.clone(), cx)
+                                            })),
+                                    )
+                                }
                             }),
                     )
-                    .child(div().flex_1())
-                    .when_some(self.codes.get(&p.peer_id).cloned(), |r, c| {
-                        r.child(
-                            div()
-                                .text_sm()
-                                .child(format!("Their screen should show {c}")),
-                        )
+                    .when(self.show_advanced, |r| {
+                        r.child(widgets::caption(p.addr.clone(), cx).text_xs())
                     })
-                    .map(|r| {
-                        if p.trusted {
-                            r.child(widgets::chip(theme.success).child("Connected")).child(
-                                Button::new(SharedString::from(format!("sync:{id1}")))
-                                    .small()
-                                    .outline()
-                                    .selected(active)
-                                    .label("See their instances")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.select(id1.clone(), cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("forget:{id2}")))
-                                    .small()
-                                    .ghost()
-                                    .label("Forget")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        peer::forget(&id2);
-                                        if this.selected.as_deref() == Some(id2.as_str()) {
-                                            this.selected = None;
-                                        }
-                                        cx.notify();
-                                    })),
-                            )
-                        } else {
-                            r.child(
-                                Button::new(SharedString::from(format!("pair:{id3}")))
-                                    .small()
-                                    .outline()
-                                    .label("Connect")
-                                    .tooltip("Connect once. Then check their screen shows the same 6-digit code.")
-                                    .disabled(!online)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.pair(id3.clone(), cx)
-                                    })),
-                            )
-                        }
+                    .when_some(self.codes.get(&p.peer_id).cloned().filter(|_| !p.trusted), |r, c| {
+                        r.child(div().text_sm().child(format!("Their screen should show {c}. Check it matches.")))
+                    })
+                    .when(p.trusted, |r| {
+                        r.child(
+                            h_flex()
+                                .gap_2()
+                                .flex_wrap()
+                                .child(
+                                    Button::new(SharedString::from(format!("sync:{id1}")))
+                                        .small()
+                                        .outline()
+                                        .selected(active)
+                                        .label("See their packs")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.select(id1.clone(), cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!("forget:{id2}")))
+                                        .small()
+                                        .ghost()
+                                        .label("Forget")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            peer::forget(&id2);
+                                            if this.selected.as_deref() == Some(id2.as_str()) {
+                                                this.selected = None;
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
                     })
             }))
             .when(empty, |c| {
                 c.child(
-                    v_flex()
+                    v_flex().w_full()
                         .items_start()
                         .gap_3()
                         .p_4()
@@ -729,7 +734,7 @@ impl PeersView {
                         .border_1()
                         .border_color(theme.border)
                         .child(
-                            h_flex()
+                            h_flex().w_full()
                                 .gap_3()
                                 .items_start()
                                 .child(
@@ -738,7 +743,7 @@ impl PeersView {
                                         .text_color(theme.muted_foreground),
                                 )
                                 .child(
-                                    v_flex()
+                                    v_flex().flex_1().min_w_0()
                                         .gap_1()
                                         .child(
                                             div()
@@ -746,7 +751,7 @@ impl PeersView {
                                                 .font_semibold()
                                                 .child(empty_title),
                                         )
-                                        .child(widgets::caption(empty_body, cx)),
+                                        .child(widgets::fine_print(empty_body, cx)),
                                 ),
                         )
                         .child(
@@ -759,7 +764,7 @@ impl PeersView {
                                     cx.notify();
                                 })),
                         )
-                        .child(widgets::caption(
+                        .child(widgets::fine_print(
                             "PCs on this network talk to each other directly.",
                             cx,
                         ).text_xs()),
@@ -847,8 +852,7 @@ impl PeersView {
                     .collect();
                 let (np, nu) = (pull.len(), push.len());
                 v_flex()
-                    .flex_1()
-                    .min_h_0()
+                    .w_full()
                     .gap_3()
                     .child(
                         h_flex()
@@ -875,7 +879,6 @@ impl PeersView {
                                         cx.notify();
                                     })),
                             )
-                            .child(div().flex_1())
                             .child(
                                 Button::new("push-peer")
                                     .small()
@@ -902,10 +905,10 @@ impl PeersView {
                             ),
                     )
                     .child(
+                        // The whole page scrolls, so the list takes the height it needs.
                         v_flex()
                             .id("peer-diff")
-                            .flex_1()
-                            .min_h_0()
+                            .w_full()
                             .children(changed.into_iter().map(|e| {
                                 let picked = self.picked.contains(&e.rel);
                                 let rel = e.rel.clone();
@@ -922,8 +925,9 @@ impl PeersView {
                                     .map(|f| f.name.clone())
                                     .filter(|n| !n.is_empty());
                                 h_flex()
-                                    .gap_3()
+                                    .gap_2()
                                     .py_1()
+                                    .min_w_0()
                                     .child(
                                         Checkbox::new(SharedString::from(format!("pp:{rel}")))
                                             .checked(picked)
@@ -970,41 +974,48 @@ impl PeersView {
                                                 .text_sm()
                                                 .font_medium(),
                                             )
-                                            .child(widgets::caption(e.rel.clone(), cx).text_xs())
+                                            .child(div().min_w_0().truncate().child(widgets::caption(e.rel.clone(), cx).text_xs()))
                                         }
                                         None => r.child(div().text_sm().child(e.rel.clone())),
                                     })
-                            }))
-                            .overflow_y_scrollbar(),
+                            })),
                     )
                     .into_any_element()
             }
         };
         Some(
             v_flex()
-                .flex_1()
-                .min_h_0()
+                .w_full()
                 .gap_3()
                 .pt_3()
                 .border_t_1()
                 .border_color(theme.border)
                 .child(
                     h_flex()
-                        .gap_3()
-                        .child(div().text_sm().font_semibold().child(format!("{} here", me.name)))
-                        .child(Icon::new(IconName::ArrowLeftRight).small())
-                        .child(div().w_72().child(widgets::picker("peer-inst", current, items, rem, pick)))
-                        .when(self.show_files, |r| {
-                            r.child(
-                                widgets::Segmented::new("peer-folder")
-                                    .selected_index(folder_ix)
-                                    .children(peer::FOLDERS.iter().map(|f| widgets::SegItem::new().label(format!("{f}/"))))
-                                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                                        this.folder = peer::FOLDERS[*ix];
-                                        this.compare(cx);
-                                    })),
-                            )
-                        })
+                        .gap_2()
+                        .child(div().min_w_0().truncate().text_sm().font_semibold().child(format!("{} here", me.name)))
+                        .child(Icon::new(IconName::ArrowLeftRight).small().flex_none())
+                        .child(div().flex_1().min_w_0().child(widgets::picker("peer-inst", current, items, rem, pick))),
+                )
+                .when(self.show_files, |c| {
+                    // Seven folder names are wider than the narrowest panel: scroll sideways
+                    // rather than clip them at the edge.
+                    c.child(
+                        div().id("peer-folder-scroll").w_full().min_w_0().overflow_x_scroll().child(
+                            widgets::Segmented::new("peer-folder")
+                                .selected_index(folder_ix)
+                                .children(peer::FOLDERS.iter().map(|f| widgets::SegItem::new().label(format!("{f}/"))))
+                                .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                    this.folder = peer::FOLDERS[*ix];
+                                    this.compare(cx);
+                                })),
+                        ),
+                    )
+                })
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
                         .when(self.show_files, |r| {
                             r.child(
                                 Button::new("peer-compare")
@@ -1016,7 +1027,6 @@ impl PeersView {
                                     .on_click(cx.listener(|this, _, _, cx| this.compare(cx))),
                             )
                         })
-                        .child(div().flex_1())
                         .when(self.followed(cx).is_none(), |r| {
                             r.child(
                                 Button::new("peer-follow")
@@ -1047,7 +1057,7 @@ impl PeersView {
                 )
                 .when(self.show_files, |c| c.child(diff))
                 .when(!self.show_files, |c| {
-                    c.child(widgets::caption(
+                    c.child(widgets::fine_print(
                         "Only the mod list is sent. The mods download from CurseForge, Modrinth and GitHub.",
                         cx,
                     ))
@@ -1060,7 +1070,7 @@ impl PeersView {
 impl Render for PeersView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(hub) = self.hub(cx) else {
-            return self.intro(cx);
+            return self.unavailable(cx);
         };
         let theme = cx.theme();
         let message: Option<AnyElement> = self.message.as_ref().map(|m| match m {
@@ -1078,14 +1088,14 @@ impl Render for PeersView {
                 .pt_2()
                 .border_t_1()
                 .border_color(theme.border)
-                .child(widgets::caption(
+                .child(widgets::fine_print(
                     format!("This PC: {} · port {}", peer::self_name(), hub.port),
                     cx,
                 ))
                 .child(
                     h_flex()
                         .gap_2()
-                        .child(div().w_96().child(Input::new(&self.address).small()))
+                        .child(div().flex_1().min_w_0().child(Input::new(&self.address).small()))
                         .child(
                             Button::new("peer-add")
                                 .small()
@@ -1096,16 +1106,16 @@ impl Render for PeersView {
                 )
                 .when_some(discovery, |c, e| {
                     c.child(
-                        widgets::caption(
+                        widgets::fine_print(
                             "Hopper can't find other PCs on this network. Connect by address instead.",
                             cx,
                         )
                         .text_xs(),
                     )
-                    .child(widgets::caption(e, cx).text_xs())
+                    .child(widgets::fine_print(e, cx).text_xs())
                 })
                 .child(
-                    widgets::caption(
+                    widgets::fine_print(
                         "Windows may ask to let Hopper use private networks. Say yes, so the other PC can find this one.",
                         cx,
                     )
@@ -1135,56 +1145,30 @@ impl Render for PeersView {
             )
             .into_any_element()
         };
-        // The page is taller than the window once there are friends and a
-        // library, so it scrolls as a whole.
-        div()
-            .id("peers-scroll")
-            .size_full()
-            .overflow_y_scrollbar()
-            .child(
+        // The Friends panel scrolls the page, so this is plain content.
         v_flex()
             .w_full()
-            .px_6()
-            .pb_6()
+            .px_4()
+            .py_3()
             .gap_4()
             .child(
-                h_flex()
-                    .gap_3()
-                    .child(
-                        v_flex()
-                            .gap_0p5()
-                            .child(div().text_lg().font_semibold().child("Friends nearby"))
-                            .child(widgets::caption(
-                                "Share this instance with a friend's PC on the same network. Only the mod list is sent. The mods download from their own sites.",
-                                cx,
-                            )),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("peers-off")
-                            .small()
-                            .ghost()
-                            .label("Turn off Friends nearby")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.store.update(cx, |s, cx| s.set_peer_sync(false, cx))
-                            })),
-                    ),
+                v_flex()
+                    .gap_0p5()
+                    .child(widgets::fine_print(
+                        "PCs on your home network or Tailscale. This works without the internet and without a friend code. Friends who are elsewhere are under Everyone.",
+                        cx,
+                    )),
             )
             .children(follow)
-            .child(widgets::caption(
-                "Friends anywhere, and the packs they share, are in the Friends panel (the people button at the top).",
-                cx,
-            ))
             .children(message)
             .child(
                 v_flex()
                     .gap_1()
-                    .child(div().text_sm().font_semibold().child("On this network"))
+                    .child(div().text_sm().font_semibold().child("Found here"))
                     .child(peers),
             )
             .children(panel)
             .child(advanced)
-            )
             .into_any_element()
     }
 }

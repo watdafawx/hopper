@@ -8,7 +8,6 @@ use crate::inst_settings::InstanceSettings;
 use crate::logs::LogsView;
 use crate::notice_slot::{self, Notice, Tier};
 use crate::part::Part;
-use crate::peers::PeersView;
 use crate::rigsync::SyncPanel;
 use crate::store::{self, Msg, Store};
 use crate::widgets;
@@ -54,14 +53,13 @@ pub(crate) enum InstTab {
     Configs,
     Screenshots,
     Server,
-    Peers,
     Settings,
     Logs,
     Performance,
 }
 
 impl InstTab {
-    pub(crate) const ALL: [InstTab; 13] = [
+    pub(crate) const ALL: [InstTab; 12] = [
         InstTab::Overview,
         InstTab::Mods,
         InstTab::ResourcePacks,
@@ -71,7 +69,6 @@ impl InstTab {
         InstTab::Configs,
         InstTab::Screenshots,
         InstTab::Server,
-        InstTab::Peers,
         InstTab::Settings,
         InstTab::Logs,
         InstTab::Performance,
@@ -88,7 +85,6 @@ impl InstTab {
             InstTab::Configs => "Configs",
             InstTab::Screenshots => "Screenshots",
             InstTab::Server => "Server",
-            InstTab::Peers => "Friends nearby",
             InstTab::Settings => "Settings",
             InstTab::Logs => "Logs & crashes",
             InstTab::Performance => "Performance",
@@ -115,7 +111,6 @@ impl InstTab {
             InstTab::Configs => IconName::FileCog,
             InstTab::Screenshots => IconName::Image,
             InstTab::Server => IconName::HardDrive,
-            InstTab::Peers => IconName::Users,
             InstTab::Settings => IconName::SlidersHorizontal,
             InstTab::Logs => IconName::Stethoscope,
             InstTab::Performance => IconName::Activity,
@@ -151,8 +146,8 @@ const BAR: [InstTab; 8] = [
     InstTab::Logs,
     InstTab::Performance,
 ];
-// Settings, Server and Peers aren't bar tabs: the header's Settings and
-// server buttons open the first two, the ⋯ menu Peers (also Ctrl+K and MCP).
+// Settings and Server aren't bar tabs: the header's Settings and server
+// buttons open them. "On this network" is a page of the Friends panel.
 
 /// Where the header's server menu goes on the Server tab.
 #[derive(Clone, Copy)]
@@ -344,7 +339,6 @@ pub struct LibraryView {
     settings: Entity<InstanceSettings>,
     logs: Entity<LogsView>,
     perf: Entity<crate::perf_view::PerfView>,
-    peers: Entity<PeersView>,
     /// The Friends panel, docked beside the page from the title bar.
     friends: Entity<crate::friends::FriendsPanel>,
     search: Entity<InputState>,
@@ -374,6 +368,14 @@ impl LibraryView {
     /// The title bar's Friends button: dock or hide the panel.
     pub fn toggle_friends(&mut self, cx: &mut Context<Self>) {
         self.set_friends(!self.friends_open, cx);
+    }
+
+    /// Opens the Friends panel on "On this network", working on this
+    /// instance.
+    pub fn open_nearby(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.select(root.clone(), cx);
+        self.set_friends(true, cx);
+        self.friends.update(cx, |f, cx| f.show_nearby(Some(root), cx));
     }
 
     fn set_friends(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -519,7 +521,6 @@ impl LibraryView {
         let settings = cx.new(|cx| InstanceSettings::new(store.clone(), window, cx));
         let logs = cx.new(|cx| LogsView::new(store.clone(), window, cx));
         let perf = cx.new(|cx| crate::perf_view::PerfView::new(store.clone(), window, cx));
-        let peers = cx.new(|cx| PeersView::new(store.clone(), window, cx));
         let friends = cx.new(|cx| crate::friends::FriendsPanel::new(store.clone(), window, cx));
         server.update(cx, |s, _| s.set_peek(peek.clone()));
         let control = server.read(cx).control().clone();
@@ -618,7 +619,6 @@ impl LibraryView {
             settings,
             logs,
             perf,
-            peers,
             friends,
             search,
             query: String::new(),
@@ -660,6 +660,13 @@ impl LibraryView {
         }
         if let Some(t) = tab {
             let t = t.to_lowercase().replace(' ', "");
+            // The old Friends nearby tab: now a page of the Friends panel.
+            if ["peers", "nearby", "onthisnetwork", "friendsnearby"].iter().any(|k| k.starts_with(t.as_str()) && t.len() >= 4) {
+                if let Some(root) = self.selected.clone() {
+                    self.open_nearby(root, cx);
+                }
+                return;
+            }
             if let Some(tab) = InstTab::ALL
                 .into_iter()
                 .find(|x| x.label().to_lowercase().replace(' ', "").starts_with(&t))
@@ -775,6 +782,8 @@ impl LibraryView {
     fn select(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let _t = crate::frame_log::span("lib.select");
         self.selected = Some(root.clone());
+        // "On this network" in the Friends panel follows the open instance.
+        self.friends.update(cx, |f, cx| f.set_instance(Some(root.clone()), cx));
         self.store.read(cx).watch_open(Some(root.clone()));
         self.watch_paired(true, cx);
         let key = root.to_string_lossy().to_string();
@@ -950,10 +959,6 @@ impl LibraryView {
             }
             InstTab::Performance => {
                 self.perf.update(cx, |w, cx| w.show_for(root, cx));
-                return;
-            }
-            InstTab::Peers => {
-                self.peers.update(cx, |w, cx| w.show_for(root, cx));
                 return;
             }
             _ => {}
@@ -2729,7 +2734,6 @@ impl LibraryView {
             None if self.tab == InstTab::Settings => cached(self.settings.clone()),
             None if self.tab == InstTab::Logs => cached(self.logs.clone()),
             None if self.tab == InstTab::Performance => cached(self.perf.clone()),
-            None if self.tab == InstTab::Peers => cached(self.peers.clone()),
             None => v_flex()
                 .size_full()
                 .items_center()
@@ -3620,14 +3624,12 @@ fn instance_menu(
         )
     };
     menu
-    // Peers is a server tool: only with them on.
+    // PCs on this network are a server tool: only with them on. It opens
+    // that page of the Friends panel for this instance.
     .when(tools, |m| {
         let (v, r) = vr();
-        m.item(PopupMenuItem::new("Friends nearby").icon(IconName::Users).on_click(move |_, _, cx| {
-            v.update(cx, |this, cx| {
-                this.select(r.clone(), cx);
-                this.set_tab(InstTab::Peers, cx);
-            })
+        m.item(PopupMenuItem::new("Share on this network").icon(IconName::Monitor).on_click(move |_, _, cx| {
+            v.update(cx, |this, cx| this.open_nearby(r.clone(), cx))
         }))
     })
     .when_some(server_pack.clone(), |m, (pid, fid, name)| {

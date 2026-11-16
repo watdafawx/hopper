@@ -5,6 +5,7 @@
 //! `design/friends-sync.md`.
 
 use crate::drag_pick;
+use crate::peers::PeersView;
 use crate::store::{FollowReq, FollowTarget, Store, SyncStatus};
 use crate::widgets::{self, Clickable as _};
 use crate::widgets::ToastAction as _;
@@ -74,13 +75,15 @@ const TILE_FILL: f32 = 0.08;
 const PAGE_SEARCH_FROM: usize = 8;
 
 /// What the panel shows beside the rail: everyone, one friend, one group
-/// (or its invitation), or the packs.
+/// (or its invitation), the packs, or the PCs on this network (which don't
+/// need the internet or a friend code).
 #[derive(Clone, PartialEq)]
 enum Page {
     Everyone,
     Friend(String),
     Group(String),
     Packs,
+    Nearby,
 }
 
 /// Someone in the Friends list: a friend, a member of a group you joined, or
@@ -123,6 +126,9 @@ pub struct FriendsPanel {
     /// The invite countdown's redraw is running.
     ticking: bool,
     page: Page,
+    /// The "On this network" page's content (PCs found on the LAN or
+    /// Tailscale, pairing, and sharing the open instance with them).
+    nearby: Entity<PeersView>,
     /// On a friend's page, their packs changed after this are New. Opening
     /// the page marks them seen, so this keeps the time from before.
     page_since: u64,
@@ -160,6 +166,7 @@ impl FriendsPanel {
         let join_code = cx.new(|cx| InputState::new(window, cx).placeholder("Paste their code"));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search friends and packs"));
         let pack_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search their packs"));
+        let nearby = cx.new(|cx| PeersView::new(store.clone(), window, cx));
         let subs = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.observe(&search, |_, _, cx| cx.notify()),
@@ -179,6 +186,7 @@ impl FriendsPanel {
             paint: drag_pick::Paint::default(),
             ticking: false,
             page: Page::Everyone,
+            nearby,
             page_since: 0,
             plus_pop: false,
             plus_anchor: Rc::default(),
@@ -233,6 +241,23 @@ impl FriendsPanel {
             cx.emit(FriendsEvent::Popover);
         }
         cx.notify();
+    }
+
+    /// Opens "On this network" for this instance (the Library's ⋯ menu).
+    pub fn show_nearby(&mut self, root: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.set_instance(root, cx);
+        self.leave_page(cx);
+        self.set_pop(None, cx);
+        self.page = Page::Nearby;
+        cx.notify();
+    }
+
+    /// The instance open in the Library: what "On this network" shares
+    /// and compares.
+    pub fn set_instance(&mut self, root: Option<PathBuf>, cx: &mut Context<Self>) {
+        if let Some(root) = root {
+            self.nearby.update(cx, |n, cx| n.show_for(root, cx));
+        }
     }
 
     /// The panel was opened or closed.
@@ -2299,6 +2324,7 @@ impl FriendsPanel {
             },
             cx,
         );
+        let nearby_open = self.page == Page::Nearby;
         let packs_open = self.page == Page::Packs;
         let packs_alert = alert_of(sync.iter(), cx);
         v_flex()
@@ -2320,6 +2346,15 @@ impl FriendsPanel {
             ))
             .child(div().flex_none().mx_auto().w(rems(1.5)).h_px().my_0p5().bg(theme.border))
             .child(v_flex().id("rail-groups").flex_1().min_h_0().overflow_y_scroll().gap_1().children(tiles).child(plus))
+            .child(self.tile(
+                "rail-nearby".into(),
+                nearby_open,
+                "On this network: PCs near you, no internet needed".into(),
+                Icon::new(IconName::Monitor).small().into_any_element(),
+                None,
+                Some(Page::Nearby),
+                cx,
+            ))
             .child(self.tile(
                 "rail-packs".into(),
                 packs_open,
@@ -2354,6 +2389,12 @@ impl FriendsPanel {
         let all_recipes = s.mailbox_recipes().to_vec();
         let recipes: Vec<Event> = all_recipes.iter().filter(|e| !s.pack_hidden(e)).cloned().collect();
         let groups: Vec<Group> = s.mailbox_groups().to_vec();
+        if self.page == Page::Nearby {
+            // Works without the internet and without any friend: no list
+            // of friends needed.
+            let top = self.page_head("On this network", None, cx);
+            return (Some(top), self.nearby.clone().into_any_element());
+        }
         if self.page == Page::Packs {
             let top = self.page_head("Packs", None, cx);
             return (Some(top), self.packs_view(&friends, &recipes, &all_recipes, down, window, cx));
@@ -2374,7 +2415,7 @@ impl FriendsPanel {
                     return self.group_page(g, &all_recipes, down, window, cx);
                 }
             }
-            Page::Everyone | Page::Packs => {}
+            Page::Everyone | Page::Packs | Page::Nearby => {}
         }
         // The page's friend or group is gone: everyone again.
         self.page = Page::Everyone;
@@ -2670,13 +2711,13 @@ impl Render for FriendsPanel {
         let live = s.friends_live();
         let body: AnyElement = match &status {
             SyncStatus::Off => self.off(cx),
-            SyncStatus::Connecting if !heard => {
+            SyncStatus::Connecting if !heard && self.page != Page::Nearby => {
                 v_flex().p_3().child(widgets::skeleton_rows(5, rems(2.75), cx)).into_any_element()
             }
             _ => {
                 // Down before the relay ever answered: the friend list isn't
                 // known, so don't show the "no friends yet" pitch.
-                let (top, content) = if down && !heard && self.page != Page::Packs {
+                let (top, content) = if down && !heard && !matches!(self.page, Page::Packs | Page::Nearby) {
                     (None, div().into_any_element())
                 } else {
                     self.page_body(down, window, cx)
@@ -2687,14 +2728,16 @@ impl Render for FriendsPanel {
                     Page::Friend(id) => SharedString::from(format!("friends-scroll:f:{id}")),
                     Page::Group(id) => SharedString::from(format!("friends-scroll:g:{id}")),
                     Page::Packs => SharedString::from("friends-scroll:packs"),
+                    Page::Nearby => SharedString::from("friends-scroll:nearby"),
                     Page::Everyone => SharedString::from("friends-scroll"),
                 };
                 let main = v_flex()
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    // The internet being down doesn't touch PCs on this network.
                     .when_some(match &status {
-                        SyncStatus::Down(e) => Some(e.clone()),
+                        SyncStatus::Down(e) if self.page != Page::Nearby => Some(e.clone()),
                         _ => None,
                     }, |c, e| {
                         c.child(
@@ -2759,7 +2802,8 @@ impl Render for FriendsPanel {
                     }))
                     .children(top)
                     .child(div().id(scroll_id).flex_1().min_h_0().overflow_y_scrollbar().child(content))
-                    .child(link_line(&status, live, cx));
+                    // The mailbox's state means nothing on the LAN page.
+                    .when(self.page != Page::Nearby, |c| c.child(link_line(&status, live, cx)));
                 h_flex().size_full().items_start().child(self.rail(&groups, cx)).child(main).into_any_element()
             }
         };
