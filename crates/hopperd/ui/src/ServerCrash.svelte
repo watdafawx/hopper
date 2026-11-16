@@ -429,7 +429,7 @@
                 <span class="done"><Check size={13} />{back.from || 'The older version'} is back</span>
                 <span class="tiny muted">Start the server to try again. Mods › History has the newer one.</span>
               {:else}
-                <button class="btn sm pri" disabled={busy || alive} title={alive ? 'Stop the server first' : 'Swaps in the copy Hopper kept. The newer one goes to Mods › History, so you can undo this there.'} onclick={() => putBack(changed)}><Undo2 size={13} />{changed.from ? `Put ${changed.from} back` : 'Put the older version back'}</button>
+                <button class="btn sm pri" disabled={busy || alive} title={alive ? 'Stop the server first' : 'Swaps in the copy Hopper kept. The newer one goes to Mods › History, so you can undo this there.'} onclick={() => putBack(changed)}><Undo2 size={13} />{changed.from ? `Roll back to ${changed.from}` : 'Roll back to the older version'}</button>
                 {@render actions()}
                 <span class="tiny muted">{changed.to ? `${changed.to} goes to Backups.` : 'The newer one goes to Backups.'}</span>
               {/if}

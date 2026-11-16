@@ -487,7 +487,7 @@ async fn history_undo(State(app): State<Arc<App>>, headers: HeaderMap, method: M
         {
             match hopper_core::undo::restore_pack(&mut inst, &m, since) {
                 Ok(r) => pack = Some(r.to_json()),
-                Err(err) => errors.push(format!("{}'s pack version wasn't put back: {err:#}", m.name)),
+                Err(err) => errors.push(format!("{}'s pack version wasn't rolled back: {err:#}", m.name)),
             }
         }
         Ok((done, gone, errors, pack))

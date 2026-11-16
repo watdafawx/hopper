@@ -373,7 +373,7 @@ pub fn mismatch_signals(error: &str, frames: &[&str], out: &mut Vec<Raw>) {
             return;
         }
         let why = format!(
-            "Its {} is missing {method}, which the installed version of the mod with {i_s} asks for: the two were built for different versions of each other. Update it, or put back the version of the other mod it was made for.",
+            "Its {} is missing {method}, which the installed version of the mod with {i_s} asks for: the two were built for different versions of each other. Update it, or roll back to the version of the other mod it was made for.",
             short(&receiver)
         );
         out.push(by_class(&receiver, Certainty::Likely, why));
@@ -406,7 +406,7 @@ pub fn report_signals(text: &str, out: &mut Vec<Raw>) {
     if let Some(m) = MISSING_KEY.captures(text)
         && !matches!(&m[1], "minecraft" | "neoforge" | "forge" | "c" | "fabric")
     {
-        let why = format!("The world or a data pack needs {}:{} from it, and the installed version doesn't have it. Update it (or put back the version the world was made with).", &m[1], &m[2]);
+        let why = format!("The world or a data pack needs {}:{} from it, and the installed version doesn't have it. Update it (or roll back to the version the world was made with).", &m[1], &m[2]);
         out.push(raw(&m[1], "", Certainty::Likely, why));
     }
 }
