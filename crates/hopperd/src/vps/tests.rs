@@ -375,7 +375,8 @@ async fn home_routes_by_tag_and_refuses_others() {
             // The address names no server: the tag decides.
             let mut out = core::handshake_packet(767, "nothing.example", 25565, 1);
             out.extend(core::packet(0, &[]));
-            s.tx.send(&out).await.unwrap();
+            // A rejected stream can reset before DATA is sent.
+            s.tx.send(&out).await?;
             // The first answer, or the stream's end.
             tokio::time::timeout(Duration::from_secs(10), s.rx.recv()).await.expect("an answer or the end")
         }
