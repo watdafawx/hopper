@@ -494,5 +494,13 @@
   .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 12.5px; }
   .kv span:nth-child(odd) { color: var(--muted); }
-  @media (max-width: 900px) { .split { flex-direction: column; } .rail { width: auto; } .main :global(.term) { min-height: 60vh; } }
+  /* Stacked: the page scrolls as one column. Without this, .main and .rail
+     keep their shrunk flex heights and the console and relay card spill over
+     the rail below them. */
+  @media (max-width: 900px) {
+    .split { flex-direction: column; overflow-y: auto; }
+    .main { flex: none; min-height: auto; }
+    .rail { width: auto; flex: none; overflow: visible; }
+    .main :global(.term) { min-height: 60vh; }
+  }
 </style>
