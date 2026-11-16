@@ -1650,10 +1650,12 @@ mod tests {
         assert!(!old.needs_setup());
         let empty: Settings = serde_json::from_str("{}").unwrap();
         assert!(empty.setup_done);
-        // The old "Skip the Recycle Bin" setting is dropped quietly: deletes
-        // go to Recently deleted, with "Delete for good now" in each dialog.
+        // The old "Skip the Recycle Bin" setting does nothing now: deletes go
+        // to Recently deleted, with "Delete for good now" in each dialog. It
+        // stays in the file like any unknown setting, so going back to an
+        // older Hopper keeps the player's choice there.
         let skipped: Settings = serde_json::from_str(r#"{"delete_permanently":true}"#).unwrap();
-        assert!(!serde_json::to_string(&skipped).unwrap().contains("delete_permanently"));
+        assert_eq!(skipped.unknown.get("delete_permanently"), Some(&serde_json::Value::Bool(true)));
         // No settings file: a new user, who sees the setup.
         assert!(Settings::default().needs_setup());
         // Saved either way, it reads back the same.
