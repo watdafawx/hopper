@@ -5,7 +5,10 @@
   import { api, post, del } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
+  import { matches } from './lib/rulesPage.js';
 
+  // `hosted`: shown on the Rules page, which has the one Add button and search.
+  let { hosted = false, query = '' } = $props();
   let hooks = $state([]);
   let events = $state([]);
   let servers = $state([]);
@@ -26,6 +29,13 @@
       ? { id: h.id, name: h.name, url: h.url, events: [...h.events], servers: [...h.servers], enabled: h.enabled }
       : { name: '', url: '', events: ['start', 'stop', 'crash', 'backup', 'problem', 'tps', 'disk', 'ram', 'copy_failed'], servers: [], enabled: true };
   }
+
+  /** Rules page's Add menu. */
+  export function add() {
+    edit(null);
+  }
+
+  const shown = $derived(hooks.filter((h) => matches(query, h.name, h.kind, ...h.events.map((id) => events.find((ev) => ev.id === id)?.label))));
 
   const flip = (list, v) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
 
@@ -82,8 +92,8 @@
 </script>
 
 <div class="card">
-  <h3><Webhook size={14} />Webhooks <span class="sp"></span>
-    {#if !form}<button class="btn sm" onclick={() => edit(null)}><Plus size={13} />Add</button>{/if}</h3>
+  <h3><Webhook size={14} />Messages <span class="sp"></span>
+    {#if !form && !hosted}<button class="btn sm" onclick={() => edit(null)}><Plus size={13} />Add</button>{/if}</h3>
   {#if form}
     <form class="col" onsubmit={save}>
       <div class="input"><input bind:value={form.url} placeholder="https://discord.com/api/webhooks/…" required /></div>
@@ -107,7 +117,7 @@
         <button class="btn sm pri" disabled={!form.url || !form.events.length}>Save</button></div>
     </form>
   {:else}
-    {#each hooks as h (h.id)}
+    {#each shown as h (h.id)}
       <div class="hook" class:off={!h.enabled}>
         <div class="grow">
           <div>{h.name} <span class="chip">{h.kind === 'discord' ? 'Discord' : 'JSON'}</span></div>
@@ -120,7 +130,8 @@
         <button class="btn sm icon ghost" title="Remove" onclick={() => remove(h)}><Trash2 size={13} /></button>
       </div>
     {:else}
-      <p class="small subtle">Post to Discord or any URL when servers start, stop or crash, players join or leave, backups finish, and alerts fire.</p>
+      {#if query && hooks.length}<p class="small subtle">No messages match “{query}”.</p>{:else}
+      <p class="small subtle">Post to Discord or any URL when servers start, stop or crash, players join or leave, backups finish, and alerts fire.</p>{/if}
     {/each}
   {/if}
 </div>

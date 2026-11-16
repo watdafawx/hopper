@@ -36,7 +36,7 @@
 </script>
 
 <div class="card">
-  <h3><BellRing size={14} />Alerts<span class="sp"></span>{#if dirty}<button class="btn sm pri" onclick={save}>Save</button>{/if}</h3>
+  <h3><BellRing size={14} />Warnings<span class="sp"></span>{#if dirty}<button class="btn sm pri" onclick={save}>Save</button>{/if}</h3>
   {#if s}
     <div class="f"><div class="l">Crashed<small>Shown on the server; webhooks get "Server crashed"</small></div>
       <label class="switch"><input type="checkbox" checked={s.crash} onchange={(e) => set('crash', e.target.checked)} /><span></span></label></div>

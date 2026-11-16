@@ -9,7 +9,10 @@
   import { confirmIt } from './lib/dialog.svelte.js';
   import { describe, since, stepFor } from './lib/rules.js';
   import RuleForm from './RuleForm.svelte';
+  import { matches } from './lib/rulesPage.js';
 
+  // `hosted`: shown on the Rules page, which has the one Add button and search.
+  let { hosted = false, query = '' } = $props();
   let rules = $state([]);
   let events = $state([]);
   let minCooldown = $state(5);
@@ -30,6 +33,11 @@
       say(e.message, true);
     }
     loaded = true;
+  }
+
+  /** Rules page's Add menu. */
+  export function add() {
+    edit(null);
   }
 
   function edit(r) {
@@ -80,6 +88,8 @@
     }
   }
 
+  const shown = $derived(rules.filter((r) => matches(query, r.name, describe(r, events))));
+
   const covered = (r) => (r.servers.length ? servers.filter((s) => r.servers.includes(s.id)) : servers);
 
   function runNow(r) {
@@ -117,14 +127,14 @@
 </script>
 
 <div class="card">
-  <h3><Zap size={14} />Automations <span class="sp"></span>
-    {#if !form}<button class="btn sm" onclick={() => edit(null)}><Plus size={13} />Add</button>{/if}</h3>
+  <h3><Zap size={14} />Actions <span class="sp"></span>
+    {#if !form && !hosted}<button class="btn sm" onclick={() => edit(null)}><Plus size={13} />Add</button>{/if}</h3>
   {#if form}
     <RuleForm bind:form {events} {servers} {minCooldown} onsave={save} oncancel={() => (form = null)} />
   {:else if !loaded}
     <div class="skel"><i></i></div><div class="skel"><i></i></div>
   {:else}
-    {#each rules as r (r.id)}
+    {#each shown as r (r.id)}
       {@const last = r.history[0]}
       <div class="rule" class:off={!r.enabled}>
         <div class="grow">
@@ -157,7 +167,8 @@
         <button class="btn sm icon ghost" title="Remove" onclick={() => remove(r)}><Trash2 size={13} /></button>
       </div>
     {:else}
-      <p class="small subtle">Have the panel act on its own: restart a server when TPS stays low, greet players who join, back up every night, or call a URL when a server crashes.</p>
+      {#if query && rules.length}<p class="small subtle">No actions match “{query}”.</p>{:else}
+      <p class="small subtle">Have the panel act on its own: restart a server when TPS stays low, greet players who join, back up every night, or call a URL when a server crashes.</p>{/if}
     {/each}
     <p class="tiny muted foot">Crash restarts, the daily restart and scheduled backups are on each server's Schedule. Automations can't run programs on this PC; point "Call a URL" at a local service to do that.</p>
   {/if}

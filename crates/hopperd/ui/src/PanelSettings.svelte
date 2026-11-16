@@ -1,6 +1,7 @@
 <script module>
-  import { FolderCog, Shield, Globe, Compass, Lock, Users as UsersIcon, Webhook, BellRing, CloudUpload, UserRound, Download, Zap, ServerCog } from '@lucide/svelte';
+  import { FolderCog, Shield, Globe, Compass, Lock, Users as UsersIcon, ListChecks, CloudUpload, UserRound, Download, ServerCog } from '@lucide/svelte';
   import { keepsPanels } from './lib/machines.js';
+  import { isOldRulesPage, startFilter } from './lib/rulesPage.js';
 
   // The panel's settings, by category, like Hopper desktop's Settings page
   // (src/gpui/settings_page.rs): a list of categories on the left, the
@@ -12,9 +13,7 @@
     { id: 'content', label: 'Mod sources', icon: Compass, owner: true, blurb: 'The CurseForge API key, and mods from GitHub and other links.', words: 'curseforge api key modrinth github maven jenkins link source token' },
     { id: 'security', label: 'Security', icon: Lock, owner: true, blurb: 'Two-factor sign-in, your password, API tokens and the audit log.', words: '2fa two-factor password tokens audit log' },
     { id: 'users', label: 'Users', icon: UsersIcon, owner: true, blurb: 'Others sign in with their own name and password, limited to their role and servers.', words: 'people accounts roles permissions' },
-    { id: 'webhooks', label: 'Webhooks', icon: Webhook, owner: true, blurb: 'Tell Discord or another app when servers start, stop, crash, back up or run low.', words: 'discord notify hooks' },
-    { id: 'alerts', label: 'Alerts', icon: BellRing, owner: true, blurb: 'When the panel warns you: crashes, low TPS, a nearly full drive, PC memory.', words: 'warnings crash disk memory notify' },
-    { id: 'automations', label: 'Automations', icon: Zap, owner: true, blurb: 'When a server does something, the panel acts: run a command, back up, restart, or call a URL.', words: 'rules automation trigger when then if restart lag tps players schedule timer cron command' },
+    { id: 'rules', label: 'Rules', icon: ListChecks, owner: true, blurb: 'What the panel tells you and does on its own: messages to Discord, warnings, and actions when a server does something.', words: 'webhooks discord notify hooks alerts warnings crash disk memory automations automation trigger when then if restart lag tps players schedule timer cron command messages actions' },
     // Everyone with a password keeps their own list of signed-in panels, so
     // this one shows for owners and for everyone else; its node parts are
     // the real owner's only (Machines.svelte).
@@ -29,7 +28,7 @@
   export const catsFor = (owner, trueOwner = false, role = '') => CATS.filter((c) => (c.owner === 'any' ? keepsPanels(role) : c.owner === owner) && (!c.trueOwner || trueOwner));
 
   /** Older links: Settings › Nodes is part of Other machines now. */
-  export const catAlias = (id) => (id === 'nodes' ? 'machines' : id);
+  export const catAlias = (id) => (id === 'nodes' ? 'machines' : isOldRulesPage(id) ? 'rules' : id);
 </script>
 
 <script>
@@ -45,9 +44,7 @@
   import Users from './Users.svelte';
   import { ownerLike, session } from './lib/me.svelte.js';
   import { rightClear } from './lib/rightclear.js';
-  import Webhooks from './Webhooks.svelte';
-  import Alerts from './Alerts.svelte';
-  import Automations from './Automations.svelte';
+  import Rules from './Rules.svelte';
   import BackupTargets from './BackupTargets.svelte';
   import BackupRetention from './BackupRetention.svelte';
   import Machines from './Machines.svelte';
@@ -99,9 +96,7 @@
         {:else if c.id === 'content'}<CfKey /><SourcesSetting /><FilesChangesSetting />
         {:else if c.id === 'security'}<Security />
         {:else if c.id === 'users'}<Users />
-        {:else if c.id === 'webhooks'}<Webhooks />
-        {:else if c.id === 'alerts'}<Alerts />
-        {:else if c.id === 'automations'}<Automations />
+        {:else if c.id === 'rules'}<Rules start={startFilter(cat)} />
         {:else if c.id === 'machines'}<Machines {hello} />
         {:else if c.id === 'backups'}<BackupTargets />
         {:else if c.id === 'updates'}<PanelUpdate /><PackSwitchSetting />
