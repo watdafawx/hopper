@@ -869,35 +869,11 @@ impl BackupsView {
             return self.undo_panel(t, files, window, cx);
         }
         let root = self.root.clone();
-        let s = self.store.read(cx);
-        let Some(mut inst) = s.instance(&root).cloned() else {
+        let downloads = files.iter().any(|f| f.download);
+        let Some(slot) = queue_undo(self.store.read(cx), &root, files) else {
             window.push_notification(Notification::error("That instance is gone."), cx);
             return;
         };
-        let downloads = files.iter().any(|f| f.download);
-        let title = match files.as_slice() {
-            [one] => format!("Putting back {}", one.name),
-            many => format!("Putting back {}", hopper::words::count(many.len(), "file")),
-        };
-        // Another task on the instance (an update): this waits its turn in
-        // the task list, then works on what that task left.
-        let slot = s.queue_work(&root, title, move |_| {
-            crate::store::fresh(&mut inst);
-            let mut done = Vec::new();
-            let mut gone: Option<(Saved, Gone)> = None;
-            let mut errors = Vec::new();
-            for f in &files {
-                match hopper::undo::undo(&mut inst, f) {
-                    Ok(p) => done.push(p),
-                    Err(e) => match e.downcast::<Gone>() {
-                        Ok(g) if gone.is_none() => gone = Some((f.clone(), g)),
-                        Ok(g) => errors.push(format!("{}: {g}", f.name)),
-                        Err(e) => errors.push(format!("{}: {e:#}", f.name)),
-                    },
-                }
-            }
-            (done, gone, errors)
-        });
         self.busy = Some(if downloads { "Downloading to put it back…".into() } else { "Putting it back…".into() });
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -991,18 +967,7 @@ impl BackupsView {
 
     /// Tells the store and the user what came back.
     fn after_undo(&mut self, done: &[std::path::PathBuf], window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.root.clone();
-        let mods = root.join("mods");
-        // Jars with no entry (unknown ones): identified, as on any drop.
-        let jars: Vec<String> = done
-            .iter()
-            .filter(|p| p.parent() == Some(mods.as_path()))
-            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .collect();
-        self.store.update(cx, |s, cx| {
-            s.reload_instance(&root, cx);
-            s.identify_jars(&root, jars);
-        });
+        undone(&self.store, &self.root, done, cx);
         self.say_put_back(done, false, window, cx);
         self.changed(cx);
     }
@@ -1281,4 +1246,52 @@ mod tests {
         assert_eq!(set_indent(true), LEAD_W + 1.);
         assert_eq!(set_indent(false), FACE + 1.);
     }
+}
+
+/// What an Undo put back, the first entry whose version its site no longer
+/// has (for the version picker), and what failed.
+pub(crate) type UndoDone = (Vec<std::path::PathBuf>, Option<(Saved, Gone)>, Vec<String>);
+
+/// History's Undo of `files` in an instance, as a task: it waits its turn
+/// behind another task on the instance, then works on what that one left.
+/// Pick the result up with [`crate::store::work_done`], then call
+/// [`undone`]. `None` when the instance is gone.
+pub(crate) fn queue_undo(s: &crate::store::Store, root: &std::path::Path, files: Vec<Saved>) -> Option<std::sync::Arc<std::sync::Mutex<Option<UndoDone>>>> {
+    let mut inst = s.instance(root).cloned()?;
+    let title = match files.as_slice() {
+        [one] => format!("Putting back {}", one.name),
+        many => format!("Putting back {}", hopper::words::count(many.len(), "file")),
+    };
+    Some(s.queue_work(root, title, move |_| {
+        crate::store::fresh(&mut inst);
+        let mut done = Vec::new();
+        let mut gone: Option<(Saved, Gone)> = None;
+        let mut errors = Vec::new();
+        for f in &files {
+            match hopper::undo::undo(&mut inst, f) {
+                Ok(p) => done.push(p),
+                Err(e) => match e.downcast::<Gone>() {
+                    Ok(g) if gone.is_none() => gone = Some((f.clone(), g)),
+                    Ok(g) => errors.push(format!("{}: {g}", f.name)),
+                    Err(e) => errors.push(format!("{}: {e:#}", f.name)),
+                },
+            }
+        }
+        (done, gone, errors)
+    }))
+}
+
+/// After an Undo: the instance is read again and jars with no entry
+/// (unknown ones) are identified, as on any drop.
+pub(crate) fn undone(store: &Entity<crate::store::Store>, root: &std::path::Path, done: &[std::path::PathBuf], cx: &mut App) {
+    let mods = root.join("mods");
+    let jars: Vec<String> = done
+        .iter()
+        .filter(|p| p.parent() == Some(mods.as_path()))
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    store.update(cx, |s, cx| {
+        s.reload_instance(root, cx);
+        s.identify_jars(root, jars);
+    });
 }

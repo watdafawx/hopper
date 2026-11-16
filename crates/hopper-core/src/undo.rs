@@ -42,6 +42,32 @@ fn site(r: &Ref) -> &'static str {
     if r.mr_version.is_empty() { "CurseForge" } else { "Modrinth" }
 }
 
+/// The update that brought `file_name` (a jar in `mods/`, on or off): the
+/// copy History kept of the file it replaced, and when, newest first. The
+/// Mods tab's load-problem notice offers "Roll back" with it, which is
+/// History's own Undo of that entry. Reads `.hopper-backups`: off the UI
+/// thread.
+pub fn update_that_brought(root: &Path, file_name: &str) -> Option<(i64, Saved)> {
+    brought_by(&crate::backups::list(root), file_name)
+}
+
+/// [`update_that_brought`] over History's sets (newest first).
+pub fn brought_by(sets: &[crate::backups::Set], file_name: &str) -> Option<(i64, Saved)> {
+    let bare = |s: &str| s.trim_end_matches(".disabled").to_ascii_lowercase();
+    let want = bare(file_name);
+    sets.iter().find_map(|set| {
+        set.files
+            .iter()
+            .find(|f| {
+                f.change == crate::backups::Change::Updated
+                    && f.record.is_none()
+                    && f.restore_to.starts_with("mods/")
+                    && f.now.as_deref().is_some_and(|n| bare(n) == want)
+            })
+            .map(|f| (set.when, f.clone()))
+    })
+}
+
 /// The version a file name says, without the Minecraft version and loader
 /// most names carry too ("jei-1.21.1-neoforge-19.21.0.247.jar" → "19.21.0.247").
 pub fn version_of(file_name: &str) -> String {
@@ -305,6 +331,52 @@ fn forget(f: &Saved) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn saved(name: &str, change: crate::backups::Change, now: Option<&str>) -> Saved {
+        Saved {
+            path: PathBuf::from(format!("C:/b/{name}")),
+            name: name.into(),
+            size: 1,
+            restore_to: format!("mods/{name}"),
+            download: false,
+            src: None,
+            change,
+            now: now.map(str::to_string),
+            now_site: "",
+            reason: String::new(),
+            who: None,
+            batch: String::new(),
+            put_back: false,
+            record: None,
+        }
+    }
+
+    fn set(when: i64, files: Vec<Saved>) -> crate::backups::Set {
+        crate::backups::Set { dir: PathBuf::from(format!("C:/b/{when}")), when, files, pack: None }
+    }
+
+    /// "Roll back" on the load-problem notice: the newest update that put the
+    /// current file in, whether the mod is on or off now.
+    #[test]
+    fn the_update_that_brought_a_file() {
+        use crate::backups::Change;
+        let sets = vec![
+            set(300, vec![saved("other-1.0.jar", Change::Updated, Some("other-2.0.jar"))]),
+            set(200, vec![saved("towers-1.2.3.jar", Change::Updated, Some("towers-1.3.0.jar"))]),
+            set(100, vec![saved("towers-1.1.0.jar", Change::Updated, Some("towers-1.3.0.jar"))]),
+        ];
+        let (when, f) = brought_by(&sets, "towers-1.3.0.jar").unwrap();
+        assert_eq!((when, f.name.as_str()), (200, "towers-1.2.3.jar"));
+        assert_eq!(brought_by(&sets, "Towers-1.3.0.jar.disabled").unwrap().0, 200);
+        // No update brought it: no roll back.
+        assert!(brought_by(&sets, "lonely-1.0.jar").is_none());
+        // A removal or a switch isn't the update that brought it.
+        let sets = vec![
+            set(200, vec![saved("towers-1.2.3.jar", Change::Removed, None)]),
+            set(100, vec![saved("towers-1.2.jar", Change::Switched, Some("towers-1.3.0.jar"))]),
+        ];
+        assert!(brought_by(&sets, "towers-1.3.0.jar").is_none());
+    }
 
     #[test]
     fn versions_from_file_names() {

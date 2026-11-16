@@ -143,6 +143,11 @@ pub struct MissingDeps {
     /// Wrong-version rows whose asked-for version nobody published (mod
     /// id and range → a version that does exist, as an example).
     pub ghosts: std::collections::HashMap<(String, String), String>,
+    /// Blocked jars an update put in, by file name: History's entry for the
+    /// file it replaced and when ("Roll back" undoes it).
+    pub rollbacks: std::collections::HashMap<String, (i64, hopper::backups::Saved)>,
+    /// Roll backs running now, by file name.
+    pub rolling: std::collections::HashSet<String>,
 }
 
 impl AddonsView {
@@ -278,23 +283,40 @@ impl AddonsView {
             loaded_fine: if same { self.missing.loaded_fine } else { None },
             against: against.clone(),
             ghosts: if same { std::mem::take(&mut self.missing.ghosts) } else { Default::default() },
+            rollbacks: if same { std::mem::take(&mut self.missing.rollbacks) } else { Default::default() },
+            rolling: if same { std::mem::take(&mut self.missing.rolling) } else { Default::default() },
         };
         let root = inst.root.clone();
         let snapshot = inst.clone();
         cx.spawn(async move |this, cx| {
-            let hopper::deps::Problems { missing: list, dups, blockers, loaded_fine } = cx
+            let (hopper::deps::Problems { missing: list, dups, blockers, loaded_fine }, rollbacks) = cx
                 .background_spawn(async move {
                     match panel {
-                        Some(r) => remote_problems(&r).unwrap_or_else(|e| {
-                            log::warn!("mod problems of {}: {e:#}", snapshot.root.display());
-                            Default::default()
-                        }),
-                        None => hopper::deps::problems(&snapshot),
+                        Some(r) => (
+                            remote_problems(&r).unwrap_or_else(|e| {
+                                log::warn!("mod problems of {}: {e:#}", snapshot.root.display());
+                                Default::default()
+                            }),
+                            Default::default(),
+                        ),
+                        None => {
+                            let p = hopper::deps::problems(&snapshot);
+                            // An update that put a blocked jar in: its
+                            // History entry, for "Roll back".
+                            let sets = if p.blockers.is_empty() { Vec::new() } else { hopper::backups::list(&snapshot.root) };
+                            let rollbacks = p
+                                .blockers
+                                .iter()
+                                .filter_map(|b| Some((b.file_name.clone(), hopper::undo::brought_by(&sets, &b.file_name)?)))
+                                .collect();
+                            (p, rollbacks)
+                        }
                     }
                 })
                 .await;
             this.update(cx, |this, cx| {
                 if this.missing.root.as_ref() == Some(&root) && this.missing.mtime == mtime && this.missing.listed == listed && this.missing.against == against {
+                    this.missing.rollbacks = rollbacks;
                     this.missing.dups = dups;
                     this.want_ghosts(&blockers, cx);
                     this.missing.blockers = blockers;
@@ -1265,6 +1287,14 @@ impl AddonsView {
                     );
                 }
             }
+            // An update just put this file in: undo that update, unless a
+            // Revert already offers an older version.
+            if self.store.read(cx).revert_offer(&inst.root, &b.file_name).is_none()
+                && let Some(el) = self.rollback_action(i, inst, &b.file_name, cx)
+            {
+                // Beside the Turn off for this jar (the first button).
+                actions.insert(actions.len().min(1), el);
+            }
             let view = cx.entity();
             let link = |key: String, name: String, icon: Option<std::path::PathBuf>, pid: u64, mod_id: Option<String>, cx: &Context<Self>| {
                 let v = view.clone();
@@ -1366,6 +1396,57 @@ impl AddonsView {
                         .child(self.folded_rows("blocker-rows", blockers.iter().map(|b| b.mod_name.clone()).collect(), rows, cx));
         let notice = widgets::closable_notice(body, key, widgets::Closed::Chip, title, color, &self.store, cx)?;
         Some(div().px_6().child(notice).into_any_element())
+    }
+
+    /// "Roll back" for a blocked jar an update put in: History's Undo of that
+    /// update ([`crate::history_view::queue_undo`]), then the notice checks
+    /// the folder again.
+    fn rollback_action(&self, i: usize, inst: &Instance, file: &str, cx: &Context<Self>) -> Option<AnyElement> {
+        let (when, saved) = self.missing.rollbacks.get(file)?.clone();
+        let version = hopper::undo::version_of(&saved.name);
+        let busy = self.missing.rolling.contains(file);
+        let (root, file) = (inst.root.clone(), file.to_string());
+        Some(
+            Button::new(SharedString::from(format!("blk-rollback:{i}")))
+                .xsmall()
+                .outline()
+                .label("Roll back")
+                .loading(busy)
+                .disabled(busy)
+                .tooltip(format!("Back to {version}, from before the update on {}", hopper::time::day_month(when)))
+                .on_click(cx.listener(move |this, _, window, cx| this.roll_back(&root, &file, saved.clone(), window, cx)))
+                .into_any_element(),
+        )
+    }
+
+    /// Undoes the update that put `file` in, as History's Undo does.
+    fn roll_back(&mut self, root: &std::path::Path, file: &str, saved: hopper::backups::Saved, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(slot) = crate::history_view::queue_undo(self.store.read(cx), root, vec![saved]) else { return };
+        self.missing.rolling.insert(file.to_string());
+        cx.notify();
+        let (root, file) = (root.to_path_buf(), file.to_string());
+        cx.spawn_in(window, async move |this, cx| {
+            let got = crate::store::work_done(cx.background_executor().clone(), slot).await;
+            this.update_in(cx, |this, window, cx| {
+                this.missing.rolling.remove(&file);
+                if let Some((done, gone, errors)) = got {
+                    crate::history_view::undone(&this.store, &root, &done, cx);
+                    if let Some(p) = done.first().and_then(|p| p.file_name()) {
+                        window.push_notification(Notification::success(format!("Put back {}", p.to_string_lossy())), cx);
+                    }
+                    if let Some((f, g)) = gone {
+                        window.push_notification(Notification::error(format!("{}: {g}. History can put back another version.", f.name)), cx);
+                    }
+                    for e in errors {
+                        window.push_notification(Notification::error(e), cx);
+                    }
+                }
+                // The notice checks the folder again.
+                this.resync(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// "Revert X to 1.6.3" for a problem an older version of the mod fixes
