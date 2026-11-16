@@ -2506,6 +2506,9 @@ fn loading_failures_by(text: &str, owns: Owns) -> (bool, Vec<(Raw, String)>, Vec
 /// The mod that failed becomes certain, and what the report's trace names
 /// drops to possible. If the log only says loading was broken, the trace
 /// still drops to possible (the cause is earlier in the log).
+/// Tests use it without which mods are installed; everything else goes
+/// through [`knock_on_by`].
+#[cfg(test)]
 fn knock_on(raws: &mut Vec<Raw>, loading: &str) {
     knock_on_by(raws, loading, &|_| None);
 }
