@@ -5,7 +5,7 @@
 //! and the full list are there), restart and wait. The finding itself is
 //! `hopper::stuckstart`'s; servers watch themselves in `LocalServer`.
 
-use crate::store::{Msg, Store};
+use crate::store::{Msg, MsgTx, Store};
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -44,21 +44,19 @@ pub struct StuckState {
 pub fn look(
     games: &Mutex<Games>,
     running: &HashMap<PathBuf, hopper::game::Running>,
-    tx: &std::sync::mpsc::Sender<Msg>,
-    wake: &hopper::waker::Waker,
+    tx: &MsgTx,
 ) {
     let mut g = games.lock().unwrap_or_else(|e| e.into_inner());
     g.retain(&running.keys().cloned().collect::<Vec<_>>());
     let now = hopper::time::now();
     for (root, r) in running {
         let Some(stall) = g.look(root, r.pid, r.started, now) else { continue };
-        let (root, pid, tx, wake) = (root.clone(), r.pid, tx.clone(), wake.clone());
+        let (root, pid, tx) = (root.clone(), r.pid, tx.clone());
         std::thread::spawn(move || {
             let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let report = hopper::stuckstart::investigate(&root, &name, pid, &stall, now);
             log::info!("{}: {} ({})", root.display(), report.headline, report.summary);
             let _ = tx.send(Msg::Stuck(root, report));
-            wake();
         });
     }
 }

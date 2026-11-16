@@ -691,7 +691,7 @@ pub struct Store {
     translations: crate::translation::Translations,
     /// Notified when a translation finishes, for views that are cached.
     tr_tick: Entity<TrTick>,
-    tx: Sender<Msg>,
+    tx: MsgTx,
     wake: hopper::waker::Waker,
     /// Settings as last written, to save only real changes.
     saved_settings: String,
@@ -759,6 +759,37 @@ impl PollWake {
     fn ticked(&self) -> &Arc<AtomicBool> {
         &self.ticked
     }
+
+    /// The signal sender, for [`MsgTx`] to wake the loop when a message is
+    /// sent (a message doesn't go through [`PollWake::full`] / [`PollWake::tick`]).
+    fn signal(&self) -> async_channel::Sender<()> {
+        self.signal.clone()
+    }
+}
+
+/// Sends a [`Msg`] to the store and wakes its poll loop, so a message is
+/// always drained at once — never left to whatever else happens to wake the
+/// loop. Every worker that reports back clones one of these instead of a bare
+/// [`Sender`], so a send can't forget to wake.
+#[derive(Clone)]
+pub(crate) struct MsgTx {
+    tx: Sender<Msg>,
+    signal: async_channel::Sender<()>,
+}
+
+impl MsgTx {
+    fn new(tx: Sender<Msg>, signal: async_channel::Sender<()>) -> Self {
+        Self { tx, signal }
+    }
+
+    /// Queues `msg` and wakes the poll loop. The wake fires even when the
+    /// store is gone (the loop is shutting down too), so the send's result is
+    /// the only thing worth reporting.
+    pub(crate) fn send(&self, msg: Msg) -> Result<(), std::sync::mpsc::SendError<Msg>> {
+        let r = self.tx.send(msg);
+        let _ = self.signal.try_send(());
+        r
+    }
 }
 
 #[cfg(test)]
@@ -788,6 +819,27 @@ mod poll_wake_tests {
     }
 }
 
+#[cfg(test)]
+mod msg_tx_tests {
+    use super::MsgTx;
+    use std::sync::mpsc::channel;
+
+    #[test]
+    fn send_delivers_the_message_and_signals_the_poll_loop() {
+        let (tx, rx) = channel();
+        let (signal_tx, signal_rx) = async_channel::unbounded();
+        let msg_tx = MsgTx::new(tx, signal_tx);
+
+        msg_tx.send(super::Msg::RecheckPacks).unwrap();
+
+        // The message lands in the worker channel.
+        assert!(matches!(rx.try_recv().unwrap(), super::Msg::RecheckPacks));
+        // And the poll loop got exactly one wake-up for it.
+        assert!(signal_rx.try_recv().is_ok());
+        assert!(signal_rx.try_recv().is_err());
+    }
+}
+
 impl Store {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut settings = Settings::load_or_default();
@@ -805,6 +857,7 @@ impl Store {
         }
         let (tx, rx) = channel();
         let (poll_wake, wake_rx) = PollWake::new();
+        let tx = MsgTx::new(tx, poll_wake.signal());
         let dirty = poll_wake.dirty().clone();
         let ticked = poll_wake.ticked().clone();
         let wake: hopper::waker::Waker = poll_wake.full();
@@ -827,7 +880,7 @@ impl Store {
                     wake();
                 },
                 move |running| {
-                    crate::stuck::look(&stuck_games, running, &tx2, &wake2);
+                    crate::stuck::look(&stuck_games, running, &tx2);
                     let mut live = live.lock().unwrap_or_else(|e| e.into_inner());
                     live.retain(&running.keys().cloned().collect::<Vec<_>>());
                     for (root, r) in running {
@@ -981,7 +1034,7 @@ impl Store {
             cfg: Default::default(),
             server_files_got: Default::default(),
             watched,
-            disk: disk_sync::start(tx.clone(), wake.clone()),
+            disk: disk_sync::start(tx.clone()),
             disk_later: Vec::new(),
             tx,
             wake,
