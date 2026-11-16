@@ -15,6 +15,7 @@ use gpui_kit::RenderImage;
 use image::AnimationDecoder;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -62,7 +63,12 @@ pub const VIEWER: Limits = Limits {
 /// How often a stream that fell behind its decoder looks again.
 const LATE_RETRY: Duration = Duration::from_millis(15);
 
-pub struct Clip(Inner);
+pub struct Clip {
+    inner: Inner,
+    made: Instant,
+    /// When a page last drew it, in ms after `made` (see [`Clip::unseen_for`]).
+    seen: AtomicU64,
+}
 
 enum Inner {
     /// Every frame, decoded once.
@@ -87,13 +93,36 @@ struct Stream {
 }
 
 impl Clip {
+    fn new(inner: Inner) -> Self {
+        Clip { inner, made: Instant::now(), seen: AtomicU64::new(0) }
+    }
+
     fn kept(frames: Vec<Arc<RenderImage>>, ends: Vec<u64>) -> Self {
-        Clip(Inner::Kept { frames, ends, start: Instant::now() })
+        Self::new(Inner::Kept { frames, ends, start: Instant::now() })
+    }
+
+    /// How long since a page last drew it (since it was made, if none has).
+    /// The store lets clips go that no page shows any more.
+    pub fn unseen_for(&self) -> Duration {
+        let seen = Duration::from_millis(self.seen.load(Ordering::Relaxed));
+        self.made.elapsed().saturating_sub(seen)
+    }
+
+    /// About how many bytes its frames take, decoded (and as much again on
+    /// the GPU once drawn). A streamed clip holds the frame shown and the
+    /// next one.
+    pub fn bytes(&self) -> usize {
+        let size = |f: &RenderImage| f.as_bytes(0).map_or(0, <[u8]>::len);
+        match &self.inner {
+            Inner::Kept { frames, .. } => frames.iter().map(|f| size(f)).sum(),
+            Inner::Streamed(s) => size(&s.lock().unwrap_or_else(|e| e.into_inner()).current) * 2,
+        }
     }
 
     /// The frame to show now.
     pub fn frame_now(&self) -> Arc<RenderImage> {
-        match &self.0 {
+        self.seen.store(now_ms(self.made), Ordering::Relaxed);
+        match &self.inner {
             Inner::Kept { frames, ends, start } => {
                 frames[index_at(ends, now_ms(*start))].clone()
             }
@@ -107,7 +136,7 @@ impl Clip {
 
     /// How long until the frame shown now changes.
     pub fn wait_now(&self) -> Duration {
-        match &self.0 {
+        match &self.inner {
             Inner::Kept { ends, start, .. } => wait_at(ends, now_ms(*start)),
             Inner::Streamed(s) => {
                 let s = s.lock().unwrap_or_else(|e| e.into_inner());
@@ -119,7 +148,7 @@ impl Clip {
     /// Frames no longer shown, whose GPU copies can go. Kept clips reuse
     /// theirs, so only a streamed one has any.
     pub fn take_shown(&self) -> Vec<Arc<RenderImage>> {
-        match &self.0 {
+        match &self.inner {
             Inner::Kept { .. } => Vec::new(),
             Inner::Streamed(s) => {
                 std::mem::take(&mut s.lock().unwrap_or_else(|e| e.into_inner()).shown)
@@ -129,7 +158,7 @@ impl Clip {
 
     /// Every frame it holds, to free when the clip goes.
     pub fn frames(&self) -> Vec<Arc<RenderImage>> {
-        match &self.0 {
+        match &self.inner {
             Inner::Kept { frames, .. } => frames.clone(),
             Inner::Streamed(s) => {
                 let s = s.lock().unwrap_or_else(|e| e.into_inner());
@@ -266,7 +295,7 @@ fn stream(path: PathBuf, max: u32, cache: usize) -> anyhow::Result<Option<Clip>>
         anyhow::bail!("no frames");
     };
     let due = Instant::now() + Duration::from_millis(ms);
-    Ok(Some(Clip(Inner::Streamed(Mutex::new(Stream { rx, current, due, shown: Vec::new() })))))
+    Ok(Some(Clip::new(Inner::Streamed(Mutex::new(Stream { rx, current, due, shown: Vec::new() })))))
 }
 
 /// A decoded frame kept LZ4-compressed: BGRA pixels, size, and how long
@@ -399,7 +428,7 @@ mod tests {
         let dir = dir("kept");
         // 10 ms counts as 100 ms, as in browsers.
         let clip = decode(&gif(&dir, &[50, 200, 10], 4), None, PAGE).unwrap().unwrap();
-        let Inner::Kept { ends, frames, .. } = &clip.0 else { panic!("small clips are kept") };
+        let Inner::Kept { ends, frames, .. } = &clip.inner else { panic!("small clips are kept") };
         assert_eq!(ends, &vec![50, 250, 350]);
         assert_eq!(index_at(ends, 0), 0);
         assert_eq!(index_at(ends, 49), 0);
@@ -424,7 +453,7 @@ mod tests {
         let cut = dir.join("cut.gif");
         std::fs::write(&cut, &bytes[..bytes.len() * 3 / 4]).unwrap();
         let clip = decode(&cut, None, PAGE).unwrap().unwrap();
-        let Inner::Kept { frames, .. } = &clip.0 else { panic!("small clips are kept") };
+        let Inner::Kept { frames, .. } = &clip.inner else { panic!("small clips are kept") };
         assert!((2..4).contains(&frames.len()), "{} frames", frames.len());
         // Streamed, it loops over the same part.
         let s = decode(&cut, None, Limits { keep_budget: 1, ..PAGE }).unwrap().unwrap();
@@ -460,7 +489,7 @@ mod tests {
         let dir = dir("stream");
         // Three 4x2 frames are 96 bytes: over a 40 byte budget.
         let clip = decode(&gif(&dir, &[20, 20, 20], 4), None, Limits { keep_budget: 40, ..PAGE }).unwrap().unwrap();
-        assert!(matches!(clip.0, Inner::Streamed(_)));
+        assert!(matches!(clip.inner, Inner::Streamed(_)));
         let first = clip.frame_now();
         assert!(clip.take_shown().is_empty());
         // Frames come round and round; each one replaced is handed back once.

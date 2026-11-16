@@ -397,6 +397,12 @@ fn navigate(app: &mut AppView, v: &Value, window: &mut Window, cx: &mut Context<
         app.go(Page::Browse, cx);
         app.browse.update(cx, |b, cx| b.set_query(&q, window, cx));
     }
+    // {"project": 238222}: a CurseForge project's page in Browse, so a
+    // script can walk many description pages (memory checks).
+    if let Some(id) = v["project"].as_u64() {
+        app.go(Page::Browse, cx);
+        app.browse.update(cx, |b, cx| b.show_project(id, cx));
+    }
     if let Some(name) = s("server") {
         let name = name.to_lowercase();
         let root = app

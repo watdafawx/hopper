@@ -117,16 +117,21 @@ impl SettingsPage {
         }
         rows.push(Row::new("files-folder").control(field(&f.folder, 20.)));
         let testing = self.site_editing.as_ref().is_some_and(|id| self.site_testing.contains(id));
-        let result: AnyElement = match self.site_editing.as_ref().and_then(|id| self.site_tests.get(id)) {
-            _ if testing => widgets::caption("Connecting…", cx).into_any_element(),
-            Some(Ok(t)) => status_line(IconName::CircleCheck, t.clone(), theme.success),
-            Some(Err(e)) => status_line(IconName::CircleX, e.clone(), theme.danger),
-            None => widgets::caption("Not tested yet.", cx).text_xs().into_any_element(),
+        // The certificate card spans the row under it; the note column is
+        // too narrow for it (same as the panels').
+        let card = if testing { None } else { self.site_editing.as_ref().and_then(|id| self.cert_card(id, CertSubject::Files, cx)) };
+        let asking = self.site_editing.as_ref().is_some_and(|id| self.cert_offers.contains_key(id));
+        let result: Option<AnyElement> = match (&card, self.site_editing.as_ref().and_then(|id| self.site_tests.get(id))) {
+            _ if testing => Some(widgets::caption("Connecting…", cx).into_any_element()),
+            (Some(_), _) => None,
+            (None, Some(Ok(t))) => Some(status_line(IconName::CircleCheck, t.clone(), theme.success)),
+            (None, Some(Err(e))) => Some(status_line(IconName::CircleX, e.clone(), theme.danger)),
+            (None, None) => Some(widgets::caption("Not tested yet.", cx).text_xs().into_any_element()),
         };
         let filled = |e: &Entity<InputState>| !e.read(cx).value().trim().is_empty();
         let can_save = filled(&f.host) && filled(&f.user);
         rows.push(
-            Row::new("files-test").note(Some(result)).control(
+            Row::new("files-test").note(result).when_some_below(card).control(
                 h_flex()
                     .gap_2()
                     .child(
@@ -139,7 +144,9 @@ impl SettingsPage {
                     .child(
                         Button::new("files-save")
                             .small()
-                            .primary()
+                            // One filled button: "Trust and connect" while it asks.
+                            .when(!asking, |b| b.primary())
+                            .when(asking, |b| b.outline())
                             .label("Save and test")
                             .loading(testing)
                             .disabled(testing || !can_save)
@@ -153,20 +160,24 @@ impl SettingsPage {
 
     fn site_row(&self, i: usize, x: &hopper::settings::FileSite, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let store = self.store.read(cx);
         let testing = self.site_testing.contains(&x.id);
+        let card = if testing { None } else { self.cert_card(&x.id, CertSubject::Files, cx) };
+        let store = self.store.read(cx);
         let state = match (self.site_tests.get(&x.id), store.site_error(&x.id)) {
             _ if testing => widgets::pill("Connecting", theme.muted_foreground, false),
+            // The background check can find it before any Test.
+            _ if hopper::certpin::cert_changed(CertSubject::Files, &x.id).is_some() => widgets::pill("Can't connect", theme.danger, false),
             (Some(Err(_)), _) | (None, Some(_)) => widgets::pill("Can't connect", theme.danger, false),
             (Some(Ok(_)), _) => widgets::pill("Connected", theme.success, false),
             (None, None) if store.site_listed(&x.id) => widgets::pill("Connected", theme.success, false),
             (None, None) => widgets::pill("Connecting", theme.muted_foreground, false),
         };
-        let detail: Option<AnyElement> = match (self.site_tests.get(&x.id), store.site_error(&x.id)) {
+        let detail: Option<AnyElement> = match (card, self.site_tests.get(&x.id), store.site_error(&x.id)) {
             _ if testing => None,
-            (Some(Ok(t)), _) => Some(status_line(IconName::CircleCheck, t.clone(), theme.success)),
-            (Some(Err(e)), _) => Some(status_line(IconName::CircleX, e.clone(), theme.danger)),
-            (None, Some(e)) => Some(status_line(IconName::CircleX, e.to_string(), theme.danger)),
+            (Some(card), _, _) => Some(card),
+            (None, Some(Ok(t)), _) => Some(status_line(IconName::CircleCheck, t.clone(), theme.success)),
+            (None, Some(Err(e)), _) => Some(status_line(IconName::CircleX, e.clone(), theme.danger)),
+            (None, None, Some(e)) => Some(status_line(IconName::CircleX, e.to_string(), theme.danger)),
             _ => None,
         };
         let n = store.servers().iter().filter(|s| store.site_of(&s.root).as_deref() == Some(x.id.as_str())).count();
@@ -194,6 +205,9 @@ impl SettingsPage {
                             .child(widgets::caption(sub, cx).text_xs().truncate())
                             .when(!x.host_key.is_empty(), |c| {
                                 c.child(widgets::caption(format!("Server key {}", x.host_key), cx).text_xs().truncate())
+                            })
+                            .when(x.proto == "ftps" && x.self_signed && !x.cert_pin.is_empty(), |c| {
+                                c.child(widgets::caption(format!("Certificate {}", x.cert_pin), cx).text_xs().truncate())
                             }),
                     )
                     .child(state)
@@ -251,7 +265,9 @@ impl SettingsPage {
             e.update(cx, |t, cx| t.set_value(String::new(), window, cx));
         }
         self.site_form_open = false;
-        self.site_editing = None;
+        if let Some(id) = self.site_editing.take() {
+            self.cert_offers.remove(&id);
+        }
         cx.notify();
     }
 
@@ -279,6 +295,15 @@ impl SettingsPage {
             self.site_form.pass.update(cx, |t, cx| t.set_value(String::new(), window, cx));
         }
         let (proto, ss, id2) = (self.site_proto.clone(), self.site_ss, id.clone());
+        // Another server, or the certificate switch changed: the certificate
+        // is trusted again from scratch, before the password is sent.
+        let old = self.store.read(cx).settings().file_sites.iter().find(|x| x.id == id).cloned();
+        let fresh = old.as_ref().is_none_or(|x| x.host != host || x.port != port || x.proto != proto || x.self_signed != ss);
+        if fresh {
+            hopper::certpin::forget(CertSubject::Files, &id);
+            self.cert_offers.remove(&id);
+            self.cert_ticked.remove(&id);
+        }
         self.store.update(cx, |s, cx| {
             s.update_settings(
                 move |st| {
@@ -300,6 +325,10 @@ impl SettingsPage {
                     x.key_file = key;
                     x.folder = folder;
                     x.self_signed = ss;
+                    if fresh {
+                        x.cert_pin.clear();
+                        x.cert_ask = ss && x.proto == "ftps";
+                    }
                 },
                 cx,
             )
@@ -309,8 +338,65 @@ impl SettingsPage {
     }
 
     /// Connects to site `id` and lists its servers; pins its SSH key the
-    /// first time. `close`: shut the form when it works.
+    /// first time. `close`: shut the form when it works. An FTPS server that
+    /// makes its own certificate, with none trusted yet, first shows its
+    /// certificate to trust; no user name or password is sent before that.
     fn test_site(&mut self, id: String, close: bool, cx: &mut Context<Self>) {
+        let Some(site) = self.store.read(cx).settings().file_sites.iter().find(|x| x.id == id).cloned() else { return };
+        if site.proto == "ftps" && site.self_signed && site.cert_ask && site.cert_pin.trim().is_empty() {
+            self.site_testing.insert(id.clone());
+            self.site_tests.remove(&id);
+            self.cert_offers.remove(&id);
+            cx.notify();
+            cx.spawn(async move |this, cx| {
+                let r = cx.background_spawn(async move { hopper::remotefs::probe_cert(&site).map_err(|e| format!("{e:#}")) }).await;
+                this.update(cx, |this, cx| {
+                    this.site_testing.remove(&id);
+                    match r {
+                        Ok(Some(fp)) => {
+                            this.cert_offers.insert(id, fp);
+                        }
+                        // An authority signs it: the usual check lets it in.
+                        Ok(None) => this.connect_site(id, close, cx),
+                        Err(e) => {
+                            this.site_tests.insert(id, Err(e));
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+        self.connect_site(id, close, cx);
+    }
+
+    /// Trusts certificate `fp` for site `id` (its first, or a new one after a
+    /// change), then connects.
+    pub(super) fn trust_site_cert(&mut self, id: String, fp: String, cx: &mut Context<Self>) {
+        hopper::certpin::forget(CertSubject::Files, &id);
+        self.cert_offers.remove(&id);
+        self.cert_ticked.remove(&id);
+        let id2 = id.clone();
+        self.store.update(cx, |s, cx| {
+            s.update_settings(
+                move |st| {
+                    if let Some(x) = st.file_sites.iter_mut().find(|x| x.id == id2) {
+                        x.cert_pin = fp;
+                        x.cert_ask = false;
+                    }
+                },
+                cx,
+            );
+            s.rediscover_servers();
+        });
+        let close = self.site_editing.as_deref() == Some(id.as_str());
+        self.connect_site(id, close, cx);
+    }
+
+    /// Connects to site `id`, as it's set up now, and lists its servers.
+    fn connect_site(&mut self, id: String, close: bool, cx: &mut Context<Self>) {
         let Some(site) = self.store.read(cx).settings().file_sites.iter().find(|x| x.id == id).cloned() else { return };
         self.site_testing.insert(id.clone());
         self.site_tests.remove(&id);
@@ -319,6 +405,7 @@ impl SettingsPage {
             let r = cx.background_spawn(async move { hopper::remotefs::test(&site).map_err(|e| format!("{e:#}")) }).await;
             this.update(cx, |this, cx| {
                 this.site_testing.remove(&id);
+                this.store.update(cx, |s, cx| s.save_learned_pins(cx));
                 let shown = match r {
                     Ok((found, key)) => {
                         if let Some(key) = key {
@@ -370,6 +457,8 @@ impl SettingsPage {
             return;
         }
         self.site_tests.remove(&id);
+        hopper::certpin::forget(CertSubject::Files, &id);
+        self.cert_offers.remove(&id);
         self.store.update(cx, |s, cx| {
             s.update_settings(|st| st.file_sites.retain(|x| x.id != id), cx);
             s.rediscover_servers();
