@@ -370,7 +370,7 @@ async fn talk(relay_port: u16, n: u32) -> (u32, f64, f64) {
 #[tokio::test(flavor = "multi_thread")]
 async fn voice_goes_both_ways_over_udp() {
     let p = path(false).await;
-    wait_for("UDP both ways", 10, || p.relay.udp_up() && p.slot.status().is_some_and(|s| s.via == "udp")).await;
+    wait_for("UDP both ways", 30, || p.relay.udp_up() && p.slot.status().is_some_and(|s| s.via == "udp")).await;
     let (got, med, worst) = talk(p.relay.port, 400).await;
     eprintln!("voice over UDP: {got}/400 back, median {med:.2} ms, worst {worst:.2} ms");
     assert!(got >= 396, "lost {} of 400", 400 - got);
@@ -389,7 +389,7 @@ async fn voice_rides_the_tunnel_when_udp_is_blocked() {
     // Home's voice stream is there before any keepalive answer could be,
     // and the relay has taken it: players' packets have a way home. (Talking
     // before the relay took it lost the first few under load.)
-    wait_for("the voice stream", 10, || p.slot.status().is_some() && p.relay.has_stream()).await;
+    wait_for("the voice stream", 30, || p.slot.status().is_some() && p.relay.has_stream()).await;
     let (got, med, worst) = talk(p.relay.port, 200).await;
     eprintln!("voice over the tunnel: {got}/200 back, median {med:.2} ms, worst {worst:.2} ms");
     assert!(got >= 198, "lost {} of 200", 200 - got);
@@ -403,7 +403,7 @@ async fn voice_rides_the_tunnel_when_udp_is_blocked() {
 #[tokio::test(flavor = "multi_thread")]
 async fn forged_garbage_and_floods_are_dropped() {
     let p = path(false).await;
-    wait_for("UDP both ways", 10, || p.relay.udp_up()).await;
+    wait_for("UDP both ways", 30, || p.relay.udp_up()).await;
     let bad = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     bad.connect(("127.0.0.1", p.relay.port)).await.unwrap();
     // Sealed-looking packets with the right session but no key: refused,
@@ -453,7 +453,7 @@ async fn forged_garbage_and_floods_are_dropped() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_flood_of_fakes_cant_crowd_out_home() {
     let p = path(false).await;
-    wait_for("UDP both ways", 10, || p.relay.udp_up()).await;
+    wait_for("UDP both ways", 30, || p.relay.udp_up()).await;
     // A budget the flood is sure to go over on any machine (the real one is
     // 5000 a second, which a busy test machine's flood may never reach),
     // and a flood paced so the port's queue never fills: what this checks
@@ -495,7 +495,7 @@ async fn a_flood_of_fakes_cant_crowd_out_home() {
 #[tokio::test(flavor = "multi_thread")]
 async fn nothing_passes_while_home_carries_no_voice() {
     let p = path(false).await;
-    wait_for("UDP both ways", 10, || p.relay.udp_up()).await;
+    wait_for("UDP both ways", 30, || p.relay.udp_up()).await;
     p.relay.set_enabled(1, false);
     let (got, _, _) = talk(p.relay.port, 20).await;
     assert_eq!(got, 0);

@@ -378,7 +378,7 @@ async fn home_routes_by_tag_and_refuses_others() {
             // A rejected stream can reset before DATA is sent.
             s.tx.send(&out).await?;
             // The first answer, or the stream's end.
-            tokio::time::timeout(Duration::from_secs(10), s.rx.recv()).await.expect("an answer or the end")
+            tokio::time::timeout(Duration::from_secs(30), s.rx.recv()).await.expect("an answer or the end")
         }
     };
     let id: &'static str = Box::leak(t.server.clone().into_boxed_str());

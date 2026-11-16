@@ -556,12 +556,15 @@ async fn a_draining_edge_lets_go_of_the_port() {
     player.write_all(&hello).await.unwrap();
     ctl.route_to(server, hello.len()).await;
     ctl.send(Msg::Stop { drain: true }).await;
+    // Wait for the edge to let go, with room for a machine busy with other
+    // tests (the drain message and the rebind both wait on the scheduler;
+    // another test's outgoing socket can also hold the port for a moment).
     let t = std::time::Instant::now();
     let freed = loop {
         if let Ok(l) = TcpListener::bind(("127.0.0.1", rig.port)).await {
             break l;
         }
-        assert!(t.elapsed() < Duration::from_secs(2), "the port stayed taken");
+        assert!(t.elapsed() < Duration::from_secs(15), "the port stayed taken");
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     drop(freed);

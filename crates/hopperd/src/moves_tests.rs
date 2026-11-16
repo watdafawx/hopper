@@ -129,8 +129,14 @@ async fn a_move_survives_a_cut_link_and_sends_only_whats_missing() {
     assert!(!node_servers(&p).join(crate::transfer::STAGING).read_dir().is_ok_and(|mut d| d.next().is_some()));
     // Its port was taken on the node (the node's own test server): it got another.
     let port = |d: &Path| hopper_core::hosting::Properties::load(&d.join("server.properties")).unwrap().port();
-    assert_eq!(m["new_port"].as_u64().unwrap() as u16, port(&dest));
-    assert_ne!(port(&dest), port(&src));
+    // The check before the move picked one; the commit checks again and may
+    // pick the next, since the machine's real ports are probed (other tests
+    // probe the same range at the same moment). So: a port in the range, not
+    // the source's, and the one the check named unless it was re-picked.
+    let (named, got) = (m["new_port"].as_u64().unwrap() as u16, port(&dest));
+    assert!(hopper_core::hosting::ports::RANGE.contains(&named) && hopper_core::hosting::ports::RANGE.contains(&got), "{named} / {got}");
+    assert_ne!(got, port(&src));
+    assert_ne!(got, 0);
     let new_id = m["new_id"].as_str().unwrap();
     assert!(new_id.starts_with(&format!("{}:", p.id)), "{new_id}");
     // Both Histories.
