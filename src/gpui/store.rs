@@ -381,6 +381,47 @@ const ANIMS_KEPT: usize = 12;
 /// of results shows a dozen or two, and each is a few hundred KB.
 const SMALL_ANIMS_KEPT: usize = 40;
 
+/// Bytes of decoded page GIFs kept at once, and of logos. Each byte is held
+/// twice once drawn (the frames here and their GPU copies), and a count alone
+/// let a dozen long GIFs keep over a GB after a run of description pages.
+const ANIMS_BUDGET: usize = 64 << 20;
+const SMALL_ANIMS_BUDGET: usize = 16 << 20;
+
+/// A clip no page has drawn for this long goes: a page that shows it again
+/// decodes it again, which is far cheaper than keeping every GIF met.
+const ANIM_LINGER: Duration = Duration::from_secs(20);
+
+/// A clip drawn this recently is on screen, and never goes to make room:
+/// it would only be decoded again on the next frame.
+const ANIM_GRACE: Duration = Duration::from_secs(2);
+
+/// How often ready clips are checked against [`ANIM_LINGER`].
+const ANIM_SWEEP: Duration = Duration::from_secs(5);
+
+/// Which ready clips go, given each one's key, bytes and how long since a
+/// page drew it: any unseen for `linger`, then the longest unseen until at
+/// most `kept` clips and `budget` bytes are left. None seen within `grace`.
+fn anims_to_drop(
+    clips: &[(String, usize, Duration)],
+    kept: usize,
+    budget: usize,
+    grace: Duration,
+    linger: Duration,
+) -> Vec<String> {
+    let (mut gone, mut left): (Vec<_>, Vec<_>) = clips.iter().partition(|c| c.2 >= linger);
+    left.sort_by_key(|c| std::cmp::Reverse(c.2));
+    let (mut count, mut bytes) = (left.len(), left.iter().map(|c| c.1).sum::<usize>());
+    for c in left {
+        if (count <= kept && bytes <= budget) || c.2 < grace {
+            break;
+        }
+        gone.push(c);
+        count -= 1;
+        bytes -= c.1;
+    }
+    gone.into_iter().map(|c| c.0.clone()).collect()
+}
+
 /// Whether clip `key` is a small one (a logo), see [`SMALL_ANIMS_KEPT`].
 fn small_anim(key: &str) -> bool {
     matches!(anim_parts(key).1, Some(w) if w <= crate::anim::LOGO.max_width)
@@ -500,6 +541,8 @@ pub struct Store {
     anims: HashMap<String, Anim>,
     /// Ready clips' keys, oldest first.
     anims_ready: std::collections::VecDeque<String>,
+    /// A [`Store::sweep_anims`] task is running.
+    anim_sweep: bool,
     /// Installed projects' categories (`None` until the disk cache is read);
     /// keys being fetched are in `cats_pending`.
     cats: Option<HashMap<String, Vec<String>>>,
@@ -802,6 +845,7 @@ impl Store {
             images: HashMap::new(),
             anims: HashMap::new(),
             anims_ready: Default::default(),
+            anim_sweep: false,
             cats: None,
             cats_pending: Default::default(),
             updates: HashMap::new(),
@@ -1540,18 +1584,14 @@ impl Store {
                     return;
                 };
                 self.anims.insert(key.clone(), Anim::Ready(clip));
-                // Logos and page GIFs make room for their own kind.
-                let small = small_anim(&key);
-                let kept = if small { SMALL_ANIMS_KEPT } else { ANIMS_KEPT };
-                self.anims_ready.push_back(key);
-                while self.anims_ready.iter().filter(|k| small_anim(k) == small).count() > kept {
-                    let Some(at) = self.anims_ready.iter().position(|k| small_anim(k) == small) else { break };
-                    let Some(old) = self.anims_ready.remove(at) else { break };
-                    if let Some(Anim::Ready(c)) = self.anims.remove(&old) {
-                        for f in c.frames() {
-                            cx.drop_image(f, None);
-                        }
-                    }
+                // The viewer's clip is its own to let go (see `forget_anim`).
+                if !key.ends_with(VIEW_SUFFIX) {
+                    self.anims_ready.push_back(key);
+                }
+                self.trim_anims(cx);
+                if !self.anim_sweep {
+                    self.anim_sweep = true;
+                    Self::sweep_anims(cx);
                 }
             }
             Msg::Updates { root, result, prev } => {
@@ -2476,6 +2516,49 @@ impl Store {
             }
             _ => self.want_image(url),
         }
+    }
+
+    /// Lets go of clips no page shows any more, and of the least recently
+    /// shown past [`ANIMS_KEPT`] / [`ANIMS_BUDGET`] (logos and page GIFs each
+    /// against their own), freeing their GPU copies. A page still showing
+    /// one asks for it again.
+    fn trim_anims(&mut self, cx: &mut App) {
+        self.anims_ready.retain(|k| matches!(self.anims.get(k), Some(Anim::Ready(_))));
+        for small in [false, true] {
+            let clips: Vec<(String, usize, Duration)> = self
+                .anims_ready
+                .iter()
+                .filter(|k| small_anim(k) == small)
+                .filter_map(|k| match self.anims.get(k) {
+                    Some(Anim::Ready(c)) => Some((k.clone(), c.bytes(), c.unseen_for())),
+                    _ => None,
+                })
+                .collect();
+            let (kept, budget) = if small { (SMALL_ANIMS_KEPT, SMALL_ANIMS_BUDGET) } else { (ANIMS_KEPT, ANIMS_BUDGET) };
+            for key in anims_to_drop(&clips, kept, budget, ANIM_GRACE, ANIM_LINGER) {
+                self.forget_anim(&key, cx);
+            }
+        }
+    }
+
+    /// Runs [`Self::trim_anims`] every [`ANIM_SWEEP`] while any clip is
+    /// ready, so pages left behind free their GIFs without anything else
+    /// happening.
+    fn sweep_anims(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(ANIM_SWEEP).await;
+                let more = this.update(cx, |s, cx| {
+                    s.trim_anims(cx);
+                    s.anim_sweep = !s.anims_ready.is_empty();
+                    s.anim_sweep
+                });
+                if !matches!(more, Ok(true)) {
+                    return;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Drops clip `key` and frees its GPU copies.
@@ -5363,6 +5446,58 @@ mod anim_key_tests {
         assert!(!small_anim(&view_key("https://x/a.gif")));
         assert_eq!(anim_parts("https://x/a.gif#w=128").2.max_width, crate::anim::LOGO.max_width);
         assert_eq!(anim_parts("https://x/a.gif#w=400").2.max_width, crate::anim::PAGE.max_width);
+    }
+}
+
+#[cfg(test)]
+mod anim_trim_tests {
+    use super::anims_to_drop;
+    use std::time::Duration;
+
+    const MB: usize = 1 << 20;
+    const GRACE: Duration = Duration::from_secs(2);
+    const LINGER: Duration = Duration::from_secs(20);
+
+    fn clip(key: &str, mb: usize, unseen_s: u64) -> (String, usize, Duration) {
+        (key.to_string(), mb * MB, Duration::from_secs(unseen_s))
+    }
+
+    fn dropped(clips: &[(String, usize, Duration)], kept: usize, budget_mb: usize) -> Vec<String> {
+        let mut d = anims_to_drop(clips, kept, budget_mb * MB, GRACE, LINGER);
+        d.sort();
+        d
+    }
+
+    #[test]
+    fn a_few_small_clips_on_screen_all_stay() {
+        let clips = [clip("a", 2, 0), clip("b", 3, 1), clip("c", 1, 10)];
+        assert!(dropped(&clips, 12, 64).is_empty());
+    }
+
+    #[test]
+    fn clips_no_page_drew_for_a_while_go_whatever_room_is_left() {
+        let clips = [clip("old", 1, 20), clip("older", 1, 300), clip("shown", 1, 0)];
+        assert_eq!(dropped(&clips, 12, 64), ["old", "older"]);
+    }
+
+    #[test]
+    fn over_budget_the_longest_unseen_go_first() {
+        // 120 MB of 40 MB clips against 64 MB: two go, the one drawn last stays.
+        let clips = [clip("a", 40, 5), clip("b", 40, 15), clip("c", 40, 3)];
+        assert_eq!(dropped(&clips, 12, 64), ["a", "b"]);
+    }
+
+    #[test]
+    fn over_the_count_the_longest_unseen_go_first() {
+        let clips: Vec<_> = (0..5).map(|i| clip(&format!("k{i}"), 1, 3 + i)).collect();
+        assert_eq!(dropped(&clips, 3, 64), ["k3", "k4"]);
+    }
+
+    #[test]
+    fn clips_on_screen_never_go_to_make_room() {
+        // A page showing three 40 MB GIFs keeps them, over the budget.
+        let clips = [clip("a", 40, 0), clip("b", 40, 1), clip("c", 40, 0), clip("gone", 40, 6)];
+        assert_eq!(dropped(&clips, 12, 64), ["gone"]);
     }
 }
 
