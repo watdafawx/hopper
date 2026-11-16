@@ -103,7 +103,7 @@ CONSTS = [
     "REGISTER_PER_HOUR", "MAX_CONNECTIONS", "MAX_PACK_BYTES", "MAX_QUEUE_BYTES", "MAX_EVENTS",
     "MAX_EVENTS_PER_SENDER", "MAX_LIVE_INVITES", "JOIN_FAILS", "MAX_FRIENDS", "SAVE_INTERVAL",
     "MAX_BODY", "MAX_POLLS_PER_USER", "SOLO_PACK_BYTES", "JOIN_FAILS_IP", "MAX_STATE_BYTES",
-    "MAX_USERS", "SENDER_QUOTA_BYTES", "EVENT_BUDGET_FRACTION", "LOAD_LIMIT_FRACTION", "REQUEST_DEADLINE", "MAX_WAIT", "EVENT_TTL", "KEEP_TTL", "IDLE_PRUNE_SECS",
+    "MAX_USERS", "SENDER_QUOTA_BYTES", "EVENT_BUDGET_FRACTION", "LOAD_LIMIT_FRACTION", "REQUEST_DEADLINE", "MAX_WAIT", "EVENT_TTL", "KEEP_TTL", "IDLE_PRUNE_SECS", "ONLINE_SECS",
 ]
 
 
@@ -1806,6 +1806,114 @@ class RoomTest(Base):
         self.a.post("/v1/recipes", dict(recipe("p1", code="HOP-v2"), to=[], groups=[gid]))
         evs = [e for e in self.b.events() if e["kind"] == "recipe" and e["inst"] == "p1"]
         self.assertEqual([(e["code"], e["direct"], e["groups"]) for e in evs], [("HOP-v2", False, [gid])])
+
+
+class FriendListTest(Base):
+    """The long-poll says when the friend list changed (`friends`, a digest
+    the desktop sends back as `fr`), so desktops stop reading the list every
+    few seconds."""
+
+    def setUp(self):
+        super().setUp()
+        self.a = Client(self.relay, "hopper-test-a")
+        self.b = Client(self.relay, "hopper-test-b")
+        self.c = Client(self.relay, "hopper-test-c")
+
+    def poll(self, who, fr, wait=4, v=2):
+        """One long-poll in the background, past every event so only the
+        friend list can end it early. Returns the thread and a list that
+        gets (seconds taken, answer)."""
+        out = []
+        after = mb.state["seq"] + 1000
+
+        def run():
+            t = time.time()
+            q = "/v1/recipes?after=%d&wait=%d&v=%d" % (after, wait, v)
+            if fr is not None:
+                q += "&fr=" + fr
+            ans = who.get(q)
+            out.append((time.time() - t, ans))
+
+        th = threading.Thread(target=run)
+        th.start()
+        time.sleep(0.4)
+        return th, out
+
+    def rev(self, who):
+        return who.get("/v1/friends")["rev"]
+
+    def test_the_digest_matches_the_list_and_moves_with_it(self):
+        r0 = self.rev(self.a)
+        self.assertEqual(self.a.get("/v1/recipes?after=0&wait=0&v=2")["friends"], r0)
+        self.a.befriend(self.b)
+        r1 = self.rev(self.a)
+        self.assertNotEqual(r0, r1)
+        # Another request from B moves B's last_seen but not the digest.
+        time.sleep(1.1)
+        self.b.get("/v1/friends")
+        self.assertEqual(self.rev(self.a), r1)
+        # Old clients (v=1) get the same answer as before.
+        self.assertNotIn("friends", self.a.get("/v1/recipes?after=0&wait=0&v=1"))
+
+    def test_a_new_friend_ends_the_poll_on_both_sides(self):
+        ta, oa = self.poll(self.a, self.rev(self.a))
+        tb, ob = self.poll(self.b, self.rev(self.b))
+        self.a.befriend(self.b)
+        ta.join(3)
+        tb.join(3)
+        for out, who in ((oa, self.a), (ob, self.b)):
+            took, ans = out[0]
+            self.assertLess(took, 2)
+            self.assertEqual(ans["events"], [])
+            self.assertEqual(ans["friends"], self.rev(who))
+
+    def test_removing_and_renaming_end_the_poll(self):
+        self.a.befriend(self.b)
+        self.a.befriend(self.c)
+        tc, oc = self.poll(self.c, self.rev(self.c))
+        self.a.post("/v1/profile", {"name": "Notch", "mc_id": ""})
+        tc.join(3)
+        self.assertLess(oc[0][0], 2)
+        # The same name again is no change: the poll keeps waiting.
+        tc, oc = self.poll(self.c, self.rev(self.c), wait=2)
+        self.a.post("/v1/profile", {"name": "Notch", "mc_id": ""})
+        tc.join(4)
+        self.assertGreater(oc[0][0], 1.5)
+        tb, ob = self.poll(self.b, self.rev(self.b))
+        self.a.post("/v1/remove", {"id": self.b.id})
+        tb.join(3)
+        self.assertLess(ob[0][0], 2)
+
+    def test_a_stale_digest_answers_at_once(self):
+        self.a.befriend(self.b)
+        t = time.time()
+        ans = self.a.get("/v1/recipes?after=999999&wait=5&v=2&fr=0000")
+        self.assertLess(time.time() - t, 1.5)
+        self.assertEqual(ans["friends"], self.rev(self.a))
+
+    def test_a_poll_without_the_digest_is_not_woken_by_friends(self):
+        # An older desktop sends no `fr`: nothing changes for it.
+        ta, oa = self.poll(self.a, None, wait=2)
+        self.a.befriend(self.b)
+        ta.join(4)
+        self.assertGreater(oa[0][0], 1.5)
+
+    def test_going_offline_and_coming_back_end_the_poll(self):
+        mb.ONLINE_SECS = 1
+        self.a.befriend(self.b)
+        # B goes quiet: A's poll ends by itself once B shows offline.
+        ta, oa = self.poll(self.a, self.rev(self.a), wait=8)
+        ta.join(8)
+        took, ans = oa[0]
+        self.assertLess(took, 4)
+        f = self.a.get("/v1/friends")
+        self.assertFalse(f["friends"][0]["online"])
+        self.assertEqual(ans["friends"], f["rev"])
+        # B's next request brings B back online and ends A's poll.
+        ta, oa = self.poll(self.a, f["rev"], wait=6)
+        self.b.get("/v1/groups")
+        ta.join(3)
+        self.assertLess(oa[0][0], 2)
 
 
 if __name__ == "__main__":

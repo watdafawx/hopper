@@ -846,6 +846,9 @@
 
   {#if sub === 'backups'}
     <ModBackups {server} onChanged={() => { load(); loadBackupCount(); checkUpdates(false); }} />
+  {:else if data && !mods.length}
+    <!-- Truly empty: no toolbar or columns, the same empty state as every content tab (desktop's empty_top). -->
+    <div class="empty-state top"><span class="es-ic"><Package size={20} /></span><b>No mods yet</b><p>Add content finds mods for this server, or drop .jar files on the window.</p><a class="btn sm pri" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add mods</a></div>
   {:else}
     <!-- Laid out as desktop's: actions, search, what's listed (Filter), in what order (Sort). -->
     <div class="row toolbar">
@@ -985,7 +988,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
           {:else if filtered}
             <div class="empty-state"><span class="es-ic"><Search size={20} /></span><b>Nothing matches</b><p>No item here fits the search and filters.</p><button class="btn sm" onclick={clearFilters}>Clear search and filters</button></div>
           {:else}
-            <div class="empty-state"><span class="es-ic"><Package size={20} /></span><b>Nothing installed here yet</b><p>Add content finds mods and data packs for this server.</p><a class="btn sm" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add content</a></div>
+            <div class="empty-state"><span class="es-ic"><Package size={20} /></span><b>No mods yet</b><p>Add content finds mods for this server, or drop .jar files on the window.</p><a class="btn sm pri" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add mods</a></div>
           {/if}
         {/if}
       </div>

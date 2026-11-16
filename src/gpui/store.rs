@@ -617,6 +617,8 @@ pub struct Store {
     /// Read the groups on the next publish tick; when they were last read.
     groups_due: bool,
     groups_at: Option<Instant>,
+    /// When the friend list is read again (see `friends::FriendReads`).
+    friend_reads: friends::FriendReads,
     /// Open invite codes, one per purpose (plain, or following a pack).
     mailbox_invites: Vec<friends::Invite>,
     /// What was last published to the mailbox, to publish on real changes.
@@ -869,6 +871,7 @@ impl Store {
             mailbox_groups: Vec::new(),
             groups_due: true,
             groups_at: None,
+            friend_reads: Default::default(),
             mailbox_invites: Vec::new(),
             mailbox_sig: 0,
             publish_failed_at: None,
@@ -1227,6 +1230,7 @@ impl Store {
                     .unwrap_or_default();
                 let found: Vec<_> = found.into_iter().chain(local).chain(remote_found).collect();
                 let alive = this.update(cx, |s, cx| {
+                    s.save_learned_pins(cx);
                     let events = s.scheduler.as_ref().map(|x| x.events()).unwrap_or_default();
                     for e in events {
                         use hopper::hosting::ScheduleEvent as E;
@@ -1976,6 +1980,35 @@ impl Store {
             st.datapack_dest.remove(&key);
             hopper::rigsync::forget_instance(&mut st.pairings, &mut st.shown_server, root);
         });
+    }
+
+    /// Saves what this run learned about the certificates of panels set up
+    /// before Hopper pinned them, and tells the user once per pinned panel.
+    pub fn save_learned_pins(&mut self, cx: &mut Context<Self>) {
+        for (id, fp) in hopper::panel::take_learned() {
+            let mut pinned = None;
+            self.update_settings(
+                |st| {
+                    let Some(p) = st.panels.iter_mut().find(|p| p.id == id && p.self_signed && p.cert_pin.is_empty()) else { return };
+                    match fp {
+                        Some(fp) => {
+                            p.cert_pin = fp;
+                            pinned = Some(p.label());
+                        }
+                        // A real certificate: from now on a self-made one
+                        // waits for the user to trust it.
+                        None => p.cert_ask = true,
+                    }
+                },
+                cx,
+            );
+            if let Some(name) = pinned {
+                cx.emit(StoreEvent::Notice(
+                    format!("{name}: Hopper now remembers this panel's certificate and connects only while it has that one. If it changes, Hopper stops and asks you (Settings → Servers)."),
+                    false,
+                ));
+            }
+        }
     }
 
     /// Changes settings and saves them, without a redraw.
@@ -2906,7 +2939,7 @@ impl Store {
         let Some(base) = hopper::perf::sessions_dir() else { return };
         let Some(inst) = self.instances.iter().find(|i| i.root == root) else { return };
         let d = self.launch_defaults();
-        let mem = if inst.settings.memory_mb > 0 { inst.settings.memory_mb } else { d.memory_mb };
+        let mem = hopper::memory::effective_mb(inst, d.memory_mb);
         let xms = hopper::launch::initial_memory(&inst.settings.java_args, &d.java_args, mem);
         let custom = hopper::launch::custom_args(&inst.settings.java_args, &d.java_args);
         let start = hopper::perf::recorder::Start {
@@ -2948,6 +2981,15 @@ impl Store {
         let dir = PathBuf::from(&self.settings.launcher_dir);
         let defaults = self.launch_defaults();
         let mc = full.settings.use_my_options.then(|| self.settings.mc_options.clone());
+        // The first start of an instance this PC gives less memory than its
+        // pack wants says so, once.
+        let memory_note = hopper::memory::first_start_note(&full, hopper::memory::pc_mb()).map(|n| {
+            let given = hopper::memory::effective_mb(&full, defaults.memory_mb);
+            (format!("{} starts with {}", full.name, hopper::memory::gb(given)), format!("{n} Change it in the instance's settings."))
+        });
+        if memory_note.is_some() {
+            full.settings.memory_told = true;
+        }
         if self.settings.launch_native {
             if !hopper::msauth::has_saved_login() {
                 return Err("Sign in with Microsoft in Settings first.".into());
@@ -2959,6 +3001,9 @@ impl Store {
                 let player = hopper::launch_native::Player::from_session(&session);
                 let child = hopper::launch_native::launch(&full, &dir, &defaults, &player, job)?;
                 job.detail(format!("Minecraft is starting (process {})", child.id()));
+                if let Some((title, body)) = memory_note {
+                    job.toast_info(title, body);
+                }
                 full.last_played = Some(hopper::time::now_iso());
                 full.save()?;
                 Ok(Msg::InstanceChanged(full.root.clone()))
@@ -2967,6 +3012,9 @@ impl Store {
             self.spawn_launch(root.to_path_buf(), format!("Launching {}", full.name), move |job| {
                 apply_mc_options(&mut full, mc.as_ref(), defaults.window, job);
                 hopper::launch::launch(&full, &dir, &defaults, job)?;
+                if let Some((title, body)) = memory_note {
+                    job.toast_info(title, body);
+                }
                 full.last_played = Some(hopper::time::now_iso());
                 full.save()?;
                 Ok(Msg::InstanceChanged(full.root.clone()))

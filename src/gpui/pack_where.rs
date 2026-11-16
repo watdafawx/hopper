@@ -32,6 +32,20 @@ const RUNNING_TIP: &str = "Close the game first: it rewrites options.txt when it
 
 /// The Where pill's width (room for "Always on · Global Packs").
 pub(crate) const PILL_W: f32 = 10.5;
+/// Its width on a narrow page (beside a side panel), with short labels.
+pub(crate) const PILL_W_SHORT: f32 = 5.75;
+
+/// A place in a load order as players say it: 1st, 2nd, 3rd, 11th, 21st.
+pub(crate) fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
 
 /// What the list knows beyond the table's rows.
 #[derive(Default)]
@@ -464,11 +478,14 @@ impl AddonsView {
         }
     }
 
-    /// The pill's words for a group.
-    fn pill_label(&self, g: &Group) -> String {
+    /// The pill's words for a group; `short` for the narrow pill (the
+    /// loader's name is in its tooltip and menu).
+    fn pill_label(&self, g: &Group, short: bool) -> String {
         match g {
             Group::InGame => "In game".into(),
+            Group::InWorlds if short => "Worlds".into(),
             Group::InWorlds => "In worlds".into(),
+            Group::Global(_) if short => "Always".into(),
             Group::Global(k) if k == pw::PAXI => "Always on".into(),
             Group::Global(k) => format!("Always on · {}", self.loc_label(k)),
             Group::Off => "Off".into(),
@@ -561,13 +578,16 @@ impl AddonsView {
         };
         let target_g = g.clone();
         let over_bg = theme.info.opacity(0.14);
+        // A quiet section heading over its rows, at the bottom of a row's
+        // height (the list's rows all share one height).
         h_flex()
             .id(ElementId::Name(gid.clone().into()))
             .h(rems(ROW_H))
             .w_full()
             .px_3()
+            .pb_1p5()
             .gap_2()
-            .items_center()
+            .items_end()
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.transparent)
@@ -613,6 +633,24 @@ impl AddonsView {
         let theme = cx.theme().clone();
         let id = |p: &str| ElementId::Name(format!("{p}:{file}").into());
         let mut out = Vec::new();
+        // Its place in a ranked group (In game, Paxi), by the name rather
+        // than in a column of its own, so names start where they do on Mods.
+        if let Some(n) = e.rank {
+            let tip: SharedString = if self.class == cf::CLASS_RESOURCE_PACKS && e.group == Group::InGame {
+                "Place in game order: the top one wins. Drag the row, or use its ⋯ menu, to move it."
+            } else {
+                "Place in the load order: later ones override earlier. Drag the row, or use its ⋯ menu, to move it."
+            }
+            .into();
+            out.push(
+                div()
+                    .id(id("rank"))
+                    .flex_none()
+                    .child(widgets::chip(Self::group_color(&e.group, cx)).child(ordinal(n)))
+                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                    .into_any_element(),
+            );
+        }
         if e.copies.len() > 1 {
             let n = e.copies.len();
             let text = match &e.using {
@@ -702,14 +740,22 @@ impl AddonsView {
             .collect();
         let now = e.target();
         let f = file.to_string();
+        let short = self.cols.pill_short;
+        let tip: SharedString = if running {
+            RUNNING_TIP.into()
+        } else if short {
+            format!("{}: where this pack is loaded", self.pill_label(&e.group, false)).into()
+        } else {
+            "Where this pack is loaded".into()
+        };
         Button::new(ElementId::Name(format!("where:{file}").into()))
             .small()
             .custom(variant)
-            .w(rems(PILL_W))
-            .label(self.pill_label(&e.group))
+            .w(rems(if short { PILL_W_SHORT } else { PILL_W }))
+            .label(self.pill_label(&e.group, short))
             .dropdown_caret(true)
             .disabled(running)
-            .tooltip(if running { RUNNING_TIP } else { "Where this pack is loaded" })
+            .tooltip(tip)
             .dropdown_menu(move |menu: PopupMenu, _, _| {
                 let mut menu = menu.label("Where");
                 for (to, label, note) in choices.clone() {
@@ -765,87 +811,76 @@ impl AddonsView {
             .into_any_element()
     }
 
-    /// The grip (drag to another place or group), the place in a ranked
-    /// group, and ↑↓ on hover there.
-    pub(crate) fn where_order_cell(&self, file: &str, name: &str, cx: &mut Context<Self>) -> AnyElement {
+    /// The drag grip, in the row's left padding and shown only while the
+    /// row is hovered, so the tick box, icon and name sit where they do on
+    /// Mods. Dragging moves the pack in its group or to another group.
+    pub(crate) fn where_grip(&self, file: &str, name: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let e = self.where_entry(file).cloned();
-        let group = e.as_ref().map_or(Group::Off, |e| e.group.clone());
-        let rank = e.as_ref().and_then(|e| e.rank);
+        let group = self.where_group(file);
         let running = self.class == cf::CLASS_RESOURCE_PACKS && self.where_running(cx);
-        let id = |p: &str| ElementId::Name(format!("{p}:{file}").into());
         let drag = WhereDrag { file: file.to_string(), name: name.to_string().into() };
         let view = cx.entity();
-        let (f, g) = (file.to_string(), group.clone());
-        let tint = Self::group_color(&group, cx);
-        let in_group = rank.map(|_| self.group_len(&group)).unwrap_or(0);
-        let (f_up, f_down) = (file.to_string(), file.to_string());
-        crate::datapacks::col_order()
-            .child(
-                div()
-                    .id(id("grip"))
-                    .flex_none()
-                    .text_color(theme.muted_foreground)
-                    .when(!running, |d| {
-                        d.cursor_grab().on_drag(drag, move |d, _, _, cx| {
-                            let (f, g) = (f.clone(), g.clone());
-                            view.update(cx, |this, cx| {
-                                this.wh.dragging = Some((f, g));
-                                cx.notify();
-                            });
-                            cx.new(|_| d.clone())
-                        })
-                    })
-                    .tooltip(move |w, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(if running {
-                            RUNNING_TIP
-                        } else {
-                            "Drag to reorder, or to another group"
-                        })
-                        .build(w, cx)
-                    })
-                    .child(Icon::new(IconName::GripVertical).small()),
-            )
-            .when_some(rank, |c, n| {
-                c.child(
-                    div()
-                        .min_w(rems(1.25)).h(rems(1.25)).px_1().whitespace_nowrap()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(tint.opacity(widgets::alpha::TINT))
-                        .text_color(crate::theme::chip_ink(tint))
-                        .text_xs()
-                        .font_bold()
-                        .child(n.to_string()),
-                )
-                .child(
-                    h_flex()
-                        .invisible()
-                        .group_hover(crate::addons::ROW_GROUP, |s| s.visible())
-                        .child(
-                            Button::new(id("up"))
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::ChevronUp)
-                                .tooltip("Move up")
-                                .disabled(running || n == 1)
-                                .on_click(cx.listener(move |this, _, window, cx| this.where_step(&f_up, -1, window, cx))),
-                        )
-                        .child(
-                            Button::new(id("down"))
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::ChevronDown)
-                                .tooltip("Move down")
-                                .disabled(running || n >= in_group)
-                                .on_click(cx.listener(move |this, _, window, cx| this.where_step(&f_down, 1, window, cx))),
-                        ),
-                )
+        let f = file.to_string();
+        div()
+            .id(ElementId::Name(format!("grip:{file}").into()))
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .w_3()
+            .flex()
+            .items_center()
+            .justify_center()
+            .invisible()
+            .group_hover(crate::addons::ROW_GROUP, |s| s.visible())
+            .text_color(theme.muted_foreground)
+            .when(!running, |d| {
+                d.cursor_grab().on_drag(drag, move |d, _, _, cx| {
+                    let (f, g) = (f.clone(), group.clone());
+                    view.update(cx, |this, cx| {
+                        this.wh.dragging = Some((f, g));
+                        cx.notify();
+                    });
+                    cx.new(|_| d.clone())
+                })
             })
+            .tooltip(move |w, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(if running {
+                    RUNNING_TIP
+                } else {
+                    "Drag to reorder, or to another group"
+                })
+                .build(w, cx)
+            })
+            .child(Icon::new(IconName::GripVertical).xsmall())
             .into_any_element()
+    }
+
+    /// Move up / Move down for the row menu of a pack in a ranked group:
+    /// the grip's job for those who don't drag.
+    pub(crate) fn where_order_menu(&self, file: &str, cx: &mut Context<Self>) -> Option<Rc<dyn Fn(PopupMenu) -> PopupMenu>> {
+        let e = self.where_entry(file)?;
+        let n = e.rank?;
+        let last = n >= self.group_len(&e.group);
+        let running = self.class == cf::CLASS_RESOURCE_PACKS && self.where_running(cx);
+        let view = cx.entity();
+        let f = file.to_string();
+        Some(Rc::new(move |menu: PopupMenu| {
+            let (v1, v2, f1, f2) = (view.clone(), view.clone(), f.clone(), f.clone());
+            menu.separator()
+                .item(
+                    PopupMenuItem::new("Move up")
+                        .icon(IconName::ChevronUp)
+                        .disabled(running || n == 1)
+                        .on_click(move |_, window, cx| v1.update(cx, |this, cx| this.where_step(&f1, -1, window, cx))),
+                )
+                .item(
+                    PopupMenuItem::new("Move down")
+                        .icon(IconName::ChevronDown)
+                        .disabled(running || last)
+                        .on_click(move |_, window, cx| v2.update(cx, |this, cx| this.where_step(&f2, 1, window, cx))),
+                )
+        }))
     }
 
     fn group_len(&self, g: &Group) -> usize {
@@ -1335,5 +1370,19 @@ impl AddonsView {
             self.update_global(dir, ups, cx);
         }
         rest
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ordinal;
+
+    #[test]
+    fn ordinals_read_as_players_say_them() {
+        let got: Vec<String> = [1, 2, 3, 4, 10, 11, 12, 13, 14, 21, 22, 23, 101, 111, 112].into_iter().map(ordinal).collect();
+        assert_eq!(
+            got,
+            ["1st", "2nd", "3rd", "4th", "10th", "11th", "12th", "13th", "14th", "21st", "22nd", "23rd", "101st", "111th", "112th"]
+        );
     }
 }

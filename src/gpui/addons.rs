@@ -177,7 +177,12 @@ pub(crate) fn col_active() -> Div {
 impl AddonsView {
     /// The On column, wide enough for the Where pill on packs.
     pub(crate) fn col_on(&self) -> Div {
-        if self.where_mode() { div().w(rems(crate::pack_where::PILL_W)).flex_none() } else { col_active() }
+        if self.where_mode() { div().w(rems(self.pill_w())).flex_none() } else { col_active() }
+    }
+
+    /// The Where pill's width this frame (narrow beside a side panel).
+    pub(crate) fn pill_w(&self) -> f32 {
+        if self.cols.pill_short { crate::pack_where::PILL_W_SHORT } else { crate::pack_where::PILL_W }
     }
 }
 pub(crate) fn col_date() -> Div {
@@ -375,11 +380,13 @@ pub(crate) struct Cols {
     /// beside a 960 px window): Update moves into the row's ⋯ menu, where
     /// Versions and changelogs already is.
     pub(crate) action: bool,
+    /// Packs' Where pill at its narrow width with short labels.
+    pub(crate) pill_short: bool,
 }
 
 impl Default for Cols {
     fn default() -> Self {
-        Self { date: true, author: true, side: true, side_inline: false, cap: false, rm: true, action: true }
+        Self { date: true, author: true, side: true, side_inline: false, cap: false, rm: true, action: true, pill_short: false }
     }
 }
 
@@ -3380,7 +3387,7 @@ impl AddonsView {
                         })),
                 ),
             )
-            .when(self.order_mode() || self.where_mode(), |r| r.child(crate::datapacks::col_order()))
+            .when(self.order_mode() && !self.where_mode(), |r| r.child(crate::datapacks::col_order()))
             .child(div().w_10().flex_none())
             .child(head(SortCol::Name, "Name", self.name_cell()))
             .when(self.show_action(), |r| r.child(col_action(self.compact)))
@@ -4031,12 +4038,11 @@ impl AddonsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let old_copy = self.old_copy_chip(a, cx);
-        // Resource packs in game order: grip, place and ↑↓ (or Use).
-        let order_cell = if self.where_mode() {
-            Some(self.where_order_cell(&a.file_name, &a.name, cx))
-        } else {
-            self.order_mode().then(|| self.order_cell(&a.file_name, &a.name, flags.rank, cx))
-        };
+        // Packs in one list: the grip in the row's padding (their place is a
+        // chip by the name). Resource packs in game order: grip, place, ↑↓.
+        let grip = self.where_mode().then(|| self.where_grip(&a.file_name, &a.name, cx));
+        let order_cell = (!self.where_mode() && self.order_mode()).then(|| self.order_cell(&a.file_name, &a.name, flags.rank, cx));
+        let order_menu = if self.where_mode() { self.where_order_menu(&a.file_name, cx) } else { None };
         // Packs: copies, the modpack's own, its worlds.
         let where_chips = if self.where_mode() { self.where_chips(&a.file_name, cx) } else { Vec::new() };
         let pill = self.where_mode().then(|| self.where_pill(&a.file_name, cx));
@@ -4513,6 +4519,11 @@ It stays disabled after updating: turn it on in the On column.")
                 .filter(|_| !self.cols.action && !vlocked && !breaking && updating.is_none() && !from_web && !done)
                 .cloned(),
         );
+        // A pack in a ranked group: Move up / Move down after the rest.
+        let menu_fn: Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu> = match order_menu {
+            Some(extra) => Rc::new(move |m, w, cx| extra(menu_fn(m, w, cx))),
+            None => menu_fn,
+        };
         h_flex()
             .id(id("row"))
             .group(ROW_GROUP)
@@ -4542,6 +4553,7 @@ It stays disabled after updating: turn it on in the On column.")
                         .bg(theme.warning),
                 )
             })
+            .children(grip)
             .child(
                 drag_pick::handle(
                     col_check().id(id("pick")).h_full().flex().items_center().cursor_pointer(),
@@ -5450,10 +5462,14 @@ Change version", a.file_name).into()
             (col_hidden(settings, Col::Author), col_hidden(settings, Col::Side), col_hidden(settings, Col::Added));
         self.col_order = col_order(settings);
         let has_side = self.class != cf::CLASS_DATAPACKS && self.table.has_side && !no_side;
-        let mut c = Cols { date: !self.tight && !no_date, author: !no_author, side: has_side, side_inline: false, cap: false, rm: true, action: true };
+        let mut c = Cols { date: !self.tight && !no_date, author: !no_author, side: has_side, side_inline: false, cap: false, rm: true, action: true, pill_short: false };
         let mut compact = self.compact;
         if self.name_room(room, &c, compact) < NAME_MIN {
             c.date = false;
+        }
+        // Packs: the Where pill narrows (short labels) before the author goes.
+        if self.where_mode() && self.name_room(room, &c, compact) < NAME_MIN {
+            c.pill_short = true;
         }
         if self.name_room(room, &c, compact) < NAME_MIN {
             c.author = false;
@@ -5485,9 +5501,12 @@ Change version", a.file_name).into()
         let mut fixed = 3.0 + 1.4 + 1.5 + 2.5 + 4.0 + 4.0 - (trash_w(true) - trash_w(c.rm));
         // In-flow cells, the name included.
         let mut cells = 5;
+        // Packs' grip sits in the row's padding, so no order column; only
+        // the pill is wider than the Enabled switch.
+        let pill = if c.pill_short { crate::pack_where::PILL_W_SHORT } else { crate::pack_where::PILL_W };
         for (on, w) in [
-            (self.order_mode() || self.where_mode(), 5.75),
-            (self.where_mode(), crate::pack_where::PILL_W - 4.75),
+            (self.order_mode() && !self.where_mode(), 5.75),
+            (self.where_mode(), pill - 4.75),
             (self.action_fits() && c.action, if compact { widgets::SPLIT_W_COMPACT + 0.25 } else { 9.5 }),
             (c.author, 10.0),
             (c.side, 3.0),
@@ -6165,6 +6184,74 @@ impl Picks for AddonsView {
     }
 }
 
+impl AddonsView {
+    /// The tab's empty state when it has nothing in it and no search or
+    /// filter is on: the same block at the same height on every content
+    /// tab, worded for the tab, with one button to add some.
+    fn bare_empty(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.class == cf::CLASS_DATAPACKS && self.locs.is_empty() {
+            return Some(widgets::empty_top(self.no_datapack_folders(cx)).into_any_element());
+        }
+        let filtered = !(self.query.is_empty() && self.show == Show::All && !self.added_only && !self.cfg_changed_only);
+        // A global folder or world picked has its own empty state, in the table.
+        if filtered || self.global_dir().is_some() {
+            return None;
+        }
+        // Group headings alone (packs) aren't content.
+        let any = self.table.rows.iter().any(|r| matches!(r, Row::Addon(_) | Row::Loose(_) | Row::Copies(..)));
+        (!any).then(|| widgets::empty_top(self.content_empty(cx)).into_any_element())
+    }
+
+    /// "No mods yet" and the like, per tab, with the button that adds some.
+    fn content_empty(&self, cx: &mut Context<Self>) -> Div {
+        let (icon, title, body, add) = match self.class {
+            cf::CLASS_RESOURCE_PACKS => (
+                IconName::Image,
+                "No resource packs yet",
+                "They change how blocks, items and menus look. Find some, or drop .zip files on the window.",
+                "Add resource packs",
+            ),
+            cf::CLASS_SHADERS => (
+                IconName::Sun,
+                "No shaders yet",
+                "Shaders add light, shadows and water effects. They need Iris or Oculus.",
+                "Add shaders",
+            ),
+            cf::CLASS_DATAPACKS => (
+                IconName::Database,
+                "No data packs yet",
+                "They change recipes, loot and world generation, in every world or one.",
+                "Add data packs",
+            ),
+            _ if self.server => (
+                IconName::Package,
+                "No mods yet",
+                "Add content finds mods for this server, or drop .jar files on the window.",
+                "Add mods",
+            ),
+            _ => (
+                IconName::Package,
+                "No mods yet",
+                "Add content finds mods for this instance, or drop .jar files on the window.",
+                "Add mods",
+            ),
+        };
+        // A Hopper Server's data packs are added in its web UI for now
+        // (Browse installs into it through its mods route only).
+        let can_add = !(self.remote && self.class == cf::CLASS_DATAPACKS);
+        widgets::empty_state(icon, title, Some(body.into()), cx).when(can_add, |d| {
+            d.child(
+                Button::new("empty-add")
+                    .small()
+                    .primary()
+                    .icon(IconName::Plus)
+                    .label(add)
+                    .on_click(cx.listener(|this, _, _, cx| this.add_content(cx))),
+            )
+        })
+    }
+}
+
 impl Render for AddonsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _t = crate::frame_log::span("addons.render");
@@ -6217,9 +6304,10 @@ impl Render for AddonsView {
             Some(None) => return div().px_6().pt_4().child(widgets::skeleton_rows(6, rems(ROW_H), cx)).into_any_element(),
             None => {}
         }
-        // Data packs with no folder to show: what to do instead.
-        if self.class == cf::CLASS_DATAPACKS && self.locs.is_empty() {
-            return self.no_datapack_folders(cx);
+        // Nothing here at all (data packs: not even a folder for them): the
+        // tab's empty state, with no toolbar or columns, like Worlds.
+        if let Some(empty) = self.bare_empty(cx) {
+            return empty;
         }
         // A drag that ended anywhere: the headings stop saying "Drop here".
         if self.wh.dragging.is_some() && !cx.has_active_drag() {
@@ -6291,19 +6379,9 @@ impl Render for AddonsView {
             } else if let Some(empty) = self.location_empty(cx) {
                 empty
             } else {
-                widgets::empty_state(
-                    IconName::Package,
-                    "Nothing installed here yet",
-                    Some("Add content finds mods, packs and shaders for this instance.".into()),
-                    cx,
-                )
+                self.content_empty(cx)
             };
-            v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child(state)
-                .into_any_element()
+            widgets::empty_top(state).into_any_element()
         } else {
             div()
                 .id("addon-table")
