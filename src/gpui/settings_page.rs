@@ -3360,7 +3360,7 @@ impl SettingsPage {
                                     let freed = cx.background_spawn(async { hopper::imgcache::clear() }).await;
                                     // Shown again, they download anew.
                                     store.update(cx, |s, cx| {
-                                        s.forget_images();
+                                        s.forget_images(cx);
                                         cx.notify();
                                     });
                                     this.update_in(cx, |this, window, cx| {
