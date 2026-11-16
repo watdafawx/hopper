@@ -298,6 +298,9 @@ async fn refusals_carry_cors_for_listed_pages() {
     assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(h["access-control-allow-origin"], LISTED);
     assert!(body(&b)["error"].as_str().unwrap().contains("Too many"));
+    // It says how long to wait, so a client can try again by itself.
+    let wait: u64 = h["retry-after"].to_str().unwrap().parse().unwrap();
+    assert!((1..=60).contains(&wait), "{wait}");
     // The same refusals to an unlisted page: no CORS headers on any.
     for (m, p) in [("GET", "/api/v1/auth/me"), ("POST", "/api/v1/users")] {
         let (s, h, _) = call(m, p).origin(UNLISTED).bearer(&tok).json(json!({})).send(&t).await;

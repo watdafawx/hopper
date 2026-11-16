@@ -250,7 +250,11 @@ impl SyncPanel {
                 let rev = this.compare_key(cx);
                 if rev != this.seen_rev {
                     this.seen_rev = rev;
-                    this.rescan(cx);
+                    // Mid-sync each copied jar changes the server: the sync
+                    // compares once when it ends, not once per jar.
+                    if !this.running {
+                        this.rescan(cx);
+                    }
                 }
                 this.check_restarted(cx);
                 cx.notify();
@@ -3394,11 +3398,11 @@ fn read_crash(inst: &Instance, server: &ServerInfo) -> (Option<ServerCrash>, Vec
             Some((client, id, _)) => client.hashes(id, rels).unwrap_or_default(),
             None => Default::default(),
         },
-        |rel| {
-            reads.set(reads.get() + 1);
+        |rels| {
+            reads.set(reads.get() + rels.len() as u64);
             match &panel {
-                Some((client, id, _)) => client.read_text(id, rel).ok(),
-                None => std::fs::read_to_string(server.root.join(rel)).ok(),
+                Some((client, id, _)) => client.read_texts(id, rels),
+                None => rels.iter().filter_map(|r| std::fs::read_to_string(server.root.join(r)).ok().map(|t| (r.clone(), t))).collect(),
             }
         },
     );
