@@ -2283,6 +2283,7 @@ pub fn description_view(
                 let cached = cached.clone();
                 let clips = clips.clone();
                 let open = open.clone();
+                let pics = crate::thumbs::cache(cx);
                 let shown = tr.shown(md);
                 gpui_kit::base::TextView::markdown(
                     ElementId::Name(format!("{id}:{i}{}", if shown.is_some() { ":en" } else { "" }).into()),
@@ -2294,8 +2295,14 @@ pub fn description_view(
                     if let Some(c) = clips.get(uri.as_ref()) {
                         return ImageSource::Render(c.frame_now());
                     }
+                    // Through the picture cache, not GPUI's own, which keeps
+                    // every picture (and its GPU copy) until the app quits:
+                    // a run of description pages held hundreds of MB. The
+                    // text view sizes a picture by its pixels, so it is
+                    // decoded no narrower than the window (never smaller than
+                    // it can be shown, so it looks and lays out the same).
                     match cached.get(uri.as_ref()) {
-                        Some(p) => ImageSource::Resource(Resource::Path(p.clone())),
+                        Some(p) => pics.source(crate::thumbs::Cat::Gallery, p, crate::thumbs::Want::Window),
                         None => ImageSource::Image(blank_image()),
                     }
                 })
@@ -2817,7 +2824,15 @@ impl DescView {
             },
             None => return,
         };
-        let Some(wait) = description_wait(images, store) else {
+        // The store lets go of clips no page has drawn for a while (see
+        // `Store::trim_anims`); one this page shows again is asked for again.
+        let gone: Vec<String> = images.iter().filter(|k| !store.anim_known(k)).cloned().collect();
+        let wait = description_wait(images, store);
+        if !gone.is_empty() {
+            let store = self.store.clone();
+            cx.defer(move |cx| store.update(cx, |s, _| gone.iter().for_each(|k| s.want_anim(k))));
+        }
+        let Some(wait) = wait else {
             return;
         };
         // At most 25 redraws a second, however many GIFs are out of step.
