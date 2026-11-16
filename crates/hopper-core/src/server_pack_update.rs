@@ -743,6 +743,10 @@ pub fn apply(
     }
     let root = &server.root;
     let mut report = Report::default();
+    // What the server records before this changes it: Undo all puts it back
+    // with the files. No server pack record yet is a blank one.
+    let mut before = crate::backups::PackBefore::of_server(root);
+    before.server.get_or_insert_with(Marker::default);
 
     if let Some((have, want)) = &p.loader {
         crate::server_update::install_neoforge_server(root, want, java, job)?;
@@ -861,7 +865,12 @@ pub fn apply(
     // History shows what it set aside as one pack update, like an instance's.
     let version = crate::undo::version_of(&p.pack.file_name);
     let version = if version.is_empty() { p.pack.display_name.clone() } else { version };
-    crate::backups::mark_pack(root, stamp, &crate::backups::PackMark { name: server.name.clone(), version });
+    let mark = crate::backups::PackMark {
+        before: Some(before),
+        file_id: p.pack.id,
+        ..crate::backups::PackMark::new(server.name.clone(), version)
+    };
+    crate::backups::mark_pack(root, stamp, &mark);
     if backups.is_dir() {
         report.backups = Some(backups);
     }

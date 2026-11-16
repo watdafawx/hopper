@@ -859,7 +859,7 @@ impl AddonsView {
                     .justify_center()
                     .rounded_full()
                     .bg(theme.primary.opacity(widgets::alpha::TINT))
-                    .text_color(crate::theme::ink(theme.primary))
+                    .text_color(crate::theme::chip_ink(theme.primary))
                     .text_xs()
                     .font_bold()
                     .child(n.to_string()),

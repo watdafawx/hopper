@@ -130,6 +130,10 @@ pub struct ModChange {
     pub project: u64,
     /// Its icon's URL, when known.
     pub icon: String,
+    /// Where it lives, for the ones you added: "resourcepacks" or
+    /// "shaderpacks" for a pack, empty (or "mods") for a mod.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder: String,
 }
 
 /// A mod you turned off that the update touches: it stays off unless you
@@ -991,32 +995,39 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
             from: a.file_name.clone(),
             project: a.project_id,
             icon: a.icon.clone(),
+            folder: a.folder().to_string(),
             ..Default::default()
         })
         .collect();
-    // Jars the player dropped into the mods folder by hand: Hopper has no
-    // record of them, but they're theirs and the update leaves them.
-    let strays = {
-        let mut known: HashSet<String> = inst.addons.iter().map(|a| jar_key(&a.file_name)).collect();
-        known.extend(mods.iter().flat_map(|m| [jar_key(&m.from), jar_key(&m.to)]));
-        for rel in new.keys().chain(old.iter().flat_map(|o| o.keys())) {
-            if let Some(jar) = rel.strip_prefix("mods/") {
-                known.insert(jar_key(jar));
-            }
-        }
-        stray_jars(&inst.root.join("mods"), &known)
-    };
-    your_mods.extend(strays.iter().map(|jar| ModChange { name: jar.clone(), from: jar.clone(), ..Default::default() }));
+    // Mods and packs the player dropped in by hand: Hopper has no record of
+    // them, but they're theirs and the update leaves them.
+    let strays = hand_added(
+        &inst.root,
+        &inst.addons,
+        &mods,
+        new.keys().chain(old.iter().flat_map(|o| o.keys())).map(String::as_str),
+    );
+    your_mods.extend(strays.iter().map(|s| ModChange {
+        name: s.name.clone(),
+        from: s.name.clone(),
+        folder: s.folder.to_string(),
+        ..Default::default()
+    }));
     let mut skip_rels: HashSet<String> = new.keys().cloned().collect();
     if let Some(o) = &old {
         skip_rels.extend(o.keys().cloned());
     }
     skip_rels.extend(inst.addons.iter().map(|a| format!("{}/{}", a.folder(), a.file_name)));
+    let stray_jars: Vec<&str> = strays.iter().filter(|s| s.folder == "mods").map(|s| s.name.as_str()).collect();
     let your_ids = mod_ids(
         &inst.root.join("mods"),
-        yours.iter().filter(|a| a.folder() == "mods").map(|a| a.file_name.as_str()).chain(strays.iter().map(String::as_str)),
+        yours.iter().filter(|a| a.folder() == "mods").map(|a| a.file_name.as_str()).chain(stray_jars.iter().copied()),
     );
-    let (your_files, mod_made) = split_made(your_files(&inst.root, new.keys().map(String::as_str), &skip_rels), &your_ids);
+    // A pack listed in "Your mods" isn't listed again (file by file) in
+    // "Your files".
+    let mut listed = your_files(&inst.root, new.keys().map(String::as_str), &skip_rels);
+    listed.retain(|rel| !strays.iter().any(|s| s.holds(rel)));
+    let (your_files, mod_made) = split_made(listed, &your_ids);
     let owners = crate::configowner::file_owners(inst, files.iter().filter(|f| f.action == FileAction::Conflict).map(|f| f.rel.as_str()));
     Ok(UpdatePlan {
         file: file.clone(),
@@ -1148,23 +1159,133 @@ fn jar_key(name: &str) -> String {
     low.strip_suffix(".disabled").unwrap_or(&low).to_string()
 }
 
-/// Jars in `mods_dir` that aren't in `known` ([`jar_key`] names), sorted:
-/// the ones the player put there by hand.
-fn stray_jars(mods_dir: &Path, known: &HashSet<String>) -> Vec<String> {
-    let mut out: Vec<String> = fs::read_dir(mods_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| jar_key(n).ends_with(".jar") && !known.contains(&jar_key(n)))
-        .collect();
-    out.sort_by_key(|n| n.to_lowercase());
+/// The folders a player drops mods and packs into by hand.
+const ADDON_FOLDERS: [&str; 3] = ["mods", "resourcepacks", "shaderpacks"];
+
+/// A mod or pack the player put in by hand (Hopper has no record of it
+/// and the pack doesn't ship it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stray {
+    /// "mods", "resourcepacks" or "shaderpacks".
+    pub folder: &'static str,
+    /// Its file (or folder) name.
+    pub name: String,
+    /// An unzipped pack: a folder, not a file.
+    pub dir: bool,
+}
+
+impl Stray {
+    /// `rel` is this one, or a file inside it when it's a folder.
+    fn holds(&self, rel: &str) -> bool {
+        let low = rel.to_ascii_lowercase();
+        let me = format!("{}/{}", self.folder, self.name.to_ascii_lowercase());
+        if self.dir {
+            low.starts_with(&format!("{me}/"))
+        } else {
+            low == me || low.strip_suffix(".disabled") == Some(me.as_str())
+        }
+    }
+}
+
+/// The mods (jars in mods/) and packs (zips or folders in resourcepacks/
+/// and shaderpacks/) under `root` that the player put there by hand: not
+/// in `addons`, not one of the update's `mods`, and not a file the pack
+/// ships in its folders (`pack_rels`). Turned-off ones count too. Sorted
+/// by folder, then name.
+pub fn hand_added<'a>(
+    root: &Path,
+    addons: &[crate::instances::Addon],
+    mods: &[ModChange],
+    pack_rels: impl Iterator<Item = &'a str>,
+) -> Vec<Stray> {
+    // "folder/name" keys ([`jar_key`] names). The update's mod list has
+    // file names only, so those are known in every folder.
+    let mut known: HashSet<String> = addons.iter().map(|a| format!("{}/{}", a.folder(), jar_key(&a.file_name))).collect();
+    for m in mods {
+        for n in [&m.from, &m.to].into_iter().filter(|n| !n.is_empty()) {
+            known.extend(ADDON_FOLDERS.iter().map(|f| format!("{f}/{}", jar_key(n))));
+        }
+    }
+    for rel in pack_rels {
+        let Some((top, rest)) = rel.split_once('/') else { continue };
+        let top = top.to_ascii_lowercase();
+        if ADDON_FOLDERS.contains(&top.as_str()) {
+            // A pack the pack ships unzipped: its folder.
+            let first = rest.split('/').next().unwrap_or(rest);
+            known.insert(format!("{top}/{}", jar_key(first)));
+        }
+    }
+    let mut out = Vec::new();
+    for folder in ADDON_FOLDERS {
+        let mut found: Vec<Stray> = fs::read_dir(root.join(folder))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let t = e.file_type().ok()?;
+                let name = e.file_name().into_string().ok()?;
+                let key = jar_key(&name);
+                let dir = t.is_dir();
+                let kind_ok = match folder {
+                    "mods" => t.is_file() && key.ends_with(".jar"),
+                    // Iris keeps a shader's settings next to it
+                    // ("x.zip.txt"): only the packs themselves count.
+                    _ => (t.is_file() && key.ends_with(".zip")) || (dir && !name.starts_with('.')),
+                };
+                (kind_ok && !known.contains(&format!("{folder}/{key}"))).then_some(Stray { folder, name, dir })
+            })
+            .collect();
+        found.sort_by_key(|s| s.name.to_lowercase());
+        out.extend(found);
+    }
     out
+}
+
+/// "2 mods, 1 resource pack and 1 shader": what `list` (from
+/// [`UpdatePlan::your_mods`]) holds, by kind.
+pub fn added_kinds(list: &[ModChange]) -> String {
+    let n = |f: &str| list.iter().filter(|m| m.folder == f || (f == "mods" && m.folder.is_empty())).count();
+    let parts: Vec<String> = [("mods", "mod"), ("resourcepacks", "resource pack"), ("shaderpacks", "shader")]
+        .into_iter()
+        .filter_map(|(f, one)| Some(n(f)).filter(|c| *c > 0).map(|c| crate::words::count(c, one)))
+        .collect();
+    match parts.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// "the mod", "the shader", "the 3 mods", "2 mods and 1 shader": what you
+/// added, for "Stays: … you added".
+pub fn added_phrase(list: &[ModChange]) -> String {
+    match list {
+        [] => String::new(),
+        [one] => format!(
+            "the {}",
+            match one.folder.as_str() {
+                "resourcepacks" => "resource pack",
+                "shaderpacks" => "shader",
+                _ => "mod",
+            }
+        ),
+        // "the 1 mod, 1 shader" reads oddly: "the" only for one kind.
+        _ if list.iter().map(|m| if m.folder.is_empty() { "mods" } else { m.folder.as_str() }).collect::<HashSet<_>>().len() > 1 => added_kinds(list),
+        _ => format!("the {}", added_kinds(list)),
+    }
+}
+
+/// `list` holds a resource pack or shader, not only mods.
+pub fn added_packs(list: &[ModChange]) -> bool {
+    list.iter().any(|m| !m.folder.is_empty() && m.folder != "mods")
 }
 
 /// Folders where mods write their own settings files.
 const SETTINGS_DIRS: [&str; 2] = ["config", "defaultconfigs"];
+
+/// Folders in config/ that hold data and resource packs every world loads
+/// (Paxi, Open Loader), not settings.
+const CONFIG_PACK_DIRS: [&str; 3] = ["config/paxi/datapacks/", "config/paxi/resourcepacks/", "config/openloader/"];
 
 /// The mod ids of the jars `files` in `mods_dir` (lower case, with their
 /// display names), for telling their settings files apart.
@@ -1199,6 +1320,12 @@ pub fn split_made(files: Vec<String>, your_ids: &[String]) -> (Vec<String>, usiz
     let yours = files
         .into_iter()
         .filter(|rel| {
+            // Data and resource packs a loader mod reads from config/ are
+            // ones you put there, not settings a mod wrote.
+            let low = rel.to_ascii_lowercase();
+            if CONFIG_PACK_DIRS.iter().any(|d| low.starts_with(d)) {
+                return true;
+            }
             let Some((top, rest)) = rel.split_once('/') else { return true };
             if !SETTINGS_DIRS.iter().any(|d| top.eq_ignore_ascii_case(d)) {
                 return true;
@@ -1433,6 +1560,7 @@ fn cf_mod_changes(
                 action: ModAction::Remove,
                 project: a.project_id,
                 icon: a.icon.clone(),
+                ..Default::default()
             });
         }
     }
@@ -1535,6 +1663,7 @@ fn sort_pack_files(
             } else {
                 ModAction::Add
             },
+            ..Default::default()
         });
     }
     mine.sort_by_key(|m| m.name.to_lowercase());
@@ -1571,6 +1700,7 @@ fn mr_mod_changes(inst: &Instance, index: &modpack::MrIndex) -> Vec<ModChange> {
             action: ModAction::Remove,
             project: a.project_id,
             icon: a.icon.clone(),
+            ..Default::default()
         })
         .collect();
     for f in files {
@@ -1756,24 +1886,126 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A scratch instance folder with `files` (folders end in "/").
+    fn stray_root(tag: &str, files: &[&str]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hopper-packdiff-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for f in files {
+            let p = dir.join(f);
+            if let Some(d) = f.strip_suffix('/') {
+                fs::create_dir_all(dir.join(d)).unwrap();
+            } else {
+                fs::create_dir_all(p.parent().unwrap()).unwrap();
+                fs::write(p, b"x").unwrap();
+            }
+        }
+        dir
+    }
+
+    fn names(s: &[Stray]) -> Vec<String> {
+        s.iter().map(|s| format!("{}/{}", s.folder, s.name)).collect()
+    }
+
     #[test]
     fn a_jar_dropped_in_the_mods_folder_by_hand_is_yours() {
-        let dir = std::env::temp_dir().join(format!("hopper-packdiff-stray-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        for f in ["pack-mod.jar", "Pack-Off.jar.disabled", "AppleSkin-1.0.jar", "mine-off.jar.disabled", "readme.txt"] {
-            fs::write(dir.join(f), b"x").unwrap();
-        }
-        fs::create_dir_all(dir.join("sub.jar")).unwrap();
-        let known: HashSet<String> = ["pack-mod.jar", "pack-off.jar"].iter().map(|s| s.to_string()).collect();
+        let dir = stray_root(
+            "stray",
+            &["mods/pack-mod.jar", "mods/Pack-Off.jar.disabled", "mods/AppleSkin-1.0.jar", "mods/mine-off.jar.disabled", "mods/readme.txt", "mods/sub.jar/"],
+        );
+        let pack = |f: &str| crate::instances::Addon { file_name: f.into(), from_pack: true, ..Default::default() };
+        let addons = vec![pack("pack-mod.jar"), pack("Pack-Off.jar")];
         // A turned-off one counts too; folders and other files don't.
-        assert_eq!(stray_jars(&dir, &known), vec!["AppleSkin-1.0.jar", "mine-off.jar.disabled"]);
+        assert_eq!(names(&hand_added(&dir, &addons, &[], std::iter::empty())), ["mods/AppleSkin-1.0.jar", "mods/mine-off.jar.disabled"]);
         assert_eq!(jar_key("Pack-Off.jar.DISABLED"), "pack-off.jar");
-        // Everything known: nothing of yours.
-        let all: HashSet<String> = ["pack-mod.jar", "pack-off.jar", "appleskin-1.0.jar", "mine-off.jar"].iter().map(|s| s.to_string()).collect();
-        assert!(stray_jars(&dir, &all).is_empty());
-        assert!(stray_jars(&dir.join("missing"), &known).is_empty());
+        // Known some other way (the update's mods, the pack's files): not yours.
+        let mods = vec![ModChange { from: "appleskin-1.0.jar".into(), ..Default::default() }];
+        assert_eq!(names(&hand_added(&dir, &addons, &mods, ["mods/mine-off.jar"].into_iter())), Vec::<String>::new());
+        assert!(hand_added(&dir.join("missing"), &addons, &[], std::iter::empty()).is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resource_packs_and_shaders_dropped_in_by_hand_are_yours() {
+        let dir = stray_root(
+            "stray-packs",
+            &[
+                "resourcepacks/Mine 16x.zip",
+                "resourcepacks/Old Mine.zip.disabled",
+                "resourcepacks/Unzipped Pack/pack.mcmeta",
+                "resourcepacks/PackShipped.zip",
+                "resourcepacks/PackListed.zip",
+                "resourcepacks/Tracked.zip",
+                "resourcepacks/notes.txt",
+                "resourcepacks/.hidden/",
+                "resourcepacks/PackFolder/pack.mcmeta",
+                "shaderpacks/ComplementaryReimagined_r5.zip",
+                "shaderpacks/ComplementaryReimagined_r5.zip.txt",
+                "shaderpacks/MyShader/shaders/final.fsh",
+                "shaderpacks/BSL.zip",
+            ],
+        );
+        let addons = vec![
+            // Hopper's record of a pack-shipped resource pack and of a shader.
+            crate::instances::Addon { file_name: "Tracked.zip".into(), class_id: cf::CLASS_RESOURCE_PACKS, from_pack: true, ..Default::default() },
+            crate::instances::Addon { file_name: "BSL.zip".into(), class_id: cf::CLASS_SHADERS, from_pack: true, ..Default::default() },
+        ];
+        // One the update's mod list brings (a resource pack in the manifest).
+        let mods = vec![ModChange { from: "PackListed.zip".into(), to: "PackListed-2.zip".into(), action: ModAction::Update, ..Default::default() }];
+        // Ones the pack ships in its folders, zipped and unzipped.
+        let rels = ["resourcepacks/PackShipped.zip", "resourcepacks/PackFolder/pack.mcmeta", "config/x.toml"];
+        let found = hand_added(&dir, &addons, &mods, rels.into_iter());
+        assert_eq!(
+            names(&found),
+            [
+                "resourcepacks/Mine 16x.zip",
+                "resourcepacks/Old Mine.zip.disabled",
+                "resourcepacks/Unzipped Pack",
+                "shaderpacks/ComplementaryReimagined_r5.zip",
+                "shaderpacks/MyShader",
+            ]
+        );
+        assert!(found.iter().find(|s| s.name == "MyShader").unwrap().dir);
+        // A folder pack holds its files; a zip only itself.
+        let folder = found.iter().find(|s| s.name == "Unzipped Pack").unwrap();
+        assert!(folder.holds("resourcepacks/Unzipped Pack/pack.mcmeta"));
+        assert!(!folder.holds("resourcepacks/Unzipped Pack.zip"));
+        let zip = &found[0];
+        assert!(zip.holds("resourcepacks/mine 16x.zip"));
+        assert!(!zip.holds("resourcepacks/Mine 16x.zip.txt"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn what_you_added_is_named_by_kind() {
+        let m = |folder: &str| ModChange { folder: folder.into(), ..Default::default() };
+        assert_eq!(added_kinds(&[m(""), m("mods")]), "2 mods");
+        assert_eq!(added_kinds(&[m("mods"), m("resourcepacks"), m("shaderpacks"), m("shaderpacks")]), "1 mod, 1 resource pack and 2 shaders");
+        assert_eq!(added_kinds(&[m("resourcepacks"), m("resourcepacks")]), "2 resource packs");
+        assert_eq!(added_kinds(&[]), "");
+        assert_eq!(added_phrase(&[m("")]), "the mod");
+        assert_eq!(added_phrase(&[m("shaderpacks")]), "the shader");
+        assert_eq!(added_phrase(&[m("mods"), m("mods")]), "the 2 mods");
+        assert_eq!(added_phrase(&[m("mods"), m("mods"), m("resourcepacks")]), "2 mods and 1 resource pack");
+        assert_eq!(added_phrase(&[m("resourcepacks"), m("shaderpacks")]), "1 resource pack and 1 shader");
+        assert!(!added_packs(&[m(""), m("mods")]));
+        assert!(added_packs(&[m(""), m("resourcepacks")]));
+    }
+
+    #[test]
+    fn data_packs_you_added_in_config_are_yours() {
+        let files = vec![
+            "config/paxi/datapacks/my_tweaks.zip".to_string(),
+            "config/paxi/resourcepacks/MyRP.zip".to_string(),
+            "config/openloader/data/extra/pack.mcmeta".to_string(),
+            "config/paxi/paxi-common.toml".to_string(),
+        ];
+        let (yours, made) = split_made(files, &[]);
+        assert_eq!(
+            yours,
+            vec!["config/paxi/datapacks/my_tweaks.zip", "config/paxi/resourcepacks/MyRP.zip", "config/openloader/data/extra/pack.mcmeta"]
+        );
+        // Paxi's own settings are still the mod's.
+        assert_eq!(made, 1);
     }
 
     #[test]
@@ -2187,6 +2419,7 @@ mod tests {
             action: ModAction::Remove,
             project,
             icon: String::new(),
+            ..Default::default()
         };
         let mut mods = vec![change("cc-tweaked-1.120.2.jar", 1676502), change("gone-1.0.jar", 7)];
         let new: HashMap<String, String> = [

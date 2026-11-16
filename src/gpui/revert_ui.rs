@@ -138,6 +138,7 @@ pub fn revert_instance(store: &Entity<Store>, root: &Path, offer: &Offer, window
             hold(store, cx);
             let (file, need, name) = (offer.file_name.clone(), offer.need.clone(), offer.name.clone());
             store.read(cx).spawn_instance_job(root, format!("Reverting {name}"), move |job| {
+                crate::store::fresh(&mut inst);
                 let got = hopper::revert::from_source(&mut inst, &file, &need, job)?;
                 job.note(format!("Reverted {name} to {got}"));
                 Ok(crate::store::Msg::InstanceChanged(inst.root.clone()))

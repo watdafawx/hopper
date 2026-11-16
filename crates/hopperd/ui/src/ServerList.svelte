@@ -6,11 +6,12 @@
   // becomes a rail of tiles (desktop's server_rail). Right-click a server
   // for desktop's row menu: Open, Start / Stop / Restart, Open folder.
   //
-  // Other panels added to this page each get a group under this panel's,
-  // like desktop's server groups: chevron, light, name, "Hopper Server · N",
-  // its health (version and round trip) or what's wrong, in place. Each
-  // group loads on its own (lib/panels.svelte.js), so a dead one never
-  // holds the list.
+  // Other machines (Settings › Other machines) each get a group under this
+  // panel's, like desktop's server groups, the same for both kinds: chevron,
+  // light, name, a chip for how it's connected ("Node" or "Signed in"), then
+  // its servers and health ("3 servers · version · round trip") or what's
+  // wrong, in place. Each signed-in panel loads on its own
+  // (lib/panels.svelte.js), so a dead one never holds the list.
   //
   // Select (the tick-list button) picks servers across every group: click
   // or drag across rows, Shift+click for a range, Ctrl+A for all shown.
@@ -20,15 +21,15 @@
   // state.
   import { tick } from 'svelte';
   import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy, Compass, ChevronRight, ChevronDown, Ellipsis, ExternalLink, LogOut, Trash2, ListChecks, Terminal, Pause, Power, ArrowRightLeft } from '@lucide/svelte';
-  import { put, post } from './lib/api.js';
   import { bytes } from './lib/format.js';
-  import { panels, retry, signOut, removePanel, setOff, retryStuck } from './lib/panels.svelte.js';
+  import { panels, retry, signOut, setOff, retryStuck } from './lib/panels.svelte.js';
   import { onOnly, offOnly, SWITCH_TIP } from './lib/panelOff.js';
   import { tokenFor } from './lib/panelTokens.js';
   import { roleLabel } from './lib/me.svelte.js';
-  import { confirmIt } from './lib/dialog.svelte.js';
   import PanelSignIn from './PanelSignIn.svelte';
-  import AddPanel from './AddPanel.svelte';
+  import AddMachine from './AddMachine.svelte';
+  import { KIND, kindTip, keepsPanels, nodeLight, panelLight, serverCount, ago } from './lib/machines.js';
+  import { updateNode, maintainNode, dropPanel } from './lib/machineActions.js';
   import { power } from './lib/power.js';
   import { say } from './lib/toast.svelte.js';
   import { live } from './lib/live.svelte.js';
@@ -71,24 +72,11 @@
   const offPanels = $derived(offOnly(panels.list));
   const grouped = $derived(livePanels.length > 0 || nodes.length > 0);
   const nodeKey = (n) => `node:${n.id}`;
-  /** A node's light: green connected, amber reconnecting, new, updating, under maintenance or needing an update, red offline. */
-  const nodeLight = (n) => (n.state === 'offline' ? 'crashed' : n.state === 'connected' && !n.maintenance && n.update?.state !== 'updating' ? 'running' : 'starting');
-  // Updating a node runs its own update (design/multi-panel.md, A3).
-  async function updateNode(n) {
-    if (!(await confirmIt(`Update ${n.name} to hopperd ${homeVersion}?`, { body: 'It downloads the new Hopper Server from GitHub and restarts into it, as its own update does. Its servers keep running.', ok: 'Update' }))) return;
-    try {
-      await post(`/nodes/${encodeURIComponent(n.id)}/update`, {}, { home: true });
-      say(`Updating ${n.name}`);
-    } catch (e) {
-      say(e.message, true);
-    }
-  }
-  const CEILING = { look: 'Look only', operate: 'Operate', manage: 'Manage' };
   const secsAgo = (t) => (t ? ago(t * 1000) : '');
-  /** The node's health line: what it runs, its machine, and the RAM its servers may take. */
+  /** The node's health line: its servers, its machine, and the RAM its servers may take. */
   function nodeHealth(n) {
     const h = n.host;
-    const parts = ['Node'];
+    const parts = [serverCount(n.count ?? 0)];
     if (h) {
       parts.push(`CPU ${Math.round(h.cpu)}%`);
       if (h.mem_total) parts.push(`RAM ${Math.round(h.mem_used / 2 ** 30)} of ${Math.round(h.mem_total / 2 ** 30)} GB`);
@@ -99,29 +87,12 @@
     if (n.rtt_ms != null) parts.push(`${n.rtt_ms} ms`);
     return parts.join(' · ');
   }
-  async function maintain(n, on) {
-    if (on && !(await confirmIt(`Put ${n.name} under maintenance?`, { body: 'Its alerts go quiet and nothing new starts there from this panel. Servers that are running keep running.', ok: 'Pause node' }))) return;
-    try {
-      await put(`/nodes/${encodeURIComponent(n.id)}/maintenance`, { on }, { home: true });
-      say(on ? `${n.name} is under maintenance` : `${n.name} is out of maintenance`);
-    } catch (e) {
-      say(e.message, true);
-    }
-  }
   // Only people signed in with a password keep a list of panels.
-  const canAdd = $derived(homeRole && homeRole !== 'device' && homeRole !== 'token');
+  const canAdd = $derived(keepsPanels(homeRole));
   let adding = $state(false);
   const sorted = (list) => [...list].sort((a, b) => Number(alive(b)) - Number(alive(a)));
-  /** The group's light: green up, amber on its way or waiting for a sign-in, red when it can't be used. */
-  const light = (p) => (p.state === 'ok' ? 'running' : p.state === 'loading' || p.state === 'reconnecting' || p.state === 'signin' ? 'starting' : 'crashed');
   const dim = (p) => p.state !== 'ok';
   const canPowerOn = (p) => (p ? p.role !== 'viewer' : canPower);
-  function ago(ms) {
-    const s = Math.round((Date.now() - ms) / 1000);
-    if (s < 60) return 'just now';
-    if (s < 3600) return `${Math.round(s / 60)} min ago`;
-    return `${Math.round(s / 3600)} h ago`;
-  }
   const serverHref = (p, s, rest = '') => `#${p ? `/p/${encodeURIComponent(p.id)}` : ''}/server/${encodeURIComponent(s.id)}${rest}`;
   const isSel = (p, s) => selected === s.id && (p ? selectedPanel === p.id : !selectedPanel);
 
@@ -356,11 +327,6 @@
     if (m) f(m.s ?? m.g, m.p);
   }
 
-  async function drop(p) {
-    if (!(await confirmIt(`Remove ${p.name} from this page?`, { body: 'Its servers leave this list and this browser signs out of it. Nothing changes on that panel.', ok: 'Remove' }))) return;
-    removePanel(p);
-  }
-
   function menuKeys(e) {
     if (e.key === 'Escape' || e.key === 'Tab') {
       e.preventDefault();
@@ -419,7 +385,7 @@
   </a>
 {/snippet}
 
-{#snippet head(id, name, chipText, lightKey, p)}
+{#snippet head(id, name, chipText, chipTip, lightKey, p)}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <div class="gh" role="group" aria-label={name} oncontextmenu={p ? (e) => openMenu(e, null, null, p) : undefined}>
     <button class="gfold" aria-expanded={!fold[id]} title="{name}: {fold[id] ? 'show its servers' : 'hide its servers'}" onclick={() => flip(id)}>
@@ -428,7 +394,7 @@
       <span class="gnm">{name}</span>
     </button>
     <span class="gfill"></span>
-    {#if chipText}<span class="chip">{chipText}</span>{/if}
+    {#if chipText}<span class="chip" title={chipTip}>{chipText}</span>{/if}
     {#if p}<button class="btn ghost icon sm gmore" title="More" aria-label="More for {name}" onclick={(e) => openMenu(e, null, null, p)}><Ellipsis size={14} /></button>{/if}
   </div>
 {/snippet}
@@ -465,7 +431,7 @@
       <div class="fbar">
         {#if grouped}
           <select class="sel" aria-label="Show the servers of" value={panelFilter} onchange={(e) => setFilter('panel', e.currentTarget.value)}>
-            <option value="all">All panels</option>
+            <option value="all">All machines</option>
             <option value="home">{homeName || 'This panel'}</option>
             {#each nodes as n (n.id)}<option value={nodeKey(n)}>{n.name}</option>{/each}
             {#each livePanels as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
@@ -478,8 +444,8 @@
       {#if selecting && !pickedRows.length}<div class="hint">Click or drag across servers to pick them.</div>{/if}
     {/if}
     {#if grouped && showGroup('home')}
-      {@render head('home', homeName || 'This panel', homeRole ? roleLabel(homeRole) : '', live.connected ? 'running' : 'starting', null)}
-      <div class="health">Hopper Server · {homeAll.length} · this panel{homeVersion ? ` · ${homeVersion}` : ''}</div>
+      {@render head('home', homeName || 'This panel', KIND.home, kindTip('home', { role: homeRole ? roleLabel(homeRole) : '' }), live.connected ? 'running' : 'starting', null)}
+      <div class="health">{serverCount(homeAll.length)}{homeVersion ? ` · hopperd ${homeVersion}` : ''}</div>
     {/if}
     {#if showGroup('home') && (!grouped || !fold.home)}
       {#if loading}
@@ -527,9 +493,9 @@
     {#each nodes.filter((n) => showGroup(nodeKey(n))) as n, i (n.id)}
       {@const k = nodeKey(n)}
       {#if showGroup('home') || i > 0}<div class="gsep"></div>{/if}
-      {@render head(k, n.name, CEILING[n.ceiling] || '', nodeLight(n), { node: n })}
+      {@render head(k, n.name, KIND.node, kindTip('node', { ceiling: n.ceiling }), nodeLight(n), { node: n })}
       {#if n.maintenance}
-        <div class="health maint"><Pause size={11} /> Under maintenance{n.maintenance.by ? ` · by ${n.maintenance.by}` : ''}{n.maintenance.since ? ` ${secsAgo(n.maintenance.since)}` : ''} · nothing starts here{#if owner}{' · '}<button class="link" onclick={() => maintain(n, false)}>End maintenance</button>{/if}</div>
+        <div class="health maint"><Pause size={11} /> Under maintenance{n.maintenance.by ? ` · by ${n.maintenance.by}` : ''}{n.maintenance.since ? ` ${secsAgo(n.maintenance.since)}` : ''} · nothing starts here{#if owner}{' · '}<button class="link" onclick={() => maintainNode(n, false)}>End maintenance</button>{/if}</div>
       {/if}
       {#if n.update?.state === 'updating'}
         <div class="health">Updating · {n.update.message}</div>
@@ -540,7 +506,7 @@
       {:else if n.state === 'connected' || n.state === 'reconnecting'}
         <div class="health">{nodeHealth(n)}{n.state === 'reconnecting' ? ' · Reconnecting…' : ''}{n.can_update ? ' · update available' : ''}</div>
       {:else if n.state === 'new'}
-        <div class="health">Node · waiting for it to connect</div>
+        <div class="health">Waiting for it to connect</div>
       {:else}
         <div class="health trouble">Offline{n.last_seen ? ` · last seen ${secsAgo(n.last_seen)}` : ''}</div>
       {/if}
@@ -556,9 +522,9 @@
 
     {#each livePanels.filter((q) => showGroup(q.id)) as p, i (p.id)}
       {#if showGroup('home') || nodes.some((n) => showGroup(nodeKey(n))) || i > 0}<div class="gsep"></div>{/if}
-      {@render head(p.id, p.name, p.me && p.state !== 'signin' ? roleLabel(p.role) : '', light(p), p)}
+      {@render head(p.id, p.name, KIND.panel, kindTip('panel', { role: p.me && p.state !== 'signin' ? roleLabel(p.role) : '' }), panelLight(p), p)}
       {#if p.state === 'ok'}
-        <div class="health">Hopper Server · {p.servers.length}{p.version ? ` · ${p.version}` : ''}{p.ping != null ? ` · ${p.ping} ms` : ''}</div>
+        <div class="health">{serverCount(p.servers.length)}{p.version ? ` · hopperd ${p.version}` : ''}{p.ping != null ? ` · ${p.ping} ms` : ''}</div>
       {:else if p.state === 'loading'}
         <div class="health">Connecting…</div>
       {:else if p.state === 'reconnecting' || p.state === 'offline'}
@@ -594,7 +560,7 @@
     {/if}
 
     {#if canAdd}
-      <button class="btn sm ghost addp" onclick={() => (adding = true)}><Plus size={13} />Add a Hopper Server</button>
+      <button class="btn sm ghost addp" onclick={() => (adding = true)}><Plus size={13} />Add a machine</button>
     {/if}
     {#if selecting && pickedRows.length}
       <SelectionBar n={pickedRows.length} onClear={stopSelecting}>
@@ -611,7 +577,7 @@
 
 <svelte:window onpointerdown={away} onresize={closeMenu} onblur={closeMenu} />
 
-{#if adding}<AddPanel onClose={() => (adding = false)} />{/if}
+{#if adding}<AddMachine onClose={() => (adding = false)} />{/if}
 {#if bulk}<BulkAction action={bulk.action} groups={bulk.groups} onClose={() => (bulk = null)} />{/if}
 
 {#if menu?.g?.node}
@@ -621,11 +587,11 @@
     <button class="menu-item" role="menuitem" disabled={!nodeRows(n).length} onclick={() => pick((g) => pickNode(g.node))}><ListChecks size={14} />Select all on {n.name}</button>
     {#if owner}
       <div class="menu-sep"></div>
-      {#if n.maintenance}<button class="menu-item" role="menuitem" onclick={() => pick((g) => maintain(g.node, false))}><Play size={14} />End maintenance</button>
-      {:else}<button class="menu-item" role="menuitem" onclick={() => pick((g) => maintain(g.node, true))}><Pause size={14} />Pause node (maintenance)</button>{/if}
-      {#if n.can_update}<button class="menu-item" role="menuitem" onclick={() => pick((g) => updateNode(g.node))}><RefreshCw size={14} />Update to hopperd {homeVersion}</button>{/if}
+      {#if n.maintenance}<button class="menu-item" role="menuitem" onclick={() => pick((g) => maintainNode(g.node, false))}><Play size={14} />End maintenance</button>
+      {:else}<button class="menu-item" role="menuitem" onclick={() => pick((g) => maintainNode(g.node, true))}><Pause size={14} />Pause node (maintenance)</button>{/if}
+      {#if n.can_update}<button class="menu-item" role="menuitem" onclick={() => pick((g) => updateNode(g.node, homeVersion))}><RefreshCw size={14} />Update to hopperd {homeVersion}</button>{/if}
       <div class="menu-sep"></div>
-      <button class="menu-item" role="menuitem" onclick={() => pick(() => (location.hash = '/settings/nodes'))}><Server size={14} />Node settings</button>
+      <button class="menu-item" role="menuitem" onclick={() => pick(() => (location.hash = '/settings/machines'))}><Server size={14} />Other machines settings</button>
     {/if}
   </div>
 {:else if menu?.g}
@@ -637,7 +603,7 @@
     {#if tokenFor(g.url) && g.state !== 'signin'}<button class="menu-item" role="menuitem" onclick={() => pick((v) => signOut(v))}><LogOut size={14} />Sign out of it</button>{/if}
     <button class="menu-item" role="menuitem" title={SWITCH_TIP} onclick={() => pick((v) => setOff(v, true))}><Power size={14} />Turn off</button>
     <div class="menu-sep"></div>
-    <button class="menu-item" role="menuitem" onclick={() => pick(drop)}><Trash2 size={14} />Remove from this page</button>
+    <button class="menu-item" role="menuitem" onclick={() => pick(dropPanel)}><Trash2 size={14} />Remove from this page</button>
   </div>
 {:else if menu}
   {@const s = menu.s}

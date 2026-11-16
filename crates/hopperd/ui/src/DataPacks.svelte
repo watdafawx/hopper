@@ -349,8 +349,8 @@
   .nm { font-weight: 500; display: flex; gap: 6px; align-items: center; min-width: 0; }
   .tags { display: flex; gap: 4px; align-items: center; margin-top: 2px; min-width: 0; overflow: hidden; flex-wrap: nowrap; min-height: 17px; }
   .tag { font-size: 10.5px; padding: 0 6px; flex: none; }
-  .tag.info { color: var(--blue); background: var(--blue-dim); }
-  .tag.okc { color: var(--green); background: var(--green-dim); }
+  .tag.info { color: var(--ink-blue); background: var(--blue-dim); }
+  .tag.okc { color: var(--ink-green); background: var(--green-dim); }
   /* Group rows: quiet headings over their rows, not boxes. */
   .grp { display: flex; align-items: flex-end; gap: 8px; height: 40px; padding: 0 8px 6px; border: 1px dashed transparent; border-radius: var(--radius); font-size: 12px; color: var(--subtle); }
   .grp b { font-weight: 600; color: var(--text); white-space: nowrap; }
@@ -362,8 +362,8 @@
   .grp.drop .hint { color: var(--blue); }
   .wrapp { position: relative; min-width: 0; }
   .pill-w { width: 100%; max-width: 10.5rem; justify-content: space-between; border-color: transparent; background: #ededef14; }
-  .pill-w.lan { color: var(--blue); background: var(--blue-dim); }
-  .pill-w.running { color: var(--green); background: var(--green-dim); }
+  .pill-w.lan { color: var(--ink-blue); background: var(--blue-dim); }
+  .pill-w.running { color: var(--ink-green); background: var(--green-dim); }
   .pop { position: absolute; z-index: 70; top: calc(100% + 4px); right: 0; width: 290px; display: flex; flex-direction: column; }
   .d { display: block; }
   .c-end { gap: 2px; justify-content: flex-end; }

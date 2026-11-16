@@ -25,6 +25,8 @@ pub mod page;
 pub mod tree;
 pub mod url;
 
+pub use http::Check;
+
 use crate::cf::{self, Loader};
 use crate::install::Update;
 use crate::instances::{Addon, Instance};
@@ -300,13 +302,19 @@ pub(crate) fn mod_for(id: u64, src: &ModSource, name: &str) -> cf::Mod {
 /// Files the source offers for this Minecraft and loader, newest first
 /// (for the Versions list).
 pub fn files(id: u64, game_version: &str, loader: Loader) -> anyhow::Result<Vec<cf::File>> {
+    files_checked(id, game_version, loader, Check::Auto)
+}
+
+/// [`files`] for a list the player asked to see (Versions, a mod's page):
+/// GitHub is asked again even if a recent answer is cached.
+pub fn files_checked(id: u64, game_version: &str, loader: Loader, check: Check) -> anyhow::Result<Vec<cf::File>> {
     let (src, _) = known(id).context("unknown source")?;
     if let Some(t) = tree::of_url(&src.url) {
         let list = vec![to_file(id, &src, &tree_newest(&t, &src)?, game_version, loader, false)];
         FILES.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(id, list.clone());
         return Ok(list);
     }
-    let list: Vec<cf::File> = list_all(&src, game_version, loader)?
+    let list: Vec<cf::File> = list_all(&src, game_version, loader, check)?
         .into_iter()
         .filter(|c| c.fit.usable() && matches_pattern(&src.pattern, &c.file_name))
         .map(|c| to_file(id, &src, &c, game_version, loader, false))
@@ -406,12 +414,15 @@ pub fn parse_link(link: &str) -> anyhow::Result<ModSource> {
 }
 
 /// Every file the source offers, newest release first, each with its fit.
-fn list_all(src: &ModSource, mc: &str, loader: Loader) -> anyhow::Result<Vec<Candidate>> {
+/// `check`: whether GitHub's release list may come from a recent cached
+/// answer ([`Check::Auto`]) or is asked for again ([`Check::Manual`]). The
+/// other sources ask every time anyway.
+fn list_all(src: &ModSource, mc: &str, loader: Loader, check: Check) -> anyhow::Result<Vec<Candidate>> {
     if let Some(t) = tree::of_url(&src.url) {
         return Ok(vec![tree_newest(&t, src)?]);
     }
     let mut all = match src.kind {
-        Kind::GitHub => github::candidates(src)?,
+        Kind::GitHub => github::candidates(src, check)?,
         Kind::Maven => maven::candidates(src)?,
         Kind::Jenkins => jenkins::candidates(src)?,
         Kind::Url => url::candidates(src)?,
@@ -496,7 +507,8 @@ pub fn resolve(link: &str, mc: &str, loader: Loader, prerelease: bool) -> anyhow
 /// what kind of file it wants).
 pub(crate) fn resolve_class(link: &str, src: ModSource, mc: &str, loader: Loader) -> anyhow::Result<Resolved> {
     let tag = github::tag_in_link(link);
-    let all = list_all(&src, mc, loader)?;
+    // A link the player pasted: look at what GitHub has now.
+    let all = list_all(&src, mc, loader, Check::Manual)?;
     // A link to one release starts there; otherwise the newest that fits.
     let mut all: Vec<Candidate> = match tag {
         Some(t) if all.iter().any(|c| c.version == t) => {
@@ -504,7 +516,7 @@ pub(crate) fn resolve_class(link: &str, src: ModSource, mc: &str, loader: Loader
         }
         // Older than the recent list: ask for that release alone.
         Some(t) if src.kind == Kind::GitHub => {
-            let mut one = github::release_by_tag(&src, &t)?;
+            let mut one = github::release_by_tag(&src, &t, Check::Manual)?;
             for c in &mut one {
                 c.fit = fit_class(&c.file_name, &c.version, mc, loader, src.class);
             }
@@ -801,7 +813,9 @@ fn newest_for(src: &ModSource, all: &[Candidate]) -> Option<Candidate> {
 
 /// New files for the instance's source-tracked mods. Mods sharing a
 /// source ask it once; GitHub answers come from the cache when unchanged.
-pub fn updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
+/// `check` says who asked: a look by hand ([`Check::Manual`]) always asks
+/// GitHub, an automatic one may use an answer from the last few minutes.
+pub fn updates(inst: &Instance, check: Check) -> anyhow::Result<Vec<Update>> {
     let loader = crate::install::loader_of(inst);
     if !enabled() {
         return Ok(Vec::new());
@@ -819,7 +833,7 @@ pub fn updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
     for a in mods {
         let Some(src) = a.source.as_ref() else { continue };
         let key = format!("{}|{}", src.key(), src.prerelease);
-        let all = by_source.entry(key).or_insert_with(|| list_all(src, &inst.game_version, loader));
+        let all = by_source.entry(key).or_insert_with(|| list_all(src, &inst.game_version, loader, check));
         let all = match all {
             Ok(all) => {
                 settle(all, &src.pattern, &inst.game_version, loader);
@@ -942,7 +956,7 @@ pub fn plan_adopt(inst: &Instance, file_name: &str, link: &str, prerelease: bool
     // Every listed file, pre-releases too: the jar may be one.
     let mut every = src.clone();
     every.prerelease = true;
-    let all = list_all(&every, &inst.game_version, loader)?;
+    let all = list_all(&every, &inst.game_version, loader, Check::Manual)?;
     let version = if info.version.is_empty() { crate::scan::version_from_file_name(file_name) } else { info.version.clone() };
     let (mut matched, pattern) = match_jar(&all, &sha, file_name, &version);
     // Older than the recent list: ask GitHub for the release named after
@@ -952,7 +966,7 @@ pub fn plan_adopt(inst: &Instance, file_name: &str, link: &str, prerelease: bool
         && tag_version(tag) != *v
     {
         for t in [format!("v{v}"), v.clone()] {
-            if let Ok(one) = github::release_by_tag(&src, &t) {
+            if let Ok(one) = github::release_by_tag(&src, &t, Check::Manual) {
                 matched = if one.iter().any(|c| c.digest.eq_ignore_ascii_case(&sha)) {
                     Matched::Exact { tag: t }
                 } else {
@@ -1300,7 +1314,8 @@ pub fn pinned_candidate(src: &ModSource, file_name: &str) -> anyhow::Result<Cand
         return Ok(tree::candidate(&t, &commit, 0));
     }
     let mut list = match src.kind {
-        Kind::GitHub => github::release_by_tag(src, &src.seen)?,
+        // A pin is a fixed release: the cached answer is as good as a new one.
+        Kind::GitHub => github::release_by_tag(src, &src.seen, Check::Auto)?,
         Kind::Maven => vec![Candidate {
             url: format!("{}/{}/{file_name}", src.url, src.seen),
             file_name: file_name.to_string(),

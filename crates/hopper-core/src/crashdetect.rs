@@ -1582,19 +1582,22 @@ pub struct ConfigDiff {
 /// crash names, then whole files. `server_text` reads a file of the server
 /// (relative path), there or through Hopper Server.
 pub fn config_differs(inst_root: &Path, c: &Crash, server_text: impl Fn(&str) -> Option<String>) -> Vec<ConfigDiff> {
-    config_differs_with(inst_root, c, |_| std::collections::HashMap::new(), server_text)
+    let texts = |rels: &[String]| rels.iter().filter_map(|r| server_text(r).map(|t| (r.clone(), t))).collect();
+    config_differs_with(inst_root, c, |_| std::collections::HashMap::new(), texts)
 }
 
 /// [`config_differs`] for a server that is far away (Hopper Server): its
 /// files' content hashes come in one request (`server_hashes`, as
-/// [`crate::hopperd::Client::hashes`]), and the text of a file is asked for
-/// only when its hash differs from the instance's copy. A file the server
-/// has no hash for is read as before. The result is the same either way.
+/// [`crate::hopperd::Client::hashes`]), and the text of the files whose
+/// hash differs from the instance's copy in one more (`server_texts`, as
+/// [`crate::hopperd::Client::read_texts`]; a file left out of its answer
+/// isn't compared). A file the server has no hash for is read as before.
+/// The result is the same either way.
 pub fn config_differs_with(
     inst_root: &Path,
     c: &Crash,
     server_hashes: impl Fn(&[String]) -> std::collections::HashMap<String, String>,
-    server_text: impl Fn(&str) -> Option<String>,
+    server_texts: impl Fn(&[String]) -> std::collections::HashMap<String, String>,
 ) -> Vec<ConfigDiff> {
     let norm = |t: &str| t.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
     let mut out: Vec<ConfigDiff> = Vec::new();
@@ -1619,14 +1622,22 @@ pub fn config_differs_with(
     }
     let rels: Vec<String> = wanted.iter().map(|w| w.1.clone()).collect();
     let theirs_hash = if rels.is_empty() { Default::default() } else { server_hashes(&rels) };
+    let mut differ: Vec<(String, String, String)> = Vec::new();
     for (mod_id, rel) in wanted {
         let Ok(mine) = fs::read_to_string(inst_root.join(&rel)) else { continue };
         // The very same bytes: nothing to read from the server.
         if theirs_hash.get(&rel).is_some_and(|h| *h == sha1_smol::Sha1::from(mine.as_bytes()).hexdigest()) {
             continue;
         }
-        let Some(theirs) = server_text(&rel) else { continue };
-        if norm(&mine) != norm(&theirs) {
+        differ.push((mod_id, rel, mine));
+    }
+    // Every file still in question in one ask, not one ask per file: a big
+    // pack's crash named enough mods to hit Hopper Server's rate limit.
+    let rels: Vec<String> = differ.iter().map(|d| d.1.clone()).collect();
+    let theirs_text = if rels.is_empty() { Default::default() } else { server_texts(&rels) };
+    for (mod_id, rel, mine) in differ {
+        let Some(theirs) = theirs_text.get(&rel) else { continue };
+        if norm(&mine) != norm(theirs) {
             out.push(ConfigDiff { mod_id, file: rel, setting: None });
         }
     }
@@ -3493,11 +3504,12 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         let rel = "config/mymod-common.toml";
         let sha = |t: &str| sha1_smol::Sha1::from(t.as_bytes()).hexdigest();
         let reads = Cell::new(0);
+        // Counts asks, not files: every file in question goes in one.
         let text = |t: &'static str| {
             let reads = &reads;
-            move |_: &str| {
+            move |rels: &[String]| {
                 reads.set(reads.get() + 1);
-                Some(t.to_string())
+                rels.iter().map(|r| (r.clone(), t.to_string())).collect::<HashMap<_, _>>()
             }
         };
         let hashes = |h: String| move |_: &[String]| HashMap::from([(rel.to_string(), h.clone())]);
@@ -3516,6 +3528,13 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         reads.set(0);
         let d = config_differs_with(&inst, &c, |_| HashMap::new(), text("a = 9\n"));
         assert_eq!((d.len(), reads.get()), (1, 1));
+        // Several files of the mod differ: still one ask for their text.
+        fs::write(inst.join("config/mymod-server.toml"), mine).unwrap();
+        fs::write(inst.join("config/mymod-client.toml"), mine).unwrap();
+        reads.set(0);
+        let d = config_differs_with(&inst, &c, |_| HashMap::new(), text("a = 9\n"));
+        assert_eq!(reads.get(), 1);
+        assert!(d.len() >= 2, "{d:?}");
         let _ = fs::remove_dir_all(&inst);
     }
 

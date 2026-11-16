@@ -985,6 +985,50 @@ impl Store {
         Some((r.error.as_str(), r.next.is_some()))
     }
 
+    /// Followed and group packs Hopper stopped updating by itself (the same
+    /// failure too many times), with one line each for the Friends panel:
+    /// (instance root, what happened).
+    pub fn given_up(&self) -> Vec<(PathBuf, String)> {
+        let mut out = Vec::new();
+        for c in &self.settings.group_copies {
+            let Some(r) = self.group_retry.get(&c.local).filter(|r| r.gave_up && !c.waiting.is_empty() && r.code == newest_waiting(c)) else { continue };
+            let Some(i) = self.instances.iter().find(|i| i.id == c.local) else { continue };
+            out.push((i.root.clone(), format!("Hopper stopped trying to update {} with the group's changes. {}", i.name, r.error)));
+        }
+        for (root, r) in &self.follow_retry {
+            let Some(f) = self.follow_at(root).filter(|f| r.gave_up && f.waiting() && r.code == f.seen) else { continue };
+            let name = self.instance(root).map(|i| i.name.clone()).unwrap_or_else(|| f.name.clone());
+            let who = if f.peer_name.is_empty() { "your friend" } else { &f.peer_name };
+            out.push((root.clone(), format!("Hopper stopped trying to update {name} with {who}'s changes. {}", r.error)));
+        }
+        out.extend(self.given_up_preview.iter().cloned());
+        out.sort_by(|a, b| a.1.cmp(&b.1));
+        out
+    }
+
+    /// `--dialog given-up`: a sample line for the Friends panel, to check
+    /// its layout without a pack that keeps failing. Try again clears it.
+    pub fn preview_given_up(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let t = "Hopper stopped trying to update Mia's Skyblock with the group's changes. The mod sites wouldn't give Hopper that file.";
+        self.given_up_preview = vec![(root, t.to_string())];
+        cx.notify();
+    }
+
+    /// "Try again" on a pack Hopper stopped updating by itself: its failed
+    /// tries are forgotten and it's tried now, as after a restart.
+    pub fn try_follow_again(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let r = match self.group_copy(root).map(|c| c.local.clone()) {
+            Some(local) => self.group_retry.remove(&local),
+            None => self.follow_retry.remove(root),
+        };
+        if let Some(r) = r {
+            self.jobs.dismiss(r.job);
+        }
+        self.given_up_preview.retain(|(p, _)| p != root);
+        self.follow_tick(cx);
+        cx.notify();
+    }
+
     /// Whether the follow at `root` is being updated now, or will be as
     /// soon as another task on it ends or its game finishes launching.
     pub fn follow_updating(&self, root: &Path) -> bool {
@@ -1337,6 +1381,12 @@ impl Store {
         if let Some(says) = merged.pack_done {
             cx.emit(StoreEvent::Notice(says, false));
         }
+        // Members' changes left out here (a locked mod): the player sees
+        // why their copy differs, once per change, in one notice per merge.
+        let kept: Vec<String> = merged.kept.iter().map(|k| k.says()).filter(|s| self.kept_said.insert(format!("{local}|{s}"))).collect();
+        if !kept.is_empty() {
+            cx.emit(StoreEvent::Notice(kept.join(" "), false));
+        }
         if merged.held {
             if self.group_held.get(&local).is_none_or(|(s, _)| *s != sent_seq) {
                 self.group_held.insert(local, (sent_seq, Instant::now()));
@@ -1662,24 +1712,42 @@ impl Store {
         self.keep_in_step(cx);
     }
 
-    /// For each group kept in step: every group pack a member follows is
-    /// followed here too, as a new instance, unless this PC already
-    /// follows it or stopped following it (`groupsync::to_follow`).
+    /// For each group kept in step: every group pack a member follows that
+    /// this PC hasn't followed, or said Not now to, is offered once with
+    /// Get / Not now (`groupsync::to_follow`). Nothing is downloaded until
+    /// the player says so: a whole modpack can be gigabytes.
     fn keep_in_step(&mut self, cx: &mut Context<Self>) {
-        // `auto_following` covers the minutes before the new instance
-        // exists; from then on the follow is in settings.
+        // `pack_offered` covers an offer still up (or closed) this run;
+        // `auto_following` the minutes before a new instance exists. From
+        // then on the follow is in settings, and Not now in `stopped`.
         let todo = groupsync::to_follow(&self.settings, &self.mailbox_groups, &self.mailbox_recipes, &self.mailbox_id(), |k| {
-            self.auto_following.contains(k)
+            self.auto_following.contains(k) || self.pack_offered.contains(k)
         });
-        for (e, gid, gname) in todo {
-            let req = FollowReq::of(&e);
-            self.auto_following.insert(format!("{}/{}", req.peer_id, req.inst));
-            cx.emit(StoreEvent::Notice(
-                format!("Following {}'s {}, so your packs stay the same as {gname}.", req.who(), req.pack()),
-                false,
-            ));
-            self.follow(req, FollowTarget::New, None, &gid, cx);
+        for (e, gid, _) in todo {
+            self.pack_offered.insert(format!("{}/{}", e.from, e.inst));
+            let mut req = FollowReq::of(&e);
+            if req.peer_name.is_empty() {
+                req.peer_name = self.friend_name(&e.from);
+            }
+            let text = format!("{} shared {}. Get it?", req.who(), req.pack());
+            cx.emit(StoreEvent::PackOffer { e: Box::new(e), group: gid, text });
         }
+    }
+
+    /// Not now on a new group pack's offer: it isn't offered again, as if
+    /// this PC had stopped following it.
+    pub fn not_now_pack(&mut self, from: &str, inst: &str, group: &str, cx: &mut Context<Self>) {
+        let key = format!("{from}/{inst}");
+        self.update_settings(
+            |st| {
+                for g in st.friend_groups.iter_mut().filter(|g| g.id == group) {
+                    if !g.stopped.contains(&key) {
+                        g.stopped.push(key.clone());
+                    }
+                }
+            },
+            cx,
+        );
     }
 
     /// Starts following. `skip`: the player's answer about mods from other
@@ -1922,6 +1990,8 @@ impl Store {
                 s.follow_tick(cx);
                 // Shared mod settings changed here, or waiting to go in.
                 s.config_tick(cx);
+                // Changes waiting to go out, for the Friends icon's count.
+                s.refresh_unsent(cx);
                 let mb = s.mailbox.clone()?;
                 if !read {
                     return Some((mb, None));
@@ -1964,6 +2034,11 @@ impl Store {
                 }
             };
             let Ok(Some(work)) = work else { continue };
+            this.update(cx, |s, cx| {
+                s.publishing = true;
+                cx.notify();
+            })
+            .ok();
             let done = {
                 let mb = mb.clone();
                 cx.background_spawn(async move { work.run(&mb) }).await
@@ -2025,7 +2100,7 @@ impl Store {
                 let copy = copies
                     .iter()
                     .find(|c| c.local == p.inst && c.inst == p.inst && p.groups.contains(&c.group))
-                    .map(|c| CopyOut { copy: c.clone(), member: false });
+                    .map(|c| CopyOut { copy: c.clone(), member: false, named: Vec::new() });
                 Some((inst, p, copy))
             })
             .collect();
@@ -2033,8 +2108,9 @@ impl Store {
         for c in copies.iter().filter(|c| c.local != c.inst) {
             let Some(inst) = self.instances.iter().find(|i| i.id == c.local) else { continue };
             let to = PublishTo { inst: c.local.clone(), to: Vec::new(), groups: vec![c.group.clone()] };
-            packs.push((inst.clone(), to, Some(CopyOut { copy: c.clone(), member: true })));
+            packs.push((inst.clone(), to, Some(CopyOut { copy: c.clone(), member: true, named: self.sharers_hand_added(c) })));
         }
+        let pack_sigs = packs.iter().filter_map(|(i, _, _)| self.share_sig(&i.id).map(|s| (i.id.clone(), s))).collect();
         // Where to look for each pack that seems deleted: where it was last
         // seen, else the instances folder.
         let homes = stale
@@ -2052,11 +2128,47 @@ impl Store {
             homes,
             instances_root: PathBuf::from(&self.settings.instances_root),
             me: self.mailbox_id(),
+            pack_sigs,
+        })
+    }
+
+    /// The hand-added files the sharer named for the group pack `c` (they
+    /// can't be downloaded, so this PC doesn't have them): a member's copy
+    /// passes the names on, so every member still sees what's missing.
+    fn sharers_hand_added(&self, c: &PackCopy) -> Vec<String> {
+        let followed = self.settings.followed_recipes.iter().find(|f| f.local == c.local && f.inst == c.inst).map(|f| f.left_out.clone());
+        followed.unwrap_or_else(|| {
+            self.mailbox_recipes
+                .iter()
+                .rev()
+                .find(|e| e.inst == c.inst && e.key != groupsync::COPY_KEY && e.kind() == Kind::Recipe)
+                .map(|e| e.left_out.clone())
+                .unwrap_or_default()
         })
     }
 
     fn publish_done(&mut self, done: PublishDone, cx: &mut Context<Self>) {
         self.mailbox_sig = done.sig;
+        self.publishing = false;
+        for id in &done.sent_ids {
+            if let Some(s) = done.pack_sigs.get(id) {
+                self.sent_sigs.insert(id.clone(), *s);
+            }
+        }
+        // A failed send is said once, not on every retry; the change stays
+        // in the waiting count until it goes.
+        if done.problems.is_empty() {
+            if !done.failed {
+                self.publish_said = None;
+            }
+        } else {
+            let text = done.problems.join(" ");
+            if self.publish_said.as_deref() != Some(text.as_str()) {
+                cx.emit(StoreEvent::Notice(text.clone(), true));
+                self.publish_said = Some(text);
+            }
+        }
+        self.refresh_unsent(cx);
         if done.failed {
             self.publish_failed_at = Some(Instant::now());
         }
@@ -2096,34 +2208,151 @@ impl Store {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.instances.len().hash(&mut h);
         for i in &self.instances {
-            i.id.hash(&mut h);
-            i.name.hash(&mut h);
-            i.game_version.hash(&mut h);
-            i.loader.hash(&mut h);
-            i.only_here.keys().for_each(|k| k.hash(&mut h));
-            if let Some(p) = &i.pack {
-                p.project_id.hash(&mut h);
-                p.file_id.hash(&mut h);
-                p.mr_project.hash(&mut h);
-                p.mr_version.hash(&mut h);
-                p.name.hash(&mut h);
-            }
-            for a in &i.addons {
-                a.project_id.hash(&mut h);
-                a.file_id.hash(&mut h);
-                a.enabled.hash(&mut h);
-                a.mr_version.hash(&mut h);
-                a.class_id.hash(&mut h);
-                if let Some(s) = &a.source {
-                    s.url.hash(&mut h);
-                    s.seen.hash(&mut h);
-                    s.sha256.hash(&mut h);
-                    s.class.hash(&mut h);
-                }
-            }
+            hash_share(i, &mut h);
         }
         h.finish()
     }
+
+    /// The ids of the packs this PC sends: its shares, and its copies of
+    /// other members' group packs.
+    fn sent_ids(&self) -> Vec<String> {
+        let live: Vec<String> = self.instances.iter().filter(|i| !i.id.is_empty()).map(|i| i.id.clone()).collect();
+        let friends: Vec<String> = self.mailbox_friends.iter().map(|f| f.id.clone()).collect();
+        let joined: Vec<String> = self.settings.friend_groups.iter().map(|g| g.id.clone()).collect();
+        let mut ids: Vec<String> = self.settings.publish_plan(&live, &friends, &joined).into_iter().map(|p| p.inst).collect();
+        for c in self.settings.group_copies.iter().filter(|c| c.local != c.inst) {
+            if !ids.contains(&c.local) && live.contains(&c.local) {
+                ids.push(c.local.clone());
+            }
+        }
+        ids
+    }
+
+    /// How the pack `id` looks to a friend: what its share code reads, and
+    /// the group's shared settings that ride along with it.
+    fn share_sig(&self, id: &str) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let i = self.instances.iter().find(|i| i.id == id)?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        hash_share(i, &mut h);
+        for c in self.settings.group_copies.iter().filter(|c| c.local == id) {
+            let mut cfg = c.configs.clone();
+            cfg.relay_reset();
+            serde_json::to_string(&cfg).unwrap_or_default().hash(&mut h);
+        }
+        Some(h.finish())
+    }
+
+    /// Works out which shared packs have changes that haven't gone out
+    /// (Hopper is offline, or the last send failed). The first look at a
+    /// pack counts as sent: what changed while Hopper was closed can't be
+    /// told apart from what went out before.
+    fn refresh_unsent(&mut self, cx: &mut Context<Self>) {
+        if self.mailbox.is_none() && self.mailbox_error.is_none() {
+            if !self.unsent.is_empty() {
+                self.unsent.clear();
+                cx.notify();
+            }
+            return;
+        }
+        let ids = self.sent_ids();
+        let mut unsent = Vec::new();
+        for id in &ids {
+            let Some(sig) = self.share_sig(id) else { continue };
+            match self.sent_sigs.get(id) {
+                Some(s) if *s == sig => {}
+                Some(_) => unsent.push(self.instances.iter().find(|i| &i.id == id).map(|i| i.name.clone()).unwrap_or_default()),
+                // A pack shared for the first time during this run hasn't
+                // gone out yet either.
+                None if self.sent_seeded => unsent.push(self.instances.iter().find(|i| &i.id == id).map(|i| i.name.clone()).unwrap_or_default()),
+                None => {
+                    self.sent_sigs.insert(id.clone(), sig);
+                }
+            }
+        }
+        if !self.instances.is_empty() {
+            self.sent_seeded = true;
+        }
+        if unsent != self.unsent {
+            self.unsent = unsent;
+            cx.notify();
+        }
+    }
+
+    /// Names of the shared packs whose changes are waiting to be sent.
+    pub fn unsent_packs(&self) -> &[String] {
+        &self.unsent
+    }
+
+    /// One plain line about changes waiting to be sent, if any.
+    pub fn unsent_line(&self) -> Option<String> {
+        let down = matches!(self.sync_status(), SyncStatus::Down(_));
+        waiting_line(&self.unsent, down, self.publishing)
+    }
+}
+
+/// Everything about one instance that its share code reads.
+fn hash_share(i: &hopper::instances::Instance, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    i.id.hash(h);
+    i.name.hash(h);
+    i.game_version.hash(h);
+    i.loader.hash(h);
+    i.only_here.keys().for_each(|k| k.hash(h));
+    if let Some(p) = &i.pack {
+        p.project_id.hash(h);
+        p.file_id.hash(h);
+        p.mr_project.hash(h);
+        p.mr_version.hash(h);
+        p.name.hash(h);
+    }
+    for a in &i.addons {
+        a.project_id.hash(h);
+        a.file_id.hash(h);
+        a.enabled.hash(h);
+        a.mr_version.hash(h);
+        a.class_id.hash(h);
+        if let Some(s) = &a.source {
+            s.url.hash(h);
+            s.seen.hash(h);
+            s.sha256.hash(h);
+            s.class.hash(h);
+        }
+    }
+}
+
+/// The files a member's copy names as hand-added: its own, then the
+/// sharer's it doesn't have, each once.
+fn with_names(own: &[String], sharers: &[String]) -> Vec<String> {
+    let mut out = own.to_vec();
+    for n in sharers {
+        if !out.contains(n) {
+            out.push(n.clone());
+        }
+    }
+    out
+}
+
+/// The line about changes waiting to be sent: `names` of the packs, whether
+/// Hopper can't reach friends right now, and whether a send is on its way.
+fn waiting_line(names: &[String], down: bool, sending: bool) -> Option<String> {
+    let what = match names {
+        [] => return None,
+        [one] if !one.is_empty() => format!("your changes to {one}"),
+        [_] => "your changes to 1 pack".to_string(),
+        many => format!("your changes to {} packs", many.len()),
+    };
+    Some(if sending && !down {
+        format!("Sending {what}…")
+    } else {
+        let mut s = what;
+        s[..1].make_ascii_uppercase();
+        if down {
+            format!("{s} are waiting to be sent. They go out by themselves when Hopper can connect again.")
+        } else {
+            format!("{s} are waiting to be sent. Hopper tries again in a minute.")
+        }
+    })
 }
 
 /// A group copy going out with a publish: the copy as it was, and whether
@@ -2131,6 +2360,8 @@ impl Store {
 struct CopyOut {
     copy: PackCopy,
     member: bool,
+    /// A member's copy: the sharer's hand-added files, passed on by name.
+    named: Vec<String>,
 }
 
 /// A group copy that went out: its code, number and own changes' marks.
@@ -2155,6 +2386,8 @@ struct PublishWork {
     instances_root: PathBuf,
     /// This PC's mailbox id, for its own changes' marks.
     me: String,
+    /// Each pack's look (by id) as this publish sends it.
+    pack_sigs: HashMap<String, u64>,
 }
 
 struct PublishDone {
@@ -2168,6 +2401,12 @@ struct PublishDone {
     /// A pack missing from the list was still on disk, so it wasn't taken
     /// back.
     held: bool,
+    /// The packs (by id) that went out, and how each looked then.
+    sent_ids: Vec<String>,
+    pack_sigs: HashMap<String, u64>,
+    /// What to tell the player about packs that couldn't be sent; empty
+    /// when Hopper only couldn't connect (the Friends panel says that).
+    problems: Vec<String>,
 }
 
 impl PublishWork {
@@ -2180,6 +2419,9 @@ impl PublishWork {
             copies: Vec::new(),
             failed: false,
             held: false,
+            sent_ids: Vec::new(),
+            pack_sigs: self.pack_sigs,
+            problems: Vec::new(),
         };
         for (s, reason) in self.stale {
             // Missing from the list isn't deleted: a pack whose file was
@@ -2231,8 +2473,14 @@ impl PublishWork {
                 Err(e) => {
                     log::warn!("making the share code of {}: {e:#}", inst.name);
                     out.failed = true;
+                    out.problems.push(format!("Couldn't send your changes to {}. Hopper tries again in a minute.", inst.name));
                     continue;
                 }
+            };
+            // A member's copy names the sharer's hand-added files too.
+            let left_out = match &copy {
+                Some(c) if c.member => with_names(&made.left_out, &c.named),
+                _ => made.left_out.clone(),
             };
             // A group copy says when each mod got the way it is, so a change
             // it only passes on keeps its own date (see `groupsync::Stamp`).
@@ -2240,8 +2488,9 @@ impl PublishWork {
             // The group's shared mod settings ride along whole, so a member
             // who was away catches up from this one recipe.
             let (configs, carried, too_big) = copy.as_ref().map(|c| super::config_sync::payload(&c.copy.configs)).unwrap_or_default();
-            match mb.publish_with(&plan.to, &plan.groups, &relay_inst, &key, &inst.name, &made.code, &made.left_out, &marks, &configs) {
+            match mb.publish_with(&plan.to, &plan.groups, &relay_inst, &key, &inst.name, &made.code, &left_out, &marks, &configs) {
                 Ok(sent) => {
+                    out.sent_ids.push(inst.id.clone());
                     if let Some(c) = &copy
                         && !sent.skipped.contains(&c.copy.group)
                     {
@@ -2259,6 +2508,13 @@ impl PublishWork {
                 Err(e) => {
                     log::warn!("sharing {}: {e:#}", inst.name);
                     out.failed = true;
+                    // Out of reach: the waiting count and the panel say so.
+                    // Couldn't save is a 503 too, but the service did
+                    // answer: say that once, as it isn't the internet.
+                    let unsaved = e.downcast_ref::<mailbox::MailboxError>().is_some_and(|m| m.code == "save_failed");
+                    if unsaved || mailbox::failure(&e) != mailbox::Failure::Unreachable {
+                        out.problems.push(format!("Couldn't send your changes to {}. {}", inst.name, mailbox::says(&e)));
+                    }
                 }
             }
         }
@@ -2298,8 +2554,32 @@ fn drop_ways(r: &mut Event, revoke: &Event) -> bool {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's own `test` macro would come with it.
-    use super::{drop_ways, minutes, newest_codes_only};
+    use super::{drop_ways, minutes, newest_codes_only, waiting_line, with_names};
     use hopper::mailbox::Event;
+
+    #[test]
+    fn a_members_copy_keeps_the_sharers_hand_added_names() {
+        let own = vec!["mine.jar".to_string()];
+        let sharers = vec!["their-own-mod.jar".to_string(), "mine.jar".to_string()];
+        assert_eq!(with_names(&own, &sharers), ["mine.jar", "their-own-mod.jar"]);
+        assert_eq!(with_names(&[], &sharers[..1]), ["their-own-mod.jar"]);
+        assert!(with_names(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn waiting_changes_say_what_happens_next() {
+        assert_eq!(waiting_line(&[], true, false), None);
+        let one = vec!["Sync Test".to_string()];
+        assert_eq!(
+            waiting_line(&one, true, false).unwrap(),
+            "Your changes to Sync Test are waiting to be sent. They go out by themselves when Hopper can connect again."
+        );
+        assert_eq!(waiting_line(&one, false, true).unwrap(), "Sending your changes to Sync Test…");
+        let two = vec!["A".to_string(), "B".to_string()];
+        assert_eq!(waiting_line(&two, false, false).unwrap(), "Your changes to 2 packs are waiting to be sent. Hopper tries again in a minute.");
+        // Offline, a send in flight still waits.
+        assert!(waiting_line(&two, true, true).unwrap().contains("waiting"));
+    }
 
     #[test]
     fn code_lifetimes_read_as_whole_minutes() {

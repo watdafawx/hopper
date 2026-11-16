@@ -37,11 +37,15 @@ pub struct RouterConfig {
     /// Where players with an address no server has go: a server id, or
     /// empty for "No server at this address".
     pub unknown_server: String,
+    /// The old way: the port and players' connections inside Hopper Server
+    /// itself, so they drop when it restarts. Off: a separate router
+    /// process holds them (`crate::edge`). Kept as a fallback for a release.
+    pub in_panel: bool,
 }
 
 impl Default for RouterConfig {
     fn default() -> Self {
-        RouterConfig { enabled: true, port: core::DEFAULT_PORT, domain: String::new(), unknown_server: String::new() }
+        RouterConfig { enabled: true, port: core::DEFAULT_PORT, domain: String::new(), unknown_server: String::new(), in_panel: false }
     }
 }
 
@@ -194,30 +198,48 @@ pub fn start(app: Arc<App>) {
             let cfg = app.cfg.read().unwrap().router.clone();
             let bind = app.cfg.read().unwrap().bind.clone();
             let wanted = (cfg.enabled && !app.router.routes.read().unwrap().is_empty()).then_some(cfg.port);
-            if current.as_ref().map(|c| c.0) != wanted {
-                if let Some((_, h)) = current.take() {
+            if !cfg.in_panel {
+                // The router process holds the port; it says how binding went.
+                if let Some((port, h)) = current.take() {
                     h.abort();
+                    log::info!("server addresses: port {port} moves to the router process");
                 }
-                // (A port that couldn't be had is tried again every round.)
-                let mut st = Status::default();
-                if let Some(port) = wanted {
-                    match TcpListener::bind((bind.as_str(), port)).await {
-                        Ok(l) => {
-                            log::info!("server addresses: listening for Minecraft on port {port}");
-                            st.listening = Some(port);
-                            current = Some((port, tokio::spawn(accept(app.clone(), l))));
-                        }
-                        Err(e) => {
-                            let who = app.servers.list().into_iter().find(|e| port_of(e) == port).map(|e| e.name.clone());
-                            st.error = Some(match who {
-                                Some(n) => format!("Port {port} is {n}'s own port. Move {n} to another port so the router can have {port}."),
-                                None => format!("Port {port} is in use by another program ({e})."),
-                            });
-                            log::warn!("server addresses: {}", st.error.as_deref().unwrap_or(""));
+                crate::edge::client::Client::start(&app);
+                app.edge.set_listen(wanted.map(|p| (bind.clone(), p)));
+                if wanted.is_none() {
+                    *app.router.status.lock().unwrap() = Status::default();
+                }
+                let a = app.clone();
+                if let Ok((list, unknown)) = tokio::task::spawn_blocking(move || fallback_answers(&a)).await {
+                    app.edge.set_answers(list, unknown);
+                }
+            } else {
+                // A router process left from before (in_panel was just turned
+                // on) is reached and told to stop listening, so the port is
+                // free here; it quits once the players on it leave.
+                crate::edge::client::Client::start(&app);
+                app.edge.set_listen(None);
+                if current.as_ref().map(|c| c.0) != wanted {
+                    if let Some((_, h)) = current.take() {
+                        h.abort();
+                    }
+                    // (A port that couldn't be had is tried again every round.)
+                    let mut st = Status::default();
+                    if let Some(port) = wanted {
+                        match TcpListener::bind((bind.as_str(), port)).await {
+                            Ok(l) => {
+                                log::info!("server addresses: listening for Minecraft on port {port}");
+                                st.listening = Some(port);
+                                current = Some((port, tokio::spawn(accept(app.clone(), l))));
+                            }
+                            Err(e) => {
+                                st.error = Some(bind_error(&app, port, &e));
+                                log::warn!("server addresses: {}", st.error.as_deref().unwrap_or(""));
+                            }
                         }
                     }
+                    *app.router.status.lock().unwrap() = st;
                 }
-                *app.router.status.lock().unwrap() = st;
             }
             let a = app.clone();
             let _ = tokio::task::spawn_blocking(move || sleep_and_time(&a)).await;
@@ -228,6 +250,37 @@ pub fn start(app: Arc<App>) {
             }
         }
     });
+}
+
+/// Why the router couldn't have `port`, for the router card.
+pub(crate) fn bind_error(app: &App, port: u16, e: &dyn std::fmt::Display) -> String {
+    let who = app.servers.list().into_iter().find(|e| port_of(e) == port).map(|e| e.name.clone());
+    match who {
+        Some(n) => format!("Port {port} is {n}'s own port. Move {n} to another port so the router can have {port}."),
+        None => format!("Port {port} is in use by another program ({e})."),
+    }
+}
+
+/// What the router process answers in the server list while Hopper Server
+/// is away (it adds the "restarting" message): each routed server's last
+/// own answer (version, mods), its icon and player count.
+fn fallback_answers(app: &App) -> (Vec<crate::edge::proto::Answer>, Value) {
+    let routes = app.router.routes.read().unwrap().clone();
+    let list = routes
+        .into_iter()
+        .filter_map(|(id, addresses)| {
+            let e = app.servers.get(&id)?;
+            let p = Properties::load(&e.root.join("server.properties")).unwrap_or_default();
+            let max: u32 = p.get("max-players").and_then(|m| m.trim().parse().ok()).unwrap_or(20);
+            let mut v = core::last_ping(&e.root).filter(Value::is_object).unwrap_or_else(|| json!({ "version": { "name": "Hopper", "protocol": -1 } }));
+            v["players"] = json!({ "max": max, "online": e.server.players().len() });
+            if let Some(icon) = core::favicon(&e.root) {
+                v["favicon"] = json!(icon);
+            }
+            Some(crate::edge::proto::Answer { addresses, status: v })
+        })
+        .collect();
+    (list, json!({ "version": { "name": "Hopper", "protocol": -1 }, "players": { "max": 0, "online": 0 } }))
 }
 
 pub(crate) fn port_of(e: &Entry) -> u16 {
@@ -430,15 +483,51 @@ pub(crate) trait PlayerConn: AsyncRead + AsyncWrite + Unpin + Send {
     fn listed(&self, _server: &str, _name: &str) -> Option<crate::player_ping::Listed> {
         None
     }
+
+    /// Hands the connection to the server on this machine's `port`:
+    /// `replay` goes first (what it would have received), then everything
+    /// the player sends. `server` and `player` name it for the Players tab.
+    /// Ok(false): the server didn't take it, and the connection is still
+    /// here to answer.
+    fn pass_to(&mut self, port: u16, replay: Vec<u8>, server: &str, player: &str) -> impl Future<Output = anyhow::Result<bool>> + Send;
 }
 
 impl PlayerConn for TcpStream {
     fn listed(&self, server: &str, name: &str) -> Option<crate::player_ping::Listed> {
         Some(crate::player_ping::listen(server, name, self))
     }
+
+    fn pass_to(&mut self, port: u16, replay: Vec<u8>, _: &str, _: &str) -> impl Future<Output = anyhow::Result<bool>> + Send {
+        connect_and_copy(self, port, replay)
+    }
 }
 
-impl PlayerConn for tokio::io::DuplexStream {}
+impl PlayerConn for tokio::io::DuplexStream {
+    fn pass_to(&mut self, port: u16, replay: Vec<u8>, _: &str, _: &str) -> impl Future<Output = anyhow::Result<bool>> + Send {
+        connect_and_copy(self, port, replay)
+    }
+}
+
+/// A connection the router process holds: the hand-over is its splice, so
+/// the player no longer depends on this process once they're through.
+impl PlayerConn for crate::edge::client::Leg {
+    fn pass_to(&mut self, port: u16, replay: Vec<u8>, server: &str, player: &str) -> impl Future<Output = anyhow::Result<bool>> + Send {
+        async move { self.splice(port, &replay, server, player).await }
+    }
+}
+
+/// Connects to the server on this machine's `port`, sends `replay` (what
+/// the player sent that was read here), then copies both ways until one
+/// side leaves. False if the server didn't take the connection.
+async fn connect_and_copy<S: AsyncRead + AsyncWrite + Unpin + Send>(sock: &mut S, port: u16, replay: Vec<u8>) -> anyhow::Result<bool> {
+    let Ok(Ok(mut up)) = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(("127.0.0.1", port))).await else {
+        return Ok(false);
+    };
+    let _ = up.set_nodelay(true);
+    up.write_all(&replay).await?;
+    tokio::io::copy_bidirectional(sock, &mut up).await?;
+    Ok(true)
+}
 
 /// How the router finds the server for a connection.
 enum Pick {
@@ -447,6 +536,11 @@ enum Pick {
     /// Already known: a relayed stream names its server, so no address is
     /// read (design/vps-relay.md, "Server tag").
     Server(String),
+}
+
+/// A connection the router process passed on (see `crate::edge`).
+pub(crate) async fn edge_leg(app: &Arc<App>, sock: &mut crate::edge::client::Leg, peer: SocketAddr) -> anyhow::Result<()> {
+    route(app, sock, peer, Pick::Address).await
 }
 
 async fn handle(app: &Arc<App>, mut sock: TcpStream, peer: SocketAddr) -> anyhow::Result<()> {
@@ -502,29 +596,32 @@ async fn route<S: PlayerConn>(app: &Arc<App>, sock: &mut S, peer: SocketAddr, pi
     let state = e.server.state();
     if state == ServerState::Running {
         let port = port_of(&e);
-        match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(("127.0.0.1", port))).await {
-            Ok(Ok(mut up)) => {
-                let _ = up.set_nodelay(true);
-                // The server list: its own answer with the message filled in now.
-                if !hs.is_login()
-                    && let Some(msg) = crate::motd_live::message(&e).await
-                {
-                    return status_through(sock, &mut up, buf, used, &msg, &e).await;
+        // The server list: its own answer with the message filled in now.
+        if !hs.is_login()
+            && let Some(msg) = crate::motd_live::message(&e).await
+        {
+            return match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(("127.0.0.1", port))).await {
+                Ok(Ok(mut up)) => {
+                    let _ = up.set_nodelay(true);
+                    status_through(sock, &mut up, buf, used, &msg, &e).await
                 }
-                // A joining player: list their connection so the Players tab
-                // can show its ping. Their name comes in the next packet.
-                let mut _listed = None;
-                if hs.is_login()
-                    && let Ok((name, _)) = read_until(sock, &mut buf, used, core::read_login_name).await
-                {
-                    _listed = sock.listed(&e.id, &name);
-                }
-                up.write_all(&buf).await?;
-                tokio::io::copy_bidirectional(sock, &mut up).await?;
-                return Ok(());
-            }
-            _ => return standin(app, sock, &buf, used, &hs, Standin::Starting, Some(&e)).await,
+                _ => standin(app, sock, &buf, used, &hs, Standin::Starting, Some(&e)).await,
+            };
         }
+        // A joining player: list their connection so the Players tab can
+        // show its ping. Their name comes in the next packet.
+        let mut _listed = None;
+        let mut player = String::new();
+        if hs.is_login()
+            && let Ok((name, _)) = read_until(sock, &mut buf, used, core::read_login_name).await
+        {
+            _listed = sock.listed(&e.id, &name);
+            player = name;
+        }
+        if sock.pass_to(port, buf.clone(), &e.id, &player).await? {
+            return Ok(());
+        }
+        return standin(app, sock, &buf, used, &hs, Standin::Starting, Some(&e)).await;
     }
     let s = settings(&e);
     let now = unix_now();
@@ -751,18 +848,13 @@ async fn wait_for<S: PlayerConn>(app: &Arc<App>, sock: &mut S, buf: &[u8], end: 
     match ended {
         Ok(crate::hold::Ended::Ready(rest)) => {
             let port = port_of(e);
-            match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(("127.0.0.1", port))).await {
-                Ok(Ok(mut up)) => {
-                    let _ = up.set_nodelay(true);
-                    log::info!("router: handing {player} to {name} after {} s", began.elapsed().as_secs());
-                    let _listed = sock.listed(&e.id, player);
-                    up.write_all(&buf[..end]).await?;
-                    up.write_all(&rest).await?;
-                    tokio::io::copy_bidirectional(sock, &mut up).await?;
-                    Ok(())
-                }
-                _ => kick(sock, &join_again()).await,
-            }
+            log::info!("router: handing {player} to {name} after {} s", began.elapsed().as_secs());
+            let _listed = sock.listed(&e.id, player);
+            // Their handshake and login as if they had just come in, then
+            // what they sent while held.
+            let mut replay = buf[..end].to_vec();
+            replay.extend_from_slice(&rest);
+            if sock.pass_to(port, replay, &e.id, player).await? { Ok(()) } else { kick(sock, &join_again()).await }
         }
         Ok(crate::hold::Ended::Failed) => kick(sock, &core::wake_failed_kick(&name, settings(e).retry_in_minutes(unix_now()))).await,
         Ok(crate::hold::Ended::Capped) => kick(sock, &join_again()).await,
@@ -872,7 +964,7 @@ fn router_json(app: &App) -> Value {
     let clash = app.servers.list().into_iter().find(|e| port_of(e) == cfg.port).map(|e| json!({ "id": e.id, "name": e.name }));
     // Players' Minecraft uses 25565 unless they type a port or DNS has an
     // SRV record, so a router on another port needs one of those.
-    json!({ "config": cfg, "status": st, "clash": clash, "state": state(&cfg, &st, has), "join_port": core::DEFAULT_PORT })
+    json!({ "config": cfg, "status": st, "clash": clash, "state": state(&cfg, &st, has), "join_port": core::DEFAULT_PORT, "edge": app.edge.info() })
 }
 
 async fn get_router(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
