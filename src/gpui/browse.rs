@@ -1962,7 +1962,9 @@ impl BrowseView {
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_spawn(async move {
-                    let files = hopper::source::files(id, &gv, loader)?;
+                    // The player opened this page: a GitHub mod's files are
+                    // asked for again, not taken from a recent answer.
+                    let files = hopper::source::files_checked(id, &gv, loader, hopper::sources::Check::Manual)?;
                     // Dependencies of the newest release that fits, like
                     // CurseForge's Relations tab.
                     let deps = files

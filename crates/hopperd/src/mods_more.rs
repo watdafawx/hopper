@@ -76,7 +76,8 @@ async fn versions(
     let v = blocking(move || {
         let inst = crate::mods_api::instance_of(&e)?;
         let a = inst.addons[addon_index(&inst, &file)?].clone();
-        let files = source::files(a.project_id, &inst.game_version, install::loader_of(&inst))?;
+        // The player opened Versions: a GitHub mod's list is asked for again.
+        let files = source::files_checked(a.project_id, &inst.game_version, install::loader_of(&inst), hopper_core::sources::Check::Manual)?;
         let rows: Vec<Value> = files
             .iter()
             .take(40)

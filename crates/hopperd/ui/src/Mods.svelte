@@ -394,7 +394,10 @@
       tick = checkedAt;
       archived = new Set(r.archived || []);
       await load();
-      if (force && !updates.length) say(hasPack ? 'Every mod added on top of the pack is up to date.' : 'Every mod is up to date.');
+      // GitHub asked this panel to wait: its mods show what was seen earlier, so say so
+      // instead of calling everything up to date.
+      if (force && r.github_paused) say(r.github_paused);
+      else if (force && !updates.length) say(hasPack ? 'Every mod added on top of the pack is up to date.' : 'Every mod is up to date.');
     } catch (e) {
       if (force) say(e.message, true);
     } finally {

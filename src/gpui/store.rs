@@ -3105,8 +3105,11 @@ impl Store {
                 Msg::Archived(root2, Default::default())
             }
         });
+        // A look the player asked for (or that follows a change they made)
+        // asks GitHub again; the automatic ones may use a recent answer.
+        let check = if force { hopper::sources::Check::Manual } else { hopper::sources::Check::Auto };
         self.spawn(move || Msg::Updates {
-            result: install::check_updates(&inst).map_err(|e| format!("{e:#}")),
+            result: install::check_updates(&inst, check).map_err(|e| format!("{e:#}")),
             root,
             prev,
         });

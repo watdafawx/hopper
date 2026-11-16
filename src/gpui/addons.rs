@@ -2935,6 +2935,14 @@ impl AddonsView {
             .map_or((false, None, false), |u| (u.checking, u.error.clone(), u.list.is_some()));
         // With results on screen the refresh icon spins instead, so nothing
         // moves; the caption shows only where the list says nothing yet.
+        // GitHub told this PC to wait: a check can't ask it, so the GitHub mods
+        // show what Hopper saw earlier, and "Up to date" would be a guess.
+        let paused: Option<String> = hopper::sources::http::pause()
+            .filter(|_| {
+                crate::store::on_hopper_server(&inst.root).is_none()
+                    && inst.addons.iter().any(|a| a.source.as_ref().is_some_and(|s| s.kind == hopper::sources::Kind::GitHub))
+            })
+            .map(|p| p.paused_note());
         let note: Option<AnyElement> = if checking && (!listed || updates.is_empty()) {
             Some(
                 h_flex()
@@ -2945,17 +2953,19 @@ impl AddonsView {
             )
         } else if checking {
             None
-        } else {
-            error.as_ref().map(|e| {
+        } else if let Some(e) = error.as_ref() {
+            Some(
                 h_flex()
                     .gap_2()
                     .min_w_0()
                     .child(div().min_w_0().text_sm().text_color(cx.theme().danger).truncate().child(e.clone()))
                     .children(widgets::cf_key_fix("updates-cf-key", e))
-                    .into_any_element()
-            })
+                    .into_any_element(),
+            )
+        } else {
+            paused.as_ref().map(|p| div().min_w_0().truncate().child(widgets::caption(p.clone(), cx)).into_any_element())
         };
-        let quiet = checking || error.is_some();
+        let quiet = checking || error.is_some() || paused.is_some();
         let result: Option<AnyElement> = match listed {
             true if updates.is_empty() => None,
             true => {

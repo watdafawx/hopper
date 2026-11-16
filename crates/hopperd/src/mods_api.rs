@@ -772,13 +772,16 @@ async fn updates(
                 a
             }
         };
-        return Ok(Json(json!({ "updates": v, "archived": archived, "cached": true, "curseforge": cf::api_key().is_some() })));
+        return Ok(Json(json!({ "updates": v, "archived": archived, "cached": true, "curseforge": cf::api_key().is_some(), "github_paused": hopper_core::sources::http::pause().map(|p| p.paused_note()) })));
     }
     let (v, archived) = blocking(move || {
         let inst = instance(&e)?;
         let archived = archived_ids(&inst);
         let pack = PackMods::of(&inst);
-        let ups = install::check_updates(&inst)?;
+        // `force=1` is the player pressing the check button (or a change they
+        // just made): GitHub is asked again. Without it, an answer from the
+        // last few minutes may stand.
+        let ups = install::check_updates(&inst, if force { hopper_core::sources::Check::Manual } else { hopper_core::sources::Check::Auto })?;
         // Names of required mods the server lacks, looked up once; `None`
         // is one that's installed after all (from the other site).
         let mut names: HashMap<u64, Option<String>> = HashMap::new();
@@ -826,7 +829,7 @@ async fn updates(
     .await?;
     keep_updates(&id, v.clone());
     archived_cache().insert(id.clone(), (now_secs(), archived.clone()));
-    Ok(Json(json!({ "updates": v, "archived": archived, "cached": false, "curseforge": cf::api_key().is_some() })))
+    Ok(Json(json!({ "updates": v, "archived": archived, "cached": false, "curseforge": cf::api_key().is_some(), "github_paused": hopper_core::sources::http::pause().map(|p| p.paused_note()) })))
 }
 
 #[derive(Deserialize)]
@@ -868,7 +871,7 @@ async fn update(
             }
         }
         if !unknown.is_empty() {
-            ups.extend(install::check_updates(&inst)?.into_iter().filter(|u| {
+            ups.extend(install::check_updates(&inst, hopper_core::sources::Check::Auto)?.into_iter().filter(|u| {
                 unknown.contains(&u.project_id) && !u.same_file() && inst.addons.iter().any(|a| a.file_name == u.from && !pack_mod(&pack, a))
             }));
         }
