@@ -344,10 +344,10 @@
   .health .lbl { margin-bottom: 2px; }
   .hv { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .mk { width: 16px; height: 16px; flex: none; display: grid; place-items: center; border-radius: 50%; color: var(--muted); }
-  .mk.ok { background: var(--green-dim); color: var(--green); }
-  .mk.fail { background: var(--red-dim); color: var(--red); }
-  .mk.warn { background: var(--gold-dim); color: var(--gold); }
-  .mk.run { color: var(--acc); }
+  .mk.ok { background: var(--green-dim); color: var(--ink-green); }
+  .mk.fail { background: var(--red-dim); color: var(--ink-red); }
+  .mk.warn { background: var(--gold-dim); color: var(--ink-gold); }
+  .mk.run { color: var(--ink-acc); }
   .mk :global(.spin) { animation: spin .8s linear infinite; }
   .checks { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   .checks li { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 16px; }

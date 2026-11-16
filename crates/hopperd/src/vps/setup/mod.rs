@@ -991,6 +991,17 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/vps-relay/setup/forget", post(forget))
 }
 
+/// The ports the setup offers. A relay that's already set up keeps its own:
+/// "Run again" repairs it, and the last check (which knew them) is gone
+/// after the panel restarts, so the defaults would move it to other ports.
+/// The tunnel port is in the saved address; the players' port is what the
+/// relay said when it last connected.
+pub(super) fn suggested_ports(address: &str, game_port: u16) -> Value {
+    let tunnel = address.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()).filter(|p| *p != 0).unwrap_or(TUNNEL_PORT);
+    let game = if game_port != 0 { game_port } else { GAME_PORT };
+    json!({ "game": game, "tunnel": tunnel })
+}
+
 fn login_json(l: &Login) -> Value {
     if l.host.is_empty() {
         return Value::Null;
@@ -1002,6 +1013,7 @@ fn login_json(l: &Login) -> Value {
 fn setup_json(app: &App) -> Value {
     let l = app.vps_setup.login();
     let cfg = app.vps.config();
+    let status = app.vps.status();
     json!({
         "login": login_json(&l),
         "new_public": l.new_public,
@@ -1009,7 +1021,7 @@ fn setup_json(app: &App) -> Value {
         "run": app.vps_setup.run.lock().unwrap().clone(),
         "version": version(),
         "source": if test_binary().is_some() { "file" } else { "release" },
-        "ports": { "game": GAME_PORT, "tunnel": TUNNEL_PORT },
+        "ports": suggested_ports(&cfg.address, status.game_port),
         "paired": { "address": cfg.address, "fingerprint": cfg.fingerprint, "servers": cfg.servers, "enabled": cfg.enabled, "public_address": cfg.public_address },
         "status": app.vps.status(),
     })

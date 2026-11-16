@@ -362,16 +362,16 @@
         {#if busy === 'check' && !check}
           <div class="loading tiny muted"><LoaderCircle size={13} class="spin" />Checking the VPS…</div>
         {:else if check}
-          {#if stopped}
-            <!-- Another system: the check stopped after reading it, and says what to do instead. -->
-            <div class="fix" role="alert">{check.rows[0]?.text} Reinstall the VPS with Debian 12 or 13, or Ubuntu 22.04 or 24.04 (on the provider's page this is often called Rebuild or Reinstall), then connect again. Nothing was changed on the VPS.</div>
-          {/if}
           <ul class="steps" class:stale={busy === 'check'}>
             {#each check.rows as r (r.id)}
               <li class:bad={r.state === 'fail'}>{@render mark(r.state)}<span class="tx">{r.text}</span></li>
             {/each}
             {#if stopped}<li class="wait">{@render mark('skip')}<span class="tx">Memory, disk, sudo and ports: not checked</span></li>{/if}
           </ul>
+          {#if stopped}
+            <!-- Another system: the check stopped after reading it (the row above says which), and this says what to do instead. -->
+            <div class="fix" role="alert">Reinstall the VPS with Debian 12 or 13, or Ubuntu 22.04 or 24.04 (on the provider's page this is often called Rebuild or Reinstall), then connect again. Nothing was changed on the VPS.</div>
+          {/if}
         {/if}
         {#if !stopped}
         <div class="frow">
@@ -395,7 +395,7 @@
           {#if login}<button class="btn ghost" disabled={!!busy} onclick={forget} title="Forget the VPS here without connecting to it (it was deleted)">Forget this VPS</button>{/if}
           <span class="sp"></span>
           <button class="btn" disabled={!!busy} onclick={runCheck}>{#if busy === 'check'}<LoaderCircle size={13} class="spin" />Checking…{:else}Check again{/if}</button>
-          {#if !stopped}<button class="btn pri" disabled={!!busy || !okToInstall} title={okToInstall ? '' : check?.ok ? 'The ports changed: check again first' : 'Fix what the check found first'} onclick={install}>{#if busy === 'install'}<LoaderCircle size={13} class="spin" />Starting…{:else}Install{/if}</button>{/if}
+          {#if !stopped}<button class="btn pri" disabled={!!busy || !okToInstall} title={okToInstall ? '' : check?.ok ? 'The ports changed: check again first' : 'Fix what the check found first'} onclick={install}>{#if busy === 'install'}<LoaderCircle size={13} class="spin" />Starting…{:else}{st.paired?.address ? 'Run again' : 'Install'}{/if}</button>{/if}
         </div>
       </div>
     {:else if stage === 'run' && run}
@@ -481,9 +481,9 @@
   .stepper span.on { color: var(--text); }
   .stepper span.on i { background: var(--acc); color: #1c0d02; }
   .stepper span.done { color: var(--subtle); }
-  .stepper span.done i { background: var(--green-dim); color: var(--green); }
+  .stepper span.done i { background: var(--green-dim); color: var(--ink-green); }
   .stepper span.bad { color: var(--text); }
-  .stepper span.bad i { background: var(--red-dim); color: var(--red); }
+  .stepper span.bad i { background: var(--red-dim); color: var(--ink-red); }
   .stepper { flex-wrap: wrap; row-gap: 6px; }
   .need { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px 12px; margin: 0; font-size: 12.5px; }
   .need dt { color: var(--muted); }
@@ -533,10 +533,10 @@
   .steps li.long { flex-wrap: wrap; row-gap: 2px; }
   .steps li.long .d { flex-basis: 100%; margin-left: 26px; padding-left: 0; white-space: normal; overflow-wrap: anywhere; color: var(--subtle); font-size: 12px; }
   .st { width: 18px; height: 18px; display: grid; place-items: center; flex: none; border-radius: 50%; color: var(--muted); }
-  .st.ok, .st.done { background: var(--green-dim); color: var(--green); }
-  .st.fail { background: var(--red-dim); color: var(--red); }
-  .st.warn { background: var(--gold-dim); color: var(--gold); }
-  .st.run { color: var(--acc); }
+  .st.ok, .st.done { background: var(--green-dim); color: var(--ink-green); }
+  .st.fail { background: var(--red-dim); color: var(--ink-red); }
+  .st.warn { background: var(--gold-dim); color: var(--ink-gold); }
+  .st.run { color: var(--ink-acc); }
   .note { font-size: 12px; color: var(--subtle); background: var(--hover); border-radius: var(--radius); padding: 8px 10px; }
   .note.good { background: var(--green-dim); color: var(--text); }
   .fix { font-size: 12.5px; border-radius: var(--radius); background: var(--red-dim); color: var(--text); padding: 8px 10px; overflow-wrap: anywhere; }

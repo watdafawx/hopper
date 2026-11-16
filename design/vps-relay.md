@@ -1049,6 +1049,10 @@ No new relay features: the same relay, made easier to set up and to see.
   `uname -m`: one failed row, the check answer carries `stop: true`, the
   dialog says to reinstall the VPS with a supported system and that nothing
   changed, and hides Install. Nothing else is run on such a box.
+- **Repair keeps the ports**: on a relay that's set up, Install reads
+  "Run again" and the setup offers the relay's own ports (the tunnel port
+  from the saved address, the players' port from the relay's last hello),
+  not the defaults, so a repair after a panel restart doesn't move it.
 - **Health on the relay card**: Relay (up/down and for how long), Ping from
   here (the tunnel's round trip), Players through it (streams open for 2 s
   or more, so server list pings don't count), Last test. "Test again"

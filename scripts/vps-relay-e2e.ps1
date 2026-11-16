@@ -129,6 +129,7 @@ if ($LinuxBinary) { $envs.HOPPERD_VPS_TEST_BINARY = (Resolve-Path $LinuxBinary).
 $saved = @{}
 foreach ($k in $envs.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $envs[$k]) }
 $log = Join-Path $root 'hopperd.log'
+Say "panel port $panelPort, router $routerPort, sftp $sftpPort"
 $proc = Start-Process -PassThru -WindowStyle Hidden -FilePath $Exe -RedirectStandardError $log -RedirectStandardOutput (Join-Path $root 'hopperd.out') `
   -ArgumentList @('--portable', '--port', $panelPort, '--data', "`"$data`"", '--home', "`"$home_`"", '--servers-root', "`"$srv`"")
 foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
@@ -145,7 +146,8 @@ function Api([string] $method, [string] $path, $body = $null, [int] $timeout = 1
 }
 
 try {
-  $codeFile = Join-Path $data 'setup-code.txt'
+  # With --home the panel's data moves into the panel folder on first start.
+  $codeFile = Join-Path $home_ '.hopper-server\setup-code.txt'
   Wait-Until 'the panel' 60 { (Test-Path $codeFile) -and (Invoke-WebRequest -Uri "$base/auth/me" -SkipHttpErrorCheck -TimeoutSec 3).StatusCode -gt 0 } | Out-Null
   $code = (Get-Content $codeFile -Raw).Trim()
   # A throwaway panel's owner password: printed only when its folders are kept.
@@ -232,7 +234,9 @@ try {
   Api POST '/vps-relay/setup/remove' @{} | Out-Null
   $run = Wait-Until 'the removal' 300 { $s = Api GET '/vps-relay/setup'; if ($s.run -and $s.run.kind -eq 'remove' -and -not $s.run.running) { $s.run } }
   Expect (-not $run.error) "removal finished$(if ($run.error) { ': ' + $run.error })"
-  $left = (Box 'systemctl list-unit-files "hopper-*" --no-legend 2>/dev/null; id hopper-relay 2>/dev/null; ls -d /opt/hopper* /var/lib/hopper* 2>/dev/null; ss -Hltn | grep -E ":(' + $gamePort + '|' + $tunnelPort + ')\b"').out.Trim()
+  # Units, users, folders and listeners the install made; any output is a leftover.
+  $left = (Box ("systemctl list-unit-files --no-legend | grep hopper; getent passwd hopper-relay hopper-velocity; " +
+    "ls -d /opt/hopper* /var/lib/hopper* 2>/dev/null; ss -Hltn | grep -e :$gamePort -e :$tunnelPort; true")).out.Trim()
   Expect (-not $left) "nothing of the relay is left on the box$(if ($left) { ": $left" })"
 } catch {
   if ($_.Exception.Message -ne 'stop-before-remove') { Fail $_.Exception.Message }
