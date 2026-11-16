@@ -83,8 +83,16 @@ pub fn connect(site: &FileSite) -> anyhow::Result<Box<dyn Remote>> {
     Ok(match site.proto.as_str() {
         "sftp" => Box::new(sftp::Sftp::connect(site.host.trim(), port, site.user.trim(), &pass, site.key_file.trim(), &site.host_key)?),
         "ftp" => Box::new(ftp::Ftp::connect(site.host.trim(), port, site.user.trim(), &pass, None)?),
-        _ => Box::new(ftp::Ftp::connect(site.host.trim(), port, site.user.trim(), &pass, Some(site.self_signed))?),
+        _ => Box::new(ftp::Ftp::connect(site.host.trim(), port, site.user.trim(), &pass, Some(&ftp::Tls::of(site)))?),
     })
+}
+
+/// The certificate an FTPS `site` answers with, found before anything is
+/// sent (no user name, no password). None: an authority signs it for that
+/// address, so there's nothing to trust.
+pub fn probe_cert(site: &FileSite) -> anyhow::Result<Option<String>> {
+    let port = if site.port == 0 { default_port(&site.proto) } else { site.port };
+    ftp::probe_cert(site.host.trim(), port)
 }
 
 /// `a/b`, without doubled or trailing slashes.

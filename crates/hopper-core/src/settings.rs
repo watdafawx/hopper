@@ -453,7 +453,7 @@ pub struct OtherPanel {
     pub self_signed: bool,
     /// The certificate (its SHA-256, "AB:CD:…") the user trusted. Empty on
     /// a panel saved before Hopper pinned them: its next connect pins the
-    /// one it's shown and says so once ([`crate::panel::take_learned`]).
+    /// one it's shown and says so once ([`crate::certpin::take_learned`]).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub cert_pin: String,
     /// Saved from the form with no certificate trusted yet: nothing
@@ -517,8 +517,19 @@ pub struct FileSite {
     pub key_file: String,
     /// SFTP: the server's key ("SHA256:…"), pinned on the first connect.
     pub host_key: String,
-    /// FTPS: accept a certificate the server makes for itself.
+    /// FTPS: the server may make its own certificate: Hopper then connects
+    /// only to the one in `cert_pin`. A certificate an authority signs for
+    /// the address is checked as usual either way.
     pub self_signed: bool,
+    /// The certificate (its SHA-256, "AB:CD:…") the user trusted. Empty on a
+    /// site saved before Hopper pinned them: its next connect pins the one
+    /// it's shown and says so once ([`crate::certpin::take_learned`]).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cert_pin: String,
+    /// Saved from the form with no certificate trusted yet: nothing
+    /// connects (so its password isn't sent) until the user trusts one.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cert_ask: bool,
 }
 
 impl FileSite {
