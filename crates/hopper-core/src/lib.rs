@@ -63,6 +63,7 @@ pub mod instances;
 pub mod java;
 pub mod javadl;
 pub mod jobs;
+pub mod lanes;
 pub mod jvm_args;
 pub mod jvm_editor;
 pub mod launch;

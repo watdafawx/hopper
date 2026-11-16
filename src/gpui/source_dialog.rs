@@ -356,6 +356,7 @@ impl SourceForm {
             let root = inst.root.clone();
             s.spawn_instance_job(&root, what, move |job| {
                 let mut inst = inst;
+                crate::store::fresh(&mut inst);
                 let before = crate::store::Before::at(&inst.root);
                 let done = match &follow {
                     Some((f, _)) => sources::follow(&mut inst, f, &r, i, job)?,

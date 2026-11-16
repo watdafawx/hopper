@@ -166,7 +166,10 @@ impl TasksButton {
         let rows = jobs.iter().rev().map(|j| {
             let id = j.id;
             let store = store.clone();
-            let state: AnyElement = if !j.done {
+            let state: AnyElement = if !j.done && j.queued {
+                // Waiting its turn behind another task on the instance.
+                Icon::new(IconName::Hourglass).small().text_color(theme.muted_foreground).into_any_element()
+            } else if !j.done {
                 gpui_kit::component::spinner::Spinner::new().small().into_any_element()
             } else if j.cancelled {
                 Icon::new(IconName::CircleX).small().text_color(theme.muted_foreground).into_any_element()

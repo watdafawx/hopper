@@ -451,6 +451,17 @@ pub fn confirm_delete(store: Entity<Store>, root: PathBuf, window: &mut Window, 
         );
         return;
     }
+    // Other tasks on an instance wait their turn, but a delete would pull
+    // the folder out from under the one running.
+    if store.read(cx).is_busy(&root) {
+        window.push_notification(
+            gpui_kit::component::notification::Notification::error(
+                "Can't delete it now: a task is changing this instance. Wait for it to finish, or cancel it in Tasks.",
+            ),
+            cx,
+        );
+        return;
+    }
     // A network drive has no Recycle Bin: Hopper moves the folder aside.
     let remote = hopper::instance_ops::is_remote_drive(&inst.root);
     let permanent = store.read(cx).settings().delete_permanently;

@@ -389,6 +389,31 @@ fn small_anim(key: &str) -> bool {
 /// [`Store::want_anim_view`]), apart from the page's copy of the same image.
 const VIEW_SUFFIX: &str = "#view";
 
+thread_local! {
+    /// Set on a job's thread when the job waited for another one on the
+    /// same instance (see [`fresh`]).
+    static WAITED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// What a [`Store::queue_work`] job handed back, once its thread let go of
+/// it: `None` when it ended without running (cancelled while it waited).
+pub async fn work_done<T>(exec: gpui::BackgroundExecutor, slot: Arc<std::sync::Mutex<Option<T>>>) -> Option<T> {
+    // The job holds the other handle until its work ran or was dropped.
+    while Arc::strong_count(&slot) > 1 {
+        exec.timer(Duration::from_millis(150)).await;
+    }
+    slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// A job's copy of its instance, read again from disk when the job waited
+/// its turn behind another: it was taken when the job was asked for, and
+/// the job before it has changed the instance since.
+pub fn fresh(inst: &mut Instance) {
+    if WAITED.with(|w| w.get()) {
+        hopper::instances::reload(inst);
+    }
+}
+
 /// The key of image `url`'s big clip for the image viewer.
 pub fn view_key(url: &str) -> String {
     format!("{url}{VIEW_SUFFIX}")
@@ -530,8 +555,9 @@ pub struct Store {
     /// started then (the panel's word; empty when unknown). Gone once it
     /// stops or restarts.
     live_syncs: HashMap<PathBuf, String>,
-    /// Instances jobs are changing, with how many jobs.
-    busy: Arc<std::sync::Mutex<HashMap<PathBuf, u32>>>,
+    /// Instances jobs are changing: each one's line of jobs, the running
+    /// one first and the rest waiting their turn.
+    lanes: Arc<hopper::lanes::Lanes>,
     /// Instances whose game is being launched (the Play button says so).
     launching: Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
     /// Mod updates of instances an update job is running on: the batch
@@ -798,7 +824,7 @@ impl Store {
             site_servers: HashMap::new(),
             started_with: HashMap::new(),
             live_syncs: HashMap::new(),
-            busy: Default::default(),
+            lanes: Default::default(),
             launching: Default::default(),
             update_queue: Default::default(),
             recent_updates: Default::default(),
@@ -1019,6 +1045,7 @@ impl Store {
                     for root in ready {
                         let Some(mut inst) = s.instance(&root).cloned() else { continue };
                         s.spawn_instance_job(&root, format!("Adding downloaded files to {}", inst.name), move |job| {
+                            fresh(&mut inst);
                             let mut placed = Vec::new();
                             for d in hopper::modpack::landing_dirs() {
                                 placed.extend(hopper::modpack::place_downloads(&mut inst, &d)?);
@@ -2626,14 +2653,37 @@ impl Store {
         quiet: bool,
         work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
     ) -> u64 {
-        let job = if quiet { self.jobs.start_quiet(title) } else { self.jobs.start(title) };
+        let job = if quiet { self.jobs.start_quiet(title.clone()) } else { self.jobs.start(title.clone()) };
         let id = job.id();
         crate::hero_drift::job_started();
-        if let Some(r) = &root {
-            *self.busy.lock().unwrap_or_else(|e| e.into_inner()).entry(r.clone()).or_default() += 1;
+        // Another job is changing this instance: this one waits its turn
+        // (in the task list, where it can be cancelled), in order.
+        let queued = root.as_ref().and_then(|r| self.lanes.join(r, id, &title));
+        if let Some(ahead) = &queued {
+            job.queued(true);
+            job.detail(hopper::lanes::waiting_text(ahead));
+            job.show();
         }
-        let (tx, wake, busy) = (self.tx.clone(), self.wake.clone(), self.busy.clone());
+        let (tx, wake, lanes) = (self.tx.clone(), self.wake.clone(), self.lanes.clone());
         std::thread::spawn(move || {
+            if queued.is_some()
+                && let Some(r) = &root
+            {
+                let w = wake.clone();
+                let turn = lanes.wait_turn(r, id, || job.is_cancelled(), |ahead| {
+                    job.detail(hopper::lanes::waiting_text(ahead));
+                    w();
+                });
+                if !turn {
+                    job.finish::<()>(&Err(anyhow::anyhow!("Cancelled")));
+                    crate::hero_drift::job_ended();
+                    wake();
+                    return;
+                }
+                job.queued(false);
+                job.detail(String::new());
+                WAITED.with(|w| w.set(true));
+            }
             // A bug in the work must still end the job, not leave it spinning.
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&job)))
                 .unwrap_or_else(|p| {
@@ -2652,14 +2702,9 @@ impl Store {
             }
             job.finish(&r);
             crate::hero_drift::job_ended();
+            // Fine or failed, the next job in line may start.
             if let Some(r) = &root {
-                let mut b = busy.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(n) = b.get_mut(r) {
-                    *n = n.saturating_sub(1);
-                    if *n == 0 {
-                        b.remove(r);
-                    }
-                }
+                lanes.leave(r, id);
             }
             if let Ok(msg) = r {
                 let _ = tx.send(msg);
@@ -2698,6 +2743,7 @@ impl Store {
         let Some(mut inst) = self.instance(root).cloned() else { return };
         let Some(pack) = inst.pack.clone() else { return };
         self.spawn_instance_job(root, format!("Finishing {}", inst.name), move |job| {
+            fresh(&mut inst);
             let file = hopper::cf::file(pack.project_id, pack.file_id)?;
             hopper::modpack::update_any(&mut inst, pack.project_id, &file, None, job)?;
             let left = hopper::modpack::pending_downloads(&inst).len();
@@ -2741,26 +2787,34 @@ impl Store {
         });
     }
 
+    /// Whether a job is changing this instance or waits to.
     pub fn is_busy(&self, root: &Path) -> bool {
-        self.busy.lock().unwrap_or_else(|e| e.into_inner()).contains_key(root)
+        self.lanes.busy(root)
     }
 
-    /// Why mods, packs and shaders can't be added, updated or removed right
-    /// now, if they can't. A running game doesn't stop that (as in
-    /// CurseForge): the changes apply on its next start.
-    pub fn edit_hold_reason(&self, root: &Path) -> Option<&'static str> {
-        self.is_busy(root).then_some("Another task is changing this instance")
-    }
-
-    /// Why the instance can't be changed right now, if it can't.
+    /// Why the instance can't be changed right now, if it can't. Another
+    /// job on it is no reason: the change waits its turn behind it.
     pub fn hold_reason(&self, root: &Path) -> Option<&'static str> {
-        if self.running(root).is_some() {
-            Some("Close the game first")
-        } else if self.is_busy(root) {
-            Some("Another task is changing this instance")
-        } else {
-            None
-        }
+        self.running(root).is_some().then_some("Close the game first")
+    }
+
+    /// Runs `work` as a quiet instance job (in the task list only while it
+    /// waits for another job on the instance, or when it fails) and hands
+    /// back what it returned, for a view to pick up with [`work_done`].
+    pub fn queue_work<T: Send + 'static>(
+        &self,
+        root: &Path,
+        title: impl Into<String>,
+        work: impl FnOnce(&Job) -> T + Send + 'static,
+    ) -> Arc<std::sync::Mutex<Option<T>>> {
+        let slot = Arc::new(std::sync::Mutex::new(None));
+        let out = slot.clone();
+        self.run_job(Some(root.to_path_buf()), title.into(), true, move |job| {
+            let v = work(job);
+            *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+            Ok(Msg::Nothing)
+        });
+        slot
     }
 
     fn launch_defaults(&self) -> hopper::launch::Defaults {
@@ -2862,6 +2916,7 @@ impl Store {
         self.spawn_instance_job(&root, title, move |job| {
             prepare_loader(&inst, &dir, &defaults, native, job)?;
             let mut inst = inst;
+            crate::store::fresh(&mut inst);
             sync_cf_loader(&mut inst, job);
             job.detail("Ready to play");
             Ok(Msg::InstanceChanged(inst.root.clone()))
@@ -2937,7 +2992,7 @@ impl Store {
         backup_worlds: bool,
         kept: String,
     ) -> Option<u64> {
-        let Some(mut full) = self.instance(root).cloned() else {
+        let Some(full) = self.instance(root).cloned() else {
             return None;
         };
         let Some(pid) = full.pack.as_ref().map(|p| p.project_id) else {
@@ -2969,6 +3024,8 @@ impl Store {
         let native = self.settings.launch_native;
         let (fetching, wake) = (self.fetching.clone(), self.wake.clone());
         let id = self.spawn_instance_job_id(&full.root.clone(), format!("{} → {}", full.name, file.display_name), move |job| {
+            let mut full = full;
+            fresh(&mut full);
             job.announce();
             job.presence(full.name.clone(), true);
             let name = full.name.clone();
@@ -3216,6 +3273,7 @@ impl Store {
         let recent = self.recent_updates.clone();
         let wake = self.wake.clone();
         self.spawn_instance_job(&inst.root.clone(), format!("Updating mods in {}", inst.name), move |job| {
+            fresh(&mut inst);
             // No snapshot first: backups are the player's to make. The
             // old jars still go to .hopper-backups, so Undo works.
             let mut clear = ClearQueue(queue.clone(), Some(inst.root.clone()));
@@ -3663,6 +3721,7 @@ impl Store {
         }
         if let Some(mut inst) = self.instance(root).cloned() {
             self.spawn_instance_job(&inst.root.clone(), format!("Identifying jars in {}", inst.name), move |job| {
+                fresh(&mut inst);
                 let n = install::identify_loose(&mut inst, job)?;
                 // A CurseForge pack's mods named on Modrinth earlier move to
                 // CurseForge where it has them (updates follow the pack's site).
@@ -3683,6 +3742,7 @@ impl Store {
         }
         if let Some(mut inst) = self.instance(root).cloned() {
             self.spawn_instance_job(&inst.root.clone(), format!("Identifying {}", jars.join(", ")), move |job| {
+                fresh(&mut inst);
                 let n = install::identify_jars(&mut inst, &jars, job)?;
                 job.detail(format!("Identified {n} jars"));
                 Ok(Msg::Reidentified(inst.root.clone()))
@@ -3699,6 +3759,7 @@ impl Store {
         }
         if let Some(mut inst) = self.instance(root).cloned() {
             self.spawn_instance_job(&inst.root.clone(), format!("Switching source of {file}"), move |job| {
+                fresh(&mut inst);
                 let done = install::switch_source(&mut inst, &file, job)?;
                 job.detail(done);
                 Ok(Msg::InstanceChanged(inst.root.clone()))

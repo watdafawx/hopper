@@ -132,6 +132,7 @@ impl Store {
         let Some(mut inst) = self.instance(root).cloned() else { return };
         let root = root.to_path_buf();
         self.spawn_instance_job(&root.clone(), format!("Syncing {what} with friends again"), move |job| {
+            crate::store::fresh(&mut inst);
             hopper::onlyhere::sync_again(&mut inst, &keys, job)?;
             Ok(Msg::InstanceChanged(root))
         });

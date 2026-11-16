@@ -50,28 +50,29 @@ pub fn undo_changed(store: &Entity<Store>, root: &Path, ch: &hopper::crashdetect
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::component::notification::Notification;
     let s = store.read(cx);
-    if let Some(why) = s.edit_hold_reason(root) {
-        window.push_notification(Notification::error(format!("Can't undo now: {why}.")), cx);
-        return;
-    }
     let Some(mut inst) = s.instance(root).cloned() else { return };
     let saved = hopper::backups::list(root).into_iter().flat_map(|s| s.files).find(|f| f.path == ch.backup);
     let Some(saved) = saved else {
         window.push_notification(Notification::warning(format!("The older copy of {} isn't in History any more.", ch.name)), cx);
         return;
     };
-    // A kept copy with no site file behind it: History's own undo would put
-    // it beside the newer jar, so swap the two instead.
-    if saved.src.is_none() {
-        if put_back_changed(store, root, ch, window, cx) {
-            window.push_notification(Notification::success(format!("Put back the older {}.", ch.name)), cx);
+    // Another task on the instance: this waits its turn behind it.
+    let (r2, ch2) = (root.to_path_buf(), ch.clone());
+    let slot = s.queue_work(root, format!("Putting back the older {}", ch.name), move |_| {
+        crate::store::fresh(&mut inst);
+        // A kept copy with no site file behind it: History's own undo would
+        // put it beside the newer jar, so swap the two instead.
+        if saved.src.is_none() {
+            hopper::crashdetect::put_back(&r2, &ch2)
+        } else {
+            hopper::undo::undo(&mut inst, &saved)
         }
-        return;
-    }
+        .map_err(|e| format!("{e:#}"))
+    });
     let (store, root, name) = (store.clone(), root.to_path_buf(), ch.name.clone());
     window
         .spawn(cx, async move |cx| {
-            let done = cx.background_spawn(async move { hopper::undo::undo(&mut inst, &saved).map_err(|e| format!("{e:#}")) }).await;
+            let Some(done) = crate::store::work_done(cx.background_executor().clone(), slot).await else { return };
             cx.update(|window, cx| match done {
                 Ok(p) => {
                     let jars: Vec<String> = p.file_name().map(|n| n.to_string_lossy().into_owned()).into_iter().collect();
@@ -157,6 +158,7 @@ impl CrashHelp {
         let store = self.store.read(cx);
         let Some(mut inst) = store.instance(&root).cloned() else { return };
         store.spawn_instance_job(&root, "Installing Crash Assistant", move |job| {
+            crate::store::fresh(&mut inst);
             let before = crate::store::Before::at(&inst.root);
             let added = hopper::install::install_mod_id(&mut inst, "crash_assistant", job)?;
             job.note(format!("Installed {}", added.join(", ")));

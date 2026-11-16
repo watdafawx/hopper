@@ -329,9 +329,6 @@ fn set_enabled(store: &Entity<Store>, args: &Value, cx: &mut App) -> Reply {
         .map(|a| a.iter().filter_map(|f| f.as_str().map(|s| s.trim_end_matches(".disabled").to_string())).collect())
         .unwrap_or_default();
     let on = args["enabled"].as_bool().ok_or("enabled is needed")?;
-    if let Some(why) = store.read(cx).edit_hold_reason(&root) {
-        return Err(format!("Can't change it now: {why}."));
-    }
     store.update(cx, |s, cx| {
         let r = s.set_enabled(&root, &files, on);
         cx.notify();
@@ -352,11 +349,6 @@ fn update_mods(store: &Entity<Store>, args: &Value, cx: &mut App) -> Reply {
     if picked.is_empty() {
         return Err("No updates waiting for those (list_mods with only_updates shows them).".into());
     }
-    if !s.queues_updates(&root)
-        && let Some(why) = s.edit_hold_reason(&root)
-    {
-        return Err(format!("Can't update now: {why}."));
-    }
     let n = picked.len();
     s.run_updates(&root, picked);
     Ok(vec![text(format!("Updating {n} in Hopper (a task; switched-off mods stay off)."))])
@@ -366,12 +358,11 @@ fn install(store: &Entity<Store>, args: &Value, cx: &mut App) -> Reply {
     let s = store.read(cx);
     let inst = find(s, args["instance"].as_str().unwrap_or(""))?.clone();
     let id = args["id"].as_u64().ok_or("id is needed")?;
-    if let Some(why) = s.edit_hold_reason(&inst.root) {
-        return Err(format!("Can't install now: {why}."));
-    }
     let root = inst.root.clone();
     let instances_root = PathBuf::from(&s.settings().instances_root);
     s.spawn_instance_job(&root, format!("Installing project {id} into {}", inst.name), move |job| {
+        let mut inst = inst;
+        crate::store::fresh(&mut inst);
         let m = hopper::source::get_mod(id)?;
         let class = m.class_id.unwrap_or(cf::CLASS_MODS);
         // Website-only files (the project or a dependency) go to the
