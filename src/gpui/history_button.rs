@@ -137,6 +137,7 @@ impl HistoryButton {
             let mut first = true;
             loop {
                 let r2 = r.clone();
+                crate::wakes::hit(&crate::wakes::HISTORY);
                 let n = cx.background_spawn(async move { r2.new_entries() }).await;
                 let alive = this
                     .update(cx, |t, cx| {

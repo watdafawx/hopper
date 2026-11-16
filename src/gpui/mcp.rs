@@ -80,6 +80,7 @@ pub fn start(window: &mut Window, cx: &mut Context<AppView>) {
                 .await;
             // How late the timer fired is how long the UI thread was busy
             // (drawing, loading) since the last tick: see `probe`.
+            crate::wakes::hit(&crate::wakes::MCP);
             probe::tick(slept.elapsed().saturating_sub(Duration::from_millis(30)));
             // Settings changes take effect within a tick.
             let Ok(want) = this.update(cx, |this, cx| {

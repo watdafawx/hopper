@@ -1251,6 +1251,7 @@ impl BrowseView {
     // ---- loading -------------------------------------------------------
 
     fn load_versions(&mut self, cx: &mut Context<Self>) {
+        crate::wakes::hit(&crate::wakes::VERSIONS);
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_spawn(async move { cf::minecraft_versions() })

@@ -960,6 +960,7 @@ impl Store {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(3)).await;
+                crate::wakes::hit(&crate::wakes::DOWNLOADS);
                 let Ok(roots) = this.update(cx, |s, _| {
                     s.pending
                         .keys()
@@ -1016,6 +1017,7 @@ impl Store {
             // settings change (by panel id: setup key, when, list).
             let mut listed: HashMap<String, (String, std::time::Instant, Vec<PanelServer>)> = HashMap::new();
             loop {
+                crate::wakes::hit(&crate::wakes::PANEL);
                 let Ok(setup) = this.update(cx, |s, _| {
                     let panels: Vec<(String, String, Arc<dyn ServerPanel>)> = hopper::panel::panels(&s.settings)
                         .iter()
@@ -1169,6 +1171,7 @@ impl Store {
                 cx.background_executor()
                     .timer(Duration::from_millis(50))
                     .await;
+                crate::wakes::hit(&crate::wakes::STORE_POLL);
                 let msgs: Vec<Msg> = rx.try_iter().collect();
                 if msgs.is_empty() && !dirty.swap(false, Ordering::Relaxed) {
                     if ticked.swap(false, Ordering::Relaxed) {
