@@ -933,8 +933,10 @@ pub(crate) fn update_projects(addons: &[Addon]) -> Vec<u64> {
         .collect()
 }
 
-/// Newer files for installed projects that fit the instance.
-pub fn check_updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
+/// Newer files for installed projects that fit the instance. `check`: a look
+/// the player asked for ([`Check::Manual`]) asks GitHub for its newest
+/// releases; an automatic one may use an answer from the last few minutes.
+pub fn check_updates(inst: &Instance, check: crate::sources::Check) -> anyhow::Result<Vec<Update>> {
     // Without a CurseForge key only Modrinth's mods can be checked.
     let ids: Vec<u64> = if cf::api_key().is_some() {
         update_projects(&inst.addons)
@@ -981,7 +983,7 @@ pub fn check_updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
     }
     // Mods from GitHub and other links: their trouble (a rate limit, a
     // host that's down) never hides the sites' updates.
-    match crate::sources::updates(inst) {
+    match crate::sources::updates(inst, check) {
         Ok(src) => out.extend(src),
         Err(e) if !out.is_empty() => log::warn!("source updates for {}: {e:#}", inst.name),
         Err(e) => return Err(e),
@@ -1692,7 +1694,9 @@ pub fn changelogs(
     } else {
         Loader::Any
     };
-    let listed = crate::source::files(project_id, &inst.game_version, loader)?;
+    // Every caller opens this for the player (Versions, a changelog), so a
+    // GitHub mod's list is asked for again, not taken from a recent answer.
+    let listed = crate::source::files_checked(project_id, &inst.game_version, loader, crate::sources::Check::Manual)?;
     // File ids only order CurseForge files; see `file_age`.
     let have = crate::file_age::Age::installed(inst, project_id, installed_file, &listed);
     let mut between: Vec<cf::File> = match update {
