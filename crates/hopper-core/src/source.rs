@@ -47,13 +47,18 @@ pub fn files_checked(id: u64, game_version: &str, loader: Loader, check: crate::
     if crate::sources::is_src(id) {
         return crate::sources::files_checked(id, game_version, loader, check);
     }
-    if !is_mr(id) {
-        return cf::files(id, game_version, loader);
-    }
-    Ok(modrinth::versions(&real_id(id)?, game_version, loader)?
-        .iter()
-        .map(modrinth::version_to_file)
-        .collect())
+    let mut files = if !is_mr(id) {
+        cf::files(id, game_version, loader)?
+    } else {
+        modrinth::versions(&real_id(id)?, game_version, loader)?
+            .iter()
+            .map(modrinth::version_to_file)
+            .collect()
+    };
+    // The sites match the version tag alone; a jar tagged for both 1.21.x
+    // and 26.x is made for 26.x, so it's not a file for a 1.21 instance.
+    files.retain(|f| !f.wrong_era(game_version));
+    Ok(files)
 }
 
 pub fn file(project: u64, file: u64) -> anyhow::Result<cf::File> {

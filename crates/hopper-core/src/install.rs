@@ -191,12 +191,24 @@ pub fn best_file(
     let is_mod = class_id.unwrap_or(cf::CLASS_MODS) == cf::CLASS_MODS;
     let loader = if is_mod { loader_of(inst) } else { Loader::Any };
     let files = crate::source::files(project, &inst.game_version, loader)?;
-    let pick = files
+    Ok(pick_best(&files, &inst.game_version).cloned())
+}
+
+/// [`best_file`]'s pick from a newest-first list: the newest release made
+/// for `mc` (see [`cf::File::fits`]), else the newest such file of any kind.
+pub fn pick_best<'a>(files: &'a [cf::File], mc: &str) -> Option<&'a cf::File> {
+    let fit = || files.iter().filter(|f| !f.wrong_era(mc));
+    fit().find(|f| f.release_type == 1).or_else(|| fit().next())
+}
+
+/// The newest file of `files` made for `mc`, no less stable than
+/// `max_release` allows, and newer than the installed `above`. Picks the
+/// update when CurseForge's index points at a file that doesn't fit.
+pub fn pick_update<'a>(files: &'a [cf::File], mc: &str, max_release: u32, above: u64) -> Option<&'a cf::File> {
+    files
         .iter()
-        .find(|f| f.release_type == 1)
-        .or(files.first())
-        .cloned();
-    Ok(pick)
+        .filter(|f| f.id > above && f.release_type <= max_release && !f.wrong_era(mc))
+        .max_by_key(|f| f.id)
 }
 
 /// Downloads one file into the instance, replacing the project's old file.
@@ -966,6 +978,18 @@ pub fn check_updates(inst: &Instance, check: crate::sources::Check) -> anyhow::R
         .into_iter()
         .filter_map(|f| {
             let a = inst.addons.iter().find(|a| a.project_id == f.mod_id)?;
+            // CurseForge's index lists a file under every version its author
+            // tagged, so the newest "1.21.1" file can be a jar built for 26.2.
+            // Then the newest file that really fits is the update, if any.
+            let f = if f.wrong_era(&inst.game_version) {
+                let is_mod = a.class_id == 0 || a.class_id == cf::CLASS_MODS;
+                let l = if is_mod { loader_of(inst) } else { Loader::Any };
+                let list = crate::source::files(a.project_id, &inst.game_version, l).ok()?;
+                let max = inst.settings.release_channel.max(a.release_type).max(1);
+                pick_update(&list, &inst.game_version, max, a.file_id)?.clone()
+            } else {
+                f
+            };
             Some(Update {
                 project_id: f.mod_id,
                 name: a.name.clone(),
@@ -1055,8 +1079,22 @@ fn modrinth_updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
         .into_iter()
         .filter_map(|a| {
             let v = latest.get(&a.mr_sha1)?;
-            let f = crate::modrinth::version_to_file(v);
-            (v.id != a.mr_version && f.release_type <= channel.max(a.release_type).max(1)).then(
+            let mut f = crate::modrinth::version_to_file(v);
+            let max = channel.max(a.release_type).max(1);
+            // Same rule as CurseForge: a jar tagged for 1.21.x and 26.x is
+            // made for 26.x, so a 1.21 instance takes the newest one that
+            // fits, unless that's the one it has.
+            if f.wrong_era(&inst.game_version) {
+                let is_mod = a.class_id == 0 || a.class_id == cf::CLASS_MODS;
+                let l = if is_mod { loader_of(inst) } else { Loader::Any };
+                let list = crate::source::files(a.project_id, &inst.game_version, l).ok()?;
+                // Newest first: only files above the installed one are newer.
+                let ver = |f: &cf::File| f.modrinth.as_ref().is_some_and(|m| m.version_id == a.mr_version);
+                let end = list.iter().position(ver).unwrap_or(list.len());
+                f = list[..end].iter().find(|f| f.release_type <= max)?.clone();
+            }
+            let id = f.modrinth.as_ref().map_or(v.id.as_str(), |m| m.version_id.as_str()).to_string();
+            (id != a.mr_version && f.release_type <= max).then(
                 || Update {
                     project_id: a.project_id,
                     name: a.name.clone(),
@@ -2907,5 +2945,101 @@ mod stale_copy_tests {
         assert_eq!(job.note_count(), 1);
         assert!(history(&root).is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// Picking files by Minecraft version when an author tags one jar with both
+/// 1.21.x and the year-named versions (Structory: Towers, November 2026).
+#[cfg(test)]
+mod era_tests {
+    use super::{pick_best, pick_update};
+    use crate::cf::{self, Loader};
+
+    fn file(id: u64, name: &str, tags: &[&str]) -> cf::File {
+        cf::File {
+            id,
+            file_name: name.into(),
+            release_type: 1,
+            game_versions: tags.iter().map(|t| t.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    const OLD: &[&str] = &["1.21", "1.21.1", "1.21.8", "1.21.11", "NeoForge", "Fabric"];
+
+    /// Newest first, as the sites list them; the tags are the real ones, cut short.
+    fn towers() -> Vec<cf::File> {
+        let mixed = |extra: &[&'static str]| [OLD, extra].concat();
+        vec![
+            file(8968055, "Structory_Towers_26.3_v1.0.19+26.3.jar", &["NeoForge", "Fabric", "26.3"]),
+            file(8396885, "Structory_Towers_26.2_v1.0.17.jar", &mixed(&["26.1", "26.1.1", "26.1.2", "26.2"])),
+            file(7842394, "Structory_Towers_26.1_v1.0.16.jar", &mixed(&["26.1"])),
+            file(7375538, "Structory_Towers_1.21.x_v1.0.15.jar", OLD),
+            file(7078283, "Structory_Towers_1.21.x_v1.0.14.jar", OLD),
+        ]
+    }
+
+    #[test]
+    fn version_names() {
+        for v in ["26.1", "26.1.1", "26.2", "27.1", "26.1-snapshot-1"] {
+            assert!(cf::is_year_mc(v) && !cf::is_old_mc(v), "{v}");
+        }
+        for v in ["1.21.1", "1.20", "1.21.11"] {
+            assert!(cf::is_old_mc(v) && !cf::is_year_mc(v), "{v}");
+        }
+        for v in ["NeoForge", "Client", "Java 25", "1.", "26"] {
+            assert!(!cf::is_old_mc(v) && !cf::is_year_mc(v), "{v}");
+        }
+    }
+
+    #[test]
+    fn old_instance_skips_jars_tagged_for_26() {
+        let files = towers();
+        // What CurseForge returns for gameVersion=1.21.1: every file tagged 1.21.1.
+        let listed: Vec<cf::File> = files.into_iter().filter(|f| f.game_versions.iter().any(|v| v == "1.21.1")).collect();
+        assert_eq!(listed.len(), 4);
+        assert_eq!(pick_best(&listed, "1.21.1").unwrap().id, 7375538);
+        assert!(!listed[0].fits("1.21.1", Loader::NeoForge));
+        assert!(listed[2].fits("1.21.1", Loader::NeoForge));
+    }
+
+    #[test]
+    fn year_instance_takes_26_files() {
+        let files = towers();
+        let listed: Vec<cf::File> = files.into_iter().filter(|f| f.game_versions.iter().any(|v| v == "26.1")).collect();
+        // The jar tagged for both is the newest 26.1 one, and it fits there.
+        assert_eq!(pick_best(&listed, "26.1").unwrap().id, 8396885);
+        assert!(listed[0].fits("26.1", Loader::NeoForge));
+        assert_eq!(pick_best(&towers(), "26.3").unwrap().id, 8968055);
+    }
+
+    #[test]
+    fn update_from_old_file_skips_26_jars() {
+        let files = towers();
+        // On v1.0.14: v1.0.15 is the update, not the 26.2 jar the index names.
+        assert_eq!(pick_update(&files, "1.21.1", 1, 7078283).unwrap().id, 7375538);
+        // Already on v1.0.15: nothing newer fits.
+        assert!(pick_update(&files, "1.21.1", 1, 7375538).is_none());
+        // A 26.2 instance on v1.0.16 updates to v1.0.17.
+        let on26: Vec<cf::File> = towers().into_iter().filter(|f| f.game_versions.iter().any(|v| v == "26.2")).collect();
+        assert_eq!(pick_update(&on26, "26.2", 1, 7842394).unwrap().id, 8396885);
+    }
+
+    #[test]
+    fn packs_and_shaders_tagged_for_both_still_fit() {
+        // A zip (resource pack, shader) often works across both; only jars are held back.
+        let pack = file(1, "Fancy_Shaders_v2.zip", &["1.21.1", "26.1"]);
+        assert!(pack.fits("1.21.1", Loader::Any));
+        assert_eq!(pick_best(std::slice::from_ref(&pack), "1.21.1").unwrap().id, 1);
+    }
+
+    #[test]
+    fn beta_only_when_no_release_fits() {
+        let mut beta = file(9, "M_1.21.1_beta.jar", &["1.21.1"]);
+        beta.release_type = 2;
+        let files = vec![file(10, "M_26.1.jar", &["1.21.1", "26.1"]), beta];
+        assert_eq!(pick_best(&files, "1.21.1").unwrap().id, 9);
+        assert!(pick_update(&files, "1.21.1", 1, 0).is_none());
+        assert_eq!(pick_update(&files, "1.21.1", 2, 0).unwrap().id, 9);
     }
 }
