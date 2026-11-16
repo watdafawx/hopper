@@ -1,9 +1,11 @@
 <script>
   // A server's alerts and TPS, in three spots on its page: a TPS chip in the
-  // header (`part="chip"`), banners under it ("banner") and a TPS line in
-  // the Live card ("live").
+  // header (`part="chip"`), notices in the page's notice slot ("banner")
+  // and a TPS line in the Live card ("live").
   import { onMount } from 'svelte';
-  import { AlertTriangle, X, Share2, Info } from '@lucide/svelte';
+  import { Share2, Terminal } from '@lucide/svelte';
+  import Notice from './lib/Notice.svelte';
+  import { mainClass } from './lib/noticeorder.js';
   import ShareLog from './ShareLog.svelte';
   import { alerts, alertsFor, watchAlerts, dismissAlert, refreshAlerts } from './lib/alerts.svelte.js';
   import { post, target } from './lib/api.js';
@@ -55,6 +57,10 @@
   onMount(watchAlerts);
 </script>
 
+{#snippet shareCrash(fit)}
+  <button class={mainClass(fit)} onclick={() => (sharing = true)}><Share2 size={13} />{fit.narrow ? 'Share' : 'Share crash report'}</button>
+{/snippet}
+
 {#if remote}{:else if part === 'chip'}
   {#if running && tps}
     <span class="chip tps {level}" title={tpsTitle(tps) || 'Ticks per second'}>TPS {tps.tps.toFixed(1)}</span>
@@ -63,19 +69,18 @@
   {/if}
 {:else if part === 'banner'}
   {#if turnedOn && turnedOn === id}
-    <div class="ban info"><Info size={14} /><span class="grow">RCON is on. {running ? 'It starts with the server’s next restart.' : 'It starts with the server.'}</span></div>
+    <Notice id="rcon-on-{id}" tier="info" icon={Terminal} title="RCON is on" subject={running ? 'It starts with the server’s next restart' : 'It starts with the server'} onclose={() => (turnedOn = '')} />
   {:else if server.rcon === false}
     <!-- Older panels don't send `rcon`: no notice for them. -->
-    <div class="ban info"><Info size={14} /><span class="grow">Console commands and live player info need RCON · <button class="lnk" disabled={turning} onclick={rcon} title="Gives it its own port and a random password. Never restarts the server.">{turning ? 'Turning on…' : 'Turn on'}</button> <span class="muted">(applies on restart)</span></span></div>
+    <Notice id="rcon-off-{id}" tier="info" icon={Terminal} title="Console commands and live player info need RCON" subject="Applies on restart">
+      {#snippet primary(fit)}
+        <button class={mainClass(fit)} disabled={turning} onclick={rcon} title="Gives it its own port and a random password. Never restarts the server.">{turning ? 'Turning on…' : 'Turn on'}</button>
+      {/snippet}
+    </Notice>
   {/if}
   {#each shown as a (a.kind + a.server_id + a.since)}
-    <div class="ban" class:red={a.kind === 'crash'}>
-      <AlertTriangle size={14} />
-      <span class="grow">{md(a.text)}</span>
-      <span class="tiny muted">{new Date(a.since * 1000).toLocaleTimeString()}</span>
-      {#if a.kind === 'crash'}<button class="btn sm" onclick={() => (sharing = true)}><Share2 size={13} />Share crash report</button>{/if}
-      <button class="btn sm ghost icon" title="Dismiss" onclick={() => dismissAlert(a)}><X size={13} /></button>
-    </div>
+    <!-- A crash also has its own notice (CrashStrip); this one shares it. -->
+    <Notice id="alert-{a.kind}-{a.server_id}-{a.since}" tier="choice" title={md(a.text)} subject={new Date(a.since * 1000).toLocaleTimeString()} since={a.since} onclose={() => dismissAlert(a)} primary={a.kind === 'crash' ? shareCrash : null} />
   {/each}
   {#if sharing}<ShareLog {server} crash onClose={() => (sharing = false)} />{/if}
 {:else if part === 'live'}
@@ -97,13 +102,6 @@
   .chip.good { color: var(--green); background: var(--green-dim); }
   .chip.warn { color: var(--gold); background: var(--gold-dim); }
   .chip.bad { color: var(--red); background: var(--red-dim); }
-  .ban { display: flex; align-items: center; gap: 10px; margin: 0 18px 10px; padding: 7px 12px; border-radius: var(--radius-lg); background: var(--gold-dim); border: 1px solid #eab30840; color: var(--text); font-size: 12.5px; }
-  .ban.red { background: var(--red-dim); border-color: #ef444440; }
-  .ban :global(svg) { color: var(--gold); flex: none; }
-  .ban.red :global(svg) { color: var(--red); }
-  .ban.info { background: var(--blue-dim); border-color: #38bdf840; }
-  .ban.info :global(svg) { color: var(--blue); }
-  .grow { flex: 1; min-width: 0; }
   .t { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); }
   .t b { color: var(--text); font-weight: 500; }
   .t b.w { color: var(--gold); } .t b.r { color: var(--red); }

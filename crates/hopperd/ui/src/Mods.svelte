@@ -13,6 +13,8 @@
   import { browseHash } from './lib/browse.js';
   import { isShown, isUnknown, shownBrowse } from './lib/shown.js';
   import CfKey from './CfKey.svelte';
+  import Notice from './lib/Notice.svelte';
+  import { mainClass } from './lib/noticeorder.js';
   import DropJars from './DropJars.svelte';
   import ModPeek from './ModPeek.svelte';
   import ModVersions from './ModVersions.svelte';
@@ -281,6 +283,11 @@
     const keep = [...l].sort((a, b) => Number(b.enabled) - Number(a.enabled) || (b.file_date || '').localeCompare(a.file_date || ''))[0];
     return l.filter((m) => m !== keep);
   }));
+  // A notice's subject from names: "A, B, C" or "A, B and 4 more" (desktop's brief_names).
+  const briefNames = (names) => {
+    const n = [...new Set(names.filter(Boolean))];
+    return n.length <= 3 ? n.join(', ') : `${n[0]}, ${n[1]} and ${n.length - 2} more`;
+  };
   const clientOn = $derived(mods.filter((m) => m.side === 'client' && m.enabled).length);
   const pickedMod = $derived(picked ? mods.find((m) => m.file === picked.file) || (picked.pid !== '0' && mods.find((m) => m.project_id === picked.pid)) || null : null);
   const peekOf = (m) => ({ file: m.file, pid: m.project_id || '0' });
@@ -817,6 +824,8 @@
   {:else}<span class="c-added muted" title={dateOf(m.date_added)}>{ago(m.date_added)}</span>{/if}
 {/snippet}
 
+{#snippet cfKeyForm()}<CfKey inline onSaved={() => { load(); checkUpdates(true); }} />{/snippet}
+
 <DropJars {server} onAdded={() => { load(); identify(true); }} />
 <div class="card">
   <nav class="subtabs">
@@ -860,13 +869,35 @@
       {#if srcOn && counts.unknown}<button class="btn sm ghost" onclick={() => (finding = true)} title="Jars that link to their GitHub repo can follow it for updates"><Link size={13} /><span class="lb">Find sources for </span>{counts.unknown}<span class="lb"> unknown mod{counts.unknown === 1 ? '' : 's'}</span></button>{/if}
       <ModProfiles {base} {alive} onChanged={() => changed(false)} />
     </div>
-    {#if server.changed_since_start && !restartClosed}<div class="banner small restart-note"><Info size={14} /><span class="grow">Changed while the server runs: restart it to load the changes</span><button class="btn sm" disabled={server.state === 'stopping'} onclick={() => askPower(server, 'restart')}><RotateCcw size={13} />Restart</button><button class="btn sm ghost icon" title="Hide" onclick={() => (restartClosed = true)}><X size={13} /></button></div>{/if}
-    {#if identifying}<div class="banner small"><span class="spinner blue"></span>{identifying}… names, icons and updates fill in when it's done.</div>{/if}
-    {#if showSourcesHint({ known: srcKnown, allowed: srcOn, chip, unknown: counts.unknown, closed: srcHintClosed })}<div class="banner small src-hint"><Info size={14} /><span class="grow">Their sources may not have come along: mods from links is off. <a href="#/settings/content">Turn it on in Settings › Mod sources</a>.</span><button class="btn sm ghost icon" title="Hide" aria-label="Hide this note" onclick={() => (srcHintClosed = true)}><X size={13} /></button></div>{/if}
+    <!-- The notes go to the notice slot above the server's tabs. -->
+    {#if server.changed_since_start && !restartClosed}
+      <Notice id="mods-restart" tier="info" icon={RotateCcw} title="Changed while the server runs" subject="Restart it to load the changes" onclose={() => (restartClosed = true)}>
+        {#snippet primary(fit)}<button class={mainClass(fit)} disabled={server.state === 'stopping'} onclick={() => askPower(server, 'restart')}><RotateCcw size={13} />Restart</button>{/snippet}
+      </Notice>
+    {/if}
+    {#if identifying}<Notice id="mods-identifying" tier="info" icon={ScanSearch} title={identifying} subject="Names, icons and updates fill in when it's done" />{/if}
+    {#if showSourcesHint({ known: srcKnown, allowed: srcOn, chip, unknown: counts.unknown, closed: srcHintClosed })}
+      <Notice id="mods-src-hint" tier="info" title="Their sources may not have come along" subject="Mods from links is off" onclose={() => (srcHintClosed = true)}>
+        {#snippet primary(fit)}<a class={mainClass(fit)} href="#/settings/content">{fit.narrow ? 'Turn on' : 'Turn it on in Settings'}</a>{/snippet}
+      </Notice>
+    {/if}
     {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
-    {#if data && !data.curseforge}<CfKey inline onSaved={() => { load(); checkUpdates(true); }} />{/if}
-    {#if twice.length}<div class="small warn row wrap">{twice.length} mod{twice.length === 1 ? ' is' : 's are'} in twice: {twice.map((l) => l[0].name).join(', ')}. <button class="link" onclick={async () => (await drop(older)) && changed(true)}>Keep newest</button><span class="muted">(undo from History)</span></div>{/if}
-    {#if clientOn}<div class="small warn">{clientOn} client-only mod{clientOn === 1 ? '' : 's'} on: servers usually don't need {clientOn === 1 ? 'it' : 'them'}, and some won't start with them. <button class="link" onclick={() => (chip = 'client')}>Show</button></div>{/if}
+    {#if data && !data.curseforge}
+      <Notice id="mods-cf-key" tier="info" title="CurseForge needs an API key" subject="For search, identify and updates. Modrinth works without one" details={cfKeyForm}>
+        {#snippet primary(fit)}<a class={mainClass(fit)} href="https://console.curseforge.com/" target="_blank" rel="noreferrer" title="Opens console.curseforge.com: sign in, open API keys and copy your key">Get a key</a>{/snippet}
+      </Notice>
+    {/if}
+    {#if twice.length}
+      <!-- A mod in twice stops Fabric and Quilt from loading; NeoForge and Forge load one. -->
+      <Notice id="mods-twice" tier={/^(fabric|quilt)/i.test(data?.loader || '') ? 'stop' : 'info'} title="{twice.length} mod{twice.length === 1 ? ' is' : 's are'} in twice" subject={briefNames(twice.map((l) => l[0].name))}>
+        {#snippet primary(fit)}<button class={mainClass(fit)} title="Removes the older copies. Undo from History." onclick={async () => (await drop(older)) && changed(true)}>Keep newest</button>{/snippet}
+      </Notice>
+    {/if}
+    {#if clientOn && chip !== 'client'}
+      <Notice id="mods-client-on" tier="choice" title="{clientOn} client-only mod{clientOn === 1 ? '' : 's'} on" subject="Servers usually don't need {clientOn === 1 ? 'it' : 'them'}, and some won't start with them" closeKey="hopper.client-on.{server.id}.{clientOn}">
+        {#snippet primary(fit)}<button class={mainClass(fit)} title="Shows only the client-only mods" onclick={() => (chip = 'client')}>Show</button>{/snippet}
+      </Notice>
+    {/if}
 
     <div class="split">
       <div class="list" class:sidein={hasSide && !cols.includes('side')} class:narrow style:--cols={gridCols} bind:clientWidth={listW}>
@@ -1092,15 +1123,9 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .find { padding: 3px 8px; width: 224px; font-weight: 400; }
   .clr { color: var(--muted); display: grid; }
   .wrap { flex-wrap: wrap; }
-  .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .warn { color: var(--gold); }
+  .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .okt { color: var(--green); gap: 5px; }
   .link { color: var(--acc); text-decoration: underline; font-size: 12px; }
-  .restart-note .grow { flex: 1; }
-  /* Readable in both themes: the panel's orange link is too faint on the light page. */
-  .src-hint .grow { flex: 1; color: var(--text); }
-  .src-hint a { color: inherit; text-decoration: underline; font-weight: 600; }
-  .banner { display: flex; align-items: center; gap: 8px; border: 1px solid #60a5fa44; background: var(--blue-dim); border-radius: var(--radius-lg); padding: 6px 10px; color: var(--subtle); }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
   .spinner.blue { color: var(--blue); }
   .vr { width: 1px; height: 20px; background: var(--line2); margin: 0 2px; }

@@ -1,11 +1,13 @@
 <script>
-  // One line above the server's tabs while its start looks stuck (no
-  // progress, almost no CPU), as Hopper desktop's (stuck.rs) and like the
-  // crash strip: what's stuck, the mod the thread dump points at first,
-  // "Restart server…", and "See why →", which opens Logs & crashes on the
-  // saved dump. The server process watches itself
-  // (hopper_core::stuckstart); this only shows `server.stuck`.
-  import { Clock, RotateCcw, X } from '@lucide/svelte';
+  // The notice in the slot above the server's tabs while its start looks
+  // stuck (no progress, almost no CPU), as Hopper desktop's (stuck.rs):
+  // what's stuck, the mod the thread dump points at first, "Restart
+  // server…", "See why →" (Logs & crashes on the saved dump) and "Wait".
+  // The server process watches itself (hopper_core::stuckstart); this only
+  // shows `server.stuck`.
+  import { Clock, RotateCcw } from '@lucide/svelte';
+  import Notice from './lib/Notice.svelte';
+  import { mainClass } from './lib/noticeorder.js';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { power } from './lib/power.js';
@@ -52,29 +54,30 @@
 </script>
 
 {#if r && !hidden}
-  <div class="strip">
-    <Clock size={14} />
-    <b class="t">{server.name} looks stuck {doing}</b>
-    {#if top}
-      <span class="muted">·</span>
-      <span class="what" title={top.why}>
-        <span class="mod">{#if mod?.icon}<img src={mod.icon} alt="" width="16" height="16" />{:else}<span class="ph"></span>{/if}<b>{topName}</b></span>
-        <span class="chip {top.certainty === 'Likely' ? 'warn' : ''}">{top.certainty}</span>
-      </span>
-    {/if}
-    <span class="grow"></span>
-    <button class="btn sm pri" onclick={() => power(server, 'restart')}><RotateCcw size={13} />Restart server…</button>
-    <button class="btn sm" onclick={() => seeWhy(dump)}>See why →</button>
-    <button class="btn sm ghost icon" disabled={busy} title="Wait: hides this and asks again in 5 minutes if it's still stuck" onclick={wait}><X size={13} /></button>
-  </div>
+  <Notice id="srv-stuck" tier="stop" icon={Clock} title="{server.name} looks stuck {doing}" subject={top ? `${topName} (${top.certainty})` : ''} since={r.when || 0} details={top ? stuckDetails : null}>
+    {#snippet primary(fit)}
+      <button class={mainClass(fit)} title="It won't finish on its own; starting again usually gets past it" onclick={() => power(server, 'restart')}><RotateCcw size={13} />{fit.narrow ? 'Restart…' : 'Restart server…'}</button>
+    {/snippet}
+    {#snippet actions()}
+      <button class="btn sm" title="Opens Logs & crashes on the thread dump" onclick={() => seeWhy(dump)}>See why →</button>
+      <button class="btn sm ghost" disabled={busy} title="Hides this and asks again in 5 minutes if it's still stuck" onclick={wait}>Wait</button>
+    {/snippet}
+  </Notice>
 {/if}
 
+{#snippet stuckDetails()}
+  {#if top}
+    <span class="what" title={top.why}>
+      <span class="mod">{#if mod?.icon}<img src={mod.icon} alt="" width="16" height="16" />{:else}<span class="ph"></span>{/if}<b>{topName}</b></span>
+      <span class="chip {top.certainty === 'Likely' ? 'warn' : ''}">{top.certainty}</span>
+    </span>
+    <span class="small muted">{top.why}</span>
+  {/if}
+{/snippet}
+
 <style>
-  .strip { display: flex; align-items: center; gap: 8px; margin: 0 18px 10px; padding: 6px 8px 6px 12px; border: 1px solid #facc1599; border-radius: var(--radius-lg); background: #facc150f; color: var(--gold); font-size: 13px; }
-  .t { font-weight: 600; flex: none; }
-  .what { display: inline-flex; align-items: center; gap: 8px; color: var(--text); min-width: 0; overflow: hidden; white-space: nowrap; }
-  .mod { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; }
+  .what { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+  .mod { display: inline-flex; align-items: center; gap: 6px; }
   .mod b { font-weight: 600; }
   .mod img, .ph { width: 16px; height: 16px; border-radius: var(--radius-sm); background: var(--raise); flex: none; display: inline-block; }
-  .grow { flex: 1; }
 </style>

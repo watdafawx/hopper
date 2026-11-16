@@ -504,7 +504,7 @@ impl LogsView {
     /// the picked report's card beside it.
     fn crashes_pane(&mut self, root: &Path, cx: &mut Context<Self>) -> AnyElement {
         // What Hopper read from the last crash, when it was one of Hopper's
-        // games ("Revert X" for a mod an older version of it fixes).
+        // games ("Roll back X" for a mod an older version of it fixes).
         let detected = self.store.update(cx, |s, _| {
             if let Some(i) = s.instance(root).cloned() {
                 s.want_reverts(&i.root, &i.loader, &i.game_version, &i.addons, true);

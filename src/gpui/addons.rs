@@ -2,6 +2,7 @@
 //! of what an instance has installed, with updates, toggles and removal.
 
 use crate::drag_pick::{self, DragPick, PickDrag, PickState, Picks, Sweep};
+use crate::notice_slot::{Notice, Tier};
 use crate::store::Store;
 use crate::widgets::{self, Clickable as _};
 use crate::widgets::ToastAction as _;
@@ -782,6 +783,11 @@ pub enum AddonsEvent {
     CollapseList,
     /// A mod's config button: its config in the side panel.
     Config { root: PathBuf, file: String },
+    /// A notice's "See why →": the last crash in Logs & crashes.
+    SeeCrash,
+    /// A notice's button that acts on the Mods list (Review, Show): the
+    /// Mods tab, when the notice was clicked on another tab.
+    ShowMods,
 }
 
 impl EventEmitter<AddonsEvent> for AddonsView {}
@@ -904,8 +910,6 @@ pub struct AddonsView {
     /// The last crash's mod that stopped the game loading, and the update
     /// its error names (with the older copy), for the top notice. None
     /// once that mod is off or the older copy is back.
-    /// Notices whose whole row list shows (else the first two).
-    pub(crate) rows_open: std::collections::HashSet<&'static str>,
     pub(crate) crash_stop: Option<(hopper::crashdetect::Stopped, Option<hopper::crashdetect::Changed>)>,
     /// Clicks and pointer, for when Updated rows may go.
     pub(crate) settle: widgets::Settle,
@@ -1031,7 +1035,6 @@ impl AddonsView {
             recent: HashMap::new(),
             settle: Default::default(),
             crashed: HashMap::new(),
-            rows_open: Default::default(),
             crash_stop: None,
             dep_jobs: HashMap::new(),
             dep_done: HashSet::new(),
@@ -1085,6 +1088,56 @@ impl AddonsView {
         self.search.update(cx, |s, cx| s.set_value(t, window, cx));
         self.query = text.trim().to_lowercase();
         cx.notify();
+    }
+
+    /// The notices the table knows about (load problems, missing and
+    /// doubled mods, notes), for the notice slot above an instance's or a
+    /// server's tabs. Empty while the table shows another instance.
+    pub fn notices(&mut self, root: &Path, cx: &mut Context<Self>) -> Vec<Notice> {
+        if self.root.as_deref() != Some(root) {
+            return Vec::new();
+        }
+        let Some(inst) = self.table.inst.clone() else { return Vec::new() };
+        let mut out: Vec<Notice> = Vec::new();
+        out.extend(self.blocker_banner(&inst, cx));
+        out.extend(self.missing_banner(&inst, cx));
+        out.extend(self.duplicate_banner(&inst, cx));
+        out.extend(self.client_on_note(&inst, cx));
+        out.extend(self.shader_notes(&inst, cx));
+        out.extend(self.only_here_note(&inst, cx));
+        out.extend(self.restart_note(&inst, cx));
+        out
+    }
+
+    /// What [`Self::notices`] depends on that the store doesn't: the
+    /// folder reads and the last crash. The Library redraws when it changes.
+    pub fn notice_sig(&self, cx: &App) -> u64 {
+        let mut h = std::hash::DefaultHasher::new();
+        let m = &self.missing;
+        (&self.root, self.class, self.show == Show::ClientOnly, self.table.sig, self.table.has_shader_loader).hash(&mut h);
+        (&m.root, m.mtime, m.listed, m.list.len(), m.dups.len(), m.blockers.len(), m.queued, m.switch_off, m.switch_on, m.loaded_fine, m.ghosts.len()).hash(&mut h);
+        self.crash_stop.as_ref().map(|(st, _)| st.file_name.clone()).hash(&mut h);
+        self.store.read(cx).changed_while_running(self.root.as_deref().unwrap_or(Path::new(""))).hash(&mut h);
+        h.finish()
+    }
+
+    /// Keeps the table on `root` while a tab without a list is open, so the
+    /// notice slot there has the Mods tab's notices. Points it at the mods
+    /// when it shows another instance.
+    pub fn follow(&mut self, root: &Path, cx: &mut Context<Self>) {
+        if self.root.as_deref() != Some(root) {
+            self.show_for(root.to_path_buf(), cf::CLASS_MODS, cx);
+        }
+    }
+
+    /// A notice's button acting on the Mods list: the table goes to the
+    /// mods first (a class change would clear what it picks).
+    pub(crate) fn to_mods(&mut self, cx: &mut Context<Self>) {
+        if self.class != cf::CLASS_MODS
+            && let Some(root) = self.root.clone()
+        {
+            self.point(root, cf::CLASS_MODS, cx);
+        }
     }
 
     /// Points the table at an instance and class.
@@ -1232,7 +1285,8 @@ impl AddonsView {
             self.refresh_loose(&inst, cx);
         }
         self.waiting = self.store.read(cx).waiting_switches(&root).cloned().unwrap_or_default();
-        if class == cf::CLASS_MODS {
+        // The notice slot shows these on every tab of an instance.
+        if class == cf::CLASS_MODS || !self.server {
             self.want_missing(&inst, cx);
         }
         let archived = self.store.read(cx).archived(&root).cloned().unwrap_or_default();
@@ -4952,8 +5006,8 @@ Change version", a.file_name).into()
     /// offered to keep only on this PC. Nothing is marked until they pick;
     /// Review picks them in the list, next to the selection's "Only on
     /// this PC". Shown once per pack.
-    fn only_here_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.server || self.remote || self.class != cf::CLASS_MODS || self.global_dir().is_some() {
+    fn only_here_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
+        if self.server || self.remote {
             return None;
         }
         // Marks live in the store; the table's copy can be a step behind.
@@ -4968,36 +5022,46 @@ Change version", a.file_name).into()
         if client.is_empty() || store.synced_with(&inst.root).is_none() {
             return None;
         }
-        let theme = cx.theme();
         let n = client.len();
         let names: Vec<String> = client.iter().map(|a| a.name.clone()).collect();
-        let text = format!(
-            "{} only change{} your own game ({}). Keep {} only on this PC?",
+        let title = format!(
+            "{} only change{} your own game. Keep {} only on this PC?",
             if n == 1 { "1 mod".to_string() } else { format!("{n} mods") },
             if n == 1 { "s" } else { "" },
-            crate::store::and_list(&names),
             if n == 1 { "it" } else { "them" },
         );
         let key = hopper::settings::notice_key(&inst.root.to_string_lossy(), "only-here", "");
+        if crate::notice_slot::hidden(&self.store, &key, cx) {
+            return None;
+        }
         let files: Vec<String> = client.iter().map(|a| a.file_name.clone()).collect();
-        let body = crate::crash_help::callout(theme.info, cx)
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(div().flex_1().min_w_0().text_sm().child(text))
-            .child(Button::new("only-here-review").small().outline().label("Review").on_click(cx.listener(move |this, _, _, cx| {
-                this.selected = files.iter().cloned().collect();
-                cx.notify();
-            })));
-        let notice = widgets::closable_notice(body, key, widgets::Closed::Gone, "", theme.info, &self.store, cx)?;
-        Some(div().px_6().child(notice).into_any_element())
+        let view = cx.entity().downgrade();
+        Some(
+            Notice::new("only-here", Tier::Info, title)
+                .subject(crate::addons_extra::brief_names(names))
+                .primary(move |fit| {
+                    crate::notice_slot::main_button(Button::new("only-here-review").small(), fit)
+                        .label("Review")
+                        .tooltip("Picks them in the Mods list, next to \"Only on this PC\"")
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.to_mods(cx);
+                                this.selected = files.iter().cloned().collect();
+                                cx.emit(AddonsEvent::ShowMods);
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                })
+                .dismiss_key(&self.store, key),
+        )
     }
 
     /// A server's mods: "N client-only mods on", as Hopper Server's web UI
     /// says, with Show (the Client-only filter). Hidden once closed, until
     /// the count changes.
-    fn client_on_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.server || self.class != cf::CLASS_MODS || self.show == Show::ClientOnly {
+    fn client_on_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
+        if !self.server || (self.class == cf::CLASS_MODS && self.show == Show::ClientOnly) {
             return None;
         }
         let n = inst
@@ -5008,24 +5072,31 @@ Change version", a.file_name).into()
         if n == 0 {
             return None;
         }
-        let theme = cx.theme();
-        let text = format!(
-            "{n} client-only mod{} on: servers usually don't need {}, and some won't start with them.",
-            if n == 1 { "" } else { "s" },
-            if n == 1 { "it" } else { "them" }
-        );
+        let title = format!("{n} client-only mod{} on", if n == 1 { "" } else { "s" });
         let key = hopper::settings::notice_key(&inst.root.to_string_lossy(), "client-on", &n.to_string());
-        let body = crate::crash_help::callout(theme.warning, cx)
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(div().flex_1().min_w_0().text_sm().child(text))
-            .child(Button::new("client-on-show").small().outline().label("Show").on_click(cx.listener(|this, _, _, cx| {
-                this.show = Show::ClientOnly;
-                cx.notify();
-            })));
-        let notice = widgets::closable_notice(body, key, widgets::Closed::Gone, "", theme.warning, &self.store, cx)?;
-        Some(div().px_6().child(notice).into_any_element())
+        if crate::notice_slot::hidden(&self.store, &key, cx) {
+            return None;
+        }
+        let view = cx.entity().downgrade();
+        Some(
+            Notice::new("client-on", Tier::Choice, title)
+                .subject(format!("Servers usually don't need {}, and some won't start with them", if n == 1 { "it" } else { "them" }))
+                .primary(move |fit| {
+                    crate::notice_slot::main_button(Button::new("client-on-show").small(), fit)
+                        .label("Show")
+                        .tooltip("Shows only the client-only mods")
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.to_mods(cx);
+                                this.show = Show::ClientOnly;
+                                cx.emit(AddonsEvent::ShowMods);
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                })
+                .dismiss_key(&self.store, key),
+        )
     }
 
     /// "Old copy": the mod is in twice, an older file kept turned off beside
@@ -6231,13 +6302,6 @@ impl Render for AddonsView {
         }
         let tabs = self.location_row(cx);
         let global_head = self.location_caption(cx);
-        let missing = self.missing_banner(&inst, cx);
-        let dups = self.duplicate_banner(&inst, cx);
-        let blockers = self.blocker_banner(&inst, cx);
-        let shaders = self.shader_notes(&inst, cx);
-        let restart = self.restart_note(&inst, cx);
-        let client_on = self.client_on_note(&inst, cx);
-        let only_here = self.only_here_note(&inst, cx);
         let updates = self.table.updates.clone();
         let rows = self.table.rows.clone();
         // Narrow with the instance list open: offer its room, once.
@@ -6376,13 +6440,6 @@ impl Render for AddonsView {
             .children(tabs)
             .children(global_head)
             .child(toolbar)
-            .children(restart)
-            .children(client_on)
-            .children(only_here)
-            .children(blockers)
-            .children(dups)
-            .children(missing)
-            .children(shaders)
             .child(v_flex().flex_1().min_h_0().child(header).child(body));
         list.size_full().relative().children(bulk).into_any_element()
     }
