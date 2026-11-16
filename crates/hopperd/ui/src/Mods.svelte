@@ -846,6 +846,9 @@
 
   {#if sub === 'backups'}
     <ModBackups {server} onChanged={() => { load(); loadBackupCount(); checkUpdates(false); }} />
+  {:else if data && !mods.length}
+    <!-- Truly empty: no toolbar or columns, the same empty state as every content tab (desktop's empty_top). -->
+    <div class="empty-state top"><span class="es-ic"><Package size={20} /></span><b>No mods yet</b><p>Add content finds mods for this server, or drop .jar files on the window.</p><a class="btn sm pri" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add mods</a></div>
   {:else}
     <!-- Laid out as desktop's: actions, search, what's listed (Filter), in what order (Sort). -->
     <div class="row toolbar">
@@ -985,7 +988,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
           {:else if filtered}
             <div class="empty-state"><span class="es-ic"><Search size={20} /></span><b>Nothing matches</b><p>No item here fits the search and filters.</p><button class="btn sm" onclick={clearFilters}>Clear search and filters</button></div>
           {:else}
-            <div class="empty-state"><span class="es-ic"><Package size={20} /></span><b>Nothing installed here yet</b><p>Add content finds mods and data packs for this server.</p><a class="btn sm" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add content</a></div>
+            <div class="empty-state"><span class="es-ic"><Package size={20} /></span><b>No mods yet</b><p>Add content finds mods for this server, or drop .jar files on the window.</p><a class="btn sm pri" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add mods</a></div>
           {/if}
         {/if}
       </div>
@@ -1121,7 +1124,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
   .spinner.blue { color: var(--blue); }
   .vr { width: 1px; height: 20px; background: var(--line2); margin: 0 2px; }
-  .bad { color: var(--red); }
+  .bad { color: var(--red-text); }
   .split { display: flex; gap: 12px; align-items: flex-start; }
   .addsplit { display: inline-flex; }
   .addsplit > .btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
@@ -1186,7 +1189,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .c-end { gap: 2px; justify-content: flex-end; }
   .ib { color: var(--muted); padding: 3px; border-radius: var(--radius); display: grid; }
   .ib:hover { color: var(--text); background: #ffffff10; }
-  .ib.del:hover { color: var(--red); }
+  .ib.del:hover { color: var(--red-text); }
   /* Hover-only controls stay shown on the picked row, the key row and the row whose menu is open. */
   .mod .more, .mod .ghostcl, .mod .cfg { visibility: hidden; }
   /* The config icon: shown on hover when the mod has config files, always (orange) when one is changed. */
@@ -1221,7 +1224,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .skels { display: flex; flex-direction: column; gap: 4px; padding-top: 6px; }
   .ctx { position: fixed; z-index: 80; width: 250px; display: flex; flex-direction: column; }
   .ctx .menu-item { min-width: 0; }
-  .ctx .bad { color: var(--red); }
+  .ctx .bad { color: var(--red-text); }
   .noi { width: 13px; flex: none; }
   .srcp { font-size: 11px; color: var(--subtle); padding: 0 4px; border-radius: var(--radius-sm); text-decoration: underline dotted; }
   .srcp:hover { color: var(--text); background: var(--hover, rgba(255,255,255,.06)); }

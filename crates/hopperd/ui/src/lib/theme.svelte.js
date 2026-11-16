@@ -4,6 +4,7 @@
 // choice is kept in this browser; "Follow system" tracks the OS.
 
 import themes from './themes.json';
+import { inkRed, toHex } from './ink.js';
 
 const KEY = 'hopper.theme';
 
@@ -34,7 +35,10 @@ function resolve(name) {
 export function paint(name) {
   const t = resolve(name);
   const st = document.documentElement.style;
-  const vars = t.name === 'Hopper Dark' ? {} : {
+  // The red for small text (lib/ink.js) is fitted to every theme, Hopper Dark too.
+  const redText = toHex(inkRed(t));
+  const vars = t.name === 'Hopper Dark' ? { '--red-text': redText } : {
+    '--red-text': redText,
     '--bg': t.bg, '--side': t.panel, '--base': mix(t.bg, 55, t.surface), '--surface': t.surface, '--raise': t.raised,
     '--line': t.border, '--line2': mix(t.border, 70, t.text), '--term': mix(t.bg, 75, t.panel),
     '--text': t.text, '--subtle': t.muted, '--muted': t.muted,
@@ -48,7 +52,7 @@ export function paint(name) {
     '--popover': mix(t.bg, 55, t.surface),
   };
   const all = ['--bg', '--side', '--base', '--surface', '--raise', '--line', '--line2', '--term', '--text', '--subtle', '--muted', '--acc', '--acc-dim',
-    '--green', '--green-dim', '--gold', '--gold-dim', '--blue', '--blue-dim', '--red', '--red-dim', '--danger', '--input-line', '--side-line',
+    '--green', '--green-dim', '--gold', '--gold-dim', '--blue', '--blue-dim', '--red', '--red-dim', '--red-text', '--danger', '--input-line', '--side-line',
     '--hover', '--sel', '--popover'];
   for (const k of all) {
     if (vars[k]) st.setProperty(k, vars[k]); else st.removeProperty(k);

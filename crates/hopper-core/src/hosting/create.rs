@@ -168,6 +168,8 @@ impl CreateOptions {
         );
         if inst.settings.memory_mb >= 2048 {
             o.memory_mb = inst.settings.memory_mb;
+        } else if inst.settings.pack_memory_mb >= 2048 {
+            o.memory_mb = default_memory_mb(o.loader.is_modded(), inst.settings.pack_memory_mb);
         }
         Ok(o)
     }
@@ -177,15 +179,24 @@ impl CreateOptions {
     }
 }
 
-/// The memory (MB) a new server gets unless the player picks some: the
-/// pack's recommendation when it gives one (rounded up to 0.5 GB), else
-/// 6 GB for a modded server and 2 GB for vanilla, Paper or Purpur. Both
-/// apps use this, so the same pack gets the same default everywhere.
+/// The memory (MB) a new server on this machine gets unless the player
+/// picks some: [`default_memory_for`] with this machine's memory.
 pub fn default_memory_mb(modded: bool, recommended_mb: u32) -> u32 {
-    if recommended_mb >= 2048 {
-        return recommended_mb.div_ceil(512) * 512;
-    }
-    if modded { 6144 } else { 2048 }
+    default_memory_for(modded, recommended_mb, crate::memory::pc_mb())
+}
+
+/// The memory (MB) a new server gets on a host with `host_mb` (0: not
+/// known): the pack's recommendation when it gives one (whole GB, as for an
+/// instance), else 6 GB for a modded server and 2 GB for vanilla, Paper or
+/// Purpur; never more than the host spares beside it
+/// ([`crate::memory::spare_mb`]). Both apps use this, so the same pack gets
+/// the same default everywhere.
+pub fn default_memory_for(modded: bool, recommended_mb: u32, host_mb: u32) -> u32 {
+    // A server's mods aren't counted where this is asked, so without a
+    // recommendation it's the plain modded / vanilla amount.
+    let base = if modded { 6144 } else { 2048 };
+    let rec = if recommended_mb >= 2048 { recommended_mb } else { base };
+    crate::memory::pick(rec, 0, "", host_mb, crate::memory::Side::Server).given_mb
 }
 
 /// Free bytes on the drive holding `path`; 0 when Hopper can't tell.
@@ -1060,13 +1071,29 @@ mod tests {
 
     #[test]
     fn memory_default_follows_the_pack_then_the_loader() {
-        assert_eq!(default_memory_mb(false, 0), 2048);
-        assert_eq!(default_memory_mb(true, 0), 6144);
-        // A pack's recommendation wins, rounded up to half a gigabyte.
-        assert_eq!(default_memory_mb(true, 8192), 8192);
-        assert_eq!(default_memory_mb(true, 7000), 7168);
+        let big = 64 * 1024;
+        assert_eq!(default_memory_for(false, 0, big), 2048);
+        assert_eq!(default_memory_for(true, 0, big), 6144);
+        // A pack's recommendation wins, to the nearest whole gigabyte.
+        assert_eq!(default_memory_for(true, 8192, big), 8192);
+        assert_eq!(default_memory_for(true, 7000, big), 7168);
+        assert_eq!(default_memory_for(true, 8196, big), 8192);
         // Too small to be a real recommendation.
-        assert_eq!(default_memory_mb(true, 1024), 6144);
+        assert_eq!(default_memory_for(true, 1024, big), 6144);
+        // Host not known: no limit.
+        assert_eq!(default_memory_for(true, 12288, 0), 12288);
+    }
+
+    #[test]
+    fn memory_default_fits_the_host() {
+        let gb = |g: u32| g * 1024;
+        // A 12 GB pack on 4/8/16/32/64 GB hosts: keeps max(2 GB, 20%) free.
+        let got: Vec<u32> = [4, 8, 16, 32, 64].iter().map(|h| default_memory_for(true, gb(12), gb(*h)) / 1024).collect();
+        assert_eq!(got, [2, 6, 12, 12, 12]);
+        // Modded without a recommendation on an 8 GB VPS: all 6 GB fit.
+        assert_eq!(default_memory_for(true, 0, gb(8)), gb(6));
+        assert_eq!(default_memory_for(true, 0, gb(4)), gb(2));
+        assert_eq!(default_memory_for(false, 0, gb(4)), gb(2));
     }
 
     #[test]

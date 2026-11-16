@@ -346,7 +346,7 @@
   /* The number is drawn, not text: picking and copying leave it out. */
   .ln::before { content: attr(data-n); position: absolute; left: 0; width: calc(var(--gw) - 2ch); text-align: right; color: var(--muted); opacity: .6; user-select: none; }
   .ln::selection { background: #f9731659; }
-  .ln.e { color: var(--red); } .ln.w { color: var(--gold); } .ln.j { color: var(--green); }
+  .ln.e { color: var(--red-text); } .ln.w { color: var(--gold); } .ln.j { color: var(--green); }
   .ln.h { color: var(--acc); } .ln.f { color: var(--subtle); }
   .jump { position: absolute; right: 16px; bottom: 60px; box-shadow: 0 6px 20px #0008; }
   .cmd { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); padding: 8px 10px; background: var(--base); }

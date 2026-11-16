@@ -260,7 +260,7 @@
   .ck :global(svg) { flex: none; margin-top: 2px; }
   .ck.ok :global(svg) { color: var(--green); }
   .ck.warn :global(svg) { color: var(--gold); }
-  .ck.fail :global(svg) { color: var(--red); }
+  .ck.fail :global(svg) { color: var(--red-text); }
   .prog { gap: 8px; min-width: 0; }
   .stp { min-width: 0; }
   .amt { flex: none; white-space: nowrap; }

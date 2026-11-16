@@ -499,7 +499,7 @@
       {:else if data}
         {#each data.targets.filter((t) => t.on) as t (t.id)}
           <div class="tg">
-            {#if t.last_error}<AlertTriangle size={13} color="var(--red)" />{:else if t.working || t.pending}<RefreshCw size={13} color="var(--gold)" />{:else}<Check size={13} color="var(--green)" />{/if}
+            {#if t.last_error}<AlertTriangle size={13} color="var(--red-text)" />{:else if t.working || t.pending}<RefreshCw size={13} color="var(--gold)" />{:else}<Check size={13} color="var(--green)" />{/if}
             <div class="nmw"><div class="ell small">{t.name}{#if !t.enabled}<span class="muted"> (off)</span>{/if}</div>
               <div class="tiny ell" class:muted={!t.last_error} class:errc={t.last_error} title={t.last_error || ''}>
                 {t.last_error ? t.last_error : t.working ? 'Copying now' : t.pending ? `${t.pending} waiting` : t.last_ok ? `Up to date · ${ago(t.last_ok)}` : 'Waiting'}</div></div>
@@ -562,12 +562,12 @@
   .tck { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12.5px; cursor: pointer; }
   .tg { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--line); }
   .tg:last-of-type { border: 0; }
-  .errc { color: var(--red); }
+  .errc { color: var(--red-text); }
   .wrapr { flex-wrap: wrap; margin-bottom: 6px; gap: 5px; }
   .since { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; }
   .since .wrapr { margin-bottom: 2px; }
   .chg { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 6px; }
   .mk { width: 10px; flex: none; font-weight: 700; text-align: center; }
-  .mk.changed { color: var(--gold); } .mk.added { color: var(--green); } .mk.removed { color: var(--red); }
+  .mk.changed { color: var(--gold); } .mk.added { color: var(--green); } .mk.removed { color: var(--red-text); }
   .pickc { cursor: pointer; }
 </style>

@@ -187,7 +187,7 @@
   .raw { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .d { color: var(--subtle); font-size: 12px; white-space: pre-line; }
   .cap { color: var(--muted); font-size: 11.5px; }
-  .cap.err { color: var(--red); }
+  .cap.err { color: var(--red-text); }
   .cap.pc { color: var(--blue); }
   .ctl { display: flex; align-items: flex-start; gap: 6px; justify-content: flex-end; min-width: 0; }
   .sl { display: flex; align-items: center; gap: 8px; }

@@ -136,6 +136,15 @@
   // The host's RAM, for the memory slider's range and hint.
   const hostGb = $derived(hostInfo?.mem_total ? hostInfo.mem_total / 2 ** 30 : 0);
   const memMax = $derived(hostGb ? Math.max(2, Math.floor(hostGb)) : 32);
+  // What a new server may take by default, as the panel works it out
+  // (hopper-core memory::spare_mb for a server host): keep max(2 GB, 20%)
+  // of the host free, whole GB, never under 2 GB.
+  const spareGb = $derived.by(() => {
+    if (!hostGb) return Infinity;
+    const pc = Math.round(hostGb);
+    return Math.max(2, Math.floor(pc - Math.max(2, pc * 0.2)));
+  });
+  const fitHost = (gb) => Math.min(gb, spareGb);
   const canMake = $derived(
     !busy &&
       (from === 'folder'
@@ -257,8 +266,8 @@
   });
   $effect(() => {
     if (memTouched) return;
-    if (from === 'fresh') memory = loader === 'vanilla' || PLUGINS.includes(loader) ? 2 : 6;
-    else if (from === 'pack') memory = 6;
+    if (from === 'fresh') memory = fitHost(loader === 'vanilla' || PLUGINS.includes(loader) ? 2 : 6);
+    else if (from === 'pack') memory = fitHost(6);
   });
 
   function loaderId() {
@@ -273,7 +282,7 @@
     try {
       zipInfo = await api(`/servers/zip-info?${q}`);
       if (!name.trim()) name = zipInfo.name;
-      if (zipInfo.recommended_mb && !memTouched) memory = Math.ceil(zipInfo.recommended_mb / 512) / 2;
+      if (zipInfo.recommended_mb && !memTouched) memory = fitHost(Math.max(1, Math.round(zipInfo.recommended_mb / 1024)));
     } catch (e) {
       error = e.message;
     }

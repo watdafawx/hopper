@@ -86,5 +86,5 @@
   .hd .tiny { flex: none; }
   .foot { gap: 8px; margin-top: 8px; align-items: center; }
   .sp { flex: 1; }
-  .err { color: var(--red); }
+  .err { color: var(--red-text); }
 </style>

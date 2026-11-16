@@ -519,7 +519,7 @@
 
 <style>
   .crash { container-type: inline-size; display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; margin-bottom: 10px; border: 1px solid #ef444499; border-radius: var(--radius-lg); background: #ef44440f; }
-  .head { gap: 8px; color: var(--red); }
+  .head { gap: 8px; color: var(--red-text); }
   .head b { font-weight: 600; font-size: 14px; }
   .follow { display: flex; gap: 6px; align-items: flex-start; }
   .follow :global(svg) { flex: none; margin-top: 2px; }
@@ -558,7 +558,7 @@
   .facts li { display: flex; gap: 8px; align-items: flex-start; }
   .mark { flex: none; width: 10px; font-size: 12px; color: var(--subtle); }
   .mark.up { color: var(--green); }
-  .mark.down { color: var(--red); }
+  .mark.down { color: var(--red-text); }
   .note { font-size: 13px; }
   .switches, .sw { display: flex; flex-direction: column; gap: 6px; }
   .fixfirst { padding: 10px 12px; border-radius: var(--radius); border: 1px solid #f9731659; background: #f9731612; }

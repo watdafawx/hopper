@@ -58,7 +58,7 @@ desktop shows its message like any other error.
 |---|---|
 | `POST /v1/invite` | `{inst?}` → `{code, expires}`; one use, 15 minutes |
 | `POST /v1/join` | `{code}` → `{friend, inst}` |
-| `GET /v1/friends` | `{friends: [{id, name, mc_id, online, last_seen}], max}` |
+| `GET /v1/friends` | `{friends: [{id, name, mc_id, online, last_seen}], max, rev}` |
 | `POST /v1/remove` | `{id}` |
 
 `inst` on an invite is the follow part of a share code: the code is
@@ -78,13 +78,18 @@ is held back by the limits instead of a longer code.
 Removing a friend also takes each out of the other's groups and queues an
 `unfriended` event. A follow of their pack keeps its last version.
 
+`rev` is a short digest of the list as the caller sees it: each friend's id,
+name, Minecraft id, online, and last seen while offline (`friends_rev`). The
+feed carries the same digest, so the desktop reads the list only when it
+changed instead of every few seconds (see Events).
+
 ### Packs
 
 | Route | Body → answer |
 |---|---|
 | `POST /v1/recipes` | `{to: [ids], groups: [ids], inst, key, name, code, left_out, marks?, configs?}` → `{seq, sent, skipped}` |
 | `POST /v1/revoke` | `{inst, to: [ids], groups: [ids], reason}` |
-| `GET /v1/recipes?after=N&wait=60&v=2` | `{seq, events}`, long-polls up to `wait` seconds |
+| `GET /v1/recipes?after=N&wait=60&v=2&fr=REV` | `{seq, events, friends}`, long-polls up to `wait` seconds |
 
 A publish goes once to each person, whether they get it directly, through
 one group or several; the event says which (`direct`, `groups`). `to` must
@@ -195,6 +200,14 @@ Membership changes:
 Every event has `seq`, `kind`, `from`, `from_name`, `at`. Without `v=2` only
 `recipe` events are sent, so an older Hopper never sees the rest.
 
+A `v=2` answer also carries `friends`: the friend list's `rev` right now.
+With `fr` (the digest the desktop last saw) the poll also ends as soon as the
+digest differs: a friend joins, is removed, renames, changes their Minecraft
+account, comes online after being away, or goes quiet (the wait is cut to
+the moment someone's online time runs out). Friend changes are not events in
+the queue, so nothing is stored for them. A poll without `fr` (an older
+Hopper) is never woken by them.
+
 | kind | fields | the desktop |
 |---|---|---|
 | `recipe` | `inst, key, name, code, left_out, direct, groups`, `marks` and `configs` when sent | lists it; applies it to every local follow |
@@ -241,7 +254,15 @@ read, only the newest code of each pack is applied.
   usual way. A pack stopped here, answered Not now, or whose instance was
   deleted in Hopper is remembered per group (`FriendGroup::stopped`) and not
   offered again.
+- **Reading the friend list** (`store::friends::FriendReads`): when the
+  feed's `friends` differs from the last read's `rev`, every 5 minutes as a
+  safety net, when the window comes back after a minute or more, and 20 s
+  after a failed read. Against a mailbox whose feed has no `friends` (older
+  than this) it reads every 30 s. Shares and follows are still checked every
+  3 s locally, without asking the mailbox. Groups are read every minute.
 - **Status**: `Store::sync_status()` is Off, Connecting, Down(text) or Ok.
+  The Friends panel shows it in one line under every page (connected,
+  connecting, reconnecting, offline).
   Notices (copied, paired, joined, stopped sharing, errors) go out as
   `StoreEvent::Notice`.
 
