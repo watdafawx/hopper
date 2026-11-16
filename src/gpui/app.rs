@@ -226,7 +226,16 @@ impl AppView {
             cx.observe(&settings, |this, _, cx| this.track(cx)),
             cx.observe(&store, |_, _, cx| cx.notify()),
             // The hero drift stops while unfocused; a redraw starts it again.
-            cx.observe_window_activation(window, |_, _, cx| cx.notify()),
+            // Coming back also reads the friend list if it is getting old.
+            {
+                let store = store.clone();
+                cx.observe_window_activation(window, move |_, window, cx| {
+                    if window.is_window_active() {
+                        store.update(cx, |s, _| s.window_focused());
+                    }
+                    cx.notify()
+                })
+            },
             cx.observe(&tasks, |_, _, cx| cx.notify()),
             cx.subscribe_in(&store, window, |this, _, event, window, cx| match event {
                 StoreEvent::BrowsePacksFor(place) => {
