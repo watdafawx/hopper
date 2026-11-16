@@ -254,5 +254,6 @@ mod ux {
     }
 }
 
-#[cfg(windows)]
+// Only the edge tests read the descriptor text on its own.
+#[cfg(all(windows, test))]
 pub use win::sddl;

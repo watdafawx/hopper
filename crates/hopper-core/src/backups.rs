@@ -600,9 +600,16 @@ impl Saved {
     /// What History says was done: the change's verb, or "put back" for
     /// what an Undo set aside ("You put back Create", with "0.6 → 0.5.1"
     /// under it). An undo's file is judged like any other, so it would read
-    /// "rolled back" or "switched", as if someone had picked that.
+    /// "switched" or "updated", as if someone had picked that. The one
+    /// exception is an undone update: the newer file it set aside is judged
+    /// against the older one now in the instance, and that reads, and is
+    /// called, "rolled back".
     pub fn verb(&self) -> &'static str {
-        if self.put_back { "put back" } else { self.change.verb() }
+        match (self.put_back, self.change) {
+            (true, Change::RolledBack) => Change::RolledBack.verb(),
+            (true, _) => "put back",
+            _ => self.change.verb(),
+        }
     }
 
     /// A mod (its copy, note or record), not a config or another file.
@@ -2010,6 +2017,21 @@ mod tests {
         f.now_site = "Modrinth";
         assert_eq!(f.detail(), "1.21.1 · CurseForge → Modrinth");
         assert_eq!(Change::TurnedOn.label(), "Turned on");
+    }
+
+    #[test]
+    fn an_undone_update_reads_rolled_back_and_other_undos_put_back() {
+        // Undo of an update: the newer file it set aside is judged against
+        // the older one now in the instance.
+        let mut f = saved_of("brewin-1.21.2.jar", "brewin-1.21.1.jar", Change::RolledBack);
+        assert_eq!(f.verb(), "rolled back");
+        f.put_back = true;
+        assert_eq!(f.verb(), "rolled back");
+        // Any other undo still reads put back, a plain change its own verb.
+        f.change = Change::Switched;
+        assert_eq!(f.verb(), "put back");
+        f.put_back = false;
+        assert_eq!(f.verb(), "switched");
     }
 
     #[test]

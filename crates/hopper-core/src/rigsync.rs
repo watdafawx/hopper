@@ -1354,7 +1354,6 @@ mod tests {
         // already there in another build: left out.
         assert_eq!(ids, ["diegesis", "handsondelight", "old"]);
     }
-    use super::*;
 
     /// A proxy mod only on the server isn't in the way of joining, isn't
     /// removed by Update or Sync, and sits in its own quiet group; a plain

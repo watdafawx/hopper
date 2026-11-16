@@ -618,7 +618,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-fn jar_script_and_java8() {
+    #[test]
+    fn jar_script_and_java8() {
         let t = LaunchTarget::Jar("fabric-server-launch.jar".into());
         let l = parse_launch(&run_bat(Path::new("java"), &t, 21), &jvm()).unwrap();
         assert_eq!(l.args, ["-Xms4G", "-Xmx4G", "-jar", "fabric-server-launch.jar", "nogui"]);

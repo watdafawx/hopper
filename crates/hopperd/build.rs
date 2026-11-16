@@ -193,8 +193,7 @@ fn logo_svg() -> String {
             x += run;
         }
     }
-    s.push_str("</svg>
-");
+    s.push_str("</svg>\n");
     s
 }
 
@@ -299,7 +298,9 @@ fn main() {
     }
     let svg = logo_svg();
     println!("cargo:rerun-if-changed=ui/public/logo.svg");
-    if std::fs::read_to_string("ui/public/logo.svg").ok().as_deref() != Some(svg.as_str()) {
+    // A checkout that turns LF into CRLF (git's autocrlf on Windows) isn't a different logo.
+    let on_disk = std::fs::read_to_string("ui/public/logo.svg").ok().map(|t| t.replace("\r\n", "\n"));
+    if on_disk.as_deref() != Some(svg.as_str()) {
         println!("cargo:warning=ui/public/logo.svg differs from build.rs's LOGO: copy it from OUT_DIR/ui/logo.svg");
     }
     if dist.join("index.html").is_file() {
