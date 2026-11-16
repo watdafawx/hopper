@@ -49,8 +49,37 @@ pub fn fingerprint(dir: &Path) -> Option<String> {
     Some(key.public_key().fingerprint(russh::keys::HashAlg::Sha256).to_string())
 }
 
-/// Listens for SFTP for as long as the panel runs.
+/// What stops the running SFTP listener and ends its open connections (the
+/// owner switching SFTP off in Access & devices).
+static RUNNING: std::sync::Mutex<Option<russh::server::RunningServerHandle>> = std::sync::Mutex::new(None);
+
+/// The address SFTP listens on; the owner's switch binds it first so a port
+/// that is taken is reported at once instead of failing in the background.
+pub async fn bind(bind: &str, port: u16) -> std::io::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind((bind, port)).await
+}
+
+/// Ends SFTP: no new connections, and open ones are disconnected.
+pub fn stop() {
+    if let Some(h) = RUNNING.lock().unwrap().take() {
+        h.shutdown("SFTP was switched off".into());
+        log::info!("SFTP off");
+    }
+}
+
+/// Listens for SFTP for as long as the panel runs (or until [`stop`]).
 pub async fn serve(app: Arc<App>, bind: String, port: u16) {
+    let listener = match tokio::net::TcpListener::bind((bind.as_str(), port)).await {
+        Ok(l) => l,
+        Err(e) => {
+            log::warn!("SFTP off: can't listen on port {port}: {e}. Pick another with sftp_port in hopperd.toml (0 turns it off).");
+            return;
+        }
+    };
+    serve_on(app, listener, port).await;
+}
+
+pub async fn serve_on(app: Arc<App>, listener: tokio::net::TcpListener, port: u16) {
     let key = match host_key(&app.data_dir) {
         Ok(k) => k,
         Err(e) => {
@@ -66,16 +95,14 @@ pub async fn serve(app: Arc<App>, bind: String, port: u16) {
         methods: russh::MethodSet::from(&[russh::MethodKind::Password][..]),
         ..Default::default()
     });
-    let listener = match tokio::net::TcpListener::bind((bind.as_str(), port)).await {
-        Ok(l) => l,
-        Err(e) => {
-            log::warn!("SFTP off: can't listen on port {port}: {e}. Pick another with sftp_port in hopperd.toml (0 turns it off).");
-            return;
-        }
-    };
     log::info!("SFTP on port {port} (host key {})", fingerprint(&app.data_dir).unwrap_or_default());
     let mut server = SshServer { app };
-    if let Err(e) = server.run_on_socket(config, &listener).await {
+    let running = server.run_on_socket(config, &listener);
+    // Switching it on twice: the older listener goes.
+    if let Some(old) = RUNNING.lock().unwrap().replace(running.handle()) {
+        old.shutdown("SFTP restarted".into());
+    }
+    if let Err(e) = running.await {
         log::warn!("SFTP stopped: {e}");
     }
 }
