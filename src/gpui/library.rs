@@ -1834,6 +1834,7 @@ impl LibraryView {
             _ => format!("Keeping Hopper's info for {}", inst.name),
         };
         store.spawn_instance_job(root, title, move |job| {
+            crate::store::fresh(&mut inst);
             match choice {
                 CfChoice::UseCurseForge => hopper::cf_instance::use_curseforge(&mut inst),
                 CfChoice::Keep | CfChoice::KeepAndWrite => hopper::cf_instance::keep_hopper(&mut inst)?,

@@ -870,38 +870,45 @@ impl BackupsView {
         }
         let root = self.root.clone();
         let s = self.store.read(cx);
-        if let Some(why) = s.edit_hold_reason(&root) {
-            window.push_notification(Notification::error(format!("Can't undo now: {why}.")), cx);
-            return;
-        }
         let Some(mut inst) = s.instance(&root).cloned() else {
             window.push_notification(Notification::error("That instance is gone."), cx);
             return;
         };
         let downloads = files.iter().any(|f| f.download);
+        let title = match files.as_slice() {
+            [one] => format!("Putting back {}", one.name),
+            many => format!("Putting back {}", hopper::words::count(many.len(), "file")),
+        };
+        // Another task on the instance (an update): this waits its turn in
+        // the task list, then works on what that task left.
+        let slot = s.queue_work(&root, title, move |_| {
+            crate::store::fresh(&mut inst);
+            let mut done = Vec::new();
+            let mut gone: Option<(Saved, Gone)> = None;
+            let mut errors = Vec::new();
+            for f in &files {
+                match hopper::undo::undo(&mut inst, f) {
+                    Ok(p) => done.push(p),
+                    Err(e) => match e.downcast::<Gone>() {
+                        Ok(g) if gone.is_none() => gone = Some((f.clone(), g)),
+                        Ok(g) => errors.push(format!("{}: {g}", f.name)),
+                        Err(e) => errors.push(format!("{}: {e:#}", f.name)),
+                    },
+                }
+            }
+            (done, gone, errors)
+        });
         self.busy = Some(if downloads { "Downloading to put it back…".into() } else { "Putting it back…".into() });
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let (done, gone, errors) = cx
-                .background_spawn(async move {
-                    let mut done = Vec::new();
-                    let mut gone: Option<(Saved, Gone)> = None;
-                    let mut errors = Vec::new();
-                    for f in &files {
-                        match hopper::undo::undo(&mut inst, f) {
-                            Ok(p) => done.push(p),
-                            Err(e) => match e.downcast::<Gone>() {
-                                Ok(g) if gone.is_none() => gone = Some((f.clone(), g)),
-                                Ok(g) => errors.push(format!("{}: {g}", f.name)),
-                                Err(e) => errors.push(format!("{}: {e:#}", f.name)),
-                            },
-                        }
-                    }
-                    (done, gone, errors)
-                })
-                .await;
+            let got = crate::store::work_done(cx.background_executor().clone(), slot).await;
             this.update_in(cx, |this, window, cx| {
                 this.busy = None;
+                // Cancelled while it waited: nothing changed.
+                let Some((done, gone, errors)) = got else {
+                    cx.notify();
+                    return;
+                };
                 this.after_undo(&done, window, cx);
                 for e in errors {
                     window.push_notification(Notification::error(e), cx);
@@ -1098,6 +1105,7 @@ impl BackupsView {
             let name = f.src.as_ref().map(|r| r.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| f.name.clone());
             let r2 = root.clone();
             s.spawn_instance_job(&root, format!("Putting back {name}"), move |job| {
+                crate::store::fresh(&mut inst);
                 hopper::undo::put_back_as(&mut inst, &f, &file, Some(job))?;
                 job.detail(format!("Put back {}", file.file_name));
                 Ok(crate::store::Msg::InstanceChanged(r2))

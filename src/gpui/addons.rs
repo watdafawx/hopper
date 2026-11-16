@@ -723,15 +723,12 @@ impl Breaks {
 /// Moves removed files back and puts their entries back in the instance.
 pub(crate) fn undo_remove(store: &Entity<Store>, root: PathBuf, items: Vec<Removed>, window: &mut Window, cx: &mut App) {
     let s = store.read(cx);
-    if let Some(why) = s.edit_hold_reason(&root) {
-        window.push_notification(Notification::error(format!("Can't undo now: {why}.")), cx);
-        return;
-    }
     let Some(mut inst) = s.instance(&root).cloned() else {
         window.push_notification(Notification::error("That instance is gone."), cx);
         return;
     };
     s.spawn_instance_job(&root, "Undoing remove", move |job| {
+        crate::store::fresh(&mut inst);
         let mut back = 0;
         for it in &items {
             if it.original.exists() {
@@ -2552,11 +2549,9 @@ impl AddonsView {
         }
         let Some(root) = &self.root else { return };
         let store = self.store.read(cx);
-        // A running update job queues these; any other job holds the
-        // instance.
-        if store.queues_updates(root) || store.edit_hold_reason(root).is_none() {
-            store.run_updates(root, updates);
-        }
+        // A running update job takes these into its batch; behind any other
+        // job they wait their turn.
+        store.run_updates(root, updates);
         cx.notify();
     }
 
@@ -2982,9 +2977,6 @@ impl AddonsView {
                     .filter(|u| store.update_state(&inst.root, u.project_id).is_none())
                     .cloned()
                     .collect();
-                let queues = store.queues_updates(&inst.root);
-                let hold = if queues { None } else { store.edit_hold_reason(&inst.root) };
-                let busy = !queues && store.is_busy(&inst.root);
                 // The toolbar's one filled button: opens the review first.
                 let n = all.len();
                 Button::new("update-all")
@@ -2992,15 +2984,12 @@ impl AddonsView {
                     .primary()
                     .icon(IconName::Download)
                     .label(if lv >= 3 { n.to_string() } else { format!("Update all ({n})") })
-                    .loading(all.is_empty() || busy)
-                    .disabled(hold.is_some())
-                    .tooltip(hold.map(|w| w.to_string()).unwrap_or_else(|| {
-                        if n == 1 {
-                            "Review 1 update, then update".to_string()
-                        } else {
-                            format!("Review {n} updates, then update")
-                        }
-                    }))
+                    .loading(all.is_empty())
+                    .tooltip(if n == 1 {
+                        "Review 1 update, then update".to_string()
+                    } else {
+                        format!("Review {n} updates, then update")
+                    })
                     .rounded_tr(px(0.))
                     .rounded_br(px(0.))
                     .on_click(cx.listener(move |this, _, window, cx| this.review_updates(all.clone(), window, cx)))
@@ -3894,10 +3883,9 @@ impl AddonsView {
             if !store.update_breaks(r, a.project_id).is_empty() || store.update_needs(r, a.project_id).is_some() {
                 return None;
             }
-            let hold = !store.queues_updates(r) && store.edit_hold_reason(r).is_some();
             let busy = store.update_state(r, a.project_id).is_some();
             let from_web = a.project_id != 0 && store.pending(r).iter().any(|p| p.project_id == a.project_id);
-            if hold || busy || from_web {
+            if busy || from_web {
                 return None;
             }
         }
@@ -4060,11 +4048,6 @@ impl AddonsView {
         });
         let store = self.store.read(cx);
         let theme = cx.theme();
-        let hold = self
-            .root
-            .as_ref()
-            .filter(|r| !store.queues_updates(r))
-            .and_then(|r| store.edit_hold_reason(r));
         // `Some(true)` downloading now, `Some(false)` queued.
         let updating = self.root.as_ref().and_then(|r| store.update_state(r, a.project_id));
         // Its new file is with the download window (the author allows
@@ -4341,13 +4324,13 @@ Details").into()),
             let (pid, file) = (u.project_id, u.file.clone());
             let view = cx.entity();
             let f_sweep = a.file_name.clone();
-            let can_run = hold.is_none() && updating.is_none() && !from_web;
+            let can_run = updating.is_none() && !from_web;
             // Its new file waits for the website but no window is on it (Hopper
             // restarted, or the player picked it by hand): a click starts one.
             let web_url = self
                 .root
                 .as_ref()
-                .filter(|_| from_web && fetch.is_none() && hold.is_none())
+                .filter(|_| from_web && fetch.is_none())
                 .and_then(|r| store.pending(r).iter().find(|p| p.project_id == a.project_id && !p.url.is_empty()))
                 .map(|p| p.url.clone());
             let (fetch, fetch_tip) = (fetch.clone(), fetch.as_ref().map(|v| {
@@ -4405,8 +4388,6 @@ Details").into()),
                                 t
                             } else if from_web && updating.is_none() {
                                 "The author only allows downloads from CurseForge's website. Click to get it through Hopper's download window; a file you download yourself is picked up from Downloads too".to_string()
-                            } else if let Some(h) = hold {
-                                h.to_string()
                             } else if vlocked {
                                 let (old, new) = u.versions();
                                 format!("{new} is locked: you keep {old}.\nShift+click to update anyway, or click the lock tag to unlock.")
@@ -4529,7 +4510,7 @@ It stays disabled after updating: turn it on in the On column.")
             // Only a plain update: locked, breaking, held or website-only
             // ones need the column's tooltip and its extra steps.
             update
-                .filter(|_| !self.cols.action && !vlocked && !breaking && hold.is_none() && updating.is_none() && !from_web && !done)
+                .filter(|_| !self.cols.action && !vlocked && !breaking && updating.is_none() && !from_web && !done)
                 .cloned(),
         );
         h_flex()
@@ -6039,15 +6020,12 @@ impl BulkSum {
 /// too, so nothing is lost either way.
 fn undo_update(store: &Entity<Store>, root: PathBuf, items: Vec<Replaced>, window: &mut Window, cx: &mut App) {
     let s = store.read(cx);
-    if let Some(why) = s.edit_hold_reason(&root) {
-        window.push_notification(Notification::error(format!("Can't undo now: {why}.")), cx);
-        return;
-    }
     let Some(mut inst) = s.instance(&root).cloned() else {
         window.push_notification(Notification::error("That instance is gone."), cx);
         return;
     };
     s.spawn_instance_job(&root, "Undoing update", move |job| {
+        crate::store::fresh(&mut inst);
         let mut back = 0;
         for it in &items {
             if !hopper::backups::exists(&it.backup) {

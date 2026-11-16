@@ -921,6 +921,7 @@ impl AddonsView {
         self.settle.clicked();
         let for_chips = ids.clone();
         let job = store.spawn_instance_job_id(&root, title, move |job| {
+            crate::store::fresh(&mut inst);
             let mut got = 0;
             let before = crate::store::Before::at(&inst.root);
             for id in &ids {
