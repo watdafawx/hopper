@@ -99,6 +99,7 @@ pub mod paths;
 pub mod msauth;
 pub mod net;
 pub mod peer;
+pub mod recently_deleted;
 pub mod recipe;
 pub mod proc;
 pub mod perf;
