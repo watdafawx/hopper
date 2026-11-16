@@ -140,6 +140,48 @@ footer a:hover{color:var(--fg)}
     <p class="lede">For each release: what it did before, what it does now, pictures of both, and how it was checked, including what was not. Newest first. Plain release notes are on <a href="https://github.com/watdafawx/hopper/releases">GitHub</a>.</p>
     <div class="legend"><span class="tag ok">seen on screen</span><span class="tag warn">partly checked</span><span class="tag bad">gap found</span></div>
   </header>
+  <section class="rel" id="v0-79-0"><div class="relhead"><h2>Hopper 0.79.0 · Hopper Server 0.74.0</h2><span class="when">16 Nov 2026</span></div><article class="cl">
+      <h3>Friend groups: a mod removed while a friend plays stays removed</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Hopper desktop (and the shared code, so Hopper Server&#x27;s mod lists follow the same rule). Hopper Server takes no part in friend groups.</dd><dt>Before</dt><dd>You removed a mod from a group pack while a friend was in game. If their game held the jar, it waited in their mods folder, and any older copy of their mod list read back meanwhile (CurseForge&#x27;s own file, or a stale save as the game closed) listed it again. Their next update then sent it back to everyone as their own newest change.</dd><dt>After</dt><dd>A jar waiting for the game to let go counts as gone, so nothing can list it again. The play time saved when a game ends no longer writes the whole, possibly older, in-memory instance over the file.</dd></dl>
+      <ul class="files"><li>crates/hopper-core/src/instances.rs</li><li>crates/hopper-core/src/groupsync.rs</li><li>src/gpui/store.rs</li></ul>
+      <div><span class="tag warn">partly checked</span><ul class="tested"><li>Three new tests fail with the fix switched off and pass with it, one of them end to end: a member who plays while a mod is removed, then closes the game (Windows only, it holds the jar the way Java does). The shared library&#x27;s suite passed (1,538 tests, none failed) and the desktop app compiles.</li><li>No screenshots: nothing looks different, this is sync logic only.</li><li>Not checked: the friend&#x27;s own PC. The sharer&#x27;s data shows the mod was listed again with a new date, but not which path on that PC did it. If a game lets the jar move while it plays (NeoForge can), the jar was never queued and this fix does not cover that case.</li><li>Not done: Undo of a removal whose jar is still waiting does not unqueue it yet, so the jar still leaves at game end.</li></ul></div>
+    </article><article class="cl">
+      <h3>&quot;Roll back&quot;, not &quot;Put back&quot;, in History, crash help and the docs</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Hopper desktop, Hopper Server and the docs.</dd><dt>Before</dt><dd>History, the crash help and the docs said &quot;Put back&quot; for going back to an earlier version.</dd><dt>After</dt><dd>They say &quot;Roll back&quot; everywhere.</dd></dl>
+      <div><span class="tag warn">no card</span><ul class="tested"><li>No change card was written for this change, so there are no screenshots and no test notes here. The text comes from the release notes.</li></ul></div>
+    </article><article class="cl">
+      <h3>Logs: a new instance says &quot;No latest.log yet&quot;</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Hopper desktop.</dd><dt>Before</dt><dd>The Logs tab of an instance that had never run showed a read error.</dd><dt>After</dt><dd>It says &quot;No latest.log yet&quot; until the game has run once.</dd></dl>
+      <div><span class="tag warn">no card</span><ul class="tested"><li>No change card was written for this change, so there are no screenshots and no test notes here. The text comes from the release notes.</li></ul></div>
+    </article><article class="cl">
+      <h3>Servers sidebar: long panel names end in an ellipsis</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Hopper Server.</dd><dt>Before</dt><dd>A long panel name ran past the edge of the sidebar.</dd><dt>After</dt><dd>It ends in an ellipsis, and the full name shows in a tooltip.</dd></dl>
+      <div><span class="tag warn">no card</span><ul class="tested"><li>No change card was written for this change, so there are no screenshots and no test notes here. The text comes from the release notes.</li></ul></div>
+    </article><article class="cl">
+      <h3>Hopper Server: &quot;Find Paxi&quot; opens Browse already searched</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Hopper Server.</dd><dt>Before</dt><dd>&quot;Find Paxi&quot; opened Browse with an empty search.</dd><dt>After</dt><dd>It opens Browse with &quot;paxi&quot; already searched.</dd></dl>
+      <div><span class="tag warn">no card</span><ul class="tested"><li>No change card was written for this change, so there are no screenshots and no test notes here. The text comes from the release notes.</li></ul></div>
+    </article><article class="cl">
+      <h3>Library: switching instance closes the config panel and mod page</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Hopper desktop.</dd><dt>Before</dt><dd>The config panel and a mod&#x27;s page from the old instance stayed open after you picked another instance.</dd><dt>After</dt><dd>Both close when you switch instance.</dd></dl>
+      <div><span class="tag warn">no card</span><ul class="tested"><li>No change card was written for this change, so there are no screenshots and no test notes here. The text comes from the release notes.</li></ul></div>
+    </article><article class="cl">
+      <h3>Server page: console and relay card no longer overlap</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Hopper desktop and Hopper Server.</dd><dt>Before</dt><dd>In a narrow window the console and the relay card overlapped the side cards.</dd><dt>After</dt><dd>They no longer overlap, and the console column scrolls when the relay card pushes it past the window.</dd></dl>
+      <div><span class="tag warn">no card</span><ul class="tested"><li>No change card was written for this change, so there are no screenshots and no test notes here. The text comes from the release notes.</li></ul></div>
+    </article><article class="cl">
+      <h3>Hopper Server: SFTP remembers its port while off</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Hopper Server and the docs.</dd><dt>Before</dt><dd>Turning SFTP off forgot its port. The Docker docs did not say SFTP is off by default.</dd><dt>After</dt><dd>The port is kept while SFTP is off, and the Docker docs say it starts off.</dd></dl>
+      <div><span class="tag warn">no card</span><ul class="tested"><li>No change card was written for this change, so there are no screenshots and no test notes here. The text comes from the release notes.</li></ul></div>
+    </article><article class="cl">
+      <h3>Clear image cache also frees GIF frames</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Hopper desktop.</dd><dt>Before</dt><dd>&quot;Clear image cache&quot; left the graphics copies of GIF frames in memory.</dd><dt>After</dt><dd>They are freed too.</dd></dl>
+      <div><span class="tag warn">no card</span><ul class="tested"><li>No change card was written for this change, so there are no screenshots and no test notes here. The text comes from the release notes.</li></ul></div>
+    </article><article class="cl">
+      <h3>Behind the scenes: flaky tests fixed</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Hopper Server tests only. Nothing looks different.</dd><dt>Before</dt><dd>A few Hopper Server tests failed now and then when several builds ran at once.</dd><dt>After</dt><dd>The checks are the same, without the timing and port races they depended on.</dd></dl>
+      <div><span class="tag warn">no card</span><ul class="tested"><li>No card needed: no player-visible change. They passed repeatedly under heavy parallel load.</li></ul></div>
+    </article></section>
   <section class="rel" id="v0-78-0"><div class="relhead"><h2>Hopper 0.78.0 · Hopper Server 0.73.0</h2><span class="when">16 Nov 2026</span></div><article class="cl">
       <h3>First run: one &quot;Here&#x27;s what we found&quot; screen instead of a seven-step wizard</h3>
       <dl class="ft"><dt>Apps</dt><dd>Hopper desktop (the setup screen) and Hopper Server (its panel folder screen).</dd><dt>Before</dt><dd>Setup asked about folders, launchers, look, servers, the CurseForge key and where to install, one step at a time, with Back and Next and a summary at the end.</dd><dt>After</dt><dd>One screen, &quot;Here&#x27;s what we found&quot;: the launchers it found, switched on and read where they are (nothing is copied), the Discord switch, and one &quot;Use these&quot; button. Look, servers, the CurseForge key, Install and Hopper&#x27;s own files sit under &quot;More&quot; in the same window. With nothing found it says &quot;Welcome to Hopper&quot; and the button offers &quot;Find a modpack&quot;. Skip adds no launchers and leaves an empty Library with its own &quot;Find a modpack&quot; button. Hopper Server&#x27;s folder screen works the same way, with &quot;Change…&quot; for the folder and &quot;Not now&quot; instead of Skip.</dd></dl>
