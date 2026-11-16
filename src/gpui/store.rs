@@ -1749,6 +1749,7 @@ impl Store {
                 self.merge_servers(cx);
             }
             Msg::SiteServers(id, r) => {
+                self.save_learned_pins(cx);
                 let r = match r {
                     Ok((list, key)) => {
                         // The first connect pins the server's SSH key.
@@ -2022,31 +2023,49 @@ impl Store {
         });
     }
 
-    /// Saves what this run learned about the certificates of panels set up
-    /// before Hopper pinned them, and tells the user once per pinned panel.
+    /// Saves what this run learned about the certificates of panels and FTPS
+    /// server files set up before Hopper pinned them, and tells the user once
+    /// per pinned one.
     pub fn save_learned_pins(&mut self, cx: &mut Context<Self>) {
-        for (id, fp) in hopper::panel::take_learned() {
-            let mut pinned = None;
-            self.update_settings(
-                |st| {
-                    let Some(p) = st.panels.iter_mut().find(|p| p.id == id && p.self_signed && p.cert_pin.is_empty()) else { return };
-                    match fp {
-                        Some(fp) => {
-                            p.cert_pin = fp;
-                            pinned = Some(p.label());
+        use hopper::certpin::Subject;
+        for who in [Subject::Panel, Subject::Files] {
+            for (id, fp) in hopper::certpin::take_learned(who) {
+                let mut pinned = None;
+                self.update_settings(
+                    |st| {
+                        let (pin, ask, label) = match who {
+                            Subject::Panel => {
+                                let Some(p) = st.panels.iter_mut().find(|p| p.id == id && p.self_signed && p.cert_pin.is_empty()) else { return };
+                                let label = p.label();
+                                (&mut p.cert_pin, &mut p.cert_ask, label)
+                            }
+                            Subject::Files => {
+                                let Some(x) = st.file_sites.iter_mut().find(|x| x.id == id && x.proto == "ftps" && x.self_signed && x.cert_pin.is_empty()) else { return };
+                                let label = x.label();
+                                (&mut x.cert_pin, &mut x.cert_ask, label)
+                            }
+                        };
+                        match fp {
+                            Some(fp) => {
+                                *pin = fp;
+                                pinned = Some(label);
+                            }
+                            // A real certificate: from now on a self-made one
+                            // waits for the user to trust it.
+                            None => *ask = true,
                         }
-                        // A real certificate: from now on a self-made one
-                        // waits for the user to trust it.
-                        None => p.cert_ask = true,
-                    }
-                },
-                cx,
-            );
-            if let Some(name) = pinned {
-                cx.emit(StoreEvent::Notice(
-                    format!("{name}: Hopper now remembers this panel's certificate and connects only while it has that one. If it changes, Hopper stops and asks you (Settings → Servers)."),
-                    false,
-                ));
+                    },
+                    cx,
+                );
+                if let Some(name) = pinned {
+                    cx.emit(StoreEvent::Notice(
+                        format!(
+                            "{name}: Hopper now remembers this {what}'s certificate and connects only while it has that one. If it changes, Hopper stops and asks you (Settings → Servers).",
+                            what = who.what()
+                        ),
+                        false,
+                    ));
+                }
             }
         }
     }
