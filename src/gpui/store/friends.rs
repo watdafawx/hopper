@@ -116,12 +116,20 @@ impl FriendReads {
         if rev.is_some() {
             // The list is at least this new, so the next poll waits on it.
             self.feed_rev = rev.clone();
+            // Only a mailbox that knows digests sends one with the list, so
+            // its feed does too: no need to wait up to a minute for the
+            // first poll to answer.
+            self.pushes = Some(true);
         }
         self.read_rev = rev;
     }
 
     fn failed(&mut self) {
         self.failed = true;
+    }
+
+    fn live(&self) -> bool {
+        self.pushes == Some(true)
     }
 
     /// The window came back to the front.
@@ -663,7 +671,7 @@ impl Store {
     /// show up right away. An older mailbox doesn't (it's read on a timer),
     /// and before the first answer nobody knows yet.
     pub fn friends_live(&self) -> bool {
-        self.friend_reads.pushes == Some(true)
+        self.friend_reads.live()
     }
 
     /// The Friends panel was open: what's there now isn't new any more.
@@ -2699,6 +2707,10 @@ mod tests {
         r.start(t0);
         r.done(rev("a"));
         assert_eq!(r.waits_on(), "a");
+        // A list with a digest means the feed has them too, before the
+        // first poll answers.
+        assert!(r.live());
+        assert!(!r.due(at(3)));
         // The feed says the same list: no read for minutes.
         r.heard(rev("a"));
         assert!(!r.due(at(3)));
@@ -2730,6 +2742,7 @@ mod tests {
         assert!(r.due(t0 + FRIENDS_FALLBACK));
         r.heard(None);
         assert_eq!(r.waits_on(), "");
+        assert!(!r.live());
         assert!(!r.due(t0 + FRIENDS_FALLBACK - Duration::from_secs(1)));
         assert!(r.due(t0 + FRIENDS_FALLBACK));
     }
