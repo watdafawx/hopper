@@ -23,6 +23,7 @@ mod friends;
 mod only_here;
 mod node_heads;
 mod panel_events;
+mod panel_slow;
 mod server_mods;
 mod server_offer;
 // Invite and SyncStatus are for the Friends screen being rebuilt on top.
@@ -4021,7 +4022,7 @@ impl Store {
             match hopper::hopperd::Client::for_panel(&p) {
                 Some(client) => {
                     self.panel_asked.insert(id.clone(), std::time::Instant::now());
-                    self.spawn(move || Msg::PanelServers(id, client.server_infos().map_err(|e| format!("{e:#}"))))
+                    self.spawn(move || panel_slow::list_servers(id, &client))
                 }
                 None => {
                     self.panel_servers.insert(id, Err("Not paired. Pair it again in Settings â€º Servers.".into()));
@@ -4133,7 +4134,7 @@ impl Store {
         }
         self.panel_asked.insert(p.id.clone(), std::time::Instant::now());
         let id = p.id.clone();
-        self.spawn(move || Msg::PanelServers(id, client.server_infos().map_err(|e| format!("{e:#}"))));
+        self.spawn(move || panel_slow::list_servers(id, &client));
         cx.notify();
     }
 

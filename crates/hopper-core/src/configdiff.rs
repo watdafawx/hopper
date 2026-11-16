@@ -468,7 +468,35 @@ pub struct Reading {
 /// Reads both copies of a changed settings file: whether only formatting
 /// differs, and how many settings differ.
 pub fn read_change(client: &Path, server: &Path) -> Reading {
-    let (c, s) = (read_text(client), read_text(server));
+    reading_of(read_text(client), read_text(server))
+}
+
+/// The server's copies of `rels` (inside `s_dir`) when it's on a Hopper
+/// Server, read in as few asks as it allows; `None` for a server on disk.
+/// One ask per file made a big pack's changed configs run into the
+/// panel's rate limit.
+fn remote_texts(s_dir: &Path, rels: &[&str]) -> Option<HashMap<String, String>> {
+    if rels.is_empty() {
+        return None;
+    }
+    let Some(Ok((c, id, base))) = crate::hopperd::locate(s_dir) else { return None };
+    let at = |rel: &str| if base.is_empty() { rel.to_string() } else { format!("{}/{rel}", base.trim_end_matches('/')) };
+    let asked: Vec<String> = rels.iter().map(|r| at(r)).collect();
+    let texts = c.read_texts(&id, &asked);
+    Some(rels.iter().filter_map(|r| Some((r.to_string(), texts.get(&at(r))?.replace("\r\n", "\n")))).collect())
+}
+
+/// [`read_change`], with the server's copy from `remote` (see
+/// [`remote_texts`]) when it was read ahead.
+fn read_change_with(client: &Path, server: &Path, rel: &str, remote: Option<&HashMap<String, String>>) -> Reading {
+    match remote {
+        Some(m) => reading_of(read_text(client), m.get(rel).cloned().ok_or_else(|| "The server's copy couldn't be read".to_string())),
+        None => read_change(client, server),
+    }
+}
+
+/// [`read_change`] of two copies already read.
+fn reading_of(c: Result<String, String>, s: Result<String, String>) -> Reading {
     let binary = |r: &Result<String, String>| r.as_ref().is_err_and(|e| e.contains("binary"));
     if binary(&c) || binary(&s) {
         return Reading { format_only: false, settings: None, binary: true };
@@ -545,15 +573,17 @@ pub fn classify(
     let out: Mutex<Vec<(usize, Reading)>> = Mutex::new(Vec::new());
     if total > 0 {
         progress(0, total);
+        let rels: Vec<&str> = todo.iter().map(|&i| diff.files[i].rel.as_str()).collect();
+        let remote = remote_texts(&s_dir, &rels);
         let chunk = total.div_ceil(8);
         let files = &diff.files;
         std::thread::scope(|sc| {
             for part in todo.chunks(chunk) {
-                let (done, out, c_dir, s_dir) = (&done, &out, &c_dir, &s_dir);
+                let (done, out, c_dir, s_dir, remote) = (&done, &out, &c_dir, &s_dir, &remote);
                 sc.spawn(move || {
                     for &i in part {
                         let rel = &files[i].rel;
-                        let r = read_change(&c_dir.join(rel), &s_dir.join(rel));
+                        let r = read_change_with(&c_dir.join(rel), &s_dir.join(rel), rel, remote.as_ref());
                         out.lock().unwrap().push((i, r));
                         let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                         if n % 10 == 0 || n == total {
@@ -1039,7 +1069,16 @@ pub fn drift(client_root: &Path, server_root: &Path, mods: &[(String, String)]) 
     let mut by_mod: Vec<DriftGroup> = Vec::new();
     let mut server_tops: HashMap<(&str, String), bool> = HashMap::new();
     for &folder in MOD_CONFIG_FOLDERS {
-        for f in get(folder).files {
+        let files = get(folder).files;
+        // The changed settings files read below, from a Hopper Server in one go.
+        let reads: Vec<&str> = files
+            .iter()
+            .filter(|f| f.status == FileStatus::Modified && settings_file(&f.rel) && server_side_config(folder, &f.rel) && !drift_noise(&f.rel))
+            .filter(|f| config_owner(&f.rel).is_some_and(|k| owners.contains_key(&k)))
+            .map(|f| f.rel.as_str())
+            .collect();
+        let remote = remote_texts(&server_root.join(folder), &reads);
+        for f in files.iter().cloned() {
             // A server-only file is the server's own business.
             if f.status == FileStatus::OnlyServer
                 || drift_noise(&f.rel)
@@ -1055,7 +1094,7 @@ pub fn drift(client_root: &Path, server_root: &Path, mods: &[(String, String)]) 
             // Same settings, other comments: nothing to bring along.
             if f.status == FileStatus::Modified
                 && settings_file(&f.rel)
-                && read_change(&client_root.join(folder).join(&f.rel), &server_root.join(folder).join(&f.rel))
+                && read_change_with(&client_root.join(folder).join(&f.rel), &server_root.join(folder).join(&f.rel), &f.rel, remote.as_ref())
                     .format_only
             {
                 continue;
