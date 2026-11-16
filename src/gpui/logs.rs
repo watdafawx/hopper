@@ -45,6 +45,9 @@ struct LogFile {
     read_to: u64,
     /// Still reading the file.
     loading: bool,
+    /// Why it couldn't be read, if it couldn't: a log that isn't there yet
+    /// says so instead of showing the error as its first line.
+    error: Option<std::io::Error>,
 }
 
 impl LogFile {
@@ -277,6 +280,7 @@ impl LogsView {
             problems: Vec::new(),
             read_to: 0,
             loading: true,
+            error: None,
         });
         self._follow = Some(cx.spawn(async move |this, cx| {
             let p = path.clone();
@@ -293,7 +297,7 @@ impl LogsView {
                         log.push(&text);
                         log.read_to = to;
                     }
-                    Err(e) => log.push(&format!("Could not open {}: {e}", path.display())),
+                    Err(e) => log.error = Some(e),
                 }
                 // A followed log opens at its end; a crash report at its top,
                 // where the cause is.
@@ -331,11 +335,13 @@ impl LogsView {
                         Chunk::Append(text, to) => {
                             log.push(&text);
                             log.read_to = to;
+                            log.error = None;
                         }
                         Chunk::Reset(text, to) => {
                             log.clear();
                             log.push(&text);
                             log.read_to = to;
+                            log.error = None;
                         }
                     }
                     if at_end {
@@ -1069,6 +1075,16 @@ impl LogsView {
             return div().into_any_element();
         };
         let (path, loading, total) = (log.path.clone(), log.loading, log.lines.len());
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if let Some(e) = log.error.as_ref().filter(|_| total == 0) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return widgets::empty_state(IconName::TriangleAlert, format!("Can't read {name}"), Some(format!("{e}").into()), cx).into_any_element();
+            }
+            // Not written yet is the usual reason: a new instance's first
+            // launch makes it, so that is worth saying instead of the error.
+            let body = if name == "debug.log" { "It appears after the first launch. Not every pack writes one." } else { "It appears after the first launch." };
+            return widgets::empty_state(IconName::FileText, format!("No {name} yet"), Some(body.into()), cx).into_any_element();
+        }
         let n = self.line_count();
         let filtered = self.visible.is_some();
         let rel = path.strip_prefix(root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
@@ -1180,6 +1196,7 @@ mod tests {
             problems: Vec::new(),
             read_to: 0,
             loading: false,
+            error: None,
         };
         l.push("ok\n[ERROR] bad\nok\n");
         assert_eq!(l.problems, vec![1]);
