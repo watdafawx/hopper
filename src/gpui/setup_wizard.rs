@@ -1,20 +1,24 @@
-//! The first-run setup: a few steps in a dialog (install, where Hopper
-//! keeps its files, the CurseForge key, instances, servers, the theme). Shown on the first start (no
-//! settings yet), and again from Settings or Ctrl+K.
+//! The first-run setup: one dialog, "Here's what we found". It lists the
+//! instance folders found on this PC (CurseForge's, and other launchers'),
+//! switched on, the Discord switch, and folds the rarely changed choices
+//! (where new instances go, the look, servers, the CurseForge key,
+//! installing, where Hopper keeps its files) under "More". Shown on the
+//! first start (no settings yet), and again from Settings or Ctrl+K.
 //!
-//! Nothing is written until the user acts: a step's choices are saved on
-//! Next, only when they differ from the settings, and the theme previews
-//! live but is only kept on Next (Skip puts the old one back). The Discord
-//! switch on the Look step is the exception: it saves when clicked.
+//! Nothing is written until the player acts: "Use these" saves what differs
+//! from the settings, and the theme previews live but is only kept then
+//! (Skip puts the old one back). The Discord switch is the exception: it
+//! saves when clicked, so turning it off never waits on a later button.
 
 use crate::app::{AppView, Page};
-use crate::launchers_list::LaunchersList;
+use crate::java_form::settings_form;
 use crate::store::Store;
 use crate::switch::Switch;
 use crate::widgets;
 use crate::widgets::Clickable as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::form::Field;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
@@ -23,12 +27,16 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::path::Path;
+use hopper::launchers::Kind;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
-const STEPS: [&str; 7] = ["Welcome", "Files", "CurseForge", "Instances", "Servers", "Look", "Done"];
 pub(crate) const CF_CONSOLE: &str = "https://console.curseforge.com/";
-/// After a restart that moved Hopper's files: the step to open on.
+/// After a restart that moved Hopper's files: open with More unfolded.
 const RESUME_ARG: &str = "--setup-step=";
+/// More found folders than this and the list scrolls in its card, and the
+/// "New instances go in" row moves under More, so the dialog keeps its size.
+const LIST_ROWS: usize = 3;
 
 /// Where the user's servers are.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -38,24 +46,41 @@ enum Servers {
     OtherPc,
 }
 
+/// A folder of instances found on this PC.
+#[derive(Clone)]
+struct Found {
+    /// `None`: the instances folder Hopper reads as its main library
+    /// (CurseForge's, when the CurseForge app is installed).
+    kind: Option<Kind>,
+    path: PathBuf,
+    count: usize,
+    /// Switched on (launchers only; the main folder's switch follows the
+    /// "New instances go in" field).
+    on: bool,
+}
+
 pub struct SetupWizard {
     store: Entity<Store>,
     app: WeakEntity<AppView>,
     /// Opened with `--setup` or over MCP: finishing or skipping doesn't
     /// mark the setup done.
     preview: bool,
-    step: usize,
+    /// The first run (not yet done): Skip then leaves the Library empty.
+    fresh: bool,
+    /// "More" unfolded.
+    more: bool,
+    /// What was found: `None` while looking.
+    found: Option<Vec<Found>>,
+    /// Why a picked launcher folder wasn't added.
+    add_note: Option<String>,
+    instances_root: Entity<InputState>,
     installing: bool,
     install_result: Option<Result<String, String>>,
     cf_key: Entity<InputState>,
     cf_testing: bool,
     cf_result: Option<Result<String, String>>,
-    /// "Use your own key instead" unfolded (builds with Hopper's own key).
+    /// "Use my own key" unfolded (builds with Hopper's own key).
     cf_own_open: bool,
-    instances_root: Entity<InputState>,
-    /// Instances found in a folder: (folder, count), None while counting.
-    counted: Option<(String, Option<usize>)>,
-    launchers: Entity<LaunchersList>,
     servers: Servers,
     servers_root: Entity<InputState>,
     server_host: Entity<InputState>,
@@ -63,8 +88,8 @@ pub struct SetupWizard {
     theme_saved: (String, u8),
     /// A theme shown but not saved yet.
     theme_preview: Option<String>,
-    /// Where Hopper's files should go: `None` next to hopper.exe.
-    files_dest: Option<std::path::PathBuf>,
+    /// A folder picked for Hopper's files, waiting for "Move and restart".
+    files_dest: Option<PathBuf>,
     /// Copying them there (Hopper restarts after).
     files_moving: bool,
     files_error: Option<String>,
@@ -94,50 +119,40 @@ impl SetupWizard {
                 .placeholder("Paste your CurseForge API key")
         });
         let mut subs = Vec::new();
-        for i in [&cf_key, &servers_root, &server_host] {
+        for i in [&cf_key, &servers_root, &server_host, &instances_root] {
             subs.push(cx.subscribe(i, |_, _, e: &InputEvent, cx| {
                 if matches!(e, InputEvent::Change) {
                     cx.notify();
                 }
             }));
         }
-        subs.push(cx.subscribe(&instances_root, |this, _, e: &InputEvent, cx| {
-            if matches!(e, InputEvent::Change) {
-                this.count_instances(cx);
-            }
-        }));
+        let resumed = std::env::args().any(|a| a.starts_with(RESUME_ARG));
         let mut this = Self {
-            launchers: cx.new(|_| LaunchersList::new(store.clone())),
             store,
             app,
             preview,
-            step: 0,
+            fresh: !s.setup_done,
+            more: resumed,
+            found: None,
+            add_note: None,
+            instances_root,
             installing: false,
             install_result: None,
             cf_key,
             cf_testing: false,
             cf_result: None,
             cf_own_open: false,
-            instances_root,
-            counted: None,
             servers: if s.servers_root.is_empty() { Servers::None } else { Servers::OtherPc },
             servers_root,
             server_host,
             theme_saved: (s.theme_name.clone(), s.theme),
             theme_preview: None,
-            files_dest: hopper::paths::dirs()
-                .and_then(|d| d.root())
-                .filter(|r| Some(r.to_path_buf()) != hopper::paths::beside_exe())
-                .map(Path::to_path_buf),
+            files_dest: None,
             files_moving: false,
             files_error: None,
             _subscriptions: subs,
         };
-        // Back after moving the files: carry on where the setup was.
-        if let Some(n) = std::env::args().find_map(|a| a.strip_prefix(RESUME_ARG)?.parse::<usize>().ok()) {
-            this.step = n.min(STEPS.len() - 1);
-        }
-        this.count_instances(cx);
+        this.detect(resumed, cx);
         this
     }
 
@@ -145,156 +160,148 @@ impl SetupWizard {
         input.read(cx).value().trim().to_string()
     }
 
-    /// Counts the instances in the typed folder (in the background).
-    fn count_instances(&mut self, cx: &mut Context<Self>) {
-        let dir = Self::typed(&self.instances_root, cx);
-        if self.counted.as_ref().is_some_and(|(d, _)| *d == dir) {
-            return;
-        }
-        self.counted = Some((dir.clone(), None));
-        cx.notify();
+    /// Looks for instances on this PC (in the background): the instances
+    /// folder from the settings, then every other launcher's folder. A new
+    /// player gets each launcher with instances switched on; running the
+    /// setup again (or after a restart that moved Hopper's files) shows
+    /// what is managed now.
+    fn detect(&mut self, resumed: bool, cx: &mut Context<Self>) {
+        let s = self.store.read(cx).settings().clone();
+        let defaults = !s.setup_done && !resumed;
         cx.spawn(async move |this, cx| {
-            let probe = dir.clone();
-            let n = cx
-                .background_spawn(async move { hopper::instances::discover(Path::new(&probe)).len() })
+            let main = s.instances_root.clone();
+            let managed = s.launcher_dirs.clone();
+            let rows = cx
+                .background_spawn(async move {
+                    let mut rows = Vec::new();
+                    let n = hopper::instances::discover(Path::new(&main)).len();
+                    if n > 0 {
+                        rows.push(Found { kind: None, path: PathBuf::from(&main), count: n, on: true });
+                    }
+                    let is_managed = |k: Kind, p: &Path| managed.iter().any(|d| d.kind == k.key() && Path::new(&d.path) == p);
+                    for (k, p, n) in hopper::launchers::found() {
+                        let on = if defaults { n > 0 } else { is_managed(k, &p) };
+                        rows.push(Found { kind: Some(k), path: p, count: n, on });
+                    }
+                    // Folders added by hand (or no longer where the launcher
+                    // keeps them) stay listed.
+                    for d in &managed {
+                        let p = PathBuf::from(&d.path);
+                        if let Some(k) = Kind::from_key(&d.kind)
+                            && !rows.iter().any(|r| r.path == p)
+                        {
+                            let n = hopper::launchers::list(k, &p).len();
+                            rows.push(Found { kind: Some(k), path: p, count: n, on: true });
+                        }
+                    }
+                    rows
+                })
                 .await;
             this.update(cx, |this, cx| {
-                if this.counted.as_ref().is_some_and(|(d, _)| *d == dir) {
-                    this.counted = Some((dir, Some(n)));
-                    cx.notify();
-                }
+                this.found = Some(rows);
+                cx.notify();
             })
             .ok();
         })
         .detach();
     }
 
-    // ---- moving between steps ------------------------------------------------
+    /// Hopper's own instances folder, for a player who doesn't keep their
+    /// instances in CurseForge's.
+    fn own_instances() -> String {
+        let root = hopper::paths::forced_root()
+            .or_else(|| hopper::paths::dirs().and_then(|d| d.root()).map(Path::to_path_buf))
+            .or_else(|| hopper::paths::dirs().and_then(|d| d.data_dir().parent()).map(Path::to_path_buf));
+        root.map(|r| r.join("instances").to_string_lossy().into_owned()).unwrap_or_default()
+    }
 
-    /// Keeps what this step chose, then shows step `to`.
-    fn go(&mut self, to: usize, cx: &mut Context<Self>) {
-        if to == self.step || to >= STEPS.len() {
-            return;
+    /// The main folder's row: on while new instances go there too (it is
+    /// the one folder Hopper reads in place as its own library).
+    fn main_on(&self, row: &Found, cx: &App) -> bool {
+        Path::new(&Self::typed(&self.instances_root, cx)) == row.path
+    }
+
+    fn set_row(&mut self, i: usize, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.found.as_mut().and_then(|f| f.get_mut(i)) else { return };
+        if row.kind.is_some() {
+            row.on = on;
+        } else {
+            // Off: new instances (and the Library) use Hopper's own folder.
+            let to = if on { row.path.to_string_lossy().into_owned() } else { Self::own_instances() };
+            self.instances_root.update(cx, |s, cx| s.set_value(to, window, cx));
         }
-        self.commit(cx);
-        self.step = to;
         cx.notify();
     }
 
-    fn next(&mut self, cx: &mut Context<Self>) {
-        self.go(self.step + 1, cx);
+    /// The rows that have instances (an empty launcher folder alone isn't
+    /// "found").
+    fn anything_found(&self) -> bool {
+        self.found.as_ref().is_some_and(|f| f.iter().any(|r| r.count > 0))
     }
 
-    /// Next, moving Hopper's files first when the Files step chose another
-    /// place (Hopper restarts and the setup carries on from the next step).
-    fn next_from(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if STEPS[self.step] != "Files" || self.files_moving {
-            return self.next(cx);
-        }
-        let Some(dest) = self.files_dest.clone().or_else(hopper::paths::beside_exe) else {
-            return self.next(cx);
-        };
-        let now = hopper::paths::dirs().and_then(|d| d.root()).map(Path::to_path_buf);
-        if now.as_ref() == Some(&dest) {
-            return self.next(cx);
-        }
-        if let Err(e) = hopper::paths::check_dest(&dest) {
-            self.files_error = Some(format!("{e:#}"));
-            cx.notify();
-            return;
-        }
-        self.files_moving = true;
-        self.files_error = None;
-        cx.notify();
-        let me = cx.entity().downgrade();
-        crate::data_move::start(
-            self.store.clone(),
-            dest,
-            vec![format!("{RESUME_ARG}{}", self.step + 1)],
-            move |e, cx| {
-                me.update(cx, |this, cx| {
-                    this.files_moving = false;
-                    this.files_error = Some(e);
-                    cx.notify();
-                })
-                .ok();
-            },
-            window,
-            cx,
-        );
-    }
+    // ---- saving ----------------------------------------------------------------
 
-    fn back(&mut self, cx: &mut Context<Self>) {
-        self.go(self.step.saturating_sub(1), cx);
-    }
-
-    /// Saves the current step's choices that differ from the settings.
-    fn commit(&mut self, cx: &mut Context<Self>) {
+    /// Saves every choice that differs from the settings.
+    fn save(&mut self, cx: &mut Context<Self>) {
         let s = self.store.read(cx).settings().clone();
-        match STEPS[self.step] {
-            "Instances" => {
-                let dir = Self::typed(&self.instances_root, cx);
-                if !dir.is_empty() && dir != s.instances_root {
-                    self.store.update(cx, |st, cx| {
-                        st.update_settings(|s| s.instances_root = dir, cx);
-                        st.refresh();
-                        cx.notify();
-                    });
-                }
+        let dir = Self::typed(&self.instances_root, cx);
+        let dir = if dir.is_empty() { s.instances_root.clone() } else { dir };
+        let mut launchers = s.launcher_dirs.clone();
+        for r in self.found.iter().flatten() {
+            let Some(k) = r.kind else { continue };
+            let d = hopper::settings::LauncherDir { kind: k.key().to_string(), path: r.path.to_string_lossy().into_owned() };
+            launchers.retain(|x| x != &d);
+            if r.on {
+                launchers.push(d);
             }
-            // The servers choice sets server tools: on when any servers are
-            // picked; off for "None for now" only on a first run that hasn't
-            // chosen yet (running the setup again never hides them).
-            "Servers" if self.servers == Servers::None => {
-                if !self.preview && !s.setup_done && s.server_tools.is_none() {
-                    self.store
-                        .update(cx, |st, cx| st.update_settings(|s| s.server_tools = Some(false), cx));
-                }
-            }
-            "Servers" if self.servers == Servers::ThisPc => {
-                if !self.preview {
-                    self.store.update(cx, |st, cx| st.set_server_tools(true, cx));
-                }
-            }
-            "Servers" if self.servers == Servers::OtherPc => {
-                if !self.preview {
-                    self.store.update(cx, |st, cx| st.set_server_tools(true, cx));
-                }
-                let root = Self::typed(&self.servers_root, cx);
-                let host = Self::typed(&self.server_host, cx);
-                let host = if host.is_empty() { s.server_host.clone() } else { host };
-                if root != s.servers_root || host != s.server_host {
-                    self.store.update(cx, |st, cx| {
-                        st.update_settings(
-                            |s| {
-                                s.servers_root = root;
-                                s.server_host = host;
-                            },
-                            cx,
-                        );
-                        st.refresh();
-                        cx.notify();
-                    });
-                }
-            }
-            "Look" => {
-                if let Some(name) = self.theme_preview.take()
-                    && name != s.theme_name
-                {
-                    self.store.update(cx, |st, cx| {
-                        st.update_settings(
-                            |s| {
-                                s.theme_name = name.clone();
-                                s.theme = 0;
-                            },
-                            cx,
-                        )
-                    });
-                    self.theme_saved = (name, 0);
-                }
-            }
-            _ => {}
         }
+        let (mut root, mut host) = (s.servers_root.clone(), s.server_host.clone());
+        if self.servers == Servers::OtherPc {
+            root = Self::typed(&self.servers_root, cx);
+            let h = Self::typed(&self.server_host, cx);
+            if !h.is_empty() {
+                host = h;
+            }
+        }
+        // The servers choice sets server tools: on when any servers are
+        // picked; off for "None" only on a first run that hasn't chosen yet
+        // (running the setup again never hides them).
+        let tools = match self.servers {
+            Servers::None if !self.preview && self.fresh && s.server_tools.is_none() => Some(false),
+            Servers::ThisPc | Servers::OtherPc if !self.preview => Some(true),
+            _ => s.server_tools,
+        };
+        let theme = self.theme_preview.take().filter(|n| *n != s.theme_name);
+        let changed = dir != s.instances_root
+            || launchers != s.launcher_dirs
+            || root != s.servers_root
+            || host != s.server_host
+            || tools != s.server_tools
+            || theme.is_some();
+        if !changed {
+            return;
+        }
+        if let Some(name) = &theme {
+            self.theme_saved = (name.clone(), 0);
+        }
+        self.store.update(cx, |st, cx| {
+            st.update_settings(
+                |s| {
+                    s.instances_root = dir;
+                    s.launcher_dirs = launchers;
+                    s.servers_root = root;
+                    s.server_host = host;
+                    s.server_tools = tools;
+                    if let Some(name) = theme {
+                        s.theme_name = name;
+                        s.theme = 0;
+                    }
+                },
+                cx,
+            );
+            st.refresh();
+            cx.notify();
+        });
     }
 
     /// Puts back a theme that was only being looked at.
@@ -306,17 +313,42 @@ impl SetupWizard {
         }
     }
 
-    /// Ends the setup: marks it done (unless previewing) and closes.
-    fn close(&mut self, library: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.revert_theme(cx);
+    fn mark_done(&mut self, cx: &mut Context<Self>) {
         if !self.preview && !self.store.read(cx).settings().setup_done {
             self.store
                 .update(cx, |st, cx| st.update_settings(|s| s.setup_done = true, cx));
         }
+    }
+
+    /// "Use these" (and the nothing-found buttons): saves, then opens `page`.
+    fn finish(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        self.save(cx);
+        self.mark_done(cx);
         window.close_dialog(cx);
-        if library {
-            self.app.update(cx, |a, cx| a.go(Page::Library, cx)).ok();
+        self.app.update(cx, |a, cx| a.go(page, cx)).ok();
+    }
+
+    /// Skip: nothing found is added. On the first run that includes
+    /// CurseForge's folder, so the Library starts empty with its "Find a
+    /// modpack" button; all of it can be added later in Settings. Running
+    /// the setup again, Skip changes nothing.
+    fn skip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.revert_theme(cx);
+        if self.fresh && !self.preview {
+            let s = self.store.read(cx).settings().clone();
+            let main_found = self.found.iter().flatten().any(|r| r.kind.is_none() && Path::new(&s.instances_root) == r.path);
+            let own = Self::own_instances();
+            if main_found && !own.is_empty() {
+                self.store.update(cx, |st, cx| {
+                    st.update_settings(|s| s.instances_root = own, cx);
+                    st.refresh();
+                    cx.notify();
+                });
+            }
         }
+        self.mark_done(cx);
+        window.close_dialog(cx);
+        self.app.update(cx, |a, cx| a.go(Page::Library, cx)).ok();
     }
 
     // ---- actions ---------------------------------------------------------------
@@ -414,6 +446,99 @@ impl SetupWizard {
         .detach();
     }
 
+    /// Asks for a launcher's folder and lists it (switched on) when it has
+    /// instances.
+    fn add_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Use this launcher's instances".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(p))) = rx.await else { return };
+            let Some(p) = p.into_iter().next() else { return };
+            let probe = p.clone();
+            let found = cx
+                .background_spawn(async move {
+                    Kind::ALL.into_iter().find_map(|k| {
+                        let n = hopper::launchers::list(k, &probe).len();
+                        (n > 0).then_some((k, n))
+                    })
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match found {
+                    Some((k, n)) => {
+                        this.add_note = None;
+                        let rows = this.found.get_or_insert_with(Vec::new);
+                        match rows.iter_mut().find(|r| r.path == p) {
+                            Some(r) => r.on = true,
+                            None => rows.push(Found { kind: Some(k), path: p, count: n, on: true }),
+                        }
+                    }
+                    None => {
+                        this.add_note = Some(format!(
+                            "No Modrinth App, Prism, MultiMC, ATLauncher, GDLauncher or FTB App instances in {}.",
+                            p.display()
+                        ));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn pick_files_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let me = cx.entity().downgrade();
+        crate::data_move::pick_folder(
+            "Keep Hopper's files here",
+            move |dest, _, cx| {
+                me.update(cx, |this, cx| {
+                    this.files_error = hopper::paths::check_dest(&dest).err().map(|e| format!("{e:#}"));
+                    this.files_dest = Some(dest);
+                    cx.notify();
+                })
+                .ok();
+            },
+            window,
+            cx,
+        )
+    }
+
+    /// Saves the choices so far, then moves Hopper's files (Hopper restarts
+    /// and the setup opens again with More unfolded).
+    fn move_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dest) = self.files_dest.clone() else { return };
+        if let Err(e) = hopper::paths::check_dest(&dest) {
+            self.files_error = Some(format!("{e:#}"));
+            cx.notify();
+            return;
+        }
+        self.save(cx);
+        self.files_moving = true;
+        self.files_error = None;
+        cx.notify();
+        let me = cx.entity().downgrade();
+        crate::data_move::start(
+            self.store.clone(),
+            dest,
+            vec![format!("{RESUME_ARG}more")],
+            move |e, cx| {
+                me.update(cx, |this, cx| {
+                    this.files_moving = false;
+                    this.files_error = Some(e);
+                    cx.notify();
+                })
+                .ok();
+            },
+            window,
+            cx,
+        );
+    }
+
     fn preview_theme(&mut self, name: String, cx: &mut Context<Self>) {
         let zoom = self.store.read(cx).settings().zoom;
         crate::theme::apply(&name, 0, zoom, cx);
@@ -434,742 +559,17 @@ impl SetupWizard {
         }
     }
 
-    // ---- the steps ---------------------------------------------------------------
-
-    fn welcome(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let installed_here = hopper::setup::running_installed();
-        let other = hopper::setup::installed_exe();
-        let dir = hopper::setup::install_dir()
-            .map(|d| d.display().to_string())
-            .unwrap_or_default();
-        let hero = v_flex()
-            .items_center()
-            .gap_3()
-            .pt_2()
-            .child(widgets::glow(widgets::logo().size(rems(4.)), theme.primary, cx))
-            .child(div().text_2xl().font_bold().child("Welcome to Hopper"))
-            .child(
-                div()
-                    .max_w(rems(32.))
-                    .text_center()
-                    .text_color(theme.muted_foreground)
-                    .child("Play and update your Minecraft modpacks, from CurseForge and Modrinth, and keep your servers in step with them. A minute of setup and you're in."),
-            );
-        let body: AnyElement = if installed_here {
-            h_flex()
-                .justify_center()
-                .gap_2()
-                .child(widgets::pill("Installed", theme.success, true))
-                .child(note(format!("in {dir}. Hopper updates itself."), cx))
-                .into_any_element()
-        } else {
-            let busy = self.installing;
-            let install = choice_card(
-                "setup-install",
-                IconName::Download,
-                if other.is_some() { "Install this version" } else { "Install Hopper" },
-                if other.is_some() {
-                    "A copy is already installed. This replaces it with this one."
-                } else {
-                    "Start menu and desktop shortcuts, and Hopper updates itself. No admin rights."
-                },
-                false,
-                cx,
-            )
-            .when(busy, |c| c.opacity(0.6))
-            .when(!busy, |c| {
-                c.on_click(cx.listener(|this, _, window, cx| this.install(window, cx)))
-            });
-            let portable = choice_card(
-                "setup-portable",
-                IconName::Box,
-                "Keep it portable",
-                "Run Hopper from where it is. You can install it later in Settings.",
-                false,
-                cx,
-            )
-            .on_click(cx.listener(|this, _, _, cx| this.next(cx)));
-            v_flex()
-                .gap_3()
-                .child(h_flex().w_full().gap_3().items_stretch().child(install).child(portable))
-                .when(busy, |c| c.child(note("Installing…", cx)))
-                .when_some(self.install_result.clone(), |c, r| c.child(result_line(r, cx)))
-                .into_any_element()
-        };
-        v_flex().gap_6().child(hero).child(body).into_any_element()
-    }
-
-    fn files(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let beside = hopper::paths::beside_exe();
-        let picked = self.files_dest.clone();
-        let here = choice_card(
-            "setup-files-here",
-            IconName::FolderOpen,
-            "Next to hopper.exe",
-            "A Hopper Data folder beside the app. Move the app and its folder together.",
-            picked.is_none(),
-            cx,
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.files_dest = None;
-            this.files_error = None;
-            cx.notify();
-        }));
-        let other = choice_card(
-            "setup-files-pick",
-            IconName::Search,
-            "Pick a folder",
-            "Any drive with room: Hopper keeps everything in the folder you choose.",
-            picked.is_some(),
-            cx,
-        )
-        .on_click(cx.listener(|_, _, window, cx| {
-            let me = cx.entity().downgrade();
-            crate::data_move::pick_folder(
-                "Keep Hopper's files here",
-                move |dest, _, cx| {
-                    me.update(cx, |this, cx| {
-                        this.files_error = hopper::paths::check_dest(&dest).err().map(|e| format!("{e:#}"));
-                        this.files_dest = Some(dest);
-                        cx.notify();
-                    })
-                    .ok();
-                },
-                window,
-                cx,
-            )
-        }));
-        let target = picked.or(beside).map(|p| p.display().to_string()).unwrap_or_default();
-        v_flex()
-            .gap_4()
-            .child(note(
-                "Settings, accounts, downloads, caches and (if you don't use CurseForge's folders) your instances. Put them on a drive with room, not just C:.",
-                cx,
-            ))
-            .child(h_flex().w_full().gap_3().items_stretch().child(here).child(other))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .rounded(theme.radius)
-                    .bg(theme.muted)
-                    .text_sm()
-                    .child(Icon::new(IconName::FolderOpen).small().text_color(theme.muted_foreground))
-                    .child(div().min_w_0().child(target)),
-            )
-            .when(self.files_moving, |c| c.child(note("Moving Hopper's files… Hopper restarts and carries on here.", cx)))
-            .when_some(self.files_error.clone(), |c, e| c.child(result_line(Err(e), cx)))
-            .child(note("You can move them again any time in Settings > Advanced.", cx))
-            .into_any_element()
-    }
-
-    fn curseforge(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        use hopper::cf::KeySource;
-        let theme = cx.theme().clone();
-        let source = hopper::cf::api_key_source().map(|(_, s)| s);
-        let status = match source {
-            Some(KeySource::Env) => Some("Already set (from .env)"),
-            Some(KeySource::Session) => Some("Already set (for this run)"),
-            Some(KeySource::Saved) => Some("Already set (saved)"),
-            Some(KeySource::BuiltIn) => Some("Already set (built in)"),
-            None => None,
-        };
-        let typed = !Self::typed(&self.cf_key, cx).is_empty();
-        let step = |n: &'static str, text: AnyElement| {
-            h_flex()
-                .gap_2p5()
-                .items_start()
-                .child(
-                    div()
-                        .flex_none()
-                        .size(rems(1.375))
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(theme.primary.opacity(0.15))
-                        .text_color(crate::theme::ink(theme.primary))
-                        .text_xs()
-                        .font_bold()
-                        .child(n),
-                )
-                .child(div().flex_1().min_w_0().child(text))
-        };
-        // A step's words over a screenshot of where to click.
-        let shots = crate::brand::cf_key_steps();
-        // Sized from each picture's shape: an image sized by width alone
-        // lays out at its own pixel height.
-        let shot = |text: &'static str, image: std::sync::Arc<Image>, aspect: f32, border: Hsla| {
-            const W: f32 = 26.;
-            v_flex()
-                .gap_1p5()
-                .child(text)
-                .child(
-                    img(image)
-                        .w(rems(W))
-                        .h(rems(W / aspect))
-                        .rounded(px(crate::theme::RADIUS))
-                        .border_1()
-                        .border_color(border),
-                )
-                .into_any_element()
-        };
-        let how = v_flex()
-            .text_sm()
-            .gap_2()
-            .child(step(
-                "1",
-                h_flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child("Open")
-                    .child(
-                        Button::new("setup-cf-console")
-                            .small()
-                            .outline()
-                            .icon(IconName::ExternalLink)
-                            .label("console.curseforge.com")
-                            .on_click(|_, _, cx| cx.open_url(CF_CONSOLE)),
-                    )
-                    .child("and sign in.")
-                    .into_any_element(),
-            ))
-            .child(step("2", shot("Click API keys on the left.", shots[0].clone(), 1100. / 420., theme.border)))
-            .child(step("3", shot("Copy your key with the copy button beside it.", shots[1].clone(), 1450. / 420., theme.border)))
-            .child(step("4", div().child("Paste it here, then Test.").into_any_element()));
-        let field = h_flex()
-            .gap_2()
-            .child(div().flex_1().min_w_0().child(Input::new(&self.cf_key).mask_toggle()))
-            .child(
-                Button::new("setup-cf-test")
-                    .primary()
-                    .label(if typed { "Test and save" } else { "Test" })
-                    .loading(self.cf_testing)
-                    .disabled(self.cf_testing || (!typed && source.is_none()))
-                    .on_click(cx.listener(|this, _, window, cx| this.test_key(window, cx))),
-            );
-        // Some authors only allow downloads from the CurseForge website.
-        let site_only = h_flex()
-            .gap_2()
-            .items_start()
-            .text_xs()
-            .text_color(theme.muted_foreground)
-            .child(Icon::new(IconName::Info).xsmall().flex_none().mt_0p5())
-            .child(div().flex_1().min_w_0().child(
-                "Some authors only allow downloads from the CurseForge website. Hopper opens those pages, picks the files up from your Downloads folder by itself, then cleans them up.",
-            ));
-        let result = |c: Div| {
-            c.when(self.cf_testing, |c| c.child(note("Asking CurseForge…", cx)))
-                .when_some(self.cf_result.clone(), |c, r| c.child(result_line(r, cx)))
-        };
-        if hopper::cf::has_built_in_key() {
-            // CurseForge works already. A key of the player's own is only a
-            // fallback in case Hopper's key is ever revoked, so its steps
-            // wait behind a fold.
-            let pill = match source {
-                Some(KeySource::Saved) => "Your key",
-                Some(KeySource::Env) => "From .env",
-                Some(KeySource::Session) => "This run",
-                _ => "Built in",
-            };
-            // A player already on their own key is only swapping it.
-            let fold = match source {
-                Some(KeySource::BuiltIn) | None => "Use your own key instead",
-                _ => "Paste a different key",
-            };
-            let open = self.cf_own_open;
-            let hover = theme.list_hover;
-            let own = v_flex()
-                .gap_3()
-                .px_3()
-                .pb_3()
-                .child(note(
-                    "Your own key keeps CurseForge working even if Hopper's key is ever revoked. It's free, takes a minute, stays on this PC (in Windows Credential Manager), and only your Hopper uses it.",
-                    cx,
-                ))
-                .child(how)
-                .child(field);
-            return v_flex()
-                .gap_4()
-                .child(
-                    h_flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .items_center()
-                        .text_sm()
-                        .child(widgets::pill(pill, theme.success, true))
-                        .child(
-                            div()
-                                .text_color(theme.muted_foreground)
-                                .child("Search, install and update packs and mods from CurseForge."),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .rounded(theme.radius_lg)
-                        .bg(theme.foreground.opacity(0.035))
-                        .border_1()
-                        .border_color(theme.foreground.opacity(0.08))
-                        .child(
-                            h_flex()
-                                .id("setup-cf-own")
-                                .clickable(cx)
-                                .gap_2()
-                                .items_center()
-                                .p_3()
-                                .rounded(theme.radius_lg)
-                                .text_sm()
-                                .hover(move |s| s.bg(hover))
-                                .child(
-                                    Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
-                                        .small()
-                                        .text_color(theme.muted_foreground),
-                                )
-                                .child(fold)
-                                .child(div().text_color(theme.muted_foreground).child("(optional)"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.cf_own_open = !this.cf_own_open;
-                                    cx.notify();
-                                })),
-                        )
-                        .when(open, |c| c.child(result(own))),
-                )
-                .child(site_only)
-                .into_any_element();
-        }
-        let how = how
-            .p_3()
-            .rounded(theme.radius_lg)
-            .bg(theme.foreground.opacity(0.035))
-            .border_1()
-            .border_color(theme.foreground.opacity(0.08));
-        v_flex()
-            .gap_4()
-            .child(
-                v_flex()
-                    .gap_1p5()
-                    .text_sm()
-                    .child("Optional. A free CurseForge key unlocks searching, installing and updating packs and mods from CurseForge; without one, Hopper uses Modrinth only.")
-                    .child(
-                        div().text_color(theme.muted_foreground).child(
-                            "This copy of Hopper has no CurseForge key built in, so you use your own: it's free, takes a minute, stays on this PC (in Windows Credential Manager), and only your Hopper uses it.",
-                        ),
-                    ),
-            )
-            .child(how)
-            .when_some(status, |c, s| {
-                c.child(
-                    h_flex()
-                        .gap_2()
-                        .child(widgets::pill(s, theme.success, true))
-                        .child(note("Paste another to replace it, or go on.", cx)),
-                )
-            })
-            .child(result(v_flex().gap_4().child(field)))
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_x_3()
-                    .gap_y_1()
-                    .items_center()
-                    .child(
-                        Button::new("setup-cf-skip")
-                            .ghost()
-                            .small()
-                            .label("Skip — use Modrinth for now")
-                            .on_click(cx.listener(|this, _, _, cx| this.next(cx))),
-                    )
-                    .child(note("You can add a key any time in Settings.", cx)),
-            )
-            .child(site_only)
-            .into_any_element()
-    }
-
-    fn instances(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let typed = Self::typed(&self.instances_root, cx);
-        let found = match &self.counted {
-            Some((d, Some(n))) if *d == typed => Some(*n),
-            _ => None,
-        };
-        let missing = !typed.is_empty() && !Path::new(&typed).is_dir();
-        let input = self.instances_root.clone();
-        let status: AnyElement = if missing {
-            h_flex()
-                .gap_2()
-                .child(widgets::pill("New folder", theme.warning, false))
-                .child(note("It doesn't exist yet: Hopper makes it for your first instance.", cx))
-                .into_any_element()
-        } else {
-            match found {
-                None => note("Looking…", cx).into_any_element(),
-                Some(0) => h_flex()
-                    .gap_2()
-                    .child(widgets::pill("Start fresh", theme.primary, false))
-                    .child(note(
-                        "No instances here yet. Create one or install a modpack from Browse.",
-                        cx,
-                    ))
-                    .into_any_element(),
-                Some(n) => h_flex()
-                    .gap_2()
-                    .child(widgets::pill(
-                        format!("{n} instance{} found", if n == 1 { "" } else { "s" }),
-                        theme.success,
-                        true,
-                    ))
-                    .child(note("They show in your Library as they are.", cx))
-                    .into_any_element(),
-            }
-        };
-        v_flex()
-            .gap_4()
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(label("Instances folder"))
-                    .child(note(
-                        "Where your instances live. CurseForge's Instances folder works, so its packs show up as they are.",
-                        cx,
-                    ))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().flex_1().min_w_0().child(Input::new(&self.instances_root)))
-                            .child(
-                                Button::new("setup-browse-instances")
-                                    .outline()
-                                    .icon(IconName::FolderOpen)
-                                    .label("Browse…")
-                                    .on_click(cx.listener(move |_, _, window, cx| {
-                                        Self::browse(input.clone(), "Use this folder", window, cx)
-                                    })),
-                            ),
-                    )
-                    .child(status),
-            )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(label("Other launchers"))
-                    .child(self.launchers.clone()),
-            )
-            .into_any_element()
-    }
-
-    fn servers(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let pick = self.servers;
-        let card = |id: &'static str, icon, title, text, v: Servers, cx: &mut Context<Self>| {
-            choice_card(id, icon, title, text, pick == v, cx)
-                .flex_1()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.servers = v;
-                    cx.notify();
-                }))
-        };
-        let cards = h_flex()
-            .w_full()
-            .gap_3()
-            .items_stretch()
-            .child(card(
-                "setup-srv-none",
-                IconName::CircleOff,
-                "None for now",
-                "Just play. Add servers any time.",
-                Servers::None,
-                cx,
-            ))
-            .child(card(
-                "setup-srv-here",
-                IconName::Monitor,
-                "Host on this PC",
-                "Hopper runs them: start, stop, console, backups.",
-                Servers::ThisPc,
-                cx,
-            ))
-            .child(card(
-                "setup-srv-other",
-                IconName::HardDrive,
-                "Another PC at home",
-                "Their folder is shared on your network.",
-                Servers::OtherPc,
-                cx,
-            ));
-        let hosted = self.store.read(cx).hosted_root();
-        let detail: AnyElement = match pick {
-            Servers::None => note(
-                "Nothing to set up. Servers stays a quiet item in the top bar: click it, or ⋯ → Host a server from this pack, when you want one.",
-                cx,
-            )
-            .into_any_element(),
-            Servers::ThisPc => v_flex()
-                .gap_1()
-                .text_sm()
-                .child("Create a server from any instance later: open it, then ⋯ → Host a server from this pack, or + on the Servers page.")
-                .child(note(format!("Hosted servers go in {hosted}."), cx))
-                .into_any_element(),
-            Servers::OtherPc => {
-                let input = self.servers_root.clone();
-                v_flex()
-                    .gap_3()
-                    .child(
-                        v_flex()
-                            .gap_1p5()
-                            .child(label("Servers folder"))
-                            .child(note(
-                                "The shared folder that holds your server folders: a mapped drive or \\\\PC-NAME\\share.",
-                                cx,
-                            ))
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(div().flex_1().min_w_0().child(Input::new(&self.servers_root)))
-                                    .child(
-                                        Button::new("setup-browse-servers")
-                                            .outline()
-                                            .icon(IconName::FolderOpen)
-                                            .label("Browse…")
-                                            .on_click(cx.listener(move |_, _, window, cx| {
-                                                Self::browse(input.clone(), "Use this folder", window, cx)
-                                            })),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1p5()
-                            .child(label("Server host"))
-                            .child(note("That PC's name, for status pings.", cx))
-                            .child(div().w(rems(16.)).child(Input::new(&self.server_host))),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_start()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(Icon::new(IconName::Info).xsmall().flex_none().mt_0p5())
-                            .child(div().flex_1().min_w_0().child(
-                                "Runs them with Crafty, MCSS or Pterodactyl? Add the panel later in Settings → Servers for start, stop, console and backups.",
-                            )),
-                    )
-                    .into_any_element()
-            }
-        };
-        v_flex()
-            .gap_4()
-            .child(cards)
-            .child(
-                div()
-                    .p_3()
-                    .rounded(theme.radius_lg)
-                    .bg(theme.foreground.opacity(0.035))
-                    .border_1()
-                    .border_color(theme.foreground.opacity(0.08))
-                    .child(detail),
-            )
-            .into_any_element()
-    }
-
-    fn look(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let discord_on = self.store.read(cx).settings().discord.enabled;
-        let current = self.current_theme();
-        let names: Vec<String> = std::iter::once(String::new())
-            .chain(crate::theme::names())
-            .collect();
-        v_flex()
-            .gap_3()
-            // On unless it was turned off before; only a click here changes it
-            // (the full set of Discord choices stays in Settings › Discord).
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_center()
-                    .p_3()
-                    .rounded(theme.radius_lg)
-                    .border_1()
-                    .border_color(theme.foreground.opacity(0.1))
-                    .bg(theme.foreground.opacity(0.035))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_0p5()
-                            .child(label("Show what I'm playing on Discord"))
-                            .child(note(
-                                "Friends see the modpack you're playing and what you're browsing in Hopper, and nothing else. Turn it off here or any time in Settings.",
-                                cx,
-                            )),
-                    )
-                    .child(
-                        Switch::new("setup-discord")
-                            .checked(discord_on)
-                            .on_click(cx.listener(|this, v: &bool, _, cx| {
-                                let v = *v;
-                                this.store.update(cx, |st, cx| st.update_settings(|s| s.discord.enabled = v, cx));
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(note(
-                "Pick a theme to see it right away. Change it any time in Settings or Ctrl+K.",
-                cx,
-            ).whitespace_normal())
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .children(names.into_iter().enumerate().map(|(i, name)| {
-                        let on = name == current;
-                        let n2 = name.clone();
-                        theme_card(&name, on, cx)
-                            .id(("setup-theme", i))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.preview_theme(n2.clone(), cx)
-                            }))
-                    })),
-            )
-            .into_any_element()
-    }
-
-    fn done(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let s = self.store.read(cx).settings().clone();
-        let installed = hopper::setup::running_installed() || hopper::setup::installed_exe().is_some();
-        let key_source = hopper::cf::api_key_source().map(|(_, s)| s);
-        let key = key_source.is_some();
-        let count = match &self.counted {
-            Some((d, Some(n))) if *d == s.instances_root => Some(*n),
-            _ => None,
-        };
-        let (managed, _) = self.launchers.read(cx).counts(cx);
-        let theme_name = if s.theme_name.is_empty() { "Follow Windows".to_string() } else { s.theme_name.clone() };
-        let row = |icon: IconName, what: &'static str, value: String, ok: bool, cx: &App| {
-            let t = cx.theme();
-            h_flex()
-                .gap_3()
-                .px_3()
-                .py_2p5()
-                .rounded(t.radius_lg)
-                .bg(t.foreground.opacity(0.035))
-                .border_1()
-                .border_color(t.foreground.opacity(0.08))
-                .child(
-                    Icon::new(icon)
-                        .small()
-                        .text_color(if ok { t.primary } else { t.muted_foreground }),
-                )
-                .child(div().w(rems(7.)).flex_none().font_medium().child(what))
-                .child(div().flex_1().min_w_0().text_sm().text_color(t.muted_foreground).child(value))
-                .child(if ok {
-                    Icon::new(IconName::CircleCheck).small().text_color(t.success)
-                } else {
-                    Icon::new(IconName::CircleOff).small().text_color(t.muted_foreground)
-                })
-        };
-        let servers = match (self.servers, s.servers_root.is_empty()) {
-            (Servers::OtherPc, false) | (Servers::None, false) => format!("{} on {}", s.servers_root, s.server_host),
-            (Servers::ThisPc, true) => "Host them on this PC, from any instance".to_string(),
-            (Servers::ThisPc, false) => format!(
-                "Host on this PC, and {} on {}",
-                s.servers_root, s.server_host
-            ),
-            _ => "None for now".to_string(),
-        };
-        let mut inst = s.instances_root.clone();
-        if let Some(n) = count {
-            inst = format!("{n} in {inst}");
-        }
-        if managed > 0 {
-            inst.push_str(&format!(" · {managed} other launcher{}", if managed == 1 { "" } else { "s" }));
-        }
-        v_flex()
-            .gap_4()
-            .child(
-                v_flex()
-                    .items_center()
-                    .gap_2()
-                    .pt_1()
-                    .child(
-                        div()
-                            .size(rems(3.))
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(theme.success.opacity(0.15))
-                            .child(Icon::new(IconName::Check).large().text_color(theme.success)),
-                    )
-                    .child(div().text_xl().font_semibold().child("You're all set"))
-                    .child(note("All of this stays in Settings, and setup runs again from there.", cx)),
-            )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(row(
-                        IconName::Download,
-                        "Hopper",
-                        if installed { "Installed, updates itself".into() } else { "Portable".into() },
-                        installed,
-                        cx,
-                    ))
-                    .child(row(
-                        IconName::Lock,
-                        "CurseForge",
-                        match key_source {
-                            Some(hopper::cf::KeySource::BuiltIn) => "Hopper's built-in key".into(),
-                            Some(hopper::cf::KeySource::Saved) => "Your own key".into(),
-                            Some(hopper::cf::KeySource::Env) => "Key from .env".into(),
-                            Some(hopper::cf::KeySource::Session) => "Key for this run".into(),
-                            None => "No key: Modrinth only for now".into(),
-                        },
-                        key,
-                        cx,
-                    ))
-                    .child(row(
-                        IconName::FolderOpen,
-                        "Files",
-                        hopper::paths::dirs()
-                            .map(|d| d.root().unwrap_or(d.data_dir()).display().to_string())
-                            .unwrap_or_default(),
-                        true,
-                        cx,
-                    ))
-                    .child(row(IconName::LibraryBig, "Instances", inst, true, cx))
-                    .child(row(
-                        IconName::Server,
-                        "Servers",
-                        servers,
-                        self.servers != Servers::None || !s.servers_root.is_empty(),
-                        cx,
-                    ))
-                    .child(row(IconName::Palette, "Theme", theme_name, true, cx)),
-            )
-            .into_any_element()
-    }
+    // ---- the parts -------------------------------------------------------------
 
     fn heading(&self, cx: &App) -> AnyElement {
         let theme = cx.theme();
-        let (icon, title, sub) = match STEPS[self.step] {
-            "Welcome" => (IconName::Sparkles, "Set up Hopper", "About a minute. All of it can change later in Settings."),
-            "Files" => (IconName::FolderOpen, "Where Hopper keeps its files", "One folder for everything Hopper needs."),
-            "CurseForge" if hopper::cf::has_built_in_key() => {
-                (IconName::CircleCheck, "CurseForge is ready", "Nothing to do here. Go on when you're ready.")
-            }
-            "CurseForge" => (IconName::Lock, "Your CurseForge key (optional)", "Skip it to use Modrinth only; add it later in Settings."),
-            "Instances" => (IconName::LibraryBig, "Your instances", "Where Hopper finds what you play."),
-            "Servers" => (IconName::Server, "Servers", "Optional. Skip it if you just play."),
-            "Look" => (IconName::Palette, "Make it yours", "A theme for Hopper, and whether friends see what you play."),
-            _ => (IconName::CircleCheck, "Done", "Here's what's set."),
+        let (icon, title, sub) = if self.found.is_some() && !self.anything_found() {
+            (IconName::Plus, "Welcome to Hopper", "No other launchers on this PC, so you start fresh.")
+        } else {
+            (IconName::Check, "Here's what we found", "Hopper is set up from what's on this PC. Use it, or change anything first.")
         };
         h_flex()
-            .flex_1()
-            .min_w_0()
+            .flex_none()
             .gap_3()
             .child(
                 div()
@@ -1194,84 +594,578 @@ impl SetupWizard {
             .into_any_element()
     }
 
-    /// The steps as dots: the current one long, finished ones in the accent
-    /// color, later ones faint. Each jumps to its step.
-    fn dots(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// One found folder: its launcher's tile, name, count and path, and
+    /// its switch.
+    fn found_row(&self, i: usize, row: &Found, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let on = if row.kind.is_none() { self.main_on(row, cx) } else { row.on };
+        let path = row.path.display().to_string();
+        let line = if row.count == 0 {
+            "Folder found, no instances in it".to_string()
+        } else {
+            format!("{} · {path}", hopper::launchers::count_label(row.kind, row.count))
+        };
+        let tip = path.clone();
         h_flex()
-            .flex_none()
-            .items_center()
-            .children((0..STEPS.len()).map(|i| {
-                let current = i == self.step;
-                let dot = div().h(rems(0.5)).rounded_full().map(|d| {
-                    if current {
-                        d.w(rems(1.5)).bg(theme.primary)
-                    } else if i < self.step {
-                        d.w(rems(0.5)).bg(theme.primary.opacity(0.55))
-                    } else {
-                        d.w(rems(0.5)).bg(theme.muted_foreground.opacity(0.35))
-                    }
-                });
-                let name = format!("{}. {}", i + 1, STEPS[i]);
-                div()
-                    .id(("setup-dot", i))
-                    .p(rems(0.3125))
-                    .rounded_full()
-                    .when(!current, |d| d.clickable(cx).hover(|s| widgets::row_hover(s, cx)))
-                    .tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(window, cx)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| this.go(i, cx)))
-                    .child(dot)
+            .id(("setup-found", i))
+            .gap_3()
+            .px_3()
+            .py_2()
+            .rounded(theme.radius)
+            .hover(|s| widgets::row_hover(s, cx))
+            .child(launcher_tile(row.kind, &row.path, on, rems(2.), cx))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().font_medium().truncate().child(launcher_name(row.kind, &row.path)))
+                    .child(
+                        div()
+                            .id(("setup-found-path", i))
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .truncate()
+                            .child(line)
+                            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)),
+                    ),
+            )
+            .child(
+                Switch::new(("setup-found-switch", i))
+                    .checked(on)
+                    .on_click(cx.listener(move |this, v: &bool, window, cx| this.set_row(i, *v, window, cx))),
+            )
+            .into_any_element()
+    }
+
+    /// The found list: every row, scrolling inside its card when there are
+    /// more than a few; or, with More open, one summary line.
+    fn found_list(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let rows = self.found.clone().unwrap_or_default();
+        let card = || {
+            v_flex()
+                .rounded(theme.radius_lg)
+                .bg(theme.foreground.opacity(0.035))
+                .border_1()
+                .border_color(theme.foreground.opacity(0.08))
+        };
+        if self.found.is_none() {
+            return card()
+                .p_3()
+                .child(note("Looking for instances on this PC…", cx))
+                .into_any_element();
+        }
+        if self.more {
+            let on: Vec<&Found> = rows.iter().filter(|r| if r.kind.is_none() { self.main_on(r, cx) } else { r.on }).collect();
+            let names: Vec<&str> = on.iter().map(|r| launcher_name(r.kind, &r.path)).collect();
+            let total: usize = on.iter().map(|r| r.count).sum();
+            let text = if on.is_empty() {
+                "Nothing switched on".to_string()
+            } else {
+                format!("{} · {}", names.join(", "), hopper::launchers::count_label(None, total))
+            };
+            return card()
+                .child(
+                    h_flex()
+                        .id("setup-found-summary")
+                        .clickable(cx)
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .rounded(theme.radius_lg)
+                        .hover(|s| widgets::row_hover(s, cx))
+                        .text_sm()
+                        .children(on.iter().map(|r| launcher_tile(r.kind, &r.path, true, rems(1.5), cx)))
+                        .child(div().flex_1().min_w_0().truncate().child(text))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("{} of {} on", on.len(), rows.len())),
+                        )
+                        .child(Icon::new(IconName::ChevronDown).small().text_color(theme.muted_foreground))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.more = false;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element();
+        }
+        let many = rows.len() > LIST_ROWS + 2;
+        let list = v_flex()
+            .p_0p5()
+            .children(rows.iter().enumerate().map(|(i, r)| self.found_row(i, r, cx)));
+        if many {
+            // Five rows tall; the rest scroll, so nothing below moves.
+            card()
+                .child(div().id("setup-found-scroll").h(rems(17.)).overflow_y_scrollbar().child(list))
+                .into_any_element()
+        } else {
+            card().child(list).into_any_element()
+        }
+    }
+
+    fn discord(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let on = self.store.read(cx).settings().discord.enabled;
+        h_flex()
+            .gap_3()
+            .px_3()
+            .py_2p5()
+            .rounded(theme.radius_lg)
+            .bg(theme.foreground.opacity(0.035))
+            .border_1()
+            .border_color(theme.foreground.opacity(0.08))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(div().font_medium().child("Show what I'm playing on Discord"))
+                    .child(note(
+                        "Friends see the modpack you're playing and what you're browsing in Hopper, and nothing else. Turn it off here or any time in Settings.",
+                        cx,
+                    )),
+            )
+            // On unless it was turned off before; only a click here changes
+            // it (the full set of Discord choices stays in Settings › Discord).
+            .child(
+                Switch::new("setup-discord")
+                    .checked(on)
+                    .on_click(cx.listener(|this, v: &bool, _, cx| {
+                        let v = *v;
+                        this.store.update(cx, |st, cx| st.update_settings(|s| s.discord.enabled = v, cx));
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The instances folder field with its Change… button.
+    fn folder_field(&self, cx: &mut Context<Self>) -> AnyElement {
+        let input = self.instances_root.clone();
+        h_flex()
+            .w_full()
+            .gap_2()
+            .child(div().flex_1().min_w_0().child(Input::new(&self.instances_root)))
+            .child(
+                Button::new("setup-browse-instances")
+                    .outline()
+                    .label("Change…")
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        Self::browse(input.clone(), "New instances go here", window, cx)
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn more_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let open = self.more;
+        let what = if self.list_long() {
+            "Instances folder, look, servers, CurseForge key, install"
+        } else {
+            "Look, servers, CurseForge key, install"
+        };
+        h_flex()
+            .id("setup-more")
+            .clickable(cx)
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .when(open, |d| d.bg(theme.foreground.opacity(0.035)))
+            .hover(|s| widgets::row_hover(s, cx))
+            .text_sm()
+            .child(
+                Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+                    .small()
+                    .text_color(theme.muted_foreground),
+            )
+            .child(div().flex_none().font_medium().child("More"))
+            .child(div().flex_1().min_w_0().truncate().text_color(theme.muted_foreground).child(what))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.more = !this.more;
+                cx.notify();
             }))
+            .into_any_element()
+    }
+
+    /// Many folders found: the instances folder row waits under More.
+    fn list_long(&self) -> bool {
+        self.found.as_ref().is_some_and(|f| f.len() > LIST_ROWS) && self.anything_found()
+    }
+
+    /// Everything under More, as a settings form.
+    fn more_form(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let rem = window.rem_size();
+        let folder_here = self.anything_found();
+        // The look: the two Hopper themes or Windows' choice, the rest in a
+        // menu.
+        let current = self.current_theme();
+        let basics = [String::new(), crate::theme::HOPPER_DARK.to_string(), crate::theme::HOPPER_LIGHT.to_string()];
+        let picked = basics.iter().position(|n| *n == current);
+        let others: Vec<String> = crate::theme::names().into_iter().filter(|n| !basics.contains(n)).collect();
+        let view = cx.entity().downgrade();
+        let others2 = others.clone();
+        let pick_other: Rc<dyn Fn(usize, &mut Window, &mut App)> = Rc::new(move |ix, _, cx| {
+            if let Some(n) = others2.get(ix).cloned() {
+                view.update(cx, |this, cx| this.preview_theme(n, cx)).ok();
+            }
+        });
+        let look = h_flex()
+            .gap_2()
+            .child(
+                widgets::Segmented::new("setup-look")
+                    .when_some(picked, |t, i| t.selected_index(i))
+                    .children(["Follow Windows", "Hopper Dark", "Hopper Light"].map(|l| widgets::SegItem::new().label(l)))
+                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                        let n = basics[*ix].clone();
+                        this.preview_theme(n, cx)
+                    })),
+            )
+            .child(div().w(rems(12.)).child(widgets::field_picker(
+                "setup-look-more",
+                if picked.is_none() && !current.is_empty() { current.clone() } else { "More themes".into() },
+                others.iter().map(|n| (n.clone(), *n == current)).collect(),
+                rem,
+                pick_other,
+            )));
+        // Servers.
+        let srv_ix = match self.servers {
+            Servers::None => 0,
+            Servers::ThisPc => 1,
+            Servers::OtherPc => 2,
+        };
+        let servers = widgets::Segmented::new("setup-servers")
+            .selected_index(srv_ix)
+            .children(["None", "On this PC", "On another PC"].map(|l| widgets::SegItem::new().label(l)))
+            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                this.servers = [Servers::None, Servers::ThisPc, Servers::OtherPc][*ix];
+                cx.notify();
+            }));
+        let hosted = self.store.read(cx).hosted_root();
+        let srv_note = match self.servers {
+            Servers::None => "Just play. Add servers any time from the Servers page.".to_string(),
+            Servers::ThisPc => format!("Make one from any instance: ⋯ → Host a server from this pack. They go in {hosted}."),
+            Servers::OtherPc => "The shared folder that holds their server folders, and that PC's name for status pings.".to_string(),
+        };
+        // The CurseForge key.
+        use hopper::cf::KeySource;
+        let source = hopper::cf::api_key_source().map(|(_, s)| s);
+        let built_in = hopper::cf::has_built_in_key();
+        let typed = !Self::typed(&self.cf_key, cx).is_empty();
+        let key_field = v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.cf_key).mask_toggle()))
+                    .child(
+                        Button::new("setup-cf-test")
+                            .outline()
+                            .label(if typed { "Test and save" } else { "Test" })
+                            .loading(self.cf_testing)
+                            .disabled(self.cf_testing || (!typed && source.is_none()))
+                            .on_click(cx.listener(|this, _, window, cx| this.test_key(window, cx))),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_x_1()
+                    .items_center()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("Free from")
+                    .child(
+                        Button::new("setup-cf-console")
+                            .link()
+                            .small()
+                            .label("console.curseforge.com")
+                            .on_click(|_, _, cx| cx.open_url(CF_CONSOLE)),
+                    )
+                    .child("(API keys, then copy). It stays on this PC."),
+            )
+            .when(self.cf_testing, |c| c.child(note("Asking CurseForge…", cx)))
+            .when_some(self.cf_result.clone(), |c, r| c.child(result_line(r, cx)));
+        let key_text = match source {
+            Some(KeySource::Saved) => "Your own key is saved.",
+            Some(KeySource::Env) => "Using the key from .env.",
+            Some(KeySource::Session) => "Using a key for this run.",
+            _ if built_in => "Hopper's own key works for downloads.",
+            _ => "Optional. Without a key, Hopper uses Modrinth only.",
+        };
+        let own_open = self.cf_own_open || !built_in;
+        let key = v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(note(key_text, cx).flex_1())
+                    .when(built_in, |r| {
+                        r.child(
+                            Button::new("setup-cf-own")
+                                .outline()
+                                .small()
+                                .label(if own_open { "Hide" } else { "Use my own key…" })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.cf_own_open = !this.cf_own_open;
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            )
+            .when(own_open, |c| c.child(key_field));
+        // Installing.
+        let installed_here = hopper::setup::running_installed();
+        let install: AnyElement = if installed_here {
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(widgets::pill("Installed", theme.success, true))
+                .child(note("Hopper updates itself.", cx))
+                .into_any_element()
+        } else {
+            let other = hopper::setup::installed_exe().is_some();
+            v_flex()
+                .gap_1p5()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Button::new("setup-install")
+                                .outline()
+                                .small()
+                                .icon(IconName::Download)
+                                .label(if other { "Install this version" } else { "Install Hopper" })
+                                .loading(self.installing)
+                                .disabled(self.installing)
+                                .on_click(cx.listener(|this, _, window, cx| this.install(window, cx))),
+                        )
+                        .child(note(
+                            if other { "Replaces the installed copy." } else { "Start menu shortcut, and it updates itself." },
+                            cx,
+                        )),
+                )
+                .child(note("Or keep it portable: it runs from where it is now.", cx))
+                .when_some(self.install_result.clone(), |c, r| c.child(result_line(r, cx)))
+                .into_any_element()
+        };
+        // Where Hopper keeps its files.
+        let files_now = hopper::paths::dirs()
+            .map(|d| d.root().unwrap_or(d.data_dir()).display().to_string())
+            .unwrap_or_default();
+        let files = v_flex()
+            .gap_1p5()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1().min_w_0().text_sm().truncate().child(files_now))
+                    .child(
+                        Button::new("setup-files-pick")
+                            .outline()
+                            .small()
+                            .label("Move…")
+                            .disabled(self.files_moving)
+                            .on_click(cx.listener(|this, _, window, cx| this.pick_files_folder(window, cx))),
+                    ),
+            )
+            .when_some(self.files_dest.clone(), |c, d| {
+                c.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(note(format!("Hopper restarts to move them to {}.", d.display()), cx).flex_1())
+                        .child(
+                            Button::new("setup-files-cancel")
+                                .ghost()
+                                .small()
+                                .label("Cancel")
+                                .disabled(self.files_moving)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.files_dest = None;
+                                    this.files_error = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("setup-files-move")
+                                .outline()
+                                .small()
+                                .label("Move and restart")
+                                .loading(self.files_moving)
+                                .disabled(self.files_moving || self.files_error.is_some())
+                                .on_click(cx.listener(|this, _, window, cx| this.move_files(window, cx))),
+                        ),
+                )
+            })
+            .when_some(self.files_error.clone(), |c, e| c.child(result_line(Err(e), cx)));
+        let servers_root = self.servers_root.clone();
+        settings_form(rem)
+            .when(folder_here, |f| f.child(Field::new().label("New instances go in").child(self.folder_field(cx))))
+            .child(Field::new().label("Look").child(look))
+            .child(
+                Field::new()
+                    .label("Servers")
+                    .child(v_flex().gap_1p5().child(servers).child(note(srv_note, cx))),
+            )
+            .when(self.servers == Servers::OtherPc, |f| {
+                f.child(
+                    Field::new().label("Servers folder").child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(div().flex_1().min_w_0().child(Input::new(&self.servers_root)))
+                            .child(
+                                Button::new("setup-browse-servers")
+                                    .outline()
+                                    .label("Browse…")
+                                    .on_click(cx.listener(move |_, _, window, cx| {
+                                        Self::browse(servers_root.clone(), "Use this folder", window, cx)
+                                    })),
+                            ),
+                    ),
+                )
+                .child(Field::new().label("Server host").child(div().w(rems(16.)).child(Input::new(&self.server_host))))
+            })
+            .child(Field::new().label("CurseForge key").child(key))
+            .child(Field::new().label("Install").child(install))
+            .child(Field::new().label("Hopper's files").child(files))
+            .into_any_element()
     }
 }
 
-/// The wizard's height: what the window has room for, up to 40rem.
-fn height(window: &Window) -> Pixels {
-    let room = window.viewport_size().height - px(DIALOG_CHROME + 2. * DIALOG_MARGIN);
-    room.min(rems(40.).to_pixels(window.rem_size())).max(px(260.))
+/// A launcher's name, for showing. The main folder is CurseForge's when
+/// its path says so.
+fn launcher_name(kind: Option<Kind>, path: &Path) -> &'static str {
+    match kind {
+        Some(k) => k.name(),
+        None if path.to_string_lossy().to_lowercase().contains("curseforge") => "CurseForge",
+        None => "Instances folder",
+    }
 }
 
-/// The dialog's own padding, top and bottom.
-const DIALOG_CHROME: f32 = 32.;
-/// Space kept clear above and below the dialog.
-const DIALOG_MARGIN: f32 = 24.;
+/// A launcher's tile: its initials on its colour (grey while off).
+fn launcher_tile(kind: Option<Kind>, path: &Path, on: bool, size: Rems, cx: &App) -> Div {
+    let theme = cx.theme();
+    // Dark enough shades that the white initials pass 4.5:1.
+    let (text, color): (&str, u32) = match kind {
+        None if launcher_name(kind, path) == "CurseForge" => ("CF", 0xc2410c),
+        None => ("", 0x52525b),
+        Some(Kind::Modrinth) => ("M", 0x15803d),
+        Some(Kind::Prism) => ("P", 0x4d7c0f),
+        Some(Kind::MultiMC) => ("MM", 0x0e7490),
+        Some(Kind::ATLauncher) => ("AT", 0x7c3aed),
+        Some(Kind::GDLauncher) => ("GD", 0xbe185d),
+        Some(Kind::FtbApp) => ("FTB", 0x1d4ed8),
+    };
+    let bg: Hsla = if on { rgb(color).into() } else { theme.muted_foreground.opacity(0.35) };
+    let small = size.0 < 1.75;
+    div()
+        .flex_none()
+        .size(size)
+        .rounded(theme.radius)
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(bg)
+        .text_color(white())
+        .font_bold()
+        .map(|d| if small { d.text_size(rems(0.5625)) } else { d.text_xs() })
+        .map(|d| {
+            if text.is_empty() {
+                d.child(Icon::new(IconName::FolderOpen).small().text_color(white()))
+            } else {
+                d.child(text)
+            }
+        })
+}
+
+/// The section labels over the cards.
+fn section(text: &'static str, cx: &App) -> Div {
+    div()
+        .text_xs()
+        .font_semibold()
+        .text_color(cx.theme().muted_foreground)
+        .child(text)
+}
 
 impl Render for SetupWizard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let body = match STEPS[self.step] {
-            "Welcome" => self.welcome(cx),
-            "Files" => self.files(cx),
-            "CurseForge" => self.curseforge(cx),
-            "Instances" => self.instances(cx),
-            "Servers" => self.servers(cx),
-            "Look" => self.look(cx),
-            _ => self.done(cx),
+        let found = self.found.is_none() || self.anything_found();
+        let long = self.list_long();
+        let mut body = v_flex().gap_1p5().pr_3().py_1();
+        if found {
+            body = body
+                .child(
+                    h_flex()
+                        .items_center()
+                        .child(section("Your instances · shown in the Library, left where they are", cx).flex_1())
+                        .child(
+                            Button::new("setup-add-folder")
+                                .ghost()
+                                .xsmall()
+                                .label("Add a folder…")
+                                .tooltip("A launcher Hopper didn't find: a portable MultiMC or a moved instances folder")
+                                .on_click(cx.listener(|this, _, window, cx| this.add_folder(window, cx))),
+                        ),
+                )
+                .child(self.found_list(cx));
+        } else {
+            body = body
+                .child(section("Your instances go in", cx))
+                .child(self.folder_field(cx))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("Use another launcher?")
+                        .child(
+                            Button::new("setup-add-folder")
+                                .link()
+                                .small()
+                                .label("Point Hopper at its folder…")
+                                .on_click(cx.listener(|this, _, window, cx| this.add_folder(window, cx))),
+                        ),
+                );
+        }
+        body = body
+            .when_some(self.add_note.clone(), |c, n| c.child(div().text_sm().text_color(theme.warning).child(n)))
+            .child(div().h_2())
+            .child(section("Discord", cx))
+            .child(self.discord(cx));
+        if found && !long && !self.more {
+            body = body
+                .child(div().h_2())
+                .child(section("New instances go in", cx))
+                .child(self.folder_field(cx));
+        }
+        body = body.child(div().h_3()).child(self.more_button(cx));
+        if self.more {
+            body = body.child(div().pt_2().child(self.more_form(window, cx)));
+        }
+        let primary = |id: &'static str, label: &'static str, page: Page, cx: &mut Context<Self>| {
+            widgets::glow(
+                Button::new(id)
+                    .primary()
+                    .label(label)
+                    .disabled(self.files_moving)
+                    .on_click(cx.listener(move |this, _, window, cx| this.finish(page, window, cx))),
+                theme.primary,
+                cx,
+            )
         };
-        let last = self.step + 1 == STEPS.len();
-        let header = h_flex()
-            .flex_none()
-            .gap_4()
-            .pb_3()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(self.heading(cx))
-            .child(
-                v_flex()
-                    .flex_none()
-                    .items_end()
-                    .gap_0p5()
-                    .child(self.dots(cx))
-                    .child(
-                        div()
-                            .pr_1()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format!("{} of {} · {}", self.step + 1, STEPS.len(), STEPS[self.step])),
-                    ),
-            );
         let footer = h_flex()
             .flex_none()
             .pt_3()
@@ -1280,205 +1174,45 @@ impl Render for SetupWizard {
             .items_center()
             .gap_2()
             .child(
-                h_flex().flex_1().child(if last {
-                    div().into_any_element()
-                } else {
-                    Button::new("setup-skip")
-                        .ghost()
-                        .small()
-                        .label("Skip setup")
-                        .on_click(cx.listener(|this, _, window, cx| this.close(false, window, cx)))
-                        .into_any_element()
-                }),
+                Button::new("setup-skip")
+                    .ghost()
+                    .label("Skip")
+                    .disabled(self.files_moving)
+                    .tooltip("Adds nothing it found. You can add launchers later in Settings.")
+                    .on_click(cx.listener(|this, _, window, cx| this.skip(window, cx))),
             )
-            .when(self.step > 0, |r| {
-                r.child(
-                    Button::new("setup-back")
-                        .outline()
-                        .icon(IconName::ArrowLeft)
-                        .label("Back")
-                        .on_click(cx.listener(|this, _, _, cx| this.back(cx))),
-                )
-            })
-            .child(if last {
-                widgets::glow(
-                    Button::new("setup-library")
-                        .primary()
-                        .icon(IconName::LibraryBig)
-                        .label("Open Library")
-                        .on_click(cx.listener(|this, _, window, cx| this.close(true, window, cx))),
-                    theme.primary,
-                    cx,
-                )
-            } else {
-                widgets::glow(
-                    Button::new("setup-next")
-                        .primary()
-                        .label(if self.step == 0 { "Get started" } else { "Next" })
-                        .icon(IconName::ArrowRight)
-                        .disabled(self.files_moving)
-                        .on_click(cx.listener(|this, _, window, cx| this.next_from(window, cx))),
-                    theme.primary,
-                    cx,
-                )
+            .child(div().flex_1())
+            .map(|f| {
+                if found {
+                    f.child(note("You can change all of this in Settings.", cx))
+                        .child(primary("setup-use", "Use these", Page::Library, cx))
+                } else {
+                    f.child(
+                        Button::new("setup-library")
+                            .outline()
+                            .label("Open the Library")
+                            .disabled(self.files_moving)
+                            .on_click(cx.listener(|this, _, window, cx| this.finish(Page::Library, window, cx))),
+                    )
+                    .child(primary("setup-find", "Find a modpack", Page::Browse, cx))
+                }
             });
+        // The body scrolls when the window is short; the title and the
+        // buttons stay.
+        let room = (widgets::dialog_room(window) - window.rem_size() * 7.).max(window.rem_size() * 10.);
         v_flex()
             .id("setup-wizard")
-            .h(height(window))
             .gap_3()
-            .child(header)
+            .child(self.heading(cx))
             .child(
                 div()
-                    .id(("setup-body", self.step))
-                    .flex_1()
-                    .min_h_0()
+                    .id("setup-body")
+                    .max_h(room)
                     .overflow_y_scrollbar()
-                    .child(widgets::enter(
-                        ("setup-step", self.step),
-                        v_flex().pr_3().py_1().child(body),
-                    )),
+                    .child(body),
             )
             .child(footer)
     }
-}
-
-/// A big clickable choice: an icon, a title and a line, outlined in the
-/// accent color when picked.
-fn choice_card(
-    id: &'static str,
-    icon: IconName,
-    title: &'static str,
-    text: &'static str,
-    picked: bool,
-    cx: &App,
-) -> Stateful<Div> {
-    let theme = cx.theme();
-    v_flex()
-        .id(id)
-        .flex_1()
-        .flex_basis(px(0.))
-        .min_w_0()
-        .gap_2()
-        .p_4()
-        .rounded(theme.radius_lg)
-        .clickable(cx)
-        .border_1()
-        .map(|d| {
-            if picked {
-                d.border_color(theme.primary)
-                    .bg(theme.primary.opacity(widgets::alpha::TINT))
-                    .shadow(vec![BoxShadow::new(px(0.), px(4.), theme.primary.opacity(0.25)).blur_radius(px(16.))])
-            } else {
-                d.border_color(theme.foreground.opacity(0.1))
-                    .bg(theme.foreground.opacity(0.035))
-                    .hover(|s| widgets::row_hover(s, cx))
-            }
-        })
-        .child(
-            h_flex()
-                .justify_between()
-                .child(
-                    div()
-                        .size(rems(2.))
-                        .rounded(theme.radius)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(theme.primary.opacity(0.14))
-                        .child(Icon::new(icon).small().text_color(theme.primary)),
-                )
-                .when(picked, |r| {
-                    r.child(Icon::new(IconName::CircleCheck).small().text_color(theme.primary))
-                }),
-        )
-        .child(div().font_semibold().child(title))
-        .child(div().text_sm().text_color(theme.muted_foreground).child(text))
-}
-
-/// A theme as a tiny window: its sidebar, page, text and accent.
-fn theme_card(name: &str, picked: bool, cx: &App) -> Div {
-    let theme = cx.theme();
-    let mini = |n: &str| {
-        let [bg, panel, accent, fg] = crate::theme::swatch(n);
-        h_flex()
-            .flex_1()
-            .h_full()
-            .child(
-                v_flex()
-                    .w(rems(1.5))
-                    .h_full()
-                    .bg(panel)
-                    .p_1()
-                    .gap_1()
-                    .child(div().h(rems(0.25)).w_full().rounded_full().bg(fg.opacity(0.35)))
-                    .child(div().h(rems(0.25)).w_full().rounded_full().bg(accent))
-                    .child(div().h(rems(0.25)).w_full().rounded_full().bg(fg.opacity(0.35))),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .h_full()
-                    .bg(bg)
-                    .p_1p5()
-                    .gap_1()
-                    .child(div().h(rems(0.3)).w(rems(2.5)).rounded_full().bg(fg.opacity(0.85)))
-                    .child(div().h(rems(0.25)).w(rems(3.5)).rounded_full().bg(fg.opacity(0.35)))
-                    .child(div().mt_auto().h(rems(0.5)).w(rems(1.75)).rounded_full().bg(accent)),
-            )
-    };
-    let preview = if name.is_empty() {
-        // Follow Windows: Hopper Dark beside Hopper Light.
-        h_flex()
-            .size_full()
-            .child(mini(crate::theme::HOPPER_DARK))
-            .child(mini(crate::theme::HOPPER_LIGHT))
-    } else {
-        h_flex().size_full().child(mini(name))
-    };
-    v_flex()
-        .w(rems(7.625))
-        .gap_1p5()
-        .p_1p5()
-        .rounded(theme.radius_lg)
-        .clickable(cx)
-        .border_1()
-        .map(|d| {
-            if picked {
-                d.border_color(theme.primary).bg(theme.primary.opacity(widgets::alpha::TINT))
-            } else {
-                d.border_color(theme.foreground.opacity(0.08)).hover(|s| widgets::row_hover(s, cx))
-            }
-        })
-
-        .child(
-            div()
-                .h(rems(3.75))
-                .rounded(theme.radius)
-                .overflow_hidden()
-                .border_1()
-                .border_color(theme.foreground.opacity(0.1))
-                .child(preview),
-        )
-        .child(
-            h_flex()
-                .gap_1()
-                .px_0p5()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_xs()
-                        .font_medium()
-                        .child(if name.is_empty() { "Follow Windows".to_string() } else { name.to_string() }),
-                )
-                .when(crate::theme::is_glass(name), |r| {
-                    r.child(div().text_xs().text_color(theme.muted_foreground).child("glass"))
-                })
-                .when(picked, |r| {
-                    r.child(Icon::new(IconName::Check).xsmall().text_color(theme.primary))
-                }),
-        )
 }
 
 /// A muted line that wraps (`widgets::caption` cuts long text short).
@@ -1488,10 +1222,6 @@ fn note(text: impl Into<SharedString>, cx: &App) -> Div {
         .text_sm()
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
-}
-
-fn label(text: &'static str) -> Div {
-    div().font_semibold().child(text)
 }
 
 /// A test or install outcome: green when it worked, red with why when not.
@@ -1520,11 +1250,9 @@ pub fn open(
 ) {
     let view = cx.new(|cx| SetupWizard::new(store, app, preview, window, cx));
     window.open_dialog(cx, move |dialog, window, _| {
-        // Centered in the window, at whatever height fits.
-        let spare = window.viewport_size().height - height(window) - px(DIALOG_CHROME);
         dialog
             .w(rems(46.).to_pixels(window.rem_size()))
-            .margin_top((spare / 2.).max(px(DIALOG_MARGIN)))
+            .margin_top(rems(widgets::DIALOG_TOP).to_pixels(window.rem_size()))
             .close_button(false)
             .overlay_closable(false)
             .keyboard(false)

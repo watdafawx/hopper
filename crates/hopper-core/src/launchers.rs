@@ -98,14 +98,29 @@ pub fn instances(dirs: &[crate::settings::LauncherDir]) -> Vec<crate::instances:
 
 /// Launchers installed on this PC with at least one instance, and how many.
 pub fn detect() -> Vec<(Kind, PathBuf, usize)> {
+    found().into_iter().filter(|(_, _, n)| *n > 0).collect()
+}
+
+/// Every launcher folder on this PC, with how many instances are in it
+/// (0 for an installed launcher with nothing in it yet). The first-run
+/// screen lists the empty ones too, switched off, so the player sees
+/// Hopper looked there.
+pub fn found() -> Vec<(Kind, PathBuf, usize)> {
     Kind::ALL
         .into_iter()
         .filter_map(|k| {
             let d = default_dir(k)?;
             let n = list(k, &d).len();
-            (n > 0).then_some((k, d, n))
+            Some((k, d, n))
         })
         .collect()
+}
+
+/// "12 instances", "1 instance"; the Modrinth App calls its instances
+/// profiles, so it says "2 profiles". `None` is CurseForge's folder.
+pub fn count_label(kind: Option<Kind>, n: usize) -> String {
+    let word = if kind == Some(Kind::Modrinth) { "profile" } else { "instance" };
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
 
 /// Hopper's loader string from a loader name and version.
@@ -486,6 +501,15 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn count_labels() {
+        assert_eq!(count_label(None, 12), "12 instances");
+        assert_eq!(count_label(Some(Kind::Prism), 1), "1 instance");
+        assert_eq!(count_label(Some(Kind::Modrinth), 2), "2 profiles");
+        assert_eq!(count_label(Some(Kind::Modrinth), 1), "1 profile");
+        assert_eq!(count_label(Some(Kind::FtbApp), 0), "0 instances");
     }
 
     #[test]
