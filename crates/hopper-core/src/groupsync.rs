@@ -2549,6 +2549,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&inst.root);
     }
 
+    /// The sharer removed a mod while a member played. The member took it
+    /// in, but the game held the jar, so it waited in the folder. Then a
+    /// copy of the member's instance from before the change was saved over
+    /// it (the play time written as the game closed; CurseForge writing its
+    /// own file back reads the same). With the jar still there, the mod
+    /// counted as installed again: the member's next code listed it as
+    /// their own, newest change, and the sharer got it back.
+    #[cfg(windows)]
+    #[test]
+    fn a_mod_removed_while_a_member_plays_does_not_come_back_when_they_close_the_game() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let mut inst = locked_inst("removed-while-playing");
+        let older = inst.clone();
+        let jar = inst.root.join("mods").join("Iris.jar");
+        // Open the way Java's JarFile does: no sharing of delete or rename.
+        let held = std::fs::OpenOptions::new().read(true).share_mode(1).open(&jar).unwrap();
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        let code_of = |i: &Instance| crate::sharecode::make(i, &job).unwrap().code;
+        let root = inst.root.clone();
+        let load = || crate::instances::load(&root).unwrap();
+
+        // The sharer (A) took Iris out at 5; the member (B) takes it in.
+        let removal = Mark { state: State::Unlisted, kind: Kind::Removed, by: "A".into(), name: String::new(), seq: 5, at: 5 };
+        apply(&mut inst, &[ch("p:2", st(21, true), State::Unlisted)], &[], &job).unwrap();
+        assert!(find_addon(&inst, "p:2").is_none());
+        assert!(jar.is_file(), "the game still has it");
+        // The member's code without it, taken in by the sharer at 6.
+        let member = PackCopy { marks: [("p:2".to_string(), removal.clone())].into(), ..Default::default() };
+        let taken = code_of(&load());
+        assert!(dec(&taken).unwrap().map.get("p:2").is_none());
+
+        // The older copy lands on top while the game still has the jar.
+        older.save().unwrap();
+        let next = code_of(&load());
+        let stamps = stamps_out(&member.marks, dec(&taken).as_ref(), &dec(&next).unwrap(), "B");
+
+        // The sharer reads the member's next code (8).
+        let here = m(vec![cf(11, true)]);
+        let mut sharer = PackCopy { marks: [("p:2".to_string(), removal)].into(), ..Default::default() };
+        sharer.got.insert("B".into(), got(taken.clone(), 6, "B"));
+        sharer.arrive("B", Got { stamps, ..got(next.clone(), 8, "B") });
+        let (todo, _) = plan(&sharer, &here, Some(&here), false, dec);
+        assert!(todo.iter().all(|c| c.key != "p:2"), "Iris comes back: {todo:?}");
+        assert_eq!(next, taken, "the member's code is unchanged");
+
+        // The game closes: the jar goes, and the mod stays out.
+        drop(held);
+        assert_eq!(crate::locked::flush(&inst.root), 1);
+        assert!(!jar.exists());
+        assert!(find_addon(&load(), "p:2").is_none());
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
     // ---- the loader goes the way the mods do ----
 
     /// A plain code of `loader` (no mods).

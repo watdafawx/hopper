@@ -1623,12 +1623,20 @@ impl Store {
                             wake();
                         });
                     }
-                    // Count the session (sanity-capped at a day).
-                    if let Some(i) = self.instances.iter_mut().find(|i| i.root == root) {
-                        i.play_seconds += secs_now.saturating_sub(started).min(86_400);
-                        i.last_played = Some(hopper::time::now_iso());
-                        if let Err(e) = i.save() {
-                            log::warn!("saving play time: {e:#}");
+                    // Count the session (sanity-capped at a day). Onto the
+                    // instance as it is on disk: the copy here can be older
+                    // than a change a task just saved (a friend's removal
+                    // taken in while playing), and saving it whole would
+                    // undo that change.
+                    if self.instances.iter().any(|i| i.root == root) {
+                        let played = secs_now.saturating_sub(started).min(86_400);
+                        let at = hopper::time::now_iso();
+                        match Instance::update_on_disk(&root, |i| {
+                            i.play_seconds += played;
+                            i.last_played = Some(at);
+                        }) {
+                            Ok(saved) => self.put_instance(saved),
+                            Err(e) => log::warn!("saving play time: {e:#}"),
                         }
                     }
                 }

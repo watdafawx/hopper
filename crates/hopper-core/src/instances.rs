@@ -766,16 +766,25 @@ fn file_state(root: &Path, a: &Addon) -> Option<bool> {
 /// Does nothing when the mods folder can't be read or none of the entries'
 /// jars are in it: a drive that's offline or a moved folder isn't a reason
 /// to forget every mod.
+///
+/// A jar waiting for the game to let go of it ([`crate::locked`]) counts as
+/// gone: it was removed, and only sits in the folder until the game closes.
+/// Counted as there, a list that still names it (CurseForge's own file
+/// written back, or a copy of the instance from before the change saved
+/// over it) would list the mod again, and a group pack would send that out
+/// as this player's own, newest change: the mod came back for everyone.
 pub fn drop_gone_mods(inst: &mut Instance) -> Vec<String> {
     let Ok(rd) = fs::read_dir(inst.mods_dir()) else {
         return Vec::new();
     };
+    let leaving = crate::locked::queued_mods(&inst.root);
     let on_disk: std::collections::HashSet<String> = rd
         .flatten()
         .map(|e| {
             let n = e.file_name().to_string_lossy().to_lowercase();
             n.strip_suffix(".disabled").map(str::to_string).unwrap_or(n)
         })
+        .filter(|n| !leaving.contains(n))
         .collect();
     let is_mod = |a: &Addon| a.class_id == crate::cf::CLASS_MODS || a.class_id == 0;
     let there = |a: &Addon| {
@@ -2255,6 +2264,59 @@ mod tests {
         fs::create_dir_all(&mods).unwrap();
         fs::write(mods.join("other.jar"), b"x").unwrap();
         assert!(super::drop_gone_mods(&mut offline).is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A mod removed while the game held its jar: the jar waits in the
+    /// folder for the game to close. A copy of the instance from before
+    /// the removal saved over it (the play time written as the game
+    /// closes) must not list the mod again.
+    #[test]
+    fn a_jar_waiting_for_the_game_to_let_go_is_not_listed_again() {
+        let root = temp("leaving");
+        for f in ["a.jar", "b.jar"] {
+            fs::write(root.join("mods").join(f), b"x").unwrap();
+        }
+        let older = Instance {
+            root: root.clone(),
+            format: FORMAT,
+            addons: vec![addon("a.jar", |a| a.project_id = 1), addon("b.jar", |a| a.project_id = 2)],
+            ..Default::default()
+        };
+        crate::locked::queue(&root, &root.join("mods").join("b.jar"), false).unwrap();
+        older.save().unwrap();
+        let inst = load(&root).unwrap();
+        assert!(inst.addon_by_file("a.jar").is_some());
+        assert!(inst.addon_by_file("b.jar").is_none(), "b.jar is on its way out");
+        assert!(read_own(&root).unwrap().unwrap().addon_by_file("b.jar").is_none(), "and its file says so");
+        // Only switched while the game has it (a queued rename): still there.
+        crate::locked::unqueue(&root, &root.join("mods").join("b.jar"));
+        crate::locked::queue_rename(&root, &root.join("mods").join("a.jar"), &root.join("mods").join("a.jar.disabled")).unwrap();
+        assert!(load(&root).unwrap().addon_by_file("a.jar").is_some());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The same jar, with the CurseForge app writing back its own file,
+    /// which still lists the mod (it found the jar in the folder).
+    #[test]
+    fn curseforge_listing_a_jar_waiting_to_leave_does_not_bring_it_back() {
+        let root = temp("leaving-cf");
+        fs::write(root.join("minecraftinstance.json"), CF_JSON).unwrap();
+        for f in ["a.jar", "b.jar.disabled", "c-2.jar", "d.jar"] {
+            fs::write(root.join("mods").join(f), b"x").unwrap();
+        }
+        crate::locked::queue(&root, &root.join("mods").join("d.jar"), false).unwrap();
+        // Hopper's own list, from before CurseForge rewrote its file.
+        let own = Instance {
+            format: FORMAT,
+            imported_from_cf: 0,
+            addons: vec![addon("a.jar", |a| a.project_id = 10), addon("c-2.jar", |a| a.project_id = 12)],
+            ..Default::default()
+        };
+        fs::write(root.join(HOPPER_FILE), serde_json::to_vec(&own).unwrap()).unwrap();
+        let inst = load(&root).unwrap();
+        assert!(inst.addon_by_file("c-2.jar").is_some());
+        assert!(inst.addon_by_file("d.jar").is_none(), "{:?}", inst.addons.iter().map(|a| &a.file_name).collect::<Vec<_>>());
         let _ = fs::remove_dir_all(&root);
     }
 
