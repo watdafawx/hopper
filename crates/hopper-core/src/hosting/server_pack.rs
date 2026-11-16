@@ -54,22 +54,17 @@ pub fn resolve_server_pack(inst: &Instance) -> anyhow::Result<cf::File> {
             inst.name
         );
     };
-    let mut id = p.server_pack_file_id;
-    if id == 0 && p.file_id != 0 {
-        id = cf::file(p.project_id, p.file_id)
-            .with_context(|| format!("looking up {} on CurseForge", p.name))?
-            .server_pack_file_id
-            .unwrap_or(0);
+    match server_pack_file(p)? {
+        Some(f) => Ok(f),
+        None => {
+            let pack = if p.name.is_empty() {
+                inst.name.as_str()
+            } else {
+                p.name.as_str()
+            };
+            bail!("The author of {pack} didn't publish a server pack for this version.");
+        }
     }
-    if id == 0 {
-        let pack = if p.name.is_empty() {
-            inst.name.as_str()
-        } else {
-            p.name.as_str()
-        };
-        bail!("The author of {pack} didn't publish a server pack for this version.");
-    }
-    cf::file(p.project_id, id).context("looking up the server pack on CurseForge")
 }
 
 /// Like [`resolve_server_pack`], but `None` when the pack has no server
@@ -77,17 +72,38 @@ pub fn resolve_server_pack(inst: &Instance) -> anyhow::Result<cf::File> {
 /// CurseForge can't be reached.
 pub fn find_server_pack(inst: &Instance) -> anyhow::Result<Option<cf::File>> {
     let Some(p) = curse_pack(inst) else { return Ok(None) };
-    let mut id = p.server_pack_file_id;
-    if id == 0 && p.file_id != 0 {
-        id = cf::file(p.project_id, p.file_id)
+    server_pack_file(p)
+}
+
+/// The server pack of `p`'s version on CurseForge: the recorded one, else
+/// the one the pack file names. Also asked when the recorded file is gone:
+/// authors replace a version's server pack after release and delete the
+/// old one (as [`crate::serverpack::current`] does for the mod list).
+fn server_pack_file(p: &crate::instances::PackRef) -> anyhow::Result<Option<cf::File>> {
+    let named = || -> anyhow::Result<u64> {
+        if p.file_id == 0 {
+            return Ok(0);
+        }
+        Ok(cf::file(p.project_id, p.file_id)
             .with_context(|| format!("looking up {} on CurseForge", p.name))?
             .server_pack_file_id
-            .unwrap_or(0);
+            .unwrap_or(0))
+    };
+    let lookup = |id: u64| cf::file(p.project_id, id).context("looking up the server pack on CurseForge");
+    let recorded = p.server_pack_file_id;
+    if recorded != 0 {
+        return match lookup(recorded) {
+            Ok(f) => Ok(Some(f)),
+            Err(e) => match named() {
+                Ok(id) if id != 0 && id != recorded => lookup(id).map(Some),
+                _ => Err(e),
+            },
+        };
     }
-    if id == 0 {
-        return Ok(None);
+    match named()? {
+        0 => Ok(None),
+        id => lookup(id).map(Some),
     }
-    cf::file(p.project_id, id).context("looking up the server pack on CurseForge").map(Some)
 }
 
 impl ServerPackReport {

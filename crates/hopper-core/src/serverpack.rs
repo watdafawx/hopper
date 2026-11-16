@@ -101,9 +101,29 @@ pub fn annotate(
     inst: &crate::instances::Instance,
     sync_anyway: &HashSet<u64>,
 ) -> Annotation {
+    annotate_with(
+        mods,
+        inst,
+        sync_anyway,
+        &|p| crate::synctiming::time_res("server pack list", "", 0, || current(p)),
+        &crate::modrinth::sides_of,
+        &crate::modrinth::sides_by_slug,
+    )
+}
+
+/// [`annotate`] with the network parts passed in (the server pack's list and
+/// Modrinth's sides by jar and by slug), so tests can stand in for them.
+fn annotate_with(
+    mods: &mut [crate::model::ModInfo],
+    inst: &crate::instances::Instance,
+    sync_anyway: &HashSet<u64>,
+    server_pack: &dyn Fn(&crate::instances::PackRef) -> anyhow::Result<ServerPackSet>,
+    sides_of: &dyn Fn(&[PathBuf]) -> HashMap<String, String>,
+    sides_by_slug: &dyn Fn(&[(String, String)]) -> HashMap<String, String>,
+) -> Annotation {
     let mut out = Annotation::default();
     let matcher = match &inst.pack {
-        Some(p) if p.server_pack_file_id != 0 => match crate::synctiming::time_res("server pack list", "", 0, || get(p.project_id, p.server_pack_file_id)) {
+        Some(p) if p.server_pack_file_id != 0 => match server_pack(p) {
             Ok(set) => {
                 out.server_pack_jars = Some(set.jars.len());
                 Some(Matcher::new(set))
@@ -122,23 +142,22 @@ pub fn annotate(
         None => None,
     };
 
-    // Mods the user added that don't say which side they run on: ask
-    // Modrinth (mod-sync scraped CurseForge's page; that is blocked now).
+    // Mods that don't say which side they run on: ask Modrinth (mod-sync
+    // scraped CurseForge's page; that is blocked now). Pack mods only when
+    // there is no server pack to go by: many authors tag a client-only mod
+    // on Modrinth but not on CurseForge, and without the server pack that
+    // tag is all that keeps it off the server.
+    let asks = |a: &crate::instances::Addon| !a.from_pack || (matcher.is_none() && a.env.is_empty());
     let unknown: Vec<std::path::PathBuf> = mods
         .iter()
-        .filter(|m| {
-            m.side.is_empty()
-                && !inst
-                    .addon_by_file(&m.file_name)
-                    .is_some_and(|a| a.from_pack)
-        })
+        .filter(|m| m.side.is_empty() && inst.addon_by_file(&m.file_name).is_none_or(asks))
         .map(|m| inst.mods_dir().join(&m.file_name))
         .collect();
     // Sides from the authors' tags (Modrinth's, CurseForge's), sometimes
     // wrong, so for a tracked mod a client-only verdict is a won't-sync the
     // user can override rather than a hard side.
     let mut guessed: HashMap<String, (String, &str)> = HashMap::new();
-    let sides = crate::modrinth::sides_of(&unknown);
+    let sides = sides_of(&unknown);
     for m in mods.iter_mut() {
         if m.side.is_empty()
             && let Some(s) = sides.get(&m.file_name)
@@ -155,7 +174,7 @@ pub fn annotate(
     // same mod on Modrinth by slug (its jar may only be on CurseForge).
     let unknown_added = |m: &crate::model::ModInfo| {
         inst.addon_by_file(&m.file_name)
-            .filter(|a| !a.from_pack && m.side.is_empty() && !guessed.contains_key(&m.file_name))
+            .filter(|a| asks(a) && m.side.is_empty() && !guessed.contains_key(&m.file_name))
     };
     let mut more: Vec<(String, (String, &str))> = Vec::new();
     let mut by_slug: Vec<(String, String)> = Vec::new();
@@ -168,7 +187,7 @@ pub fn annotate(
         }
     }
     if !by_slug.is_empty() {
-        let sides = crate::modrinth::sides_by_slug(&by_slug);
+        let sides = sides_by_slug(&by_slug);
         for m in mods.iter() {
             if let Some(a) = unknown_added(m)
                 && a.env.is_empty()
@@ -217,6 +236,9 @@ pub fn annotate(
             } else {
                 "Client-only on Modrinth".into()
             }),
+            // No server pack and no tag on the site it came from: what
+            // Modrinth said above stands.
+            None => m.wont_sync.take(),
             _ => None,
         };
         out.flagged += m.wont_sync.is_some() as usize;
@@ -257,6 +279,48 @@ pub fn get(project_id: u64, server_pack_file_id: u64) -> anyhow::Result<ServerPa
         }
     });
     Ok(set)
+}
+
+/// The server pack of `p`'s installed version. Authors sometimes replace a
+/// version's server pack after release and delete the old file, so the id
+/// recorded at install stops working; then the pack file is asked for the
+/// one it has now. The set is also kept under the recorded id, so later
+/// comparisons don't ask again.
+pub fn current(p: &crate::instances::PackRef) -> anyhow::Result<ServerPackSet> {
+    let recorded = p.server_pack_file_id;
+    let (id, set) = read_or_replaced(
+        recorded,
+        |id| get(p.project_id, id),
+        || Ok(cf::file(p.project_id, p.file_id)?.server_pack_file_id.unwrap_or(0)),
+    )?;
+    if id != recorded {
+        log::info!("{}: server pack {recorded} is gone, using {id}", p.name);
+        with_cache(|c| {
+            c.insert(recorded, set.clone());
+            if let (Some(path), Ok(bytes)) = (cache_path(), serde_json::to_vec(c)) {
+                let _ = fs::write(path, bytes);
+            }
+        });
+    }
+    Ok(set)
+}
+
+/// Reads server pack `recorded`; when that fails, asks `now` which server
+/// pack the pack file has and reads that one if it's another file. The
+/// first error stands when there is no other file or it fails too.
+fn read_or_replaced(
+    recorded: u64,
+    read: impl Fn(u64) -> anyhow::Result<ServerPackSet>,
+    now: impl FnOnce() -> anyhow::Result<u64>,
+) -> anyhow::Result<(u64, ServerPackSet)> {
+    let first = match read(recorded) {
+        Ok(set) => return Ok((recorded, set)),
+        Err(e) => e,
+    };
+    match now() {
+        Ok(id) if id != 0 && id != recorded => read(id).map(|set| (id, set)).map_err(|_| first),
+        _ => Err(first),
+    }
 }
 
 fn fetch(project_id: u64, file_id: u64) -> anyhow::Result<ServerPackSet> {
@@ -510,6 +574,88 @@ mod tests {
         assert_eq!(cf_slug("https://www.curseforge.com/minecraft/mc-mods/jei/files?x=1"), Some("jei"));
         assert_eq!(cf_slug("https://modrinth.com/mod/jei"), None);
         assert_eq!(cf_slug(""), None);
+    }
+
+    /// A pack version whose server pack can't be read (TNP Limitless 8
+    /// 1.80.0: the author replaced it and the recorded file is gone). A pack
+    /// mod CurseForge doesn't tag but Modrinth calls client-only (Inventory
+    /// Profiles Next) must still stay off the server.
+    #[test]
+    fn untagged_pack_mods_go_by_modrinth_without_a_server_pack() {
+        use crate::instances::{Addon, Instance, PackRef};
+        let mut inst = Instance::default();
+        inst.pack = Some(PackRef { project_id: 1, file_id: 2, server_pack_file_id: 3, ..Default::default() });
+        let addon = |id: u64, file: &str, env: &str| Addon {
+            project_id: id,
+            file_name: file.into(),
+            from_pack: true,
+            enabled: true,
+            env: env.into(),
+            class_id: cf::CLASS_MODS,
+            ..Default::default()
+        };
+        inst.addons = vec![addon(10, "ipn.jar", ""), addon(11, "tagged-both.jar", "both"), addon(12, "illager.jar", "")];
+        let fresh = || -> Vec<crate::model::ModInfo> {
+            ["ipn.jar", "tagged-both.jar", "illager.jar"]
+                .map(|f| crate::model::ModInfo { file_name: f.into(), ..Default::default() })
+                .to_vec()
+        };
+        let gone = |_: &PackRef| -> anyhow::Result<ServerPackSet> { Err(anyhow!("404")) };
+        // Modrinth: IPN and the both-tagged mod are client-only there.
+        let modrinth = |paths: &[PathBuf]| -> HashMap<String, String> {
+            paths
+                .iter()
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .filter(|n| n == "ipn.jar" || n == "tagged-both.jar")
+                .map(|n| (n, "client".to_string()))
+                .collect()
+        };
+        let no_slugs = |_: &[(String, String)]| HashMap::new();
+
+        let mut mods = fresh();
+        let a = annotate_with(&mut mods, &inst, &HashSet::new(), &gone, &modrinth, &no_slugs);
+        assert_eq!(mods[0].wont_sync.as_deref(), Some("Client-only on Modrinth"));
+        assert_eq!(mods[0].side, "client");
+        // CurseForge's own tag says the server needs it: it outranks Modrinth.
+        assert_eq!(mods[1].wont_sync, None);
+        // Nobody knows: it goes along, as before.
+        assert_eq!(mods[2].wont_sync, None);
+        assert_eq!(a.flagged, 1);
+
+        // "Sync anyway" still wins.
+        let mut mods = fresh();
+        annotate_with(&mut mods, &inst, &HashSet::from([10]), &gone, &modrinth, &no_slugs);
+        assert_eq!(mods[0].wont_sync, None);
+
+        // With a readable server pack, it alone decides for pack mods.
+        let pack = |_: &PackRef| -> anyhow::Result<ServerPackSet> {
+            Ok(ServerPackSet { jars: ["ipn.jar".to_string()].into(), ..Default::default() })
+        };
+        let mut mods = fresh();
+        annotate_with(&mut mods, &inst, &HashSet::new(), &pack, &modrinth, &no_slugs);
+        assert_eq!(mods[0].wont_sync, None);
+        assert!(mods[1].wont_sync.is_some() && mods[2].wont_sync.is_some());
+    }
+
+    #[test]
+    fn a_replaced_server_pack_is_followed() {
+        let set = |j: &str| ServerPackSet { jars: [j.to_string()].into(), ..Default::default() };
+        let read = |id: u64| match id {
+            9612933 => Ok(set("new.jar")),
+            _ => Err(anyhow!("file {id} not found")),
+        };
+        // The recorded file is gone; the pack file names its replacement.
+        let (id, got) = read_or_replaced(9612710, read, || Ok(9612933)).unwrap();
+        assert_eq!(id, 9612933);
+        assert!(got.jars.contains("new.jar"));
+        // The recorded one works: the pack file isn't asked.
+        let (id, _) = read_or_replaced(9612933, read, || panic!("asked")).unwrap();
+        assert_eq!(id, 9612933);
+        // Same id, none, or the lookup fails: the first error stands.
+        for now in [Ok(9612710), Ok(0), Err(anyhow!("offline"))] {
+            let e = read_or_replaced(9612710, read, || now).unwrap_err();
+            assert!(e.to_string().contains("9612710"), "{e}");
+        }
     }
 
     #[test]
