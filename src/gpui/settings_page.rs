@@ -259,7 +259,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Servers, "panel-find", "Find on the LAN", "Hopper Servers announce themselves on your network.", "hopper server hopperd discover lan"),
     e(C::Servers, "panel-pair", "Add a Hopper Server", "Its address, then Pair: the panel shows the same code, allow it there under Access & devices. Behind a reverse proxy, a web address like https://hopper.example.com works too.", "hopper server hopperd pair code add address reverse proxy domain"),
     e(C::Servers, "panel-key", "API key", "Kept in Windows Credential Manager, not in settings.json.", "token server panel"),
-    e(C::Servers, "panel-cert", "Self-signed certificate", "Accept a certificate the panel makes for itself.", "https ssl tls server panel"),
+    e(C::Servers, "panel-cert", "Self-signed certificate", "Accept a certificate the panel makes for itself, once you trust it. Hopper then connects only while it has that one.", "https ssl tls server panel certificate fingerprint"),
     e(C::Servers, "panel-test", "Connection", "Whether the panel answers with this address and key.", "test server panel"),
     e(C::Servers, "files-sites", "Server files over the network", "Servers Hopper reaches over SFTP or FTP instead of a shared folder: rented hosts, Pterodactyl's SFTP, a PC with an SSH server. Sync copies mods and configs over it.", "sftp ftp ftps ssh files remote host sync"),
     e(C::Servers, "files-add", "Add server files", "SFTP, or FTP with or without TLS. Hopper keeps a copy of each server's mods and configs to compare, and changes only what differs.", "sftp ftp ftps ssh add remote"),
@@ -500,6 +500,12 @@ pub struct SettingsPage {
     panel_form_ss: bool,
     /// Remove was clicked once on this panel (asks again).
     panel_removing: Option<String>,
+    /// "Trust this panel's certificate?": (panel id, the fingerprint it
+    /// showed), asked before its API key is ever sent.
+    panel_cert_offer: Option<(String, String)>,
+    /// Panels whose certificate changed and whose "I changed it myself"
+    /// box is ticked.
+    panel_cert_ticked: HashSet<String>,
     /// Server files over SFTP / FTP: the form and its state, like the panels'.
     site_form: sites::SiteForm,
     site_form_open: bool,
@@ -686,6 +692,11 @@ impl SettingsPage {
             cx.observe_in(&store, window, |this, store, window, cx| {
                 let s = store.read(cx).settings().clone();
                 for t in Text::ALL {
+                    // The panel form's address belongs to the form, not to
+                    // one setting; a save must not blank it while it's open.
+                    if t == Text::PanelUrl {
+                        continue;
+                    }
                     let input = this.texts[&t].clone();
                     let saved = t.saved(&s).to_string();
                     let shown = input.read(cx).value().trim().to_string();
@@ -741,6 +752,8 @@ impl SettingsPage {
             panel_form_kind: "crafty".into(),
             panel_form_ss: true,
             panel_removing: None,
+            panel_cert_offer: None,
+            panel_cert_ticked: HashSet::new(),
             site_form,
             site_form_open: false,
             site_editing: None,
@@ -981,6 +994,15 @@ impl SettingsPage {
             });
         }
         let (kind, ss, id2) = (self.panel_form_kind.clone(), self.panel_form_ss, id.clone());
+        // Another address, or the certificate switch changed: the
+        // certificate is trusted again from scratch, before the key is sent.
+        let old = self.store.read(cx).settings().panels.iter().find(|p| p.id == id).cloned();
+        let fresh = old.as_ref().is_none_or(|p| p.url.trim() != url || p.self_signed != ss);
+        if fresh {
+            hopper::panel::forget_cert(&id);
+            self.panel_cert_offer = None;
+            self.panel_cert_ticked.remove(&id);
+        }
         self.store.update(cx, |s, cx| {
             s.update_settings(
                 move |st| match st.panels.iter_mut().find(|p| p.id == id2) {
@@ -988,8 +1010,19 @@ impl SettingsPage {
                         p.kind = kind;
                         p.url = url;
                         p.self_signed = ss;
+                        if fresh {
+                            p.cert_pin.clear();
+                            p.cert_ask = ss;
+                        }
                     }
-                    None => st.panels.push(hopper::settings::OtherPanel { id: id2, kind, name: String::new(), url, self_signed: ss, off: false }),
+                    None => st.panels.push(hopper::settings::OtherPanel {
+                        id: id2,
+                        kind,
+                        url,
+                        self_signed: ss,
+                        cert_ask: ss,
+                        ..Default::default()
+                    }),
                 },
                 cx,
             );
@@ -1002,7 +1035,68 @@ impl SettingsPage {
     }
 
     /// Asks panel `id` for its servers. `close`: shut the form when it works.
+    /// A panel that makes its own certificate, with none trusted yet, first
+    /// shows its certificate to trust; nothing is sent before that.
     fn test_panel(&mut self, id: String, close: bool, cx: &mut Context<Self>) {
+        let s = self.store.read(cx).settings().clone();
+        let Some(p) = hopper::panel::panels(&s).into_iter().find(|p| p.id == id) else {
+            self.panel_tests.insert(id, Err("Add the address and an API key first.".into()));
+            cx.notify();
+            return;
+        };
+        if p.self_signed && p.cert_ask && p.cert_pin.trim().is_empty() && hopper::panel::token_for(&id).is_some() {
+            self.panel_testing.insert(id.clone());
+            self.panel_tests.remove(&id);
+            self.panel_cert_offer = None;
+            cx.notify();
+            let url = p.url.clone();
+            cx.spawn(async move |this, cx| {
+                let r = cx.background_spawn(async move { hopper::panel::probe_cert(&url).map_err(|e| format!("{e:#}")) }).await;
+                this.update(cx, |this, cx| {
+                    this.panel_testing.remove(&id);
+                    match r {
+                        Ok(Some(fp)) => this.panel_cert_offer = Some((id, fp)),
+                        // An authority signs it: the usual check lets it in.
+                        Ok(None) => this.connect_panel(id, close, cx),
+                        Err(e) => {
+                            this.panel_tests.insert(id, Err(e));
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+        self.connect_panel(id, close, cx);
+    }
+
+    /// Trusts certificate `fp` for panel `id` (its first, or a new one after
+    /// a change), then connects.
+    fn trust_panel_cert(&mut self, id: String, fp: String, cx: &mut Context<Self>) {
+        hopper::panel::forget_cert(&id);
+        self.panel_cert_offer = None;
+        self.panel_cert_ticked.remove(&id);
+        let id2 = id.clone();
+        self.store.update(cx, |s, cx| {
+            s.update_settings(
+                move |st| {
+                    if let Some(p) = st.panels.iter_mut().find(|p| p.id == id2) {
+                        p.cert_pin = fp;
+                        p.cert_ask = false;
+                    }
+                },
+                cx,
+            );
+            s.rediscover_servers();
+        });
+        let close = self.panel_editing.as_deref() == Some(id.as_str());
+        self.connect_panel(id, close, cx);
+    }
+
+    /// Asks panel `id` for its servers, as it's set up now.
+    fn connect_panel(&mut self, id: String, close: bool, cx: &mut Context<Self>) {
         let s = self.store.read(cx).settings().clone();
         let Some(panel) = hopper::panel::panels(&s).iter().find(|p| p.id == id).and_then(hopper::panel::open) else {
             self.panel_tests.insert(id, Err("Add the address and an API key first.".into()));
@@ -1026,6 +1120,7 @@ impl SettingsPage {
                 .await;
             this.update(cx, |this, cx| {
                 this.panel_testing.remove(&id);
+                this.store.update(cx, |s, cx| s.save_learned_pins(cx));
                 if r.is_ok() && close && this.panel_editing.as_deref() == Some(id.as_str()) {
                     this.panel_form = false;
                     this.panel_editing = None;
@@ -1747,11 +1842,16 @@ impl SettingsPage {
         let form_id = self.panel_editing.clone().unwrap_or_default();
         let form_testing = self.panel_editing.is_some() && self.panel_testing.contains(&form_id);
         let key_typed = !self.panel_token.read(cx).value().trim().is_empty();
-        let result: AnyElement = match self.panel_editing.as_ref().and_then(|id| self.panel_tests.get(id)) {
-            _ if form_testing => widgets::caption("Connecting…", cx).into_any_element(),
-            Some(Ok(t)) => status_line(IconName::CircleCheck, t.clone(), theme.success),
-            Some(Err(e)) => status_line(IconName::CircleX, e.clone(), theme.danger),
-            None => widgets::caption("Not tested yet.", cx).text_xs().into_any_element(),
+        let card = if form_testing { None } else { self.panel_editing.as_ref().and_then(|id| self.cert_card(id, cx)) };
+        let asking = self.panel_cert_offer.as_ref().is_some_and(|(o, _)| Some(o) == self.panel_editing.as_ref());
+        // The certificate card spans the row under it; the note column is
+        // too narrow for it.
+        let result: Option<AnyElement> = match (&card, self.panel_editing.as_ref().and_then(|id| self.panel_tests.get(id))) {
+            _ if form_testing => Some(widgets::caption("Connecting…", cx).into_any_element()),
+            (Some(_), _) => None,
+            (None, Some(Ok(t))) => Some(status_line(IconName::CircleCheck, t.clone(), theme.success)),
+            (None, Some(Err(e))) => Some(status_line(IconName::CircleX, e.clone(), theme.danger)),
+            (None, None) => Some(widgets::caption("Not tested yet.", cx).text_xs().into_any_element()),
         };
         let url_typed = !self.texts[&Text::PanelUrl].read(cx).value().trim().is_empty();
         let can_save = url_typed && (key_typed || self.panel_key_saved);
@@ -1817,7 +1917,7 @@ impl SettingsPage {
                     );
                     rows.extend(self.key_rows(cx));
                     rows.push(
-                        Row::new("panel-test").note(Some(result)).control(
+                        Row::new("panel-test").note(result).when_some_below(card).control(
                             h_flex()
                                 .gap_2()
                                 .child(
@@ -1830,7 +1930,9 @@ impl SettingsPage {
                                 .child(
                                     Button::new("panel-save")
                                         .small()
-                                        .primary()
+                                        // One filled button: "Trust and connect" while it asks.
+                                        .when(!asking, |b| b.primary())
+                                        .when(asking, |b| b.outline())
                                         .label("Save and test")
                                         .loading(form_testing)
                                         .disabled(form_testing || !can_save)
@@ -1877,6 +1979,91 @@ impl SettingsPage {
         ]
     }
 
+    /// What to ask about panel `id`'s certificate, if anything: trust it
+    /// (the first connect) or trust a new one (it changed, with a tick box
+    /// to confirm). Fingerprints show whole, to compare with the panel's.
+    fn cert_card(&self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use gpui_kit::component::alert::Alert;
+        use gpui_kit::component::checkbox::Checkbox;
+        let mono = cx.theme().mono_font_family.clone();
+        let fp_line = |text: String, cx: &App| widgets::caption(text, cx).text_xs().font_family(mono.clone());
+        let key = |what: &str| ElementId::Name(format!("panel-cert-{what}:{id}").into());
+        if let Some((_, fp)) = self.panel_cert_offer.as_ref().filter(|(o, _)| o == id) {
+            let (id2, fp2) = (id.to_string(), fp.clone());
+            return Some(
+                v_flex()
+                    .gap_2()
+                    .child(
+                        Alert::warning(
+                            key("offer"),
+                            "The panel made its own certificate, so Hopper can't check it the usual way. If this matches the one your panel shows, trust it. Hopper then connects to this panel only while it has this certificate.",
+                        )
+                        .title("Trust this panel's certificate?")
+                        // Same as the changed card: readable text, the
+                        // colour on the icon and the border.
+                        .text_color(cx.theme().foreground)
+                        .icon(Icon::new(IconName::TriangleAlert).text_color(cx.theme().warning)),
+                    )
+                    .child(fp_line(format!("SHA-256 {fp}"), cx))
+                    .child(
+                        h_flex().justify_end().child(
+                            Button::new(key("trust"))
+                                .small()
+                                .primary()
+                                .label("Trust and connect")
+                                .on_click(cx.listener(move |this, _, _, cx| this.trust_panel_cert(id2.clone(), fp2.clone(), cx))),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let (was, now) = hopper::panel::cert_changed(id)?;
+        let ticked = self.panel_cert_ticked.contains(id);
+        let (id2, id3) = (id.to_string(), id.to_string());
+        Some(
+            v_flex()
+                .gap_2()
+                .child(
+                    Alert::error(
+                        key("changed"),
+                        "Hopper stopped before sending the API key. If you didn't reinstall the panel or change its certificate, someone may be listening in.",
+                    )
+                    .title("This panel's certificate changed")
+                    // The kit's red text on its red tint measures under
+                    // 4.5:1; the red stays on the icon and the border.
+                    .text_color(cx.theme().foreground)
+                    .icon(Icon::new(IconName::CircleX).text_color(cx.theme().danger)),
+                )
+                .child(fp_line(format!("Was {was}"), cx))
+                .child(fp_line(format!("Now {now}"), cx))
+                .child(
+                    Checkbox::new(key("tick"))
+                        .label("I changed the panel's certificate myself")
+                        .checked(ticked)
+                        .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                            if *on {
+                                this.panel_cert_ticked.insert(id2.clone());
+                            } else {
+                                this.panel_cert_ticked.remove(&id2);
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    h_flex().justify_end().child(
+                        Button::new(key("trust-new"))
+                            .small()
+                            .outline()
+                            .label("Trust the new certificate")
+                            .disabled(!ticked)
+                            .when(!ticked, |b| b.tooltip("Tick the box first"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.trust_panel_cert(id3.clone(), now.clone(), cx))),
+                    ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// One added Crafty / MCSS / Pterodactyl panel: Test, Edit, Remove.
     fn other_panel_row(&self, i: usize, p: &hopper::settings::OtherPanel, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
@@ -1888,15 +2075,20 @@ impl SettingsPage {
         let state = match test {
             _ if p.off => widgets::pill("Off", theme.muted_foreground, false),
             _ if testing => widgets::pill("Connecting", theme.muted_foreground, false),
+            // The background check can find it before any Test.
+            _ if hopper::panel::cert_changed(&p.id).is_some() => widgets::pill("Can't connect", theme.danger, false),
             Some(Ok(_)) => widgets::pill("Connected", theme.success, false),
             Some(Err(_)) => widgets::pill("Can't connect", theme.danger, false),
             None if !has_key => widgets::pill("No API key", theme.warning, false),
             None => widgets::pill("Not tested", theme.muted_foreground, false),
         };
-        let detail: Option<AnyElement> = match test {
-            Some(Ok(t)) if !testing => Some(status_line(IconName::CircleCheck, t.clone(), theme.success)),
-            Some(Err(e)) if !testing => Some(status_line(IconName::CircleX, e.clone(), theme.danger)),
-            _ => None,
+        let card = if testing || p.off { None } else { self.cert_card(&p.id, cx) };
+        let detail: Option<AnyElement> = match (card, test) {
+            _ if testing => None,
+            (Some(card), _) => Some(card),
+            (None, Some(Ok(t))) => Some(status_line(IconName::CircleCheck, t.clone(), theme.success)),
+            (None, Some(Err(e))) => Some(status_line(IconName::CircleX, e.clone(), theme.danger)),
+            (None, None) => None,
         };
         let asking = self.panel_removing.as_deref() == Some(p.id.as_str());
         let (open, id, id2, id3, id4) = (url.clone(), p.id.clone(), p.id.clone(), p.id.clone(), p.id.clone());
@@ -1919,7 +2111,10 @@ impl SettingsPage {
                             .min_w_0()
                             .when(p.off, |d| d.opacity(0.6))
                             .child(div().text_sm().font_medium().truncate().child(format!("{} · {}", p.label(), kind_name(&p.kind))))
-                            .child(widgets::caption(sub, cx).text_xs().truncate()),
+                            .child(widgets::caption(sub, cx).text_xs().truncate())
+                            .when(p.self_signed && !p.cert_pin.is_empty(), |c| {
+                                c.child(widgets::caption(format!("Certificate {}", p.cert_pin), cx).text_xs().truncate())
+                            }),
                     )
                     .child(state)
                     .child(
@@ -2000,6 +2195,7 @@ impl SettingsPage {
         self.notes.remove(&Text::PanelUrl);
         self.panel_form = false;
         self.panel_editing = None;
+        self.panel_cert_offer = None;
         cx.notify();
     }
 
@@ -2017,6 +2213,7 @@ impl SettingsPage {
             return;
         }
         self.panel_tests.remove(&id);
+        hopper::panel::forget_cert(&id);
         self.store.update(cx, |s, cx| {
             s.update_settings(|st| st.panels.retain(|p| p.id != id), cx);
             s.rediscover_servers();
@@ -3523,6 +3720,13 @@ impl Row {
 
     fn below(mut self, b: impl IntoElement) -> Self {
         self.below = Some(b.into_any_element());
+        self
+    }
+
+    fn when_some_below(mut self, b: Option<AnyElement>) -> Self {
+        if b.is_some() {
+            self.below = b;
+        }
         self
     }
 

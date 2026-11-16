@@ -447,8 +447,19 @@ pub struct OtherPanel {
     /// What the list calls it ("rig").
     pub name: String,
     pub url: String,
-    /// Accept the panel's self-signed certificate (Crafty makes its own).
+    /// The panel may make its own certificate (Crafty does): Hopper then
+    /// connects only to the one in `cert_pin`. A certificate an authority
+    /// signs for the address is checked as usual either way.
     pub self_signed: bool,
+    /// The certificate (its SHA-256, "AB:CD:…") the user trusted. Empty on
+    /// a panel saved before Hopper pinned them: its next connect pins the
+    /// one it's shown and says so once ([`crate::panel::take_learned`]).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cert_pin: String,
+    /// Saved from the form with no certificate trusted yet: nothing
+    /// connects (so its API key isn't sent) until the user trusts one.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cert_ask: bool,
     /// Turned off in Settings: nothing asks it anything. Its API key stays.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub off: bool,
@@ -456,7 +467,16 @@ pub struct OtherPanel {
 
 impl Default for OtherPanel {
     fn default() -> Self {
-        OtherPanel { id: String::new(), kind: "crafty".into(), name: String::new(), url: String::new(), self_signed: true, off: false }
+        OtherPanel {
+            id: String::new(),
+            kind: "crafty".into(),
+            name: String::new(),
+            url: String::new(),
+            self_signed: true,
+            cert_pin: String::new(),
+            cert_ask: false,
+            off: false,
+        }
     }
 }
 
@@ -1160,7 +1180,7 @@ impl Settings {
                         name: String::new(),
                         url: self.panel_url.trim().to_string(),
                         self_signed: self.panel_self_signed,
-                        off: false,
+                        ..Default::default()
                     },
                 );
                 self.panel_url.clear();
