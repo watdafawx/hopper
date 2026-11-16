@@ -112,6 +112,18 @@ pub fn compare(
     server: &ServerInfo,
     sync_anyway: &HashSet<u64>,
 ) -> Result<(Vec<DiffEntry>, Annotation), String> {
+    compare_full(inst, server, sync_anyway).map_err(|e| format!("{e:#}"))
+}
+
+/// [`compare`], keeping the error itself: a Hopper Server asking to slow
+/// down (429) stays readable with `hopperd::Refused::slow_down`, so the
+/// Sync tab can wait and ask again instead of calling it unreachable.
+pub fn compare_full(
+    inst: &Instance,
+    server: &ServerInfo,
+    sync_anyway: &HashSet<u64>,
+) -> anyhow::Result<(Vec<DiffEntry>, Annotation)> {
+    use anyhow::Context as _;
     // The pack's side (jar reads, Modrinth lookups) and the server's (its
     // folder or a Hopper Server's answer) don't depend on each other: they
     // run at the same time. The client's error still wins when both fail.
@@ -120,8 +132,8 @@ pub fn compare(
         let client = crate::synctiming::time("pack scan", "", 0, || client_mods(inst, sync_anyway));
         (client, theirs.join().unwrap_or_else(|_| Err(anyhow::anyhow!("the server scan stopped"))))
     });
-    let (client, note) = client.map_err(|e| format!("client: {e:#}"))?;
-    let theirs = theirs.map_err(|e| format!("server: {e:#}"))?;
+    let (client, note) = client.context("client")?;
+    let theirs = theirs.context("server")?;
     let diff = crate::synctiming::time("diff", "", 0, || diff_mods(&client, &theirs));
     Ok((diff, note))
 }

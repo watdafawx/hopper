@@ -30,6 +30,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 const ROW_H: f32 = 3.5;
+/// How long after a sync the server's changes are taken as its echo: a
+/// little over Hopper Server's five-second poll, so its next mods
+/// fingerprint lands inside it.
+const SYNC_ECHO: std::time::Duration = std::time::Duration::from_secs(7);
 /// The mod name's least width in rem: other cells give way first.
 const NAME_MIN: f32 = 14.0;
 /// The action cell: "Update server", its changelog half, the ⋯ slot and
@@ -332,6 +336,15 @@ pub struct SyncPanel {
     failed: HashMap<String, String>,
     /// The server changed while a sync ran: compare once it's over.
     rescan_held: bool,
+    /// Until then, changes are the echo of the sync that just ended (its
+    /// change events, the panel's next mods poll), already in the compare
+    /// it ended with: comparing again for each read the panel once more
+    /// per echo.
+    echo_until: Option<std::time::Instant>,
+    /// Hopper Server asked to slow down (429): the last list stays and it
+    /// is compared again by itself at this time.
+    slowed: Option<std::time::Instant>,
+    _slow_task: Option<Task<()>>,
     /// A comparison that came in while rows were acting or done: shown once
     /// they've gone, so rows don't jump under the pointer.
     diff_next: Option<(Result<Vec<DiffEntry>, String>, Option<Annotation>)>,
@@ -369,11 +382,12 @@ impl SyncPanel {
                     // compares once when it ends, not once per jar.
                     if this.syncing(cx) {
                         this.rescan_held = true;
-                    } else {
+                    } else if !this.echo_until.is_some_and(|t| std::time::Instant::now() < t) {
                         this.rescan(cx);
                     }
                 } else if this.rescan_held && !this.syncing(cx) {
                     this.rescan(cx);
+                    this.echo_until = Some(std::time::Instant::now() + SYNC_ECHO);
                 }
                 this.check_restarted(cx);
                 cx.notify();
@@ -409,6 +423,7 @@ impl SyncPanel {
         subs.push(cx.subscribe(&history, |this, _, _: &crate::configs::HistoryApplied, cx| {
             this.files_changed(cx);
             this.rescan(cx);
+            this.echo_until = Some(std::time::Instant::now() + SYNC_ECHO);
         }));
         subs.push(cx.observe(&control, |this, _, cx| {
             this.check_restarted(cx);
@@ -475,6 +490,9 @@ impl SyncPanel {
             push: None,
             failed: HashMap::new(),
             rescan_held: false,
+            echo_until: None,
+            slowed: None,
+            _slow_task: None,
             diff_next: None,
             settle: Default::default(),
             _ticker: None,
@@ -677,6 +695,9 @@ impl SyncPanel {
             self.crash = None;
             self.crash_configs.clear();
             self.failed.clear();
+            self.echo_until = None;
+            self.slowed = None;
+            self._slow_task = None;
             self.drift = None;
             self.server_nf = None;
             self.show = None;
@@ -747,6 +768,47 @@ impl SyncPanel {
                 .is_some_and(|j| !j.done)
     }
 
+    /// Hopper Server answered 429: the list stays as it was, says so with a
+    /// countdown, and compares again by itself when the wait is over.
+    fn slow_down(&mut self, scan: u64, secs: u64, cx: &mut Context<Self>) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        self.slowed = Some(until);
+        self._slow_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let go = this
+                    .update(cx, |this, cx| {
+                        cx.notify();
+                        this.scan_gen == scan && std::time::Instant::now() >= until
+                    })
+                    .unwrap_or(false);
+                if go {
+                    this.update(cx, |this, cx| this.rescan(cx)).ok();
+                    return;
+                }
+                if this.update(cx, |this, _| this.scan_gen != scan).unwrap_or(true) {
+                    return;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    /// The "asked to slow down" line, while waiting out the panel's pause.
+    fn slow_note(&self, cx: &App) -> Option<AnyElement> {
+        let until = self.slowed?;
+        let n = until.saturating_duration_since(std::time::Instant::now()).as_secs().max(1);
+        Some(
+            h_flex()
+                .gap_2()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(Icon::new(IconName::Clock).small().text_color(cx.theme().warning))
+                .child(format!("Hopper Server asked to slow down. Trying again in {n} s."))
+                .into_any_element(),
+        )
+    }
+
     fn rescan(&mut self, cx: &mut Context<Self>) {
         self.rescan_held = false;
         let Some((server, inst)) = self.pair(cx) else {
@@ -795,11 +857,13 @@ impl SyncPanel {
                         use hopper::synctiming::time;
                         let nf = s.spawn(move || time("NeoForge read", "", 0, || hopper::server_update::server_neoforge(&server.root)));
                         let marker = s.spawn(move || time("pack marker read", "", 0, || hopper::server_pack_update::recorded_on(server)));
-                        let diff = rigsync::compare(inst, server, anyway);
+                        let diff = rigsync::compare_full(inst, server, anyway);
                         (diff, nf.join().ok().flatten(), marker.join().ok().flatten())
                     })
                 })
                 .await;
+            let slow = diff.as_ref().err().and_then(hopper::hopperd::Refused::slow_down);
+            let diff = diff.map_err(|e| format!("{e:#}"));
             this.update(cx, |this, cx| {
                 if this.scan_gen != scan || this.server.as_ref() != Some(&root) {
                     return;
@@ -808,6 +872,14 @@ impl SyncPanel {
                 hopper::synctiming::first_result();
                 this.scan_read_done();
                 this.comparing = false;
+                // Busy, not down: keep the list and ask again when the panel
+                // said to (the server list does the same).
+                if let Some(secs) = slow {
+                    this.slow_down(scan, secs, cx);
+                    return;
+                }
+                this.slowed = None;
+                this._slow_task = None;
                 if let Ok((d, _)) = &diff {
                     this.check_drift(d, cx);
                 }
@@ -1058,6 +1130,7 @@ impl SyncPanel {
                 this.carry = carry.note().is_some().then_some(carry);
                 this.files_changed(cx);
                 this.rescan(cx);
+                this.echo_until = Some(std::time::Instant::now() + SYNC_ECHO);
             })
             .ok();
         }));
@@ -1148,6 +1221,7 @@ impl SyncPanel {
                 }
                 this.files_changed(cx);
                 this.rescan(cx);
+                this.echo_until = Some(std::time::Instant::now() + SYNC_ECHO);
             })
             .ok();
         })
@@ -2991,8 +3065,9 @@ impl SyncPanel {
                         .id(id("push-failed"))
                         .gap_1()
                         .text_sm()
-                        .text_color(danger)
-                        .child(Icon::new(IconName::TriangleAlert).small())
+                        // Red on the icon only: red text measured 3.8:1 on
+                        // the dark theme.
+                        .child(Icon::new(IconName::TriangleAlert).small().text_color(danger))
                         .when(!compact, |r| r.child("Failed"))
                         .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(why2.clone()).build(w, cx)),
                 )
@@ -3016,12 +3091,19 @@ impl SyncPanel {
         let pushing = self.push.as_ref().and_then(|p| p.of(&key));
         let action: AnyElement = if let Some((state, busy, done)) = pushing {
             match state {
-                RowRun::Waiting => Button::new(id("push-wait"))
-                    .small()
-                    .ghost()
-                    .icon(IconName::Clock)
-                    .map(|b| if compact { b.tooltip("Waiting") } else { b.label("Waiting") })
-                    .disabled(true)
+                // A plain muted mark, not a disabled button: a disabled
+                // button's text measured 2.6:1 on the dark theme.
+                RowRun::Waiting => h_flex()
+                    .id(id("push-wait"))
+                    .flex_none()
+                    .h_6()
+                    .px_2()
+                    .gap_1()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Icon::new(IconName::Clock).small())
+                    .when(!compact, |r| r.child("Waiting"))
+                    .when(compact, |r| r.tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Waiting").build(w, cx)))
                     .into_any_element(),
                 RowRun::Moving(p) => {
                     let pct = p.map(|p| format!("{}%", (p.clamp(0.0, 1.0) * 100.0).floor() as u32));
@@ -3409,11 +3491,13 @@ impl Render for SyncPanel {
             (Section::History, _) => self.history.clone().into_any_element(),
             (Section::Console, _) => self.control.update(cx, |c, cx| c.console_view(window, cx)),
             (Section::Mods, d) => match d {
+            None if let Some(note) = self.slow_note(cx) => note,
             None => h_flex()
                 .gap_2()
                 .child(Spinner::new().small())
                 .child(widgets::caption("Scanning mod folders", cx))
                 .into_any_element(),
+            Some(Err(_)) if let Some(note) = self.slow_note(cx) => note,
             // The server's folder couldn't be read (often its share is offline).
             Some(Err(e)) => widgets::empty_state(
                 IconName::TriangleAlert,
@@ -3437,6 +3521,7 @@ impl Render for SyncPanel {
                 let columns = self.column_header(cx);
                 // Beside the sidebar, the apply bar shows once something is picked.
                 let footer = (!side || !self.selected_rows(cx).is_empty()).then(|| self.footer(&server, cx));
+                let slow = self.slow_note(cx);
                 let theme = cx.theme();
                 let result: Option<AnyElement> = self.result.as_ref().map(|r| match r {
                     Ok(line) => h_flex()
@@ -3503,6 +3588,7 @@ impl Render for SyncPanel {
                             .vertical_scrollbar(&self.scroll),
                     ))
                     .children(footer)
+                    .children(slow)
                     .children(result)
                     .children(self.carry_notice(&server, cx))
                     .into_any_element()
