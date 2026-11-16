@@ -576,10 +576,10 @@ sudo ./hopperd service install</pre>
         <p style="margin-top:14px;font-size:14.5px;color:var(--mut)">The image (amd64 and arm64) has Java 8, 17 and 21, so it runs servers for every Minecraft version. Servers and the panel's data live in one volume.</p>
 <pre>docker run -d --name hopperd --restart unless-stopped \
   --stop-timeout 120 \
-  -p 8790:8790 -p 8022:8022 -p 25565:25565 \
+  -p 8790:8790 -p 25565:25565 \
   -v hopperd:/hopper ghcr.io/watdafawx/hopperd:latest
 docker logs hopperd</pre>
-        <p style="margin-top:10px;font-size:14.5px;color:var(--mut)">Open <code>http://&lt;host&gt;:8790</code> and use the setup code from <code>docker logs hopperd</code>. More in the <a href="https://github.com/watdafawx/hopper/tree/main/crates/hopperd#docker">Docker guide</a>.</p>
+        <p style="margin-top:10px;font-size:14.5px;color:var(--mut)">Open <code>http://&lt;host&gt;:8790</code> and use the setup code from <code>docker logs hopperd</code>. SFTP is off until you switch it on in Settings &rarr; Access &amp; devices; only then publish port 8022 too (<code>-p 8022:8022</code>). More in the <a href="https://github.com/watdafawx/hopper/tree/main/crates/hopperd#docker">Docker guide</a>.</p>
       </div>
     </div>
   </div>
