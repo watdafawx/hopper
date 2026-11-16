@@ -1602,7 +1602,7 @@ impl AddonsView {
     }
 
     /// The banner's row for the last crash: "X stopped the game from
-    /// loading after Y was updated (a → b)", with Put a back and Turn off X.
+    /// loading after Y was updated (a → b)", with Turn off X.
     fn crash_stop_row(
         &self,
         inst: &Instance,
@@ -1660,28 +1660,9 @@ impl AddonsView {
         } else {
             format!("In the last crash: \"{}\"", st.error)
         };
+        // Putting the older copy back is the strip's own main button
+        // ("Roll back X to a"), so the row only offers turning it off.
         let mut actions: Vec<AnyElement> = Vec::new();
-        if let Some(ch) = changed {
-            let (root, ch) = (inst.root.clone(), ch.clone());
-            actions.push(
-                Button::new("crash-stop-back")
-                    .xsmall()
-                    .outline()
-                    .icon(IconName::Undo2)
-                    .label(if ch.from.is_empty() { "Put the older version back".to_string() } else { format!("Put {} back", ch.from) })
-                    .tooltip("Swaps in the copy Hopper kept. The newer one goes to History, so you can undo this there.")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        let store = this.store.clone();
-                        if crate::crash_help::put_back_changed(&store, &root, &ch, window, cx) {
-                            this.crash_stop = None;
-                            // Untracked jars changed too: re-read the folder.
-                            this.resync(cx);
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-        }
         let file = st.file_name.clone();
         actions.push(
             Button::new("crash-stop-off")
@@ -1733,10 +1714,12 @@ impl AddonsView {
 
     /// Shader packs need Iris or Oculus: a notice with Find when it's missing.
     pub(crate) fn shader_notes(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
-        if self.class != cf::CLASS_SHADERS {
+        // Servers don't draw shaders.
+        if self.server || self.remote {
             return None;
         }
-        // Read from disk when the table was built, not per frame.
+        // Read from disk when the table was built, not per frame (on the
+        // Shaders tab always, elsewhere only once packs are there).
         let (_, has_loader) = self.shader_state();
         if has_loader {
             return None;

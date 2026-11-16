@@ -47,6 +47,8 @@
   import MovedBanner from './MovedBanner.svelte';
   import NoticeSlot from './lib/NoticeSlot.svelte';
   import { provideNotices } from './lib/notices.svelte.js';
+  import { provideModsShared } from './lib/modsShared.svelte.js';
+  import ModsNotices from './ModsNotices.svelte';
   import { openMove } from './lib/moveDialog.svelte.js';
   import { startBlocked } from './lib/moves.js';
   import PackVersions from './PackVersions.svelte';
@@ -60,6 +62,7 @@
   // One slot above the tabs for every notice the page has (desktop's
   // notice_slot.rs): the crash, a stuck start, alerts, a move, the Mods tab's.
   const notices = provideNotices();
+  const modsShared = provideModsShared();
   const panel = untrack(() => panelProp);
   enter(panel);
   const feed = panel ?? live;
@@ -328,6 +331,7 @@
   {#if !panel}<MovedBanner server={s} owner={session.owner} />{/if}
   <CrashStrip server={s} hidden={tab === 'logs'} seeWhy={(rel) => nav('logs', rel)} />
   <StuckStrip server={s} hidden={tab === 'logs'} seeWhy={(rel) => nav('logs', rel)} />
+  <ModsNotices server={s} openMods={(chip) => ((modsShared.want = chip), nav('mods'))} />
   <NoticeSlot {notices} />
 
   <nav class="tabs">

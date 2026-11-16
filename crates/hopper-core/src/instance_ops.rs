@@ -709,6 +709,19 @@ pub fn active_shader(inst: &Instance) -> Option<String> {
 }
 
 /// Whether a shader loader (Iris, Oculus) is installed and enabled.
+/// Whether the shaderpacks folder holds a pack (a zip or a folder; the
+/// `.txt` option files Iris and Oculus write beside them don't count).
+pub fn has_shader_packs(inst: &Instance) -> bool {
+    fs::read_dir(inst.root.join("shaderpacks"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            let n = e.file_name().to_string_lossy().to_lowercase();
+            !n.ends_with(".txt") && (n.ends_with(".zip") || e.path().is_dir())
+        })
+}
+
 pub fn has_shader_loader(inst: &Instance) -> bool {
     fs::read_dir(inst.mods_dir())
         .into_iter()
@@ -1165,6 +1178,24 @@ mod tests {
         assert_ne!(empty, with);
         fs::remove_file(dir.join("a.zip")).unwrap();
         assert_eq!(empty, global_packs_stamp(&inst));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn shader_packs_count_zips_and_folders_not_option_files() {
+        let root = std::env::temp_dir().join(format!("hopper-shaderpacks-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let inst = Instance { root: root.clone(), name: "t".into(), ..Default::default() };
+        assert!(!has_shader_packs(&inst));
+        let dir = root.join("shaderpacks");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("BSL.zip.txt"), "x").unwrap();
+        assert!(!has_shader_packs(&inst));
+        fs::write(dir.join("BSL.zip"), "x").unwrap();
+        assert!(has_shader_packs(&inst));
+        fs::remove_file(dir.join("BSL.zip")).unwrap();
+        fs::create_dir_all(dir.join("Complementary")).unwrap();
+        assert!(has_shader_packs(&inst));
         fs::remove_dir_all(&root).ok();
     }
 

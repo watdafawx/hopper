@@ -233,6 +233,10 @@ struct SlotState {
 /// "N more" becomes "+N".
 const NARROW_REM: f32 = 34.;
 
+/// Under this width the strips drop only their subject line (it's in the
+/// title's tooltip): a long title and a long button leave it a few letters.
+const SUBJECT_REM: f32 = 46.;
+
 /// The slot itself: `None` when there's nothing to say. `id` names the
 /// page ("instance", "server") so each page keeps its own open details.
 pub fn slot(id: &str, notices: Vec<Notice>, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
@@ -242,6 +246,7 @@ pub fn slot(id: &str, notices: Vec<Notice>, window: &mut Window, cx: &mut App) -
     let state = window.use_keyed_state(ElementId::Name(format!("notice-slot:{id}").into()), cx, |_, _| SlotState::default());
     let width = state.read(cx).width;
     let narrow = width > px(0.) && width < window.rem_size() * NARROW_REM;
+    let subjects = !(width > px(0.) && width < window.rem_size() * SUBJECT_REM);
     let keys: Vec<(Tier, i64)> = notices.iter().map(|n| (n.tier, n.since)).collect();
     let mut slots: Vec<Option<Notice>> = notices.into_iter().map(Some).collect();
     let sorted: Vec<Notice> = order(&keys).into_iter().filter_map(|i| slots[i].take()).collect();
@@ -281,7 +286,7 @@ pub fn slot(id: &str, notices: Vec<Notice>, window: &mut Window, cx: &mut App) -
     for (k, &i) in shown.iter().enumerate() {
         let Some(n) = sorted[i].take() else { continue };
         let trigger = if k == last { list.take() } else { None };
-        strips.push(strip(n, Fit { narrow, lead: k == 0 }, trigger, &state, &open, cx));
+        strips.push(strip(n, Fit { narrow, lead: k == 0 }, subjects, trigger, &state, &open, cx));
     }
     let st = state.clone();
     Some(
@@ -322,10 +327,11 @@ fn toggle(state: &Entity<SlotState>, id: SharedString, cx: &mut App) {
 
 /// One notice as a one-line strip: icon, title, subject, its buttons, and
 /// on the last strip the "N more" button. Its details open under it.
-fn strip(n: Notice, fit: Fit, more: Option<AnyElement>, state: &Entity<SlotState>, open: &HashSet<SharedString>, cx: &mut App) -> AnyElement {
+fn strip(n: Notice, fit: Fit, subjects: bool, more: Option<AnyElement>, state: &Entity<SlotState>, open: &HashSet<SharedString>, cx: &mut App) -> AnyElement {
     let theme = cx.theme().clone();
     let color = n.tier.color(cx);
-    let ink = crate::theme::ink(color);
+    // The title on the strip's own tint (`bg` below), readable in any theme.
+    let ink = crate::theme::ink_over(color, theme.background, 0.08);
     let id = n.id.clone();
     let narrow = fit.narrow;
     // Narrow: the other buttons go in the details, so the strip stays one line.
@@ -359,6 +365,9 @@ fn strip(n: Notice, fit: Fit, more: Option<AnyElement>, state: &Entity<SlotState
         .id(SharedString::from(format!("notice-strip:{id}")))
         .relative()
         .w_full()
+        // One line at its own height: open details under it mustn't
+        // squeeze it.
+        .flex_none()
         .h(rems(2.25))
         .gap_2()
         .pl_3()
@@ -374,7 +383,7 @@ fn strip(n: Notice, fit: Fit, more: Option<AnyElement>, state: &Entity<SlotState
             div()
                 .id(SharedString::from(format!("notice-title:{id}")))
                 .min_w_0()
-                .when(narrow || n.subject.is_none(), |d| d.flex_1())
+                .when(!subjects || n.subject.is_none(), |d| d.flex_1())
                 .truncate()
                 .text_sm()
                 .font_semibold()
@@ -382,7 +391,7 @@ fn strip(n: Notice, fit: Fit, more: Option<AnyElement>, state: &Entity<SlotState
                 .child(n.title.clone())
                 .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)),
         )
-        .when_some(n.subject.filter(|_| !narrow), |r, s| {
+        .when_some(n.subject.filter(|_| subjects), |r, s| {
             r.child(div().flex_1().min_w(rems(4.)).truncate().text_sm().text_color(theme.muted_foreground).child(format!("· {s}")))
         })
         .child(
@@ -475,8 +484,10 @@ fn list_row(n: Notice, state: &Entity<SlotState>, open: &HashSet<SharedString>, 
                         .gap_1()
                         .items_center()
                         .children(n.primary.map(|p| p(Fit::default())))
-                        .children(toggle_btn)
-                        .children(close),
+                        // A row without details or ✕ keeps their room, so the
+                        // buttons line up in one column down the list.
+                        .child(toggle_btn.map_or_else(|| blank("notice-blank-d", &id), IntoElement::into_any_element))
+                        .child(close.map_or_else(|| blank("notice-blank-x", &id), IntoElement::into_any_element)),
                 ),
         )
         .when(is_open, |c| {
@@ -488,6 +499,14 @@ fn list_row(n: Notice, state: &Entity<SlotState>, open: &HashSet<SharedString>, 
                     .children(n.details),
             )
         })
+        .into_any_element()
+}
+
+/// An unseen icon button: holds a list row's missing ✕ or details place.
+fn blank(key: &str, id: &SharedString) -> AnyElement {
+    div()
+        .invisible()
+        .child(Button::new(SharedString::from(format!("{key}:{id}"))).xsmall().ghost().icon(IconName::X))
         .into_any_element()
 }
 

@@ -1278,7 +1278,8 @@ impl AddonsView {
                 hopper::instance_ops::has_shader_loader(&inst),
             )
         } else {
-            (None, true)
+            // The notice shows on every tab, once there are packs to use.
+            (None, !hopper::instance_ops::has_shader_packs(&inst) || hopper::instance_ops::has_shader_loader(&inst))
         };
         if self.remote {
             let loose = self.store.read(cx).remote_loose(&root).to_vec();

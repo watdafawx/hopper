@@ -15,6 +15,9 @@
   import CfKey from './CfKey.svelte';
   import Notice from './lib/Notice.svelte';
   import { mainClass } from './lib/noticeorder.js';
+  import { modsShared } from './lib/modsShared.svelte.js';
+  import { twiceOf, clientOnOf } from './lib/modsnotes.js';
+  import { onDestroy } from 'svelte';
   import DropJars from './DropJars.svelte';
   import ModPeek from './ModPeek.svelte';
   import ModVersions from './ModVersions.svelte';
@@ -33,7 +36,6 @@
   import { cfg, loadIndex, modForFile } from './lib/configs.svelte.js';
   import SourceAdd from './SourceAdd.svelte';
   import SourceFind from './SourceFind.svelte';
-  import { askPower } from './lib/consoleKit.js';
   import { showSourcesHint } from './lib/sourcehint.js';
   import { api, post, here } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
@@ -58,7 +60,10 @@
   $effect(() => { if (sub === 'backups') markHistorySeen(sid); });
   let data = $state(null);
   let filter = $state('');
-  let chip = $state('all');
+  // The page's notices on other tabs read the list, the chip and the reload
+  // from here while this tab is open; "Show" there opens this tab on a chip.
+  const shared = modsShared();
+  let chip = $state(untrack(() => shared?.want) || 'all');
   let busy = $state('');
   let identifying = $state('');
   let updates = $state(null);
@@ -180,13 +185,6 @@
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
-  // "Restart to load": only once mods changed while it runs (the panel
-  // compares with what it started with). Closed until the next change.
-  let restartClosed = $state(false);
-  const changedSince = $derived(server.changed_since_start);
-  $effect(() => {
-    if (!changedSince) restartClosed = false;
-  });
   const mods = $derived(data?.mods || []);
   // "Added by you" only means something on a server made from a pack.
   const hasPack = $derived(!!data?.pack);
@@ -281,23 +279,10 @@
   const foldDel = $derived(listW > 0 && nameRoom(actW, 74) < NAME_MIN);
   const foldUp = $derived(foldDel && nameRoom(actW, 52) < NAME_MIN);
   const gridCols = $derived(`22px 30px minmax(0, 1fr) ${foldUp ? 0 : actW}px ${cols.map((c) => COL_W[c]).join(' ')} ${foldDel ? 52 : 74}px`);
-  // The same mod in twice (an old jar left beside the new one): every
-  // copy but the newest, as desktop's "Keep newest" finds them.
-  const twice = $derived.by(() => {
-    const g = new Map();
-    for (const m of mods) if (m.source && m.project_id !== '0') g.set(m.project_id, [...(g.get(m.project_id) || []), m]);
-    return [...g.values()].filter((l) => l.length > 1);
-  });
-  const older = $derived(twice.flatMap((l) => {
-    const keep = [...l].sort((a, b) => Number(b.enabled) - Number(a.enabled) || (b.file_date || '').localeCompare(a.file_date || ''))[0];
-    return l.filter((m) => m !== keep);
-  }));
-  // A notice's subject from names: "A, B, C" or "A, B and 4 more" (desktop's brief_names).
-  const briefNames = (names) => {
-    const n = [...new Set(names.filter(Boolean))];
-    return n.length <= 3 ? n.join(', ') : `${n[0]}, ${n[1]} and ${n.length - 2} more`;
-  };
-  const clientOn = $derived(mods.filter((m) => m.side === 'client' && m.enabled).length);
+  // The notices about these live on the page (ModsNotices.svelte); the list's
+  // window moves when they come or go.
+  const twice = $derived(twiceOf(mods));
+  const clientOn = $derived(clientOnOf(mods));
   const pickedMod = $derived(picked ? mods.find((m) => m.file === picked.file) || (picked.pid !== '0' && mods.find((m) => m.project_id === picked.pid)) || null : null);
   const peekOf = (m) => ({ file: m.file, pid: m.project_id || '0' });
   // Picks of mods still here (a remove elsewhere drops theirs).
@@ -462,6 +447,12 @@
 
   // Remove, with Undo in its toast (it reloads the list once they're back).
   const drop = (list) => removeMods(base, list, alive, { onUndo: () => changed(true) });
+
+  if (shared) {
+    shared.want = null;
+    Object.assign(shared, { list: () => data, chip: () => chip, show: (c) => (chip = c), reload: () => changed(true) });
+  }
+  onDestroy(() => shared && Object.assign(shared, { list: null, chip: null, show: null, reload: null }));
 
   async function bulk(kind) {
     const list = selMods;
@@ -885,11 +876,6 @@
       <ModProfiles {base} {alive} onChanged={() => changed(false)} />
     </div>
     <!-- The notes go to the notice slot above the server's tabs. -->
-    {#if server.changed_since_start && !restartClosed}
-      <Notice id="mods-restart" tier="info" icon={RotateCcw} title="Changed while the server runs" subject="Restart it to load the changes" onclose={() => (restartClosed = true)}>
-        {#snippet primary(fit)}<button class={mainClass(fit)} disabled={server.state === 'stopping'} onclick={() => askPower(server, 'restart')}><RotateCcw size={13} />Restart</button>{/snippet}
-      </Notice>
-    {/if}
     {#if identifying}<Notice id="mods-identifying" tier="info" icon={ScanSearch} title={identifying} subject="Names, icons and updates fill in when it's done" />{/if}
     {#if showSourcesHint({ known: srcKnown, allowed: srcOn, chip, unknown: counts.unknown, closed: srcHintClosed })}
       <Notice id="mods-src-hint" tier="info" title="Their sources may not have come along" subject="Mods from links is off" onclose={() => (srcHintClosed = true)}>
@@ -900,17 +886,6 @@
     {#if data && !data.curseforge}
       <Notice id="mods-cf-key" tier="info" title="CurseForge needs an API key" subject="For search, identify and updates. Modrinth works without one" details={cfKeyForm}>
         {#snippet primary(fit)}<a class={mainClass(fit)} href="https://console.curseforge.com/" target="_blank" rel="noreferrer" title="Opens console.curseforge.com: sign in, open API keys and copy your key">Get a key</a>{/snippet}
-      </Notice>
-    {/if}
-    {#if twice.length}
-      <!-- A mod in twice stops Fabric and Quilt from loading; NeoForge and Forge load one. -->
-      <Notice id="mods-twice" tier={/^(fabric|quilt)/i.test(data?.loader || '') ? 'stop' : 'info'} title="{twice.length} mod{twice.length === 1 ? ' is' : 's are'} in twice" subject={briefNames(twice.map((l) => l[0].name))}>
-        {#snippet primary(fit)}<button class={mainClass(fit)} title="Removes the older copies. Undo from History." onclick={async () => (await drop(older)) && changed(true)}>Keep newest</button>{/snippet}
-      </Notice>
-    {/if}
-    {#if clientOn && chip !== 'client'}
-      <Notice id="mods-client-on" tier="choice" title="{clientOn} client-only mod{clientOn === 1 ? '' : 's'} on" subject="Servers usually don't need {clientOn === 1 ? 'it' : 'them'}, and some won't start with them" closeKey="hopper.client-on.{server.id}.{clientOn}">
-        {#snippet primary(fit)}<button class={mainClass(fit)} title="Shows only the client-only mods" onclick={() => (chip = 'client')}>Show</button>{/snippet}
       </Notice>
     {/if}
 
