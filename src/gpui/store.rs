@@ -944,6 +944,17 @@ impl Store {
         // Packs kept from updates that weren't used for a while go.
         let keep = store.settings.pack_keep_days;
         std::thread::spawn(move || hopper::modpack::prune_packs_older_than(keep));
+        // What waited its week in Recently deleted goes for good: now, then
+        // every few hours while Hopper stays open.
+        let beside = store.deleted_beside();
+        std::thread::spawn(move || loop {
+            let places = hopper::recently_deleted::known_places(&beside);
+            let s = hopper::recently_deleted::sweep(&places, hopper::recently_deleted::now(), false);
+            if s.count > 0 {
+                log::info!("recently deleted: removed {} for good ({})", s.count, hopper::instance_ops::human_bytes(s.bytes));
+            }
+            std::thread::sleep(Duration::from_secs(6 * 3600));
+        });
         store
     }
 
@@ -1941,6 +1952,19 @@ impl Store {
     }
 
     /// Drops an instance that no longer exists (deleted).
+    /// The folders Recently deleted sits beside: the instances folder and
+    /// each folder holding an instance or a server on this PC.
+    pub fn deleted_beside(&self) -> Vec<PathBuf> {
+        let mut v = vec![PathBuf::from(&self.settings.instances_root)];
+        let roots = self.instances.iter().map(|i| &i.root).chain(self.servers.iter().filter(|s| self.is_hosted(&s.root)).map(|s| &s.root));
+        for p in roots.filter_map(|r| r.parent()) {
+            if !v.iter().any(|x| x == p) {
+                v.push(p.to_path_buf());
+            }
+        }
+        v
+    }
+
     pub fn forget(&mut self, root: &Path) {
         self.instances.retain(|i| i.root != root);
         self.updates.remove(root);
