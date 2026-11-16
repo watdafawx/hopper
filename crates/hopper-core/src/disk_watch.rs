@@ -313,11 +313,13 @@ enum Cmd {
     Roots(Vec<PathBuf>),
     Open(Option<PathBuf>),
     Release(PathBuf),
+    Reclaim(PathBuf),
     Check,
     Event(notify::Result<notify::Event>),
 }
 
-/// The watcher thread's handle. Dropping it stops the thread.
+/// The watcher thread's handle. Dropping the last one stops the thread.
+#[derive(Clone)]
 pub struct DiskWatch {
     tx: Sender<Cmd>,
 }
@@ -352,6 +354,13 @@ impl DiskWatch {
         let _ = self.tx.send(Cmd::Release(root.to_path_buf()));
     }
 
+    /// Undoes [`release`](Self::release) when the move failed and the
+    /// folder is still there: it's watched again if it was the open
+    /// instance and nothing else was opened since.
+    pub fn reclaim(&self, root: &Path) {
+        let _ = self.tx.send(Cmd::Reclaim(root.to_path_buf()));
+    }
+
     /// Looks for changes now (the window came back into focus).
     pub fn check(&self) {
         let _ = self.tx.send(Cmd::Check);
@@ -370,9 +379,32 @@ struct State {
     installing: HashSet<PathBuf>,
     watcher: Option<notify::RecommendedWatcher>,
     watched: Vec<PathBuf>,
+    /// The open instance let go of for a move ([`Cmd::Release`]), until
+    /// another is opened.
+    released: Option<PathBuf>,
 }
 
 impl State {
+    /// Lets go of `r` when it's the open instance; whether that changed.
+    fn release(&mut self, r: PathBuf) -> bool {
+        if self.open.as_deref() != Some(r.as_path()) {
+            return false;
+        }
+        self.open = None;
+        self.released = Some(r);
+        true
+    }
+
+    /// Opens `r` again when it was let go of, is still there, and nothing
+    /// else was opened since; whether that changed.
+    fn reclaim(&mut self, r: &Path) -> bool {
+        if self.open.is_some() || self.released.as_deref() != Some(r) || !r.is_dir() {
+            return false;
+        }
+        self.open = self.released.take();
+        true
+    }
+
     /// Watches what the roots and the open instance need, and nothing else.
     fn rewatch(&mut self) {
         let Some(w) = self.watcher.as_mut() else { return };
@@ -452,6 +484,7 @@ fn run(rx: Receiver<Cmd>, events: Sender<Cmd>, on_change: impl Fn(Vec<Change>)) 
         installing: HashSet::new(),
         watcher,
         watched: Vec::new(),
+        released: None,
     };
     loop {
         let now = Instant::now();
@@ -469,6 +502,7 @@ fn run(rx: Receiver<Cmd>, events: Sender<Cmd>, on_change: impl Fn(Vec<Change>)) 
                 }
             }
             Ok(Cmd::Open(o)) => {
+                st.released = None;
                 if o != st.open {
                     st.open = o;
                     st.snap = Snapshot::take(&st.roots, st.open.as_deref());
@@ -476,9 +510,14 @@ fn run(rx: Receiver<Cmd>, events: Sender<Cmd>, on_change: impl Fn(Vec<Change>)) 
                 }
             }
             Ok(Cmd::Release(r)) => {
-                if st.open.as_deref() == Some(r.as_path()) {
-                    st.open = None;
+                if st.release(r) {
                     st.snap = Snapshot::take(&st.roots, None);
+                    st.rewatch();
+                }
+            }
+            Ok(Cmd::Reclaim(r)) => {
+                if st.reclaim(&r) {
+                    st.snap = Snapshot::take(&st.roots, st.open.as_deref());
                     st.rewatch();
                 }
             }
@@ -588,6 +627,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    fn state(open: Option<PathBuf>) -> State {
+        State {
+            roots: Vec::new(),
+            open,
+            remote: false,
+            snap: Snapshot::default(),
+            polled: Instant::now(),
+            debounce: Debounce::default(),
+            installing: HashSet::new(),
+            watcher: None,
+            watched: Vec::new(),
+            released: None,
+        }
+    }
+
+    /// A delete that fails puts the open instance's watch back; one that
+    /// worked (folder gone), or another instance opened since, doesn't.
+    #[test]
+    fn a_failed_move_watches_the_instance_again() {
+        let root = scratch("reclaim");
+        let (inst, other) = (root.join("Pack"), root.join("Other"));
+        std::fs::create_dir_all(&inst).unwrap();
+        let mut st = state(Some(inst.clone()));
+        assert!(!st.release(other.clone()));
+        assert!(st.release(inst.clone()));
+        assert_eq!(st.open, None);
+        assert!(!st.reclaim(&other));
+        assert!(st.reclaim(&inst));
+        assert_eq!(st.open.as_deref(), Some(inst.as_path()));
+        // Moved away for real: nothing to watch.
+        assert!(st.release(inst.clone()));
+        std::fs::remove_dir_all(&inst).unwrap();
+        assert!(!st.reclaim(&inst));
+        assert_eq!(st.open, None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

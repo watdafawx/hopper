@@ -1651,28 +1651,38 @@ impl ScreenshotsView {
         self.shots.iter().filter(|p| self.sel.contains(&p.display().to_string())).cloned().collect()
     }
 
-    /// Asks once, then sends `paths` to the Recycle Bin (as the viewer's
+    /// Moves screenshots the player deleted to Recently deleted, as one
+    /// entry from this instance.
+    fn to_recently_deleted(&self, paths: &[PathBuf]) -> anyhow::Result<()> {
+        let root = self.root.as_ref().ok_or_else(|| anyhow::anyhow!("No instance is open."))?;
+        hopper::recently_deleted::delete_files(root, paths, hopper::recently_deleted::Kind::Screenshot).map(|_| ())
+    }
+
+    /// Asks once, then sends `paths` to Recently deleted (as the viewer's
     /// Delete does).
     fn ask_delete(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let n = paths.len();
         if n == 0 {
             return;
         }
+        let days = hopper::recently_deleted::KEEP_DAYS;
         let title = if n == 1 { format!("Delete {}?", file_name(&paths[0])) } else { format!("Delete {n} screenshots?") };
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let (paths, view) = (paths.clone(), view.clone());
             alert
                 .title(title.clone())
-                .description(if n == 1 { "It moves to the Recycle Bin." } else { "They move to the Recycle Bin." })
+                .description(if n == 1 {
+                    format!("It moves to Recently deleted (Settings › Library & folders) for {days} days.")
+                } else {
+                    format!("They move to Recently deleted (Settings › Library & folders) for {days} days.")
+                })
                 .confirm()
                 .ok_text("Delete")
                 .ok_variant(ButtonVariant::Danger)
                 .on_ok(move |_, window, cx| {
-                    for p in &paths {
-                        if let Err(e) = trash::delete(p) {
-                            window.push_notification(Notification::error(format!("{e:#}")), cx);
-                        }
+                    if let Err(e) = view.read(cx).to_recently_deleted(&paths) {
+                        window.push_notification(Notification::error(format!("{e:#}")), cx);
                     }
                     view.update(cx, |v, cx| v.reload(cx));
                     true
@@ -1760,7 +1770,7 @@ impl ScreenshotsView {
         let Some(p) = self.shots.get(i).cloned() else {
             return;
         };
-        match trash::delete(&p) {
+        match self.to_recently_deleted(&[p]) {
             Ok(()) => {
                 self.reload(cx);
                 // Stay in the viewer, on the neighbour.
@@ -1858,7 +1868,7 @@ impl ScreenshotsView {
                             .ghost()
                             .small()
                             .icon(IconName::Trash)
-                            .tooltip("Delete (to the Recycle Bin)")
+                            .tooltip("Delete (to Recently deleted)")
                             .on_click(cx.listener(move |this, _, w, cx| this.delete(i, w, cx))),
                     ),
             )

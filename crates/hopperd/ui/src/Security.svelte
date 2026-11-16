@@ -249,7 +249,7 @@
   .audit { max-height: 360px; overflow: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   td { padding: 5px 8px; border-bottom: 1px solid #26262c; }
-  tr.bad td { color: var(--red); }
+  tr.bad td { color: var(--red-text); }
   .nw { white-space: nowrap; }
   /* On a phone the node tabs get their own line, so Refresh stays in view. */
   .ah { flex-wrap: wrap; row-gap: 4px; }

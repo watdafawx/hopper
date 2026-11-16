@@ -343,8 +343,9 @@ async fn backup_count(
     Ok(Json(json!({ "new": n, "newest": newest })))
 }
 
-/// Where old backups go when they're cleaned up: the server's trash (Files
-/// › Trash), which empties itself after its usual time.
+/// Where what the owner deletes by hand goes (a History backup, logs): the
+/// server's trash (Files › Trash), which empties itself after its usual
+/// time.
 pub fn to_server_trash(root: &std::path::Path, paths: &[std::path::PathBuf]) -> anyhow::Result<()> {
     for p in paths {
         let rel = p.strip_prefix(root)?.to_string_lossy().replace('\\', "/");

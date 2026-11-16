@@ -1,10 +1,13 @@
 <script>
-  // One line above every server tab but Logs & crashes after a crashed
-  // start, as Hopper desktop's (server_crash.rs): what stopped the server,
-  // "Put 1.2 back" when the error names an update, and "See why →", which
-  // opens Logs & crashes (the full card lives only there). Closing it hides
-  // this crash only; the next one shows again.
-  import { AlertTriangle, Undo2, X } from '@lucide/svelte';
+  // The notice in the slot above every server tab but Logs & crashes after
+  // a crashed start, as Hopper desktop's (server_crash.rs): what stopped
+  // the server, "Roll back X to 1.2" when the error names an update, and
+  // "See why →", which opens Logs & crashes (the full card lives only
+  // there). It stops play, so it can't be closed; it goes once the server
+  // starts without crashing.
+  import { Undo2 } from '@lucide/svelte';
+  import Notice from './lib/Notice.svelte';
+  import { mainClass } from './lib/noticeorder.js';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { crashes } from './lib/crashseen.svelte.js';
@@ -55,29 +58,14 @@
     return i < 0 ? '' : s.slice(i);
   }
 
-  const key = $derived(crash ? `hopper.crash-strip.${server.id}.${crash.when}` : '');
-  let closed = $state(false);
-  $effect(() => {
-    key;
-    try {
-      closed = !!key && localStorage.getItem(key) === '1';
-    } catch {
-      closed = false;
-    }
-  });
-  function close() {
-    closed = true;
-    try {
-      localStorage.setItem(key, '1');
-    } catch {}
-  }
-
   const bare = (f) => (f || '').toLowerCase().replace(/\.disabled$/, '');
   const st = $derived(crash?.stopped && (crash.suspects || []).some((s) => s.file_name === crash.stopped.file_name) ? crash.stopped : null);
   const stoppedSuspect = $derived(st ? crash.suspects.find((s) => s.file_name === st.file_name) : null);
   const changed = $derived(stoppedSuspect?.changed || null);
   const mod = $derived(st ? mods.find((m) => bare(m.file) === bare(st.file_name)) : null);
-  const what = $derived(st ? 'stopped it from starting' : crash?.headline || '');
+  const modName = $derived(st ? mod?.name || st.file_name.replace(/\.disabled$/, '').replace(/\.jar$/, '') : '');
+  const what = $derived(st ? `${modName} stopped it from starting` : crash?.headline || '');
+  const rollLabel = $derived(changed ? (changed.from ? `Roll back ${modName || 'the mod'} to ${changed.from}` : `Roll back ${modName || 'the mod'}`) : '');
 
   async function putBack() {
     busy = true;
@@ -94,30 +82,25 @@
   }
 </script>
 
-{#if crash && settled && !closed && !hidden}
-  <div class="strip">
-    <AlertTriangle size={14} />
-    <b class="t">The server crashed</b>
-    <span class="muted">·</span>
-    <span class="what">
-      {#if st}<span class="mod">{#if mod?.icon}<img src={mod.icon} alt="" width="16" height="16" />{:else}<span class="ph"></span>{/if}<b>{mod?.name || st.file_name.replace(/\.disabled$/, '').replace(/\.jar$/, '')}</b></span>{/if}
-      {what}
-    </span>
-    <span class="grow"></span>
-    {#if changed && !back}
-      <button class="btn sm pri" disabled={busy || alive} title={alive ? 'Stop the server first' : 'Swaps in the older copy. The newer one goes to Mods › History.'} onclick={putBack}><Undo2 size={13} />{changed.from ? `Put ${changed.from} back` : 'Put the older version back'}</button>
-    {/if}
-    <button class="btn sm" onclick={() => seeWhy(reportOf(crash))}>See why →</button>
-    <button class="btn sm ghost icon" title="Hide this notice" onclick={close}><X size={13} /></button>
-  </div>
+{#if crash && settled && !hidden}
+  <Notice id="srv-crash" tier="stop" title="The server crashed" subject={what} since={crash.when} details={st ? crashDetails : null}>
+    {#snippet primary(fit)}
+      {#if changed && !back}
+        <button class={mainClass(fit)} disabled={busy || alive} title={alive ? 'Stop the server first' : `${fit.narrow ? rollLabel + '. ' : ''}Swaps in the older copy. The newer one goes to Mods › History.`} onclick={putBack}><Undo2 size={13} />{fit.narrow ? `Roll back ${modName || 'the mod'}` : rollLabel}</button>
+      {/if}
+    {/snippet}
+    {#snippet actions()}
+      <button class="btn sm" title="Opens Logs & crashes on this crash" onclick={() => seeWhy(reportOf(crash))}>See why →</button>
+    {/snippet}
+  </Notice>
 {/if}
 
+{#snippet crashDetails()}
+  {#if st}<span class="mod">{#if mod?.icon}<img src={mod.icon} alt="" width="16" height="16" />{:else}<span class="ph"></span>{/if}<b>{modName}</b> stopped it from starting</span>{/if}
+{/snippet}
+
 <style>
-  .strip { display: flex; align-items: center; gap: 8px; margin: 0 18px 10px; padding: 6px 8px 6px 12px; border: 1px solid #ef444499; border-radius: var(--radius-lg); background: #ef44440f; color: var(--red); font-size: 13px; }
-  .t { font-weight: 600; flex: none; }
-  .what { color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mod { display: inline-flex; align-items: center; gap: 6px; margin-right: 4px; vertical-align: middle; }
+  .mod { display: inline-flex; align-items: center; gap: 6px; }
   .mod b { font-weight: 600; }
   .mod img, .ph { width: 16px; height: 16px; border-radius: var(--radius-sm); background: var(--raise); flex: none; display: inline-block; }
-  .grow { flex: 1; }
 </style>

@@ -14,12 +14,16 @@
   import Addr from './Addr.svelte';
   import ServerAlerts from './ServerAlerts.svelte';
   import Progress from './Progress.svelte';
+  import NoticeSlot from './lib/NoticeSlot.svelte';
+  import { provideNotices } from './lib/notices.svelte.js';
 
   let { onNew = () => {}, homeName = '' } = $props();
 
   // Alerts about the PC itself (drive nearly full, memory): the server
   // pages show them too, but this is where they belong.
   const PANEL = { id: '', state: '' };
+  // Their notices, in the page's own slot (as a server page's).
+  const notices = provideNotices();
 
   const h = $derived(live.host);
   const players = $derived(live.servers.reduce((n, s) => n + s.players.length, 0));
@@ -64,7 +68,8 @@
   <div class="row hd"><h2>Overview</h2><span class="sp"></span>
     <a class="btn ghost icon" title="Browse modpacks to make a server from" href="#/browse"><Compass size={15} /></a>
     <button class="btn pri" onclick={onNew}><Plus size={14} />New server</button></div>
-  <div class="alerts"><ServerAlerts server={PANEL} part="banner" /></div>
+  <ServerAlerts server={PANEL} part="banner" />
+  <div class="alerts"><NoticeSlot {notices} /></div>
   <div class="grid4">
     <div class="card stat">
       <div class="lbl">CPU{h?.cpu_name ? ` · ${h.cpu_name.replace(/\(R\)|\(TM\)|CPU|Processor|\d+-Core/g, '').trim()}` : ''}</div>
@@ -186,7 +191,7 @@
 </div>
 
 <style>
-  .alerts :global(.ban) { margin: 0 0 10px; }
+  .alerts :global(.nslot) { margin: 0 0 10px; }
   .icl { display: flex; flex: none; }
   .pad { padding: 18px; }
   h2 { font-size: 17px; font-weight: 600; }

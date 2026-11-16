@@ -233,5 +233,5 @@
   .eula { display: flex; gap: 8px; align-items: center; }
   .end { justify-content: flex-end; gap: 8px; }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
-  .bad { color: var(--red); }
+  .bad { color: var(--red-text); }
 </style>

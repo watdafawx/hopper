@@ -204,6 +204,6 @@
   .pick { width: 100%; padding: 4px 8px; }
   .fw { width: 100%; display: flex; flex-direction: column; gap: 3px; }
   .field { width: 100%; padding: 4px 8px; }
-  .bad { color: var(--red); }
+  .bad { color: var(--red-text); }
   .switch { margin-top: 2px; }
 </style>

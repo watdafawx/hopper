@@ -149,7 +149,7 @@ pub fn flush(root: &Path) -> usize {
         let r = if let Some(to) = &q.to {
             rename(root, &p, to)
         } else if q.delete {
-            crate::install::delete_path(&p)
+            crate::install::delete_path(root, &p)
         } else {
             crate::sync::backup_into(root, &p).map(|_| ())
         };

@@ -29,5 +29,5 @@
   .selb b:has(+ .muted) { padding-right: 0; }
   .selb .muted { padding-right: 8px; white-space: nowrap; }
   .vr { width: 1px; height: 20px; background: var(--line2); margin: 0 2px; }
-  .bad { color: var(--red); }
+  .bad { color: var(--red-text); }
 </style>

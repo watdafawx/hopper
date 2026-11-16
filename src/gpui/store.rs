@@ -4165,7 +4165,7 @@ impl Store {
                     self.spawn(move || panel_slow::list_servers(id, &client))
                 }
                 None => {
-                    self.panel_servers.insert(id, Err("Not paired. Pair it again in Settings â€º Servers.".into()));
+                    self.panel_servers.insert(id, Err("Not paired. Pair it again in Settings › Servers.".into()));
                 }
             }
         }

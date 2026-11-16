@@ -176,7 +176,7 @@
   .steps li { display: flex; align-items: center; gap: 7px; color: var(--subtle); }
   .ck { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--green-dim); color: var(--green); flex: none; }
   .steps li.bad { color: var(--text); }
-  .steps li.bad .ck { background: var(--red-dim); color: var(--red); }
+  .steps li.bad .ck { background: var(--red-dim); color: var(--red-text); }
   .fix { display: flex; flex-direction: column; gap: 8px; font-size: 13px; border-radius: var(--radius-lg); background: var(--raise); padding: 10px 12px; }
   .fix ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
   /* Inline and unbroken, not inline-flex: on a phone the comma after a link

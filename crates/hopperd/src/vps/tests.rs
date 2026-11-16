@@ -27,8 +27,12 @@ fn small() -> Codec {
     Codec { level: 3, window_log: 20, long_distance: false, cache_bytes: 1 << 20 }
 }
 
+/// Pings often (so a round trip is measured early), but gives a quiet link
+/// the normal time before calling it dead: every test that cuts the link
+/// does it by closing the connection, which ends it at once, and a short
+/// "dead" time only made a busy test machine drop tunnels mid-test.
 pub(super) fn quick() -> mux::Config {
-    mux::Config { ping_every: Duration::from_millis(300), dead_after: Duration::from_secs(2), ..link::mux_config() }
+    mux::Config { ping_every: Duration::from_millis(300), ..link::mux_config() }
 }
 
 fn head(kind: &str, server: &str) -> Vec<u8> {
@@ -387,23 +391,54 @@ async fn home_routes_by_tag_and_refuses_others() {
     assert!(!matches!(ask(id, "control").await, Ok(Some(_))), "a non-game stream from the relay");
 }
 
-/// A TCP proxy in front of the relay's tunnel port that the test can stop
-/// (standing in for the VPS going away) and start again on the same port.
-async fn proxy(listen: Option<u16>, to: u16) -> (u16, JoinHandle<()>) {
-    let l = TcpListener::bind(("127.0.0.1", listen.unwrap_or(0))).await.unwrap();
+/// A TCP proxy in front of the relay's tunnel port that the test can switch
+/// off (standing in for the VPS going away: open connections are cut and
+/// new ones closed at once) and on again. It keeps its port the whole time:
+/// a port handed back to the OS and bound again later can be taken by
+/// another socket in between, which made the reconnect test fail now and
+/// then on a busy machine.
+struct Proxy {
+    port: u16,
+    on: Arc<tokio::sync::watch::Sender<bool>>,
+    task: JoinHandle<()>,
+}
+
+impl Proxy {
+    fn set(&self, on: bool) {
+        self.on.send_replace(on);
+    }
+}
+
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn proxy(to: u16) -> Proxy {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
+    let on = Arc::new(tokio::sync::watch::channel(true).0);
+    let o = on.clone();
     let task = tokio::spawn(async move {
         let mut set = tokio::task::JoinSet::new();
         loop {
             let Ok((mut a, _)) = l.accept().await else { continue };
+            if !*o.borrow() {
+                continue;
+            }
+            let mut off = o.subscribe();
             set.spawn(async move {
                 if let Ok(mut b) = TcpStream::connect(("127.0.0.1", to)).await {
-                    let _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
+                    tokio::select! {
+                        _ = tokio::io::copy_bidirectional(&mut a, &mut b) => {}
+                        _ = off.wait_for(|on| !*on) => {}
+                    }
                 }
             });
         }
     });
-    (port, task)
+    Proxy { port, on, task }
 }
 
 async fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
@@ -422,11 +457,20 @@ async fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
 async fn whole_path_and_reconnect() {
     let t = crate::cross_origin_tests::panel_with(crate::TlsInfo { fingerprint: "AA:BB".into(), ca_pem: String::new() });
     let r = run_relay().await;
-    let (pport, ptask) = proxy(None, r.tunnel).await;
-    t.app.vps.set_config(home_cfg(&r, pport, &t.server)).unwrap();
+    let px = proxy(r.tunnel).await;
+    // Players' address: the relay's game port here (the health test pings it).
+    let cfg = home::HomeConfig { public_address: format!("127.0.0.1:{}", r.game), ..home_cfg(&r, px.port, &t.server) };
+    t.app.vps.set_config(cfg).unwrap();
     home::start(t.app.clone());
     wait_for("the link", 15, || r.relay.ready()).await;
     assert_eq!(t.app.vps.status().state, "up");
+    // The health test: connected, and a player's server list ping on the
+    // players' address is answered by home through the relay.
+    let h = super::health::test(&t.app, &t.server).await;
+    assert_eq!(h["ok"], true, "{h}");
+    assert_eq!(h["rows"][0]["id"], "link");
+    assert_eq!(h["rows"][1]["state"], "ok", "{h}");
+    assert_eq!(t.app.vps.server_status(&t.server)["test"]["ok"], true);
 
     let (status, pong) = list_ping(r.game).await;
     assert_ne!(status["description"]["text"], "Home server is offline", "{status}");
@@ -438,19 +482,30 @@ async fn whole_path_and_reconnect() {
     assert_eq!(s["state"], "up");
     assert!(s["connection"]["raw"].as_u64().unwrap() > 0, "{s}");
     assert!(s["total"]["streams"].as_u64().unwrap() >= 1, "{s}");
+    // A server list ping isn't a player.
+    assert_eq!(s["players"], 0, "{s}");
 
     // The VPS goes away.
-    ptask.abort();
-    let _ = ptask.await;
+    px.set(false);
     wait_for("down", 20, || t.app.vps.status().state == "down" && !r.relay.ready()).await;
     let (status, _) = list_ping(r.game).await;
     assert_eq!(status["description"]["text"], "Home server is offline");
     let s = t.app.vps.server_status(&t.server);
     assert_eq!(s["state"], "down");
     assert!(!s["error"].as_str().unwrap().is_empty());
+    // The test tries once more, then says the relay is down and players
+    // reach only the relay's "Home server is offline".
+    let h = super::health::test(&t.app, &t.server).await;
+    assert_eq!(h["ok"], false, "{h}");
+    assert_eq!(h["rows"][0]["state"], "fail", "{h}");
+    assert_eq!(h["rows"][1]["state"], "fail", "{h}");
+    assert!(h["rows"][1]["text"].as_str().unwrap().contains("Home server is offline"), "{h}");
 
-    // And comes back on the same address.
-    let (_, ptask) = proxy(Some(pport), r.tunnel).await;
+    // And comes back on the same address. "Try now" (the card's button)
+    // instead of waiting out the backoff, which may have grown on a slow
+    // machine while the relay was away.
+    px.set(true);
+    t.app.vps.wake();
     wait_for("up again", 30, || t.app.vps.status().state == "up" && r.relay.ready()).await;
     let (status, pong) = list_ping(r.game).await;
     assert_ne!(status["version"]["name"], "Hopper relay");
@@ -458,7 +513,6 @@ async fn whole_path_and_reconnect() {
     // Totals carry over the reconnect.
     t.app.vps.tick();
     assert!(t.app.vps.server_status(&t.server)["total"]["streams"].as_u64().unwrap() >= 2);
-    ptask.abort();
 }
 
 #[test]

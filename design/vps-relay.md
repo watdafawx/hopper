@@ -1037,6 +1037,51 @@ so the step rightly added nothing).
 - A server that joined voice while already relayed needs "Stop using the
   relay" and "Use" again to be pointed at it.
 
+## Trust pass (as built)
+
+No new relay features: the same relay, made easier to set up and to see.
+
+- **Setup in five steps**: Before you start (what to rent: Debian 12/13 or
+  Ubuntu 22.04/24.04, 2 GB memory, 2 GB disk, a public IPv4, the three
+  ports, ssh with sudo; no provider names), Connect, Check, Install, Test.
+  It opens on Before you start only the first time (no saved login).
+- **Another system stops the check** after `cat /etc/os-release` and
+  `uname -m`: one failed row, the check answer carries `stop: true`, the
+  dialog says to reinstall the VPS with a supported system and that nothing
+  changed, and hides Install. Nothing else is run on such a box.
+- **Repair keeps the ports**: on a relay that's set up, Install reads
+  "Run again" and the setup offers the relay's own ports (the tunnel port
+  from the saved address, the players' port from the relay's last hello),
+  not the defaults, so a repair after a panel restart doesn't move it.
+- **Health on the relay card**: Relay (up/down and for how long), Ping from
+  here (the tunnel's round trip), Players through it (streams open for 2 s
+  or more, so server list pings don't count), Last test. "Test again"
+  (owner) replaces "Try now".
+- **The test** (`POST /api/v1/servers/{id}/vps-relay/test`, owner only,
+  `vps/health.rs`): if the relay isn't up it wakes the supervisor and
+  waits up to 12 s for that try; then a server list ping on the players'
+  address from this panel, which tells home's answer apart from the
+  relay's own "Home server is offline"; then the voice row when the server
+  has voice. It never opens the tunnel port itself: the relay counts an
+  unfinished key check as a failed try (10 in 10 minutes locks home out).
+  The last result is kept per server (memory only) and shown on the card.
+- **Plain reasons**: the link's errors say what happened and what to do
+  ("Can't reach the VPS at host:port: the VPS is up, but the relay isn't
+  running there. Open the relay setup and press Run again to repair it."),
+  with no system error text (`health::connect_words`, `health::mux_words`).
+- **End-to-end check**: `scripts/vps-relay-e2e.ps1` runs the whole setup
+  against the WSL test box (reset from its snapshot first): the
+  unsupported-system stop (a bind-mounted fake os-release), check, install,
+  test, relay stopped and started again, remove, nothing left behind.
+- **Flaky tests fixed**: see the commit. Causes were timing on a busy test
+  machine (fixed sleeps, a 100 ms dead time, a port given back and bound
+  again), not the relay.
+
+### Not done
+
+- Desktop: Hopper desktop shows nothing of the relay for a paired Hopper
+  Server's servers (B8, unchanged).
+
 ## Open questions for the maintainer (answered: see Decisions)
 
 1. **Voice: built-in UDP relay instead of AmneziaWG?** AmneziaWG needs a
