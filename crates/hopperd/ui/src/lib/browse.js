@@ -16,6 +16,18 @@ export const LOADER_NAME = { neoforge: 'NeoForge', forge: 'Forge', fabric: 'Fabr
 /// Where a project runs, as desktop's facts say it.
 export const SIDE = { client: 'Client', server: 'Server', both: 'Client & server' };
 
+// One-shot search text for the next Browse list ("Find Paxi" on Data packs):
+// the click sets it, the list takes it once, so a later visit starts clean.
+let seed = '';
+export function seedBrowse(q = '') {
+  seed = String(q);
+}
+export function takeBrowseSeed() {
+  const q = seed;
+  seed = '';
+  return q;
+}
+
 /// "A", "A and B", "A, B and C".
 export function andList(names = []) {
   if (names.length < 2) return names[0] || '';

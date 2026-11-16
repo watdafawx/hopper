@@ -11,7 +11,7 @@
   import { GripVertical, ChevronDown, ChevronUp, Check, FolderOpen, Package, Search, X, Plus, Layers, Globe, Map as MapIcon, CircleOff, Database } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
-  import { browseHash } from './lib/browse.js';
+  import { browseHash, seedBrowse } from './lib/browse.js';
   import { rightClear } from './lib/rightclear.js';
 
   let { server, openFiles, reloadKey = 0 } = $props();
@@ -200,10 +200,10 @@
     <div class="skels">{#each [0, 1, 2, 3] as i (i)}<div class="skel"><i></i></div>{/each}</div>
   {:else if !locs.length && !entries.length}
     <!-- Nothing to put packs in yet: no world, no loader. -->
-    <div class="empty-state top"><span class="es-ic"><Globe size={20} /></span><b>No world yet</b><p>Data packs go into a world. Start the server once to make one, or install Paxi to load them in every world.</p><a class="btn sm" href="#{browseHash('mods', server.id)}"><Search size={13} />Find Paxi</a></div>
+    <div class="empty-state top"><span class="es-ic"><Globe size={20} /></span><b>No world yet</b><p>Data packs go into a world. Start the server once to make one, or install Paxi to load them in every world.</p><a class="btn sm" href="#{browseHash('mods', server.id)}" onclick={() => seedBrowse('paxi')}><Search size={13} />Find Paxi</a></div>
   {:else if !entries.length}
     <!-- Truly empty: no toolbar or columns, as an empty Mods tab. -->
-    <div class="empty-state top"><span class="es-ic"><Database size={20} /></span><b>No data packs yet</b><p>They change recipes, loot and world generation, in every world or one.</p><a class="btn sm pri" href="#{browseHash('datapacks', server.id)}"><Plus size={13} />Add data packs</a></div>
+    <div class="empty-state top"><span class="es-ic"><Database size={20} /></span><b>No data packs yet</b><p>They change recipes, loot and world generation, in every world or one.</p><span class="row eb"><a class="btn sm pri" href="#{browseHash('datapacks', server.id)}"><Plus size={13} />Add data packs</a>{#if !loaders.some((l) => l.key === 'paxi')}<a class="btn sm" href="#{browseHash('mods', server.id)}" title="Paxi loads data packs into every world, new ones included" onclick={() => seedBrowse('paxi')}><Search size={13} />Find Paxi</a>{/if}</span></div>
   {:else}
     <!-- Laid out as Mods' toolbar: actions, search, what's listed. -->
     <div class="row toolbar">
@@ -373,5 +373,6 @@
   /* Move up / down: on hover, as Mods' row buttons. */
   .dp .mv { visibility: hidden; }
   .dp:hover .mv, .dp:focus-within .mv { visibility: visible; }
+  .eb { gap: 8px; justify-content: center; flex-wrap: wrap; }
   .skels { display: flex; flex-direction: column; gap: 4px; padding-top: 6px; }
 </style>
