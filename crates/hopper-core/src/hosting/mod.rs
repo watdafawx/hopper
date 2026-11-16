@@ -41,7 +41,7 @@ pub mod zip_import;
 
 pub use create::{
     CreateOptions, CreateReport, ServerLoader, create_from_client_pack, create_from_instance,
-    count_server_mods, create_server, default_memory_mb, disk_free, free_server_name, java_check, room_needed, room_problem,
+    count_server_mods, create_server, default_memory_for, default_memory_mb, disk_free, free_server_name, java_check, room_needed, room_problem,
     server_content_zip, write_left_out,
 };
 pub use jvm::{JvmArgs, JvmPreset};

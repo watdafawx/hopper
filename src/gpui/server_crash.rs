@@ -1,14 +1,16 @@
-//! What a server's crash looks like outside Logs & crashes: one line above
-//! every server tab but that one ("The server crashed · X stopped it from
-//! starting · Put 1.2 back · See why →"). The full card lives in Logs &
-//! crashes (`server_logs.rs`); this only points there. Also the two fixes
+//! What a server's crash looks like outside Logs & crashes: a notice in the
+//! slot above every server tab but that one ("The server crashed · X
+//! stopped it from starting · Roll back X to 1.2 · See why →"). The full
+//! card lives in Logs & crashes (`server_logs.rs`); this only points there.
+//! Also the two fixes
 //! both places run on a server: put the older jar back, turn mods off.
 
+use crate::notice_slot::{self, Notice, Tier};
 use crate::store::Store;
 use crate::widgets;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{Disableable as _, Sizable as _, StyledExt as _, h_flex};
 use gpui_kit::*;
 use hopper::crashdetect::{Changed, Crash};
 use std::path::{Path, PathBuf};
@@ -182,12 +184,13 @@ impl CrashStrip {
     }
 }
 
-impl Render for CrashStrip {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (Some(root), Some(c)) = (self.root.clone(), self.crash().cloned()) else {
-            return div().into_any_element();
-        };
-        let theme = cx.theme().clone();
+impl CrashStrip {
+    /// The crash as a notice for the server page's notice slot: "The server
+    /// crashed", what stopped it, "Roll back X to 1.2" when Hopper kept the
+    /// older copy, and "See why →" (Logs & crashes). It stops play, so it
+    /// can't be closed; it goes when the server starts without crashing.
+    pub fn notice(&mut self, cx: &mut Context<Self>) -> Option<Notice> {
+        let (root, c) = (self.root.clone()?, self.crash().cloned()?);
         // Names from the pack the server runs, else the jar's own.
         let (addons, pack) = {
             let store = self.store.read(cx);
@@ -197,19 +200,22 @@ impl Render for CrashStrip {
         let local = (!hopper::hopperd::is_remote_root(&root)).then(|| root.join("mods"));
         let name_of = |f: &str| crate::rigsync::crash_addon(&addons, f, local.as_deref());
         let stopped = stopped_change(&c);
-        let what: AnyElement = match &stopped {
+        let mut name = String::new();
+        let (subject, what): (String, Option<AnyElement>) = match &stopped {
             Some((file, _)) => {
-                let (name, a) = name_of(file);
+                let (n, a) = name_of(file);
+                name = n.clone();
                 let icon = a.and_then(|a| self.store.read(cx).image(&a.icon)).map(Path::to_path_buf);
                 let (store, pack) = (self.store.clone(), pack.clone());
-                h_flex()
+                // The mod named with its icon, opening its page.
+                let el = h_flex()
                     .gap_1p5()
                     .min_w_0()
                     .text_sm()
                     .child(
                         widgets::mod_link(
                             ElementId::Name("srv-strip-mod".into()),
-                            name,
+                            n.clone(),
                             icon.as_deref(),
                             if pack.is_some() { a.map_or(0, |a| a.project_id) } else { 0 },
                             move |project, _, cx| {
@@ -222,49 +228,47 @@ impl Render for CrashStrip {
                         .flex_none()
                         .font_semibold(),
                     )
-                    .child(div().truncate().child("stopped it from starting"))
-                    .into_any_element()
+                    .child(div().child("stopped it from starting"))
+                    .into_any_element();
+                (format!("{n} stopped it from starting"), Some(el))
             }
-            None => div().text_sm().truncate().child(crate::rigsync::crash_reason(&c)).into_any_element(),
+            None => (crate::rigsync::crash_reason(&c), None),
         };
         let rel = report_rel(&c);
         let changed = stopped.and_then(|(_, ch)| ch);
-        let put_back = changed.map(|ch| {
-            let label = if ch.from.is_empty() { "Put the older version back".to_string() } else { format!("Put {} back", ch.from) };
-            Button::new("srv-strip-put-back")
-                .xsmall()
-                .primary()
-                .icon(IconName::Undo2)
-                .label(label)
-                .tooltip("Swaps in the older copy. The newer one goes to backups.")
-                .disabled(self.busy)
-                .on_click(cx.listener(move |this, _, window, cx| this.fix_back(ch.clone(), window, cx)))
-        });
-        let see = Button::new("srv-strip-see")
-            .xsmall()
-            .outline()
-            .label("See why →")
-            .on_click(cx.listener(move |_, _, _, cx| cx.emit(StripEvent::SeeWhy(rel.clone()))));
-        let place = root.to_string_lossy().into_owned();
-        let key = hopper::settings::notice_key(&place, "server-crash-strip", &format!("{}|{}", c.source.to_string_lossy(), c.when));
-        let body = h_flex()
-            .gap_2()
-            .items_center()
-            .px_3()
-            .py_1p5()
-            .pr_8()
-            .rounded(theme.radius)
-            .border_1()
-            .border_color(theme.danger.opacity(0.6))
-            .bg(theme.danger.opacity(0.06))
-            .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.danger))
-            .child(div().flex_none().text_sm().font_semibold().text_color(theme.danger).child("The server crashed"))
-            .child(div().opacity(0.5).child("·"))
-            .child(div().min_w_0().child(what))
-            .child(div().flex_1())
-            .children(put_back)
-            .child(see);
-        widgets::closable_notice(body, key, widgets::Closed::Chip, "The server crashed", theme.danger, &self.store, cx)
-            .unwrap_or_else(|| div().into_any_element())
+        let view = cx.entity().downgrade();
+        let busy = self.busy;
+        let mut n = Notice::new("srv-crash", Tier::Stop, "The server crashed").subject(subject).since(c.when);
+        if let Some(el) = what {
+            n = n.details(el);
+        }
+        if let Some(ch) = changed {
+            let who = if name.is_empty() { "the mod".to_string() } else { name.clone() };
+            let label = if ch.from.is_empty() { format!("Roll back {who}") } else { format!("Roll back {who} to {}", ch.from) };
+            let short = format!("Roll back {who}");
+            let view = view.clone();
+            n = n.primary(move |fit| {
+                let tip = "Swaps in the older copy Hopper kept. The newer one goes to backups.";
+                notice_slot::main_button(Button::new("srv-strip-put-back").small(), fit)
+                    .icon(IconName::Undo2)
+                    .label(if fit.narrow { short } else { label.clone() })
+                    .tooltip(if fit.narrow { format!("{label}. {tip}") } else { tip.to_string() })
+                    .disabled(busy)
+                    .on_click(move |_, window, cx| {
+                        view.update(cx, |this, cx| this.fix_back(ch.clone(), window, cx)).ok();
+                    })
+            });
+        }
+        n = n.action(
+            Button::new("srv-strip-see")
+                .small()
+                .outline()
+                .label("See why →")
+                .tooltip("Opens Logs & crashes on this crash")
+                .on_click(move |_, _, cx| {
+                    view.update(cx, |_, cx| cx.emit(StripEvent::SeeWhy(rel.clone()))).ok();
+                }),
+        );
+        Some(n)
     }
 }

@@ -183,7 +183,7 @@ impl Store {
         self.dir.join(CHUNKS).join(&hash[..2]).join(hash)
     }
 
-    fn manifest_path(&self, name: &str) -> PathBuf {
+    pub fn manifest_path(&self, name: &str) -> PathBuf {
         self.dir.join(SNAPSHOTS).join(format!("{name}.json"))
     }
 
@@ -349,9 +349,15 @@ impl Store {
 
     /// Deletes chunks no snapshot uses; returns (chunks, bytes) freed.
     pub fn gc(&self) -> anyhow::Result<(usize, u64)> {
+        self.gc_keeping(&HashSet::new())
+    }
+
+    /// [`gc`](Self::gc), keeping the chunks in `keep` too (those of
+    /// snapshots waiting in the server's trash).
+    pub fn gc_keeping(&self, keep: &HashSet<String>) -> anyhow::Result<(usize, u64)> {
         let lock = self.lock();
         let _g = lock.lock().unwrap();
-        let mut used = HashSet::new();
+        let mut used = keep.clone();
         for n in self.names() {
             // A manifest that can't be read keeps everything: better a
             // bigger store than a broken backup.

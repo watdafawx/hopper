@@ -417,7 +417,7 @@ pub async fn forward(app: Arc<App>, t: Target, req: Request) -> Response {
     }
     // A move's steps come from the move engine only (`crate::moves`).
     if engine_only(&t.route) {
-        return refuse(StatusCode::FORBIDDEN, "Use Move or copy toâ€¦ for that.");
+        return refuse(StatusCode::FORBIDDEN, "Use Move or copy to… for that.");
     }
     // Making or removing a server on a node: owners and managers only.
     let making = t.route == "/api/v1/servers/create";

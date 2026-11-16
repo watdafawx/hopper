@@ -311,3 +311,13 @@ fn voice_gets_a_udp_rule_beside_the_tcp_ones() {
     let nft = "table inet filter {\n\tchain input {\n\t\ttype filter hook input priority filter; policy drop;\n\t}\n}\n";
     assert!(plan_firewall(None, None, Some(nft), false, &[25565], &[24454]).manual.unwrap().contains("25565/tcp and 24454/udp"));
 }
+
+#[test]
+fn a_relay_set_up_before_is_offered_its_own_ports() {
+    // First time: the defaults.
+    assert_eq!(super::suggested_ports("", 0), serde_json::json!({ "game": 25565, "tunnel": 25566 }));
+    // Set up on other ports: repair it there, even before it has connected.
+    assert_eq!(super::suggested_ports("203.0.113.10:9168", 9167), serde_json::json!({ "game": 9167, "tunnel": 9168 }));
+    assert_eq!(super::suggested_ports("[2001:db8::1]:9168", 0), serde_json::json!({ "game": 25565, "tunnel": 9168 }));
+    assert_eq!(super::suggested_ports("vps.example.com", 0)["tunnel"], 25566);
+}

@@ -1,7 +1,7 @@
 //! MCSS (MC Server Soft) through its web API v2, with an API key made in
 //! MCSS (Web Panel → API keys).
 
-use super::{PanelAction, PanelServer, PanelStats, ServerPanel, agent, base_url};
+use super::{PanelAction, PanelServer, PanelStats, PanelTls, ServerPanel, agent, base_url};
 use anyhow::{Context as _, bail};
 use serde_json::{Value, json};
 
@@ -12,11 +12,11 @@ pub struct Mcss {
 }
 
 impl Mcss {
-    pub fn new(url: &str, key: &str, self_signed: bool) -> Self {
+    pub fn new(url: &str, key: &str, tls: PanelTls) -> Self {
         Mcss {
             base: base_url(url),
             key: key.to_string(),
-            agent: agent(self_signed),
+            agent: agent(&tls),
         }
     }
 

@@ -62,40 +62,16 @@ pub fn policy() -> Retention {
     POLICY.read().unwrap_or_else(|e| e.into_inner()).unwrap_or_default()
 }
 
-/// Where pruned backups go: given the folder being pruned and the paths
-/// leaving it. Never deletes for good.
-pub type Dispose = fn(root: &Path, paths: &[PathBuf]) -> anyhow::Result<()>;
+/// What happens to pruned backups: given the folder being pruned and the
+/// paths leaving it. Tests catch them instead.
+type Dispose = fn(root: &Path, paths: &[PathBuf]) -> anyhow::Result<()>;
 
-static DISPOSE: RwLock<Option<Dispose>> = RwLock::new(None);
-
-/// Replaces the Recycle Bin (Hopper Server uses each server's trash).
-pub fn set_disposer(f: Dispose) {
-    *DISPOSE.write().unwrap_or_else(|e| e.into_inner()) = Some(f);
-}
-
-/// Sends `paths` (inside `root`) where deleted things go: the Recycle Bin,
-/// or Hopper Server's trash. Never deletes for good.
-pub fn dispose(root: &Path, paths: &[PathBuf]) -> anyhow::Result<()> {
-    disposer()(root, paths)
-}
-
-fn disposer() -> Dispose {
-    DISPOSE.read().unwrap_or_else(|e| e.into_inner()).unwrap_or(recycle)
-}
-
-/// The Recycle Bin; a network drive has none, so there they move to
-/// `.hopper-trash` beside them, as deleted instances do.
-fn recycle(_root: &Path, paths: &[PathBuf]) -> anyhow::Result<()> {
-    let mut local = Vec::new();
+/// Clean-up deletes for good, in both apps: the player chose to keep only
+/// so many, and a second copy of what goes (the Recycle Bin, Recently
+/// deleted, a server's trash) would fill the drive the clean-up just freed.
+fn for_good(_root: &Path, paths: &[PathBuf]) -> anyhow::Result<()> {
     for p in paths {
-        if crate::instance_ops::is_remote_drive(p) {
-            crate::instance_ops::move_to_hopper_trash(p)?;
-        } else {
-            local.push(p);
-        }
-    }
-    if !local.is_empty() {
-        trash::delete_all(local)?;
+        crate::instance_ops::remove_for_good(p)?;
     }
     Ok(())
 }
@@ -428,15 +404,15 @@ fn run_scanned(root: &Path, scanned: (Vec<Entry>, Store, u64), r: Retention, mod
     out
 }
 
-/// Clean up: moves every backup in `root` past the current rules to the
-/// Recycle Bin (Hopper Server: the server's trash).
+/// Clean up: deletes every backup in `root` past the current rules, for
+/// good.
 pub fn clean_up(root: &Path) -> Pruned {
-    run(root, policy(), Mode::Full, false, disposer())
+    run(root, policy(), Mode::Full, false, for_good)
 }
 
 /// What [`clean_up`] would remove now, touching nothing.
 pub fn preview(root: &Path) -> Pruned {
-    run(root, policy(), Mode::Full, true, disposer())
+    run(root, policy(), Mode::Full, true, for_good)
 }
 
 /// [`usage`] and [`preview`] from one look at the folder: sizing every
@@ -445,13 +421,13 @@ pub fn usage_and_preview(root: &Path) -> (Usage, Pruned) {
     let _g = lock_for(root);
     let scanned = scan(root);
     let usage = usage_of(&scanned);
-    (usage, run_scanned(root, scanned, policy(), Mode::Full, true, disposer()))
+    (usage, run_scanned(root, scanned, policy(), Mode::Full, true, for_good))
 }
 
 /// Notes whether `root` has old backups for Clean up, touching nothing.
 pub fn check(root: &Path) {
     let r = policy();
-    let p = run(root, r, Mode::Full, true, disposer());
+    let p = run(root, r, Mode::Full, true, for_good);
     let over = r.max_mb > 0 && usage(root).limited() > r.max_mb.saturating_mul(1024 * 1024);
     set_needs(root, p.count() > 0 || over);
 }
@@ -497,7 +473,7 @@ pub fn schedule(root: &Path) {
         // Older jar copies CurseForge / Modrinth can hand out again become
         // notes first, then the rules apply.
         crate::backups::slim(&root);
-        run(&root, policy(), Mode::Auto, false, disposer());
+        run(&root, policy(), Mode::Auto, false, for_good);
     });
 }
 
@@ -638,6 +614,22 @@ mod tests {
         // keep_actions wins when it's the larger.
         let p = full(&root, Retention { keep_actions: 20, keep_days: 0, max_mb: 0 });
         assert_eq!(p.folders, 0);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The real clean-up keeps no copy anywhere: what goes is gone.
+    #[test]
+    fn clean_up_deletes_for_good() {
+        let root = tmp("forgood");
+        let now = crate::time::now();
+        let at = |i: i64| (now - i * DAY).to_string();
+        for i in 1..=4 {
+            action(&root, &at(i), 10);
+        }
+        let p = run(&root, Retention { keep_actions: 1, keep_days: 0, max_mb: 0 }, Mode::Full, false, for_good);
+        assert_eq!(p.folders, 3);
+        assert_eq!(names(&root), [at(1)]);
+        assert!(binned(&root).is_empty());
         fs::remove_dir_all(&root).unwrap();
     }
 

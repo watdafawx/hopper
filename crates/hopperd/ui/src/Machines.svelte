@@ -323,10 +323,7 @@
   .nm { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mrow.off .nm { color: var(--muted); }
   .ln { overflow-wrap: anywhere; }
-  .bad { color: var(--red); }
-  /* Small red text on the card measured 4.4:1 in both themes; a little of the
-     text colour lifts it past 4.5:1 and it still reads as red. */
-  .ln.bad { color: color-mix(in srgb, var(--red) 85%, var(--text)); }
+  .bad { color: var(--red-text); }
   .meta { grid-area: meta; display: flex; align-items: center; gap: 10px; }
   .cnt { min-width: 58px; text-align: right; white-space: nowrap; }
   /* The action slot keeps its width when a row has none, so every row's
@@ -337,10 +334,10 @@
   .signin { border-top: 1px dashed var(--line); padding-left: 8px; }
   .mainrow { gap: 10px; }
   .msg { margin-top: 10px; }
-  .msg.bad { color: var(--red); }
+  .msg.bad { color: var(--red-text); }
   .fp { margin-top: 8px; word-break: break-all; }
   .rmenu { position: fixed; z-index: 66; }
-  .menu-item.bad { color: var(--red); }
+  .menu-item.bad { color: var(--red-text); }
   .empty-state :global(svg) { display: block; }
   @media (max-width: 600px) {
     .top { flex-wrap: wrap; }

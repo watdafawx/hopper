@@ -506,6 +506,49 @@ def friend_ids(uid):
     return list(state["friends"].get(uid, []))
 
 
+def friends_rev(uid):
+    """A short digest of what /v1/friends shows `uid`: who, their names and
+    Minecraft ids, who is online, and when the others were last seen. The
+    long-poll reports it, so a desktop reads the list only when it changed
+    instead of every few seconds. An online friend's last_seen moves on
+    every request they make, so it only counts once they are offline."""
+    t = now()
+    parts = []
+    for x in friend_ids(uid):
+        u = state["users"].get(x)
+        if not u:
+            continue
+        seen = u.get("last_seen", 0)
+        on = t - seen <= ONLINE_SECS
+        parts.append([x, u.get("name", ""), u.get("mc_id", ""), on, 0 if on else seen])
+    parts.append(MAX_FRIENDS)
+    raw = json.dumps(parts, separators=(",", ":")).encode("utf-8", "replace")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def next_offline(uid):
+    """Seconds until a friend shown online would be shown offline, or None.
+    Nothing wakes a long-poll when someone simply goes quiet, so it wakes
+    itself then."""
+    t = time.time()
+    best = None
+    for x in friend_ids(uid):
+        u = state["users"].get(x)
+        if not u:
+            continue
+        left = u.get("last_seen", 0) + ONLINE_SECS + 1 - t
+        if left > 0 and (best is None or left < best):
+            best = left
+    return best
+
+
+def wake_friends(uid):
+    """Something every friend of `uid` sees changed (their name, or them
+    coming online): their long-polls look again."""
+    for x in friend_ids(uid):
+        wake(x)
+
+
 def text(v, n, nbytes=None):
     """A string cut to n characters and to nbytes of UTF-8 (default 4 per
     character), so a limit on length is also a limit on size."""
@@ -1088,7 +1131,11 @@ class Handler(BaseHTTPRequestHandler):
             if not found:
                 return None
             uid, u = found
+            was = u.get("last_seen", 0)
             u["last_seen"] = now()
+            if u["last_seen"] - was > ONLINE_SECS:
+                # Back online: friends waiting on their feed see it now.
+                wake_friends(uid)
             return uid
 
     # -- requests
@@ -1135,6 +1182,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = self.encode({
                     "friends": [public(x) for x in friend_ids(uid) if x in state["users"]],
                     "max": MAX_FRIENDS,
+                    "rev": friends_rev(uid),
                 })
             return self.send_json(200, None, raw=data)
         if u.path == "/v1/groups":
@@ -1152,10 +1200,13 @@ class Handler(BaseHTTPRequestHandler):
                 v = int((q.get("v") or ["1"])[0])
             except ValueError:
                 return self.fail(400, "bad query")
-            return self.long_poll(uid, after, wait, v)
+            # The friend list's digest this PC has (`friends` from the last
+            # answer): the poll also ends when the list no longer matches.
+            fr = text((q.get("fr") or [""])[0], 64) if v >= 2 else ""
+            return self.long_poll(uid, after, wait, v, fr)
         return self.fail(404, "not found")
 
-    def long_poll(self, uid, after, wait, v):
+    def long_poll(self, uid, after, wait, v, fr=""):
         deadline = time.time() + wait
         poll = {"stop": False}
         with lock:
@@ -1189,16 +1240,25 @@ class Handler(BaseHTTPRequestHandler):
                         status = 409
                         data = self.encode({"error": "another connection took over this feed", "code": "poll_superseded"})
                         break
-                    if evs or time.time() >= deadline:
+                    rev = friends_rev(uid) if v >= 2 else None
+                    if evs or (fr and rev != fr) or time.time() >= deadline:
                         out = []
                         for e in evs:
                             x = dict(e)
                             x.setdefault("kind", "recipe")
                             x["from_name"] = state["users"].get(e["from"], {}).get("name", "")
                             out.append(x)
-                        data = self.encode({"seq": top, "events": out})
+                        answer = {"seq": top, "events": out}
+                        if rev is not None:
+                            answer["friends"] = rev
+                        data = self.encode(answer)
                         break
-                    cond.wait(timeout=max(0.1, deadline - time.time()))
+                    left = deadline - time.time()
+                    if fr:
+                        soon = next_offline(uid)
+                        if soon is not None:
+                            left = min(left, soon)
+                    cond.wait(timeout=max(0.1, left))
             finally:
                 if poll in mine:
                     mine.remove(poll)
@@ -1287,9 +1347,12 @@ class Handler(BaseHTTPRequestHandler):
             if not me:
                 return 404, {"error": "unknown account"}
             name = text(body.get("name"), 64).strip()
+            before = (me.get("name"), me.get("mc_id"))
             if name:
                 me["name"] = name
             me["mc_id"] = text(body.get("mc_id"), 64)
+            if (me.get("name"), me.get("mc_id")) != before:
+                wake_friends(uid)
             return 200, {"ok": True}
         if path == "/v1/invite":
             inst = text(body.get("inst"), 128)
@@ -1324,6 +1387,8 @@ class Handler(BaseHTTPRequestHandler):
                     q[:] = [e for e in q if e["from"] != other]
                 unfriend_groups(uid, other)
                 make_event(other, "unfriended", uid)
+                # This PC's own other long-polls (its friend list changed).
+                wake(uid)
             return 200, {"ok": True}
         if path == "/v1/recipes":
             return self.recipes(uid, body)
@@ -1365,6 +1430,9 @@ class Handler(BaseHTTPRequestHandler):
             mine.append(owner)
         if uid not in theirs:
             theirs.append(uid)
+        # Both friend lists changed; their long-polls say so.
+        wake(owner)
+        wake(uid)
         inst = inv.get("inst", "")
         if inst:
             # A share code's follow part: the owner's desktop shares that

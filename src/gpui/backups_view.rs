@@ -7,7 +7,7 @@ use crate::widgets::Clickable as _;
 use crate::store::{Msg, Store};
 use crate::widgets;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
@@ -200,7 +200,7 @@ impl BackupsView {
             let p = cx
                 .background_spawn(async move {
                     match panel {
-                        // The panel moves them to the server's trash.
+                        // The panel deletes them for good, as here.
                         Some(t) => t.client.post(&t.sp("/mod-backups/clean"), serde_json::json!({})).map(|v| hopper::retention::Pruned {
                             folders: v["removed"].as_u64().unwrap_or(0) as usize,
                             snapshots: 0,
@@ -264,7 +264,7 @@ impl BackupsView {
                     .small()
                     .outline()
                     .label(label)
-                    .tooltip("Clears History older than the rules in Settings › Library & folders (to the Recycle Bin). Hopper does this by itself as History grows, but leaves older entries for you. Snapshots you took and world backups stay.")
+                    .tooltip("Deletes History older than the rules in Settings › Library & folders, for good. Hopper does this by itself as History grows, but leaves older entries for you. Snapshots you took and world backups stay.")
                     .disabled(self.busy.is_some() || would.count() == 0)
                     .on_click(cx.listener(|this, _, window, cx| this.clean_up(window, cx))),
             )
@@ -608,36 +608,39 @@ impl BackupsView {
     fn ask_delete_snapshot(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(snap) = self.snap(&id) else { return };
         let view = cx.entity();
-        let title = snap.label();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let (view, id) = (view.clone(), id.clone());
-            alert
-                .title(format!("Delete \"{title}\"?"))
-                .description("Files only this snapshot keeps are deleted for good. The instance itself isn't touched.")
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default()
-                        .ok_text("Delete")
-                        .ok_variant(ButtonVariant::Danger)
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, window, cx| {
-                    let id = id.clone();
-                    view.update(cx, |this, cx| {
-                        let root = this.root.clone();
-                        cx.spawn_in(window, async move |this, cx| {
-                            let r = cx.background_spawn(async move { hopper::snapshots::delete(&root, &id) }).await;
-                            this.update_in(cx, |this, window, cx| {
-                                if let Err(e) = r {
-                                    window.push_notification(Notification::error(format!("{e:#}")), cx);
-                                }
-                                this.reload_snaps(cx);
-                            })
-                            .ok();
+        let title = format!("Delete \"{}\"?", snap.label());
+        let owner = {
+            let s = self.store.read(cx);
+            s.instance(&self.root)
+                .map(|i| i.name.clone())
+                .or_else(|| s.servers().iter().find(|x| x.root == self.root).map(|x| x.name.clone()))
+                .unwrap_or_default()
+        };
+        let what = "The files only this snapshot keeps go with it. The instance itself isn't touched.".to_string();
+        crate::delete_ask::open(title, what, false, "Delete snapshot", window, cx, move |for_good, window, cx| {
+            let (id, owner) = (id.clone(), owner.clone());
+            view.update(cx, |this, cx| {
+                let root = this.root.clone();
+                cx.spawn_in(window, async move |this, cx| {
+                    let r = cx
+                        .background_spawn(async move {
+                            if for_good {
+                                hopper::snapshots::delete(&root, &id)
+                            } else {
+                                hopper::snapshots::delete_to_recently_deleted(&root, &id, &owner)
+                            }
                         })
-                        .detach();
-                    });
-                    true
+                        .await;
+                    this.update_in(cx, |this, window, cx| {
+                        if let Err(e) = r {
+                            window.push_notification(Notification::error(format!("{e:#}")), cx);
+                        }
+                        this.reload_snaps(cx);
+                    })
+                    .ok();
                 })
+                .detach();
+            });
         });
     }
 

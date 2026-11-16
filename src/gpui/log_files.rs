@@ -102,7 +102,7 @@ pub fn report(window: &mut Window, cx: &mut App, r: anyhow::Result<usize>) {
 
 /// Where deleted things can be got back from, for the confirm's text.
 pub fn trash_name(root: &Path) -> &'static str {
-    if hopper::hopperd::is_remote_root(root) { "the server's trash (Files › Trash)" } else { "the Recycle Bin" }
+    if hopper::hopperd::is_remote_root(root) { "the server's trash (Files › Trash)" } else { "Recently deleted (Settings › Library & folders)" }
 }
 
 /// "3.2 MB".

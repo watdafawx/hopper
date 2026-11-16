@@ -789,7 +789,7 @@
   .sum:disabled { opacity: 1; }
   .si { width: 20px; height: 20px; border-radius: var(--radius-sm); display: grid; place-items: center; flex: none; }
   .si.blue { background: var(--blue-dim); color: var(--blue); } .si.acc { background: var(--acc-dim); color: var(--acc); }
-  .si.red { background: var(--red-dim); color: var(--red); } .si.green { background: var(--green-dim); color: var(--green); }
+  .si.red { background: var(--red-dim); color: var(--red-text); } .si.green { background: var(--green-dim); color: var(--green); }
   .si.mut { background: #ffffff10; color: var(--muted); }
   .sb { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
   .show { display: inline-flex; align-items: center; gap: 2px; color: var(--muted); font-size: 12px; }
@@ -816,9 +816,9 @@
   .indent { padding-left: 36px; }
   .aside { border-left: 2px solid var(--line2); padding-left: 10px; }
   .diff { margin: 4px 8px; max-height: 260px; overflow: auto; background: var(--term); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 8px; font: 11.5px/1.5 var(--mono); white-space: pre; color: var(--muted); }
-  .diff .da { color: var(--green); } .diff .dr { color: var(--red); } .diff .dh { color: var(--blue); }
+  .diff .da { color: var(--green); } .diff .dr { color: var(--red-text); } .diff .dh { color: var(--blue); }
   .warn { color: var(--gold); gap: 6px; align-items: flex-start; }
-  .redt { color: var(--red); gap: 6px; align-items: flex-start; }
+  .redt { color: var(--red-text); gap: 6px; align-items: flex-start; }
   .gold { color: var(--gold); }
   .prep { gap: 8px; }
   .foot { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; flex: none; }

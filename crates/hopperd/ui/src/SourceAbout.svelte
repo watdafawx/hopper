@@ -43,6 +43,6 @@
   .facts .row { gap: 4px; }
   .ok { color: var(--green); }
   .wrap { flex-wrap: wrap; }
-  .bad { color: var(--red); }
+  .bad { color: var(--red-text); }
   .desc { max-height: 420px; overflow: auto; border-top: 1px solid var(--line); padding-top: 8px; }
 </style>

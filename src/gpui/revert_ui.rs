@@ -1,4 +1,4 @@
-//! "Revert X to 1.6.3": the fix offered beside Turn off and Update when a
+//! "Roll back X to 1.6.3": the fix offered beside Turn off and Update when a
 //! mod needs a newer mod or loader than the folder has. Shared by the Mods
 //! tab's problem notice, the Logs crash card and a server's crash card;
 //! the offers are worked out once per mods folder in the store.
@@ -35,14 +35,14 @@ impl Offer {
         let (name, other) = (&self.name, &self.other);
         match &self.backup {
             Some(ch) if !ch.from.is_empty() => (
-                format!("Revert {name} to {}", ch.from),
+                format!("Roll back {name} to {}", ch.from),
                 format!("Puts back {}, the copy Hopper kept, which works with your {other}. The newer one goes to History, so you can undo this there.", ch.from),
             ),
             Some(_) => (
-                format!("Revert {name}"),
+                format!("Roll back {name}"),
                 format!("Puts back the copy Hopper kept, which works with your {other}. The newer one goes to History, so you can undo this there."),
             ),
-            None => (format!("Revert {name}"), format!("Installs the newest older version of {name} that works with your {other}.")),
+            None => (format!("Roll back {name}"), format!("Installs the newest older version of {name} that works with your {other}.")),
         }
     }
 }
@@ -137,10 +137,10 @@ pub fn revert_instance(store: &Entity<Store>, root: &Path, offer: &Offer, window
             let Some(mut inst) = store.read(cx).instance(root).cloned() else { return false };
             hold(store, cx);
             let (file, need, name) = (offer.file_name.clone(), offer.need.clone(), offer.name.clone());
-            store.read(cx).spawn_instance_job(root, format!("Reverting {name}"), move |job| {
+            store.read(cx).spawn_instance_job(root, format!("Rolling back {name}"), move |job| {
                 crate::store::fresh(&mut inst);
                 let got = hopper::revert::from_source(&mut inst, &file, &need, job)?;
-                job.note(format!("Reverted {name} to {got}"));
+                job.note(format!("Rolled back {name} to {got}"));
                 Ok(crate::store::Msg::InstanceChanged(inst.root.clone()))
             });
             window.refresh();

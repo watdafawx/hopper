@@ -161,10 +161,10 @@
   .ping, .on { font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; flex: none; }
   .ping { width: 4rem; }
   .on { width: 4.5rem; }
-  .ping.good { color: var(--green); } .ping.warn { color: var(--gold); } .ping.bad { color: var(--red); }
+  .ping.good { color: var(--green); } .ping.warn { color: var(--gold); } .ping.bad { color: var(--red-text); }
   .empty { padding: 0 8px; }
   /* Ban is red, as desktop draws it (also on hover). */
-  .btn.red, .btn.red:hover:not(:disabled) { color: var(--red); }
+  .btn.red, .btn.red:hover:not(:disabled) { color: var(--red-text); }
   .wrap { flex-wrap: wrap; }
   .addrow { margin-top: 10px; }
   .namebox { width: 16rem; padding: 4px 9px; }

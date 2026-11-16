@@ -229,7 +229,9 @@ impl Render for CrashHelp {
             .border_color(color.opacity(0.4))
             .bg(color.opacity(0.04))
             .child(Icon::new(IconName::Stethoscope).small().text_color(color))
-            .child(div().flex_none().text_sm().font_semibold().text_color(color).child(title))
+            // In a narrow window the title shortens after the text has gone,
+            // so the buttons never slide under the ✕.
+            .child(div().min_w_0().truncate().text_sm().font_semibold().text_color(color).child(title))
             .child(
                 div()
                     .id("crash-assistant-text")

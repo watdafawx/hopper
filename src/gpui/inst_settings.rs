@@ -141,8 +141,19 @@ impl InstanceSettings {
             s.java_args.clone(),
             inst.game_version.clone(),
         );
-        self.java
-            .update(cx, |j, cx| j.set(mem, &path, &args, Some(gv), window, cx));
+        // Hopper picks this instance's memory while it's at 0: the slider's
+        // left end says how much and why.
+        let default_mem = self.store.read(cx).settings().default_memory_mb;
+        let (label, fallback, hint) = if s.memory_auto {
+            let p = hopper::memory::pick_for(&inst, hopper::memory::pc_mb());
+            ("Auto", p.given_mb, Some(p.note().unwrap_or_else(|| p.source())))
+        } else {
+            ("Default", default_mem, None)
+        };
+        self.java.update(cx, |j, cx| {
+            j.set_fallback(label, fallback, hint, cx);
+            j.set(mem, &path, &args, Some(gv), window, cx)
+        });
         self.game_version = inst.game_version.clone();
         self.loader = inst.loader.clone();
         self.channel = s.release_channel;

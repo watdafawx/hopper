@@ -111,7 +111,7 @@
   .pu { gap: 8px; }
   .wrap { flex-wrap: wrap; }
   .gold { color: var(--gold); }
-  .red { color: var(--red); }
+  .red { color: var(--red-text); }
   .sw-row { align-items: flex-start; gap: 10px; cursor: pointer; }
   .sw-row input { width: 15px; height: 15px; accent-color: var(--acc); margin-top: 2px; flex: none; }
   .sw-row > span { display: flex; flex-direction: column; gap: 2px; }

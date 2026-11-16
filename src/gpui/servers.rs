@@ -581,7 +581,8 @@ struct Group {
     /// For `collapsed_groups`.
     key: String,
     name: String,
-    /// What it is ("Hopper Server", "Crafty").
+    /// What it is ("Crafty", "SFTP"). Empty for a Hopper Server and its
+    /// nodes: they get the web UI's chip (`machine_chip`) and "N servers".
     what: String,
 }
 
@@ -603,7 +604,7 @@ fn groups(s: &Store) -> Vec<Group> {
     let st = s.settings();
     let mut out: Vec<Group> = Vec::new();
     for p in st.hopper_panels_on() {
-        out.push(Group { kind: GroupKind::Panel(p.id.clone()), key: format!("panel:{}", p.id), name: p.name.clone(), what: "Hopper Server".into() });
+        out.push(Group { kind: GroupKind::Panel(p.id.clone()), key: format!("panel:{}", p.id), name: p.name.clone(), what: String::new() });
         let mut nodes: Vec<String> = s
             .servers()
             .iter()
@@ -620,7 +621,7 @@ fn groups(s: &Store) -> Vec<Group> {
             key: format!("node:{}:{n}", p.id),
             kind: GroupKind::Node(p.id.clone(), n),
             name,
-            what: format!("node · via {}", p.name),
+            what: String::new(),
         }));
     }
     let folder = st.servers_root.trim();
@@ -713,7 +714,16 @@ fn group_head(
             })
         }
     };
-    let what = if g.what.is_empty() { format!("{n}") } else { format!("{} · {n}", g.what) };
+    // A Hopper Server and its nodes read as in the web UI: a tinted chip
+    // for how it's connected, then "N servers". The rest keep their kind.
+    let chip = machine_chip(g, s, cx);
+    let what = if chip.is_some() {
+        if n == 1 { "1 server".to_string() } else { format!("{n} servers") }
+    } else if g.what.is_empty() {
+        format!("{n}")
+    } else {
+        format!("{} · {n}", g.what)
+    };
     let browse: Option<AnyElement> = match &g.kind {
         GroupKind::Panel(_) | GroupKind::Local => {
             let place = if let GroupKind::Panel(id) = &g.kind { Some(id.clone()) } else { None };
@@ -861,6 +871,7 @@ fn group_head(
                         .text_color(theme.foreground)
                         .child(g.name.clone()),
                 )
+                .children(chip)
                 .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(what))
                 .children(retry)
                 .children(browse)
@@ -870,6 +881,33 @@ fn group_head(
             c.child(div().px_3().pb_1().text_xs().text_color(color).child(e))
         })
         .into_any_element()
+}
+
+/// The chip after a group's name for a paired Hopper Server ("This panel")
+/// or one of its nodes ("Node"): the same words, tint and tooltip as the
+/// web UI's list (`lib/machines.js`). Desktop pairs as a device, so it has
+/// no "Signed in" kind. None for the folder, sites and this PC.
+fn machine_chip(g: &Group, s: &Store, cx: &App) -> Option<AnyElement> {
+    let (label, tip) = match &g.kind {
+        GroupKind::Panel(_) => ("This panel", "This panel.".to_string()),
+        GroupKind::Node(panel, node) => {
+            let via = s.settings().hopper_panels.iter().find(|p| &p.id == panel).map(|p| p.name.clone()).unwrap_or_default();
+            let ceiling = s.node_head(panel, node).map(|h| h.ceiling.clone()).unwrap_or_default();
+            let mut c = ceiling.chars();
+            let limit = c.next().map(|f| format!(" This panel may: {}{}.", f.to_uppercase(), c.as_str())).unwrap_or_default();
+            ("Node", format!("A node of {via}: it connects there by itself.{limit}"))
+        }
+        _ => return None,
+    };
+    let color = cx.theme().muted_foreground;
+    Some(
+        div()
+            .id(ElementId::Name(format!("group-chip:{}", g.key).into()))
+            .flex_none()
+            .child(widgets::chip(color).child(label))
+            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+            .into_any_element(),
+    )
 }
 
 fn now_secs() -> u64 {
@@ -1131,6 +1169,9 @@ pub struct ServersView {
     mods_table: Entity<crate::addons::AddonsView>,
     /// The server the Mods table was last pointed at.
     mods_shown: Option<PathBuf>,
+    /// The Mods table's notices as last drawn: the page redraws when they
+    /// change ([`crate::addons::AddonsView::notice_sig`]).
+    notice_sig: u64,
     /// The Worlds tab: the instance's Worlds view, on the server.
     worlds: Entity<crate::content::WorldsView>,
     /// The Data packs tab: the instance's data pack table, on the server's
@@ -1339,9 +1380,18 @@ impl ServersView {
         let peek = mods_table.read(cx).peek().clone();
         let mut subs = subs;
         subs.push(crate::browse::observe_peek(&peek, cx, |_, cx| cx.notify()));
-        subs.push(cx.subscribe(&mods_table, |_, _, e: &crate::addons::AddonsEvent, cx| {
+        subs.push(cx.observe(&mods_table, |this, t, cx| {
+            let sig = t.read(cx).notice_sig(cx);
+            if sig != this.notice_sig {
+                this.notice_sig = sig;
+                cx.notify();
+            }
+        }));
+        subs.push(cx.subscribe(&mods_table, |this, _, e: &crate::addons::AddonsEvent, cx| {
             use crate::addons::AddonsEvent as E;
             match e {
+                // A notice's button for the Mods list, clicked on another tab.
+                E::ShowMods if this.tab != TAB_MODS => this.set_tab(TAB_MODS, cx),
                 E::AddContent { root, class } | E::AddTo { root, class, .. } => {
                     cx.emit(ServersEvent::Browse { root: root.clone(), class: *class })
                 }
@@ -1392,6 +1442,7 @@ impl ServersView {
             strip,
             p_files,
             mods_table,
+            notice_sig: 0,
             worlds,
             dp_table,
             dp_shown: None,
@@ -1860,11 +1911,13 @@ impl ServersView {
     }
 
     /// Points the Mods table at the picked server when its Mods tab opens.
+    /// A server on this PC: on every tab, for the notice slot above them (a
+    /// Hopper Server's list is fetched, so only once its Mods tab opens).
     fn show_mods_table(&mut self, cx: &mut Context<Self>) {
-        if self.tab != TAB_MODS {
+        let Some(s) = self.picked.as_ref().and_then(|p| self.store.read(cx).server(p)).cloned() else { return };
+        if self.tab != TAB_MODS && s.remote.is_some() {
             return;
         }
-        let Some(s) = self.picked.as_ref().and_then(|p| self.store.read(cx).server(p)).cloned() else { return };
         if self.mods_shown.as_ref() == Some(&s.root) || !self.mods_table_for(&s, cx) {
             return;
         }
@@ -2282,6 +2335,23 @@ impl ServersView {
             },
             cx,
         );
+        let slot = {
+            // One slot above the tabs for every notice the server has,
+            // as on an instance: the crash (not on Logs & crashes, which
+            // shows it in full), a stuck start, the Mods table's.
+            let mut notices: Vec<crate::notice_slot::Notice> = Vec::new();
+            if self.tab != TAB_LOGS {
+                self.strip.update(cx, |st, cx| st.show(s.root.clone(), cx));
+                notices.extend(self.strip.update(cx, |st, cx| st.notice(cx)));
+            }
+            let view = cx.entity().downgrade();
+            notices.extend(crate::stuck::server_stuck_bar(&self.store, &s.root, pstats.as_ref(), &self.control, move |rel, _, cx| {
+                view.update(cx, |this, cx| this.see_crash(rel, cx)).ok();
+            }, cx));
+            let root = s.root.clone();
+            notices.extend(self.mods_table.update(cx, |a, cx| a.notices(&root, cx)));
+            crate::notice_slot::slot("server", notices, window, cx)
+        };
         let body = v_flex()
             .flex_1()
             .min_h_0()
@@ -2289,6 +2359,7 @@ impl ServersView {
             .pt_2()
             .pb_5()
             .map(|c| if self.tab == TAB_OVERVIEW { c.gap_5() } else { c.gap_3() })
+            .children(slot)
             .child({
                 let codes = tabs_for(remote, self.store.read(cx).site_of(&s.root).is_some(), self.store.read(cx).is_hosted(&s.root));
                 let danger = cx.theme().danger;
@@ -2334,16 +2405,7 @@ impl ServersView {
                 // scrolls, so it isn't measured against it.
                 self.tabs_fit.wrap("server-tabs-fit", bar, 2, key, cx.entity_id())
             })
-            .when(self.tab != TAB_LOGS, |c| {
-                self.strip.update(cx, |st, cx| st.show(s.root.clone(), cx));
-                if self.strip.read(cx).crash().is_some() { c.child(self.strip.clone()) } else { c }
-            })
-            .children({
-                let view = cx.entity().downgrade();
-                crate::stuck::server_stuck_bar(&self.store, &s.root, pstats.as_ref(), &self.control, move |rel, _, cx| {
-                    view.update(cx, |this, cx| this.see_crash(rel, cx)).ok();
-                }, cx)
-            })
+
             .when(remote && matches!(self.tab, TAB_FILES | TAB_MODS | TAB_PLAYERS | TAB_BACKUPS | TAB_SCHEDULE | TAB_SETTINGS), |c| {
                 let body: AnyElement = match &self.target {
                     Some(Err(e)) => widgets::empty_state(IconName::TriangleAlert, "Can't reach this panel", Some(e.clone().into()), cx)

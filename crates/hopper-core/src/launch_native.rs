@@ -502,11 +502,7 @@ pub fn command(
         .join(cp_sep);
     let mut features: HashMap<&str, bool> = HashMap::new();
     features.insert("has_custom_resolution", true);
-    let mem = if inst.settings.memory_mb > 0 {
-        inst.settings.memory_mb
-    } else {
-        defaults.memory_mb
-    };
+    let mem = crate::memory::effective_mb(inst, defaults.memory_mb);
     let vars: HashMap<&str, String> = HashMap::from([
         (
             "natives_directory",

@@ -553,6 +553,25 @@ pub fn delete(root: &Path, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Moves a snapshot to Recently deleted: its manifest and the files only it
+/// used, so it can be restored into the store for a while. `owner` is the
+/// instance's or server's name, for the list.
+pub fn delete_to_recently_deleted(root: &Path, id: &str, owner: &str) -> anyhow::Result<()> {
+    use crate::recently_deleted as rd;
+    let label = list(root).into_iter().find(|s| s.id == id).map(|s| s.label()).unwrap_or_else(|| "Snapshot".into());
+    let Some(out) = take_out(root, &[id.to_string()])? else { return Ok(()) };
+    let meta = rd::Meta::new(rd::Kind::Backup, label, &base(root)).owner(owner);
+    if let Err(e) = rd::move_in(&out, &rd::places_for(root), meta.clone()) {
+        // Nothing is lost: the files go back into the store.
+        let back = rd::Entry { dir: out.clone(), meta };
+        return Err(match rd::restore(&back) {
+            Ok(_) => e,
+            Err(e2) => e.context(format!("and putting it back failed ({e2:#}); its files are in {}", out.display())),
+        });
+    }
+    Ok(())
+}
+
 /// Takes snapshots out of the store without deleting anything: their
 /// manifests and the files none of the rest use move into one new folder
 /// (`.hopper-backups/.pruned-<ms>/`), which is returned for the caller to

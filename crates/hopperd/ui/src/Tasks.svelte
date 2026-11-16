@@ -106,7 +106,7 @@
 {#if !gone}
   <div class="wrap" bind:this={wrap}>
     <button class="btn ghost sm tb" class:on={open} title="Tasks" aria-expanded={open} onclick={toggle}>
-      {#if running}<span class="spinner acc"></span>{:else if failed}<CircleX size={14} color="var(--red)" />{:else}<ListChecks size={14} />{/if}
+      {#if running}<span class="spinner acc"></span>{:else if failed}<CircleX size={14} color="var(--red-text)" />{:else}<ListChecks size={14} />{/if}
       {#if running}<span>{running}</span>{/if}
     </button>
     {#if open}
@@ -119,7 +119,7 @@
             <div class="job">
               <div class="row top">
                 <span class="st">
-                  {#if !j.done}<span class="spinner acc"></span>{:else if j.cancelled}<CircleX size={15} color="var(--muted)" />{:else if j.error}<CircleX size={15} color="var(--red)" />{:else}<CircleCheck size={15} color="var(--green)" />{/if}
+                  {#if !j.done}<span class="spinner acc"></span>{:else if j.cancelled}<CircleX size={15} color="var(--muted)" />{:else if j.error}<CircleX size={15} color="var(--red-text)" />{:else}<CircleCheck size={15} color="var(--green)" />{/if}
                 </span>
                 <div class="txt">
                   <div class="t">{j.title}</div>
@@ -156,7 +156,7 @@
   .txt { flex: 1; min-width: 0; }
   .t { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .d { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .d.bad { color: var(--red); }
+  .d.bad { color: var(--red-text); }
   .pb { margin-left: 28px; }
   .note { margin-left: 28px; font-size: 11.5px; color: var(--gold); }
   .none { padding: 24px 0; text-align: center; color: var(--muted); font-size: 12px; }

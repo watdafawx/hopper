@@ -186,6 +186,10 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
 impl Addon {
     pub fn folder(&self) -> &'static str {
         folder_for_class(self.class_id)
@@ -210,8 +214,20 @@ pub fn folder_for_class(class_id: u32) -> &'static str {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LaunchSettings {
-    /// Max heap in MB. 0 uses the global default.
+    /// Max heap in MB. 0: Hopper's pick when `memory_auto`, else the
+    /// global default (see [`crate::memory::effective_mb`]).
     pub memory_mb: u32,
+    /// Hopper picks the memory while `memory_mb` is 0 (instances made since
+    /// it does; older ones keep the default from Settings they ran with).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub memory_auto: bool,
+    /// The memory the pack's author recommends (CurseForge's
+    /// `recommendedRam`), 0 when the pack gives none.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub pack_memory_mb: u32,
+    /// The player was told this PC gives it less than the pack wants.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub memory_told: bool,
     pub java_args: String,
     /// Empty uses the launcher's bundled Java.
     pub java_path: String,
@@ -252,6 +268,12 @@ pub fn resolve_window(own: Option<WindowSetting>, global: Option<WindowSetting>)
 }
 
 impl LaunchSettings {
+    /// A new instance's: Hopper picks its memory ([`crate::memory`]), from
+    /// `pack_memory_mb` when its pack recommends some (0: none).
+    pub fn new_instance(pack_memory_mb: u32) -> Self {
+        Self { memory_auto: true, pack_memory_mb, ..Default::default() }
+    }
+
     /// This instance's own window setting, if it has one. Files from before
     /// the global default carry no flag: those count as their own when they
     /// differ from the stock window (somebody chose it) and follow the
@@ -275,6 +297,9 @@ impl Default for LaunchSettings {
     fn default() -> Self {
         Self {
             memory_mb: 0,
+            memory_auto: false,
+            pack_memory_mb: 0,
+            memory_told: false,
             java_args: String::new(),
             java_path: String::new(),
             width: 1280,
@@ -522,7 +547,7 @@ pub fn discover(root: &Path) -> Vec<Instance> {
     };
     let mut out: Vec<Instance> = entries
         .flatten()
-        .filter(|e| e.file_name() != crate::instance_ops::HOPPER_TRASH)
+        .filter(|e| e.file_name() != crate::instance_ops::HOPPER_TRASH && e.file_name() != crate::recently_deleted::DIR)
         .filter_map(|e| load_managed(&e.path()))
         .collect();
     out.sort_by_key(|i| i.name.to_lowercase());

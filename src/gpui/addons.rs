@@ -2,6 +2,7 @@
 //! of what an instance has installed, with updates, toggles and removal.
 
 use crate::drag_pick::{self, DragPick, PickDrag, PickState, Picks, Sweep};
+use crate::notice_slot::{Notice, Tier};
 use crate::store::Store;
 use crate::widgets::{self, Clickable as _};
 use crate::widgets::ToastAction as _;
@@ -177,7 +178,12 @@ pub(crate) fn col_active() -> Div {
 impl AddonsView {
     /// The On column, wide enough for the Where pill on packs.
     pub(crate) fn col_on(&self) -> Div {
-        if self.where_mode() { div().w(rems(crate::pack_where::PILL_W)).flex_none() } else { col_active() }
+        if self.where_mode() { div().w(rems(self.pill_w())).flex_none() } else { col_active() }
+    }
+
+    /// The Where pill's width this frame (narrow beside a side panel).
+    pub(crate) fn pill_w(&self) -> f32 {
+        if self.cols.pill_short { crate::pack_where::PILL_W_SHORT } else { crate::pack_where::PILL_W }
     }
 }
 pub(crate) fn col_date() -> Div {
@@ -375,11 +381,13 @@ pub(crate) struct Cols {
     /// beside a 960 px window): Update moves into the row's ⋯ menu, where
     /// Versions and changelogs already is.
     pub(crate) action: bool,
+    /// Packs' Where pill at its narrow width with short labels.
+    pub(crate) pill_short: bool,
 }
 
 impl Default for Cols {
     fn default() -> Self {
-        Self { date: true, author: true, side: true, side_inline: false, cap: false, rm: true, action: true }
+        Self { date: true, author: true, side: true, side_inline: false, cap: false, rm: true, action: true, pill_short: false }
     }
 }
 
@@ -781,6 +789,11 @@ pub enum AddonsEvent {
     CollapseList,
     /// A mod's config button: its config in the side panel.
     Config { root: PathBuf, file: String },
+    /// A notice's "See why →": the last crash in Logs & crashes.
+    SeeCrash,
+    /// A notice's button that acts on the Mods list (Review, Show): the
+    /// Mods tab, when the notice was clicked on another tab.
+    ShowMods,
 }
 
 impl EventEmitter<AddonsEvent> for AddonsView {}
@@ -903,8 +916,6 @@ pub struct AddonsView {
     /// The last crash's mod that stopped the game loading, and the update
     /// its error names (with the older copy), for the top notice. None
     /// once that mod is off or the older copy is back.
-    /// Notices whose whole row list shows (else the first two).
-    pub(crate) rows_open: std::collections::HashSet<&'static str>,
     pub(crate) crash_stop: Option<(hopper::crashdetect::Stopped, Option<hopper::crashdetect::Changed>)>,
     /// Modrinth is being asked where untagged mods run (one ask at a time).
     pub(crate) sides_busy: bool,
@@ -1032,7 +1043,6 @@ impl AddonsView {
             recent: HashMap::new(),
             settle: Default::default(),
             crashed: HashMap::new(),
-            rows_open: Default::default(),
             crash_stop: None,
             sides_busy: false,
             dep_jobs: HashMap::new(),
@@ -1087,6 +1097,57 @@ impl AddonsView {
         self.search.update(cx, |s, cx| s.set_value(t, window, cx));
         self.query = text.trim().to_lowercase();
         cx.notify();
+    }
+
+    /// The notices the table knows about (load problems, missing and
+    /// doubled mods, notes), for the notice slot above an instance's or a
+    /// server's tabs. Empty while the table shows another instance.
+    pub fn notices(&mut self, root: &Path, cx: &mut Context<Self>) -> Vec<Notice> {
+        if self.root.as_deref() != Some(root) {
+            return Vec::new();
+        }
+        let Some(inst) = self.table.inst.clone() else { return Vec::new() };
+        let mut out: Vec<Notice> = Vec::new();
+        out.extend(self.blocker_banner(&inst, cx));
+        out.extend(self.missing_banner(&inst, cx));
+        out.extend(self.duplicate_banner(&inst, cx));
+        out.extend(self.client_on_note(&inst, cx));
+        out.extend(self.shader_notes(&inst, cx));
+        out.extend(self.only_here_note(&inst, cx));
+        out.extend(self.restart_note(&inst, cx));
+        out
+    }
+
+    /// What [`Self::notices`] depends on that the store doesn't: the
+    /// folder reads and the last crash. The Library redraws when it changes.
+    pub fn notice_sig(&self, cx: &App) -> u64 {
+        let mut h = std::hash::DefaultHasher::new();
+        let m = &self.missing;
+        (&self.root, self.class, self.show == Show::ClientOnly, self.table.sig, self.table.has_shader_loader).hash(&mut h);
+        (&m.root, m.mtime, m.listed, m.list.len(), m.dups.len(), m.blockers.len(), m.queued, m.switch_off, m.switch_on, m.loaded_fine, m.ghosts.len()).hash(&mut h);
+        (m.rollbacks.len(), m.rolling.len()).hash(&mut h);
+        self.crash_stop.as_ref().map(|(st, _)| st.file_name.clone()).hash(&mut h);
+        self.store.read(cx).changed_while_running(self.root.as_deref().unwrap_or(Path::new(""))).hash(&mut h);
+        h.finish()
+    }
+
+    /// Keeps the table on `root` while a tab without a list is open, so the
+    /// notice slot there has the Mods tab's notices. Points it at the mods
+    /// when it shows another instance.
+    pub fn follow(&mut self, root: &Path, cx: &mut Context<Self>) {
+        if self.root.as_deref() != Some(root) {
+            self.show_for(root.to_path_buf(), cf::CLASS_MODS, cx);
+        }
+    }
+
+    /// A notice's button acting on the Mods list: the table goes to the
+    /// mods first (a class change would clear what it picks).
+    pub(crate) fn to_mods(&mut self, cx: &mut Context<Self>) {
+        if self.class != cf::CLASS_MODS
+            && let Some(root) = self.root.clone()
+        {
+            self.point(root, cf::CLASS_MODS, cx);
+        }
     }
 
     /// Points the table at an instance and class.
@@ -1224,7 +1285,8 @@ impl AddonsView {
                 hopper::instance_ops::has_shader_loader(&inst),
             )
         } else {
-            (None, true)
+            // The notice shows on every tab, once there are packs to use.
+            (None, !hopper::instance_ops::has_shader_packs(&inst) || hopper::instance_ops::has_shader_loader(&inst))
         };
         if self.remote {
             let loose = self.store.read(cx).remote_loose(&root).to_vec();
@@ -1234,7 +1296,8 @@ impl AddonsView {
             self.refresh_loose(&inst, cx);
         }
         self.waiting = self.store.read(cx).waiting_switches(&root).cloned().unwrap_or_default();
-        if class == cf::CLASS_MODS {
+        // The notice slot shows these on every tab of an instance.
+        if class == cf::CLASS_MODS || !self.server {
             self.want_missing(&inst, cx);
             self.want_sides(&inst, cx);
         }
@@ -3380,7 +3443,7 @@ impl AddonsView {
                         })),
                 ),
             )
-            .when(self.order_mode() || self.where_mode(), |r| r.child(crate::datapacks::col_order()))
+            .when(self.order_mode() && !self.where_mode(), |r| r.child(crate::datapacks::col_order()))
             .child(div().w_10().flex_none())
             .child(head(SortCol::Name, "Name", self.name_cell()))
             .when(self.show_action(), |r| r.child(col_action(self.compact)))
@@ -3972,7 +4035,7 @@ impl AddonsView {
     }
 
     /// Delete: the picked rows, else the keys' row, go through the usual
-    /// Remove question (backups with Undo, or the Recycle Bin).
+    /// Remove question (backups with Undo, or Recently deleted).
     fn on_remove_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_rows();
         let files = if self.selected.is_empty() {
@@ -4031,12 +4094,11 @@ impl AddonsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let old_copy = self.old_copy_chip(a, cx);
-        // Resource packs in game order: grip, place and ↑↓ (or Use).
-        let order_cell = if self.where_mode() {
-            Some(self.where_order_cell(&a.file_name, &a.name, cx))
-        } else {
-            self.order_mode().then(|| self.order_cell(&a.file_name, &a.name, flags.rank, cx))
-        };
+        // Packs in one list: the grip in the row's padding (their place is a
+        // chip by the name). Resource packs in game order: grip, place, ↑↓.
+        let grip = self.where_mode().then(|| self.where_grip(&a.file_name, &a.name, cx));
+        let order_cell = (!self.where_mode() && self.order_mode()).then(|| self.order_cell(&a.file_name, &a.name, flags.rank, cx));
+        let order_menu = if self.where_mode() { self.where_order_menu(&a.file_name, cx) } else { None };
         // Packs: copies, the modpack's own, its worlds.
         let where_chips = if self.where_mode() { self.where_chips(&a.file_name, cx) } else { Vec::new() };
         let pill = self.where_mode().then(|| self.where_pill(&a.file_name, cx));
@@ -4513,6 +4575,11 @@ It stays disabled after updating: turn it on in the On column.")
                 .filter(|_| !self.cols.action && !vlocked && !breaking && updating.is_none() && !from_web && !done)
                 .cloned(),
         );
+        // A pack in a ranked group: Move up / Move down after the rest.
+        let menu_fn: Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu> = match order_menu {
+            Some(extra) => Rc::new(move |m, w, cx| extra(menu_fn(m, w, cx))),
+            None => menu_fn,
+        };
         h_flex()
             .id(id("row"))
             .group(ROW_GROUP)
@@ -4542,6 +4609,7 @@ It stays disabled after updating: turn it on in the On column.")
                         .bg(theme.warning),
                 )
             })
+            .children(grip)
             .child(
                 drag_pick::handle(
                     col_check().id(id("pick")).h_full().flex().items_center().cursor_pointer(),
@@ -4951,8 +5019,8 @@ Change version", a.file_name).into()
     /// offered to keep only on this PC. Nothing is marked until they pick;
     /// Review picks them in the list, next to the selection's "Only on
     /// this PC". Shown once per pack.
-    fn only_here_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.server || self.remote || self.class != cf::CLASS_MODS || self.global_dir().is_some() {
+    fn only_here_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
+        if self.server || self.remote {
             return None;
         }
         // Marks live in the store; the table's copy can be a step behind.
@@ -4967,36 +5035,46 @@ Change version", a.file_name).into()
         if client.is_empty() || store.synced_with(&inst.root).is_none() {
             return None;
         }
-        let theme = cx.theme();
         let n = client.len();
         let names: Vec<String> = client.iter().map(|a| a.name.clone()).collect();
-        let text = format!(
-            "{} only change{} your own game ({}). Keep {} only on this PC?",
+        let title = format!(
+            "{} only change{} your own game. Keep {} only on this PC?",
             if n == 1 { "1 mod".to_string() } else { format!("{n} mods") },
             if n == 1 { "s" } else { "" },
-            crate::store::and_list(&names),
             if n == 1 { "it" } else { "them" },
         );
         let key = hopper::settings::notice_key(&inst.root.to_string_lossy(), "only-here", "");
+        if crate::notice_slot::hidden(&self.store, &key, cx) {
+            return None;
+        }
         let files: Vec<String> = client.iter().map(|a| a.file_name.clone()).collect();
-        let body = crate::crash_help::callout(theme.info, cx)
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(div().flex_1().min_w_0().text_sm().child(text))
-            .child(Button::new("only-here-review").small().outline().label("Review").on_click(cx.listener(move |this, _, _, cx| {
-                this.selected = files.iter().cloned().collect();
-                cx.notify();
-            })));
-        let notice = widgets::closable_notice(body, key, widgets::Closed::Gone, "", theme.info, &self.store, cx)?;
-        Some(div().px_6().child(notice).into_any_element())
+        let view = cx.entity().downgrade();
+        Some(
+            Notice::new("only-here", Tier::Info, title)
+                .subject(crate::addons_extra::brief_names(names))
+                .primary(move |fit| {
+                    crate::notice_slot::main_button(Button::new("only-here-review").small(), fit)
+                        .label("Review")
+                        .tooltip("Picks them in the Mods list, next to \"Only on this PC\"")
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.to_mods(cx);
+                                this.selected = files.iter().cloned().collect();
+                                cx.emit(AddonsEvent::ShowMods);
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                })
+                .dismiss_key(&self.store, key),
+        )
     }
 
     /// A server's mods: "N client-only mods on", as Hopper Server's web UI
     /// says, with Show (the Client-only filter). Hidden once closed, until
     /// the count changes.
-    fn client_on_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.server || self.class != cf::CLASS_MODS || self.show == Show::ClientOnly {
+    fn client_on_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
+        if !self.server || (self.class == cf::CLASS_MODS && self.show == Show::ClientOnly) {
             return None;
         }
         let n = inst
@@ -5007,24 +5085,31 @@ Change version", a.file_name).into()
         if n == 0 {
             return None;
         }
-        let theme = cx.theme();
-        let text = format!(
-            "{n} client-only mod{} on: servers usually don't need {}, and some won't start with them.",
-            if n == 1 { "" } else { "s" },
-            if n == 1 { "it" } else { "them" }
-        );
+        let title = format!("{n} client-only mod{} on", if n == 1 { "" } else { "s" });
         let key = hopper::settings::notice_key(&inst.root.to_string_lossy(), "client-on", &n.to_string());
-        let body = crate::crash_help::callout(theme.warning, cx)
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(div().flex_1().min_w_0().text_sm().child(text))
-            .child(Button::new("client-on-show").small().outline().label("Show").on_click(cx.listener(|this, _, _, cx| {
-                this.show = Show::ClientOnly;
-                cx.notify();
-            })));
-        let notice = widgets::closable_notice(body, key, widgets::Closed::Gone, "", theme.warning, &self.store, cx)?;
-        Some(div().px_6().child(notice).into_any_element())
+        if crate::notice_slot::hidden(&self.store, &key, cx) {
+            return None;
+        }
+        let view = cx.entity().downgrade();
+        Some(
+            Notice::new("client-on", Tier::Choice, title)
+                .subject(format!("Servers usually don't need {}, and some won't start with them", if n == 1 { "it" } else { "them" }))
+                .primary(move |fit| {
+                    crate::notice_slot::main_button(Button::new("client-on-show").small(), fit)
+                        .label("Show")
+                        .tooltip("Shows only the client-only mods")
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.to_mods(cx);
+                                this.show = Show::ClientOnly;
+                                cx.emit(AddonsEvent::ShowMods);
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                })
+                .dismiss_key(&self.store, key),
+        )
     }
 
     /// "Old copy": the mod is in twice, an older file kept turned off beside
@@ -5450,10 +5535,14 @@ Change version", a.file_name).into()
             (col_hidden(settings, Col::Author), col_hidden(settings, Col::Side), col_hidden(settings, Col::Added));
         self.col_order = col_order(settings);
         let has_side = self.class != cf::CLASS_DATAPACKS && self.table.has_side && !no_side;
-        let mut c = Cols { date: !self.tight && !no_date, author: !no_author, side: has_side, side_inline: false, cap: false, rm: true, action: true };
+        let mut c = Cols { date: !self.tight && !no_date, author: !no_author, side: has_side, side_inline: false, cap: false, rm: true, action: true, pill_short: false };
         let mut compact = self.compact;
         if self.name_room(room, &c, compact) < NAME_MIN {
             c.date = false;
+        }
+        // Packs: the Where pill narrows (short labels) before the author goes.
+        if self.where_mode() && self.name_room(room, &c, compact) < NAME_MIN {
+            c.pill_short = true;
         }
         if self.name_room(room, &c, compact) < NAME_MIN {
             c.author = false;
@@ -5485,9 +5574,12 @@ Change version", a.file_name).into()
         let mut fixed = 3.0 + 1.4 + 1.5 + 2.5 + 4.0 + 4.0 - (trash_w(true) - trash_w(c.rm));
         // In-flow cells, the name included.
         let mut cells = 5;
+        // Packs' grip sits in the row's padding, so no order column; only
+        // the pill is wider than the Enabled switch.
+        let pill = if c.pill_short { crate::pack_where::PILL_W_SHORT } else { crate::pack_where::PILL_W };
         for (on, w) in [
-            (self.order_mode() || self.where_mode(), 5.75),
-            (self.where_mode(), crate::pack_where::PILL_W - 4.75),
+            (self.order_mode() && !self.where_mode(), 5.75),
+            (self.where_mode(), pill - 4.75),
             (self.action_fits() && c.action, if compact { widgets::SPLIT_W_COMPACT + 0.25 } else { 9.5 }),
             (c.author, 10.0),
             (c.side, 3.0),
@@ -6165,6 +6257,74 @@ impl Picks for AddonsView {
     }
 }
 
+impl AddonsView {
+    /// The tab's empty state when it has nothing in it and no search or
+    /// filter is on: the same block at the same height on every content
+    /// tab, worded for the tab, with one button to add some.
+    fn bare_empty(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.class == cf::CLASS_DATAPACKS && self.locs.is_empty() {
+            return Some(widgets::empty_top(self.no_datapack_folders(cx)).into_any_element());
+        }
+        let filtered = !(self.query.is_empty() && self.show == Show::All && !self.added_only && !self.cfg_changed_only);
+        // A global folder or world picked has its own empty state, in the table.
+        if filtered || self.global_dir().is_some() {
+            return None;
+        }
+        // Group headings alone (packs) aren't content.
+        let any = self.table.rows.iter().any(|r| matches!(r, Row::Addon(_) | Row::Loose(_) | Row::Copies(..)));
+        (!any).then(|| widgets::empty_top(self.content_empty(cx)).into_any_element())
+    }
+
+    /// "No mods yet" and the like, per tab, with the button that adds some.
+    fn content_empty(&self, cx: &mut Context<Self>) -> Div {
+        let (icon, title, body, add) = match self.class {
+            cf::CLASS_RESOURCE_PACKS => (
+                IconName::Image,
+                "No resource packs yet",
+                "They change how blocks, items and menus look. Find some, or drop .zip files on the window.",
+                "Add resource packs",
+            ),
+            cf::CLASS_SHADERS => (
+                IconName::Sun,
+                "No shaders yet",
+                "Shaders add light, shadows and water effects. They need Iris or Oculus.",
+                "Add shaders",
+            ),
+            cf::CLASS_DATAPACKS => (
+                IconName::Database,
+                "No data packs yet",
+                "They change recipes, loot and world generation, in every world or one.",
+                "Add data packs",
+            ),
+            _ if self.server => (
+                IconName::Package,
+                "No mods yet",
+                "Add content finds mods for this server, or drop .jar files on the window.",
+                "Add mods",
+            ),
+            _ => (
+                IconName::Package,
+                "No mods yet",
+                "Add content finds mods for this instance, or drop .jar files on the window.",
+                "Add mods",
+            ),
+        };
+        // A Hopper Server's data packs are added in its web UI for now
+        // (Browse installs into it through its mods route only).
+        let can_add = !(self.remote && self.class == cf::CLASS_DATAPACKS);
+        widgets::empty_state(icon, title, Some(body.into()), cx).when(can_add, |d| {
+            d.child(
+                Button::new("empty-add")
+                    .small()
+                    .primary()
+                    .icon(IconName::Plus)
+                    .label(add)
+                    .on_click(cx.listener(|this, _, _, cx| this.add_content(cx))),
+            )
+        })
+    }
+}
+
 impl Render for AddonsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _t = crate::frame_log::span("addons.render");
@@ -6217,9 +6377,10 @@ impl Render for AddonsView {
             Some(None) => return div().px_6().pt_4().child(widgets::skeleton_rows(6, rems(ROW_H), cx)).into_any_element(),
             None => {}
         }
-        // Data packs with no folder to show: what to do instead.
-        if self.class == cf::CLASS_DATAPACKS && self.locs.is_empty() {
-            return self.no_datapack_folders(cx);
+        // Nothing here at all (data packs: not even a folder for them): the
+        // tab's empty state, with no toolbar or columns, like Worlds.
+        if let Some(empty) = self.bare_empty(cx) {
+            return empty;
         }
         // A drag that ended anywhere: the headings stop saying "Drop here".
         if self.wh.dragging.is_some() && !cx.has_active_drag() {
@@ -6227,13 +6388,6 @@ impl Render for AddonsView {
         }
         let tabs = self.location_row(cx);
         let global_head = self.location_caption(cx);
-        let missing = self.missing_banner(&inst, cx);
-        let dups = self.duplicate_banner(&inst, cx);
-        let blockers = self.blocker_banner(&inst, cx);
-        let shaders = self.shader_notes(&inst, cx);
-        let restart = self.restart_note(&inst, cx);
-        let client_on = self.client_on_note(&inst, cx);
-        let only_here = self.only_here_note(&inst, cx);
         let updates = self.table.updates.clone();
         let rows = self.table.rows.clone();
         // Narrow with the instance list open: offer its room, once.
@@ -6291,19 +6445,9 @@ impl Render for AddonsView {
             } else if let Some(empty) = self.location_empty(cx) {
                 empty
             } else {
-                widgets::empty_state(
-                    IconName::Package,
-                    "Nothing installed here yet",
-                    Some("Add content finds mods, packs and shaders for this instance.".into()),
-                    cx,
-                )
+                self.content_empty(cx)
             };
-            v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child(state)
-                .into_any_element()
+            widgets::empty_top(state).into_any_element()
         } else {
             div()
                 .id("addon-table")
@@ -6372,13 +6516,6 @@ impl Render for AddonsView {
             .children(tabs)
             .children(global_head)
             .child(toolbar)
-            .children(restart)
-            .children(client_on)
-            .children(only_here)
-            .children(blockers)
-            .children(dups)
-            .children(missing)
-            .children(shaders)
             .child(v_flex().flex_1().min_h_0().child(header).child(body));
         list.size_full().relative().children(bulk).into_any_element()
     }

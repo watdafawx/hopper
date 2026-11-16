@@ -29,6 +29,7 @@ pub fn ended(store: &Entity<Store>, j: &JobState, window: &mut Window, cx: &mut 
     let n = match kind {
         ToastKind::Done => Notification::success(body).title(title),
         ToastKind::Failed => Notification::error(body).title(title),
+        ToastKind::Info => Notification::info(body).title(title),
         // Some website files didn't come: Retry opens the window again for
         // the ones the instance still waits for.
         ToastKind::Missing => {

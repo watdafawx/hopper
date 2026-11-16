@@ -343,8 +343,9 @@ async fn backup_count(
     Ok(Json(json!({ "new": n, "newest": newest })))
 }
 
-/// Where old backups go when they're cleaned up: the server's trash (Files
-/// › Trash), which empties itself after its usual time.
+/// Where what the owner deletes by hand goes (a History backup, logs): the
+/// server's trash (Files › Trash), which empties itself after its usual
+/// time.
 pub fn to_server_trash(root: &std::path::Path, paths: &[std::path::PathBuf]) -> anyhow::Result<()> {
     for p in paths {
         let rel = p.strip_prefix(root)?.to_string_lossy().replace('\\', "/");
@@ -567,13 +568,15 @@ struct DeleteBody {
     when: i64,
 }
 
-/// Deletes a backup (to the Recycle Bin where there is one).
+/// Deletes a backup to the server's trash (a rename inside its folder, so
+/// it can come back from Files › Trash), like old backups past their time.
+/// Never the Recycle Bin: nobody empties it on a server and the drive fills.
 async fn backup_delete(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Json(b): Json<DeleteBody>) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
     let root = e.root.clone();
     blocking(move || {
         let set = backups::list(&e.root).into_iter().find(|s| s.when == b.when).ok_or_else(|| anyhow::anyhow!("That backup is gone."))?;
-        backups::delete(&set, false)
+        to_server_trash(&e.root, &[set.dir])
     })
     .await?;
     Sizes::forget(&root);

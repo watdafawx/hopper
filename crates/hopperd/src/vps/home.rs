@@ -111,7 +111,25 @@ pub struct ServerLive {
     pub vanilla: AtomicU64,
     /// Player connections (and server list pings) open now.
     pub open: AtomicUsize,
+    /// Of those, the ones open for a while: players in the game, not the
+    /// server list asking how many there are.
+    pub players: AtomicUsize,
     pub streams: AtomicU64,
+}
+
+/// A stream open this long is a player, not a server list ping (those
+/// close within a second).
+const PLAYER_AFTER: Duration = Duration::from_secs(2);
+
+/// Counts one player while it lives.
+struct Player(Option<Arc<ServerLive>>);
+
+impl Drop for Player {
+    fn drop(&mut self) {
+        if let Some(l) = self.0.take() {
+            l.players.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -199,9 +217,11 @@ pub struct Home {
     pings_in: tokio::sync::watch::Sender<u64>,
     /// Voice through the relay while connected (B6).
     pub voice: Arc<super::voice::home::Slot>,
+    /// Each server's last health check ("Test again"), for the card.
+    last_test: Mutex<HashMap<String, Value>>,
 }
 
-fn unix() -> u64 {
+pub(super) fn unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
@@ -220,7 +240,12 @@ impl Home {
             pings: Mutex::new(None),
             pings_in: tokio::sync::watch::channel(0).0,
             voice: Arc::default(),
+            last_test: Mutex::default(),
         }
+    }
+
+    pub(super) fn set_last_test(&self, id: &str, res: Value) {
+        self.last_test.lock().unwrap().insert(id.to_string(), res);
     }
 
     pub fn config(&self) -> HomeConfig {
@@ -400,7 +425,9 @@ impl Home {
         let (sent_bps, vanilla_bps) = st.now.get(id).copied().unwrap_or_default();
         let samples: Vec<Sample> = st.saved.samples.get(id).map(|q| q.iter().copied().collect()).unwrap_or_default();
         let open = st.live.get(id).map_or(0, |l| l.open.load(Ordering::Relaxed));
+        let players = st.live.get(id).map_or(0, |l| l.players.load(Ordering::Relaxed));
         drop(st);
+        let test = self.last_test.lock().unwrap().get(id).cloned();
         let address = self.players_address();
         let now = unix();
         json!({
@@ -414,6 +441,8 @@ impl Home {
             "relay_version": s.relay_version,
             "address": address,
             "open": open,
+            "players": players,
+            "test": test,
             "connection": conn,
             "total": total,
             "now": { "sent": sent_bps, "vanilla": vanilla_bps },
@@ -518,18 +547,9 @@ pub(super) async fn connect(cfg: &HomeConfig) -> Result<(Live, link::RelayHello)
     let (host, port) = relay_target(&cfg.address)?;
     let tcp = match tokio::time::timeout(Duration::from_secs(10), TcpStream::connect((host.as_str(), port))).await {
         Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            // In words a player can act on, not the system's error text.
-            let why = match e.kind() {
-                std::io::ErrorKind::ConnectionRefused => "nothing answers on that port. Is hopperd relay running there?".to_string(),
-                std::io::ErrorKind::TimedOut => "no answer".to_string(),
-                std::io::ErrorKind::NotFound => "that name isn't known".to_string(),
-                _ if e.raw_os_error() == Some(11001) => "that name isn't known".to_string(),
-                _ => e.to_string(),
-            };
-            return Err(format!("Can't reach the relay ({host}:{port}): {why}"));
-        }
-        Err(_) => return Err(format!("Can't reach the relay ({host}:{port}): no answer.")),
+        // In words an owner can act on, not the system's error text.
+        Ok(Err(e)) => return Err(format!("Can't reach the VPS at {host}:{port}: {}", super::health::connect_words(&e, port))),
+        Err(_) => return Err(format!("Can't reach the VPS at {host}:{port}: {}", super::health::no_answer(port))),
     };
     let _ = tcp.set_nodelay(true);
     let (tls, _) = dial::pinned_config(&Pin::Fingerprint(cfg.fingerprint.clone()), vec![link::ALPN.to_vec()]);
@@ -541,7 +561,7 @@ pub(super) async fn connect(cfg: &HomeConfig) -> Result<(Live, link::RelayHello)
             return Err(if cert {
                 "The relay's certificate doesn't match the fingerprint saved here.".into()
             } else {
-                format!("The relay didn't finish the secure connection: {e}")
+                format!("The VPS answered on port {port}, but the secure connection to the relay failed. Open the relay setup and press Run again to repair it.")
             });
         }
         Err(_) => return Err(format!("The port {port} is open but the relay didn't answer.")),
@@ -551,7 +571,8 @@ pub(super) async fn connect(cfg: &HomeConfig) -> Result<(Live, link::RelayHello)
     let exported: Option<super::voice::Exported> = tls.get_ref().1.export_keying_material([0u8; 64], super::voice::EXPORTER_LABEL, None).ok();
     let (mut live, hello) = link::home(tls, &cfg.key, Codec::quiet(), link::mux_config()).await.map_err(|e| match e {
         LinkError::Refused(m) => m,
-        e => format!("The relay connection failed: {e}"),
+        LinkError::Mux(e) => super::health::mux_words(&e),
+        _ => "The relay didn't finish connecting. Open the relay setup and press Run again to repair it.".into(),
     })?;
     live.exported = exported;
     Ok((live, hello))
@@ -566,7 +587,7 @@ fn routes(app: &App) -> Control {
 
 /// The server's voice mod points players at the relay (set with "Use the
 /// relay", B6).
-fn has_voice(app: &App, id: &str) -> bool {
+pub(super) fn has_voice(app: &App, id: &str) -> bool {
     let r = app.vps_forward.record(id);
     r.mode == hopper_core::hosting::proxy_forward::Mode::Relay && r.voice.as_ref().is_some_and(|v| v.kind.is_some())
 }
@@ -669,7 +690,10 @@ async fn run(app: &Arc<App>, live: Live, cfg: &HomeConfig) -> String {
         }
     };
     let why = tokio::select! {
-        r = done => format!("Lost the connection to the relay ({}).", r.map(|e| e.to_string()).unwrap_or_else(|e| e.to_string())),
+        r = done => match r {
+            Ok(e) => super::health::mux_words(&e),
+            Err(_) => "Lost the connection to the relay.".into(),
+        },
         why = control => why,
         _ = streams => "Lost the connection to the relay.".into(),
         _ = voice => "Lost the connection to the relay.".into(),
@@ -725,7 +749,7 @@ pub(super) async fn stream(app: &Arc<App>, s: mux::Stream) {
     });
     let mut van = VanillaEstimate::new();
     let (l1, l2) = (live.clone(), live.clone());
-    let r = super::pipe(
+    let pipe = super::pipe(
         far,
         s,
         move |d| {
@@ -737,8 +761,18 @@ pub(super) async fn stream(app: &Arc<App>, s: mux::Stream) {
         move |d| {
             l2.raw_up.fetch_add(d.len() as u64, Ordering::Relaxed);
         },
-    )
-    .await;
+    );
+    tokio::pin!(pipe);
+    let mut _player = Player(None);
+    let r = tokio::select! {
+        r = &mut pipe => r,
+        _ = tokio::time::sleep(PLAYER_AFTER) => {
+            live.players.fetch_add(1, Ordering::Relaxed);
+            _player = Player(Some(live.clone()));
+            pipe.await
+        }
+    };
+    drop(_player);
     if let Err(e) = r {
         log::debug!("relay: stream from {peer}: {e}");
     }
@@ -753,6 +787,7 @@ pub fn routes_api() -> Router<Arc<App>> {
         .route("/api/v1/vps-relay", get(get_config).put(put_config))
         .route("/api/v1/vps-relay/retry", post(retry))
         .route("/api/v1/servers/{id}/vps-relay", get(server_status))
+        .route("/api/v1/servers/{id}/vps-relay/test", post(super::health::test_route))
 }
 
 fn config_json(app: &App) -> Value {

@@ -98,7 +98,7 @@
   .wrap { flex-wrap: wrap; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .icon { padding: 3px 5px; }
-  .bad { color: var(--red); }
+  .bad { color: var(--red-text); }
   .warnline { gap: 6px; align-items: flex-start; color: var(--gold); }
   .warnline :global(svg) { flex: none; margin-top: 2px; }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }

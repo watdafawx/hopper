@@ -134,5 +134,5 @@
   .hook.off { opacity: 0.55; }
   .grow { flex: 1; min-width: 0; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bad { color: var(--red); display: flex; align-items: center; gap: 4px; }
+  .bad { color: var(--red-text); display: flex; align-items: center; gap: 4px; }
 </style>

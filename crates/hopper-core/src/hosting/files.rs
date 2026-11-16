@@ -304,6 +304,20 @@ pub fn list_trash(root: &Path) -> anyhow::Result<Vec<TrashItem>> {
     Ok(out)
 }
 
+/// Each item in the trash with the path of what it holds, for items from
+/// under `prefix` (a path relative to the server folder).
+pub fn trashed_under(root: &Path, prefix: &str) -> Vec<(TrashItem, PathBuf)> {
+    list_trash(root)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| t.path.starts_with(prefix))
+        .map(|t| {
+            let p = trash_root(root).join(&t.id).join(ITEM);
+            (t, p)
+        })
+        .collect()
+}
+
 /// `name` in `dir`, or "name (2).ext" etc. if taken.
 fn free_name(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);
