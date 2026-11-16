@@ -1108,6 +1108,57 @@ pub fn run_on_report(ops: Ops, server: &ServerInfo, inst_root: &Path) -> (Vec<Sy
     run_report(ops, &server.root, inst_root)
 }
 
+/// How one row of [`run_rows`] is going.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RowStep {
+    /// Under way: `done` of `total` (bytes for a copy, else one per file).
+    Moving { done: u64, total: u64 },
+    /// Through: `Err` with the first failure's reason.
+    Finished(Result<(), String>),
+}
+
+/// [`run_on_report`] for several list rows, one after another, telling
+/// `each` how each row (by its index in `rows`) is going, so every row can
+/// show its own progress. It is still one sync: one History entry for it
+/// all, and the mods' sources go along once at the end.
+pub fn run_rows(
+    rows: Vec<Ops>,
+    server: &ServerInfo,
+    inst_root: &Path,
+    each: &dyn Fn(usize, RowStep),
+) -> (Vec<SyncResult>, crate::sources::carry::CarryReport) {
+    if let Some(r) = &server.remote {
+        crate::hopperd::register(&server.root, r);
+    }
+    let server_root = &server.root;
+    let (mut up, down) = run_rows_only(rows, server_root, inst_root, each);
+    crate::history::record(server_root, "server", server_root, &up);
+    let mut report = crate::sources::carry::carry(inst_root, server_root, &crate::sources::carry::copied_jars(&up, server_root));
+    crate::history::record(server_root, "client", inst_root, &down);
+    report.merge(crate::sources::carry::carry(server_root, inst_root, &crate::sources::carry::copied_jars(&down, inst_root)));
+    up.extend(down);
+    (up, report)
+}
+
+/// [`run_rows`]' file work, without History: (the server side's results,
+/// the client side's).
+fn run_rows_only(rows: Vec<Ops>, server_root: &Path, inst_root: &Path, each: &dyn Fn(usize, RowStep)) -> (Vec<SyncResult>, Vec<SyncResult>) {
+    let (mut up, mut down) = (Vec::new(), Vec::new());
+    for (i, ops) in rows.into_iter().enumerate() {
+        let r = crate::sync::execute_watch(ops.up, server_root, &|s| {
+            if s.op.is_some() || s.total > 0 {
+                each(i, RowStep::Moving { done: s.done, total: s.total });
+            }
+        });
+        let d = crate::sync::execute(ops.down, inst_root);
+        let failed = r.iter().chain(&d).find(|r| !r.ok).map(|r| r.error.clone().unwrap_or_else(|| "It didn't go through.".into()));
+        each(i, RowStep::Finished(failed.map_or(Ok(()), Err)));
+        up.extend(r);
+        down.extend(d);
+    }
+    (up, down)
+}
+
 /// "Done: 12 files; 3 kept in .hopper-backups." or the failures.
 pub fn summary(results: &[SyncResult]) -> Result<String, Vec<String>> {
     let failed: Vec<String> = results
@@ -1207,6 +1258,40 @@ mod tests {
         let again = mods_with_off(&dir).unwrap();
         assert_eq!(again.iter().find(|m| m.file_name == "a-1.0.jar").unwrap().version, "9.9");
         assert_eq!(again.len(), got.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rows_run_one_after_another_and_each_says_how_it_went() {
+        let dir = std::env::temp_dir().join(format!("hopper-runrows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (pack, srv) = (dir.join("pack/mods"), dir.join("srv"));
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::create_dir_all(srv.join("mods")).unwrap();
+        std::fs::write(pack.join("a.jar"), vec![1u8; 300]).unwrap();
+        std::fs::write(pack.join("c.jar"), vec![2u8; 50]).unwrap();
+        let copy = |name: &str| Ops { up: vec![SyncOp::Copy { src: pack.join(name), dst: srv.join("mods").join(name) }], down: Vec::new() };
+        // The middle row's jar is gone from the pack: that row fails, the others go on.
+        let rows = vec![copy("a.jar"), copy("missing.jar"), copy("c.jar")];
+        let seen = std::sync::Mutex::new(Vec::new());
+        let (up, down) = run_rows_only(rows, &srv, &dir.join("pack"), &|i, s| seen.lock().unwrap().push((i, s)));
+        let seen = seen.into_inner().unwrap();
+        assert_eq!((up.len(), down.len()), (3, 0));
+        assert!(srv.join("mods/a.jar").is_file() && srv.join("mods/c.jar").is_file());
+        // Every row ends once, in order; the failed one says why.
+        let ends: Vec<(usize, bool)> = seen.iter().filter_map(|(i, s)| match s {
+            RowStep::Finished(r) => Some((*i, r.is_ok())),
+            _ => None,
+        }).collect();
+        assert_eq!(ends, [(0, true), (1, false), (2, true)]);
+        assert!(matches!(&seen.iter().find(|(i, s)| *i == 1 && matches!(s, RowStep::Finished(_))).unwrap().1, RowStep::Finished(Err(e)) if !e.is_empty()));
+        // A row's progress is its own: its total is its jar's size, and it
+        // comes before that row ends.
+        let first = seen.iter().position(|(i, s)| *i == 0 && matches!(s, RowStep::Moving { .. })).unwrap();
+        let end0 = seen.iter().position(|(i, s)| *i == 0 && matches!(s, RowStep::Finished(_))).unwrap();
+        assert!(first < end0);
+        assert!(seen.iter().any(|(i, s)| *i == 0 && *s == RowStep::Moving { done: 300, total: 300 }), "{seen:?}");
+        assert!(seen.iter().any(|(i, s)| *i == 2 && matches!(s, RowStep::Moving { total: 50, .. })), "{seen:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
