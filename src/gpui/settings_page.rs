@@ -23,6 +23,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use hopper::certpin::Subject as CertSubject;
 use std::collections::{HashMap, HashSet};
 
 mod minecraft;
@@ -206,10 +207,10 @@ const ENTRIES: &[Entry] = &[
     e(C::Accounts, "account", "Microsoft accounts", "Switch which one starts your games, add another, or sign one out.", "sign in login microsoft profile skin"),
     e(C::Folders, "instances-root", "Instances folder", "Where your instances live. CurseForge's Instances folder works.", "path directory library"),
     e(C::Folders, "launcher-dir", "Launcher folder", "The folder with minecraft.exe. CurseForge keeps one in Curse\\Install.", "minecraft.exe mojang path directory"),
-    e(C::Folders, "keep-actions", "Keep the last", "Old files from updates, removals and syncs are kept so you can undo. The last this many actions always stay, however old. After each new backup, older ones go to the Recycle Bin; backups from before wait for Clean up in an instance's Backups.", "backups undo hopper-backups disk space clean up retention keep"),
+    e(C::Folders, "keep-actions", "Keep the last", "Old files from updates, removals and syncs are kept so you can undo. The last this many actions always stay, however old. After each new backup, older ones are deleted for good; backups from before wait for Clean up in an instance's Backups.", "backups undo hopper-backups disk space clean up retention keep"),
     e(C::Folders, "keep-days", "And anything newer than", "Actions from these last days stay, however many.", "backups undo hopper-backups disk space clean up retention days"),
     e(C::Folders, "keep-gb", "Up to", "Per instance. Past this the oldest go first; 0 is no limit. Snapshots you take and world backups stay until you delete them.", "backups undo hopper-backups disk space clean up retention size limit gb"),
-    e(C::Folders, "recently-deleted", "Recently deleted", "Deleted instances, worlds, backups and servers wait here for 7 days, on the drive they were on, then go for good.", "recently deleted trash recycle bin restore undo undelete delete permanent skip disk space empty"),
+    e(C::Folders, "recently-deleted", "Recently deleted", "Deleted instances, worlds, backups, servers, screenshots, mods and logs wait here for 7 days, on the drive they were on, then go for good.", "recently deleted trash recycle bin restore undo undelete delete permanent skip disk space empty"),
     e(C::Launchers, "launchers", "Other launchers", "Found on this PC, and folders you add. Each one's instances can be managed in Hopper.", "modrinth prism multimc atlauncher gdlauncher ftb import manage"),
     e(C::Java, "launch-with", "Launch with", "Hopper starts games itself with your Microsoft sign-in, like CurseForge. Mojang's launcher opens instead and you press Play there.", "launcher native mojang direct"),
     e(C::Java, "minimize", "Minimize while playing", "Hide Hopper while a game runs, and bring it back when it closes.", "minimize window hide"),
@@ -268,7 +269,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Servers, "files-user", "User name", "Pterodactyl: your panel user name, a dot, and the server's short id (shown under SFTP details).", "user login name"),
     e(C::Servers, "files-pass", "Password", "Kept in Windows Credential Manager, not in settings.json. With a key file, the key's passphrase (if any).", "password secret passphrase"),
     e(C::Servers, "files-key", "Key file", "Sign in with an SSH private key instead of a password.", "ssh key private id_ed25519 id_rsa"),
-    e(C::Servers, "files-cert", "Self-signed certificate", "Accept a certificate the FTP server makes for itself.", "tls ssl certificate ftps"),
+    e(C::Servers, "files-cert", "Self-signed certificate", "Accept a certificate the FTP server makes for itself, once you trust it. Hopper then connects only while it has that one.", "tls ssl certificate ftps fingerprint"),
     e(C::Servers, "files-plain", "Not encrypted", "Plain FTP has no encryption.", "ftp insecure plain"),
     e(C::Servers, "files-folder", "Folder", "A server's folder, or a folder of server folders. Empty: the folder you land in.", "folder path directory root"),
     e(C::Servers, "files-test", "Connection", "Whether the server answers with these details. SFTP remembers the server's key the first time and refuses a different one later.", "test connect host key fingerprint"),
@@ -500,12 +501,13 @@ pub struct SettingsPage {
     panel_form_ss: bool,
     /// Remove was clicked once on this panel (asks again).
     panel_removing: Option<String>,
-    /// "Trust this panel's certificate?": (panel id, the fingerprint it
-    /// showed), asked before its API key is ever sent.
-    panel_cert_offer: Option<(String, String)>,
-    /// Panels whose certificate changed and whose "I changed it myself"
-    /// box is ticked.
-    panel_cert_ticked: HashSet<String>,
+    /// "Trust this certificate?" for panels and server files that make their
+    /// own: id -> the fingerprint it showed, asked before the API key or
+    /// password is ever sent.
+    cert_offers: HashMap<String, String>,
+    /// Ones whose certificate changed and whose "I changed it myself" box is
+    /// ticked.
+    cert_ticked: HashSet<String>,
     /// Server files over SFTP / FTP: the form and its state, like the panels'.
     site_form: sites::SiteForm,
     site_form_open: bool,
@@ -752,8 +754,8 @@ impl SettingsPage {
             panel_form_kind: "crafty".into(),
             panel_form_ss: true,
             panel_removing: None,
-            panel_cert_offer: None,
-            panel_cert_ticked: HashSet::new(),
+            cert_offers: HashMap::new(),
+            cert_ticked: HashSet::new(),
             site_form,
             site_form_open: false,
             site_editing: None,
@@ -999,9 +1001,9 @@ impl SettingsPage {
         let old = self.store.read(cx).settings().panels.iter().find(|p| p.id == id).cloned();
         let fresh = old.as_ref().is_none_or(|p| p.url.trim() != url || p.self_signed != ss);
         if fresh {
-            hopper::panel::forget_cert(&id);
-            self.panel_cert_offer = None;
-            self.panel_cert_ticked.remove(&id);
+            hopper::certpin::forget(CertSubject::Panel, &id);
+            self.cert_offers.remove(&id);
+            self.cert_ticked.remove(&id);
         }
         self.store.update(cx, |s, cx| {
             s.update_settings(
@@ -1047,7 +1049,7 @@ impl SettingsPage {
         if p.self_signed && p.cert_ask && p.cert_pin.trim().is_empty() && hopper::panel::token_for(&id).is_some() {
             self.panel_testing.insert(id.clone());
             self.panel_tests.remove(&id);
-            self.panel_cert_offer = None;
+            self.cert_offers.remove(&id);
             cx.notify();
             let url = p.url.clone();
             cx.spawn(async move |this, cx| {
@@ -1055,7 +1057,9 @@ impl SettingsPage {
                 this.update(cx, |this, cx| {
                     this.panel_testing.remove(&id);
                     match r {
-                        Ok(Some(fp)) => this.panel_cert_offer = Some((id, fp)),
+                        Ok(Some(fp)) => {
+                            this.cert_offers.insert(id, fp);
+                        }
                         // An authority signs it: the usual check lets it in.
                         Ok(None) => this.connect_panel(id, close, cx),
                         Err(e) => {
@@ -1072,12 +1076,19 @@ impl SettingsPage {
         self.connect_panel(id, close, cx);
     }
 
-    /// Trusts certificate `fp` for panel `id` (its first, or a new one after
-    /// a change), then connects.
+    /// Trusts certificate `fp` for `id` (its first, or a new one after a
+    /// change), then connects.
+    fn trust_cert(&mut self, who: CertSubject, id: String, fp: String, cx: &mut Context<Self>) {
+        match who {
+            CertSubject::Panel => self.trust_panel_cert(id, fp, cx),
+            CertSubject::Files => self.trust_site_cert(id, fp, cx),
+        }
+    }
+
     fn trust_panel_cert(&mut self, id: String, fp: String, cx: &mut Context<Self>) {
-        hopper::panel::forget_cert(&id);
-        self.panel_cert_offer = None;
-        self.panel_cert_ticked.remove(&id);
+        hopper::certpin::forget(CertSubject::Panel, &id);
+        self.cert_offers.remove(&id);
+        self.cert_ticked.remove(&id);
         let id2 = id.clone();
         self.store.update(cx, |s, cx| {
             s.update_settings(
@@ -1661,7 +1672,14 @@ impl SettingsPage {
                 match r {
                     Ok(done) => {
                         store.update(cx, |s, cx| match done.kind {
-                            hopper::recently_deleted::Kind::Instance => s.reload_instance(&done.to, cx),
+                            hopper::recently_deleted::Kind::Instance => {
+                                // Back in its group, paired with its servers.
+                                if let Some(kept) = &done.settings {
+                                    s.update_settings(|st| st.restore_instance_settings(&done.to, kept), cx);
+                                }
+                                s.reload_instance(&done.to, cx)
+                            }
+                            hopper::recently_deleted::Kind::File if s.instance(&done.to).is_some() => s.reload_instance(&done.to, cx),
                             hopper::recently_deleted::Kind::Server => s.rediscover_servers(),
                             _ => {}
                         });
@@ -1846,8 +1864,8 @@ impl SettingsPage {
         let form_id = self.panel_editing.clone().unwrap_or_default();
         let form_testing = self.panel_editing.is_some() && self.panel_testing.contains(&form_id);
         let key_typed = !self.panel_token.read(cx).value().trim().is_empty();
-        let card = if form_testing { None } else { self.panel_editing.as_ref().and_then(|id| self.cert_card(id, cx)) };
-        let asking = self.panel_cert_offer.as_ref().is_some_and(|(o, _)| Some(o) == self.panel_editing.as_ref());
+        let card = if form_testing { None } else { self.panel_editing.as_ref().and_then(|id| self.cert_card(id, CertSubject::Panel, cx)) };
+        let asking = self.panel_editing.as_ref().is_some_and(|id| self.cert_offers.contains_key(id));
         // The certificate card spans the row under it; the note column is
         // too narrow for it.
         let result: Option<AnyElement> = match (&card, self.panel_editing.as_ref().and_then(|id| self.panel_tests.get(id))) {
@@ -1983,16 +2001,19 @@ impl SettingsPage {
         ]
     }
 
-    /// What to ask about panel `id`'s certificate, if anything: trust it
-    /// (the first connect) or trust a new one (it changed, with a tick box
-    /// to confirm). Fingerprints show whole, to compare with the panel's.
-    fn cert_card(&self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// What to ask about `id`'s certificate (a panel's or an FTPS server's),
+    /// if anything: trust it (the first connect) or trust a new one (it
+    /// changed, with a tick box to confirm). Fingerprints show whole, to
+    /// compare with the ones the server shows.
+    pub(super) fn cert_card(&self, id: &str, who: CertSubject, cx: &mut Context<Self>) -> Option<AnyElement> {
         use gpui_kit::component::alert::Alert;
         use gpui_kit::component::checkbox::Checkbox;
         let mono = cx.theme().mono_font_family.clone();
         let fp_line = |text: String, cx: &App| widgets::caption(text, cx).text_xs().font_family(mono.clone());
-        let key = |what: &str| ElementId::Name(format!("panel-cert-{what}:{id}").into());
-        if let Some((_, fp)) = self.panel_cert_offer.as_ref().filter(|(o, _)| o == id) {
+        let (thing, secret) = (who.what(), who.secret());
+        let prefix = if who == CertSubject::Panel { "panel" } else { "files" };
+        let key = |what: &str| ElementId::Name(format!("{prefix}-cert-{what}:{id}").into());
+        if let Some(fp) = self.cert_offers.get(id) {
             let (id2, fp2) = (id.to_string(), fp.clone());
             return Some(
                 v_flex()
@@ -2000,9 +2021,9 @@ impl SettingsPage {
                     .child(
                         Alert::warning(
                             key("offer"),
-                            "The panel made its own certificate, so Hopper can't check it the usual way. If this matches the one your panel shows, trust it. Hopper then connects to this panel only while it has this certificate.",
+                            format!("The {thing} made its own certificate, so Hopper can't check it the usual way. If this matches the one your {thing} shows, trust it. Hopper then connects to this {thing} only while it has this certificate."),
                         )
-                        .title("Trust this panel's certificate?")
+                        .title(format!("Trust this {thing}'s certificate?"))
                         // Same as the changed card: readable text, the
                         // colour on the icon and the border.
                         .text_color(cx.theme().foreground)
@@ -2015,14 +2036,14 @@ impl SettingsPage {
                                 .small()
                                 .primary()
                                 .label("Trust and connect")
-                                .on_click(cx.listener(move |this, _, _, cx| this.trust_panel_cert(id2.clone(), fp2.clone(), cx))),
+                                .on_click(cx.listener(move |this, _, _, cx| this.trust_cert(who, id2.clone(), fp2.clone(), cx))),
                         ),
                     )
                     .into_any_element(),
             );
         }
-        let (was, now) = hopper::panel::cert_changed(id)?;
-        let ticked = self.panel_cert_ticked.contains(id);
+        let (was, now) = hopper::certpin::cert_changed(who, id)?;
+        let ticked = self.cert_ticked.contains(id);
         let (id2, id3) = (id.to_string(), id.to_string());
         Some(
             v_flex()
@@ -2030,9 +2051,9 @@ impl SettingsPage {
                 .child(
                     Alert::error(
                         key("changed"),
-                        "Hopper stopped before sending the API key. If you didn't reinstall the panel or change its certificate, someone may be listening in.",
+                        format!("Hopper stopped before sending the {secret}. If you didn't reinstall the {thing} or change its certificate, someone may be listening in."),
                     )
-                    .title("This panel's certificate changed")
+                    .title(format!("This {thing}'s certificate changed"))
                     // The kit's red text on its red tint measures under
                     // 4.5:1; the red stays on the icon and the border.
                     .text_color(cx.theme().foreground)
@@ -2042,13 +2063,13 @@ impl SettingsPage {
                 .child(fp_line(format!("Now {now}"), cx))
                 .child(
                     Checkbox::new(key("tick"))
-                        .label("I changed the panel's certificate myself")
+                        .label(format!("I changed the {thing}'s certificate myself"))
                         .checked(ticked)
                         .on_click(cx.listener(move |this, on: &bool, _, cx| {
                             if *on {
-                                this.panel_cert_ticked.insert(id2.clone());
+                                this.cert_ticked.insert(id2.clone());
                             } else {
-                                this.panel_cert_ticked.remove(&id2);
+                                this.cert_ticked.remove(&id2);
                             }
                             cx.notify();
                         })),
@@ -2061,7 +2082,7 @@ impl SettingsPage {
                             .label("Trust the new certificate")
                             .disabled(!ticked)
                             .when(!ticked, |b| b.tooltip("Tick the box first"))
-                            .on_click(cx.listener(move |this, _, _, cx| this.trust_panel_cert(id3.clone(), now.clone(), cx))),
+                            .on_click(cx.listener(move |this, _, _, cx| this.trust_cert(who, id3.clone(), now.clone(), cx))),
                     ),
                 )
                 .into_any_element(),
@@ -2080,13 +2101,13 @@ impl SettingsPage {
             _ if p.off => widgets::pill("Off", theme.muted_foreground, false),
             _ if testing => widgets::pill("Connecting", theme.muted_foreground, false),
             // The background check can find it before any Test.
-            _ if hopper::panel::cert_changed(&p.id).is_some() => widgets::pill("Can't connect", theme.danger, false),
+            _ if hopper::certpin::cert_changed(CertSubject::Panel, &p.id).is_some() => widgets::pill("Can't connect", theme.danger, false),
             Some(Ok(_)) => widgets::pill("Connected", theme.success, false),
             Some(Err(_)) => widgets::pill("Can't connect", theme.danger, false),
             None if !has_key => widgets::pill("No API key", theme.warning, false),
             None => widgets::pill("Not tested", theme.muted_foreground, false),
         };
-        let card = if testing || p.off { None } else { self.cert_card(&p.id, cx) };
+        let card = if testing || p.off { None } else { self.cert_card(&p.id, CertSubject::Panel, cx) };
         let detail: Option<AnyElement> = match (card, test) {
             _ if testing => None,
             (Some(card), _) => Some(card),
@@ -2198,8 +2219,9 @@ impl SettingsPage {
         self.panel_token.update(cx, |t, cx| t.set_value(String::new(), window, cx));
         self.notes.remove(&Text::PanelUrl);
         self.panel_form = false;
-        self.panel_editing = None;
-        self.panel_cert_offer = None;
+        if let Some(id) = self.panel_editing.take() {
+            self.cert_offers.remove(&id);
+        }
         cx.notify();
     }
 
@@ -2217,7 +2239,7 @@ impl SettingsPage {
             return;
         }
         self.panel_tests.remove(&id);
-        hopper::panel::forget_cert(&id);
+        hopper::certpin::forget(CertSubject::Panel, &id);
         self.store.update(cx, |s, cx| {
             s.update_settings(|st| st.panels.retain(|p| p.id != id), cx);
             s.rediscover_servers();

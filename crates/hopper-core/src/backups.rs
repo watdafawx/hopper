@@ -1516,19 +1516,6 @@ pub fn free_space(root: &Path) -> (u64, u64) {
     (freed, kept)
 }
 
-/// Sends a whole backup to the Recycle Bin (or deletes it on a network
-/// drive, which has none). `permanent` skips the Recycle Bin.
-pub fn delete(set: &Set, permanent: bool) -> anyhow::Result<()> {
-    if permanent {
-        crate::instance_ops::remove_for_good(&set.dir)?;
-    } else if crate::instance_ops::is_remote_drive(&set.dir) {
-        fs::remove_dir_all(&set.dir)?;
-    } else {
-        trash::delete(&set.dir)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

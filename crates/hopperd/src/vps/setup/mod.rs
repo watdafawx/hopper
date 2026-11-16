@@ -257,10 +257,31 @@ async fn run_check(app: &Arc<App>, ports: (u16, u16)) -> Result<Value, String> {
     let os = plan::parse_os_release(&c.exec("cat /etc/os-release", None, SHORT).await?.out);
     let arch_raw = c.exec("uname -m", None, SHORT).await?.out;
     let arch = plan::parse_arch(&arch_raw);
-    match (plan::os_supported(&os), arch) {
-        (Ok(name), Some(a)) => rows.push(row("system", true, format!("{name} · {a}"))),
-        (Err(e), _) => rows.push(row("system", false, e)),
-        (Ok(name), None) => rows.push(row("system", false, format!("{name} on {} isn't supported: the relay runs on x86_64 (x64) and aarch64 (arm64).", arch_raw.trim()))),
+    let unsupported = match (plan::os_supported(&os), arch) {
+        (Ok(name), Some(a)) => {
+            rows.push(row("system", true, format!("{name} · {a}")));
+            false
+        }
+        (Err(e), _) => {
+            rows.push(row("system", false, e));
+            true
+        }
+        (Ok(name), None) => {
+            rows.push(row("system", false, format!("{name} on {} isn't supported: the relay runs on x86_64 (x64) and aarch64 (arm64).", arch_raw.trim())));
+            true
+        }
+    };
+    // Another system: nothing else is worth checking (or fixing) there, so
+    // the setup stops with that one row and says what to rent instead.
+    if unsupported {
+        c.ssh.close().await;
+        let commands = c.log.lock().unwrap().clone();
+        let res = json!({
+            "ok": false, "stop": true, "rows": rows, "os": os.pretty, "arch": arch,
+            "ports": { "game": ports.0, "tunnel": ports.1 }, "commands": commands, "at": unix(),
+        });
+        *app.vps_setup.check.lock().unwrap() = Some(res.clone());
+        return Ok(res);
     }
     let mem = plan::parse_meminfo(&c.exec("cat /proc/meminfo", None, SHORT).await?.out).unwrap_or(0);
     let cache = CodecConfig::for_memory(mem).cache_bytes;
@@ -970,6 +991,17 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/vps-relay/setup/forget", post(forget))
 }
 
+/// The ports the setup offers. A relay that's already set up keeps its own:
+/// "Run again" repairs it, and the last check (which knew them) is gone
+/// after the panel restarts, so the defaults would move it to other ports.
+/// The tunnel port is in the saved address; the players' port is what the
+/// relay said when it last connected.
+pub(super) fn suggested_ports(address: &str, game_port: u16) -> Value {
+    let tunnel = address.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()).filter(|p| *p != 0).unwrap_or(TUNNEL_PORT);
+    let game = if game_port != 0 { game_port } else { GAME_PORT };
+    json!({ "game": game, "tunnel": tunnel })
+}
+
 fn login_json(l: &Login) -> Value {
     if l.host.is_empty() {
         return Value::Null;
@@ -981,6 +1013,7 @@ fn login_json(l: &Login) -> Value {
 fn setup_json(app: &App) -> Value {
     let l = app.vps_setup.login();
     let cfg = app.vps.config();
+    let status = app.vps.status();
     json!({
         "login": login_json(&l),
         "new_public": l.new_public,
@@ -988,7 +1021,7 @@ fn setup_json(app: &App) -> Value {
         "run": app.vps_setup.run.lock().unwrap().clone(),
         "version": version(),
         "source": if test_binary().is_some() { "file" } else { "release" },
-        "ports": { "game": GAME_PORT, "tunnel": TUNNEL_PORT },
+        "ports": suggested_ports(&cfg.address, status.game_port),
         "paired": { "address": cfg.address, "fingerprint": cfg.fingerprint, "servers": cfg.servers, "enabled": cfg.enabled, "public_address": cfg.public_address },
         "status": app.vps.status(),
     })

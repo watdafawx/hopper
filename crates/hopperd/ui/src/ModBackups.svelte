@@ -278,7 +278,7 @@
     busy = true;
     try {
       const r = await post(`${base}/mod-backups/clean`, {});
-      say(r.removed ? `Cleared ${r.removed} old History entr${r.removed === 1 ? 'y' : 'ies'} to the server's trash (${bytes(r.freed)})` : 'Nothing to clean up');
+      say(r.removed ? `Deleted ${r.removed} old History entr${r.removed === 1 ? 'y' : 'ies'} for good (${bytes(r.freed)})` : 'Nothing to clean up');
       await load();
     } catch (e) {
       say(e.message, true);
@@ -465,7 +465,7 @@
     <span class="sp"></span>
     {#if u}
       <span class="tiny muted">Keeps the last {u.keep_actions} actions and {u.keep_days} days</span>
-      <button class="btn sm" disabled={busy || !u.removes} title="Clears History older than the rules in Settings › Panel folder (to the server's trash, Files › Trash). The panel does this by itself as History grows, but leaves older entries for you. World backups stay." onclick={clean}>{u.frees ? `Clean up · frees ${bytes(u.frees)}` : 'Clean up'}</button>
+      <button class="btn sm" disabled={busy || !u.removes} title="Deletes History older than the rules in Settings › Panel folder, for good. The panel does this by itself as History grows, but leaves older entries for you. World backups stay." onclick={clean}>{u.frees ? `Clean up · frees ${bytes(u.frees)}` : 'Clean up'}</button>
     {/if}
   </div>
 </div>
@@ -501,7 +501,7 @@
   .ent.nested { padding-left: 42px; }
   .t { gap: 6px; min-width: 0; }
   .ch { flex: none; font-weight: 500; }
-  .ch.red { color: var(--red); }
+  .ch.red { color: var(--red-text); }
   .ch.blue { color: var(--blue, #7fc3e8); }
   .ch.warn { color: var(--amber, #e0b04a); }
   .ch.pri { color: var(--accent); }
@@ -518,7 +518,7 @@
   /* A pack update's counts, tinted like the change they count. The text leans
      toward the page's text colour: raw yellow or red on a pale tint is too faint to read. */
   .cnt { flex: none; --k: var(--subtle); }
-  .cnt.red { --k: var(--red); background: var(--red-dim); }
+  .cnt.red { color: var(--ink-red); background: var(--red-dim); }
   .cnt.blue { --k: var(--blue); background: var(--blue-dim); }
   .cnt.warn { --k: var(--gold); background: var(--gold-dim); }
   .cnt.green { --k: var(--green); background: var(--green-dim); }

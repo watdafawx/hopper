@@ -159,12 +159,12 @@
   .it { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 5px 2px; font-size: 12.5px; }
   .st { width: 16px; flex: none; display: grid; place-items: center; color: var(--muted); }
   .st.ok { color: var(--green); }
-  .st.no { color: var(--red); }
+  .st.no { color: var(--red-text); }
   .nm { flex: none; max-width: 45%; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .why { flex: 1; min-width: 0; text-align: right; font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Why it failed or was skipped is the point of the row: wrap, never cut. */
   .it.bad .why, .it.skip .why { white-space: normal; }
-  .it.bad .why { color: var(--red); }
+  .it.bad .why { color: var(--red-text); }
   .it.skip .nm { color: var(--subtle); }
   .tk { gap: 8px; align-items: center; }
   .tk input { accent-color: var(--acc); }

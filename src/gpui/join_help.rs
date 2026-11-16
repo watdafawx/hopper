@@ -474,7 +474,7 @@ pub fn card<V: 'static>(store: &Entity<Store>, root: &Path, p: &JoinProblem, cx:
 
 /// The warning under an instance's header: its paired server would turn
 /// it away (or ask for mods it lacks). Closed per set of differences.
-pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Context<V>) -> Option<AnyElement> {
+pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Context<V>) -> Option<crate::notice_slot::Notice> {
     store.update(cx, |s, _| s.want_pre_join(root));
     let s = store.read(cx);
     let all = s.pre_joins(root);
@@ -488,9 +488,10 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
     let add_job = s.server_add_job(&p.server_root);
     let online = crate::rigsync::server_online(s, None, &p.server_root);
     let pack_nf = s.instance(root).and_then(|i| i.loader.strip_prefix("neoforge-").map(str::to_string));
-    let theme = cx.theme().clone();
-    let color = theme.warning;
     let key = hopper::settings::notice_key(&root.to_string_lossy(), "pre-join", &p.check.signature());
+    if crate::notice_slot::hidden(store, &key, cx) {
+        return None;
+    }
     let title = if p.check.loader.is_some() {
         format!("{} will turn this pack away", p.server)
     } else {
@@ -617,19 +618,20 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
         sentence(parts).into_any_element()
     });
     let (st, r, sr) = (store.clone(), root.to_path_buf(), p.server_root.clone());
-    let update = Button::new("prejoin-update")
-        .small()
-        .primary()
-        .icon(IconName::ServerCog)
-        .label(match (updating, several) {
-            (true, _) => "Updating…".to_string(),
-            // With several servers, which one it updates.
-            (false, true) => format!("Update {}", p.server),
-            (false, false) => "Update server".to_string(),
-        })
-        .loading(updating)
-        .tooltip("Gives the server this pack's NeoForge and mods (it asks first)")
-        .on_click(move |_, window, cx| update_server(&st, &r, &sr, window, cx));
+    let server = p.server.clone();
+    let update = move |fit: crate::notice_slot::Fit| {
+        crate::notice_slot::main_button(Button::new("prejoin-update").small(), fit)
+            .icon(IconName::ServerCog)
+            .label(match (updating, several && !fit.narrow) {
+                (true, _) => "Updating…".to_string(),
+                // With several servers, which one it updates.
+                (false, true) => format!("Update {server}"),
+                (false, false) => "Update server".to_string(),
+            })
+            .loading(updating)
+            .tooltip("Gives the server this pack's NeoForge and mods (it asks first)")
+            .on_click(move |_, window, cx| update_server(&st, &r, &sr, window, cx))
+    };
     let matcher = p.check.loader.as_ref().filter(|_| pack_nf.is_some()).map(|(_, snf)| {
         let (st, r, nf) = (store.clone(), root.to_path_buf(), snf.clone());
         Button::new("prejoin-match")
@@ -649,25 +651,26 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
             let root = sr.clone();
             st.update(cx, |_, cx| cx.emit(StoreEvent::ShowServer { root, compare: true }));
         });
-    // The lines above and below the "Only in the pack" row.
+    // The first line is the strip's subject; the rest, with the "Only in
+    // the pack" row, is under Details.
+    let subject = detail.first().cloned().unwrap_or_default();
     let (head, tail) = match only_at {
         Some(at) => (detail[..at].to_vec(), detail[at + 1..].to_vec()),
         None => (detail, Vec::new()),
     };
     let lines = |v: Vec<String>| v.into_iter().map(|l| widgets::caption(l, cx).text_xs().whitespace_normal()).collect::<Vec<_>>();
-    let body = widgets::notice_bar(color, IconName::TriangleAlert, cx)
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .child(div().text_sm().font_medium().child(title.clone()))
-                .children(lines(head))
-                .when_some(only_row, |d, row| d.child(row))
-                .children(lines(tail)),
-        )
-        .child(h_flex().flex_none().gap_2().child(update).children(matcher).child(details));
-    widgets::closable_notice(body, key, widgets::Closed::Chip, title, color, store, cx).map(|e| {
-        // A closed notice's chip needs the same room as the bar.
-        div().mx_6().mt_3().child(e).into_any_element()
-    })
+    let body = v_flex()
+        .gap_0p5()
+        .children(lines(head))
+        .when_some(only_row, |d, row| d.child(row))
+        .children(lines(tail));
+    let mut n = crate::notice_slot::Notice::new("pre-join", crate::notice_slot::Tier::Choice, title)
+        .icon(IconName::ServerCog)
+        .subject(subject)
+        .primary(update)
+        .details(body);
+    if let Some(m) = matcher {
+        n = n.action(m);
+    }
+    Some(n.action(details).dismiss_key(store, key))
 }

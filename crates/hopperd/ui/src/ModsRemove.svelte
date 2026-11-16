@@ -115,7 +115,7 @@
   .box { width: min(460px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 18px; max-height: calc(100vh - var(--dialog-top) - 16px); }
   .box h3 { margin: 0; font-size: 15px; font-weight: 600; }
   .need { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: var(--radius); border: 1px solid #ef444480; background: var(--red-dim); }
-  .nh { gap: 6px; color: var(--red); font-weight: 600; }
+  .nh { gap: 6px; color: var(--red-text); font-weight: 600; }
   .libs { gap: 6px; min-height: 0; }
   .ol { overflow: auto; min-height: 0; max-height: 240px; display: flex; flex-direction: column; }
   .orow { gap: 8px; padding: 4px 6px; border-radius: var(--radius); cursor: pointer; font-size: 12.5px; }

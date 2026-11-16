@@ -216,7 +216,7 @@
   .g2 { gap: 2px; min-width: 0; }
   .grow { flex: 1; min-width: 0; }
   .err { gap: 8px; align-items: flex-start; }
-  .red { color: var(--red); }
+  .red { color: var(--red-text); }
   .acc { color: var(--acc); }
   .gold { color: var(--gold); }
   .loading { gap: 8px; justify-content: center; padding: 24px 0; }

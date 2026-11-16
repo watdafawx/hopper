@@ -647,7 +647,7 @@
   .upd { width: 7px; height: 7px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 2px var(--acc-dim); flex: none; }
   /* A server being made: desktop's making row. */
   .making.ready { background: #22c55e14; }
-  .mk.bad { color: var(--red); }
+  .mk.bad { color: var(--red-text); }
   .mk.ok { color: var(--green); }
   .mkbar { margin-left: 44px; height: 3px; border-radius: 2px; background: var(--line2); overflow: hidden; }
   .mkbar i { display: block; height: 100%; background: var(--acc); }

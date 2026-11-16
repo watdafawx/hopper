@@ -122,9 +122,9 @@
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .vchip { display: inline-flex; align-items: center; gap: 4px; max-width: 240px; min-width: 0; padding: 1px 7px; border-radius: var(--radius-sm); background: var(--acc-dim); font-size: 11.5px; color: var(--ink-acc); flex: none; }
   .to { color: var(--acc); }
-  .prob { display: flex; align-items: center; gap: 4px; color: var(--red); margin: 2px 0 0 52px; min-width: 0; }
+  .prob { display: flex; align-items: center; gap: 4px; color: var(--red-text); margin: 2px 0 0 52px; min-width: 0; }
   .kept { display: flex; align-items: center; gap: 4px; margin: 2px 0 0 52px; }
-  .redt { color: var(--red); gap: 6px; }
+  .redt { color: var(--red-text); gap: 6px; }
   .wrap { flex-wrap: wrap; }
   .notes { margin: 6px 0 2px 52px; background: var(--base); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 10px; max-height: 240px; overflow: auto; overflow-wrap: anywhere; }
   .end { justify-content: flex-end; }

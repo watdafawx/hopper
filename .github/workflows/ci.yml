@@ -21,6 +21,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Library tests
         run: cargo test -p hopper-core --lib
+      - name: Desktop speed budget (headless)
+        run: cargo test -p hopper-core --test desktop_speed -- --ignored --nocapture
       - name: Build the app
         run: cargo build --bin hopper
       - uses: pnpm/action-setup@v4
@@ -62,6 +64,8 @@ jobs:
         run: cargo test -p hopperd
       - name: Build Hopper Server
         run: cargo build -p hopperd
+      - name: Desktop speed budget (headless)
+        run: cargo test -p hopper-core --test desktop_speed -- --ignored --nocapture
 
   # Hopper desktop on Linux and macOS. Pushes and pull requests only check
   # that it compiles (fast); the nightly run and a manual run do the full

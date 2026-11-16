@@ -488,10 +488,11 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     });
     app.rescan();
     autoupdate::start(app.clone());
-    // Old backups go to the server's trash, not away for good. At start
-    // nothing goes: Mods › Backups shows what Clean up would remove.
+    // Old backups past the rules go for good (the owner chose how many to
+    // keep). At start nothing goes: Mods › Backups shows what Clean up
+    // would remove. Deleted logs go to the server's trash.
     hopper_core::retention::set_policy(cfg.backup_retention);
-    hopper_core::retention::set_disposer(mods_more::to_server_trash);
+    hopper_core::crashfiles::set_disposer(mods_more::to_server_trash);
     // Read every server's mod jars once in the background; the Mods tab
     // then opens from the scan cache instead of opening hundreds of jars.
     {

@@ -12,6 +12,7 @@ pub mod bisect;
 pub mod bookmarks;
 pub mod browse;
 pub mod browser;
+pub mod certpin;
 pub mod cf;
 pub mod cf_instance;
 pub mod cfcomments;

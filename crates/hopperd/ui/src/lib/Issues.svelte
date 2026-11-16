@@ -188,5 +188,5 @@
   .cc { display: inline-flex; align-items: center; gap: 4px; flex: none; }
   .foot { gap: 8px; margin-top: 4px; align-items: center; }
   .sp { flex: 1; }
-  .err { color: var(--red); }
+  .err { color: var(--red-text); }
 </style>

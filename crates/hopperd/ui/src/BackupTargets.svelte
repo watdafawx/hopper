@@ -267,7 +267,7 @@
   .hook { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
   .hook.off { opacity: 0.55; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .err { color: var(--red); display: flex; align-items: center; gap: 4px; }
+  .err { color: var(--red-text); display: flex; align-items: center; gap: 4px; }
   .keybox { background: var(--acc-dim); border: 1px solid #f9731640; border-radius: var(--radius-lg); padding: 10px; display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px; }
   .key { background: var(--base); padding: 4px 8px; border-radius: var(--radius-sm); font-size: 11.5px; word-break: break-all; }
   .end { justify-content: flex-end; }

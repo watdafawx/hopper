@@ -95,5 +95,5 @@
   .og { padding: 6px 0; border-bottom: 1px solid var(--line); }
   .new { border-top: 1px solid var(--line); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
   .mg { border-top: 1px solid var(--line); padding-top: 10px; gap: 12px; }
-  .err { color: var(--red); }
+  .err { color: var(--red-text); }
 </style>

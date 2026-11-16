@@ -2,7 +2,7 @@
 //! friends), required mods that are missing, shader notes and mod profiles.
 
 use crate::addons::{AddonsEvent, AddonsView};
-use crate::crash_help::callout;
+use crate::notice_slot::{self, Notice, Tier};
 use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -10,9 +10,8 @@ use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
+    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -112,6 +111,26 @@ fn remote_problems(r: &hopper::hopperd::Remote) -> anyhow::Result<hopper::deps::
     let c = hopper::hopperd::Client::for_remote(r)?;
     let v = c.get(&hopper::hopperd::Client::server_path(&r.id, "/mods/problems"))?;
     Ok(serde_json::from_value(v)?)
+}
+
+/// What the load problem's "Roll back" button puts back.
+enum RollBack {
+    /// The copy Hopper kept before the update the last crash names.
+    Crash { name: String, ch: hopper::crashdetect::Changed },
+    /// An older version that works with what the mod needs.
+    Offer(crate::revert_ui::Offer),
+    /// History's Undo of the update that put the blocked jar in.
+    Undo { name: String, file: String, saved: hopper::backups::Saved, when: i64 },
+}
+
+/// A notice's subject from a list of names: "A, B, C" or "A, B and 4 more".
+pub(crate) fn brief_names(names: Vec<String>) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let names: Vec<String> = names.into_iter().filter(|n| !n.is_empty() && seen.insert(n.clone())).collect();
+    match names.len() {
+        0..=3 => names.join(", "),
+        k => format!("{}, {} and {} more", names[0], names[1], k - 2),
+    }
 }
 
 /// Required mods that are missing, for the mods folder as of `mtime`.
@@ -251,7 +270,7 @@ impl AddonsView {
     pub(crate) fn want_missing(&mut self, inst: &Instance, cx: &mut Context<Self>) {
         // A Hopper Server's jars are read by its panel.
         let panel = crate::store::on_hopper_server(&inst.root);
-        // "Revert X" on the problem notice, worked out in the store.
+        // "Roll back X" on the problem notice, worked out in the store.
         if panel.is_none() {
             self.store.update(cx, |s, _| s.want_reverts(&inst.root, &inst.loader, &inst.game_version, &inst.addons, true));
         }
@@ -499,9 +518,10 @@ impl AddonsView {
 
     /// "N mods are in twice", with Keep newest; and old files waiting for
     /// the game to let go of them.
-    pub(crate) fn duplicate_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.class != cf::CLASS_MODS || self.missing.root.as_ref() != Some(&inst.root) {
-            return None;
+    pub(crate) fn duplicate_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Vec<Notice> {
+        let mut out = Vec::new();
+        if self.missing.root.as_ref() != Some(&inst.root) {
+            return out;
         }
         // Fabric and Quilt refuse to start with a mod in twice: the warning.
         // NeoForge and Forge load the highest version: a copy the player
@@ -510,17 +530,41 @@ impl AddonsView {
         let notes: Vec<&hopper::install::Duplicate> = self.missing.dups.iter().filter(|d| d.is_note()).collect();
         let queued = self.missing.queued;
         let (off, on) = (self.missing.switch_off, self.missing.switch_on);
-        if dups.is_empty() && notes.is_empty() && queued + off + on == 0 {
-            return None;
-        }
         let place = inst.root.to_string_lossy();
-        let note = (!notes.is_empty()).then(|| self.dup_note(inst, &notes, &place, cx)).flatten();
-        let rows = self.dup_rows(inst, &dups, false, cx);
-        let theme = cx.theme();
-        if dups.is_empty() {
-            if queued + off + on == 0 {
-                return note.map(|n| div().px_6().child(n).into_any_element());
-            }
+        if !dups.is_empty() {
+            let rows = self.dup_rows(inst, &dups, false, cx);
+            let extra: Vec<String> = dups.iter().flat_map(|d| d.files[1..].to_vec()).collect();
+            let n = dups.len();
+            let title = format!("{n} mod{} in twice: the game won't start with both", if n == 1 { " is" } else { "s are" });
+            let what = if n == 1 { dups[0].name.clone() } else { format!("{n} older duplicates") };
+            let keep = cx.listener(move |this, _: &ClickEvent, window, cx| this.remove(extra.clone(), what.clone(), window, cx));
+            let details = v_flex()
+                .gap_2()
+                .when(queued > 0, |c| {
+                    c.child(widgets::caption(
+                        format!("{queued} old file{} will be removed when the game closes.", if queued == 1 { "" } else { "s" }),
+                        cx,
+                    ))
+                })
+                .children(rows);
+            out.push(
+                Notice::new("dups", Tier::Stop, title)
+                    .subject(brief_names(dups.iter().map(|d| d.name.clone()).collect()))
+                    .primary(move |fit| {
+                        notice_slot::main_button(Button::new("keep-newest-all").small(), fit)
+                            .label(if n > 1 { "Keep newest of all" } else { "Keep newest" })
+                            .tooltip("Removes the older jars (undo from History)")
+                            .on_click(keep)
+                    })
+                    .details(details),
+            );
+        }
+        if !notes.is_empty() {
+            out.extend(self.dup_note(inst, &notes, &place, cx));
+        }
+        // Old files and switches waiting for the game to close (the problem
+        // notice above says it for its own files).
+        if dups.is_empty() && queued + off + on > 0 {
             let s = |n: usize| if n == 1 { "" } else { "s" };
             let mut said = Vec::new();
             if queued > 0 {
@@ -534,51 +578,16 @@ impl AddonsView {
             }
             let text = said.join(" ");
             let key = hopper::settings::notice_key(&place, "queued", &text);
-            let body = callout(theme.info, cx).child(div().text_sm().child(text));
-            let notice = widgets::closable_notice(body, key, widgets::Closed::Gone, "", theme.info, &self.store, cx)?;
-            return Some(div().px_6().flex().flex_col().gap_2().children(note).child(notice).into_any_element());
+            if !notice_slot::hidden(&self.store, &key, cx) {
+                out.push(
+                    Notice::new("queued", Tier::Info, "Waiting for the game to close")
+                        .icon(IconName::Hourglass)
+                        .subject(text)
+                        .dismiss_key(&self.store, key),
+                );
+            }
         }
-        let dup_key = hopper::settings::notice_key(
-            &place,
-            "dups",
-            &dups.iter().map(|d| d.files.join(",")).collect::<Vec<_>>().join(";"),
-        );
-        let extra: Vec<String> = dups.iter().flat_map(|d| d.files[1..].to_vec()).collect();
-        let n = dups.len();
-        let title = format!("{n} mod{} in twice: the game won't start with both", if n == 1 { " is" } else { "s are" });
-        let warning = theme.warning;
-        let body = callout(theme.warning, cx)
-                        .child(
-                            h_flex()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .font_semibold()
-                                        .text_color(theme.warning)
-                                        .child(title.clone()),
-                                )
-                                .when(n > 1, |r| {
-                                    r.child(
-                                        Button::new("keep-newest-all")
-                                            .small()
-                                            .primary()
-                                            .label("Keep newest of all")
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.remove(extra.clone(), format!("{n} older duplicates"), window, cx)
-                                            })),
-                                    )
-                                }),
-                        )
-                        .when(queued > 0, |c| {
-                            c.child(widgets::caption(
-                                format!("{queued} old file{} will be removed when the game closes.", if queued == 1 { "" } else { "s" }),
-                                cx,
-                            ))
-                        })
-                        .child(self.folded_rows("dup-rows", dups.iter().map(|d| d.name.clone()).collect(), rows, cx));
-        let notice = widgets::closable_notice(body, dup_key, widgets::Closed::Chip, title, warning, &self.store, cx)?;
-        Some(div().px_6().flex().flex_col().gap_2().child(notice).children(note).into_any_element())
+        out
     }
 
     /// One row per mod in twice: its icon and name, which file stays, and the
@@ -639,27 +648,31 @@ impl AddonsView {
     /// NeoForge and Forge load the highest version of a mod that is in
     /// twice, so a copy the player added beside the pack's isn't a problem:
     /// a quiet note says which one loads, with the remove button.
-    fn dup_note(&self, inst: &Instance, notes: &[&hopper::install::Duplicate], place: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let info = cx.theme().info;
+    fn dup_note(&self, inst: &Instance, notes: &[&hopper::install::Duplicate], place: &str, cx: &mut Context<Self>) -> Option<Notice> {
         let n = notes.len();
-        let text = if n == 1 {
-            notes[0].note()
-        } else {
-            format!("{n} mods are in twice. Only the highest version of each loads; the other copies do nothing.")
-        };
         let key = hopper::settings::notice_key(place, "dups-note", &notes.iter().map(|d| d.files.join(",")).collect::<Vec<_>>().join(";"));
+        if notice_slot::hidden(&self.store, &key, cx) {
+            return None;
+        }
+        let (title, subject) = if n == 1 {
+            let note = notes[0].note();
+            (format!("{} is in twice", notes[0].name), note.split_once(". ").map_or(note.clone(), |(_, rest)| rest.to_string()))
+        } else {
+            (format!("{n} mods are in twice"), "Only the highest version of each loads; the other copies do nothing.".to_string())
+        };
         let rows = self.dup_rows(inst, notes, true, cx);
-        let folded = self.folded_rows("dup-note-rows", notes.iter().map(|d| d.name.clone()).collect(), rows, cx);
-        let body = callout(info, cx).child(div().text_sm().child(text)).child(folded);
-        widgets::closable_notice(body, key, widgets::Closed::Gone, "", info, &self.store, cx)
+        Some(
+            Notice::new("dups-note", Tier::Info, title)
+                .icon(IconName::Copy)
+                .subject(subject)
+                .details(v_flex().gap_2().children(rows))
+                .dismiss_key(&self.store, key),
+        )
     }
 
     /// "N required mods are missing", with Enable or Find for each.
-    pub(crate) fn missing_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.class != cf::CLASS_MODS
-            || self.missing.root.as_ref() != Some(&inst.root)
-            || self.missing.list.is_empty()
-        {
+    pub(crate) fn missing_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
+        if self.missing.root.as_ref() != Some(&inst.root) || self.missing.list.is_empty() {
             return None;
         }
         let theme = cx.theme();
@@ -675,9 +688,9 @@ impl AddonsView {
         installable.dedup();
         // Not what's installing or just installed.
         installable.retain(|i| !self.dep_jobs.contains_key(i) && !self.dep_done.contains(i));
-        // "Install all" is the banner's one filled button; beside it each
-        // line's Install is an outline.
-        let one_primary = installable.len() <= 1;
+        // The strip's Install is the notice's main button; each line's
+        // Install under Details is an outline.
+        let one_primary = false;
         // One row per mod, naming everything it lacks.
         let mut groups: Vec<(&str, Vec<&hopper::deps::Missing>)> = Vec::new();
         for m in &self.missing.list {
@@ -875,7 +888,6 @@ impl AddonsView {
                     .into_any_element()
             })
             .collect();
-        let color = if loaded_fine.is_some() { theme.info } else { theme.warning };
         let title = match loaded_fine {
             Some(_) => format!(
                 "{n} mod{} list{} a requirement that isn't installed",
@@ -883,7 +895,7 @@ impl AddonsView {
                 if n == 1 { "s" } else { "" }
             ),
             None => format!(
-                "{n} required mod{} missing: the game will stop at loading",
+                "{n} required mod{} missing",
                 if n == 1 { " is" } else { "s are" }
             ),
         };
@@ -892,35 +904,54 @@ impl AddonsView {
             "missing",
             &self.missing.list.iter().map(|m| format!("{}>{}", m.mod_name, m.needs)).collect::<Vec<_>>().join(";"),
         );
+        // It loaded fine anyway: only a note, which can be hidden.
+        if loaded_fine.is_some() && notice_slot::hidden(&self.store, &key, cx) {
+            return None;
+        }
+        // "Sophisticated Core (for Sophisticated Backpacks), …": what's
+        // missing and what asks for it.
+        let subject = {
+            let known = self.dep_projects.borrow();
+            brief_names(
+                self.missing
+                    .list
+                    .iter()
+                    .map(|m| {
+                        let name = known.get(&m.needs).cloned().flatten().map_or_else(|| m.needs.clone(), |(_, n, _)| n);
+                        format!("{name} (for {})", m.mod_name)
+                    })
+                    .collect(),
+            )
+        };
         let hover = cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h);
-        let body = callout(color, cx)
-                        .child(
-                            h_flex()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .font_semibold()
-                                        .text_color(color)
-                                        .child(title.clone()),
-                                )
-                                .when(installable.len() > 1, |r| {
-                                    r.child(
-                                        Button::new("install-all-missing")
-                                            .small()
-                                            .primary()
-                                            .icon(IconName::Download)
-                                            .label(format!("Install all {}", installable.len()))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.install_missing(installable.clone(), cx)
-                                            })),
-                                    )
-                                }),
-                        )
-                        .when_some(loaded_fine, |c, at| c.child(widgets::caption(loaded_fine_note(at), cx)))
-                        .child(self.folded_rows("missing-rows", self.missing.list.iter().map(|m| m.mod_name.clone()).collect(), rows, cx));
-        let notice = widgets::closable_notice(body, key, widgets::Closed::Chip, title, color, &self.store, cx)?;
-        Some(div().id("missing-banner").on_hover(hover).px_6().child(notice).into_any_element())
+        let details = div()
+            .id("missing-rows")
+            .on_hover(hover)
+            .child(
+                v_flex()
+                    .gap_2()
+                    .when_some(loaded_fine, |c, at| c.child(widgets::caption(loaded_fine_note(at), cx).whitespace_normal()))
+                    .children(rows),
+            );
+        let mut notice = Notice::new("missing", if loaded_fine.is_some() { Tier::Info } else { Tier::Stop }, title)
+            .icon(IconName::PackageX)
+            .subject(subject)
+            .details(details);
+        if !installable.is_empty() {
+            let k = installable.len();
+            let get = cx.listener(move |this, _: &ClickEvent, _, cx| this.install_missing(installable.clone(), cx));
+            notice = notice.primary(move |fit| {
+                notice_slot::main_button(Button::new("install-all-missing").small(), fit)
+                    .icon(IconName::Download)
+                    .label(if k > 1 { format!("Install all {k}") } else { "Install".to_string() })
+                    .tooltip("Downloads them from Modrinth or CurseForge, with what they need")
+                    .on_click(get)
+            });
+        }
+        if loaded_fine.is_some() {
+            notice = notice.dismiss_key(&self.store, key);
+        }
+        Some(notice)
     }
 
     /// Downloads mods jars ask for by id; one that can't be found is
@@ -1102,53 +1133,6 @@ impl AddonsView {
         .detach();
     }
 
-    /// A notice's rows behind one line: the mods' names and "Show details".
-    /// Open, the rows show (past four they scroll inside the notice), so a
-    /// long list never pushes the mods table off the screen.
-    fn folded_rows(&self, id: &'static str, names: Vec<String>, rows: Vec<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
-        let n = rows.len();
-        let open = self.rows_open.contains(id);
-        let mut seen = std::collections::HashSet::new();
-        let names: Vec<String> = names.into_iter().filter(|n| !n.is_empty() && seen.insert(n.clone())).collect();
-        let brief = match names.len() {
-            0 => String::new(),
-            1..=3 => names.join(", "),
-            k => format!("{}, {} and {} more", names[0], names[1], k - 2),
-        };
-        let toggle = cx.listener(move |this, _, _, cx| {
-            if !this.rows_open.remove(id) {
-                this.rows_open.insert(id);
-            }
-            cx.notify();
-        });
-        v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().flex_1().min_w_0().truncate().text_sm().child(brief))
-                    .child(
-                        Button::new(SharedString::from(format!("{id}-more")))
-                            .ghost()
-                            .small()
-                            .icon(if open { IconName::ChevronUp } else { IconName::ChevronDown })
-                            .label(if open { "Hide details" } else { "Show details" })
-                            .on_click(toggle),
-                    ),
-            )
-            .when(open, |c| {
-                c.child(
-                    div()
-                        .id(id)
-                        .when(n > 4, |d| d.h(rems(10.5)))
-                        .overflow_y_scrollbar()
-                        .child(v_flex().gap_2().children(rows)),
-                )
-            })
-            .into_any_element()
-    }
-
     /// Problems the loader will hit (missing or doubled mods, blockers):
     /// the Logs & crashes tab's amber dot.
     pub(crate) fn load_problems(&self, root: &std::path::Path) -> usize {
@@ -1161,7 +1145,7 @@ impl AddonsView {
 
     /// "N problems will stop the game at loading": what the loader refuses
     /// besides missing mods, with Turn off where that fixes it.
-    pub(crate) fn blocker_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn blocker_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
         use hopper::deps::BlockerKind;
         let blockers: &[hopper::deps::Blocker] =
             if self.missing.root.as_ref() == Some(&inst.root) { &self.missing.blockers } else { &[] };
@@ -1170,16 +1154,34 @@ impl AddonsView {
         let stop = self.crash_stop.as_ref().filter(|(st, _)| {
             !blockers.iter().any(|b| b.file_name.eq_ignore_ascii_case(st.file_name.trim_end_matches(".disabled")))
         });
-        if self.class != cf::CLASS_MODS || (blockers.is_empty() && stop.is_none()) {
+        // The crash is this table's instance's (`sync`).
+        let stop = stop.filter(|_| self.root.as_ref() == Some(&inst.root));
+        if blockers.is_empty() && stop.is_none() {
             return None;
         }
-        let theme = cx.theme().clone();
         // A crash says loading broke, whatever the files look like.
         let loaded_fine = self.missing.loaded_fine.filter(|_| stop.is_none());
         let n = blockers.len() + usize::from(stop.is_some());
         let mut rows: Vec<AnyElement> = Vec::new();
+        // The strip's line: what the first problem is, in words.
+        let mut subject = String::new();
+        // Its main fix: rolling the mod back, when an older copy fixes it.
+        let mut roll: Option<RollBack> = None;
         if let Some((st, changed)) = stop {
             rows.push(self.crash_stop_row(inst, st, changed.as_ref(), cx));
+            let name = self.jar_label(inst, &st.file_name);
+            subject = match changed {
+                Some(ch) => format!(
+                    "{name} stopped the game from loading. {} was updated {}",
+                    if ch.name.is_empty() { self.jar_label(inst, &ch.file_name) } else { ch.name.clone() },
+                    hopper::time::relative_secs(ch.when)
+                ),
+                None => format!("{name} stopped the game from loading"),
+            };
+            if let Some(ch) = changed.clone() {
+                let changed_name = if ch.name.is_empty() { self.jar_label(inst, &ch.file_name) } else { ch.name.clone() };
+                roll = Some(RollBack::Crash { name: changed_name, ch });
+            }
         }
         for (i, b) in blockers.iter().enumerate() {
             let addon = inst.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(&b.file_name));
@@ -1208,6 +1210,17 @@ impl AddonsView {
                 (id.clone(), jar.clone(), a.map_or_else(|| id.clone(), |a| a.name.clone()), a.map_or(0, |a| a.project_id), icon)
             });
             let mut actions: Vec<AnyElement> = Vec::new();
+            if roll.is_none()
+                && let Some(offer) = self.store.read(cx).revert_offer(&inst.root, &b.file_name)
+            {
+                roll = Some(RollBack::Offer(offer));
+            }
+            // An update just put this jar in: undoing it is the main fix.
+            if roll.is_none()
+                && let Some((when, saved)) = self.missing.rollbacks.get(&b.file_name)
+            {
+                roll = Some(RollBack::Undo { name: self.jar_label(inst, &b.file_name), file: b.file_name.clone(), saved: saved.clone(), when: *when });
+            }
             match &b.kind {
                 BlockerKind::Loader { id, versions, .. } => {
                     // A newer loader fixes it, when it's this instance's
@@ -1289,7 +1302,10 @@ impl AddonsView {
             }
             // An update just put this file in: undo that update, unless a
             // Revert already offers an older version.
-            if self.store.read(cx).revert_offer(&inst.root, &b.file_name).is_none()
+            // (The notice's main button already does it for this jar.)
+            let main_undo = matches!(&roll, Some(RollBack::Undo { file, .. }) if file == &b.file_name);
+            if !main_undo
+                && self.store.read(cx).revert_offer(&inst.root, &b.file_name).is_none()
                 && let Some(el) = self.rollback_action(i, inst, &b.file_name, cx)
             {
                 // Beside the Turn off for this jar (the first button).
@@ -1326,6 +1342,14 @@ impl AddonsView {
                 _ => None,
             };
             let mut parts = parts;
+            if subject.is_empty() {
+                let o = other.as_ref().map_or_else(String::new, |o| o.2.clone());
+                subject = [b.mod_name.as_str(), parts.lead.as_str(), o.as_str(), parts.tail.as_str()]
+                    .into_iter()
+                    .filter(|p| !p.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+            }
             if let (Some(example), Some(o)) = (&ghost, other.as_ref()) {
                 parts.tail = format!("{}, a version that doesn't exist", parts.tail.split(';').next().unwrap_or("").trim());
                 parts.why = format!(
@@ -1374,9 +1398,9 @@ impl AddonsView {
         let loader_note = blockers
             .iter()
             .any(|b| matches!(&b.kind, BlockerKind::Loader { id, .. } if id != "minecraft"));
-        let color = if loaded_fine.is_some() { theme.info } else { theme.danger };
         let title = match loaded_fine {
             Some(_) => format!("{n} possible problem{} in the mods' own files", if n == 1 { "" } else { "s" }),
+            None if stop.is_some() && blockers.is_empty() => "The game stopped at loading".to_string(),
             None => format!("{n} problem{} will stop the game at loading", if n == 1 { "" } else { "s" }),
         };
         let key = hopper::settings::notice_key(
@@ -1384,18 +1408,117 @@ impl AddonsView {
             "blockers",
             &format!("{:?}{:?}", stop.map(|(st, _)| &st.file_name), blockers),
         );
-        let body = callout(color, cx)
-                        .child(div().font_semibold().text_color(color).child(title.clone()))
-                        .when_some(loaded_fine, |c, at| c.child(widgets::caption(loaded_fine_note(at), cx)))
-                        .when(loader_note, |c| {
-                            c.child(widgets::caption(
-                                "For a mod that needs a newer loader, update the loader here or pick a version in this instance's settings.",
-                                cx,
-                            ))
-                        })
-                        .child(self.folded_rows("blocker-rows", blockers.iter().map(|b| b.mod_name.clone()).collect(), rows, cx));
-        let notice = widgets::closable_notice(body, key, widgets::Closed::Chip, title, color, &self.store, cx)?;
-        Some(div().px_6().child(notice).into_any_element())
+        if loaded_fine.is_some() && notice_slot::hidden(&self.store, &key, cx) {
+            return None;
+        }
+        let details = v_flex()
+            .gap_2()
+            .when_some(loaded_fine, |c, at| c.child(widgets::caption(loaded_fine_note(at), cx).whitespace_normal()))
+            .when(loader_note, |c| {
+                c.child(
+                    widgets::caption(
+                        "For a mod that needs a newer loader, update the loader here or pick a version in this instance's settings.",
+                        cx,
+                    )
+                    .whitespace_normal(),
+                )
+            })
+            .children(rows);
+        let mut notice = Notice::new("blockers", if loaded_fine.is_some() { Tier::Info } else { Tier::Stop }, title)
+            .subject(subject)
+            .since(stop.and_then(|(_, ch)| ch.as_ref().map(|c| c.when)).unwrap_or(0))
+            .details(details);
+        if let Some(roll) = roll {
+            notice = notice.primary(self.roll_back_button(inst, roll, cx));
+        }
+        // The crash's own page: what happened, in full.
+        if stop.is_some() {
+            notice = notice.action(
+                Button::new("blockers-see")
+                    .small()
+                    .outline()
+                    .label("See why →")
+                    .tooltip("Opens Logs & crashes on the last crash")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(AddonsEvent::SeeCrash))),
+            );
+        }
+        if loaded_fine.is_some() {
+            notice = notice.dismiss_key(&self.store, key);
+        }
+        Some(notice)
+    }
+
+    /// A jar's mod name, from the instance's list, else from the file.
+    fn jar_label(&self, inst: &Instance, file: &str) -> String {
+        let bare = file.trim_end_matches(".disabled");
+        inst.addons
+            .iter()
+            .find(|a| a.file_name.eq_ignore_ascii_case(bare))
+            .map(|a| a.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| hopper::crashdetect::jar_name(&inst.root.join("mods"), file))
+    }
+
+    /// The load problem's main button: "Roll back Create to 6.0.4", from
+    /// the copy Hopper kept before an update (the crash's), a revert offer
+    /// (a blocker an older version fixes) or History's Undo of the update
+    /// that put a blocked jar in. Narrow: "Roll back Create".
+    fn roll_back_button(&self, inst: &Instance, roll: RollBack, cx: &mut Context<Self>) -> impl FnOnce(notice_slot::Fit) -> AnyElement + 'static {
+        let root = inst.root.clone();
+        let view = cx.entity().downgrade();
+        let (label, short, tip) = match &roll {
+            RollBack::Crash { name, ch } => (
+                if ch.from.is_empty() { format!("Roll back {name}") } else { format!("Roll back {name} to {}", ch.from) },
+                format!("Roll back {name}"),
+                "Swaps in the copy Hopper kept. The newer one goes to History, so you can undo this there.".to_string(),
+            ),
+            RollBack::Offer(o) => {
+                let (label, tip) = o.label();
+                (label, format!("Roll back {}", o.name), tip)
+            }
+            RollBack::Undo { name, saved, when, .. } => (
+                format!("Roll back {name} to {}", hopper::undo::version_of(&saved.name)),
+                format!("Roll back {name}"),
+                format!("Undoes the update on {}, as History's Undo does", hopper::time::day_month(*when)),
+            ),
+        };
+        let busy = matches!(&roll, RollBack::Undo { file, .. } if self.missing.rolling.contains(file));
+        move |fit| {
+            let tooltip = if fit.narrow { format!("{label}. {tip}") } else { tip };
+            notice_slot::main_button(Button::new("notice-roll-back").small(), fit)
+                .icon(IconName::Undo2)
+                .label(if fit.narrow { short } else { label })
+                .tooltip(tooltip)
+                .loading(busy)
+                .disabled(busy)
+                .on_click(move |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        let store = this.store.clone();
+                        let done = match &roll {
+                            RollBack::Crash { ch, .. } => {
+                                let ok = crate::crash_help::put_back_changed(&store, &root, ch, window, cx);
+                                if ok {
+                                    this.crash_stop = None;
+                                }
+                                ok
+                            }
+                            RollBack::Offer(o) => crate::revert_ui::revert_instance(&store, &root, o, window, cx),
+                            RollBack::Undo { file, saved, .. } => {
+                                // Re-reads the folder itself when it's done.
+                                this.roll_back(&root, file, saved.clone(), window, cx);
+                                false
+                            }
+                        };
+                        if done {
+                            // Untracked jars changed too: re-read the folder.
+                            this.resync(cx);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .into_any_element()
+        }
     }
 
     /// "Roll back" for a blocked jar an update put in: History's Undo of that
@@ -1454,7 +1577,7 @@ impl AddonsView {
         .detach();
     }
 
-    /// "Revert X to 1.6.3" for a problem an older version of the mod fixes
+    /// "Roll back X to 1.6.3" for a problem an older version of the mod fixes
     /// (`revert_ui`); its updates are then marked with what they need.
     fn revert_action(&self, i: usize, inst: &Instance, b: &hopper::deps::Blocker, cx: &Context<Self>) -> Option<AnyElement> {
         let offer = self.store.read(cx).revert_offer(&inst.root, &b.file_name)?;
@@ -1479,7 +1602,7 @@ impl AddonsView {
     }
 
     /// The banner's row for the last crash: "X stopped the game from
-    /// loading after Y was updated (a → b)", with Put a back and Turn off X.
+    /// loading after Y was updated (a → b)", with Turn off X.
     fn crash_stop_row(
         &self,
         inst: &Instance,
@@ -1537,28 +1660,9 @@ impl AddonsView {
         } else {
             format!("In the last crash: \"{}\"", st.error)
         };
+        // Putting the older copy back is the strip's own main button
+        // ("Roll back X to a"), so the row only offers turning it off.
         let mut actions: Vec<AnyElement> = Vec::new();
-        if let Some(ch) = changed {
-            let (root, ch) = (inst.root.clone(), ch.clone());
-            actions.push(
-                Button::new("crash-stop-back")
-                    .xsmall()
-                    .outline()
-                    .icon(IconName::Undo2)
-                    .label(if ch.from.is_empty() { "Put the older version back".to_string() } else { format!("Put {} back", ch.from) })
-                    .tooltip("Swaps in the copy Hopper kept. The newer one goes to History, so you can undo this there.")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        let store = this.store.clone();
-                        if crate::crash_help::put_back_changed(&store, &root, &ch, window, cx) {
-                            this.crash_stop = None;
-                            // Untracked jars changed too: re-read the folder.
-                            this.resync(cx);
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-        }
         let file = st.file_name.clone();
         actions.push(
             Button::new("crash-stop-off")
@@ -1608,73 +1712,60 @@ impl AddonsView {
         }
     }
 
-    /// Shader packs need Iris or Oculus: a callout with Find when it's missing.
-    pub(crate) fn shader_notes(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.class != cf::CLASS_SHADERS {
+    /// Shader packs need Iris or Oculus: a notice with Find when it's missing.
+    pub(crate) fn shader_notes(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
+        // Servers don't draw shaders.
+        if self.server || self.remote {
             return None;
         }
-        // Read from disk when the table was built, not per frame.
+        // Read from disk when the table was built, not per frame (on the
+        // Shaders tab always, elsewhere only once packs are there).
         let (_, has_loader) = self.shader_state();
         if has_loader {
             return None;
         }
-        let theme = cx.theme();
         let want = if inst.loader.starts_with("forge") { "Oculus" } else { "Iris" };
         let root = inst.root.clone();
         let title = "Install Iris or Oculus to use shaders";
         let key = hopper::settings::notice_key(&inst.root.to_string_lossy(), "shader-loader", title);
-        let warning = theme.warning;
-        let body = callout(theme.warning, cx).child(
-                        h_flex()
-                            .gap_3()
-                            .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning))
-                            .child(div().flex_1().min_w_0().text_sm().child(title))
-                            .child(
-                                Button::new("find-shader-loader")
-                                    .small()
-                                    .outline()
-                                    .icon(IconName::Search)
-                                    .label(format!("Find {want}"))
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.emit(AddonsEvent::Find { root: root.clone(), text: want.to_lowercase() })
-                                    })),
-                            ),
-                    );
-        let notice = widgets::closable_notice(body, key, widgets::Closed::Chip, title, warning, &self.store, cx)?;
-        Some(div().px_6().child(notice).into_any_element())
+        if notice_slot::hidden(&self.store, &key, cx) {
+            return None;
+        }
+        let view = cx.entity().downgrade();
+        Some(
+            Notice::new("shader-loader", Tier::Choice, title)
+                .subject("Shader packs here do nothing without one of them")
+                .primary(move |fit| {
+                    notice_slot::main_button(Button::new("find-shader-loader").small(), fit)
+                        .icon(IconName::Search)
+                        .label(format!("Find {want}"))
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |_, cx| cx.emit(AddonsEvent::Find { root: root.clone(), text: want.to_lowercase() })).ok();
+                        })
+                })
+                .dismiss_key(&self.store, key),
+        )
     }
 
     /// "Restart the game to use them": only once mods or packs changed
-    /// while it runs, under the filter bar, until closed or the game
-    /// restarts.
-    pub(crate) fn restart_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// while it runs, until closed or the game restarts.
+    pub(crate) fn restart_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
         if !self.store.read(cx).changed_while_running(&inst.root) {
             return None;
         }
-        let theme = cx.theme();
         let root = inst.root.clone();
-        let bar = widgets::notice_bar(theme.info, IconName::Info, cx)
-            .py_1()
-            .child(
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .child("Changed while the game runs: restart it to load the changes"),
-            )
-            .child(
-                Button::new("restart-note-close")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::X)
-                    .tooltip("Hide")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.store.update(cx, |s, cx| {
-                            s.dismiss_changed_while_running(&root);
-                            cx.notify();
-                        });
-                    })),
-            );
-        Some(div().px_6().child(bar).into_any_element())
+        let store = self.store.clone();
+        Some(
+            Notice::new("restart", Tier::Info, "Changed while the game runs")
+                .icon(IconName::RefreshCw)
+                .subject("Restart it to load the changes")
+                .dismiss(move |_, cx| {
+                    store.update(cx, |s, cx| {
+                        s.dismiss_changed_while_running(&root);
+                        cx.notify();
+                    });
+                }),
+        )
     }
 
     /// Named sets of disabled mods to switch between.

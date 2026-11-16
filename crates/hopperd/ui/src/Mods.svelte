@@ -13,6 +13,11 @@
   import { browseHash } from './lib/browse.js';
   import { isShown, isUnknown, shownBrowse } from './lib/shown.js';
   import CfKey from './CfKey.svelte';
+  import Notice from './lib/Notice.svelte';
+  import { mainClass } from './lib/noticeorder.js';
+  import { modsShared } from './lib/modsShared.svelte.js';
+  import { twiceOf, clientOnOf } from './lib/modsnotes.js';
+  import { onDestroy } from 'svelte';
   import DropJars from './DropJars.svelte';
   import ModPeek from './ModPeek.svelte';
   import ModVersions from './ModVersions.svelte';
@@ -31,7 +36,6 @@
   import { cfg, loadIndex, modForFile } from './lib/configs.svelte.js';
   import SourceAdd from './SourceAdd.svelte';
   import SourceFind from './SourceFind.svelte';
-  import { askPower } from './lib/consoleKit.js';
   import { showSourcesHint } from './lib/sourcehint.js';
   import { api, post, here } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
@@ -56,7 +60,10 @@
   $effect(() => { if (sub === 'backups') markHistorySeen(sid); });
   let data = $state(null);
   let filter = $state('');
-  let chip = $state('all');
+  // The page's notices on other tabs read the list, the chip and the reload
+  // from here while this tab is open; "Show" there opens this tab on a chip.
+  const shared = modsShared();
+  let chip = $state(untrack(() => shared?.want) || 'all');
   let busy = $state('');
   let identifying = $state('');
   let updates = $state(null);
@@ -178,13 +185,6 @@
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
-  // "Restart to load": only once mods changed while it runs (the panel
-  // compares with what it started with). Closed until the next change.
-  let restartClosed = $state(false);
-  const changedSince = $derived(server.changed_since_start);
-  $effect(() => {
-    if (!changedSince) restartClosed = false;
-  });
   const mods = $derived(data?.mods || []);
   // "Added by you" only means something on a server made from a pack.
   const hasPack = $derived(!!data?.pack);
@@ -279,18 +279,10 @@
   const foldDel = $derived(listW > 0 && nameRoom(actW, 74) < NAME_MIN);
   const foldUp = $derived(foldDel && nameRoom(actW, 52) < NAME_MIN);
   const gridCols = $derived(`22px 30px minmax(0, 1fr) ${foldUp ? 0 : actW}px ${cols.map((c) => COL_W[c]).join(' ')} ${foldDel ? 52 : 74}px`);
-  // The same mod in twice (an old jar left beside the new one): every
-  // copy but the newest, as desktop's "Keep newest" finds them.
-  const twice = $derived.by(() => {
-    const g = new Map();
-    for (const m of mods) if (m.source && m.project_id !== '0') g.set(m.project_id, [...(g.get(m.project_id) || []), m]);
-    return [...g.values()].filter((l) => l.length > 1);
-  });
-  const older = $derived(twice.flatMap((l) => {
-    const keep = [...l].sort((a, b) => Number(b.enabled) - Number(a.enabled) || (b.file_date || '').localeCompare(a.file_date || ''))[0];
-    return l.filter((m) => m !== keep);
-  }));
-  const clientOn = $derived(mods.filter((m) => m.side === 'client' && m.enabled).length);
+  // The notices about these live on the page (ModsNotices.svelte); the list's
+  // window moves when they come or go.
+  const twice = $derived(twiceOf(mods));
+  const clientOn = $derived(clientOnOf(mods));
   const pickedMod = $derived(picked ? mods.find((m) => m.file === picked.file) || (picked.pid !== '0' && mods.find((m) => m.project_id === picked.pid)) || null : null);
   const peekOf = (m) => ({ file: m.file, pid: m.project_id || '0' });
   // Picks of mods still here (a remove elsewhere drops theirs).
@@ -455,6 +447,12 @@
 
   // Remove, with Undo in its toast (it reloads the list once they're back).
   const drop = (list) => removeMods(base, list, alive, { onUndo: () => changed(true) });
+
+  if (shared) {
+    shared.want = null;
+    Object.assign(shared, { list: () => data, chip: () => chip, show: (c) => (chip = c), reload: () => changed(true) });
+  }
+  onDestroy(() => shared && Object.assign(shared, { list: null, chip: null, show: null, reload: null }));
 
   async function bulk(kind) {
     const list = selMods;
@@ -832,6 +830,8 @@
   {:else}<span class="c-added muted" title={dateOf(m.date_added)}>{ago(m.date_added)}</span>{/if}
 {/snippet}
 
+{#snippet cfKeyForm()}<CfKey inline onSaved={() => { load(); checkUpdates(true); }} />{/snippet}
+
 <DropJars {server} onAdded={() => { load(); identify(true); }} />
 <div class="card">
   <nav class="subtabs">
@@ -878,13 +878,19 @@
       {#if srcOn && counts.unknown}<button class="btn sm ghost" onclick={() => (finding = true)} title="Jars that link to their GitHub repo can follow it for updates"><Link size={13} /><span class="lb">Find sources for </span>{counts.unknown}<span class="lb"> unknown mod{counts.unknown === 1 ? '' : 's'}</span></button>{/if}
       <ModProfiles {base} {alive} onChanged={() => changed(false)} />
     </div>
-    {#if server.changed_since_start && !restartClosed}<div class="banner small restart-note"><Info size={14} /><span class="grow">Changed while the server runs: restart it to load the changes</span><button class="btn sm" disabled={server.state === 'stopping'} onclick={() => askPower(server, 'restart')}><RotateCcw size={13} />Restart</button><button class="btn sm ghost icon" title="Hide" onclick={() => (restartClosed = true)}><X size={13} /></button></div>{/if}
-    {#if identifying}<div class="banner small"><span class="spinner blue"></span>{identifying}… names, icons and updates fill in when it's done.</div>{/if}
-    {#if showSourcesHint({ known: srcKnown, allowed: srcOn, chip, unknown: counts.unknown, closed: srcHintClosed })}<div class="banner small src-hint"><Info size={14} /><span class="grow">Their sources may not have come along: mods from links is off. <a href="#/settings/content">Turn it on in Settings › Mod sources</a>.</span><button class="btn sm ghost icon" title="Hide" aria-label="Hide this note" onclick={() => (srcHintClosed = true)}><X size={13} /></button></div>{/if}
+    <!-- The notes go to the notice slot above the server's tabs. -->
+    {#if identifying}<Notice id="mods-identifying" tier="info" icon={ScanSearch} title={identifying} subject="Names, icons and updates fill in when it's done" />{/if}
+    {#if showSourcesHint({ known: srcKnown, allowed: srcOn, chip, unknown: counts.unknown, closed: srcHintClosed })}
+      <Notice id="mods-src-hint" tier="info" title="Their sources may not have come along" subject="Mods from links is off" onclose={() => (srcHintClosed = true)}>
+        {#snippet primary(fit)}<a class={mainClass(fit)} href="#/settings/content">{fit.narrow ? 'Turn on' : 'Turn it on in Settings'}</a>{/snippet}
+      </Notice>
+    {/if}
     {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
-    {#if data && !data.curseforge}<CfKey inline onSaved={() => { load(); checkUpdates(true); }} />{/if}
-    {#if twice.length}<div class="small warn row wrap">{twice.length} mod{twice.length === 1 ? ' is' : 's are'} in twice: {twice.map((l) => l[0].name).join(', ')}. <button class="link" onclick={async () => (await drop(older)) && changed(true)}>Keep newest</button><span class="muted">(undo from History)</span></div>{/if}
-    {#if clientOn}<div class="small warn">{clientOn} client-only mod{clientOn === 1 ? '' : 's'} on: servers usually don't need {clientOn === 1 ? 'it' : 'them'}, and some won't start with them. <button class="link" onclick={() => (chip = 'client')}>Show</button></div>{/if}
+    {#if data && !data.curseforge}
+      <Notice id="mods-cf-key" tier="info" title="CurseForge needs an API key" subject="For search, identify and updates. Modrinth works without one" details={cfKeyForm}>
+        {#snippet primary(fit)}<a class={mainClass(fit)} href="https://console.curseforge.com/" target="_blank" rel="noreferrer" title="Opens console.curseforge.com: sign in, open API keys and copy your key">Get a key</a>{/snippet}
+      </Notice>
+    {/if}
 
     <div class="split">
       <div class="list" class:sidein={hasSide && !cols.includes('side')} class:narrow class:foldup={foldUp} class:folded={foldDel} style:--cols={gridCols} bind:clientWidth={listW}>
@@ -1113,18 +1119,12 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .clr { color: var(--muted); display: grid; }
   .wrap { flex-wrap: wrap; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .warn { color: var(--gold); }
   .okt { color: var(--green); gap: 5px; }
   .link { color: var(--acc); text-decoration: underline; font-size: 12px; }
-  .restart-note .grow { flex: 1; }
-  /* Readable in both themes: the panel's orange link is too faint on the light page. */
-  .src-hint .grow { flex: 1; color: var(--text); }
-  .src-hint a { color: inherit; text-decoration: underline; font-weight: 600; }
-  .banner { display: flex; align-items: center; gap: 8px; border: 1px solid #60a5fa44; background: var(--blue-dim); border-radius: var(--radius-lg); padding: 6px 10px; color: var(--subtle); }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
   .spinner.blue { color: var(--blue); }
   .vr { width: 1px; height: 20px; background: var(--line2); margin: 0 2px; }
-  .bad { color: var(--red); }
+  .bad { color: var(--red-text); }
   .split { display: flex; gap: 12px; align-items: flex-start; }
   .addsplit { display: inline-flex; }
   .addsplit > .btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
@@ -1189,7 +1189,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .c-end { gap: 2px; justify-content: flex-end; }
   .ib { color: var(--muted); padding: 3px; border-radius: var(--radius); display: grid; }
   .ib:hover { color: var(--text); background: #ffffff10; }
-  .ib.del:hover { color: var(--red); }
+  .ib.del:hover { color: var(--red-text); }
   /* Hover-only controls stay shown on the picked row, the key row and the row whose menu is open. */
   .mod .more, .mod .ghostcl, .mod .cfg { visibility: hidden; }
   /* The config icon: shown on hover when the mod has config files, always (orange) when one is changed. */
@@ -1224,7 +1224,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .skels { display: flex; flex-direction: column; gap: 4px; padding-top: 6px; }
   .ctx { position: fixed; z-index: 80; width: 250px; display: flex; flex-direction: column; }
   .ctx .menu-item { min-width: 0; }
-  .ctx .bad { color: var(--red); }
+  .ctx .bad { color: var(--red-text); }
   .noi { width: 13px; flex: none; }
   .srcp { font-size: 11px; color: var(--subtle); padding: 0 4px; border-radius: var(--radius-sm); text-decoration: underline dotted; }
   .srcp:hover { color: var(--text); background: var(--hover, rgba(255,255,255,.06)); }

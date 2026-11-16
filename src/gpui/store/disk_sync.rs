@@ -23,9 +23,11 @@ impl Store {
 
     /// Lets go of `root`'s folders before it's moved or deleted (see
     /// [`hopper::disk_watch::DiskWatch::release`]). Selecting it again
-    /// watches it again.
-    pub fn unwatch(&self, root: &Path) {
+    /// watches it again; so does [`DiskWatch::reclaim`] on the handle this
+    /// returns, for a job whose move failed.
+    pub fn unwatch(&self, root: &Path) -> DiskWatch {
         self.disk.release(root);
+        self.disk.clone()
     }
 
     /// Looks for changes made outside Hopper now (the window is back in

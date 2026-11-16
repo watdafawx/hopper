@@ -115,11 +115,34 @@ fn exists(root: &Path, name: &str) -> bool {
     if name.ends_with(chunkstore::EXT) { store(root).has_manifest(name) } else { dir(root).join(name).is_file() }
 }
 
-/// The server's backups, newest first (only ones that still exist).
+/// The server's backups, newest first (only ones that still exist). One
+/// put back from the server's trash has its file again but no entry: it
+/// joins the list from what its file says.
 pub fn list(root: &Path) -> Vec<Backup> {
     let mut l: Vec<Backup> = load_meta(root).into_iter().filter(|b| exists(root, &b.name)).collect();
+    let st = store(root);
+    for n in st.names() {
+        if !l.iter().any(|b| b.name == n)
+            && let Ok(m) = st.manifest(&n)
+        {
+            l.push(from_manifest(&m));
+        }
+    }
+    for e in fs::read_dir(dir(root)).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".zip") && check(&name).is_ok() && !l.iter().any(|b| b.name == name)
+            && let Ok(md) = e.metadata()
+        {
+            let at = md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+            l.push(Backup { name, at, size: md.len(), files: 0, scope: Scope::Full, kind: Kind::Manual, note: String::new(), added: 0 });
+        }
+    }
     l.sort_by_key(|b| std::cmp::Reverse(b.at));
     l
+}
+
+fn from_manifest(m: &Manifest) -> Backup {
+    Backup { name: m.name.clone(), at: m.at, size: m.size, files: m.files.len(), scope: m.scope, kind: m.kind, note: m.note.clone(), added: m.added }
 }
 
 /// Bytes the backups take on disk: the store plus the zips.
@@ -136,16 +159,7 @@ pub fn adopt(root: &Path, m: &Manifest) -> anyhow::Result<Backup> {
         bail!("not a snapshot");
     }
     store(root).save_manifest(m)?;
-    let b = Backup {
-        name: m.name.clone(),
-        at: m.at,
-        size: m.size,
-        files: m.files.len(),
-        scope: m.scope,
-        kind: m.kind,
-        note: m.note.clone(),
-        added: m.added,
-    };
+    let b = from_manifest(m);
     edit_meta(root, |meta| {
         meta.retain(|x| x.name != b.name);
         meta.push(b.clone());
@@ -334,13 +348,33 @@ fn chrono_like(secs: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}_{:02}-{:02}-{:02}", rem / 3600, (rem % 3600) / 60, rem % 60)
 }
 
-/// Deletes a backup (and the chunks no other backup uses).
+/// Deletes a backup by hand: it moves to the server's trash (Files ›
+/// Trash) for 30 days, like other deletes, and can be put back from there.
+/// Its chunks stay while it waits. Thinning by the keep rules ([`prune`])
+/// deletes for good instead.
 pub fn delete(root: &Path, name: &str) -> anyhow::Result<()> {
-    remove(root, name)?;
-    if name.ends_with(chunkstore::EXT) {
-        store(root).gc()?;
+    check(name)?;
+    let file = if name.ends_with(chunkstore::EXT) { store(root).manifest_path(name) } else { dir(root).join(name) };
+    if file.is_file() {
+        super::files::trash(root, &super::files::rel_of(root, &file))?;
     }
-    Ok(())
+    edit_meta(root, |meta| meta.retain(|b| b.name != name))
+}
+
+/// Chunks of snapshots waiting in the server's trash: kept by clean-ups.
+fn trashed_chunks(root: &Path) -> std::collections::HashSet<String> {
+    let prefix = format!("{DIR}/");
+    super::files::trashed_under(root, &prefix)
+        .into_iter()
+        .filter(|(t, _)| t.path.ends_with(".json"))
+        .filter_map(|(_, p)| fs::read(p).ok().and_then(|b| serde_json::from_slice::<Manifest>(&b).ok()))
+        .flat_map(|m| m.files.into_iter().flat_map(|f| f.chunks))
+        .collect()
+}
+
+/// Deletes the chunks no backup uses, here or in the server's trash.
+pub fn gc(root: &Path) -> anyhow::Result<(usize, u64)> {
+    store(root).gc_keeping(&trashed_chunks(root))
 }
 
 /// Deletes a backup's zip or manifest and its entry; chunks stay until the
@@ -435,7 +469,7 @@ pub fn prune(root: &Path, keep: usize) -> anyhow::Result<usize> {
         remove(root, n)?;
     }
     if snaps {
-        store(root).gc()?;
+        gc(root)?;
     }
     Ok(gone.len())
 }
@@ -732,15 +766,32 @@ mod tests {
         assert!(aside.join("world/new.dat").exists());
         assert!(delete(&root, "../x.zip").is_err());
 
-        // Deleting one keeps the other whole; deleting both empties the store.
+        // Deleting one keeps the other whole; it waits in the server's
+        // trash with its chunks, and comes back from there.
+        let chunks = |root: &Path| fs::read_dir(store(root).dir().join("chunks")).map(|d| d.flatten().flat_map(|x| fs::read_dir(x.path()).unwrap().flatten()).count()).unwrap_or(0);
+        let all = chunks(&root);
         delete(&root, &full.name).unwrap();
+        assert_eq!(list(&root).iter().map(|b| b.name.clone()).collect::<Vec<_>>(), [w.name.clone()]);
         let j2 = crate::jobs::Jobs::default().start("t");
         restore(&root, &w.name, &[], &j2).unwrap();
         assert_eq!(fs::read_to_string(root.join("world/level.dat")).unwrap(), "level");
+        gc(&root).unwrap();
+        assert_eq!(chunks(&root), all, "a backup in the trash keeps its chunks");
+        let trashed = super::super::files::list_trash(&root).unwrap();
+        assert_eq!(trashed.len(), 1);
+        super::super::files::restore(&root, &trashed[0].id).unwrap();
+        let back = list(&root).into_iter().find(|b| b.name == full.name).expect("back in the list");
+        assert_eq!((back.kind, back.note.as_str()), (Kind::Manual, "first"));
+        fs::write(root.join("config/a.toml"), "broken").unwrap();
+        restore(&root, &full.name, &["config/a.toml".into()], &j2).unwrap();
+        assert_eq!(fs::read_to_string(root.join("config/a.toml")).unwrap(), "a = 1");
+        // Both deleted, then the trash emptied: the store empties.
+        delete(&root, &full.name).unwrap();
         delete(&root, &w.name).unwrap();
         assert!(list(&root).is_empty());
-        let left = fs::read_dir(store(&root).dir().join("chunks")).map(|d| d.flatten().flat_map(|x| fs::read_dir(x.path()).unwrap().flatten()).count()).unwrap_or(0);
-        assert_eq!(left, 0);
+        super::super::files::purge(&root, &[]).unwrap();
+        gc(&root).unwrap();
+        assert_eq!(chunks(&root), 0);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -790,6 +841,16 @@ mod tests {
         assert_eq!(prune(&root, 2).unwrap(), 1);
         let left: Vec<String> = list(&root).into_iter().map(|b| b.name).collect();
         assert_eq!(left, ["b3.zip", "b2.zip", "b1.zip"]);
+        // Thinning deletes for good: nothing waits in the trash.
+        assert!(!dir(&root).join("b0.zip").exists());
+        assert!(super::super::files::list_trash(&root).unwrap().is_empty());
+        // A zip deleted by hand waits there, and lists again once back.
+        delete(&root, "b1.zip").unwrap();
+        assert_eq!(list(&root).len(), 2);
+        let t = super::super::files::list_trash(&root).unwrap();
+        assert_eq!(t[0].path, format!("{DIR}/b1.zip"));
+        super::super::files::restore(&root, &t[0].id).unwrap();
+        assert!(list(&root).iter().any(|b| b.name == "b1.zip"));
         assert_eq!(last_scheduled(&root), Some(103));
         let _ = fs::remove_dir_all(&root);
     }

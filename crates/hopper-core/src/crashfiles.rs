@@ -1,10 +1,32 @@
 //! Deleting crash reports and old logs from a server's or game's folder.
 //! Only plain files directly inside `crash-reports/` and `logs/` can go,
-//! whatever path a caller (a browser, another PC) sends, and they go to the
-//! trash (the Recycle Bin, or Hopper Server's trash), never for good.
+//! whatever path a caller (a browser, another PC) sends, and they go where
+//! deleted things wait (Recently deleted, or Hopper Server's trash), never
+//! for good.
 
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
+
+/// Where deleted logs go: given the server or game folder and the files.
+pub type Dispose = fn(root: &Path, paths: &[PathBuf]) -> Result<()>;
+
+static DISPOSE: RwLock<Option<Dispose>> = RwLock::new(None);
+
+/// Replaces Recently deleted (Hopper Server uses each server's trash).
+pub fn set_disposer(f: Dispose) {
+    *DISPOSE.write().unwrap_or_else(|e| e.into_inner()) = Some(f);
+}
+
+fn dispose(root: &Path, paths: &[PathBuf]) -> Result<()> {
+    let f = DISPOSE.read().unwrap_or_else(|e| e.into_inner()).unwrap_or(to_recently_deleted);
+    f(root, paths)
+}
+
+/// Hopper's Recently deleted: one entry for the files cleared together.
+fn to_recently_deleted(root: &Path, paths: &[PathBuf]) -> Result<()> {
+    crate::recently_deleted::delete_files(root, paths, crate::recently_deleted::Kind::Log).map(|_| ())
+}
 
 /// The two folders whose files can be deleted here.
 const DIRS: [&str; 2] = ["crash-reports", "logs"];
@@ -84,7 +106,7 @@ pub fn delete(root: &Path, rels: &[String], running: bool) -> Result<usize> {
     if files.is_empty() {
         return Ok(0);
     }
-    crate::retention::dispose(root, &files)?;
+    dispose(root, &files)?;
     Ok(files.len())
 }
 
@@ -170,6 +192,27 @@ mod tests {
         assert!(delete(&root, &["logs/latest.log".into()], true).is_err());
         assert!(root.join("logs/latest.log").is_file());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Cleared files wait in Recently deleted as one entry, never the
+    /// Recycle Bin, and come back from there.
+    #[test]
+    fn cleared_files_go_to_recently_deleted() {
+        let base = std::env::temp_dir().join(format!("hopper-crashfiles-rd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("Pack");
+        std::fs::create_dir_all(root.join("crash-reports")).unwrap();
+        for f in ["crash-reports/a.txt", "crash-reports/b.txt"] {
+            std::fs::write(root.join(f), "x").unwrap();
+        }
+        assert_eq!(clear(&root, Kind::Crashes).unwrap(), 2);
+        assert!(!root.join("crash-reports/a.txt").exists());
+        let place = base.join(crate::recently_deleted::DIR);
+        let e = &crate::recently_deleted::list(&place)[0];
+        assert_eq!((e.meta.kind, e.meta.name.as_str()), (crate::recently_deleted::Kind::Log, "2 logs"));
+        crate::recently_deleted::restore(e).unwrap();
+        assert!(root.join("crash-reports/a.txt").is_file() && root.join("crash-reports/b.txt").is_file());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

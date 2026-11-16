@@ -200,7 +200,7 @@ impl BackupsView {
             let p = cx
                 .background_spawn(async move {
                     match panel {
-                        // The panel moves them to the server's trash.
+                        // The panel deletes them for good, as here.
                         Some(t) => t.client.post(&t.sp("/mod-backups/clean"), serde_json::json!({})).map(|v| hopper::retention::Pruned {
                             folders: v["removed"].as_u64().unwrap_or(0) as usize,
                             snapshots: 0,
@@ -264,7 +264,7 @@ impl BackupsView {
                     .small()
                     .outline()
                     .label(label)
-                    .tooltip("Clears History older than the rules in Settings › Library & folders (to the Recycle Bin). Hopper does this by itself as History grows, but leaves older entries for you. Snapshots you took and world backups stay.")
+                    .tooltip("Deletes History older than the rules in Settings › Library & folders, for good. Hopper does this by itself as History grows, but leaves older entries for you. Snapshots you took and world backups stay.")
                     .disabled(self.busy.is_some() || would.count() == 0)
                     .on_click(cx.listener(|this, _, window, cx| this.clean_up(window, cx))),
             )

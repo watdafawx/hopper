@@ -253,8 +253,29 @@ impl Thumbs {
 /// is no cache. Animated files (GIF, WebP) are left to GPUI: they are
 /// played, not shown still.
 pub fn source_in(cat: Cat, path: &Path, want: Want, cx: &App) -> ImageSource {
+    cache(cx).source(cat, path, want)
+}
+
+/// The app's picture cache, for code that makes image sources without an
+/// `App` at hand (a text view's image callback).
+#[derive(Clone)]
+pub struct Cache(Option<Entity<Thumbs>>);
+
+/// See [`Cache`].
+pub fn cache(cx: &App) -> Cache {
+    Cache(cx.try_global::<Holder>().map(|g| g.0.clone()))
+}
+
+impl Cache {
+    /// [`source_in`].
+    pub fn source(&self, cat: Cat, path: &Path, want: Want) -> ImageSource {
+        source_with(self.0.clone(), cat, path, want)
+    }
+}
+
+fn source_with(cache: Option<Entity<Thumbs>>, cat: Cat, path: &Path, want: Want) -> ImageSource {
     let plain = || ImageSource::Resource(Resource::Path(path.into()));
-    let Some(cache) = cx.try_global::<Holder>().map(|g| g.0.clone()) else {
+    let Some(cache) = cache else {
         return plain();
     };
     // GIFs and SVGs aren't decoded here: the first plays, the second is

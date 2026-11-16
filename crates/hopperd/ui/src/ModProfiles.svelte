@@ -107,5 +107,5 @@
   .it .use:hover { background: none; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
   .ib { color: var(--muted); padding: 4px 6px; border-radius: var(--radius); display: grid; }
-  .ib:hover { color: var(--red); background: #ffffff10; }
+  .ib:hover { color: var(--red-text); background: #ffffff10; }
 </style>

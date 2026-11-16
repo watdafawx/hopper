@@ -694,29 +694,21 @@ pub fn explain_locked(e: anyhow::Error) -> anyhow::Error {
     }
 }
 
-/// Deletes a file for good: to the Recycle Bin, or straight away on a
-/// network drive (which has none).
-pub(crate) fn delete_path(path: &std::path::Path) -> anyhow::Result<()> {
+/// Deletes a file the player removed from the instance at `root`: to
+/// Recently deleted, where it waits a week on the same drive.
+pub(crate) fn delete_path(root: &std::path::Path, path: &std::path::Path) -> anyhow::Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    if crate::instance_ops::is_remote_drive(path) {
-        if path.is_dir() {
-            fs::remove_dir_all(path)?;
-        } else {
-            fs::remove_file(path)?;
-        }
-        return Ok(());
-    }
-    trash::delete(path).with_context(|| format!("deleting {}", path.display()))
+    crate::recently_deleted::delete_files(root, &[path.to_path_buf()], crate::recently_deleted::Kind::File).map(|_| ())
 }
 
-/// Moves a file to backups (or the Recycle Bin with `delete`). One a
+/// Moves a file to backups (or Recently deleted with `delete`). One a
 /// running game holds open is queued to leave when the game lets go
 /// ([`crate::locked`]) instead of failing.
 pub(crate) fn move_out(root: &std::path::Path, path: &std::path::Path, delete: bool) -> anyhow::Result<()> {
     let r = if delete {
-        delete_path(path)
+        delete_path(root, path)
     } else {
         backup_into(root, path).map(|_| ())
     };
@@ -726,7 +718,7 @@ pub(crate) fn move_out(root: &std::path::Path, path: &std::path::Path, delete: b
     }
 }
 
-/// Deletes an installed file (to the Recycle Bin) instead of keeping a
+/// Deletes an installed file (to Recently deleted) instead of keeping a
 /// backup.
 pub fn delete(inst: &mut Instance, idx: usize) -> anyhow::Result<()> {
     let a = inst.addons.get(idx).context("no such mod")?.clone();
@@ -735,9 +727,9 @@ pub fn delete(inst: &mut Instance, idx: usize) -> anyhow::Result<()> {
     inst.save()
 }
 
-/// Deletes an installed file at once, skipping the Recycle Bin (Shift with
-/// Delete). One the game holds open leaves for the Recycle Bin once it
-/// lets go, as a locked file can't be removed now.
+/// Deletes an installed file at once, skipping Recently deleted (Shift
+/// with Delete). One the game holds open leaves for Recently deleted once
+/// it lets go, as a locked file can't be removed now.
 pub fn purge(inst: &mut Instance, idx: usize) -> anyhow::Result<()> {
     let a = inst.addons.get(idx).context("no such mod")?.clone();
     purge_path(&inst.root, &inst.addon_path(&a))?;

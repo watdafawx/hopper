@@ -6,6 +6,7 @@ use crate::addons::{AddonsEvent, AddonsView};
 use crate::content::{ContentEvent, ScreenshotsView, WorldsView};
 use crate::inst_settings::InstanceSettings;
 use crate::logs::LogsView;
+use crate::notice_slot::{self, Notice, Tier};
 use crate::part::Part;
 use crate::peers::PeersView;
 use crate::rigsync::SyncPanel;
@@ -276,6 +277,9 @@ struct HeaderFold {
 pub struct LibraryView {
     /// The list's width while its edge is being dragged.
     drag_width: Option<f32>,
+    /// The Mods table's notices as last drawn ([`AddonsView::notice_sig`]):
+    /// the page redraws when they change, not on every redraw of the table.
+    notice_sig: u64,
     /// The list is folded to its rail while a docked panel needs the room.
     squeezed: bool,
     /// The last fold or unfold was that one, not the player's: it snaps
@@ -480,6 +484,23 @@ impl LibraryView {
             AddonsEvent::Compare(server) => cx.emit(LibraryEvent::Compare(server.clone())),
             AddonsEvent::CollapseList => self.set_collapsed(true, cx),
             AddonsEvent::Config { root, file } => self.open_config_panel(root.clone(), file.clone(), cx),
+            AddonsEvent::SeeCrash => self.see_crash(cx),
+            AddonsEvent::ShowMods => {
+                if self.tab != InstTab::Mods {
+                    self.set_tab(InstTab::Mods, cx);
+                }
+            }
+        }
+    }
+
+    /// Logs & crashes, on the last crash's report.
+    fn see_crash(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.selected.clone() else { return };
+        let source = self.store.update(cx, |s, _| s.crash(&root).map(|c| c.source.clone()));
+        self.set_tab(InstTab::Logs, cx);
+        let rel = source.and_then(|p| p.strip_prefix(&root).ok().map(|r| r.to_string_lossy().replace('\\', "/")));
+        if let Some(rel) = rel {
+            self.logs.update(cx, |l, cx| l.open_report(rel, cx));
         }
     }
 
@@ -514,6 +535,14 @@ impl LibraryView {
             }),
             crate::browse::observe_peek(&peek, cx, |_, cx| cx.notify()),
             cx.subscribe(&addons, |this, _, event, cx| this.addons_event(event, cx)),
+            // The notice slot above the tabs shows the table's notices.
+            cx.observe(&addons, |this, addons, cx| {
+                let sig = addons.read(cx).notice_sig(cx);
+                if sig != this.notice_sig {
+                    this.notice_sig = sig;
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&friends, |this, _, event, cx| this.friends_event(event, cx)),
             cx.subscribe(&worlds, |this, _, event, cx| this.content_event(event, cx)),
             cx.subscribe(&store, |this, _, event: &store::StoreEvent, cx| this.disk_event(event, cx)),
@@ -552,6 +581,7 @@ impl LibraryView {
         }));
         let mut view = Self {
             drag_width: None,
+            notice_sig: 0,
             squeezed: false,
             fold_snap: false,
             folded: Default::default(),
@@ -882,6 +912,11 @@ impl LibraryView {
         let Some(root) = self.selected.clone() else {
             return;
         };
+        // A tab without a list: the Mods table stays on this instance, for
+        // the notice slot above the tabs.
+        if self.tab.class().is_none() {
+            self.addons.update(cx, |a, cx| a.follow(&root, cx));
+        }
         match self.tab {
             InstTab::Overview => {
                 self.load_overview(root, cx);
@@ -1733,87 +1768,63 @@ impl LibraryView {
     /// "N files to download by hand", with the list and a retry.
     /// With server tools off, once per instance when there's a sign the
     /// user runs a server for it: an offer to set them up.
-    fn server_hint(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn server_hint(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
         if !self.store.read(cx).server_hint(inst) {
             return None;
         }
-        let (r1, r2, r3) = (inst.root.clone(), inst.root.clone(), inst.root.clone());
+        let (r1, r2) = (inst.root.clone(), inst.root.clone());
+        let go = cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.store.update(cx, |s, cx| s.set_server_tools(true, cx));
+            this.select(r1.clone(), cx);
+            this.set_tab(InstTab::Server, cx);
+        });
+        let store = self.store.clone();
         Some(
-            widgets::notice_bar(cx.theme().info, IconName::Server, cx)
-                .mx_6()
-                .mt_3()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_sm()
-                        .child("Running a server for this pack? Hopper can host it, keep its mods in step and start it from here."),
-                )
-                .child(
-                    Button::new("server-hint-go")
-                        .small()
-                        .outline()
-                        .label("Set it up")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.store.update(cx, |s, cx| s.set_server_tools(true, cx));
-                            this.select(r1.clone(), cx);
-                            this.set_tab(InstTab::Server, cx);
-                        })),
-                )
-                .child(
-                    Button::new("server-hint-later")
-                        .small()
-                        .ghost()
-                        .label("Not now")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.store.update(cx, |s, cx| s.dismiss_server_hint(&r2, cx))
-                        })),
-                )
-                .child(
-                    Button::new("server-hint-close")
-                        .small()
-                        .ghost()
-                        .icon(IconName::X)
-                        .tooltip("Don't show this again for this pack")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.store.update(cx, |s, cx| s.dismiss_server_hint(&r3, cx))
-                        })),
-                )
-                .into_any_element(),
+            Notice::new("server-hint", Tier::Info, "Running a server for this pack?")
+                .icon(IconName::Server)
+                .subject("Hopper can host it, keep its mods in step and start it from here")
+                .primary(move |fit| notice_slot::main_button(Button::new("server-hint-go").small(), fit).label("Set it up").on_click(go))
+                .dismiss(move |_, cx| store.update(cx, |s, cx| s.dismiss_server_hint(&r2, cx))),
         )
     }
 
     /// The CurseForge app wrote other pack info over Hopper's (see
     /// `Instance::cf_change`): say so, and let the player pick whose stays.
-    fn cf_change_bar(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn cf_change_bar(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
         let change = inst.cf_change.as_ref()?;
         let text = cf_change_text(inst, change);
         let busy = self.store.read(cx).is_busy(&inst.root);
         let (r1, r2, r3) = (inst.root.clone(), inst.root.clone(), inst.root.clone());
+        let keep = cx.listener(move |this, _: &ClickEvent, _, cx| this.settle_cf_change(&r1, CfChoice::Keep, cx));
+        // The subject is the sentence after "The CurseForge app changed
+        // this pack's info:"; the full sentence stays in the tooltip.
+        let subject = text.split_once(": ").map_or(text.clone(), |(_, rest)| {
+            let mut c = rest.chars();
+            c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+        });
         Some(
-            widgets::notice_bar(cx.theme().warning, IconName::TriangleAlert, cx)
-                .mx_6()
-                .mt_3()
-                .child(div().flex_1().min_w_0().text_sm().child(text))
-                .child(
-                    Button::new("cf-change-keep")
-                        .small()
-                        .primary()
+            Notice::new("cf-change", Tier::Choice, "The CurseForge app changed this pack's info")
+                .subject(subject)
+                .primary(move |fit| {
+                    notice_slot::main_button(Button::new("cf-change-keep").small(), fit)
                         .label("Keep Hopper's")
                         .disabled(busy)
                         .tooltip("Hopper keeps its pack version and loader. The CurseForge app's file stays as it is.")
-                        .on_click(cx.listener(move |this, _, _, cx| this.settle_cf_change(&r1, CfChoice::Keep, cx))),
-                )
-                .child(
-                    Button::new("cf-change-keep-write")
-                        .small()
-                        .outline()
-                        .label("Keep, and fix the CurseForge app")
-                        .disabled(busy)
-                        .tooltip("Hopper keeps its pack version and loader and writes them into the CurseForge app's file, so both apps agree. Close the CurseForge app first.")
-                        .on_click(cx.listener(move |this, _, _, cx| this.settle_cf_change(&r2, CfChoice::KeepAndWrite, cx))),
-                )
-                .child(
+                        .on_click(keep)
+                })
+                .action_fit({
+                    let f = cx.listener(move |this, _: &ClickEvent, _, cx| this.settle_cf_change(&r2, CfChoice::KeepAndWrite, cx));
+                    move |fit| {
+                        Button::new("cf-change-keep-write")
+                            .small()
+                            .outline()
+                            .label(if fit.narrow { "Keep, fix the app" } else { "Keep, and fix the CurseForge app" })
+                            .disabled(busy)
+                            .tooltip("Hopper keeps its pack version and loader and writes them into the CurseForge app's file, so both apps agree. Close the CurseForge app first.")
+                            .on_click(f)
+                    }
+                })
+                .action(
                     Button::new("cf-change-use")
                         .small()
                         .outline()
@@ -1821,8 +1832,7 @@ impl LibraryView {
                         .disabled(busy)
                         .tooltip("Hopper takes the CurseForge app's pack version and loader. No files change; a pack update is offered as usual.")
                         .on_click(cx.listener(move |this, _, _, cx| this.settle_cf_change(&r3, CfChoice::UseCurseForge, cx))),
-                )
-                .into_any_element(),
+                ),
         )
     }
 
@@ -1847,7 +1857,7 @@ impl LibraryView {
         });
     }
 
-    fn pending_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn pending_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
         let pending = self.store.read(cx).pending(&inst.root).to_vec();
         if pending.is_empty() {
             return None;
@@ -1855,153 +1865,115 @@ impl LibraryView {
         // While the download window works on them: one progress for all,
         // and each file's step under Show files.
         let (fetch, files) = self.store.read(cx).fetch_files(&inst.root);
-        let theme = cx.theme();
         let (root, n) = (inst.root.clone(), pending.len());
         let list = pending.clone();
         drop(files);
+        let running = fetch.as_ref().filter(|v| v.running());
+        let title = match &fetch {
+            Some(v) if v.running() => format!("Downloading from CurseForge…{}", if v.total > 1 { format!(" {} of {}", (v.done + 1).min(v.total), v.total) } else { String::new() }),
+            _ if n == 1 => format!("{} to download in your browser", pending[0].name),
+            _ => format!("{n} files to download in your browser"),
+        };
+        let subject = match &fetch {
+            Some(v) => v.detail(),
+            None => "Their authors only allow downloads from the CurseForge website".to_string(),
+        };
+        let progress = running.map(|v| v.progress.unwrap_or(0.0));
+        let urls: Vec<String> = pending.iter().map(|p| p.url.clone()).filter(|u| !u.is_empty()).collect();
+        let (store, root2) = (self.store.clone(), root.clone());
+        let main = fetch.clone();
+        let show_files = {
+            let (store, root) = (self.store.clone(), root.clone());
+            Button::new("pending-show")
+                .small()
+                .outline()
+                .label("Show files")
+                .on_click(move |_, window, cx| {
+                    let (list, store, root) = (list.clone(), store.clone(), root.clone());
+                    window.open_dialog(cx, move |d, _, cx| {
+                        // Each file's step, as the window goes.
+                        let files = store.read(cx).fetch_files(&root).1;
+                        d.title("Download these by hand").child(
+                            v_flex().gap_2().children(list.iter().enumerate().map(|(i, p)| {
+                                let url = p.url.clone();
+                                h_flex()
+                                    .gap_3()
+                                    .child(
+                                        v_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(div().text_sm().truncate().child(p.name.clone()))
+                                            .child(widgets::caption(
+                                                match files.iter().find(|f| f.url == p.url) {
+                                                    Some(f) => format!("{} · {}", p.file_name, f.shown_step().label(f.size)),
+                                                    None => p.file_name.clone(),
+                                                },
+                                                cx,
+                                            )
+                                            .text_xs()),
+                                    )
+                                    .child(
+                                        Button::new(("pending-open", i))
+                                            .xsmall()
+                                            .outline()
+                                            .icon(IconName::ExternalLink)
+                                            .label("Open page")
+                                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                                    )
+                            })),
+                        )
+                    });
+                })
+        };
+        let (st, r) = (self.store.clone(), root.clone());
+        let check = cx.listener(move |this, _: &ClickEvent, _, cx| this.store.read(cx).finish_pack(&root));
         Some(
-            h_flex()
-                .mx_6()
-                .mt_3()
-                .px_4()
-                .py_2p5()
-                .gap_3()
-                .rounded(theme.radius_lg)
-                .border_1()
-                .border_color(theme.warning.opacity(0.5))
-                .bg(theme.warning.opacity(0.08))
-                .child(
-                    Icon::new(if fetch.as_ref().is_some_and(|v| v.running()) { IconName::Hourglass } else { IconName::TriangleAlert })
-                        .small()
-                        .text_color(theme.warning),
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(match &fetch {
-                            Some(v) if v.running() => format!("Downloading from CurseForge…{}", if v.total > 1 { format!(" {} of {}", (v.done + 1).min(v.total), v.total) } else { String::new() }),
-                            _ if n == 1 => format!("{} to download in your browser", pending[0].name),
-                            _ => format!("{n} files to download in your browser"),
-                        }))
-                        .child(match &fetch {
-                            Some(v) => widgets::caption(v.detail(), cx).when(!v.running(), |c| c.text_color(theme.warning)),
-                            None => widgets::caption(
-                                "Their authors only allow downloads from the CurseForge website. Download opens each page in a small window that saves the file and closes; files you download yourself are picked up from Downloads too.",
-                                cx,
-                            ),
-                        })
-                        .when_some(fetch.as_ref().filter(|v| v.running()), |c, v| {
-                            let p = v.progress.unwrap_or(0.0).clamp(0.0, 1.0);
-                            c.child(
-                                div()
-                                    .mt_1p5()
-                                    .h(px(4.))
-                                    .w_full()
-                                    .rounded_full()
-                                    .bg(theme.primary.opacity(0.15))
-                                    .child(div().h_full().w(relative(p)).rounded_full().bg(theme.primary)),
-                            )
-                        }),
-                )
-                .child({
-                    let urls: Vec<String> = pending.iter().map(|p| p.url.clone()).filter(|u| !u.is_empty()).collect();
-                    let (store, root2) = (self.store.clone(), root.clone());
-                    match &fetch {
-                        // Running: brings the window up. Stuck: tries those again.
-                        Some(v) => {
-                            let (store, v1) = (store.clone(), v.clone());
-                            let b = Button::new("pending-open-all").small();
-                            let b = if v.running() {
-                                b.outline()
-                                    .icon(IconName::ExternalLink)
-                                    .label("Show window")
-                                    .tooltip("Brings the download window to the front")
-                                    .disabled(!v.step.is_open())
-                            } else {
-                                b.primary().icon(IconName::RefreshCw).label("Retry").tooltip("Opens the download window again for the files that didn't come")
-                            };
-                            b.on_click(move |_, _, cx| crate::fetch_progress::click(&store, &v1, cx))
-                        }
-                        None => Button::new("pending-open-all")
-                            .small()
-                            .primary()
-                            .icon(IconName::Download)
-                            .label(if urls.len() == 1 { "Download".to_string() } else { format!("Download {}", urls.len()) })
-                            .tooltip("Opens each page in a small Hopper window that saves the file and closes")
-                            .disabled(urls.is_empty())
-                            .on_click(move |_, _, cx| store.read(cx).fetch_pages(&root2, urls.clone(), None)),
+            Notice::new("pending", Tier::Choice, title)
+                .icon(if running.is_some() { IconName::Hourglass } else { IconName::Download })
+                .subject(subject)
+                .progress(progress)
+                .primary(move |fit| match &main {
+                    // Running: brings the window up. Stuck: tries those again.
+                    Some(v) => {
+                        let (store, v1) = (store.clone(), v.clone());
+                        let b = Button::new("pending-open-all").small();
+                        let b = if v.running() {
+                            b.outline()
+                                .icon(IconName::ExternalLink)
+                                .label("Show window")
+                                .tooltip("Brings the download window to the front")
+                                .disabled(!v.step.is_open())
+                        } else {
+                            notice_slot::main_button(b, fit)
+                                .icon(IconName::RefreshCw)
+                                .label("Retry")
+                                .tooltip("Opens the download window again for the files that didn't come")
+                        };
+                        b.on_click(move |_, _, cx| crate::fetch_progress::click(&store, &v1, cx))
                     }
+                    None => notice_slot::main_button(Button::new("pending-open-all").small(), fit)
+                        .icon(IconName::Download)
+                        .label(if urls.len() == 1 { "Download".to_string() } else { format!("Download {}", urls.len()) })
+                        .tooltip("Opens each page in a small Hopper window that saves the file and closes. Files you download yourself are picked up from Downloads too.")
+                        .disabled(urls.is_empty())
+                        .on_click(move |_, _, cx| store.read(cx).fetch_pages(&root2, urls.clone(), None)),
                 })
-                .child({
-                    let (store, root) = (self.store.clone(), root.clone());
-                    Button::new("pending-show")
-                        .small()
-                        .outline()
-                        .label("Show files")
-                        .on_click(move |_, window, cx| {
-                            let (list, store, root) = (list.clone(), store.clone(), root.clone());
-                            window.open_dialog(cx, move |d, _, cx| {
-                                // Each file's step, as the window goes.
-                                let files = store.read(cx).fetch_files(&root).1;
-                                d.title("Download these by hand").child(
-                                    v_flex().gap_2().children(list.iter().enumerate().map(|(i, p)| {
-                                        let url = p.url.clone();
-                                        h_flex()
-                                            .gap_3()
-                                            .child(
-                                                v_flex()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .child(div().text_sm().truncate().child(p.name.clone()))
-                                                    .child(widgets::caption(
-                                                        match files.iter().find(|f| f.url == p.url) {
-                                                            Some(f) => format!("{} · {}", p.file_name, f.shown_step().label(f.size)),
-                                                            None => p.file_name.clone(),
-                                                        },
-                                                        cx,
-                                                    )
-                                                    .text_xs()),
-                                            )
-                                            .child(
-                                                Button::new(("pending-open", i))
-                                                    .xsmall()
-                                                    .outline()
-                                                    .icon(IconName::ExternalLink)
-                                                    .label("Open page")
-                                                    .on_click(move |_, _, cx| cx.open_url(&url)),
-                                            )
-                                    })),
-                                )
-                            });
-                        })
-                })
-                .child({
-                    let r = root.clone();
-                    Button::new("pending-dismiss")
-                        .small()
-                        .ghost()
-                        .icon(IconName::Close)
-                        .tooltip("Forget these; don't wait for them")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let r = r.clone();
-                            this.store.update(cx, |s, cx| {
-                                s.forget_pending(&r);
-                                cx.notify();
-                            });
-                        }))
-                })
-                .child(
+                .action(show_files)
+                .action(
                     Button::new("pending-check")
                         .small()
                         .ghost()
                         .label("Check now")
                         .tooltip("Hopper checks Downloads every few seconds; this re-runs the pack's install too")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.store.read(cx).finish_pack(&root)
-                        })),
+                        .on_click(check),
                 )
-                .into_any_element(),
+                // Forgets them: Hopper stops waiting for these files.
+                .dismiss(move |_, cx| {
+                    st.update(cx, |s, cx| {
+                        s.forget_pending(&r);
+                        cx.notify();
+                    })
+                }),
         )
     }
 
@@ -2930,7 +2902,7 @@ impl LibraryView {
             .into_any_element()
     }
 
-    fn detail(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.addons_drawn.set(false);
         let Some(inst) = self
             .selected
@@ -3035,6 +3007,18 @@ impl LibraryView {
                 cx,
             )
         };
+        // One slot above the tabs for every notice the instance has: the
+        // two that matter most, the rest under "N more".
+        let mut notices: Vec<Notice> = Vec::new();
+        notices.extend(stuck);
+        notices.extend(cf_change);
+        notices.extend(pending);
+        notices.extend(group_pack);
+        notices.extend(pre_join);
+        let root = inst.root.clone();
+        notices.extend(self.addons.update(cx, |a, cx| a.notices(&root, cx)));
+        notices.extend(hint);
+        let slot = notice_slot::slot("instance", notices, window, cx).map(|s| div().flex_none().px_6().pt_2().child(s));
         let tabs = self.tabs(&inst, cx);
         let pack_tabs = self.pack_tabs(&inst, cx);
         let body = self.tab_body(&inst, cx);
@@ -3045,12 +3029,7 @@ impl LibraryView {
                 id("detail", &inst.root),
                 div().flex_none().child(header),
             ))
-            .children(stuck)
-            .children(hint)
-            .children(cf_change)
-            .children(pending)
-            .children(group_pack)
-            .children(pre_join)
+            .children(slot)
             .child(tabs)
             .children(pack_tabs)
             .child(
@@ -3262,9 +3241,9 @@ impl Render for LibraryView {
                     ),
                     Part::new(
                         &view,
-                        |l, _, _, cx| {
+                        |l, _, window, cx| {
                             let _t = crate::frame_log::span("lib.detail");
-                            let page = l.detail(cx);
+                            let page = l.detail(window, cx);
                             l.show_logos(cx);
                             page
                         },
