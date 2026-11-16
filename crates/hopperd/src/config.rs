@@ -63,6 +63,9 @@ pub struct Config {
     /// switches it on (Settings › Access & devices); a config that already
     /// has a port keeps it (see [`Config::load_or_create`]).
     pub sftp_port: u16,
+    /// The port SFTP had when the owner last switched it off, so switching
+    /// it on again brings it back. 0: none remembered (8022 is used).
+    pub sftp_last_port: u16,
     /// Server addresses: one Minecraft port for every server.
     pub router: crate::router::RouterConfig,
     /// Until there's an owner, a browser on this PC itself sets the owner
@@ -125,6 +128,7 @@ impl Default for Config {
             allow_sources: false,
             github_token: String::new(),
             sftp_port: 0,
+            sftp_last_port: 0,
             router: Default::default(),
             trust_local_setup: true,
             auto_update: true,
@@ -268,6 +272,23 @@ mod tests {
             std::fs::write(dir.join(FILE), text).unwrap();
             assert_eq!(Config::load_or_create(&dir).unwrap().sftp_port, want, "{text:?}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remembered_sftp_port_is_saved_and_old_configs_still_load() {
+        let dir = temp("last");
+        // A config from before the field existed loads with nothing remembered.
+        std::fs::write(dir.join(FILE), "sftp_port = 2222
+").unwrap();
+        let mut c = Config::load_or_create(&dir).unwrap();
+        assert_eq!((c.sftp_port, c.sftp_last_port), (2222, 0));
+        // Switched off: the port is remembered and survives a restart.
+        c.sftp_last_port = c.sftp_port;
+        c.sftp_port = 0;
+        c.save(&dir).unwrap();
+        let back = Config::load_or_create(&dir).unwrap();
+        assert_eq!((back.sftp_port, back.sftp_last_port), (0, 2222));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

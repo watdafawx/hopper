@@ -146,7 +146,9 @@ Incremental and off-site backups: see 0.11.0 below.
 - **MCP:** `/api/v1/mcp` (Streamable HTTP) for AI assistants, with an API
   token. Tools: servers, console, power, commands, files (list, read,
   write, search), mods, last crash, backups. Read-only tokens only look.
-- **SFTP** on port 8022 (`sftp_port`, 0 = off): `/` lists your servers.
+- **SFTP** (off until you switch it on in Settings > Access & devices; it
+  starts at once, no restart; port 8022 unless you set `sftp_port`; switching
+  it off and on again keeps your port): `/` lists your servers.
   Your name and password from the LAN or Tailscale, or an API token as
   the password from anywhere. Saved-over files keep their old version and
   deleted ones go to the trash.
@@ -388,7 +390,7 @@ a panel folder in the container.
 
 ```
 docker run -d --name hopperd --hostname hopper --restart unless-stopped --stop-timeout 120 \
-  -p 8790:8790 -p 8022:8022 -p 25565:25565 \
+  -p 8790:8790 -p 25565:25565 \
   -v hopperd:/hopper ghcr.io/watdafawx/hopperd:latest
 docker logs hopperd
 ```
@@ -398,10 +400,16 @@ Open `http://<host>:8790` and use the setup code from `docker logs hopperd`. Por
 | Port | |
 |---|---|
 | 8790 | the panel (web UI and API) |
-| 8022 | SFTP |
+| 8022 | SFTP, only if you use it (see below) |
 | 25565 | server addresses: every server joined by its address on one port |
 | each server's own port | add `-p 25566:25566` and so on for servers joined by port |
 
+- **SFTP is off on a new install**, so the container doesn't need port 8022.
+  To use FileZilla or WinSCP: switch SFTP on in Settings > Access & devices,
+  then publish the port it shows (add `-p 8022:8022` and start the container
+  again; with Compose, remove the `#` in front of the 8022 line). Without
+  the published port nothing outside the container can reach SFTP. A
+  container that already had SFTP on keeps it on, so keep its 8022 port.
 - LAN discovery (Hopper desktop finding the panel by itself) needs
   `--network host` (Linux hosts) instead of `-p`.
 - `docker stop` stops the panel, then the servers (they save their worlds),

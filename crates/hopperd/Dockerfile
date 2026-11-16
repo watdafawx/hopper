@@ -4,7 +4,7 @@
 #
 #   docker build -f crates/hopperd/Dockerfile -t hopperd .
 #   docker run -d --name hopperd --stop-timeout 120 \
-#     -p 8790:8790 -p 8022:8022 -p 25565:25565 -v hopperd:/hopper hopperd
+#     -p 8790:8790 -p 25565:25565 -v hopperd:/hopper hopperd
 #
 # Build from the repository root. Publish each server's game port too.
 # LAN discovery (mDNS) needs --network host.
@@ -52,7 +52,8 @@ ENV ProgramFiles=/opt/java \
     HOPPER_DATA_DIR=/hopper/.hopper-server/core \
     LANG=C.UTF-8
 VOLUME ["/hopper"]
-# Panel (HTTPS/HTTP), SFTP, server addresses (one Minecraft port for all).
+# Panel (HTTPS/HTTP), SFTP (off until switched on in the panel; publish 8022
+# only then), server addresses (one Minecraft port for all).
 EXPOSE 8790 8022 25565
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["tini", "--", "hopperd-docker"]

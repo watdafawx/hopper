@@ -16,7 +16,9 @@ services:
     stop_grace_period: 2m
     ports:
       - "8790:8790"   # panel (web UI and API)
-      - "8022:8022"   # SFTP
+      # SFTP is off until you switch it on in Settings > Access & devices.
+      # Only then remove the # here, so FileZilla or WinSCP can reach it:
+      # - "8022:8022"   # SFTP
       - "25565:25565" # server addresses: one Minecraft port for every server
       # A server joined by its own port needs it published too, e.g.:
       # - "25566:25566"
