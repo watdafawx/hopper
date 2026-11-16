@@ -96,6 +96,7 @@ pub mod packs;
 pub mod pack_where;
 pub mod onlyhere;
 pub mod panel;
+pub mod relay_view;
 pub mod panic_log;
 pub mod paths;
 pub mod msauth;

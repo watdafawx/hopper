@@ -771,6 +771,12 @@ impl Client {
         format!("/servers/{}{rest}", enc(id))
     }
 
+    /// The server's "Relay through a VPS" status; `None` when it doesn't use
+    /// the relay or the panel is too old to know it.
+    pub fn vps_relay(&self, id: &str) -> Option<crate::relay_view::RelayView> {
+        crate::relay_view::RelayView::parse(&self.get(&Self::server_path(id, "/vps-relay")).ok()?)
+    }
+
     /// `/fs/{id}` + `rest`, with the id encoded.
     pub fn fs_path(id: &str, rest: &str) -> String {
         format!("/fs/{}{rest}", enc(id))
