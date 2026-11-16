@@ -2630,6 +2630,29 @@ fn faces_of(store: &Entity<Store>, people: &[(String, String)], ring: Hsla, size
         .when(more > 0, |d| d.child(widgets::caption(format!("+{more}"), cx).text_xs()))
 }
 
+/// One quiet line under every Friends page saying whether Hopper is
+/// connected, so a player knows a friend's change will show up by itself.
+/// The warning bar above still explains a lost connection.
+fn link_line(status: &SyncStatus, live: bool, cx: &App) -> Div {
+    let theme = cx.theme();
+    let (dot, text) = match status {
+        SyncStatus::Ok if live => (theme.success, "Connected. Friends' changes show up right away."),
+        SyncStatus::Ok => (theme.success, "Connected. Friends' changes show up within a minute."),
+        SyncStatus::Down(e) if e == CANT_CONNECT => (theme.muted_foreground, "Offline. Hopper keeps trying."),
+        SyncStatus::Down(_) => (theme.warning, "Reconnecting…"),
+        SyncStatus::Connecting | SyncStatus::Off => (theme.muted_foreground, "Connecting…"),
+    };
+    h_flex()
+        .flex_none()
+        .gap_1p5()
+        .px_3()
+        .py_1p5()
+        .border_t_1()
+        .border_color(theme.border)
+        .child(widgets::status_dot(dot))
+        .child(widgets::caption(text, cx).text_xs().min_w_0())
+}
+
 impl Render for FriendsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
@@ -2644,6 +2667,7 @@ impl Render for FriendsPanel {
         let down = matches!(status, SyncStatus::Down(_));
         let unsent = s.unsent_line();
         let given_up = s.given_up();
+        let live = s.friends_live();
         let body: AnyElement = match &status {
             SyncStatus::Off => self.off(cx),
             SyncStatus::Connecting if !heard => {
@@ -2734,7 +2758,8 @@ impl Render for FriendsPanel {
                         )
                     }))
                     .children(top)
-                    .child(div().id(scroll_id).flex_1().min_h_0().overflow_y_scrollbar().child(content));
+                    .child(div().id(scroll_id).flex_1().min_h_0().overflow_y_scrollbar().child(content))
+                    .child(link_line(&status, live, cx));
                 h_flex().size_full().items_start().child(self.rail(&groups, cx)).child(main).into_any_element()
             }
         };

@@ -365,6 +365,18 @@ pub fn empty_state(icon: IconName, title: impl Into<SharedString>, body: Option<
         })
 }
 
+/// How far an empty tab's message sits under the tabs above it, in rem
+/// (with the page's own top padding and `empty_state`'s, its icon is 64 px
+/// under the tabs, as in the web UI; measured on screen, 1.25 left it at 59.5).
+pub const EMPTY_TOP: f32 = 1.55;
+
+/// An empty tab's message (`empty_state`), a fixed way under the tabs
+/// rather than centred in what's left, so it is at the same height on
+/// every tab whatever the window's size.
+pub fn empty_top(state: impl IntoElement) -> Div {
+    v_flex().w_full().flex_1().min_h_0().items_center().pt(rems(EMPTY_TOP)).child(state)
+}
+
 /// `n` placeholder rows of `height` while a list loads.
 pub fn skeleton_rows(n: usize, height: Rems, cx: &App) -> Div {
     let theme = cx.theme();
@@ -552,9 +564,11 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         .gap_1()
         .min_w_0()
         .overflow_hidden()
-        // Only the "+n" left: it stays whole beside a version chip that
-        // narrows (the chip gives way, not the count).
-        .when(keep == 0, |r| r.flex_none())
+        // The tags were cut to fit `room` above, so they keep their width
+        // and the version chip or file name beside them gives way (a long
+        // pack file name squeezed "New" to "Ne"). Only the "+n" left: it
+        // stays whole the same way.
+        .when(keep == 0 || t.room.is_some(), |r| r.flex_none())
         .children(items.into_iter().map(|(_, el)| el))
         .when(n_hidden > 0, |r| {
             let rest: SharedString = hidden.join(", ").into();

@@ -68,38 +68,32 @@ fn copy_to(inst: &Instance, parent: &Path, name: &str, job: &Job) -> anyhow::Res
 /// Where a deleted instance went.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeleteOutcome {
-    /// In the Windows Recycle Bin.
-    RecycleBin,
-    /// Gone for good (the "skip the Recycle Bin" setting).
+    /// In Recently deleted, beside it on its own drive (this entry), for
+    /// [`crate::recently_deleted::KEEP_DAYS`] days.
+    RecentlyDeleted(PathBuf),
+    /// Gone for good ("Delete for good now").
     Deleted,
-    /// On a network drive, which has no Recycle Bin (Windows would delete
-    /// it for good): moved aside to this folder instead, under
-    /// `<parent>\.hopper-trash`.
-    MovedAside(PathBuf),
 }
 
-/// Folder beside instances that deleted instances on network drives go to.
+/// Folder beside instances that History clean-up on network drives moves
+/// old backups to (they have no Recycle Bin).
 pub const HOPPER_TRASH: &str = ".hopper-trash";
 
-/// Sends the instance folder to the Recycle Bin, or, on a network drive,
-/// moves it to `<parent>\.hopper-trash\<name>-<timestamp>`.
+/// Moves the instance folder to Recently deleted.
 pub fn delete(inst: &Instance) -> anyhow::Result<()> {
     delete_instance(inst, false).map(|_| ())
 }
 
 /// [`delete`], saying where the folder went so the UI can word it.
-/// `permanent` skips the Recycle Bin (and `.hopper-trash`).
+/// `permanent` deletes it for good instead.
 pub fn delete_instance(inst: &Instance, permanent: bool) -> anyhow::Result<DeleteOutcome> {
     if permanent {
         remove_for_good(&inst.root)?;
         return Ok(DeleteOutcome::Deleted);
     }
-    if is_remote_drive(&inst.root) {
-        return move_to_hopper_trash(&inst.root).map(DeleteOutcome::MovedAside);
-    }
-    trash::delete(&inst.root)
-        .with_context(|| format!("moving {} to the Recycle Bin", inst.root.display()))?;
-    Ok(DeleteOutcome::RecycleBin)
+    use crate::recently_deleted as rd;
+    let e = rd::move_in(&inst.root, &rd::places_for(&inst.root), rd::Meta::new(rd::Kind::Instance, &inst.name, &inst.root))?;
+    Ok(DeleteOutcome::RecentlyDeleted(e.dir))
 }
 
 /// Deletes a file or folder outright, without the Recycle Bin. Read-only

@@ -1,6 +1,6 @@
 <script>
   // Bottom of Settings › General: take the server off the panel (the folder
-  // stays), or delete it: the folder moves to .hopper-deleted in the
+  // stays), or delete it: the folder moves to Recently deleted (.hopper-deleted) in the
   // servers folder for 30 days (Settings › Panel folder can restore it).
   // Servers that run where they are (maybe for another panel too) can only
   // be taken off.
@@ -78,7 +78,7 @@
   <div class="row wrap">
     <div class="grow small">
       {#if alive}<span class="warn">Stop the server first.</span>
-      {:else if inRoot}Remove from panel keeps the folder. Delete moves it to .hopper-deleted for 30 days, or deletes it for good.
+      {:else if inRoot}Remove from panel keeps the folder. Delete moves it to Recently deleted for 30 days, or deletes it for good.
       {:else}It runs where it is{server.managed_by ? `, and ${server.managed_by} knows it too` : ''}: the panel can take it off its list, never delete its files.{/if}
     </div>
     <button class="btn sm bad" disabled={alive} onclick={takeOff}><EyeOff size={13} />Remove from panel</button>
@@ -92,15 +92,15 @@
       <form class="f" onsubmit={(e) => (e.preventDefault(), del())}>
         <h3>Delete {server.name}?</h3>
         <label class="row small"><input type="checkbox" bind:checked={dlg.keep} disabled={dlg.busy} />Keep the world (moved to Kept worlds in the servers folder)</label>
-        <label class="row small"><input type="checkbox" bind:checked={dlg.permanent} disabled={dlg.busy} />Delete permanently (can't be undone)</label>
+        <label class="row small"><input type="checkbox" bind:checked={dlg.permanent} disabled={dlg.busy} />Delete for good now (can't be undone)</label>
         {#if dlg.permanent}
-          <p class="small warn-text">The folder is deleted for good and can't be restored.</p>
+          <p class="small warn-text">It's deleted for good now and can't be restored.</p>
         {:else}
-          <p class="small subtle">Its folder moves to .hopper-deleted in the servers folder for 30 days: restore it from Settings › Panel folder.</p>
+          <p class="small subtle">It moves to Recently deleted (Settings › Panel folder) for 30 days, then goes for good.</p>
         {/if}
         <div class="row end">
           <button type="button" class="btn" disabled={dlg.busy} onclick={() => (dlg = null)}>Cancel</button>
-          <button class="btn danger" disabled={dlg.busy}>{dlg.busy ? 'Deleting…' : dlg.permanent ? 'Delete permanently' : 'Delete server'}</button>
+          <button class="btn danger" disabled={dlg.busy}>{dlg.busy ? 'Deleting…' : dlg.permanent ? 'Delete for good' : 'Delete server'}</button>
         </div>
       </form>
     </div>

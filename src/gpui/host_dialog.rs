@@ -1365,7 +1365,9 @@ impl Render for HostForm {
         // vanilla server, 6 GB for a modded one (a pack's own recommendation
         // is applied when its files are read).
         if !self.memory_touched {
-            let gb = hopper::hosting::default_memory_mb(self.modded(cx), 0) as f32 / 1024.0;
+            // Fitted to the machine it goes on, once Hopper knows its memory.
+            let host_mb = self.host.as_ref().filter(|(p, ..)| *p == self.place).map_or(0, |(.., total, _)| (*total * 1024.0) as u32);
+            let gb = hopper::hosting::default_memory_for(self.modded(cx), 0, host_mb) as f32 / 1024.0;
             if (self.memory.read(cx).value().start() - gb).abs() > 0.01 {
                 self.memory.update(cx, |s, cx| s.set_value(gb, window, cx));
             }

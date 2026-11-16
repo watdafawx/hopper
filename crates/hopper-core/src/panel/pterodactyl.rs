@@ -1,24 +1,24 @@
 //! Pterodactyl (and panels with its client API, like Pelican) with a client
 //! API key (ptlc_…, from Account → API Credentials).
 
-use super::{PanelAction, PanelServer, PanelStats, ServerPanel, agent, base_url};
+use super::{PanelAction, PanelServer, PanelStats, PanelTls, ServerPanel, agent, base_url};
 use anyhow::{Context as _, bail};
 use serde_json::{Value, json};
 
 pub struct Pterodactyl {
     base: String,
     key: String,
-    self_signed: bool,
+    tls: PanelTls,
     agent: ureq::Agent,
 }
 
 impl Pterodactyl {
-    pub fn new(url: &str, key: &str, self_signed: bool) -> Self {
+    pub fn new(url: &str, key: &str, tls: PanelTls) -> Self {
         Pterodactyl {
             base: base_url(url),
             key: key.to_string(),
-            self_signed,
-            agent: agent(self_signed),
+            agent: agent(&tls),
+            tls,
         }
     }
 
@@ -140,7 +140,7 @@ impl ServerPanel for Pterodactyl {
     /// Pterodactyl streams the console over Wings' websocket only: a
     /// background connection keeps its latest lines.
     fn console(&self, id: &str) -> anyhow::Result<Vec<String>> {
-        let access = super::pterodactyl_ws::Access { base: self.base.clone(), key: self.key.clone(), self_signed: self.self_signed };
+        let access = super::pterodactyl_ws::Access { base: self.base.clone(), key: self.key.clone(), tls: self.tls.clone() };
         super::pterodactyl_ws::lines(&access, id)
     }
 

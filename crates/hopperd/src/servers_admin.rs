@@ -18,6 +18,7 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use hopper_core::hosting::zip_import;
 use hopper_core::hosting::{CreateOptions, ServerLoader};
+use hopper_core::recently_deleted as rd;
 use hopper_core::{browse, cf, modrinth, source};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -26,9 +27,11 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 /// Deleted servers wait here, inside the servers folder (a rename on the
-/// same drive, so instant), until restored or 30 days pass.
-pub const DELETED_DIR: &str = ".hopper-deleted";
-const KEEP_DELETED_DAYS: u64 = 30;
+/// same drive, so instant), until restored or 30 days pass. The same
+/// Recently deleted folder Hopper desktop uses, so either app lists,
+/// restores and sweeps the other's entries.
+pub const DELETED_DIR: &str = rd::DIR;
+const KEEP_DELETED_DAYS: u64 = rd::SERVER_KEEP_DAYS;
 const INCOMING: &str = "incoming";
 
 pub fn routes() -> Router<Arc<App>> {
@@ -204,36 +207,23 @@ async fn scan(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Q
 // ---- the servers folder ---------------------------------------------------------------
 
 fn deleted_list(root: &FsPath) -> Vec<Value> {
-    let mut v: Vec<Value> = std::fs::read_dir(root.join(DELETED_DIR))
+    rd::list(&root.join(DELETED_DIR))
         .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.path().is_dir())
         .map(|e| {
-            let p = e.path();
-            let meta: Value = std::fs::read(p.join(".hopper-deleted.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-            let at = meta["at"].as_u64().unwrap_or(0);
             json!({
-                "name": e.file_name().to_string_lossy(), "server": meta["name"], "from": meta["from"], "at": at,
-                "expires": at + KEEP_DELETED_DAYS * 86400,
+                "name": e.id(), "server": e.meta.name, "from": e.meta.from, "at": e.meta.at,
+                "expires": e.expires(),
             })
         })
-        .collect();
-    v.sort_by_key(|d| std::cmp::Reverse(d["at"].as_u64().unwrap_or(0)));
-    v
+        .collect()
 }
 
-/// Deleted servers past their 30 days go for good (at start).
+/// Deleted servers past their time go for good (at start).
 pub fn purge_old(root: Option<&FsPath>) {
     let Some(root) = root else { return };
-    for d in deleted_list(root) {
-        if d["expires"].as_u64().is_some_and(|e| e < now())
-            && let Some(n) = d["name"].as_str()
-        {
-            let p = root.join(DELETED_DIR).join(n);
-            log::info!("removing {} (deleted over {KEEP_DELETED_DAYS} days ago)", p.display());
-            let _ = std::fs::remove_dir_all(p);
-        }
+    let s = rd::sweep(&[root.join(DELETED_DIR)], rd::now(), false);
+    if s.count > 0 {
+        log::info!("removed {} deleted server(s) whose {KEEP_DELETED_DAYS} days were up", s.count);
     }
 }
 
@@ -1000,8 +990,9 @@ async fn remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
                         }
                         Err(e2) => why.context(format!("Couldn't finish deleting {name}, and couldn't put the folder back ({e2}). It is at {}", dest.display())),
                     };
-                    if let Err(err) = std::fs::write(dest.join(".hopper-deleted.json"), serde_json::to_vec(&json!({ "name": name, "from": src, "at": now() }))?) {
-                        return Err(undo(err.into()));
+                    let meta = rd::Meta::new(rd::Kind::Server, &name, &src).keep_days(KEEP_DELETED_DAYS);
+                    if let Err(err) = rd::write_meta(&dest, &meta) {
+                        return Err(undo(err));
                     }
                     if keep {
                         return hopper_core::hosting::worlds::keep_worlds_to(&dest, &root, &folder).map_err(undo);
@@ -1019,24 +1010,19 @@ async fn remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
     Ok(Json(json!({ "ok": true, "kept_world": kept, "keep_days": KEEP_DELETED_DAYS, "permanent": b.permanent && b.mode == "delete" })))
 }
 
-fn deleted_dir(app: &App, name: &str) -> ApiResult<PathBuf> {
+fn deleted_entry(app: &App, name: &str) -> ApiResult<rd::Entry> {
     if name.contains(['/', '\\']) || name.contains("..") || name.is_empty() {
         return Err(bad("Which one?"));
     }
-    let p = servers_root(app)?.join(DELETED_DIR).join(name);
-    p.is_dir().then_some(p).ok_or_else(|| not_found("deleted server"))
+    rd::find(&servers_root(app)?.join(DELETED_DIR), name).ok_or_else(|| not_found("deleted server"))
 }
 
 async fn restore(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(name): Path<String>) -> ApiResult<Json<Value>> {
     require_owner(&app, &headers, &method)?;
-    let p = deleted_dir(&app, &name)?;
-    let meta: Value = std::fs::read(p.join(".hopper-deleted.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    let back = meta["from"].as_str().map(PathBuf::from).ok_or_else(|| bad("Hopper doesn't know where it came from."))?;
-    if back.exists() {
-        return Err(bad(format!("{} exists again: move it away first.", back.display())));
-    }
-    std::fs::rename(&p, &back).map_err(|e| bad(format!("moving it back: {e}")))?;
-    let _ = std::fs::remove_file(back.join(".hopper-deleted.json"));
+    let e = deleted_entry(&app, &name)?;
+    // A server made since in the same folder keeps it: this one comes
+    // back as "<folder> (restored)".
+    let back = blocking(move || rd::restore(&e)).await?;
     {
         let mut c = app.cfg.write().unwrap();
         c.hidden.retain(|h| !same_path(h, &back));
@@ -1050,9 +1036,9 @@ async fn restore(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
 
 async fn purge(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(name): Path<String>) -> ApiResult<Json<Value>> {
     require_owner(&app, &headers, &method)?;
-    let p = deleted_dir(&app, &name)?;
-    log::info!("deleting {} for good", p.display());
-    blocking(move || Ok(std::fs::remove_dir_all(&p)?)).await?;
+    let e = deleted_entry(&app, &name)?;
+    log::info!("deleting {} for good", e.dir.display());
+    blocking(move || rd::purge(&e).map(|_| ())).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
