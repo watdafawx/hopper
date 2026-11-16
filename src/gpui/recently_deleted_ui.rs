@@ -12,6 +12,9 @@ pub fn icon(k: Kind) -> IconName {
         Kind::World => IconName::Globe,
         Kind::Backup => IconName::Archive,
         Kind::Server => IconName::Server,
+        Kind::Screenshot => IconName::Image,
+        Kind::File => IconName::File,
+        Kind::Log => IconName::ScrollText,
     }
 }
 
@@ -43,6 +46,9 @@ pub struct Restored {
     pub to: PathBuf,
     /// Its name was taken: it came back under another.
     pub renamed: bool,
+    /// What Hopper's settings held for an instance (its group, paired
+    /// servers), to put back for it.
+    pub settings: Option<hopper::settings::InstanceSettings>,
 }
 
 /// Puts `e` back (off the UI thread). An instance that comes back beside
@@ -50,7 +56,7 @@ pub struct Restored {
 /// Library too.
 pub fn restore(e: &Entry) -> anyhow::Result<Restored> {
     let to = rd::restore(e)?;
-    let renamed = e.meta.kind != Kind::Backup && to != e.meta.from;
+    let renamed = !matches!(e.meta.kind, Kind::Backup) && !e.meta.kind.is_files() && to != e.meta.from;
     if renamed && e.meta.kind == Kind::Instance {
         if let Some(mut i) = hopper::instances::load(&to) {
             i.name = format!("{} (restored)", i.name);
@@ -59,7 +65,8 @@ pub fn restore(e: &Entry) -> anyhow::Result<Restored> {
             }
         }
     }
-    Ok(Restored { kind: e.meta.kind, name: e.meta.name.clone(), to, renamed })
+    let settings = e.meta.settings.clone().and_then(|v| serde_json::from_value(v).ok());
+    Ok(Restored { kind: e.meta.kind, name: e.meta.name.clone(), to, renamed, settings })
 }
 
 impl Restored {

@@ -3979,7 +3979,7 @@ impl AddonsView {
     }
 
     /// Delete: the picked rows, else the keys' row, go through the usual
-    /// Remove question (backups with Undo, or the Recycle Bin).
+    /// Remove question (backups with Undo, or Recently deleted).
     fn on_remove_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_rows();
         let files = if self.selected.is_empty() {
