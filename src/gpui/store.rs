@@ -703,6 +703,91 @@ pub struct Store {
     _poll: Task<()>,
 }
 
+/// What wakes the store's poll loop when there is work. A worker thread that
+/// wants a full redraw calls [`PollWake::full`], one that only moved a job's
+/// progress calls [`PollWake::tick`]. Both set an [`AtomicBool`] so a burst of
+/// updates collapses into one redraw, and push one token into an unbounded
+/// channel the loop blocks on, so an idle Hopper never ticks.
+struct PollWake {
+    dirty: Arc<AtomicBool>,
+    ticked: Arc<AtomicBool>,
+    signal: async_channel::Sender<()>,
+}
+
+impl PollWake {
+    fn new() -> (Self, async_channel::Receiver<()>) {
+        let (signal, rx) = async_channel::unbounded();
+        // The store starts dirty so its first pass refreshes and draws;
+        // one token lets the loop's first wait return at once.
+        let _ = signal.try_send(());
+        (
+            Self {
+                dirty: Arc::new(AtomicBool::new(true)),
+                ticked: Arc::new(AtomicBool::new(false)),
+                signal,
+            },
+            rx,
+        )
+    }
+
+    /// The waker for a full redraw (a job started or finished, a file
+    /// changed, a message landed).
+    fn full(&self) -> hopper::waker::Waker {
+        let dirty = self.dirty.clone();
+        let signal = self.signal.clone();
+        Arc::new(move || {
+            dirty.store(true, Ordering::Relaxed);
+            let _ = signal.try_send(());
+        })
+    }
+
+    /// The waker for job progress only (the tasks list redraws; the rest
+    /// of the UI needn't).
+    fn tick(&self) -> hopper::waker::Waker {
+        let ticked = self.ticked.clone();
+        let signal = self.signal.clone();
+        Arc::new(move || {
+            ticked.store(true, Ordering::Relaxed);
+            let _ = signal.try_send(());
+        })
+    }
+
+    fn dirty(&self) -> &Arc<AtomicBool> {
+        &self.dirty
+    }
+
+    fn ticked(&self) -> &Arc<AtomicBool> {
+        &self.ticked
+    }
+}
+
+#[cfg(test)]
+mod poll_wake_tests {
+    use super::PollWake;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn full_and_tick_set_their_flag_and_signal_once() {
+        let (w, rx) = PollWake::new();
+        // The seed token from new(): lets the first wait return at once.
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+
+        let full = w.full();
+        full();
+        assert!(w.dirty().swap(false, Ordering::Relaxed), "full() must set dirty");
+        assert!(rx.try_recv().is_ok(), "full() must signal");
+        assert!(rx.try_recv().is_err());
+
+        let tick = w.tick();
+        tick();
+        assert!(w.ticked().swap(false, Ordering::Relaxed), "tick() must set ticked");
+        assert!(!w.dirty().swap(false, Ordering::Relaxed), "tick() must not set dirty");
+        assert!(rx.try_recv().is_ok(), "tick() must signal");
+        assert!(rx.try_recv().is_err());
+    }
+}
+
 impl Store {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut settings = Settings::load_or_default();
@@ -719,17 +804,12 @@ impl Store {
             }
         }
         let (tx, rx) = channel();
-        let dirty = Arc::new(AtomicBool::new(true));
-        let wake: hopper::waker::Waker = {
-            let dirty = dirty.clone();
-            Arc::new(move || dirty.store(true, Ordering::Relaxed))
-        };
+        let (poll_wake, wake_rx) = PollWake::new();
+        let dirty = poll_wake.dirty().clone();
+        let ticked = poll_wake.ticked().clone();
+        let wake: hopper::waker::Waker = poll_wake.full();
         crate::fetch_progress::set_waker(wake.clone());
-        let ticked = Arc::new(AtomicBool::new(false));
-        let tick: hopper::waker::Waker = {
-            let ticked = ticked.clone();
-            Arc::new(move || ticked.store(true, Ordering::Relaxed))
-        };
+        let tick: hopper::waker::Waker = poll_wake.tick();
         let watched = Arc::new(Mutex::new(Vec::new()));
         let stuck = crate::stuck::StuckState::default();
         hopper::stuckstart::set_secs(settings.stuck_start_secs);
@@ -905,7 +985,7 @@ impl Store {
             disk_later: Vec::new(),
             tx,
             wake,
-            _poll: Self::poll(rx, dirty, ticked, cx),
+            _poll: Self::poll(rx, wake_rx, dirty, ticked, cx),
         };
         // Panels turned off are refused before anything asks them.
         hopper::panel::set_off(&store.settings);
@@ -1284,13 +1364,27 @@ impl Store {
         })
     }
 
-    /// Drains worker messages and redraws when anything changed.
-    fn poll(rx: Receiver<Msg>, dirty: Arc<AtomicBool>, ticked: Arc<AtomicBool>, cx: &mut Context<Self>) -> Task<()> {
+    /// Drains worker messages and redraws when anything changed. It blocks on
+    /// [`PollWake`]'s channel instead of ticking on a timer, so an idle Hopper
+    /// never wakes; each signal drains everything that arrived, so a burst of
+    /// ticks is one redraw, as the old 50 ms timer made it.
+    fn poll(
+        rx: Receiver<Msg>,
+        wake_rx: async_channel::Receiver<()>,
+        dirty: Arc<AtomicBool>,
+        ticked: Arc<AtomicBool>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(50))
-                    .await;
+                // Wait for work: a message, a full redraw, or a job tick. All
+                // senders live as long as the store does, so this only ends
+                // when the window closes (and `this.update` fails anyway).
+                if wake_rx.recv().await.is_err() {
+                    break;
+                }
+                // A burst of ticks: drain them so one redraw covers them all.
+                while wake_rx.try_recv().is_ok() {}
                 crate::wakes::hit(&crate::wakes::STORE_POLL);
                 let msgs: Vec<Msg> = rx.try_iter().collect();
                 if msgs.is_empty() && !dirty.swap(false, Ordering::Relaxed) {

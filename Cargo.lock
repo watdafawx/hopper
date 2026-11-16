@@ -4487,6 +4487,7 @@ name = "hopper"
 version = "0.77.2"
 dependencies = [
  "anyhow",
+ "async-channel",
  "backtrace",
  "base64 0.22.1",
  "directories",

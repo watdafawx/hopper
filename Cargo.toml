@@ -55,6 +55,8 @@ memprof = ["dep:backtrace"]
 
 [dependencies]
 backtrace = { version = "0.3", optional = true }
+# The store's poll loop blocks on this, so an idle Hopper never wakes.
+async-channel = "2"
 # Imported as `hopper` so the app's `hopper::...` paths stay as they were.
 hopper = { path = "crates/hopper-core", package = "hopper-core", features = ["translate"] }
 anyhow.workspace = true
