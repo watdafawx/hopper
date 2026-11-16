@@ -225,16 +225,13 @@ fn backup(path: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
         n += 1;
         dest = backup_dir.join(format!("{n}-{name}"));
     }
-    // A jar CurseForge or Modrinth knows and hands out again isn't kept: it's
-    // deleted and a note of which file it was stands in, so Undo downloads it
-    // again. Unknown jars, files only a website has, and text files are kept
-    // as copies (nothing else has them).
+    // Every file moves into History as it is (a rename, no download, no
+    // site asked). A jar CurseForge or Modrinth knows gets its ids noted
+    // beside it: the background slim (`backups::slim`) later swaps it for a
+    // note when the site hands it out again byte for byte, and keeps it
+    // when only a website has it. Asking the site here would cost a request
+    // per jar in the middle of a big update.
     let ids = backup_dir.parent().and_then(Path::parent).and_then(|root| crate::backups::ids_for(root, path));
-    if let Some(c) = &ids
-        && crate::backups::note_instead(path, &dest, c)?
-    {
-        return Ok(Some(dest));
-    }
     if let Err(e) = fs::rename(path, &dest) {
         // In use (a running game): copying would only leave a second copy.
         if crate::locked::io_locked(&e) {
@@ -246,6 +243,9 @@ fn backup(path: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
             let _ = fs::remove_file(&dest);
             return Err(e.into());
         }
+    }
+    if let Some(c) = &ids {
+        crate::backups::note_ids(&dest, c, false);
     }
     Ok(Some(dest))
 }

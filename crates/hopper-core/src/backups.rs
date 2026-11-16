@@ -272,40 +272,17 @@ pub(crate) fn ids_for(root: &Path, path: &Path) -> Option<Cand> {
     })
 }
 
-/// Notes beside the kept copy `dest` which file it was, so History still
-/// says "Updated 1.2 → 1.3" and Undo puts its entry back, as for a note.
-fn keep_ids(dest: &Path, c: &Cand) {
+/// Notes beside the copy `dest` which file it was, so History still says
+/// "Updated 1.2 → 1.3" and Undo puts its entry back, as for a note.
+/// `keep`: already found not downloadable, so [`slim`] leaves it be;
+/// otherwise slim asks the site later and may swap it for a note.
+pub(crate) fn note_ids(dest: &Path, c: &Cand, keep: bool) {
     let (Some(dir), Some(name)) = (dest.parent(), dest.file_name()) else { return };
     let p = dir.join(IDS);
     let mut map: std::collections::BTreeMap<String, Cand> =
         fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    map.insert(name.to_string_lossy().into_owned(), Cand { keep: true, ..c.clone() });
+    map.insert(name.to_string_lossy().into_owned(), Cand { keep, ..c.clone() });
     let _ = fs::write(&p, serde_json::to_vec_pretty(&map).unwrap_or_default());
-}
-
-/// Deletes `path` (a jar CurseForge or Modrinth knows, per `c`) and leaves
-/// only a note of which file it was at `dest`, its place in a History
-/// folder: Undo downloads it again. The note is written first, so there's
-/// never neither.
-///
-/// `false`, with nothing touched, when the site wouldn't hand the file out
-/// again byte for byte (a CurseForge file only its website has, a file it
-/// no longer lists, no connection): the caller keeps the jar as a copy.
-pub(crate) fn note_instead(path: &Path, dest: &Path, c: &Cand) -> anyhow::Result<bool> {
-    let size = fs::metadata(path)?.len();
-    let r = c.to_ref(sha1_of(path)?, size);
-    let (check, _) = hooks();
-    if !check(&r) {
-        keep_ids(dest, c);
-        return Ok(false);
-    }
-    let note = ref_path(dest);
-    fs::write(&note, serde_json::to_vec_pretty(&r)?)?;
-    if let Err(e) = fs::remove_file(path) {
-        let _ = fs::remove_file(&note);
-        return Err(e.into());
-    }
-    Ok(true)
 }
 
 /// Notes in History that the mod at `path` (one CurseForge or Modrinth
@@ -328,7 +305,7 @@ pub fn note_before_switch(root: &Path, path: &Path) -> anyhow::Result<()> {
         // Only the website has it (or the site can't be asked): Undo would
         // have nothing to download, so History keeps a copy.
         fs::copy(path, &dest)?;
-        keep_ids(&dest, &c);
+        note_ids(&dest, &c, true);
     }
     // Undo reads "off" from the place it goes back to.
     if let Some(a) = &c.addon {
@@ -1603,7 +1580,8 @@ mod tests {
         crate::install::remove(&mut inst, 0).unwrap();
         let a = find(&root, &root.join("mods/a.jar"), 0).unwrap();
         let b = crate::sync::backup_into(&root, &root.join("mods/b.jar")).unwrap().unwrap();
-        // a is deleted at once, a note in its place; b (unknown) is a copy.
+        slim_older_than(&root, 0);
+        // After the background slim, a is a note; b (unknown) stays a copy.
         assert!(!root.join("mods/a.jar").exists() && !a.exists() && is_ref(&a));
         assert!(b.is_file() && !is_ref(&b));
         let r = read_ref(&a).unwrap();
@@ -1690,6 +1668,7 @@ mod tests {
         let root = instance("gone");
         fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
         let a = crate::sync::backup_into(&root, &root.join("mods/a.jar")).unwrap().unwrap();
+        slim_older_than(&root, 0);
         let f = list(&root).remove(0).files.remove(0);
         let mut inst = crate::instances::load(&root).unwrap();
         let e = crate::undo::undo(&mut inst, &f).unwrap_err();
@@ -1777,7 +1756,11 @@ mod tests {
         let root = instance("website-note");
         fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
         let a = crate::sync::backup_into(&root, &root.join("mods/a.jar")).unwrap().unwrap();
-        assert!(is_ref(&a) && !root.join("mods/a.jar").exists());
+        // Moved as it is: no site is asked while the change runs.
+        assert!(a.is_file() && !root.join("mods/a.jar").exists());
+        // The background slim makes it a note.
+        assert!(slim_older_than(&root, 0) > 0);
+        assert!(is_ref(&a) && !a.is_file());
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1808,6 +1791,8 @@ mod tests {
         fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
         let mut inst = crate::instances::load(&root).unwrap();
         crate::install::remove(&mut inst, 0).unwrap();
+        // Slimmed while the site still handed it out (as before this fix).
+        slim_older_than(&root, 0);
         let a = find(&root, &root.join("mods/a.jar"), 0).unwrap();
         assert!(is_ref(&a), "the old kind of entry: only a note");
         let f = list(&root).remove(0).files.remove(0);
@@ -1841,6 +1826,7 @@ mod tests {
         let root = instance("offline");
         fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
         let a = crate::sync::backup_into(&root, &root.join("mods/a.jar")).unwrap().unwrap();
+        slim_older_than(&root, 0);
         let e = materialize(&a).unwrap_err().to_string();
         assert!(e.contains("a.jar") && e.contains("downloading it again failed") && e.contains("no connection"), "{e}");
         assert!(is_ref(&a));
