@@ -143,11 +143,7 @@ pub fn write_profile(
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_else(|| serde_json::json!({ "profiles": {}, "settings": {}, "version": 3 }));
     let key = format!("hopper-{}", Instance::folder_name(&inst.name));
-    let mem = if inst.settings.memory_mb > 0 {
-        inst.settings.memory_mb
-    } else {
-        defaults.memory_mb
-    };
+    let mem = crate::memory::effective_mb(inst, defaults.memory_mb);
     let custom = custom_args(&inst.settings.java_args, &defaults.java_args);
     let xms = initial_memory(&inst.settings.java_args, &defaults.java_args, mem);
     let mut java_args = format!("-Xmx{mem}m -Xms{xms}m");

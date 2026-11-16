@@ -42,6 +42,12 @@ pub struct JavaForm {
     game_version: Option<String>,
     /// What 0 memory / blank arguments fall back to (None: no fallback).
     fallback_memory: Option<u32>,
+    /// What the slider's left end is called: "Default" (Settings), or
+    /// "Auto" for an instance whose memory Hopper picks.
+    fallback_label: &'static str,
+    /// Under the slider while it's at the left end: why Hopper picked that
+    /// amount (an instance whose memory Hopper picks).
+    memory_hint: Option<String>,
     /// The generator panel is open.
     generator: bool,
     /// The arguments shown one by one, each explained on hover or click.
@@ -116,6 +122,8 @@ impl JavaForm {
             args_text: String::new(),
             game_version: None,
             fallback_memory,
+            fallback_label: "Default",
+            memory_hint: None,
             generator: false,
             show_flags: false,
             explained: None,
@@ -143,6 +151,15 @@ impl JavaForm {
     /// shown (a server's: its panel says which).
     pub fn set_target(&mut self, target: Option<Target>, cx: &mut Context<Self>) {
         self.target = target;
+        cx.notify();
+    }
+
+    /// What an instance at 0 memory gets: `label` ("Default" or "Auto"),
+    /// the amount, and the line under the slider that says why (None: none).
+    pub fn set_fallback(&mut self, label: &'static str, memory_mb: u32, hint: Option<String>, cx: &mut Context<Self>) {
+        self.fallback_label = label;
+        self.fallback_memory = Some(memory_mb);
+        self.memory_hint = hint;
         cx.notify();
     }
 
@@ -287,8 +304,13 @@ impl JavaForm {
     /// The Memory, Java and Java arguments fields.
     fn fields(&self, rem: Pixels, cx: &mut Context<Self>) -> Vec<Field> {
         let [memory, java, args] = self.parts(rem, cx);
+        let mut memory_field = Field::new().label("Memory").child(memory);
+        // Only while Hopper picks: a dragged slider is the player's own amount.
+        if let Some(hint) = self.memory_hint.clone().filter(|_| self.memory_mb == 0) {
+            memory_field = memory_field.description(hint);
+        }
         vec![
-            Field::new().label("Memory").child(memory),
+            memory_field,
             Field::new().label("Java").items_start().child(java),
             Field::new()
                 .label("Java arguments")
@@ -325,7 +347,7 @@ impl JavaForm {
         let gb = self.memory_mb as f32 / 1024.;
         let memory_note = match self.fallback_memory {
             Some(def) if self.memory_mb == 0 => {
-                format!("Default ({:.1} GB)", def as f32 / 1024.)
+                format!("{} ({:.1} GB)", self.fallback_label, def as f32 / 1024.)
             }
             _ if self.xms_mb > 0 => {
                 format!("{:.1} to {gb:.1} GB", self.xms_mb as f32 / 1024.)
