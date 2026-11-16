@@ -549,9 +549,9 @@
   .entries { max-height: 420px; overflow: auto; font-size: 12px; }
   .ent { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-radius: var(--radius-sm); cursor: pointer; }
   .ent input, .tck input { accent-color: var(--acc); }
-  .chip.ok { color: var(--green); background: var(--green-dim); }
-  .chip.wait { color: var(--gold); background: var(--gold-dim); }
-  .chip.bad { color: var(--red); background: var(--red-dim); }
+  .chip.ok { color: var(--ink-green); background: var(--green-dim); }
+  .chip.wait { color: var(--ink-gold); background: var(--gold-dim); }
+  .chip.bad { color: var(--ink-red); background: var(--red-dim); }
   .space { margin-bottom: 8px; }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12.5px; }
   .kv span:nth-child(odd) { color: var(--muted); }

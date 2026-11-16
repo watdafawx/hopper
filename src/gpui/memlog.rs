@@ -96,6 +96,7 @@ fn write(why: &str, cx: &mut App) {
     if let Some(h) = cx.try_global::<Holder>() {
         line.push_str(&h.0.read(cx).mem_report());
     }
+    line.push_str(&format!(" | wakes {}", crate::wakes::report()));
     // How long the report took, to show it is cheap.
     line.push_str(&format!(" | report took {} ms\n", started.elapsed().as_millis()));
     let path = dir.join("memlog.txt");

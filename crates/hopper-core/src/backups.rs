@@ -105,13 +105,45 @@ fn mr_file_of(mut v: crate::modrinth::Version, sha1: &str) -> crate::cf::File {
 
 fn check_online(r: &Ref) -> bool {
     let Ok(f) = remote_file(r) else { return false };
-    f.sha1().is_some_and(|h| h == r.sha1) && f.file_length == r.size && crate::cf::download_url(&f).is_ok()
+    can_stand_in(r, &f, |f| crate::cf::download_url(f).is_ok())
+}
+
+/// A note may stand in for the jar only when the site's `f` is the very file
+/// `r` was and `hands_out` says Hopper can download it through the API. The
+/// second part is not a given: an author can turn third-party downloads off
+/// per file, and then only the website has it, so History must keep the jar.
+/// `hands_out` is asked last: a file with no URL of its own costs a request.
+fn can_stand_in(r: &Ref, f: &crate::cf::File, hands_out: impl FnOnce(&crate::cf::File) -> bool) -> bool {
+    f.sha1().is_some_and(|h| h == r.sha1) && f.file_length == r.size && hands_out(f)
 }
 
 fn fetch_online(r: &Ref, dest: &Path) -> anyhow::Result<()> {
     let f = remote_file(r)?;
+    // Not downloadable through the API: say so as the typed error, so Undo
+    // can send the player to the file's page instead of failing.
+    if crate::cf::website_only(&f)? {
+        return Err(website_only_of(r, &f).into());
+    }
     let url = crate::cf::download_url(&f)?;
     crate::cf::download_checked(&url, dest, &crate::cf::Expect { len: r.size, sha1: r.sha1.clone() }, None, |_| {})
+}
+
+/// The error for a note whose file only the CurseForge website hands out.
+pub(crate) fn website_only_of(r: &Ref, f: &crate::cf::File) -> crate::cf::WebsiteOnly {
+    // The project's page is known from the entry the note kept; else the
+    // site is asked, and a failure leaves the page out (the message copes).
+    let page = r
+        .addon
+        .as_ref()
+        .map(|a| a.page.clone())
+        .filter(|p| !p.is_empty())
+        .or_else(|| crate::source::get_mod(r.project_id).ok().map(|m| m.page()))
+        .unwrap_or_default();
+    crate::cf::WebsiteOnly {
+        name: if r.name.is_empty() { f.display_name.clone() } else { r.name.clone() },
+        file_name: r.file_name.clone(),
+        url: if page.is_empty() { String::new() } else { crate::cf::file_page(&page, r.file_id) },
+    }
 }
 
 fn offline_check(_: &Ref) -> bool {
@@ -159,11 +191,63 @@ pub fn mark_reason(root: &Path, since: u64, reason: &str) {
 const PACK: &str = ".pack-update.json";
 
 /// The pack update a History entry came from: "All the Mods 10", "1.80.0".
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PackMark {
     pub name: String,
+    /// The version it is about: what the update went to, or, for an update
+    /// put back ([`PackMark::undone`]), what it went back to.
     pub version: String,
+    /// What the instance or server recorded before this change, to put
+    /// back with the mods. Empty in marks made before Hopper kept it.
+    pub before: Option<PackBefore>,
+    /// The pack file the record named after this change: if it names
+    /// another one by the time of Undo, the pack moved on and stays.
+    pub file_id: u64,
+    /// This entry is an update put back; it reads as put back.
+    pub undone: bool,
+}
+
+impl PackMark {
+    pub fn new(name: String, version: String) -> Self {
+        PackMark { name, version, ..Default::default() }
+    }
+}
+
+/// An instance's or server's own pack record before a pack update: what
+/// Undo all puts back so its header and the update offer match the files.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PackBefore {
+    /// The pack: project, file, version and server pack file.
+    pub pack: Option<crate::instances::PackRef>,
+    /// The loader with its version ("neoforge-21.1.256"), when the update
+    /// can change it (an instance's).
+    pub loader: String,
+    pub game_version: String,
+    /// A server's own pack record (`.hopper-server-pack.json`).
+    pub server: Option<crate::server_pack_update::Marker>,
+    /// A server's pack link (`.hopper-pack.json`).
+    pub link: Option<crate::hosting::pack_link::PackLink>,
+}
+
+impl PackBefore {
+    /// What an instance records now.
+    pub fn of_instance(inst: &crate::instances::Instance) -> Self {
+        PackBefore { pack: inst.pack.clone(), loader: inst.loader.clone(), game_version: inst.game_version.clone(), ..Default::default() }
+    }
+
+    /// What the server in `root` records now: its server pack record, its
+    /// link and the pack its hopper.json names. Its loader isn't in it: a
+    /// server's loader is files, which History puts back on its own.
+    pub fn of_server(root: &Path) -> Self {
+        PackBefore {
+            pack: crate::instances::load(root).and_then(|i| i.pack),
+            server: crate::server_pack_update::recorded(root),
+            link: crate::hosting::pack_link::read(root),
+            ..Default::default()
+        }
+    }
 }
 
 /// Marks every History folder made since `since` (unix seconds) as part of
@@ -240,20 +324,17 @@ pub(crate) fn ids_for(root: &Path, path: &Path) -> Option<Cand> {
     })
 }
 
-/// Deletes `path` (a jar CurseForge or Modrinth knows, per `c`) and leaves
-/// only a note of which file it was at `dest`, its place in a History
-/// folder: Undo downloads it again. The note is written first, so there's
-/// never neither.
-pub(crate) fn note_instead(path: &Path, dest: &Path, c: &Cand) -> anyhow::Result<()> {
-    let size = fs::metadata(path)?.len();
-    let r = c.to_ref(sha1_of(path)?, size);
-    let note = ref_path(dest);
-    fs::write(&note, serde_json::to_vec_pretty(&r)?)?;
-    if let Err(e) = fs::remove_file(path) {
-        let _ = fs::remove_file(&note);
-        return Err(e.into());
-    }
-    Ok(())
+/// Notes beside the copy `dest` which file it was, so History still says
+/// "Updated 1.2 → 1.3" and Undo puts its entry back, as for a note.
+/// `keep`: already found not downloadable, so [`slim`] leaves it be;
+/// otherwise slim asks the site later and may swap it for a note.
+pub(crate) fn note_ids(dest: &Path, c: &Cand, keep: bool) {
+    let (Some(dir), Some(name)) = (dest.parent(), dest.file_name()) else { return };
+    let p = dir.join(IDS);
+    let mut map: std::collections::BTreeMap<String, Cand> =
+        fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    map.insert(name.to_string_lossy().into_owned(), Cand { keep, ..c.clone() });
+    let _ = fs::write(&p, serde_json::to_vec_pretty(&map).unwrap_or_default());
 }
 
 /// Notes in History that the mod at `path` (one CurseForge or Modrinth
@@ -269,7 +350,15 @@ pub fn note_before_switch(root: &Path, path: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(&dir)?;
     let dest = dir.join(&c.file_name);
     let r = c.to_ref(sha1_of(path)?, fs::metadata(path)?.len());
-    fs::write(ref_path(&dest), serde_json::to_vec_pretty(&r)?)?;
+    let (check, _) = hooks();
+    if check(&r) {
+        fs::write(ref_path(&dest), serde_json::to_vec_pretty(&r)?)?;
+    } else {
+        // Only the website has it (or the site can't be asked): Undo would
+        // have nothing to download, so History keeps a copy.
+        fs::copy(path, &dest)?;
+        note_ids(&dest, &c, true);
+    }
     // Undo reads "off" from the place it goes back to.
     if let Some(a) = &c.addon {
         let off = if a.enabled { "" } else { ".disabled" };
@@ -344,7 +433,11 @@ pub fn materialize(jar: &Path) -> anyhow::Result<()> {
     }
     let r = read_ref(jar).ok_or_else(|| anyhow::anyhow!("{}: its backup note can't be read", jar.display()))?;
     let (_, fetch) = hooks();
-    fetch(&r, jar).map_err(|e| anyhow::anyhow!("{}: History keeps only where to download it, and downloading it again failed: {e:#}", r.file_name))?;
+    fetch(&r, jar).map_err(|e| match e.downcast::<crate::cf::WebsiteOnly>() {
+        // Kept typed, for callers that send the player to the page.
+        Ok(w) => w.into(),
+        Err(e) => anyhow::anyhow!("{}: History keeps only where to download it, and downloading it again failed: {e:#}", r.file_name),
+    })?;
     let _ = fs::remove_file(ref_path(jar));
     Ok(())
 }
@@ -1539,7 +1632,8 @@ mod tests {
         crate::install::remove(&mut inst, 0).unwrap();
         let a = find(&root, &root.join("mods/a.jar"), 0).unwrap();
         let b = crate::sync::backup_into(&root, &root.join("mods/b.jar")).unwrap().unwrap();
-        // a is deleted at once, a note in its place; b (unknown) is a copy.
+        slim_older_than(&root, 0);
+        // After the background slim, a is a note; b (unknown) stays a copy.
         assert!(!root.join("mods/a.jar").exists() && !a.exists() && is_ref(&a));
         assert!(b.is_file() && !is_ref(&b));
         let r = read_ref(&a).unwrap();
@@ -1626,6 +1720,7 @@ mod tests {
         let root = instance("gone");
         fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
         let a = crate::sync::backup_into(&root, &root.join("mods/a.jar")).unwrap().unwrap();
+        slim_older_than(&root, 0);
         let f = list(&root).remove(0).files.remove(0);
         let mut inst = crate::instances::load(&root).unwrap();
         let e = crate::undo::undo(&mut inst, &f).unwrap_err();
@@ -1639,12 +1734,151 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    /// What the site lists for project 5 file 9: the jar as it was, with
+    /// or without the download URL (an author who turned off third-party
+    /// downloads leaves it out).
+    fn listed(url: Option<&str>) -> crate::cf::File {
+        crate::cf::File {
+            id: 9,
+            mod_id: 5,
+            file_name: "a.jar".into(),
+            file_length: REMOTE.len() as u64,
+            hashes: vec![crate::cf::FileHash { value: sha(REMOTE), algo: 1 }],
+            download_url: url.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// The real check's rule on a file with a URL (no network: a file
+    /// without one would ask the API).
+    fn check_downloadable(r: &Ref) -> bool {
+        can_stand_in(r, &listed(Some("https://edge.forgecdn.net/files/1/2/a.jar")), crate::cf::carries_url)
+    }
+
+    /// The real check's rule on a website-only file.
+    fn check_website_only(r: &Ref) -> bool {
+        can_stand_in(r, &listed(None), crate::cf::carries_url)
+    }
+
+    fn website_only_fetch(r: &Ref, _: &Path) -> anyhow::Result<()> {
+        // The page is on the entry, so no lookup (tests are offline).
+        let mut r = r.clone();
+        let a = r.addon.get_or_insert_with(Default::default);
+        a.page = "https://www.curseforge.com/minecraft/mc-mods/a".into();
+        Err(website_only_of(&r, &listed(None)).into())
+    }
+
+    fn a_ref() -> Ref {
+        Ref { project_id: 5, file_id: 9, file_name: "a.jar".into(), sha1: sha(REMOTE), size: REMOTE.len() as u64, mr_version: String::new(), mr_project: String::new(), name: "A".into(), addon: None }
+    }
+
+    #[test]
+    fn a_note_needs_a_file_the_site_hands_out() {
+        let r = a_ref();
+        assert!(check_downloadable(&r), "a normal file is still slimmed");
+        assert!(!check_website_only(&r), "a website-only file never is");
+        let mut other = r.clone();
+        other.sha1 = sha(b"changed");
+        assert!(!check_downloadable(&other), "a different file never is");
+        other = r;
+        other.size += 1;
+        assert!(!check_downloadable(&other));
+    }
+
+    #[test]
+    fn a_website_only_jar_stays_a_copy_and_undo_puts_it_back() {
+        set_test_hooks(check_website_only, website_only_fetch);
+        let root = instance("website-copy");
+        fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
+        let mut inst = crate::instances::load(&root).unwrap();
+        crate::install::remove(&mut inst, 0).unwrap();
+        let a = find(&root, &root.join("mods/a.jar"), 0).unwrap();
+        assert!(a.is_file() && !is_ref(&a), "the real jar is in History");
+        assert_eq!(fs::read(&a).unwrap(), REMOTE);
+        let f = list(&root).remove(0).files.remove(0);
+        // Undo needs no download: the fetch hook would fail it.
+        let back = crate::undo::undo(&mut inst, &f).unwrap();
+        assert_eq!(fs::read(back).unwrap(), REMOTE);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_downloadable_jar_is_still_a_note() {
+        set_test_hooks(check_downloadable, fake_fetch);
+        let root = instance("website-note");
+        fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
+        let a = crate::sync::backup_into(&root, &root.join("mods/a.jar")).unwrap().unwrap();
+        // Moved as it is: no site is asked while the change runs.
+        assert!(a.is_file() && !root.join("mods/a.jar").exists());
+        // The background slim makes it a note.
+        assert!(slim_older_than(&root, 0) > 0);
+        assert!(is_ref(&a) && !a.is_file());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A switch leaves the jar where it is; History's note of it follows the
+    /// same rule as a removal's.
+    #[test]
+    fn a_switch_keeps_a_copy_of_a_website_only_jar() {
+        for (check, note) in [(check_downloadable as Check, true), (check_website_only as Check, false)] {
+            set_test_hooks(check, website_only_fetch);
+            let root = instance(if note { "switch-note" } else { "switch-copy" });
+            let jar = root.join("mods/a.jar");
+            fs::write(&jar, REMOTE).unwrap();
+            note_before_switch(&root, &jar).unwrap();
+            assert!(jar.is_file(), "the jar stays where it is");
+            let a = find(&root, &jar, 0).unwrap();
+            assert_eq!((is_ref(&a), a.is_file()), (note, !note));
+            fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    /// A History folder made before this fix: only the note is left of a
+    /// website-only jar. Undo says what it is, as the typed error the app
+    /// turns into the download window; the note stays for another try.
+    #[test]
+    fn undo_with_only_a_note_for_a_website_only_file_is_the_typed_error() {
+        set_test_hooks(check_downloadable, website_only_fetch);
+        let root = instance("website-note-undo");
+        fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
+        let mut inst = crate::instances::load(&root).unwrap();
+        crate::install::remove(&mut inst, 0).unwrap();
+        // Slimmed while the site still handed it out (as before this fix).
+        slim_older_than(&root, 0);
+        let a = find(&root, &root.join("mods/a.jar"), 0).unwrap();
+        assert!(is_ref(&a), "the old kind of entry: only a note");
+        let f = list(&root).remove(0).files.remove(0);
+        let e = crate::undo::undo(&mut inst, &f).unwrap_err();
+        assert!(e.downcast_ref::<crate::undo::Gone>().is_none(), "not 'gone from the site'");
+        let w = e.downcast_ref::<crate::cf::WebsiteOnly>().expect("the typed website-only error, not a generic one");
+        assert_eq!((w.name.as_str(), w.file_name.as_str()), ("A", "a.jar"));
+        assert_eq!(
+            crate::undo::website_message(w, true),
+            "A a can only be downloaded from the CurseForge website. Download it there and Hopper puts it back."
+        );
+        assert!(is_ref(&a) && inst.addons.is_empty(), "nothing changed");
+        // materialize (Undo of a removal toast, panels) keeps it typed too.
+        assert!(materialize(&a).unwrap_err().downcast_ref::<crate::cf::WebsiteOnly>().is_some());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_website_page_comes_from_the_kept_entry() {
+        let mut r = a_ref();
+        r.addon = Some(crate::instances::Addon { page: "https://www.curseforge.com/minecraft/mc-mods/structory-towers/".into(), ..Default::default() });
+        let w = website_only_of(&r, &listed(None));
+        assert_eq!(w.url, "https://www.curseforge.com/minecraft/mc-mods/structory-towers/files/9");
+        let msg = crate::undo::website_message(&w, false);
+        assert!(msg.contains(&w.url) && msg.contains("add it to the server's mods"), "{msg}");
+    }
+
     #[test]
     fn a_failed_download_says_so_and_keeps_the_note() {
         set_test_hooks(fake_check, failing_fetch);
         let root = instance("offline");
         fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
         let a = crate::sync::backup_into(&root, &root.join("mods/a.jar")).unwrap().unwrap();
+        slim_older_than(&root, 0);
         let e = materialize(&a).unwrap_err().to_string();
         assert!(e.contains("a.jar") && e.contains("downloading it again failed") && e.contains("no connection"), "{e}");
         assert!(is_ref(&a));
@@ -1837,7 +2071,7 @@ mod tests {
         // A mod it removed, set aside in the middle of it.
         fs::create_dir_all(base.join("1003").join("mods")).unwrap();
         fs::write(base.join("1003").join("mods").join("zzz-1.0.jar"), "j").unwrap();
-        let atm = PackMark { name: "All the Mods 10".into(), version: "1.80.0".into() };
+        let atm = PackMark::new("All the Mods 10".into(), "1.80.0".into());
         mark_pack(&root, 1000, &atm);
         // The later change isn't part of it.
         fs::remove_file(base.join("1100").join(PACK)).unwrap();
@@ -1859,6 +2093,30 @@ mod tests {
         assert_eq!(j["parts"]["rest_label"], "3 configs");
         assert_eq!(j["counts"][0]["verb"], "removed");
         assert!(sets[0].to_json()["parts"].is_null());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_pack_mark_keeps_the_record_before_and_old_marks_still_load() {
+        let root = std::env::temp_dir().join(format!("hopper-backups-pack-mark-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (a, b) = (root.join(crate::sync::BACKUP_DIR).join("1000"), root.join(crate::sync::BACKUP_DIR).join("1001"));
+        fs::create_dir_all(a.join("config")).unwrap();
+        fs::create_dir_all(b.join("config")).unwrap();
+        let before = PackBefore {
+            pack: Some(crate::instances::PackRef { project_id: 7, file_id: 100, version: "1.80.0".into(), ..Default::default() }),
+            loader: "neoforge-21.1.256".into(),
+            game_version: "1.21.1".into(),
+            ..Default::default()
+        };
+        let m = PackMark { before: Some(before), file_id: 200, ..PackMark::new("ATM".into(), "1.81.0".into()) };
+        mark_pack(&root, 1000, &m);
+        assert_eq!(read_pack(&a), Some(m.clone()));
+        // A mark an older Hopper wrote has only a name and a version.
+        fs::write(b.join(PACK), br#"{"name":"ATM","version":"1.79.0"}"#).unwrap();
+        let old = read_pack(&b).unwrap();
+        assert_eq!((old.name.as_str(), old.version.as_str()), ("ATM", "1.79.0"));
+        assert!(old.before.is_none() && old.file_id == 0 && !old.undone);
         fs::remove_dir_all(&root).unwrap();
     }
 

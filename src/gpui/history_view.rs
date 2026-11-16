@@ -39,22 +39,25 @@ fn person_key(w: &Who) -> String {
 const FACE: f32 = 1.5;
 /// The gap between faces when several people made one change.
 const FACE_GAP: f32 = 0.125;
-/// At most this many faces before a row.
-const MAX_FACES: usize = 3;
-
-/// How wide a row's lead is: one face, or several side by side. Side by
+/// Room for this many faces before a row; more people fold into "+n" in
+/// the last one.
+const FACE_SLOTS: usize = 2;
+/// The face column: one width on every row, so every row's text starts at
+/// the same place however many people made the change. Faces sit side by
 /// side, not overlapped: the initials on tinted tiles are see-through and
 /// overlapping hid one letter under the next.
-fn lead_width(people: usize) -> f32 {
-    let n = people.clamp(1, MAX_FACES) as f32;
-    n * FACE + (n - 1.) * FACE_GAP
+const LEAD_W: f32 = FACE_SLOTS as f32 * FACE + (FACE_SLOTS - 1) as f32 * FACE_GAP;
+
+/// How many faces a row shows, and how many people the "+n" after them
+/// stands for.
+fn face_split(people: usize) -> (usize, usize) {
+    if people <= FACE_SLOTS { (people, 0) } else { (FACE_SLOTS - 1, people - (FACE_SLOTS - 1)) }
 }
 
-/// How far an entry's own rows sit in: under the head's text, past its
-/// faces (or chevron) and the gap (`px_2` + `gap_2`).
-fn set_indent(set: &Set, faces: bool) -> f32 {
-    let n = if faces { set.people().len() } else { 1 };
-    lead_width(n) + 1.
+/// How far an entry's own rows sit in: under the head's text, past the
+/// face column (or chevron) and the gap (`px_2` + `gap_2`).
+fn set_indent(faces: bool) -> f32 {
+    (if faces { LEAD_W } else { FACE }) + 1.
 }
 
 /// Someone with no face to show (not signed in to Minecraft, or a Hopper
@@ -257,7 +260,7 @@ impl BackupsView {
             },
             Item::File(i, j) => match self.sets.get(*i).and_then(|s| Some((s, s.files.get(*j)?))) {
                 Some((set, f)) => {
-                    let row = self.entry_row(i * 10_000 + j + 1, f, set.when, Some(set_indent(set, self.hfaces)), self.hfaces, cx);
+                    let row = self.entry_row(i * 10_000 + j + 1, f, set.when, Some(set_indent(self.hfaces)), self.hfaces, cx);
                     return div().when(self.ends_entry(ix, *i), |d| d.pb_0p5()).child(row).into_any_element();
                 }
                 None => div().into_any_element(),
@@ -488,17 +491,40 @@ impl BackupsView {
     /// What starts an entry of several files: whoever made it (several
     /// people stacked), or its chevron when History names nobody.
     fn set_lead(&self, set: &Set, faces: bool, chevron: gpui_kit::component::Icon, cx: &mut Context<Self>) -> AnyElement {
-        let people = set.people();
         if !faces {
             div().size(rems(FACE)).flex_none().flex().items_center().justify_center().child(chevron).into_any_element()
-        } else if let [w] = people.as_slice() {
-            self.who_face(w, rems(FACE), cx)
-        } else if !people.is_empty() {
-            let fs: Vec<AnyElement> = people.iter().take(MAX_FACES).map(|w| self.who_face(w, rems(FACE), cx)).collect();
-            h_flex().flex_none().w(rems(lead_width(people.len()))).gap(rems(FACE_GAP)).children(fs).into_any_element()
         } else {
-            div().size(rems(FACE)).flex_none().into_any_element()
+            self.face_column(SharedString::from(format!("hist-more:{}", set.dir.display())), &set.people(), cx)
         }
+    }
+
+    /// The faces before a row, in a column of one width for every row: up
+    /// to two faces, or the first and "+n" for the rest (hover names them).
+    /// Empty when History doesn't know who made the change.
+    fn face_column(&self, key: SharedString, people: &[Who], cx: &mut Context<Self>) -> AnyElement {
+        let (shown, more) = face_split(people.len());
+        let faces: Vec<AnyElement> = people.iter().take(shown).map(|w| self.who_face(w, rems(FACE), cx)).collect();
+        let more = (more > 0).then(|| {
+            let theme = cx.theme();
+            let muted = theme.muted_foreground;
+            let names: SharedString = people[shown..].iter().map(Who::label).collect::<Vec<_>>().join(", ").into();
+            div()
+                .id(ElementId::Name(key))
+                .flex_none()
+                .size(rems(FACE))
+                .rounded(theme.radius)
+                .bg(muted.opacity(widgets::alpha::TINT * 2.))
+                .text_color(crate::theme::ink(muted))
+                .text_size(rems(FACE * 0.45))
+                .font_semibold()
+                .flex()
+                .items_center()
+                .justify_center()
+                .whitespace_nowrap()
+                .child(format!("+{more}"))
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(names.clone()).build(w, cx))
+        });
+        h_flex().flex_none().w(rems(LEAD_W)).gap(rems(FACE_GAP)).children(faces).children(more).into_any_element()
     }
 
     /// A pack update: one row with what it did to how many mods, and its
@@ -509,6 +535,7 @@ impl BackupsView {
         let dir = set.dir.clone();
         let all: Vec<Saved> = set.files.iter().filter(|f| f.change.undoable()).cloned().collect();
         let undoable = !all.is_empty();
+        let mark = pack.clone();
         let busy = self.busy.is_some();
         let kids: Vec<String> = (0..set.files.len()).map(|j| (i * 10_000 + j + 1).to_string()).collect();
         let all_picked = kids.iter().all(|k| self.sel.contains(k));
@@ -536,13 +563,20 @@ impl BackupsView {
         let chevron = gpui_kit::component::Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small();
         let lead = self.set_lead(set, faces, chevron.clone(), cx);
         let muted = cx.theme().muted_foreground;
-        // "Updated pack All the Mods 10 to 1.80.0", the pack's name cut
-        // short first when the row is narrow.
+        // "Updated pack All the Mods 10 to 1.80.0" ("Put back pack ..." once
+        // Undo all put it back, in the muted colour of put-back rows), the
+        // pack's name cut short first when the row is narrow.
         let title = h_flex()
             .gap_1()
             .min_w_0()
             .text_sm()
-            .child(div().flex_none().whitespace_nowrap().text_color(change_color(Change::Updated, true, cx)).child("Updated pack"))
+            .child(
+                div()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_color(change_color(Change::Updated, !pack.undone, cx))
+                    .child(if pack.undone { "Put back pack" } else { "Updated pack" }),
+            )
             .child(div().min_w_0().truncate().whitespace_nowrap().font_semibold().child(pack.name.clone()))
             .when(!pack.version.is_empty(), |r| r.child(div().flex_none().whitespace_nowrap().child(format!("to {}", pack.version))))
             .when(faces, |r| r.child(div().flex_none().text_color(muted).child(chevron)));
@@ -574,7 +608,7 @@ impl BackupsView {
                             .outline()
                             .label("Undo all")
                             .disabled(busy)
-                            .on_click(cx.listener(move |this, _, window, cx| this.undo(all.clone(), window, cx))),
+                            .on_click(cx.listener(move |this, _, window, cx| this.undo_set(all.clone(), Some(mark.clone()), window, cx))),
                     )
                 }),
             )
@@ -599,7 +633,7 @@ impl BackupsView {
             .px_2()
             .py_1p5()
             // Under the pack's text, like its mods.
-            .pl(rems(set_indent(set, true)))
+            .pl(rems(set_indent(self.hfaces)))
             .rounded(cx.theme().radius)
             .hover(|s| widgets::row_hover(s, cx))
             .clickable(cx);
@@ -776,9 +810,9 @@ impl BackupsView {
         let row = self.pickable(row, vec![key.to_string()], None, cx);
         let row = if picked { widgets::row_selected(row, cx) } else { row };
         let who = f.who.as_ref().filter(|_| !nested);
-        let lead = (faces && !nested).then(|| match who {
-            Some(w) => self.who_face(w, rems(FACE), cx),
-            None => div().size(rems(FACE)).flex_none().into_any_element(),
+        let lead = (faces && !nested).then(|| {
+            let people: Vec<Who> = who.cloned().into_iter().collect();
+            self.face_column(SharedString::from(format!("hist-more:{}", f.path.display())), &people, cx)
         });
         let what = match who {
             Some(w) => h_flex()
@@ -839,46 +873,43 @@ impl BackupsView {
     /// Undoes entries, newest set first. A mod whose version its site no
     /// longer has opens the version picker.
     pub(crate) fn undo(&mut self, files: Vec<Saved>, window: &mut Window, cx: &mut Context<Self>) {
+        self.undo_set(files, None, window, cx)
+    }
+
+    /// [`Self::undo`]; with `pack`, the whole pack update is being undone
+    /// (Undo all on its row): when everything in it came back, the pack's own
+    /// record goes back too (pack version, loader, Minecraft version), so
+    /// the update is offered again.
+    fn undo_set(&mut self, files: Vec<Saved>, pack: Option<hopper::backups::PackMark>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(t) = self.panel.clone() {
-            return self.undo_panel(t, files, window, cx);
+            return self.undo_panel(t, files, pack, window, cx);
         }
         let root = self.root.clone();
-        let s = self.store.read(cx);
-        if let Some(why) = s.edit_hold_reason(&root) {
-            window.push_notification(Notification::error(format!("Can't undo now: {why}.")), cx);
-            return;
-        }
-        let Some(mut inst) = s.instance(&root).cloned() else {
+        let downloads = files.iter().any(|f| f.download);
+        let Some(slot) = queue_undo(self.store.read(cx), &root, files, pack) else {
             window.push_notification(Notification::error("That instance is gone."), cx);
             return;
         };
-        let downloads = files.iter().any(|f| f.download);
         self.busy = Some(if downloads { "Downloading to put it back…".into() } else { "Putting it back…".into() });
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let (done, gone, errors) = cx
-                .background_spawn(async move {
-                    let mut done = Vec::new();
-                    let mut gone: Option<(Saved, Gone)> = None;
-                    let mut errors = Vec::new();
-                    for f in &files {
-                        match hopper::undo::undo(&mut inst, f) {
-                            Ok(p) => done.push(p),
-                            Err(e) => match e.downcast::<Gone>() {
-                                Ok(g) if gone.is_none() => gone = Some((f.clone(), g)),
-                                Ok(g) => errors.push(format!("{}: {g}", f.name)),
-                                Err(e) => errors.push(format!("{}: {e:#}", f.name)),
-                            },
-                        }
-                    }
-                    (done, gone, errors)
-                })
-                .await;
+            let got = crate::store::work_done(cx.background_executor().clone(), slot).await;
             this.update_in(cx, |this, window, cx| {
                 this.busy = None;
+                // Cancelled while it waited: nothing changed.
+                let Some(UndoDone { done, gone, website, errors, pack_said }) = got else {
+                    cx.notify();
+                    return;
+                };
                 this.after_undo(&done, window, cx);
+                if let Some((name, r)) = pack_said {
+                    this.say_pack(&name, &r, window, cx);
+                }
                 for e in errors {
                     window.push_notification(Notification::error(e), cx);
+                }
+                for (f, w) in website {
+                    get_from_website(&this.store, &this.root, f, w, window, cx);
                 }
                 if let Some((f, g)) = gone {
                     this.pick_version(f, g, window, cx);
@@ -895,21 +926,39 @@ impl BackupsView {
     }
 
     /// Undo on a panel server: the panel does the same per file.
-    fn undo_panel(&mut self, t: crate::panel_tabs::Target, files: Vec<Saved>, window: &mut Window, cx: &mut Context<Self>) {
+    fn undo_panel(
+        &mut self,
+        t: crate::panel_tabs::Target,
+        files: Vec<Saved>,
+        pack: Option<hopper::backups::PackMark>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let picked: Vec<(i64, Saved)> = files.into_iter().filter_map(|f| Some((self.when_of(&f)?, f))).collect();
         let downloads = picked.iter().any(|(_, f)| f.download);
         self.busy = Some(if downloads { "Downloading to put it back…".into() } else { "Putting it back…".into() });
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let (done, gone, errors, restart) = cx
+            let (done, gone, errors, restart, pack_said) = cx
                 .background_spawn(async move {
                     let mut done: Vec<String> = Vec::new();
                     let mut gone: Option<(Saved, Gone)> = None;
                     let mut errors = Vec::new();
                     let mut restart = false;
-                    for (when, f) in &picked {
-                        match t.client.post(&t.sp("/mod-backups/undo"), serde_json::json!({ "when": when, "name": f.name })) {
+                    let mut pack_said = None;
+                    // A whole pack update is one request without a name: the
+                    // panel undoes the entry and, when all of it came back,
+                    // puts the pack's record back too.
+                    let requests: Vec<(Saved, serde_json::Value)> = match (&pack, picked.first()) {
+                        (Some(_), Some((when, f))) => vec![(f.clone(), serde_json::json!({ "when": when }))],
+                        _ => picked.iter().map(|(when, f)| (f.clone(), serde_json::json!({ "when": when, "name": f.name }))).collect(),
+                    };
+                    for (f, body) in &requests {
+                        match t.client.post(&t.sp("/mod-backups/undo"), body.clone()) {
                             Ok(v) => {
+                                if let Some(m) = &pack {
+                                    pack_said = hopper::undo::PackRestore::from_json(&v["pack"]).map(|r| (m.name.clone(), r));
+                                }
                                 restart |= v["restart_needed"].as_bool().unwrap_or(false);
                                 done.extend(v["restored"].as_array().into_iter().flatten().filter_map(|n| n.as_str().map(str::to_string)));
                                 errors.extend(v["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(str::to_string)));
@@ -922,13 +971,16 @@ impl BackupsView {
                             Err(e) => errors.push(format!("{}: {e:#}", f.name)),
                         }
                     }
-                    (done, gone, errors, restart)
+                    (done, gone, errors, restart, pack_said)
                 })
                 .await;
             this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 let paths: Vec<std::path::PathBuf> = done.iter().map(std::path::PathBuf::from).collect();
                 this.say_put_back(&paths, restart, window, cx);
+                if let Some((name, r)) = pack_said {
+                    this.say_pack(&name, &r, window, cx);
+                }
                 this.changed(cx);
                 for e in errors {
                     window.push_notification(Notification::error(e), cx);
@@ -956,20 +1008,33 @@ impl BackupsView {
         }
     }
 
+    /// What happened to the pack's own record after Undo all on its update.
+    fn say_pack(&self, name: &str, r: &hopper::undo::PackRestore, window: &mut Window, cx: &mut Context<Self>) {
+        use hopper::undo::PackRestore;
+        match r {
+            PackRestore::Restored { version } if !version.is_empty() => {
+                window.push_notification(Notification::success(format!("{name} is back at {version}.")), cx)
+            }
+            PackRestore::Restored { .. } => window.push_notification(Notification::success(format!("{name} is back at its old version.")), cx),
+            PackRestore::Moved { version } if !version.is_empty() => window.push_notification(
+                Notification::warning(format!("{name} was updated again after this; its version stays {version}.")),
+                cx,
+            ),
+            PackRestore::Moved { .. } => window.push_notification(
+                Notification::warning(format!("{name} was updated again after this; its version stays as it is.")),
+                cx,
+            ),
+            PackRestore::Unknown => {}
+        }
+        // The pack is at its old version again, so its update is offered again.
+        if matches!(r, PackRestore::Restored { .. }) {
+            self.store.read(cx).check_pack_updates();
+        }
+    }
+
     /// Tells the store and the user what came back.
     fn after_undo(&mut self, done: &[std::path::PathBuf], window: &mut Window, cx: &mut Context<Self>) {
-        let root = self.root.clone();
-        let mods = root.join("mods");
-        // Jars with no entry (unknown ones): identified, as on any drop.
-        let jars: Vec<String> = done
-            .iter()
-            .filter(|p| p.parent() == Some(mods.as_path()))
-            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .collect();
-        self.store.update(cx, |s, cx| {
-            s.reload_instance(&root, cx);
-            s.identify_jars(&root, jars);
-        });
+        undone(&self.store, &self.root, done, cx);
         self.say_put_back(done, false, window, cx);
         self.changed(cx);
     }
@@ -1072,6 +1137,7 @@ impl BackupsView {
             let name = f.src.as_ref().map(|r| r.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| f.name.clone());
             let r2 = root.clone();
             s.spawn_instance_job(&root, format!("Putting back {name}"), move |job| {
+                crate::store::fresh(&mut inst);
                 hopper::undo::put_back_as(&mut inst, &f, &file, Some(job))?;
                 job.detail(format!("Put back {}", file.file_name));
                 Ok(crate::store::Msg::InstanceChanged(r2))
@@ -1219,4 +1285,150 @@ fn change_color(c: Change, same: bool, cx: &App) -> Hsla {
         Change::TurnedOff => t.muted_foreground,
         Change::Moved | Change::Copied => t.info,
     }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: GPUI's own `test` macro would shadow the std one.
+    use super::{FACE, FACE_SLOTS, LEAD_W, face_split, set_indent};
+
+    #[test]
+    fn face_column_fits_two_then_folds_into_more() {
+        assert_eq!(face_split(0), (0, 0));
+        assert_eq!(face_split(1), (1, 0));
+        assert_eq!(face_split(2), (2, 0));
+        // Three or more: the first face and "+n" for everyone else.
+        assert_eq!(face_split(3), (1, 2));
+        assert_eq!(face_split(7), (1, 6));
+        // Whatever shows always fits the column.
+        for n in 0..10 {
+            let (shown, more) = face_split(n);
+            assert!(shown + usize::from(more > 0) <= FACE_SLOTS);
+        }
+    }
+
+    #[test]
+    fn nested_rows_sit_under_the_text_whoever_made_it() {
+        // One indent for every entry: past the fixed column and the gap.
+        assert_eq!(set_indent(true), LEAD_W + 1.);
+        assert_eq!(set_indent(false), FACE + 1.);
+    }
+}
+
+/// What an Undo put back, the first entry whose version its site no longer
+/// has (for the version picker), files only the CurseForge website hands
+/// out (for the download window, [`get_from_website`]), and what failed.
+pub(crate) struct UndoDone {
+    pub done: Vec<std::path::PathBuf>,
+    pub gone: Option<(Saved, Gone)>,
+    pub website: Vec<(Saved, hopper::cf::WebsiteOnly)>,
+    pub errors: Vec<String>,
+    /// Undo all on a pack update: the pack's name and what became of its
+    /// own record (version, loader).
+    pub pack_said: Option<(String, hopper::undo::PackRestore)>,
+}
+
+/// The entry's file only the CurseForge website hands out, and History
+/// kept just a note of it: installs it the way the mod page's Files tab
+/// does ("Roll back to…"), which opens the download window for its page
+/// and adds the file, hash-checked, when it arrives in Downloads.
+pub(crate) fn get_from_website(
+    store: &Entity<crate::store::Store>,
+    root: &std::path::Path,
+    f: Saved,
+    w: hopper::cf::WebsiteOnly,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(r) = f.src.clone() else {
+        window.push_notification(Notification::error(hopper::undo::website_message(&w, false)), cx);
+        return;
+    };
+    let s = store.read(cx);
+    let Some(inst) = s.instance(root).cloned() else {
+        window.push_notification(Notification::error("That instance is gone."), cx);
+        return;
+    };
+    let instances_root = std::path::PathBuf::from(&s.settings().instances_root);
+    let title = format!("Putting back {}", f.title());
+    let at = root.to_path_buf();
+    s.spawn_instance_job(root, title, move |job| {
+        let (m, file) = hopper::undo::website_file(&r)?;
+        let before = crate::store::Before::at(&at);
+        let class = m.class_id.unwrap_or(hopper::cf::CLASS_MODS);
+        let place = hopper::browse::Placement { instances_root: &instances_root, target: Some(inst), dest: None };
+        let (changed, line) = hopper::browse::install_project(&m, Some(file), class, place, job)?;
+        job.detail(line);
+        Ok(crate::store::Msg::added(changed, &before, Some(m.id)))
+    });
+    window.push_notification(Notification::info(hopper::undo::website_message(&w, true)), cx);
+}
+
+/// History's Undo of `files` in an instance, as a task: it waits its turn
+/// behind another task on the instance, then works on what that one left.
+/// Pick the result up with [`crate::store::work_done`], then call
+/// [`undone`]. `None` when the instance is gone. `pack`: Undo all on a pack
+/// update; when all of it came back, the pack's own record goes back too.
+pub(crate) fn queue_undo(
+    s: &crate::store::Store,
+    root: &std::path::Path,
+    files: Vec<Saved>,
+    pack: Option<hopper::backups::PackMark>,
+) -> Option<std::sync::Arc<std::sync::Mutex<Option<UndoDone>>>> {
+    let mut inst = s.instance(root).cloned()?;
+    let title = match files.as_slice() {
+        [one] => format!("Putting back {}", one.name),
+        many => format!("Putting back {}", hopper::words::count(many.len(), "file")),
+    };
+    Some(s.queue_work(root, title, move |_| {
+        crate::store::fresh(&mut inst);
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let mut done = Vec::new();
+        let mut gone: Option<(Saved, Gone)> = None;
+        let mut website = Vec::new();
+        let mut errors = Vec::new();
+        for f in &files {
+            match hopper::undo::undo(&mut inst, f) {
+                Ok(p) => done.push(p),
+                Err(e) => match e.downcast::<Gone>() {
+                    Ok(g) if gone.is_none() => gone = Some((f.clone(), g)),
+                    Ok(g) => errors.push(format!("{}: {g}", f.name)),
+                    // Only the CurseForge website has the file: the
+                    // download window gets it, as from the mod's page.
+                    Err(e) => match e.downcast::<hopper::cf::WebsiteOnly>() {
+                        Ok(w) => website.push((f.clone(), w)),
+                        Err(e) => errors.push(format!("{}: {e:#}", f.name)),
+                    },
+                },
+            }
+        }
+        // Only when all of it came back.
+        let mut pack_said = None;
+        if let Some(m) = &pack
+            && gone.is_none()
+            && website.is_empty()
+            && errors.is_empty()
+        {
+            match hopper::undo::restore_pack(&mut inst, m, since) {
+                Ok(r) => pack_said = Some((m.name.clone(), r)),
+                Err(e) => errors.push(format!("{}'s pack version wasn't put back: {e:#}", m.name)),
+            }
+        }
+        UndoDone { done, gone, website, errors, pack_said }
+    }))
+}
+
+/// After an Undo: the instance is read again and jars with no entry
+/// (unknown ones) are identified, as on any drop.
+pub(crate) fn undone(store: &Entity<crate::store::Store>, root: &std::path::Path, done: &[std::path::PathBuf], cx: &mut App) {
+    let mods = root.join("mods");
+    let jars: Vec<String> = done
+        .iter()
+        .filter(|p| p.parent() == Some(mods.as_path()))
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    store.update(cx, |s, cx| {
+        s.reload_instance(root, cx);
+        s.identify_jars(root, jars);
+    });
 }

@@ -317,7 +317,7 @@
   .chips { margin-top: 2px; }
   .chip { cursor: pointer; }
   .chip.on { outline: 1px solid var(--acc); }
-  .chip.r { color: #f87171; } .chip.y { color: var(--gold); } .chip.g { color: var(--green); }
+  .chip.r { color: var(--ink-red); } .chip.y { color: var(--ink-gold); } .chip.g { color: var(--ink-green); }
   .mods { border: 1px solid var(--line); border-radius: var(--radius-lg); max-height: 300px; overflow: auto; }
   .mr { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--line); }
   .mr:last-child { border: 0; }

@@ -317,10 +317,6 @@ fn change_source(store: &Entity<Store>, name: &str, inst: Instance, args: Value,
         let _ = reply.send(Err(e));
         return;
     }
-    if let Some(why) = store.read(cx).edit_hold_reason(&inst.root) {
-        let _ = reply.send(Err(format!("Can't change it now: {why}.")));
-        return;
-    }
     let Some(link) = args["link"].as_str().map(str::to_string) else {
         let _ = reply.send(Err("link is needed".into()));
         return;
@@ -402,6 +398,7 @@ fn change_source(store: &Entity<Store>, name: &str, inst: Instance, args: Value,
                     store.update(cx, |s, _| {
                         s.spawn_instance_job(&root, format!("Adding {file}"), move |job| {
                             let mut inst = inst;
+                            crate::store::fresh(&mut inst);
                             let done = sources::install(&mut inst, &r, idx, job)?;
                             job.detail(format!("{done} is in. Updates come from {publisher}."));
                             Ok(Msg::InstanceChanged(inst.root.clone()))
@@ -486,9 +483,6 @@ fn unfollow(store: &Entity<Store>, args: &Value, cx: &mut App) -> Reply {
         .ok_or(format!("No mod {file} in {} (list_mods shows the files).", inst.name))?;
     if a.source.is_none() {
         return Err(format!("{file} follows no source."));
-    }
-    if let Some(why) = s.edit_hold_reason(&inst.root) {
-        return Err(format!("Can't change it now: {why}."));
     }
     crate::source_dialog::unfollow(store.clone(), inst.root.clone(), file.clone(), cx);
     Ok(vec![text(format!("{file} stops following its source (a task). The file stays."))])

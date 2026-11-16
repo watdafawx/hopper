@@ -525,31 +525,232 @@ class HardeningTest(Base):
         with open(mb.STATE, encoding="utf-8") as f:
             return f.read()
 
-    def test_saving_is_off_the_request_path(self):
-        before = self.saved_text()
-        mb.SAVE_INTERVAL = 0.1
-        mb.start_writer()
-        self.a.post("/v1/profile", {"name": "renamed-late"})
-        self.assertEqual(self.saved_text(), before)   # the request did not write
-        deadline = time.time() + 5
-        while "renamed-late" not in self.saved_text() and time.time() < deadline:
-            time.sleep(0.05)
-        self.assertIn("renamed-late", self.saved_text())
+    def test_a_change_is_in_the_file_when_it_is_answered(self):
+        # No saver thread here (and a long interval if one runs): the answer
+        # itself must have written the file.
+        mb.SAVE_INTERVAL = 60
+        self.a.post("/v1/profile", {"name": "renamed-now"})
+        self.assertIn("renamed-now", self.saved_text())
         self.assertFalse(os.path.exists(mb.STATE + ".tmp"))
 
-    def test_requests_alone_do_not_write_the_file(self):
+    def test_requests_that_change_nothing_do_not_write_the_file(self):
         before = self.saved_text()
-        self.a.befriend(self.b)
-        self.a.post("/v1/profile", {"name": "z"})
+        self.a.get("/v1/friends")
+        self.a.events()
+        self.assertEqual(self.a.post("/v1/join", {"code": "NOPE0000"})["status"], 404)
+        self.assertEqual(self.a.post("/v1/recipes", dict(recipe("p1"), to="nobody-here"))["status"], 403)
         self.assertEqual(self.saved_text(), before)
 
     def test_stopping_flushes_what_is_unsaved(self):
+        # What the background work leaves unsaved (an idle prune, a migration)
+        # is written when the saver stops, as SIGTERM does.
         mb.SAVE_INTERVAL = 60
         mb.start_writer()
-        self.a.post("/v1/profile", {"name": "unsaved-name"})
+        with mb.lock:
+            mb.state["users"][self.a.id]["name"] = "unsaved-name"
+            mb.mark_dirty()
         self.assertNotIn("unsaved-name", self.saved_text())
         self.assertTrue(mb.stop_writer())   # what SIGTERM does
         self.assertIn("unsaved-name", self.saved_text())
+
+    # -- a change is saved before it is answered, and not heard of before
+
+    def disk(self):
+        with open(mb.STATE, encoding="utf-8") as f:
+            return json.load(f)
+
+    def memory(self):
+        with mb.lock:
+            return json.loads(json.dumps(mb.state))
+
+    def test_every_change_is_saved_before_it_is_answered(self):
+        # After each call that changes anything, the file equals the memory:
+        # whatever a desktop counts as delivered once answered is on disk.
+        mb.SAVE_INTERVAL = 60
+        a, b, c = self.a, self.b, self.c
+        a.befriend(b, inst="p1")
+        steps = [
+            ("friends", lambda: a.befriend(c)),
+            ("profile", lambda: a.post("/v1/profile", {"name": "A2", "mc_id": "abc"})),
+            ("invite", lambda: a.post("/v1/invite", {"inst": "p1"})),
+            ("new group", lambda: a.post("/v1/groups", {"name": "Crew", "members": [b.id]})),
+        ]
+        for label, step in steps:
+            r = step()
+            self.assertNotIn("error", r, label)
+            self.assertEqual(self.disk(), self.memory(), label)
+        gid = next(iter(a.groups()))
+        steps = [
+            ("accept", lambda: b.post("/v1/groups/%s/accept" % gid)),
+            ("in-step", lambda: b.post("/v1/groups/%s/in-step" % gid, {"on": True})),
+            ("edit", lambda: a.post("/v1/groups/%s" % gid, {"name": "Crew 2", "add": [c.id]})),
+            ("publish friend", lambda: a.post("/v1/recipes", dict(recipe("p1"), to=[b.id]))),
+            ("publish group", lambda: a.post("/v1/recipes", dict(recipe("p2", code="HOP-2"), to=[], groups=[gid]))),
+            ("old publish", lambda: a.post("/v1/recipes", dict(recipe("p3"), to=b.id))),
+            ("follow", lambda: b.post("/v1/groups/%s/follow" % gid, {"from": a.id, "inst": "p2"})),
+            ("revoke", lambda: a.post("/v1/revoke", {"inst": "p1", "to": [b.id], "groups": [gid]})),
+            ("leave", lambda: b.post("/v1/groups/%s/leave" % gid)),
+            ("delete group", lambda: a.post("/v1/groups/%s/delete" % gid)),
+            ("unfriend", lambda: a.post("/v1/remove", {"id": b.id})),
+        ]
+        for label, step in steps:
+            r = step()
+            self.assertNotIn("error", r, label)
+            self.assertEqual(self.disk(), self.memory(), label)
+
+    def test_a_published_change_survives_a_hard_stop(self):
+        # The mailbox is killed (no SIGTERM, no final save) right after it
+        # answers: the answer is the promise that the change is kept.
+        import subprocess
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        state = os.path.join(d.name, "state.json")
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        env = dict(os.environ, HOPPER_MAILBOX_HOST="127.0.0.1", HOPPER_MAILBOX_PORT=str(port),
+                   HOPPER_MAILBOX_STATE=state, HOPPER_MAILBOX_REGISTER_LIMIT="1000")
+
+        def start():
+            p = subprocess.Popen([sys.executable, "-B", mb.__file__], env=env,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.addCleanup(lambda: p.poll() is None and p.kill())
+            until = time.time() + 15
+            while time.time() < until:
+                try:
+                    with urllib.request.urlopen("http://127.0.0.1:%d/v1/health" % port, timeout=1):
+                        return p
+                except OSError:
+                    time.sleep(0.1)
+            self.fail("mailbox did not start")
+
+        class Remote:
+            url = "http://127.0.0.1:%d" % port
+
+        p = start()
+        a, b = Client(Remote, "hard-a"), Client(Remote, "hard-b")
+        a.befriend(b)
+        gid = a.post("/v1/groups", {"name": "Crew", "members": [b.id]})["group"]["id"]
+        b.post("/v1/groups/%s/accept" % gid)
+        r = a.post("/v1/recipes", dict(recipe("p1", code="HOP-lastchange"), to=[], groups=[gid]))
+        self.assertIn("seq", r)
+        p.kill()
+        p.wait()
+        start()
+        evs = [e for e in b.events() if e["kind"] == "recipe"]
+        self.assertEqual([e["code"] for e in evs], ["HOP-lastchange"])
+        self.assertEqual(a.groups()[gid]["packs"][0]["inst"], "p1")
+
+    def test_a_change_is_not_heard_of_before_it_is_saved(self):
+        # The sender's answer waits for the disk; the receiver's feed must
+        # too, or a crash could leave the receiver ahead of the mailbox.
+        self.a.befriend(self.b)
+        self.b.events()
+        seen = self.b.after
+        gate, entered = threading.Event(), threading.Event()
+        real = mb._write_file
+
+        def slow(data):
+            entered.set()
+            gate.wait(10)
+            real(data)
+
+        mb._write_file = slow
+        self.addCleanup(setattr, mb, "_write_file", real)
+        out = {}
+        t = threading.Thread(target=lambda: out.update(self.a.post("/v1/recipes", dict(recipe("p1"), to=[self.b.id]))))
+        t.start()
+        self.assertTrue(entered.wait(5))
+        # Queued in memory, being written, not answered.
+        self.assertEqual(len(mb.state["events"][self.b.id]), 1)
+        self.assertEqual(self.b.events(), [])
+        self.assertEqual(self.b.after, seen)   # its place in the feed did not move past it
+        gate.set()
+        t.join(10)
+        self.assertIn("seq", out)
+        self.assertEqual([e["inst"] for e in self.b.events()], ["p1"])
+
+    def test_a_waiting_poll_is_woken_when_the_save_is_done(self):
+        self.a.befriend(self.b)
+        self.b.events()
+        gate, entered = threading.Event(), threading.Event()
+        real = mb._write_file
+
+        def slow(data):
+            entered.set()
+            gate.wait(10)
+            real(data)
+
+        mb._write_file = slow
+        self.addCleanup(setattr, mb, "_write_file", real)
+        sender = threading.Thread(target=lambda: self.a.post("/v1/recipes", dict(recipe("p1"), to=[self.b.id])))
+        sender.start()
+        self.assertTrue(entered.wait(5))
+        got = []
+        waiter = threading.Thread(target=lambda: got.append(self.b.get("/v1/recipes?after=0&wait=20&v=2")))
+        waiter.start()
+        time.sleep(0.5)
+        self.assertEqual(got, [])      # held back while unsaved
+        t0 = time.time()
+        gate.set()
+        waiter.join(10)
+        sender.join(10)
+        self.assertLess(time.time() - t0, 5)   # woken, not waiting out its 20 s
+        self.assertEqual([e["inst"] for e in got[0]["events"]], ["p1"])
+
+    def test_a_failed_save_is_not_answered_as_sent(self):
+        self.a.befriend(self.b)
+        self.b.events()
+        real = mb._write_file
+
+        def broken(data):
+            raise OSError("disk full")
+
+        mb._write_file = broken
+        self.addCleanup(setattr, mb, "_write_file", real)
+        err = io.StringIO()
+        old, sys.stderr = sys.stderr, err
+        try:
+            r = self.a.post("/v1/recipes", dict(recipe("p1"), to=[self.b.id]))
+        finally:
+            sys.stderr = old
+        self.assertEqual((r["status"], r["code"]), (503, "save_failed"))
+        # Nobody hears of it while it is not on disk ...
+        self.assertEqual(self.b.events(), [])
+        # ... and once the disk works again the saver keeps it (the desktop's
+        # retry would just replace it).
+        mb._write_file = real
+        self.assertTrue(mb.flush())
+        self.assertEqual([e["inst"] for e in self.b.events()], ["p1"])
+
+    def test_requests_arriving_together_share_saves(self):
+        mb.SAVE_INTERVAL = 60
+        writes = []
+        real = mb._write_file
+
+        def counted(data):
+            writes.append(len(data))
+            time.sleep(0.05)
+            real(data)
+
+        mb._write_file = counted
+        self.addCleanup(setattr, mb, "_write_file", real)
+        self.a.befriend(self.b)
+        base = len(writes)
+        codes = []
+
+        def one(i):
+            codes.append(self.a.post("/v1/invite", {"inst": "p%d" % i}).get("code"))
+
+        ts = [threading.Thread(target=one, args=(i,)) for i in range(12)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(15)
+        self.assertEqual(len([c for c in codes if c]), 12)
+        self.assertEqual(self.disk(), self.memory())
+        self.assertLess(len(writes) - base, 12)
 
     @unittest.skipUnless(threading.current_thread() is threading.main_thread(), "signals need the main thread")
     def test_sigterm_stops_the_server_and_saves(self):

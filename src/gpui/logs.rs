@@ -1055,6 +1055,7 @@ impl LogsView {
         let store = self.store.read(cx);
         let Some(mut inst) = store.instance(root).cloned() else { return };
         store.spawn_instance_job(root, format!("Installing {id}"), move |job| {
+            crate::store::fresh(&mut inst);
             let before = crate::store::Before::at(&inst.root);
             let added = hopper::install::install_mod_id(&mut inst, &id, job)?;
             job.note(format!("Installed {}", added.join(", ")));

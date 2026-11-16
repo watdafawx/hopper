@@ -1073,7 +1073,7 @@ fn real_modrinth_end_to_end() {
     assert!(inst.mods_dir().join(&f.file_name).exists());
 
     // Updates and changelogs come from Modrinth too.
-    let ups = crate::install::check_updates(&inst).unwrap();
+    let ups = crate::install::check_updates(&inst, crate::sources::Check::Auto).unwrap();
     println!(
         "updates: {:?}",
         ups.iter().map(|u| &u.file.file_name).collect::<Vec<_>>()

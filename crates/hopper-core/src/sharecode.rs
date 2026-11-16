@@ -544,6 +544,16 @@ pub fn make(inst: &Instance, job: &Job) -> anyhow::Result<Made> {
             None => left_out.push(if a.name.is_empty() { a.file_name.clone() } else { a.name.clone() }),
         }
     }
+    // Jars dropped into mods/ by hand that Hopper doesn't track yet: no
+    // code can carry them either, but naming them tells friends what to ask
+    // for. A Modrinth pack's own file (listed by name) isn't one.
+    let pack_names: HashSet<String> = pack.iter().flat_map(|pf| pf.sha1.values().map(|n| n.to_lowercase())).collect();
+    for jar in crate::install::loose_jars(inst) {
+        let name = jar.strip_suffix(".disabled").unwrap_or(&jar).to_string();
+        if !pack_names.contains(&name.to_lowercase()) && !left_out.iter().any(|n: &String| n.eq_ignore_ascii_case(&name)) {
+            left_out.push(name);
+        }
+    }
     let mut loader = None;
     if let Some(pf) = &pack {
         // A pack mod moved to another file is in the list already, and
@@ -1293,6 +1303,34 @@ mod real_tests {
         // And back: the installed instance makes the same code.
         let again = make(&crate::instances::load(&inst.root).unwrap(), &jobs.start("make")).unwrap();
         assert_eq!(again.share, share);
+    }
+
+    /// A jar the sharer dropped into mods/ by hand (not tracked, on no mod
+    /// site) isn't in the code, but its name goes along so friends know to
+    /// ask for it; a tracked mod and a turned-off loose jar are handled too.
+    #[test]
+    fn a_hand_added_jar_is_named_for_friends() {
+        let root = std::env::temp_dir().join(format!("hopper-share-loose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        for f in ["MyTweaks-1.0.jar", "Secret-2.jar.disabled", "jei-1.jar", "notes.txt"] {
+            std::fs::write(root.join("mods").join(f), b"x").unwrap();
+        }
+        let inst = Instance {
+            root: root.clone(),
+            name: "Loose".into(),
+            game_version: "1.21.1".into(),
+            loader: "fabric".into(),
+            addons: vec![Addon { project_id: 238_222, file_id: 5, file_name: "jei-1.jar".into(), name: "JEI".into(), enabled: true, class_id: cf::CLASS_MODS, ..Default::default() }],
+            ..Default::default()
+        };
+        let jobs = crate::jobs::Jobs::default();
+        let made = make(&inst, &jobs.start("make")).unwrap();
+        let mut named = made.left_out.clone();
+        named.sort();
+        assert_eq!(named, ["MyTweaks-1.0.jar", "Secret-2.jar"]);
+        assert_eq!(made.share.entries, [Entry::CurseFile { file: 5, enabled: true }]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A follow is recorded from `made`, so `made` sees the saved instance

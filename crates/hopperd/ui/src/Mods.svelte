@@ -269,7 +269,16 @@
   const cols = $derived(colOrder.filter((c) => c === 'on' || (!colHidden.includes(c) && fitsCol(c))));
   const COL_W = { author: '130px', side: '40px', on: '64px', added: '86px' };
   // Check, icon, name, Update / Changelog, the movable columns, ⋯ and Remove.
-  const gridCols = $derived(`22px 30px minmax(0, 1fr) ${narrow ? 110 : 190}px ${cols.map((c) => COL_W[c]).join(' ')} 74px`);
+  // As the row narrows, as desktop's: Remove moves into the ⋯ menu first, then
+  // (the name keeps about 12 characters) the Update column goes in as "Update to X".
+  const NAME_MIN = 100;
+  const actW = $derived(narrow ? 110 : 190);
+  const colsW = $derived(cols.reduce((s, c) => s + parseInt(COL_W[c], 10), 0));
+  // Room the name gets with an action column of `a` px and an end column of `e` px (16 padding, 10 gaps).
+  const nameRoom = (a, e) => listW - 16 - 22 - 30 - a - colsW - e - 10 * (4 + cols.length);
+  const foldDel = $derived(listW > 0 && nameRoom(actW, 74) < NAME_MIN);
+  const foldUp = $derived(foldDel && nameRoom(actW, 52) < NAME_MIN);
+  const gridCols = $derived(`22px 30px minmax(0, 1fr) ${foldUp ? 0 : actW}px ${cols.map((c) => COL_W[c]).join(' ')} ${foldDel ? 52 : 74}px`);
   // The same mod in twice (an old jar left beside the new one): every
   // copy but the newest, as desktop's "Keep newest" finds them.
   const twice = $derived.by(() => {
@@ -339,7 +348,7 @@
       if (b !== base) return;
       data = d;
       // Categories arrive from the sites in the background: look again.
-      if (d.categories_pending && catTries++ < 6) setTimeout(() => b === base && load(), 4000);
+      if ((d.categories_pending || d.sides_pending) && catTries++ < 6) setTimeout(() => b === base && load(), 4000);
     } catch (e) {
       if (b === base) say(e.message, true);
     }
@@ -394,7 +403,10 @@
       tick = checkedAt;
       archived = new Set(r.archived || []);
       await load();
-      if (force && !updates.length) say(hasPack ? 'Every mod added on top of the pack is up to date.' : 'Every mod is up to date.');
+      // GitHub asked this panel to wait: its mods show what was seen earlier, so say so
+      // instead of calling everything up to date.
+      if (force && r.github_paused) say(r.github_paused);
+      else if (force && !updates.length) say(hasPack ? 'Every mod added on top of the pack is up to date.' : 'Every mod is up to date.');
     } catch (e) {
       if (force) say(e.message, true);
     } finally {
@@ -775,6 +787,9 @@
   // No side given: a dimmed question mark in the same slot, so it doesn't look like a bug.
   const SIDE_UNKNOWN = [CircleQuestionMark, "Side unknown: the mod doesn't say if it's needed on the server"];
   const sideOf = (m) => SIDE[m.side] || SIDE_UNKNOWN;
+  // CurseForge doesn't tag it, Modrinth does: say so where the side shows.
+  const fromMr = (m) => (m.side_from === 'modrinth' && SIDE[m.side] ? ' (from Modrinth)' : '');
+  const sideTip = (m) => (fromMr(m) ? sideOf(m)[1].replace(/^[^:]*/, (h) => h + fromMr(m)) : sideOf(m)[1]);
   // Desktop's tags: Client only (gold), Server only (blue), Client + server.
   const SIDE_TAG = { client: ['Client only', 'warnc'], server: ['Server only', 'info'], both: ['Client + server', ''] };
   const ON_HEAD = "Disabled keeps the file but the server doesn't load it (renamed to .disabled). Click to sort.";
@@ -812,7 +827,7 @@
 <!-- A row's cell in a movable column. -->
 {#snippet modCell(c, m, ix, swOn)}
   {#if c === 'author'}<span class="c-author muted ell" title={m.author}>{m.author}</span>
-  {:else if c === 'side'}{@const I = sideOf(m)[0]}<span class="c-side muted" class:unk={!SIDE[m.side]} title={sideOf(m)[1]}><I size={13} /></span>
+  {:else if c === 'side'}{@const I = sideOf(m)[0]}<span class="c-side muted" class:unk={!SIDE[m.side]} title={sideTip(m)}><I size={13} /></span>
   {:else if c === 'on'}<span class="c-on"><label class="switch" class:pend={swOn !== m.enabled} title={m.enabled ? 'Turn off' : 'Turn on'} onpointerdown={(e) => switchDown(e, m, ix)}><input type="checkbox" checked={swOn} onclick={(e) => toggle(m, e)} /><span></span></label></span>
   {:else}<span class="c-added muted" title={dateOf(m.date_added)}>{ago(m.date_added)}</span>{/if}
 {/snippet}
@@ -869,7 +884,7 @@
     {#if clientOn}<div class="small warn">{clientOn} client-only mod{clientOn === 1 ? '' : 's'} on: servers usually don't need {clientOn === 1 ? 'it' : 'them'}, and some won't start with them. <button class="link" onclick={() => (chip = 'client')}>Show</button></div>{/if}
 
     <div class="split">
-      <div class="list" class:sidein={hasSide && !cols.includes('side')} class:narrow style:--cols={gridCols} bind:clientWidth={listW}>
+      <div class="list" class:sidein={hasSide && !cols.includes('side')} class:narrow class:foldup={foldUp} class:folded={foldDel} style:--cols={gridCols} bind:clientWidth={listW}>
         <div class="tr th" oncontextmenu={openColMenu} role="row" tabindex="-1">
           <span class="c-ck"><input type="checkbox" checked={allShownPicked} onchange={checkAll} title="Select all shown" /></span>
           <span></span>
@@ -902,14 +917,14 @@
             <div class="c-name">
               <div class="nm">
                 <button class="nmlink ell" title={nameTip(m)} onclick={(e) => peek(m, e)}>{m.name}</button>
-                {#if hasSide}{@const I = sideOf(m)[0]}<span class="side-in muted" class:unk={!SIDE[m.side]} title={sideOf(m)[1]}><I size={12} /></span>{/if}
+                {#if hasSide}{@const I = sideOf(m)[0]}<span class="side-in muted" class:unk={!SIDE[m.side]} title={sideTip(m)}><I size={12} /></span>{/if}
                 {#if m.locked}<span class="lk" title="Updates ignored. Right-click to allow them."><Lock size={11} /></span>{/if}
               </div>
               <div class="tags">
                 {#if isNew(m) && !yours(m)}<span class="chip tag okc">New</span>{/if}
                 {#if yours(m)}<span class="chip tag gold">Added by you</span>{/if}
                 {#if isUnknown(m)}<span class="chip tag">Unknown</span>{/if}
-                {#if SIDE_TAG[m.side]}<span class="chip tag {SIDE_TAG[m.side][1]}">{SIDE_TAG[m.side][0]}</span>{/if}
+                {#if SIDE_TAG[m.side]}<span class="chip tag {SIDE_TAG[m.side][1]}" title={fromMr(m) ? `${SIDE_TAG[m.side][0]}${fromMr(m)}` : undefined}>{SIDE_TAG[m.side][0]}</span>{/if}
                 {#if !(up && (vl || breaking))}
                   {#each cats.slice(0, 2) as c (c)}<span class="chip tag">{c}</span>{/each}
                   {#if cats.length > 2}<span class="tiny muted" title={cats.slice(2).join(', ')}>+{cats.length - 2}</span>{/if}
@@ -936,7 +951,8 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
               </div>
             </div>
             <div class="c-act">
-              {#if done.has(m.project_id)}<span class="okt small row"><CircleCheck size={13} />Updated</span>
+              {#if foldUp}
+              {:else if done.has(m.project_id)}<span class="okt small row"><CircleCheck size={13} />Updated</span>
               {:else if up}
                 {#if isArchived(m)}<span class="archw" title="The author archived this version. Update to get the newer one."><TriangleAlert size={14} /></span>{/if}
                 <div class="splitb" class:warnb={breaking} class:lockb={vl}>
@@ -954,7 +970,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
             <span class="c-end row">
               {#if cfg.sid === sid}{@const cm = modForFile(m.file)}{#if cm}<button class="ib cfg" class:chg={cm.changed > 0} class:on={cfgFor?.file === m.file} title={cm.changed ? `Config: ${cm.changed} setting${cm.changed === 1 ? '' : 's'} not at default` : 'Config'} aria-label="{m.name} config" onclick={(e) => openCfg(m, e)}><SlidersHorizontal size={13} /></button>{/if}{/if}
               <button class="ib more" title="More" onclick={(e) => openMenu(m, e)}><Ellipsis size={14} /></button>
-              <button class="ib del" title="Remove (kept in .hopper-backups)" onclick={async (e) => { e.stopPropagation(); if (await drop([m])) changed(true); }}><Trash2 size={13} /></button>
+              {#if !foldDel}<button class="ib del" title="Remove (kept in .hopper-backups)" onclick={async (e) => { e.stopPropagation(); if (await drop([m])) changed(true); }}><Trash2 size={13} /></button>{/if}
             </span>
           </div>
         {/each}
@@ -994,6 +1010,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   {@const mup = pending(m) ? m.update : null}
   {@const mvl = versionLocked(m)}
   <div class="ctx popover menu" style:left="{menu.x}px" style:top="{menu.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+    {#if foldUp && mup}<button class="menu-item" disabled={updating.has(m.project_id) || !!busy} onclick={(e) => act((m) => updateOne(m, e))}><Download size={13} /><span class="ell">Update to {mup.to}</span></button><div class="menu-sep"></div>{/if}
     {#if m.source && browseOf(m)}<a class="menu-item" href="#{browseHash('mods', server.id)}/{m.source}/{encodeURIComponent(browseOf(m))}" onclick={() => (menu = null)}><Search size={13} />Open in Browse</a>
     {:else if shownBrowse(m)}{@const sb = shownBrowse(m)}<a class="menu-item" href="#{browseHash('mods', server.id)}/{sb.source}/{encodeURIComponent(sb.id)}" onclick={() => (menu = null)}><Search size={13} />Open in Browse</a>{/if}
     {#if m.source}<button class="menu-item" onclick={() => act((m) => (versionsFor = m))}><Clock size={13} />Versions and changelogs</button>{/if}
@@ -1145,24 +1162,24 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .lk { color: var(--muted); display: grid; }
   .tags { display: flex; gap: 4px; align-items: center; margin-top: 2px; min-width: 0; overflow: hidden; flex-wrap: nowrap; }
   .tag { font-size: 10.5px; padding: 0 6px; flex: none; }
-  .tag.gold { color: var(--gold); background: var(--gold-dim); }
-  .tag.warnc { color: var(--gold); background: var(--gold-dim); }
-  .tag.info { color: var(--blue); background: var(--blue-dim); }
-  .tag.okc, .tag.mr { color: var(--green); background: var(--green-dim); }
+  .tag.gold { color: var(--ink-gold); background: var(--gold-dim); }
+  .tag.warnc { color: var(--ink-gold); background: var(--gold-dim); }
+  .tag.info { color: var(--ink-blue); background: var(--blue-dim); }
+  .tag.okc, .tag.mr { color: var(--ink-green); background: var(--green-dim); }
   .lockt { gap: 3px; cursor: pointer; }
-  .brk { gap: 4px; color: var(--red); background: var(--red-dim); max-width: 160px; min-width: 0; flex: 0 1 auto; }
+  .brk { gap: 4px; color: var(--ink-red); background: var(--red-dim); max-width: 160px; min-width: 0; flex: 0 1 auto; }
   .brk img { border-radius: var(--radius-sm); flex: none; }
   .lockt:hover { color: var(--text); }
   /* The version chip: click to pick another version; with an update, installed → offered. */
-  .vchip { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; max-width: 200px; min-width: 0; padding: 0 6px; border-radius: var(--radius-sm); font-size: 10.5px; line-height: 17px; background: #ffffff0d; color: var(--muted); }
+  .vchip { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; max-width: 200px; min-width: 0; padding: 0 6px; border-radius: var(--radius-sm); font-size: 10.5px; line-height: 17px; background: #ffffff0d; color: var(--ink-muted); }
   .vchip .chev { visibility: hidden; display: grid; color: var(--acc); flex: none; }
-  .vchip:not(.plain):hover { background: var(--acc-dim); color: var(--acc); }
+  .vchip:not(.plain):hover { background: var(--acc-dim); color: var(--ink-acc); }
   .vchip:hover .chev { visibility: visible; }
-  .vchip.upc { background: var(--acc-dim); color: var(--acc); }
+  .vchip.upc { background: var(--acc-dim); color: var(--ink-acc); }
   .vchip.upc b { font-weight: 600; }
   .vchip.upc:hover { background: #f9731640; }
-  .vchip.warnv { background: var(--gold-dim); color: var(--gold); }
-  .vchip.lockv { background: #ffffff0d; color: var(--muted); }
+  .vchip.warnv { background: var(--gold-dim); color: var(--ink-gold); }
+  .vchip.lockv { background: #ffffff0d; color: var(--ink-muted); }
   .c-act { display: flex; justify-content: flex-start; align-items: center; gap: 6px; }
   .archw { display: inline-flex; color: var(--gold); flex: none; cursor: help; }
   .c-on { display: flex; }
@@ -1177,6 +1194,10 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .ib.cfg.chg { color: var(--acc); }
   .ib.cfg.on { color: var(--text); background: #ffffff10; }
   .mod:hover .more, .mod:hover .ghostcl, .mod.sel .more, .mod.sel .ghostcl, .mod.keys .more, .mod.keys .ghostcl, .mod.menu .more, .mod.menu .ghostcl, .mod.peeked .more, .mod.peeked .ghostcl { visibility: visible; }
+  /* Folded: the ⋯ menu holds Remove (and Update), so it is always there to reach, and the empty Update column takes no hit area. */
+  .folded .mod .more { visibility: visible; }
+  .foldup .c-act { overflow: hidden; }
+  .ib:focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
   .ghostcl { color: var(--subtle); gap: 5px; }
   .splitb { display: inline-flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; font-size: 12px; max-width: 100%; }
   .splitb button { padding: 3px 8px; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; color: var(--subtle); }

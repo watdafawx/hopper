@@ -23,7 +23,7 @@
   import Overview from './Overview.svelte';
   import Browse from './Browse.svelte';
   import ServerPage from './ServerPage.svelte';
-  import PanelSettings, { catsFor } from './PanelSettings.svelte';
+  import PanelSettings, { catsFor, catAlias } from './PanelSettings.svelte';
   import ServerList from './ServerList.svelte';
   import Tasks from './Tasks.svelte';
   import Appearance from './Appearance.svelte';
@@ -150,6 +150,7 @@
   function canonical(r) {
     if (r === '/access') return owner ? '/settings/access' : '/settings/account';
     if ((r === '/panel-folder' || r === '/servers-folder') && owner) return '/settings/panel-folder';
+    if (r === '/settings/nodes') return `/settings/${catAlias('nodes')}`;
     return null;
   }
 
@@ -236,7 +237,7 @@
     if (owner) v.push({ id: 'rescan', section: 'Actions', icon: RefreshCw, title: 'Look for new server folders', words: 'refresh reload rescan re-read', run: rescan });
     v.push({ id: 'signout', section: 'Actions', icon: LogOut, title: 'Sign out', words: 'log out logout leave', run: signOut });
     for (const n of NAV) v.push({ id: `nav:${n.id}`, section: 'Navigation', icon: n.icon, title: n.label, run: () => go(n.to) });
-    for (const c of catsFor(owner, session.trueOwner)) {
+    for (const c of catsFor(owner, session.trueOwner, me?.role)) {
       v.push({ id: `set:${c.id}`, section: 'Navigation', icon: c.icon, title: `Settings › ${c.label}`, words: c.words, run: () => go(`/settings/${c.id}`) });
     }
     for (const s of live.servers) {
@@ -442,7 +443,7 @@
       {:else if page === 'settings'}
         <PanelSettings cat={settingsCat} {hello} {me} bind:pending />
       {:else}
-        <Overview onNew={() => (making = true)} />
+        <Overview onNew={() => (making = true)} homeName={hello.name} />
       {/if}
     </main>
   </div>
