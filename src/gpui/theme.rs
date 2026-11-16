@@ -525,6 +525,30 @@ fn reach(c: &str, to: &str, bg: &str, ratio: f32) -> String {
     out
 }
 
+/// The theme's red as small text (an error line, a status word): the same
+/// hue and saturation with the lightness moved, up on a dark theme and down
+/// on a light one, the least that reaches [`INK_RATIO`] on the page, the side
+/// bar, cards, raised rows and the pop-up background, and on its own 10%
+/// tint (a chip). The palette's red is chosen as a fill, and as text it is
+/// 2.1:1 (Nord) to 4.4:1 on a card. Hopper Server's web UI does the same
+/// (`--red-text`, lib/ink.js), so a red word looks alike in both.
+fn danger_text(danger: &str, surfaces: &[&str], dark: bool) -> String {
+    let mut hsl = gpui_kit::Hsla::from(gpui_kit::Rgba { r: parse(danger).0, g: parse(danger).1, b: parse(danger).2, a: 1.0 });
+    let reads = |c: gpui_kit::Hsla| {
+        let o = gpui_kit::Rgba::from(c);
+        let fg = Rgba(o.r, o.g, o.b, 1.0);
+        surfaces.iter().all(|bg| {
+            let tint = mix(bg, danger, 0.10);
+            ratio(fg, parse(bg)) >= INK_RATIO && ratio(fg, parse(&tint)) >= INK_RATIO
+        })
+    };
+    while !reads(hsl) && hsl.l > 0.0 && hsl.l < 1.0 {
+        hsl.l += if dark { 0.005 } else { -0.005 };
+    }
+    let o = gpui_kit::Rgba::from(hsl);
+    hex(Rgba(o.r, o.g, o.b, 1.0))
+}
+
 /// Dark or light text that reads on `bg`.
 fn on(bg: &str) -> &'static str {
     let c = parse(bg);
@@ -558,6 +582,10 @@ fn config(p: &Palette) -> Option<ThemeConfig> {
     let edge = if glass { alpha(p.fg, if p.dark { 0.14 } else { 0.12 }) } else { p.border.to_string() };
     let (ok, ok_h, ok_a, ok_f) = status(p.success);
     let (bad, bad_h, bad_a, bad_f) = status(p.danger);
+    // `danger` is read as a fill and as text (error lines, status words);
+    // the buttons keep their own fill above. See `danger_text`.
+    let bad_text = danger_text(p.danger, &[p.bg, p.panel, p.surface, p.raised, &pop], p.dark);
+    let bad_text_f = on(&bad_text);
     let mut colors: Vec<(&str, String)> = vec![
         ("background", p.bg.into()),
         ("foreground", p.fg.into()),
@@ -628,8 +656,8 @@ fn config(p: &Palette) -> Option<ThemeConfig> {
         ("button.danger.foreground", bad_f.clone()),
         ("warning.background", p.warning.into()),
         ("warning.foreground", on(p.warning).into()),
-        ("danger.background", bad),
-        ("danger.foreground", bad_f),
+        ("danger.background", bad_text),
+        ("danger.foreground", bad_text_f.into()),
         ("info.background", p.info.into()),
         ("info.foreground", on(p.info).into()),
         ("overlay", if p.dark { "#0000008c".into() } else { "#00000059".into() }),
@@ -780,6 +808,47 @@ mod tests {
         assert_eq!(get(c.foreground), "#ededef");
         assert_eq!(get(c.primary), "#f97316");
         assert_eq!(get(c.border), "#26262b");
+    }
+
+    /// Red as small text reads in every theme, on the page, cards and raised
+    /// rows and on its own tint, from the theme as the app builds it. Prints
+    /// the table: `cargo test -p hopper danger_text -- --nocapture`.
+    #[::core::prelude::v1::test]
+    fn red_text_reads_in_every_theme() {
+        let hd = hopper_dark().expect("theme.json");
+        let get = |v: Option<gpui_kit::SharedString>| v.map(|s| s.to_string()).unwrap_or_default();
+        // Hopper Dark's red in theme.json is the same fit as the others get.
+        let pop = mix("#121214", "#1f1f23", 0.5);
+        let fit = danger_text("#ef4444", &["#121214", "#0e0e10", "#1f1f23", "#28282d", &pop], true);
+        assert_eq!(&fit[..7], get(hd.colors.danger.clone()).as_str(), "theme.json danger.background");
+        assert_eq!(get(hd.colors.danger_foreground.clone()), on(&fit));
+        let mut rows: Vec<(String, String, [&str; 4], String)> = vec![(
+            HOPPER_DARK.into(),
+            "#ef4444".into(),
+            ["#121214", "#0e0e10", "#1f1f23", "#28282d"],
+            get(hd.colors.danger),
+        )];
+        for p in PALETTES {
+            let danger = get(config(p).expect("theme").colors.danger);
+            rows.push((p.name.into(), p.danger.into(), [p.bg, p.panel, p.surface, p.raised], danger));
+        }
+        println!("| Theme | Theme red | Danger text now | On page | On card | Worst (5 surfaces + tint) |");
+        println!("|---|---|---|---|---|---|");
+        let mut low = Vec::new();
+        for (name, theme_red, s, text) in &rows {
+            let fg = parse(text);
+            let pop = mix(s[0], s[2], 0.5);
+            let all = [s[0], s[1], s[2], s[3], pop.as_str()];
+            let worst = all
+                .iter()
+                .flat_map(|bg| [ratio(fg, parse(bg)), ratio(fg, parse(&mix(bg, theme_red, 0.10)))])
+                .fold(f32::MAX, f32::min);
+            println!("| {name} | {theme_red} | {} | {:.2} | {:.2} | {worst:.2} |", &text[..7], ratio(fg, parse(s[0])), ratio(fg, parse(s[2])));
+            if worst < 4.5 {
+                low.push(format!("{name} {worst:.2}"));
+            }
+        }
+        assert!(low.is_empty(), "danger text under 4.5:1: {low:?}");
     }
 
     #[::core::prelude::v1::test]

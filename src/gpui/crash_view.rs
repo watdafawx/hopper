@@ -352,7 +352,7 @@ pub fn what_happened(c: &Crash, st: &Stopped, changed: Option<(&Changed, &str)>,
                     .justify_center()
                     .text_xs()
                     .bg(if cause { theme.danger } else { theme.muted_foreground.opacity(0.2) })
-                    .text_color(if cause { gpui_kit::white() } else { theme.muted_foreground })
+                    .text_color(if cause { theme.danger_foreground } else { theme.muted_foreground })
                     .child((i + 1).to_string()),
             )
             .child(div().flex_1().min_w_0().text_sm().child(body))
