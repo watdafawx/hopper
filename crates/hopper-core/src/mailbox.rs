@@ -45,6 +45,59 @@ pub struct Friend {
     pub last_seen: u64,
 }
 
+/// The friend list as `GET /v1/friends` gives it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FriendList {
+    pub friends: Vec<Friend>,
+    /// How many friends the mailbox allows (0 when it doesn't say).
+    pub max: usize,
+    /// The list's digest, the same one the feed reports; `None` from a
+    /// mailbox before digests.
+    pub rev: Option<String>,
+}
+
+impl FriendList {
+    fn from_json(v: &serde_json::Value) -> Self {
+        Self {
+            friends: serde_json::from_value(v["friends"].clone()).unwrap_or_default(),
+            max: v["max"].as_u64().unwrap_or(0) as usize,
+            rev: rev_of(&v["rev"]),
+        }
+    }
+}
+
+/// One long-poll's answer.
+#[derive(Clone, Debug, Default)]
+pub struct Feed {
+    /// The newest event number the mailbox has.
+    pub seq: u64,
+    pub events: Vec<Event>,
+    /// The friend list's digest now: read the list again when it isn't the
+    /// one last read. `None` from a mailbox before digests, which needs
+    /// the list read on a timer instead.
+    pub friends: Option<String>,
+}
+
+impl Feed {
+    fn from_json(v: &serde_json::Value, after: u64) -> Self {
+        Self {
+            seq: v["seq"].as_u64().unwrap_or(after),
+            events: serde_json::from_value(v["events"].clone()).unwrap_or_default(),
+            friends: rev_of(&v["friends"]),
+        }
+    }
+}
+
+/// A digest as the mailbox sends it, if it is one this client will send
+/// back in a URL.
+fn rev_of(v: &serde_json::Value) -> Option<String> {
+    v.as_str().filter(|s| friends_rev_ok(s)).map(str::to_string)
+}
+
+fn friends_rev_ok(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
 /// What an [`Event`] is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -548,16 +601,13 @@ impl Mailbox {
     }
 
     pub fn friends(&self) -> anyhow::Result<Vec<Friend>> {
-        Ok(self.friend_list()?.0)
+        Ok(self.friend_list()?.friends)
     }
 
-    /// The friends and how many the mailbox allows (0 when it doesn't say).
-    pub fn friend_list(&self) -> anyhow::Result<(Vec<Friend>, usize)> {
+    /// The friends, how many the mailbox allows and the list's digest.
+    pub fn friend_list(&self) -> anyhow::Result<FriendList> {
         let v = self.get("/v1/friends", Some(&self.account.token))?;
-        Ok((
-            serde_json::from_value(v["friends"].clone()).unwrap_or_default(),
-            v["max"].as_u64().unwrap_or(0) as usize,
-        ))
+        Ok(FriendList::from_json(&v))
     }
 
     pub fn remove(&self, id: &str) -> anyhow::Result<()> {
@@ -734,14 +784,22 @@ impl Mailbox {
     /// Events for this PC after `after`, waiting up to `wait` seconds for
     /// one. Returns the newest sequence seen.
     pub fn events(&self, after: u64, wait: u64) -> anyhow::Result<(u64, Vec<Event>)> {
-        let v = self.get(
-            &format!("/v1/recipes?after={after}&wait={wait}&v=2"),
-            Some(&self.account.token),
-        )?;
-        Ok((
-            v["seq"].as_u64().unwrap_or(after),
-            serde_json::from_value(v["events"].clone()).unwrap_or_default(),
-        ))
+        let f = self.feed(after, wait, "")?;
+        Ok((f.seq, f.events))
+    }
+
+    /// Like [`Mailbox::events`], and the poll also ends once the friend
+    /// list's digest is no longer `friends` (the one from the last answer;
+    /// empty to not wait on it). A mailbox that doesn't know digests
+    /// ignores it and answers `friends: None`.
+    pub fn feed(&self, after: u64, wait: u64, friends: &str) -> anyhow::Result<Feed> {
+        let mut path = format!("/v1/recipes?after={after}&wait={wait}&v=2");
+        if friends_rev_ok(friends) {
+            path.push_str("&fr=");
+            path.push_str(friends);
+        }
+        let v = self.get(&path, Some(&self.account.token))?;
+        Ok(Feed::from_json(&v, after))
     }
 
     fn call(&self, path: &str, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
@@ -1006,6 +1064,24 @@ mod tests {
         };
         let b: Account = serde_json::from_slice(&serde_json::to_vec(&a).unwrap()).unwrap();
         assert_eq!((b.id, b.token, b.name, b.mc_id), (a.id, a.token, a.name, a.mc_id));
+    }
+
+    #[test]
+    fn the_friend_digest_is_read_only_when_it_is_safe_to_send_back() {
+        let f = Feed::from_json(&serde_json::json!({"seq": 7, "events": [], "friends": "0e3cb83a962e2f72"}), 3);
+        assert_eq!((f.seq, f.friends.as_deref()), (7, Some("0e3cb83a962e2f72")));
+        // An older mailbox: no digest, so the desktop reads on a timer.
+        let f = Feed::from_json(&serde_json::json!({"events": []}), 3);
+        assert_eq!((f.seq, f.friends), (3, None));
+        // Anything that would break the URL is no digest.
+        for bad in [serde_json::json!("a&b=c"), serde_json::json!(""), serde_json::json!(5), serde_json::json!("x".repeat(65))] {
+            assert_eq!(Feed::from_json(&serde_json::json!({"friends": bad}), 0).friends, None);
+        }
+        let l = FriendList::from_json(&serde_json::json!({
+            "friends": [{"id": "aa", "name": "FOX", "online": true, "last_seen": 5}], "max": 100, "rev": "ab12"
+        }));
+        assert_eq!((l.friends.len(), l.max, l.rev.as_deref()), (1, 100, Some("ab12")));
+        assert_eq!(FriendList::from_json(&serde_json::json!({"friends": []})).rev, None);
     }
 
     #[test]

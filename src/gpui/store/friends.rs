@@ -26,8 +26,19 @@ const GROUPS_EVERY: Duration = Duration::from_secs(60);
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 /// How often shared packs are checked for changes to publish.
 const PUBLISH_TICK: Duration = Duration::from_millis(500);
-/// How often the friend list is read from the mailbox.
-const FRIENDS_EVERY: Duration = Duration::from_secs(3);
+/// How often shares and group copies are matched against the instances and
+/// friends known here (no call to the mailbox).
+const LOCAL_EVERY: Duration = Duration::from_secs(3);
+/// The friend list is read when the feed says it changed; this read is
+/// only a safety net in case a change was missed.
+const FRIENDS_SAFETY: Duration = Duration::from_secs(5 * 60);
+/// A mailbox that doesn't say when the list changes is read this often.
+const FRIENDS_FALLBACK: Duration = Duration::from_secs(30);
+/// A failed read waits this long before the next try (the feed shows the
+/// mailbox being down meanwhile).
+const FRIENDS_RETRY: Duration = Duration::from_secs(20);
+/// Coming back to the window reads the list if it's at least this old.
+const FRIENDS_ON_FOCUS: Duration = Duration::from_secs(60);
 /// Packs from friends kept for the Friends screen.
 const RECIPES_KEPT: usize = 200;
 /// How long other members' changes wait for a change made here to be
@@ -46,6 +57,84 @@ pub enum SyncStatus {
     /// text says what's wrong, for players.
     Down(String),
     Ok,
+}
+
+/// When the friend list is read from the mailbox. It used to be every 3 s
+/// (about 1,200 calls an hour per PC). Now the feed's long-poll reports the
+/// list's digest and ends as soon as it changes (a friend added or removed,
+/// renamed, coming online or going quiet), so the list is read only then,
+/// plus a slow safety read and one when the window comes back. A mailbox
+/// from before digests is read every [`FRIENDS_FALLBACK`].
+#[derive(Debug, Default)]
+pub(super) struct FriendReads {
+    /// The digest of the list last read.
+    read_rev: Option<String>,
+    /// The newest digest the feed reported; the next poll waits on it.
+    feed_rev: Option<String>,
+    /// Whether the mailbox reports digests; `None` until the feed answers.
+    pushes: Option<bool>,
+    /// When a read last started, and whether it failed.
+    at: Option<Instant>,
+    failed: bool,
+    /// The window came back: read on the next tick.
+    focus: bool,
+}
+
+impl FriendReads {
+    /// Whether to read the list now.
+    fn due(&self, now: Instant) -> bool {
+        let Some(at) = self.at else { return true };
+        let age = now.saturating_duration_since(at);
+        if self.failed {
+            return age >= FRIENDS_RETRY;
+        }
+        if self.focus {
+            return true;
+        }
+        match self.pushes {
+            Some(true) => (self.feed_rev.is_some() && self.feed_rev != self.read_rev) || age >= FRIENDS_SAFETY,
+            _ => age >= FRIENDS_FALLBACK,
+        }
+    }
+
+    /// A feed answer came with `rev` (`None`: the mailbox doesn't know
+    /// digests).
+    fn heard(&mut self, rev: Option<String>) {
+        self.pushes = Some(rev.is_some());
+        if rev.is_some() {
+            self.feed_rev = rev;
+        }
+    }
+
+    fn start(&mut self, now: Instant) {
+        self.at = Some(now);
+        self.focus = false;
+    }
+
+    fn done(&mut self, rev: Option<String>) {
+        self.failed = false;
+        if rev.is_some() {
+            // The list is at least this new, so the next poll waits on it.
+            self.feed_rev = rev.clone();
+        }
+        self.read_rev = rev;
+    }
+
+    fn failed(&mut self) {
+        self.failed = true;
+    }
+
+    /// The window came back to the front.
+    fn focused(&mut self, now: Instant) {
+        if self.at.is_some_and(|t| now.saturating_duration_since(t) >= FRIENDS_ON_FOCUS) {
+            self.focus = true;
+        }
+    }
+
+    /// The digest the next poll waits on (empty: none known yet).
+    fn waits_on(&self) -> String {
+        self.feed_rev.clone().or_else(|| self.read_rev.clone()).unwrap_or_default()
+    }
 }
 
 /// A live invite code, for its countdown.
@@ -563,6 +652,20 @@ impl Store {
             || self.mailbox_groups.iter().any(|g| !g.me.joined)
     }
 
+    /// The window came to the front: the friend list is read again soon if
+    /// it hasn't been for a while (a safety net; the feed says when it
+    /// changes).
+    pub fn window_focused(&mut self) {
+        self.friend_reads.focused(Instant::now());
+    }
+
+    /// The mailbox says when the friend list changes, so friends' changes
+    /// show up right away. An older mailbox doesn't (it's read on a timer),
+    /// and before the first answer nobody knows yet.
+    pub fn friends_live(&self) -> bool {
+        self.friend_reads.pushes == Some(true)
+    }
+
     /// The Friends panel was open: what's there now isn't new any more.
     /// A friend's own "2 new" stays until their page is opened, so anyone
     /// without a time of their own keeps the old one.
@@ -785,6 +888,7 @@ impl Store {
                 .update(cx, |s, cx| {
                     s.mailbox = Some(mb.clone());
                     s.mailbox_error = None;
+                    s.friend_reads = FriendReads::default();
                     if mb.was_reset() {
                         // The service lost its data: friends are gone there,
                         // and its event numbers start over.
@@ -808,16 +912,19 @@ impl Store {
                 return;
             }
             loop {
-                let got = this.update(cx, |s, _| (s.mailbox_seq, s.mailbox.clone()));
-                let Ok((after, Some(mb2))) = got else { return };
-                let r = cx.background_spawn(async move { mb2.events(after, 60) }).await;
+                let got = this.update(cx, |s, _| (s.mailbox_seq, s.mailbox.clone(), s.friend_reads.waits_on()));
+                let Ok((after, Some(mb2), fr)) = got else { return };
+                let r = cx.background_spawn(async move { mb2.feed(after, 60, &fr) }).await;
                 match r {
-                    Ok((seq, events)) => {
+                    Ok(mailbox::Feed { seq, events, friends }) => {
                         if this
                             .update(cx, |s, cx| {
                                 s.mailbox_seq = seq.max(after);
                                 s.mailbox_error = None;
                                 s.mailbox_heard = true;
+                                // A changed friend list is read on the next
+                                // publish tick (half a second).
+                                s.friend_reads.heard(friends);
                                 let handled = s.settings.mailbox_handled;
                                 let newest = events.iter().map(|e| e.seq).max().unwrap_or(0);
                                 for e in newest_codes_only(events) {
@@ -861,6 +968,7 @@ impl Store {
         self.mailbox = None;
         self.mailbox_error = None;
         self.mailbox_heard = false;
+        self.friend_reads = FriendReads::default();
         self.mailbox_invites.clear();
         self._mailbox_watch = None;
         self._mailbox_publish = None;
@@ -1979,12 +2087,17 @@ impl Store {
             return;
         }
         // A change is looked for often, so a friend following the pack sees
-        // it within a second or two (their feed is woken at once); the
-        // friend list, a call to the mailbox, is read less often.
-        let mut read_at: Option<Instant> = None;
+        // it within a second or two (their feed is woken at once). The
+        // friend list is read when the feed says it changed
+        // (`FriendReads`), and shares are matched against it every few
+        // seconds without asking the mailbox.
+        let mut local_at: Option<Instant> = None;
         self._mailbox_publish = Some(cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(PUBLISH_TICK).await;
-            let read = read_at.is_none_or(|t| t.elapsed() >= FRIENDS_EVERY);
+            let local = local_at.is_none_or(|t| t.elapsed() >= LOCAL_EVERY);
+            if local {
+                local_at = Some(Instant::now());
+            }
             let got = this.update(cx, |s, cx| {
                 // Follows waiting on a game, a task or a retry's delay.
                 s.follow_tick(cx);
@@ -1993,45 +2106,58 @@ impl Store {
                 // Changes waiting to go out, for the Friends icon's count.
                 s.refresh_unsent(cx);
                 let mb = s.mailbox.clone()?;
-                if !read {
-                    return Some((mb, None));
+                let now = Instant::now();
+                let friends = s.friend_reads.due(now);
+                if friends {
+                    s.friend_reads.start(now);
                 }
-                s.reconcile_shares();
-                s.sync_copies();
-                s.retry_unreadable();
-                let due = s.groups_due || s.groups_at.is_none_or(|t| t.elapsed() >= GROUPS_EVERY);
-                if due {
-                    s.groups_due = false;
-                    s.groups_at = Some(Instant::now());
+                let mut groups = false;
+                if local {
+                    s.reconcile_shares();
+                    s.sync_copies();
+                    s.retry_unreadable();
+                    groups = s.groups_due || s.groups_at.is_none_or(|t| t.elapsed() >= GROUPS_EVERY);
+                    if groups {
+                        s.groups_due = false;
+                        s.groups_at = Some(now);
+                    }
                 }
-                Some((mb, Some(due)))
+                Some((mb, friends, groups))
             });
-            let Ok(Some((mb, due))) = got else { continue };
-            let work = match due {
+            let Ok(Some((mb, friends, groups))) = got else { continue };
+            let work = if !friends && !groups {
                 // Between reads: the friends known from the last one, while
                 // the mailbox answers (the feed says when it doesn't).
-                None => this.update(cx, |s, _| if s.mailbox_error.is_none() { s.publish_work() } else { None }),
-                Some(due) => {
-                    read_at = Some(Instant::now());
-                    let (friends, groups) = {
-                        let mb = mb.clone();
-                        cx.background_spawn(async move { (mb.friend_list(), due.then(|| mb.groups())) }).await
-                    };
-                    // The feed reports the mailbox being down.
-                    let Ok((friends, max)) = friends else { continue };
-                    this.update(cx, |s, cx| {
-                        s.got_friends(friends, max, cx);
-                        match groups {
-                            Some(Ok(g)) => s.got_groups(g, cx),
-                            Some(Err(e)) => {
-                                log::warn!("reading friend groups: {e:#}");
-                                s.groups_due = true;
-                            }
-                            None => {}
+                this.update(cx, |s, _| if s.mailbox_error.is_none() { s.publish_work() } else { None })
+            } else {
+                let (list, groups) = {
+                    let mb = mb.clone();
+                    cx.background_spawn(async move { (friends.then(|| mb.friend_list()), groups.then(|| mb.groups())) })
+                        .await
+                };
+                this.update(cx, |s, cx| {
+                    match groups {
+                        Some(Ok(g)) => s.got_groups(g, cx),
+                        Some(Err(e)) => {
+                            log::warn!("reading friend groups: {e:#}");
+                            s.groups_due = true;
                         }
-                        s.publish_work()
-                    })
-                }
+                        None => {}
+                    }
+                    match list {
+                        Some(Ok(l)) => {
+                            s.friend_reads.done(l.rev);
+                            s.got_friends(l.friends, l.max, cx);
+                        }
+                        // The feed reports the mailbox being down.
+                        Some(Err(_)) => {
+                            s.friend_reads.failed();
+                            return None;
+                        }
+                        None => {}
+                    }
+                    if s.mailbox_error.is_none() { s.publish_work() } else { None }
+                })
             };
             let Ok(Some(work)) = work else { continue };
             this.update(cx, |s, cx| {
@@ -2555,7 +2681,80 @@ fn drop_ways(r: &mut Event, revoke: &Event) -> bool {
 mod tests {
     // Not `super::*`: gpui's own `test` macro would come with it.
     use super::{drop_ways, minutes, newest_codes_only, waiting_line, with_names};
+    use super::{FriendReads, FRIENDS_FALLBACK, FRIENDS_ON_FOCUS, FRIENDS_RETRY, FRIENDS_SAFETY};
     use hopper::mailbox::Event;
+    use std::time::{Duration, Instant};
+
+    fn rev(s: &str) -> Option<String> {
+        Some(s.to_string())
+    }
+
+    #[test]
+    fn the_friend_list_is_read_when_the_feed_says_it_changed() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut r = FriendReads::default();
+        // Nothing read yet: read at once.
+        assert!(r.due(t0));
+        r.start(t0);
+        r.done(rev("a"));
+        assert_eq!(r.waits_on(), "a");
+        // The feed says the same list: no read for minutes.
+        r.heard(rev("a"));
+        assert!(!r.due(at(3)));
+        assert!(!r.due(t0 + FRIENDS_SAFETY - Duration::from_secs(1)));
+        assert!(r.due(t0 + FRIENDS_SAFETY), "the safety read");
+        // A change: read now, and the next poll waits on the new digest.
+        r.heard(rev("b"));
+        assert_eq!(r.waits_on(), "b");
+        assert!(r.due(at(4)));
+        r.start(at(4));
+        r.done(rev("b"));
+        assert!(!r.due(at(5)));
+        // The list changed again while it was read: the poll waits on what
+        // was read, so it answers at once if that's old.
+        r.start(at(6));
+        r.done(rev("c"));
+        assert_eq!(r.waits_on(), "c");
+        assert!(!r.due(at(7)));
+    }
+
+    #[test]
+    fn an_older_mailbox_is_read_on_a_slow_timer() {
+        let t0 = Instant::now();
+        let mut r = FriendReads::default();
+        r.start(t0);
+        r.done(None);
+        // Before the feed's first answer, and after one without a digest.
+        assert!(!r.due(t0 + Duration::from_secs(3)));
+        assert!(r.due(t0 + FRIENDS_FALLBACK));
+        r.heard(None);
+        assert_eq!(r.waits_on(), "");
+        assert!(!r.due(t0 + FRIENDS_FALLBACK - Duration::from_secs(1)));
+        assert!(r.due(t0 + FRIENDS_FALLBACK));
+    }
+
+    #[test]
+    fn failures_wait_and_focus_reads_an_old_list() {
+        let t0 = Instant::now();
+        let mut r = FriendReads::default();
+        r.start(t0);
+        r.failed();
+        r.heard(rev("b"));
+        // A changed digest doesn't hurry a failed read's retry.
+        assert!(!r.due(t0 + Duration::from_secs(5)));
+        assert!(r.due(t0 + FRIENDS_RETRY));
+        r.start(t0);
+        r.done(rev("b"));
+        // A fresh list stays; one older than a minute is read on focus.
+        r.focused(t0 + Duration::from_secs(10));
+        assert!(!r.due(t0 + Duration::from_secs(10)));
+        let later = t0 + FRIENDS_ON_FOCUS;
+        r.focused(later);
+        assert!(r.due(later));
+        r.start(later);
+        assert!(!r.due(later + Duration::from_secs(1)));
+    }
 
     #[test]
     fn a_members_copy_keeps_the_sharers_hand_added_names() {
