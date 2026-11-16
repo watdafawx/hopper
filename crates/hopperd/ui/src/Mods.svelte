@@ -348,7 +348,7 @@
       if (b !== base) return;
       data = d;
       // Categories arrive from the sites in the background: look again.
-      if (d.categories_pending && catTries++ < 6) setTimeout(() => b === base && load(), 4000);
+      if ((d.categories_pending || d.sides_pending) && catTries++ < 6) setTimeout(() => b === base && load(), 4000);
     } catch (e) {
       if (b === base) say(e.message, true);
     }
@@ -784,6 +784,9 @@
   // No side given: a dimmed question mark in the same slot, so it doesn't look like a bug.
   const SIDE_UNKNOWN = [CircleQuestionMark, "Side unknown: the mod doesn't say if it's needed on the server"];
   const sideOf = (m) => SIDE[m.side] || SIDE_UNKNOWN;
+  // CurseForge doesn't tag it, Modrinth does: say so where the side shows.
+  const fromMr = (m) => (m.side_from === 'modrinth' && SIDE[m.side] ? ' (from Modrinth)' : '');
+  const sideTip = (m) => (fromMr(m) ? sideOf(m)[1].replace(/^[^:]*/, (h) => h + fromMr(m)) : sideOf(m)[1]);
   // Desktop's tags: Client only (gold), Server only (blue), Client + server.
   const SIDE_TAG = { client: ['Client only', 'warnc'], server: ['Server only', 'info'], both: ['Client + server', ''] };
   const ON_HEAD = "Disabled keeps the file but the server doesn't load it (renamed to .disabled). Click to sort.";
@@ -821,7 +824,7 @@
 <!-- A row's cell in a movable column. -->
 {#snippet modCell(c, m, ix, swOn)}
   {#if c === 'author'}<span class="c-author muted ell" title={m.author}>{m.author}</span>
-  {:else if c === 'side'}{@const I = sideOf(m)[0]}<span class="c-side muted" class:unk={!SIDE[m.side]} title={sideOf(m)[1]}><I size={13} /></span>
+  {:else if c === 'side'}{@const I = sideOf(m)[0]}<span class="c-side muted" class:unk={!SIDE[m.side]} title={sideTip(m)}><I size={13} /></span>
   {:else if c === 'on'}<span class="c-on"><label class="switch" class:pend={swOn !== m.enabled} title={m.enabled ? 'Turn off' : 'Turn on'} onpointerdown={(e) => switchDown(e, m, ix)}><input type="checkbox" checked={swOn} onclick={(e) => toggle(m, e)} /><span></span></label></span>
   {:else}<span class="c-added muted" title={dateOf(m.date_added)}>{ago(m.date_added)}</span>{/if}
 {/snippet}
@@ -911,14 +914,14 @@
             <div class="c-name">
               <div class="nm">
                 <button class="nmlink ell" title={nameTip(m)} onclick={(e) => peek(m, e)}>{m.name}</button>
-                {#if hasSide}{@const I = sideOf(m)[0]}<span class="side-in muted" class:unk={!SIDE[m.side]} title={sideOf(m)[1]}><I size={12} /></span>{/if}
+                {#if hasSide}{@const I = sideOf(m)[0]}<span class="side-in muted" class:unk={!SIDE[m.side]} title={sideTip(m)}><I size={12} /></span>{/if}
                 {#if m.locked}<span class="lk" title="Updates ignored. Right-click to allow them."><Lock size={11} /></span>{/if}
               </div>
               <div class="tags">
                 {#if isNew(m) && !yours(m)}<span class="chip tag okc">New</span>{/if}
                 {#if yours(m)}<span class="chip tag gold">Added by you</span>{/if}
                 {#if isUnknown(m)}<span class="chip tag">Unknown</span>{/if}
-                {#if SIDE_TAG[m.side]}<span class="chip tag {SIDE_TAG[m.side][1]}">{SIDE_TAG[m.side][0]}</span>{/if}
+                {#if SIDE_TAG[m.side]}<span class="chip tag {SIDE_TAG[m.side][1]}" title={fromMr(m) ? `${SIDE_TAG[m.side][0]}${fromMr(m)}` : undefined}>{SIDE_TAG[m.side][0]}</span>{/if}
                 {#if !(up && (vl || breaking))}
                   {#each cats.slice(0, 2) as c (c)}<span class="chip tag">{c}</span>{/each}
                   {#if cats.length > 2}<span class="tiny muted" title={cats.slice(2).join(', ')}>+{cats.length - 2}</span>{/if}

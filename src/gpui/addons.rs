@@ -452,6 +452,8 @@ fn fingerprint(store: &Store, root: &Path, class: u32) -> Option<u64> {
         (a.enabled, a.from_pack, a.locked, a.class_id, &a.env, &a.date_added).hash(&mut h);
         (&a.mr_project, &a.page, &a.locked_version).hash(&mut h);
     }
+    // Modrinth's word on untagged mods' sides landed.
+    hopper::modsides::generation().hash(&mut h);
     // Switches waiting for the game show on the switch and in the notice.
     let mut waiting: Vec<_> = store.waiting_switches(root).into_iter().flatten().collect();
     waiting.sort();
@@ -907,6 +909,8 @@ pub struct AddonsView {
     /// Notices whose whole row list shows (else the first two).
     pub(crate) rows_open: std::collections::HashSet<&'static str>,
     pub(crate) crash_stop: Option<(hopper::crashdetect::Stopped, Option<hopper::crashdetect::Changed>)>,
+    /// Modrinth is being asked where untagged mods run (one ask at a time).
+    pub(crate) sides_busy: bool,
     /// Clicks and pointer, for when Updated rows may go.
     pub(crate) settle: widgets::Settle,
     /// Missing mods installing from the banner: mod id → its job.
@@ -1033,6 +1037,7 @@ impl AddonsView {
             crashed: HashMap::new(),
             rows_open: Default::default(),
             crash_stop: None,
+            sides_busy: false,
             dep_jobs: HashMap::new(),
             dep_done: HashSet::new(),
             dep_projects: Default::default(),
@@ -1141,7 +1146,7 @@ impl AddonsView {
     /// Rebuilds the table when what it shows changed in the store (or
     /// always, with `force`). All the disk reads the table needs happen
     /// here, never while rendering.
-    fn sync(&mut self, force: bool, cx: &mut Context<Self>) {
+    pub(crate) fn sync(&mut self, force: bool, cx: &mut Context<Self>) {
         let _t = crate::frame_log::span("addons.sync");
         // The last crash's mods, for their tag (read once, then cached). A
         // server's crash has its own strip on the Servers page.
@@ -1234,6 +1239,7 @@ impl AddonsView {
         self.waiting = self.store.read(cx).waiting_switches(&root).cloned().unwrap_or_default();
         if class == cf::CLASS_MODS {
             self.want_missing(&inst, cx);
+            self.want_sides(&inst, cx);
         }
         let archived = self.store.read(cx).archived(&root).cloned().unwrap_or_default();
         let extra = if class == cf::CLASS_MODS { hopper::install::off_copies(&inst.addons) } else { HashMap::new() };
@@ -1321,7 +1327,7 @@ impl AddonsView {
         self.table.has_side = self.class == cf::CLASS_MODS
             || self.table.inst.as_ref().is_some_and(|inst| {
                 rows.iter().any(|r| match r {
-                    Row::Addon(i) => inst.addons.get(*i).is_some_and(|a| crate::side_card::side_of(&a.env).is_some()),
+                    Row::Addon(i) => inst.addons.get(*i).is_some_and(|a| hopper::modsides::side_of(a).is_some()),
                     _ => false,
                 })
             });
@@ -1673,7 +1679,7 @@ impl AddonsView {
                 ),
                 Show::AlwaysOn => matches!(self.where_group(&a.file_name), hopper::pack_where::Group::Global(_)),
                 Show::Archived => self.table.archived.contains(&a.project_id),
-                Show::ClientOnly => a.env == "client",
+                Show::ClientOnly => hopper::modsides::side_of(a).is_some_and(|s| s.is("client")),
                 Show::Unknown => a.shown_project() == 0 && a.source.is_none(),
                 Show::All => true,
             })
@@ -1697,7 +1703,7 @@ impl AddonsView {
             let ord = match col {
                 SortCol::Name => na.cmp(nb),
                 SortCol::Author => a.author.to_lowercase().cmp(&b.author.to_lowercase()),
-                SortCol::Env => a.env.cmp(&b.env),
+                SortCol::Env => hopper::modsides::env_of(a).cmp(&hopper::modsides::env_of(b)),
                 SortCol::Active => a.enabled.cmp(&b.enabled),
                 SortCol::Added => a.date_added.cmp(&b.date_added),
             };
@@ -2909,7 +2915,7 @@ impl AddonsView {
             if n_unknown > 0 || self.show == Show::Unknown {
                 rail.push(RailItem::show(Show::Unknown, "Unknown", IconName::Info, Some(n_unknown)));
             }
-            let n_client = of_class().filter(|a| a.env == "client").count();
+            let n_client = of_class().filter(|a| hopper::modsides::side_of(a).is_some_and(|s| s.is("client"))).count();
             if self.server && (n_client > 0 || self.show == Show::ClientOnly) {
                 rail.push(RailItem::show(Show::ClientOnly, "Client-only", IconName::Monitor, Some(n_client)));
             }
@@ -4087,9 +4093,10 @@ impl AddonsView {
                 };
                 (color, SharedString::from(format!("Server: {text}")))
             });
-        let side = crate::side_card::side_of(&a.env);
+        let resolved = hopper::modsides::side_of(a);
+        let side = crate::side_card::side_of(resolved.as_ref());
         let side_known = side.is_some();
-        let side = side.unwrap_or(crate::side_card::SIDE_UNKNOWN);
+        let side = side.map_or(crate::side_card::SIDE_UNKNOWN.0, |s| s.0);
         // The Side cell, in its column or (narrow) by the name.
         let side_el = (self.cols.side || self.cols.side_inline).then(|| {
             let card = self.side_card(a, cx);
@@ -4111,7 +4118,7 @@ impl AddonsView {
                             .size_4()
                             .flex_none()
                             .text_color(if side_known { theme.muted_foreground } else { theme.muted_foreground.opacity(0.75) })
-                            .child(Icon::new(side.0).small()),
+                            .child(Icon::new(side).small()),
                     )
                     .when_some(mark, |c, (color, _)| {
                         c.child(div().size_2().rounded_full().bg(color))
@@ -4154,7 +4161,8 @@ impl AddonsView {
                 added: flags.added,
                 changed_by: changed_by.as_deref(),
                 only_here: kept,
-                env: &a.env,
+                env: resolved.as_ref().map_or("", |s| s.side.as_str()),
+                env_from_modrinth: resolved.as_ref().is_some_and(|s| s.from == hopper::modsides::From::Modrinth),
                 // Narrow, the categories give the version chip room.
                 categories: if self.compact { &[] } else { store.categories(a) },
                 modrinth: !a.mr_project.is_empty(),
@@ -4962,7 +4970,7 @@ Change version", a.file_name).into()
         let client: Vec<&Addon> = inst
             .addons
             .iter()
-            .filter(|a| in_class(a, cf::CLASS_MODS) && a.env == "client" && !hidden_copy(&self.table.extra, &a.file_name))
+            .filter(|a| in_class(a, cf::CLASS_MODS) && hopper::modsides::side_of(a).is_some_and(|s| s.is("client")) && !hidden_copy(&self.table.extra, &a.file_name))
             .filter(|a| !marked(a))
             .collect();
         if client.is_empty() || store.synced_with(&inst.root).is_none() {
@@ -5003,7 +5011,7 @@ Change version", a.file_name).into()
         let n = inst
             .addons
             .iter()
-            .filter(|a| in_class(a, cf::CLASS_MODS) && a.enabled && a.env == "client" && !hidden_copy(&self.table.extra, &a.file_name))
+            .filter(|a| in_class(a, cf::CLASS_MODS) && a.enabled && hopper::modsides::side_of(a).is_some_and(|s| s.is("client")) && !hidden_copy(&self.table.extra, &a.file_name))
             .count();
         if n == 0 {
             return None;

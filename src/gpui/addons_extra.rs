@@ -218,6 +218,30 @@ impl AddonsView {
         .detach();
     }
 
+    /// Asks Modrinth where the mods CurseForge doesn't tag run, off the UI
+    /// thread. The answers are cached (disk and memory), so the table only
+    /// waits on mods never asked before; it redraws when they land.
+    pub(crate) fn want_sides(&mut self, inst: &Instance, cx: &mut Context<Self>) {
+        // A Hopper Server's list carries its own sides.
+        if self.remote || self.sides_busy || crate::store::on_hopper_server(&inst.root).is_some() || !hopper::modsides::needs_look_up(inst) {
+            return;
+        }
+        self.sides_busy = true;
+        let snapshot = inst.clone();
+        cx.spawn(async move |this, cx| {
+            let new = cx.background_spawn(async move { hopper::modsides::look_up(&snapshot) }).await;
+            this.update(cx, |this, cx| {
+                this.sides_busy = false;
+                if new {
+                    this.sync(false, cx);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Looks for missing required mods when the mods folder changed.
     pub(crate) fn want_missing(&mut self, inst: &Instance, cx: &mut Context<Self>) {
         // A Hopper Server's jars are read by its panel.

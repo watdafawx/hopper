@@ -73,7 +73,7 @@ pub fn jar_stem(file_name: &str) -> String {
 }
 
 /// "jei" from "https://www.curseforge.com/minecraft/mc-mods/jei".
-fn cf_slug(page: &str) -> Option<&str> {
+pub(crate) fn cf_slug(page: &str) -> Option<&str> {
     let rest = page.split_once("curseforge.com/minecraft/")?.1;
     let slug = rest.split('/').nth(1)?.split(['?', '#']).next()?;
     (!slug.is_empty()).then_some(slug)

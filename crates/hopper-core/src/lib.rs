@@ -87,6 +87,7 @@ pub mod modfetch;
 pub mod modindex;
 pub mod modpack;
 pub mod modrinth;
+pub mod modsides;
 pub mod packdiff;
 pub mod packs;
 pub mod pack_where;

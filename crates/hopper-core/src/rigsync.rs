@@ -173,6 +173,9 @@ pub fn client_mods(inst: &Instance, sync_anyway: &HashSet<u64>) -> anyhow::Resul
     for m in client.iter_mut().filter(|m| m.off) {
         m.wont_sync = Some(TURNED_OFF.into());
     }
+    // The rows' side icons: Modrinth's word on mods CurseForge doesn't tag
+    // (cached, so mostly free after the annotation above).
+    crate::modsides::look_up(inst);
     Ok((client, note))
 }
 

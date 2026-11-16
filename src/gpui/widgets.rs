@@ -404,6 +404,9 @@ pub struct ModTags<'a> {
     pub only_here: bool,
     /// "client" | "server" | "both" | "".
     pub env: &'a str,
+    /// Only Modrinth says where it runs (CurseForge doesn't): its chip's
+    /// tooltip says so.
+    pub env_from_modrinth: bool,
     pub categories: &'a [String],
     pub modrinth: bool,
     /// Named in the instance's last game crash: why.
@@ -439,11 +442,22 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         (theme.warning, theme.info, theme.success, theme.danger, theme.muted_foreground);
     let tag = |c: Hsla, text: SharedString| chip(c).child(text);
     let env = match t.env {
-        "client" => Some(("Client only", tag(warn, "Client only".into()))),
-        "server" => Some(("Server only", tag(info, "Server only".into()))),
-        "both" => Some(("Client + server", tag(muted, "Client + server".into()))),
+        "client" => Some(("Client only", warn)),
+        "server" => Some(("Server only", info)),
+        "both" => Some(("Client + server", muted)),
         _ => None,
-    };
+    }
+    .map(|(label, color)| {
+        let el = div()
+            .id(ElementId::Name(format!("side-tag:{}", t.key).into()))
+            .flex_none()
+            .child(chip(color).child(label))
+            .when(t.env_from_modrinth, |d| {
+                let tip = SharedString::from(format!("{} (from Modrinth)", hopper::modsides::label(t.env)));
+                d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+            });
+        (label, el)
+    });
     let shown = t.max_categories.unwrap_or(MOD_TAG_CATEGORIES).min(t.categories.len());
     let more = t.categories.len() - shown;
     let crashed = t.crashed.map(|why| {

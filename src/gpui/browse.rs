@@ -5815,11 +5815,9 @@ fn facts(m: &cf::Mod, target: Option<&Instance>, cx: &App) -> Option<Div> {
     let loaders = m.loaders();
     // For an instance: the installed file's tags, else the newest file for
     // its version and loader. Authors tag each build separately.
-    let installed = target
-        .and_then(|i| i.addons.iter().find(|a| a.project_id == m.id && m.modrinth.is_none()))
-        .map(|a| a.env.as_str())
-        .filter(|e| !e.is_empty());
-    let env = match (installed, target) {
+    let addon = target.and_then(|i| i.addons.iter().find(|a| a.project_id == m.id && m.modrinth.is_none()));
+    let installed = addon.map(|a| a.env.as_str()).filter(|e| !e.is_empty());
+    let mut env = match (installed, target) {
         (Some(e), _) => Some(match e {
             "client" => "client",
             "server" => "server",
@@ -5831,6 +5829,18 @@ fn facts(m: &cf::Mod, target: Option<&Instance>, cx: &App) -> Option<Div> {
         }
         (None, None) => m.side(),
     };
+    // CurseForge doesn't say: what Modrinth says about the installed mod.
+    let mut from_modrinth = None;
+    if env.is_none()
+        && let Some(s) = addon.and_then(hopper::modsides::side_of)
+    {
+        env = Some(match s.side.as_str() {
+            "client" => "client",
+            "server" => "server",
+            _ => "both",
+        });
+        from_modrinth = Some(SharedString::from(s.words()));
+    }
     let side = match env {
         Some("client") => Some("Client"),
         Some("server") => Some("Server"),
@@ -5894,7 +5904,11 @@ fn facts(m: &cf::Mod, target: Option<&Instance>, cx: &App) -> Option<Div> {
         ));
     }
     if let Some(s) = side {
-        row = row.child(group(IconName::Monitor, vec![tag(s.to_string())]));
+        let g = group(IconName::Monitor, vec![tag(s.to_string())]).id("fact-side");
+        row = row.child(match from_modrinth {
+            Some(tip) => g.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)),
+            None => g,
+        });
     }
     if let Some(l) = license {
         row = row.child(

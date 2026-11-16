@@ -2844,8 +2844,9 @@ impl SyncPanel {
         let fit = self.fit;
         // (icon and words, whether the mod says its side); unknown is a dimmed question mark.
         let side_icon = fit.tags.is_none().then(|| {
-            let side = crate::side_card::side_of(&tags.env);
-            (side.unwrap_or(crate::side_card::SIDE_UNKNOWN), side.is_some())
+            let side = crate::side_card::side_of(tags.side.as_ref());
+            let known = side.is_some();
+            (side.unwrap_or((crate::side_card::SIDE_UNKNOWN.0, crate::side_card::SIDE_UNKNOWN.1.to_string())), known)
         });
         let k2 = key.clone();
         let pickable = g.pickable();
@@ -2902,7 +2903,7 @@ cx.listener(move |this, e: &ClickEvent, window, cx| {
                                         .text_color(if known { theme.muted_foreground } else { theme.muted_foreground.opacity(0.75) })
                                         .child(Icon::new(icon).xsmall())
                                         .tooltip(move |w, cx| {
-                                            gpui_kit::component::tooltip::Tooltip::new(what).build(w, cx)
+                                            gpui_kit::component::tooltip::Tooltip::new(what.clone()).build(w, cx)
                                         }),
                                 )
                             }),
@@ -2924,8 +2925,9 @@ cx.listener(move |this, e: &ClickEvent, window, cx| {
                         env: if why.as_deref().is_some_and(|w| w.to_lowercase().contains("client-only")) {
                             ""
                         } else {
-                            &tags.env
+                            tags.side.as_ref().map_or("", |s| s.side.as_str())
                         },
+                        env_from_modrinth: tags.side.as_ref().is_some_and(|s| s.from == hopper::modsides::From::Modrinth),
                         categories: &tags.categories,
                         modrinth: tags.modrinth,
                         ..Default::default()
@@ -2967,7 +2969,7 @@ enum Item {
 /// What one side of a row shows as badges, read from the pack's addon.
 #[derive(Clone, Default)]
 struct RowTags {
-    env: String,
+    side: Option<hopper::modsides::Side>,
     categories: Vec<String>,
     new: bool,
     added: bool,
@@ -2979,11 +2981,8 @@ impl RowTags {
         let a = inst.and_then(|i| i.addon_by_file(&m.file_name));
         RowTags {
             // The jar's own word first, then the site's tags.
-            env: if m.side.is_empty() {
-                a.map(|a| a.env.clone()).unwrap_or_default()
-            } else {
-                m.side.clone()
-            },
+            // (Then Modrinth's, when CurseForge doesn't tag it.)
+            side: hopper::modsides::resolve(&m.side, None).or_else(|| a.and_then(hopper::modsides::side_of)),
             categories: a.map(|a| store.categories(a).to_vec()).unwrap_or_default(),
             new: a
                 .and_then(|a| hopper::time::parse_iso(&a.date_added))
