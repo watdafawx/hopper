@@ -498,8 +498,7 @@ pub fn fingerprint_of(pem: &str) -> Option<String> {
     use base64::Engine as _;
     let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
     let der = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
-    let hex = crate::javadl::sha256_hex(&der);
-    Some(hex.as_bytes().chunks(2).map(|c| String::from_utf8_lossy(c).to_uppercase()).collect::<Vec<_>>().join(":"))
+    Some(crate::tls::fingerprint(&der))
 }
 
 /// A paired Hopper Server.

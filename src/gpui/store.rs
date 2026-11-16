@@ -1123,6 +1123,7 @@ impl Store {
                     .unwrap_or_default();
                 let found: Vec<_> = found.into_iter().chain(local).chain(remote_found).collect();
                 let alive = this.update(cx, |s, cx| {
+                    s.save_learned_pins(cx);
                     let events = s.scheduler.as_ref().map(|x| x.events()).unwrap_or_default();
                     for e in events {
                         use hopper::hosting::ScheduleEvent as E;
@@ -1844,6 +1845,35 @@ impl Store {
             st.datapack_dest.remove(&key);
             hopper::rigsync::forget_instance(&mut st.pairings, &mut st.shown_server, root);
         });
+    }
+
+    /// Saves what this run learned about the certificates of panels set up
+    /// before Hopper pinned them, and tells the user once per pinned panel.
+    pub fn save_learned_pins(&mut self, cx: &mut Context<Self>) {
+        for (id, fp) in hopper::panel::take_learned() {
+            let mut pinned = None;
+            self.update_settings(
+                |st| {
+                    let Some(p) = st.panels.iter_mut().find(|p| p.id == id && p.self_signed && p.cert_pin.is_empty()) else { return };
+                    match fp {
+                        Some(fp) => {
+                            p.cert_pin = fp;
+                            pinned = Some(p.label());
+                        }
+                        // A real certificate: from now on a self-made one
+                        // waits for the user to trust it.
+                        None => p.cert_ask = true,
+                    }
+                },
+                cx,
+            );
+            if let Some(name) = pinned {
+                cx.emit(StoreEvent::Notice(
+                    format!("{name}: Hopper now remembers this panel's certificate and connects only while it has that one. If it changes, Hopper stops and asks you (Settings → Servers)."),
+                    false,
+                ));
+            }
+        }
     }
 
     /// Changes settings and saves them, without a redraw.
