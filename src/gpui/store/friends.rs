@@ -1383,12 +1383,21 @@ impl Store {
         use hopper::grouppack::{Due, Version, Wait};
         let now = unix_now();
         let ids: Vec<(PathBuf, String)> = self.instances.iter().filter(|i| !i.id.is_empty()).take(2).map(|i| (i.root.clone(), i.id.clone())).collect();
-        let Some((root, local)) = ids.first().cloned() else { return };
+        let Some((root, local)) = ids.first().cloned() else {
+            // The instances load after the window opens: look again soon.
+            let state = state.to_string();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                this.update(cx, |s, cx| s.preview_group_sync(&state, cx)).ok();
+            })
+            .detach();
+            return;
+        };
         let mine = ids.get(1).cloned();
         let friend = |id: &str, name: &str, online: bool, seen: u64| mailbox::Friend { id: id.into(), name: name.into(), mc_id: String::new(), online, last_seen: seen };
         self.mailbox_friends = vec![friend("mia", "Mia", true, now), friend("noah", "Noah", true, now), friend("ava", "Ava", false, now - 3 * 86400)];
         let member = |f: &mailbox::Friend| mailbox::GroupMember { id: f.id.clone(), name: f.name.clone(), mc_id: String::new(), online: f.online, last_seen: f.last_seen, joined: true, in_step: true };
-        let mut members = vec![mailbox::GroupMember { id: String::new(), name: "You".into(), online: true, last_seen: now, joined: true, in_step: true, ..Default::default() }];
+        let mut members = vec![mailbox::GroupMember { id: self.mailbox_id(), name: "You".into(), online: true, last_seen: now, joined: true, in_step: true, ..Default::default() }];
         members.extend(self.mailbox_friends.iter().map(member));
         self.mailbox_groups = vec![Group {
             id: "g-preview".into(),
@@ -1476,6 +1485,14 @@ impl Store {
         let (root2, mine2) = (root.to_string_lossy().into_owned(), mine.clone());
         self.update_settings_quietly(|st| {
             st.peer_sync = true;
+            st.friend_groups = vec![hopper::settings::FriendGroup {
+                id: "g-preview".into(),
+                name: "Skyblock crew".into(),
+                members: vec!["mia".into(), "noah".into(), "ava".into()],
+                owner: "mia".into(),
+                in_step: true,
+                ..Default::default()
+            }];
             st.group_copies = copies;
             st.followed_recipes.retain(|f| f.peer_id != "mia");
             st.followed_recipes.push(FollowedRecipe {
@@ -1497,6 +1514,20 @@ impl Store {
             }
         });
         cx.notify();
+        // This PC's own id can arrive after the window opens (the account
+        // loads): the "You" row follows it.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(5)).await;
+            this.update(cx, |s, cx| {
+                let me = s.mailbox_id();
+                if let Some(m) = s.mailbox_groups.first_mut().and_then(|g| g.members.first_mut()) {
+                    m.id = me;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Pull now in the made-up group: what is waiting goes in, as it would.
@@ -2066,6 +2097,9 @@ impl Store {
     /// ones it's in updated (shares with groups it left go). Then keeps the
     /// in-step groups in step.
     fn got_groups(&mut self, groups: Vec<Group>, cx: &mut Context<Self>) {
+        if self.group_preview.is_some() {
+            return;
+        }
         let mine: Vec<FriendGroup> = groups
             .iter()
             .filter(|g| g.me.joined)
@@ -2335,6 +2369,10 @@ impl Store {
     }
 
     fn got_friends(&mut self, friends: Vec<mailbox::Friend>, max: usize, cx: &mut Context<Self>) {
+        // The made-up group (`--dialog group-sync`) keeps its own friends.
+        if self.group_preview.is_some() {
+            return;
+        }
         self.mailbox_max = max;
         // The relay answered. On a quiet feed the first long poll only
         // returns after a minute, so this is what ends "Connecting".

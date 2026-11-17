@@ -1252,10 +1252,10 @@ impl FriendsPanel {
         let group = shown.as_ref().and_then(|f| Some((f.0.clone(), s.group_status(&f.0)?, s.group_pulling(&f.0))));
         let pulled = group.as_ref().and_then(|g| s.group_pulled(&g.0)).map(|(t, _)| t.to_string());
         let sub = match &shown {
+            Some((_, local, _)) if group.is_some() => format!("Your copy: {local}"),
             Some((_, local, CopyState::Updating)) => format!("Getting {who}'s changes · your copy: {local}"),
             // The note under it says what's wrong: not "up to date".
             Some((_, local, CopyState::Failed(..) | CopyState::Held(_))) => format!("Your copy: {local}"),
-            Some((_, local, _)) if group.is_some() => format!("Your copy: {local}"),
             Some((_, local, _)) => format!("Your copy: {local} · up to date"),
             None if e.at > 0 => format!("Updated {}", ago(e.at)),
             None => String::new(),
@@ -1367,7 +1367,7 @@ impl FriendsPanel {
                         )
                     })
                     .when_some(changed, |c, t| c.child(widgets::caption(t, cx).text_xs().truncate().pl(rems(1.625))))
-                    .when_some(group.as_ref(), |c, g| c.child(status_line(&g.1, pulled.as_deref(), cx)))
+                    .when_some(group.as_ref(), |c, g| c.child(status_line(&g.1, pulled.as_deref(), true, cx)))
                     .when_some(copy_note, |c, t| c.child(warn_line(t, cx)))
                     .when(missing > 0, |c| c.child(warn_line(hand_added_line(&e.left_out, &sender), cx))),
             )
@@ -1771,6 +1771,8 @@ impl FriendsPanel {
                     .when(!m.joined, |r| r.child(widgets::chip(theme.muted_foreground).child("Invited")))
                     .children(chip)
                     .children(menu)
+                    // "You" has no menu: keep its chip under the others'.
+                    .when(you, |r| r.child(div().flex_none().w(px(19.))))
                     .into_any_element()
             })
             .collect();
@@ -1827,7 +1829,7 @@ impl FriendsPanel {
                                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(FriendsEvent::Show(root.clone())))),
                             )
                             .child(widgets::caption("Yours", cx).text_xs())
-                            .when_some(state.as_ref(), |c, (st, _, said)| c.child(status_line(st, said.as_deref(), cx))),
+                            .when_some(state.as_ref(), |c, (st, _, said)| c.child(status_line(st, said.as_deref(), false, cx))),
                     )
                     .children(pull)
                     .child(
@@ -3629,12 +3631,12 @@ fn tone_color(tone: Tone, cx: &App) -> Hsla {
 
 /// How a copy stands with its group, as a chip and then what it means. The
 /// words wrap; the chip never does, so the page never has to give way.
-fn status_line(st: &Status, said: Option<&str>, cx: &App) -> Div {
+fn status_line(st: &Status, said: Option<&str>, under_icon: bool, cx: &App) -> Div {
     let text = said.map(str::to_string).unwrap_or_else(|| st.detail(now()));
     h_flex()
         .gap_1p5()
         .items_start()
-        .pl(rems(1.625))
+        .when(under_icon, |d| d.pl(rems(1.625)))
         .child(widgets::chip(tone_color(st.tone(), cx)).child(st.label()))
         .child(div().flex_1().min_w_0().text_xs().text_color(cx.theme().muted_foreground).child(text))
 }

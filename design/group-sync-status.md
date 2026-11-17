@@ -18,9 +18,9 @@ mod, loader and pack version included:
 - for every mod the group changed last (`PackCopy::marks`: key, state, who,
   relay number), my copy has it that way;
 - no other member's code is waiting to be taken in (`PackCopy::waiting`);
-- nothing the group sent was left out on purpose of the PC, other than the
-  two things that never count as behind: a mod **kept only on this PC**
-  (`onlyhere`) and a mod the player **locked** (`KeptWhy::Locked`).
+- nothing the group sent is missing from this PC, other than the two things
+  that never count as behind: a mod **kept only on this PC** (`onlyhere`)
+  and a mod the player **locked** (`KeptWhy::Locked`).
 
 "The group's latest state" is not stored anywhere central. The relay keeps
 only the newest code of each member's copy (`<who>/<inst>`), and each PC takes
@@ -63,9 +63,13 @@ source is not trusted yet (or Settings › Mod sources is off), and the member's
 code is then marked as taken in, so it is never tried again. This is a likely
 way a PC ends up without a mod nobody can see. Now `Merged::skipped` lists
 those mods, `PackCopy::skipped` remembers them (settings), the state says
-"Can't update: Sodium Extra is from GitHub (owner/repo) and this PC doesn't
-trust that source yet", and Pull now tries them again once the source is
-trusted.
+"Can't update: EZActions (GitHub: octo/ezactions) is in the group but not on
+this PC. Mods from GitHub and other links are off on this PC", and the next
+merge or Pull now tries them again once the source is trusted. The strip's
+**Allow and install** button opens the existing "Allow mods from other
+sources?" dialog (`incoming_sources::gate`); a yes sets `Skipped::approved`,
+which lets that one mod past the source check on the retry, then pulls. A
+mod the group changed again, or that is on this PC by now, leaves the list.
 
 ## Other members
 
@@ -91,9 +95,16 @@ change: the mailbox validates the event's fields and drops unknown ones, see
   or "can't apply: mod from an untrusted link". Their code only shows the
   difference.
 
-Per member: **In step** / **Behind by N** (with the names of the mods in the
-tooltip) / **Offline** (not connected; last seen), plus "not heard from yet"
-when no code of theirs has arrived. No relay change is needed for this.
+Built: per member **In step** / **Behind by N** (tooltip says what it means)
+or no chip when nothing of theirs has arrived. The rule
+(`groupstatus::member_status`): over the group's marks, a mod marked by
+someone else at relay number *n* counts as behind for a member when their
+stamp for it is older than *n*, or, with no stamp, when their newest code is
+older than *n*; a mod they changed themselves never counts. No relay change
+is needed for this.
+
+Not built (needs the relay change above): "Behind: waiting for the game"
+and "Can't update" for other members.
 
 ## Pull now
 
@@ -114,10 +125,21 @@ group's Packs list row. It:
 It does not skip what waits by design: the pack version still waits for the
 game, a pick still waits for the player; the line says so.
 
+## Seeing every state without a friend
+
+`hopper --dialog group-sync --state NAME` fills a made-up group (you, Mia,
+Noah, Ava) over the first two instances: the first is a copy of Mia's pack,
+the second a pack of yours. NAME is one of in-step, updating, game, pick,
+left-out, failed, offline, sending. Nothing goes to the real service
+(`Store::group_preview`; the feed's friends and groups are ignored while it
+shows) and Pull now settles what waits. Test builds only, like
+`given_up_preview`.
+
 ## Where the code goes
 
 - `crates/hopper-core/src/groupstatus.rs`: `Status`, `Input`, `status()`,
-  `waiting_changes()`, wording; later `member_status()`. Tests.
+  `waiting_changes()`, `member_status()`, `merge_due()` / `pack_due_ready()`
+  (what Pull now skips), `pull_says()`, wording. Tests.
 - `groupsync.rs`: `Merged::skipped`, `PackCopy::skipped`, retry of them.
 - `src/gpui/store/friends.rs`: gathers `Input`, `pull_group_now`.
 - `src/gpui/group_pack.rs` (instance page notice) and `friends.rs` (group
