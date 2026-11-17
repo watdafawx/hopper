@@ -30,6 +30,11 @@ const VERSION: u8 = 1;
 /// A code that also carries mods from GitHub and other links (pinned
 /// sources, after the groups). Older Hopper says it's from a newer one.
 const VERSION_SOURCES: u8 = 2;
+/// The first item of a lock's line in the sources list. A Hopper that knows
+/// only pinned sources reads each line as `(pin, enabled)`, fails on this one
+/// and goes on without it: no error, and no other mod is lost. Locks are
+/// carried this way so a code with them still reads as version 2.
+const LOCK_TAG: &str = "lock";
 
 const PACK_NONE: u8 = 0;
 const PACK_CF: u8 = 1;
@@ -67,6 +72,13 @@ pub enum Entry {
     Off(Target),
     /// A mod from GitHub or another link: its pinned release and sha256.
     Source { pin: crate::sources::carry::Pin, enabled: bool },
+    /// A mod's lock on the sender's PC ([`Addon::locked`] and
+    /// [`Addon::locked_version`]): `key` is the mod's
+    /// [`crate::groupsync::addon_key`]. Only a group keeps locks the same
+    /// (see `groupsync`); a plain follow or a new install leaves them out,
+    /// a lock stays one player's choice there. Carried in the code's
+    /// "sources" list as a line older Hopper skips (see [`LOCK_TAG`]).
+    Lock { key: String, version: String, locked: bool },
 }
 
 /// What a code describes.
@@ -89,6 +101,7 @@ impl Share {
                 Entry::CurseFile { .. } | Entry::ModrinthFile { .. } | Entry::Source { .. } => files += 1,
                 Entry::Remove(_) => removed += 1,
                 Entry::Off(_) => off += 1,
+                Entry::Lock { .. } => {}
             }
         }
         let mut parts = Vec::new();
@@ -222,6 +235,9 @@ impl Groups {
                 Entry::Source { pin, enabled } => {
                     g.sources.push(serde_json::to_string(&(pin, enabled)).unwrap_or_default())
                 }
+                Entry::Lock { key, version, locked } => {
+                    g.sources.push(serde_json::to_string(&(LOCK_TAG, key, version, locked)).unwrap_or_default())
+                }
             }
         }
         g
@@ -237,7 +253,12 @@ impl Groups {
         v.extend(self.remove_named.into_iter().map(|n| Entry::Remove(Target::Named(n))));
         v.extend(self.off_cf.into_iter().map(|p| Entry::Off(Target::Curse(p))));
         v.extend(self.off_named.into_iter().map(|n| Entry::Off(Target::Named(n))));
+        // One line is a pinned source, or a lock. Anything else (a newer
+        // Hopper's) is skipped, as an older Hopper skips the locks.
         v.extend(self.sources.iter().filter_map(|s| {
+            if let Ok((tag, key, version, locked)) = serde_json::from_str::<(String, String, String, bool)>(s) {
+                return (tag == LOCK_TAG).then_some(Entry::Lock { key, version, locked });
+            }
             serde_json::from_str::<(crate::sources::carry::Pin, bool)>(s).ok().map(|(pin, enabled)| Entry::Source { pin, enabled })
         }));
         v
@@ -586,11 +607,25 @@ pub fn make(inst: &Instance, job: &Job) -> anyhow::Result<Made> {
         }
     }
     entries.extend(crate::onlyhere::theirs(inst));
+    entries.extend(lock_entries(inst, pack_project));
     let pack_name = inst.pack.as_ref().map(|p| p.name.as_str()).unwrap_or("");
     let name = (inst.name != pack_name && !inst.name.is_empty()).then(|| inst.name.clone());
     let share = Share { base, name, loader, entries };
     let pack_loader = pack.map(|pf| pf.loader);
     Ok(Made { code: encode(&share), share, left_out, pack_loader })
+}
+
+/// The locks a code carries: one for each mod the player keeps on its
+/// version here ([`Entry::Lock`]). Mods kept only on this PC aren't shared,
+/// so neither are their locks.
+fn lock_entries(inst: &Instance, pack_project: u64) -> Vec<Entry> {
+    inst.addons
+        .iter()
+        .filter(|a| a.locked || !a.locked_version.is_empty())
+        .filter(|a| a.class_id != cf::CLASS_MODPACKS && !(pack_project != 0 && a.project_id == pack_project))
+        .filter(|a| !crate::onlyhere::is_kept(inst, a))
+        .map(|a| Entry::Lock { key: crate::groupsync::addon_key(a), version: a.locked_version.clone(), locked: a.locked })
+        .collect()
 }
 
 /// The file entry for an addon, or `None` when it's on neither site.
@@ -868,6 +903,9 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
             },
             Entry::Source { pin, enabled } => now.push(Seen { who: source_who(&pin.source), own: true, on: *enabled }),
             Entry::Remove(t) | Entry::Off(t) => now.push(Seen { who: target_who(t), own: false, on: false }),
+            // A lock is the player's own on a plain follow; only a group
+            // keeps them the same.
+            Entry::Lock { .. } => {}
         }
     }
     now.extend(files.iter().map(|&(p, _, on)| Seen { who: Who::Project(p), own: true, on }));
@@ -1049,6 +1087,7 @@ fn seen_in(inst: &Instance, prev: &Share) -> Vec<Seen> {
                 .map(|a| Seen { who: Who::Project(a.project_id), own: true, on: *enabled }),
             Entry::Source { pin, enabled } => Some(Seen { who: source_who(&pin.source), own: true, on: *enabled }),
             Entry::Remove(t) | Entry::Off(t) => Some(Seen { who: target_who(t), own: false, on: false }),
+            Entry::Lock { .. } => None,
         })
         .collect()
 }
@@ -1229,6 +1268,128 @@ mod tests {
         assert!(decode(&code[..code.len() - 3]).is_err());
         assert!(decode("hello there").is_err());
         assert!(decode("").is_err());
+    }
+
+    fn lock(key: &str, version: &str, locked: bool) -> Entry {
+        Entry::Lock { key: key.into(), version: version.into(), locked }
+    }
+
+    fn pinned() -> Entry {
+        Entry::Source {
+            pin: crate::sources::carry::Pin {
+                file: "ezmod-1.0.jar".into(),
+                source: crate::sources::ModSource { url: "owner/ezmod".into(), publisher: "owner/ezmod".into(), ..Default::default() },
+            },
+            enabled: true,
+        }
+    }
+
+    fn plain_share(entries: Vec<Entry>) -> Share {
+        Share { base: Base::Plain { game_version: "1.21.1".into(), loader: "neoforge".into() }, name: None, loader: None, entries }
+    }
+
+    /// The version byte and body of a code, as a reader sees them.
+    fn raw(code: &str) -> (u8, Vec<u8>) {
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&code[PREFIX.len()..]).unwrap();
+        let b = &bytes[..bytes.len() - 2];
+        let body = if b[0] & DEFLATED != 0 { inflate(&b[1..]).unwrap() } else { b[1..].to_vec() };
+        (b[0] & !DEFLATED, body)
+    }
+
+    #[test]
+    fn locks_round_trip_with_the_other_entries() {
+        let s = plain_share(vec![
+            Entry::CurseFile { file: 7, enabled: true },
+            Entry::Off(Target::Curse(9)),
+            pinned(),
+            lock("p:3", "", true),
+            lock("s:owner/ezmod#ezmod-#.jar", "ezmod-1.1.jar", false),
+            lock("n:pack.jar", "pack-2.jar", true),
+        ]);
+        let back = decode(&encode(&s)).unwrap();
+        // Entries come back grouped, in the order the code stores them.
+        assert_eq!(back.entries.len(), 6);
+        for e in &s.entries {
+            assert!(back.entries.contains(e), "{e:?} lost: {back:?}");
+        }
+        assert_eq!(s.summary(), "2 mods, 1 turned off", "a lock is no mod in the summary");
+    }
+
+    /// An older Hopper reads each line of the code's sources list as a
+    /// pinned source (`(pin, enabled)`) and skips what doesn't parse. A lock
+    /// must be one of those lines, in a code of the version it knows.
+    #[test]
+    fn an_older_hopper_skips_the_locks_and_keeps_everything_else() {
+        let s = plain_share(vec![Entry::CurseFile { file: 7, enabled: true }, pinned(), lock("p:3", "", true)]);
+        let (version, body) = raw(&encode(&s));
+        assert_eq!(version, VERSION_SOURCES, "the version an older Hopper reads");
+        // The old reader, as it was before locks: the groups, then the lines.
+        let mut r = Reader { b: &body, at: 0 };
+        let flags = r.byte().unwrap();
+        assert_eq!(flags & 3, PACK_NONE);
+        r.str().unwrap();
+        r.str().unwrap();
+        let mask = r.byte().unwrap();
+        assert_eq!(mask & 1, 1, "the CurseForge file group");
+        r.sorted().unwrap();
+        let lines = r.strs().unwrap();
+        assert_eq!(r.at, body.len(), "nothing left over for an older reader to trip on");
+        assert_eq!(lines.len(), 2);
+        let old: Vec<(crate::sources::carry::Pin, bool)> =
+            lines.iter().filter_map(|l| serde_json::from_str::<(crate::sources::carry::Pin, bool)>(l).ok()).collect();
+        assert_eq!(old.len(), 1, "the pinned source is read, the lock line skipped without an error");
+        assert_eq!(old[0].0.file, "ezmod-1.0.jar");
+    }
+
+    #[test]
+    fn a_code_without_locks_is_the_same_as_before() {
+        // No sources, no locks: version 1, as every older Hopper wrote it.
+        let s = plain_share(vec![Entry::CurseFile { file: 7, enabled: true }]);
+        assert_eq!(raw(&encode(&s)).0, VERSION);
+        let back = decode(&encode(&s)).unwrap();
+        assert_eq!(back, s);
+        assert!(!back.entries.iter().any(|e| matches!(e, Entry::Lock { .. })));
+        // With a pinned source and no lock: version 2 as before, no lock out of nowhere.
+        let s = plain_share(vec![pinned()]);
+        assert_eq!(raw(&encode(&s)).0, VERSION_SOURCES);
+        assert_eq!(decode(&encode(&s)).unwrap(), s);
+    }
+
+    #[test]
+    fn an_unknown_line_in_the_sources_list_is_skipped_not_an_error() {
+        // What a newer Hopper may add: a line this one can't read.
+        let g = Groups { sources: vec!["[\"newthing\",1,2,3]".into(), serde_json::to_string(&(LOCK_TAG, "p:1", "", true)).unwrap()], ..Default::default() };
+        assert_eq!(g.entries(), [lock("p:1", "", true)]);
+    }
+
+    /// The locks of a made code are the mods locked here, and a plain follow
+    /// or a new install doesn't take them.
+    #[test]
+    fn make_carries_the_locks_and_a_plain_follow_leaves_them() {
+        let root = std::env::temp_dir().join(format!("hopper-share-locks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        let mk = |p: u64, f: u64| Addon { project_id: p, file_id: f, file_name: format!("m{p}.jar"), name: format!("M{p}"), enabled: true, class_id: cf::CLASS_MODS, ..Default::default() };
+        let mut inst = Instance { root: root.clone(), name: "L".into(), game_version: "1.21.1".into(), loader: "fabric".into(), addons: vec![mk(1, 10), mk(2, 20), mk(3, 30)], ..Default::default() };
+        inst.addons[0].locked = true;
+        inst.addons[1].locked_version = "m2-2.0.jar".into();
+        let jobs = crate::jobs::Jobs::default();
+        let made = make(&inst, &jobs.start("make")).unwrap();
+        let locks: Vec<&Entry> = made.share.entries.iter().filter(|e| matches!(e, Entry::Lock { .. })).collect();
+        assert_eq!(locks, [&lock("p:1", "", true), &lock("p:2", "m2-2.0.jar", false)]);
+        assert_eq!(decode(&made.code).unwrap().entries.iter().filter(|e| matches!(e, Entry::Lock { .. })).count(), 2);
+        // Kept only on this PC: not shared, so neither is its lock.
+        inst.only_here.insert("p:1".into(), crate::onlyhere::Kept { theirs: None, name: "M1".into() });
+        let made = make(&inst, &jobs.start("make")).unwrap();
+        assert_eq!(made.share.entries.iter().filter(|e| matches!(e, Entry::Lock { .. })).count(), 1);
+        // A plain follow: the player's own locks stay as they are.
+        let mut here = Instance { root: root.clone(), addons: vec![mk(1, 10)], ..Default::default() };
+        here.addons[0].locked = false;
+        let theirs = plain_share(vec![lock("p:1", "", true)]);
+        let jobs = crate::jobs::Jobs::default();
+        apply_existing(&mut here, &theirs, None, &jobs.start("apply")).unwrap();
+        assert!(!here.addons[0].locked, "a lock is the player's own on a plain follow");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

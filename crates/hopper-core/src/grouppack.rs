@@ -135,7 +135,13 @@ pub fn has(ships: &Ships, key: &str, name: Option<&str>) -> bool {
 /// Unknown contents (the version couldn't be looked up) count as
 /// explained: a mod leaving a code is never taken as removed then.
 pub fn explained(was: &Mods, now: &Mods, c: &Change) -> bool {
-    if was.pack == now.pack || c.now != State::Unlisted || c.key == PACK_KEY || c.key == crate::groupsync::LOADER_KEY {
+    // A lock doesn't depend on the pack version: it's the player's choice.
+    if was.pack == now.pack
+        || c.now != State::Unlisted
+        || c.key == PACK_KEY
+        || c.key == crate::groupsync::LOADER_KEY
+        || crate::groupsync::lock_target(&c.key).is_some()
+    {
         return false;
     }
     let Some(ships) = now.ships.as_ref() else { return true };

@@ -1217,7 +1217,9 @@ impl Store {
         // Group packs with other members' changes waiting.
         let mut ready: Vec<(PackCopy, PathBuf, bool)> = Vec::new();
         for c in &self.settings.group_copies {
-            if c.waiting.is_empty() || self.group_merging.contains(&c.local) {
+            // Nothing waiting, but the player just confirmed the source of
+            // a mod the group's changes left out: make it now.
+            if (c.waiting.is_empty() && !c.owed_ready(self.settings.allow_sources)) || self.group_merging.contains(&c.local) {
                 continue;
             }
             let Some(root) = self.instances.iter().find(|i| i.id == c.local).map(|i| i.root.clone()) else { continue };
@@ -1338,6 +1340,17 @@ impl Store {
         Some(kind.says(&m.name))
     }
 
+    /// Who in the group locked (or unlocked) this mod last, when it wasn't
+    /// this PC: "Locked by Mia". Not when the mod isn't locked here since.
+    pub fn group_lock_mark(&self, root: &Path, a: &hopper::instances::Addon) -> Option<String> {
+        use groupsync::Kind;
+        let m = self.group_copy(root)?.marks.get(&format!("{}{}", groupsync::LOCK_PREFIX, groupsync::addon_key(a)))?;
+        if m.name.is_empty() || m.by == self.mailbox_id() || !matches!(m.kind, Kind::Locked) {
+            return None;
+        }
+        (a.locked || !a.locked_version.is_empty()).then(|| m.kind.says(&m.name))
+    }
+
     /// Keeps the list of group packs kept both ways matching what is
     /// shared and followed here. A member's copy that stopped is taken
     /// back from the group, so nobody keeps getting an old version of it.
@@ -1453,7 +1466,7 @@ impl Store {
     }
 
     pub(super) fn on_group_merged(&mut self, m: GroupMerged, cx: &mut Context<Self>) {
-        let GroupMerged { local, root, merged } = m;
+        let GroupMerged { local, root, mut merged } = m;
         self.group_merging.remove(&local);
         if let Some(old) = self.group_retry.remove(&local) {
             self.jobs.dismiss(old.job);
@@ -1475,6 +1488,11 @@ impl Store {
                 }
             }
             sent_seq = c.sent_seq;
+            // Mods left out for a source nobody confirmed yet, to make once
+            // they do (`PackCopy::owed`).
+            if let Some(owed) = merged.owed.take() {
+                c.owed = owed;
+            }
             // The sharer's code is in: the follow has it applied now.
             for f in st.followed_recipes.iter_mut().filter(|f| f.local == local) {
                 if let Some((_, code)) = taken.iter().find(|(from, _)| *from == f.peer_id) {
@@ -1499,7 +1517,11 @@ impl Store {
         }
         // Members' changes left out here (a locked mod): the player sees
         // why their copy differs, once per change, in one notice per merge.
-        let kept: Vec<String> = merged.kept.iter().map(|k| k.says()).filter(|s| self.kept_said.insert(format!("{local}|{s}"))).collect();
+        let mut kept: Vec<String> = merged.kept.iter().map(|k| k.says()).filter(|s| self.kept_said.insert(format!("{local}|{s}"))).collect();
+        // Several mods wait for the player to confirm their source: one
+        // line for all of them.
+        let owed = self.settings.group_copies.iter().find(|c| c.local == local).filter(|c| c.owed.len() > 1).and_then(|c| c.owed_says());
+        kept.extend(owed.filter(|s| self.kept_said.insert(format!("{local}|{s}"))));
         if !kept.is_empty() {
             cx.emit(StoreEvent::Notice(kept.join(" "), false));
         }

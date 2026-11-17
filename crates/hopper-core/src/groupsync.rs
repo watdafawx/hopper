@@ -52,6 +52,10 @@ pub enum Kind {
     On,
     Off,
     Updated,
+    /// A mod's lock ([`LOCK_PREFIX`]) was set or changed.
+    Locked,
+    /// A mod's lock was taken off.
+    Unlocked,
 }
 
 impl Kind {
@@ -63,7 +67,37 @@ impl Kind {
             Kind::On => format!("Turned on by {who}"),
             Kind::Off => format!("Turned off by {who}"),
             Kind::Updated => format!("Updated by {who}"),
+            Kind::Locked => format!("Locked by {who}"),
+            Kind::Unlocked => format!("Unlocked by {who}"),
         }
+    }
+}
+
+/// What a mod's lock goes by in a group, next to the mods: "~lock:" and the
+/// mod's key. The lock is one more thing the group keeps the same, with the
+/// same rules as the mods (latest change wins, echoes change nothing, the
+/// mark says who). Like [`LOADER_KEY`], not a mod's key in any form.
+pub const LOCK_PREFIX: &str = "~lock:";
+
+/// The mod a lock key is about ("p:123" from "~lock:p:123").
+pub fn lock_target(key: &str) -> Option<&str> {
+    key.strip_prefix(LOCK_PREFIX)
+}
+
+/// A lock as a [`State`]: unlisted when the mod isn't locked at all, else
+/// "lock:<the version kept>" with `on` for the whole-mod lock.
+fn lock_state(version: &str, locked: bool) -> State {
+    if !locked && version.is_empty() {
+        return State::Unlisted;
+    }
+    State::File { file: format!("lock:{version}"), on: locked }
+}
+
+/// The lock a state means: (locked, the version kept).
+pub fn lock_of(state: &State) -> (bool, String) {
+    match state {
+        State::File { file, on } => (*on, file.strip_prefix("lock:").unwrap_or_default().to_string()),
+        _ => (false, String::new()),
     }
 }
 
@@ -190,6 +224,7 @@ pub fn mods(share: &Share, mut project: impl FnMut(&Entry) -> Option<u64>) -> Mo
             ),
             Entry::Remove(t) => (target_key(t), State::Removed),
             Entry::Off(t) => (target_key(t), State::Off),
+            Entry::Lock { key, version, locked } => (format!("{LOCK_PREFIX}{key}"), lock_state(version, *locked)),
         };
         map.insert(key, (state, e.clone()));
     }
@@ -241,6 +276,9 @@ impl Change {
     pub fn kind(&self) -> Kind {
         if self.key == LOADER_KEY || self.key == PACK_KEY {
             return Kind::Updated;
+        }
+        if lock_target(&self.key).is_some() {
+            return if self.now == State::Unlisted { Kind::Unlocked } else { Kind::Locked };
         }
         match (&self.was, &self.now) {
             (_, State::Off) => Kind::Off,
@@ -553,9 +591,76 @@ pub struct PackCopy {
     /// (`configsync`).
     #[serde(skip_serializing_if = "crate::configsync::Configs::is_empty")]
     pub configs: crate::configsync::Configs,
+    /// Members' changes to mods from GitHub or another link that this PC
+    /// left out because it hasn't confirmed their source. Their codes are
+    /// taken in all the same, so nothing else would bring them back: they
+    /// are tried again once the player confirms the source.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub owed: Vec<Owed>,
+}
+
+/// A member's change that waits for the player to confirm a mod's source
+/// ([`PackCopy::owed`]). Everything needed to make it later, since the
+/// member's code may have moved on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Owed {
+    /// The mod's key, and what the member's change did to it.
+    pub key: String,
+    pub was: State,
+    pub now: State,
+    pub entry: Option<Entry>,
+    /// Who made it, and when (the relay's number and time), as the mark
+    /// would say.
+    pub by: String,
+    pub name: String,
+    pub seq: u64,
+    pub at: u64,
+}
+
+impl Owed {
+    /// The change this one waits to make.
+    fn change(&self) -> Change {
+        Change { key: self.key.clone(), was: self.was.clone(), now: self.now.clone(), entry: self.entry.clone() }
+    }
+
+    /// The pin it would download, when it still would.
+    fn pin(&self) -> Option<&crate::sources::carry::Pin> {
+        match &self.entry {
+            Some(Entry::Source { pin, .. }) if matches!(self.now, State::File { .. }) => Some(pin),
+            _ => None,
+        }
+    }
 }
 
 impl PackCopy {
+    /// The mods waiting for the player to confirm their source: (name for
+    /// people, source) of each, for "2 mods waiting for you to confirm their
+    /// source".
+    pub fn owed_sources(&self) -> Vec<(String, crate::sources::ModSource)> {
+        self.owed
+            .iter()
+            .filter_map(Owed::pin)
+            .map(|p| (crate::sources::carry::display_name(p), p.source.clone()))
+            .collect()
+    }
+
+    /// "2 mods waiting for you to confirm their source (Settings › Mod
+    /// sources)." None when nothing is owed.
+    pub fn owed_says(&self) -> Option<String> {
+        let n = self.owed_sources().len();
+        let (what, their) = if n == 1 { ("mod", "its") } else { ("mods", "their") };
+        (n > 0).then(|| format!("{n} {what} waiting for you to confirm {their} source (Settings › Mod sources)."))
+    }
+
+    /// Whether the player confirmed the source of one of the owed mods
+    /// since (`allow`: Settings › Mod sources is on): worth a merge now,
+    /// which makes it. Never true for a source still waiting, so asking
+    /// again and again costs nothing.
+    pub fn owed_ready(&self, allow: bool) -> bool {
+        allow && self.owed.iter().filter_map(Owed::pin).any(|p| crate::sources::trusted(&p.source))
+    }
+
     /// A member's code arrived; an older one than already known is ignored.
     pub fn arrive(&mut self, from: &str, g: Got) {
         let known = self.waiting.get(from).or_else(|| self.got.get(from)).map_or(0, |x| x.seq);
@@ -582,6 +687,9 @@ impl PackCopy {
         }
         for m in self.marks.values_mut() {
             m.seq = 0;
+        }
+        for o in &mut self.owed {
+            o.seq = 0;
         }
         self.configs.relay_reset();
         self.sent_seq = 0;
@@ -616,6 +724,8 @@ pub struct Merged {
     /// Members' changes left out on purpose, and why (see [`Kept`]). Their
     /// codes are taken in all the same: the change isn't tried again.
     pub kept: Vec<Kept>,
+    /// The copy's [`PackCopy::owed`] after this merge (None: unchanged).
+    pub owed: Option<Vec<Owed>>,
 }
 
 /// A member's change sync didn't make here, for the player to see.
@@ -667,6 +777,8 @@ impl Kept {
             Kind::On => "turned it on",
             Kind::Off => "turned it off",
             Kind::Updated => "changed its version",
+            Kind::Locked => "locked it",
+            Kind::Unlocked => "unlocked it",
         };
         if self.by.is_empty() {
             format!("{} stays as it is: {why}.", self.name)
@@ -737,6 +849,13 @@ fn keep_untrusted(inst: &Instance, mut todo: Vec<Change>, skip: &[crate::sources
             pin.source.kind.label(),
             pin.source.publisher
         );
+        // Owed to the player: made once they confirm the source (see
+        // `PackCopy::owed`), dated as the member's change was.
+        let mark = merged.marks.iter().rev().find(|(k, _)| *k == c.key).map(|(_, m)| m.clone()).unwrap_or_default();
+        let owed = Owed { key: c.key.clone(), was: c.was.clone(), now: c.now.clone(), entry: c.entry.clone(), by: mark.by, name: mark.name, seq: mark.seq, at: mark.at };
+        let list = merged.owed.get_or_insert_with(Vec::new);
+        list.retain(|o| o.key != c.key);
+        list.push(owed);
         merged.made.retain(|(k, _, _)| *k != c.key);
         merged.marks.retain(|(k, _)| *k != c.key);
         merged.kept.push(Kept { key: c.key.clone(), name, kind: c.kind(), by, why: KeptWhy::Source });
@@ -778,6 +897,56 @@ fn keep_locked(inst: &Instance, mut todo: Vec<Change>, merged: &mut Merged) -> V
         false
     });
     todo
+}
+
+/// Makes the group's lock changes here: a mod's lock ([`LOCK_PREFIX`]) is
+/// set or taken off the way the member's change says, so nobody offers the
+/// update to a mod one of the group keeps on its version. A mod this PC
+/// doesn't have, or keeps only here, has nothing to lock (its mark stays,
+/// so who changed it last still counts). True when a lock changed (the
+/// caller saves).
+fn set_locks(inst: &mut Instance, changes: &[Change], merged: &mut Merged) -> bool {
+    let mut touched = false;
+    for c in changes {
+        let at = lock_target(&c.key)
+            .and_then(|k| find_addon(inst, k))
+            .filter(|&i| !crate::onlyhere::is_kept(inst, &inst.addons[i]));
+        let (locked, version) = lock_of(&c.now);
+        match at {
+            Some(i) if (inst.addons[i].locked, &inst.addons[i].locked_version) != (locked, &version) => {
+                inst.addons[i].locked = locked;
+                inst.addons[i].locked_version = version;
+                touched = true;
+            }
+            // Already like that, or nothing to lock here: an echo.
+            _ => merged.made.retain(|(k, _, _)| *k != c.key),
+        }
+    }
+    touched
+}
+
+/// Puts back into `todo` the changes [`PackCopy::owed`] holds, so they are
+/// made now if their source is confirmed since (else they are left out and
+/// owed again, as the first time). Dropped: one a later change of the mod
+/// replaced (a member's, or this PC's own), one this PC changed itself that
+/// isn't sent yet (that one is the later), and one already the way it
+/// says.
+fn revive_owed(copy: &PackCopy, here: &Mods, sent: Option<&Mods>, todo: &mut Vec<Change>, merged: &mut Merged) {
+    let mut marks = copy.marks.clone();
+    marks.extend(merged.marks.iter().cloned());
+    for o in &copy.owed {
+        let later = marks.get(&o.key).is_some_and(|m| m.seq > o.seq) || todo.iter().any(|t| t.key == o.key);
+        let unsent = sent.is_some_and(|s| s.state(&o.key) != here.state(&o.key));
+        if later || unsent || here.state(&o.key) == o.now {
+            continue;
+        }
+        let c = o.change();
+        let kind = c.kind();
+        let mark = Mark { state: o.now.clone(), kind, by: o.by.clone(), name: o.name.clone(), seq: o.seq, at: o.at };
+        merged.marks.push((o.key.clone(), mark));
+        merged.made.push((o.key.clone(), kind, o.name.clone()));
+        todo.push(c);
+    }
 }
 
 /// Decides each waiting code's changes against this copy (`here`: its
@@ -890,6 +1059,15 @@ pub fn plan(
                     will.insert(c.key.clone(), c.now.clone());
                     todo.retain(|t| t.key != c.key);
                     todo.push(c);
+                }
+                // Already the way it says here, but it is later than a change
+                // of the mod left out for its source: that change is
+                // replaced, so it must not come back when the source is
+                // confirmed. Only the mark is kept, nothing is made.
+                Verdict::Same if copy.owed.iter().any(|o| o.key == c.key && o.seq < seq) => {
+                    let m = Mark { state: c.now.clone(), kind: c.kind(), by, name, seq, at: g.at };
+                    marks.insert(c.key.clone(), m.clone());
+                    out.marks.push((c.key.clone(), m));
                 }
                 Verdict::Held if !give_up_held => held = true,
                 Verdict::Held | Verdict::Same | Verdict::Older => {}
@@ -1343,6 +1521,12 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
     // The loader isn't a mod: it is moved here, not through `apply`.
     let (loader_change, todo): (Vec<Change>, Vec<Change>) = todo.into_iter().partition(|c| c.key == LOADER_KEY);
     let loader_set = loader_change.first().is_some_and(|c| move_loader(&mut inst, c, pack_loader.as_deref(), &mut merged, job));
+    // Nor is a lock: it changes no file, so it is set here too.
+    let (lock_changes, mut todo): (Vec<Change>, Vec<Change>) = todo.into_iter().partition(|c| lock_target(&c.key).is_some());
+    let lock_set = set_locks(&mut inst, &lock_changes, &mut merged);
+    // Changes left out before for a source the player hadn't confirmed:
+    // made now when they have, left owed otherwise.
+    revive_owed(copy, &here, sent.as_ref(), &mut todo, &mut merged);
     let todo = keep_pack_mods(&inst, todo, &mut merged, &here_pack, job);
     // Mods kept only on this PC only learn how the others have them.
     let (todo, kept) = crate::onlyhere::split(&mut inst, todo, &mut merged);
@@ -1354,6 +1538,11 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
     let wanted: Vec<crate::sources::carry::Pin> = todo.iter().filter_map(|c| pin_to_get(&inst, c).cloned()).collect();
     let skip = crate::sources::carry::auto_skip(&wanted, allow);
     let mut todo = keep_untrusted(&inst, todo, &skip, &mut merged);
+    // What is still owed is what was left out just now; what was made, or
+    // changed again since, no longer is.
+    if !copy.owed.is_empty() || merged.owed.is_some() {
+        merged.owed = Some(merged.owed.take().unwrap_or_default());
+    }
     // A change to a mod this copy doesn't have (an echo of a removal, a
     // switch of a mod removed here) changes nothing; the task only tells
     // what really changes. Its mark stays, so who changed it last still
@@ -1381,7 +1570,13 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
         }
         false
     });
-    if (kept || loader_set || merged.pack_done.is_some()) && todo.is_empty() {        inst.save()?;
+    if lock_set && let Err(e) = crate::cf_instance::write_locks(&mut inst) {
+        // So the CurseForge app keeps the same mods back as well; best
+        // effort, as when the player locks one.
+        log::warn!("writing CurseForge locks for {}: {e:#}", inst.name);
+    }
+    if (kept || loader_set || lock_set || merged.pack_done.is_some()) && todo.is_empty() {
+        inst.save()?;
     }
     if !todo.is_empty() {
         // Only a merge that changes something shows in Tasks; most codes
@@ -3612,6 +3807,7 @@ mod source_sync_tests {
     impl Drop for Fake {
         fn drop(&mut self) {
             crate::sources::http::set_test_base(None);
+            crate::sources::TEST_TRUSTED.lock().unwrap_or_else(|e| e.into_inner()).clear();
         }
     }
 
@@ -4052,6 +4248,442 @@ mod source_sync_tests {
         assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
         assert!(merged.made.is_empty());
         assert_eq!(crate::instances::load(&inst.root).unwrap().only_here[KEY].theirs, None);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    // ---- 8: changes left out for a source stay owed, and come back once it is confirmed ----
+
+    /// A copy that took Mia's code: she added the mod at 10. `merge` runs
+    /// against it like the store does.
+    fn copy_with_mia(was: Vec<Entry>, now: Vec<Entry>) -> PackCopy {
+        let mut copy = PackCopy::default();
+        copy.got.insert("mia".into(), got(code(was.clone()), 1, "Mia"));
+        copy.sent = code(was);
+        copy.arrive("mia", got(code(now), 10, "Mia"));
+        copy
+    }
+
+    fn merge_copy(inst: &Instance, copy: &PackCopy, allow: bool) -> Merged {
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        merge(&inst.root, copy, allow, false, true, &job).unwrap()
+    }
+
+    /// What the store does with a merge's result (`on_group_merged`).
+    fn take(copy: &mut PackCopy, m: &Merged) {
+        for (from, g) in &m.taken {
+            copy.waiting.remove(from);
+            copy.got.insert(from.clone(), g.clone());
+        }
+        for (k, mk) in &m.marks {
+            copy.marks.insert(k.clone(), mk.clone());
+        }
+        if let Some(o) = &m.owed {
+            copy.owed = o.clone();
+        }
+    }
+
+    fn trust_repo() {
+        crate::sources::TEST_TRUSTED.lock().unwrap().push(format!("github:{REPO}"));
+    }
+
+    #[test]
+    fn the_test_trust_key_is_the_sources_own() {
+        let p = pin("v1", "ezmod-1.0.jar", &jar("1.0"));
+        assert_eq!(p.source.key(), format!("github:{REPO}"), "the key the tests confirm");
+    }
+
+    #[test]
+    fn a_mod_left_out_for_its_source_is_owed_and_the_list_survives_settings() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let inst = inst_on_disk("owed-left");
+        let mut copy = copy_with_mia(vec![], vec![src(&p1, true)]);
+        let merged = merge_copy(&inst, &copy, true);
+        assert_eq!(f.web.load(Ordering::SeqCst), 0);
+        let owed = merged.owed.clone().expect("what is owed is said");
+        assert_eq!(owed.len(), 1);
+        let o = &owed[0];
+        assert_eq!((o.key.as_str(), o.by.as_str(), o.name.as_str(), o.seq), (KEY, "mia", "Mia", 10));
+        assert_eq!(o.now, file_state("ezmod-1.0.jar", true));
+        take(&mut copy, &merged);
+        assert_eq!(copy.owed_says().as_deref(), Some("1 mod waiting for you to confirm its source (Settings › Mod sources)."));
+        assert_eq!(copy.owed_sources().len(), 1);
+        assert_eq!(copy.owed_sources()[0].0, "ezmod");
+        // Saved with the settings and read back.
+        let json = serde_json::to_string(&copy).unwrap();
+        let back: PackCopy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.owed, copy.owed);
+        // Settings from before it had the list still load, with nothing owed.
+        let old: PackCopy = serde_json::from_str(r#"{"inst":"a","group":"g","local":"l","sent":"","sent_seq":3}"#).unwrap();
+        assert!(old.owed.is_empty() && old.owed_says().is_none());
+        let st: crate::settings::Settings = serde_json::from_str(r#"{"group_copies":[{"inst":"a","group":"g"}]}"#).unwrap();
+        assert!(st.group_copies[0].owed.is_empty());
+        // Nothing owed writes nothing, so the file doesn't change for others.
+        assert!(!serde_json::to_string(&PackCopy::default()).unwrap().contains("owed"));
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn confirming_the_source_installs_the_mod_once() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let inst = inst_on_disk("owed-confirm");
+        let mut copy = copy_with_mia(vec![], vec![src(&p1, true)]);
+        let first = merge_copy(&inst, &copy, true);
+        take(&mut copy, &first);
+        assert!(copy.waiting.is_empty() && !copy.owed.is_empty());
+        // Not confirmed: nothing to do on a tick, and a merge changes nothing.
+        assert!(!copy.owed_ready(true));
+        let again = merge_copy(&inst, &copy, true);
+        assert_eq!(again.owed.as_ref().map(Vec::len), Some(1), "still owed");
+        assert!(mods_dir_files(&inst).is_empty() && f.web.load(Ordering::SeqCst) == 0);
+        // The player confirms it.
+        trust_repo();
+        assert!(copy.owed_ready(true));
+        assert!(!copy.owed_ready(false), "Settings › Mod sources off: still waiting");
+        let done = merge_copy(&inst, &copy, true);
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+        assert_eq!(done.owed, Some(vec![]), "nothing is owed any more");
+        assert!(done.kept.is_empty(), "{done:?}");
+        let mark = done.marks.iter().find(|(k, _)| k == KEY).map(|(_, m)| m.clone()).expect("marked as Mia's change");
+        assert_eq!((mark.by.as_str(), mark.name.as_str(), mark.seq, mark.kind), ("mia", "Mia", 10, Kind::Added));
+        take(&mut copy, &done);
+        assert!(copy.owed.is_empty() && !copy.owed_ready(true));
+        // A tick that still had the old list (the store hadn't saved yet)
+        // finds the mod there and downloads nothing again.
+        let mut stale = copy.clone();
+        stale.owed = first.owed.clone().unwrap();
+        let third = merge_copy(&inst, &stale, true);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1, "installed once");
+        assert_eq!(third.owed, Some(vec![]));
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn declining_keeps_it_owed_and_downloads_nothing() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let inst = inst_on_disk("owed-decline");
+        let mut copy = copy_with_mia(vec![], vec![src(&p1, true)]);
+        for _ in 0..3 {
+            let m = merge_copy(&inst, &copy, true);
+            take(&mut copy, &m);
+            assert_eq!(copy.owed.len(), 1, "owed once, however many merges");
+            assert!(!copy.owed_ready(true));
+        }
+        assert_eq!(f.web.load(Ordering::SeqCst), 0);
+        assert!(mods_dir_files(&inst).is_empty());
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn the_same_mod_is_owed_once_and_a_newer_change_replaces_the_old_one() {
+        let (j1, j2) = (jar("1.0"), jar("1.1"));
+        let _f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone()), ("v2", "ezmod-1.1.jar", j2.clone())]);
+        let (p1, p2) = (pin("v1", "ezmod-1.0.jar", &j1), pin("v2", "ezmod-1.1.jar", &j2));
+        let inst = inst_on_disk("owed-dup");
+        let mut copy = copy_with_mia(vec![], vec![src(&p1, true)]);
+        let m = merge_copy(&inst, &copy, true);
+        take(&mut copy, &m);
+        // A list that somehow holds it twice comes out with one.
+        copy.owed.push(copy.owed[0].clone());
+        // Mia changes it again, to 1.1, while it is still owed.
+        copy.arrive("mia", got(code(vec![src(&p2, true)]), 20, "Mia"));
+        let m = merge_copy(&inst, &copy, true);
+        let owed = m.owed.clone().unwrap();
+        assert_eq!(owed.len(), 1, "{owed:?}");
+        assert_eq!((owed[0].seq, owed[0].now.clone()), (20, file_state("ezmod-1.1.jar", true)));
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn a_later_change_of_the_mod_drops_what_was_owed() {
+        let j1 = jar("1.0");
+        let _f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let inst = inst_on_disk("owed-later");
+        let mut copy = copy_with_mia(vec![], vec![src(&p1, true)]);
+        let m = merge_copy(&inst, &copy, true);
+        take(&mut copy, &m);
+        assert_eq!(copy.owed.len(), 1);
+        // Sam removed it afterwards (a later change this PC knows).
+        let mut after_sam = copy.clone();
+        after_sam.marks.insert(KEY.into(), Mark { state: State::Unlisted, kind: Kind::Removed, by: "sam".into(), name: "Sam".into(), seq: 15, at: 15 });
+        trust_repo();
+        let m = merge_copy(&inst, &after_sam, true);
+        assert!(mods_dir_files(&inst).is_empty(), "Sam's later removal wins over Mia's earlier add");
+        assert_eq!(m.owed, Some(vec![]));
+        // Or this PC changed the mod itself and hasn't sent it yet.
+        let mut own = copy.clone();
+        own.sent = code(vec![src(&p1, false)]);
+        let m = merge_copy(&inst, &own, true);
+        assert!(mods_dir_files(&inst).is_empty());
+        assert_eq!(m.owed, Some(vec![]));
+        // A waiting code that applies a change of it also replaces it.
+        let mut newer = copy.clone();
+        newer.arrive("sam", got(code(vec![]), 16, "Sam"));
+        newer.got.insert("sam".into(), got(code(vec![src(&p1, true)]), 2, "Sam"));
+        let m = merge_copy(&inst, &newer, true);
+        assert!(mods_dir_files(&inst).is_empty());
+        assert_eq!(m.owed, Some(vec![]));
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn a_relay_reset_renumbers_what_is_owed() {
+        let j1 = jar("1.0");
+        let _f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let inst = inst_on_disk("owed-reset");
+        let mut copy = copy_with_mia(vec![], vec![src(&p1, true)]);
+        let m = merge_copy(&inst, &copy, true);
+        take(&mut copy, &m);
+        assert_eq!(copy.owed[0].seq, 10);
+        copy.relay_reset();
+        assert_eq!(copy.owed[0].seq, 0);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+}
+
+#[cfg(test)]
+mod lock_sync_tests {
+    use super::*;
+    use crate::instances::Instance;
+
+    fn share_of(entries: Vec<Entry>) -> Share {
+        Share { base: Base::Plain { game_version: "1.21.1".into(), loader: "neoforge".into() }, name: None, loader: None, entries }
+    }
+
+    fn code(entries: Vec<Entry>) -> String {
+        crate::sharecode::encode(&share_of(entries))
+    }
+
+    /// Mods as the tests have them: CurseForge file `n` is project `n / 10`.
+    fn read(c: &str) -> Option<Mods> {
+        crate::sharecode::decode(c).ok().map(|s| {
+            mods(&s, |e| match e {
+                Entry::CurseFile { file, .. } => Some(file / 10),
+                _ => None,
+            })
+        })
+    }
+
+    fn file(f: u64) -> Entry {
+        Entry::CurseFile { file: f, enabled: true }
+    }
+
+    fn lock(key: &str, version: &str, locked: bool) -> Entry {
+        Entry::Lock { key: key.into(), version: version.into(), locked }
+    }
+
+    fn got(c: String, seq: u64, name: &str) -> Got {
+        Got { code: c, seq, at: seq, name: name.into(), ..Default::default() }
+    }
+
+    const LK: &str = "~lock:p:5";
+
+    /// This PC's copy: it has Mia's and Sam's codes `before`, and what each
+    /// sent now arrives.
+    fn plan_for(before: &[(&str, Vec<Entry>)], now: &[(&str, u64, Vec<Entry>)], here: Vec<Entry>) -> (Vec<Change>, Merged) {
+        let mut copy = PackCopy::default();
+        let name = |who: &str| who[..1].to_uppercase() + &who[1..];
+        for (who, entries) in before {
+            copy.got.insert((*who).into(), got(code(entries.clone()), 1, &name(who)));
+        }
+        for (who, seq, entries) in now {
+            copy.arrive(who, got(code(entries.clone()), *seq, &name(who)));
+        }
+        let here = read(&code(here)).unwrap();
+        plan(&copy, &here, Some(&here), false, read)
+    }
+
+    #[test]
+    fn a_lock_reaches_the_other_members_and_says_who() {
+        let (todo, merged) = plan_for(&[("mia", vec![file(50)])], &[("mia", 10, vec![file(50), lock("p:5", "", true)])], vec![file(50)]);
+        assert_eq!(todo.len(), 1, "{todo:?}");
+        let c = &todo[0];
+        assert_eq!((c.key.as_str(), c.kind()), (LK, Kind::Locked));
+        assert_eq!(lock_of(&c.now), (true, String::new()));
+        let (k, mark) = &merged.marks[0];
+        assert_eq!((k.as_str(), mark.name.as_str(), mark.by.as_str()), (LK, "Mia", "mia"));
+        assert_eq!(mark.kind.says(&mark.name), "Locked by Mia");
+        // The mod's own file isn't a change.
+        assert!(!todo.iter().any(|c| c.key == "p:5"));
+    }
+
+    #[test]
+    fn an_unlock_reaches_the_other_members_too() {
+        let locked = vec![file(50), lock("p:5", "", true)];
+        let (todo, merged) = plan_for(&[("mia", locked.clone())], &[("mia", 10, vec![file(50)])], locked);
+        assert_eq!(todo.len(), 1, "{todo:?}");
+        assert_eq!((todo[0].key.as_str(), todo[0].kind(), todo[0].now.clone()), (LK, Kind::Unlocked, State::Unlisted));
+        assert_eq!(lock_of(&todo[0].now), (false, String::new()));
+        assert_eq!(merged.marks[0].1.kind.says("Mia"), "Unlocked by Mia");
+    }
+
+    #[test]
+    fn the_later_of_two_lock_changes_wins_and_names_who() {
+        let both = vec![file(50), lock("p:5", "", true)];
+        let none = vec![file(50)];
+        // Mia unlocks at 10, Sam locks again with a version at 12.
+        let sam = vec![file(50), lock("p:5", "m5-2.jar", true)];
+        let (todo, merged) = plan_for(&[("mia", both.clone()), ("sam", none.clone())], &[("mia", 10, none.clone()), ("sam", 12, sam)], both.clone());
+        let c: Vec<_> = todo.iter().filter(|c| c.key == LK).collect();
+        assert_eq!(c.len(), 1, "one change per mod");
+        assert_eq!(lock_of(&c[0].now), (true, "m5-2.jar".into()), "Sam's, the later one");
+        let m = merged.marks.iter().rev().find(|(k, _)| k == LK).unwrap().1.clone();
+        assert_eq!((m.by.as_str(), m.name.as_str(), m.seq), ("sam", "Sam", 12));
+        // The other way round: Sam's is the earlier, and Mia's unlock wins.
+        let sam = vec![file(50), lock("p:5", "m5-2.jar", true)];
+        let (todo, merged) = plan_for(&[("mia", both.clone()), ("sam", none.clone())], &[("mia", 12, none.clone()), ("sam", 10, sam)], both);
+        let c: Vec<_> = todo.iter().filter(|c| c.key == LK).collect();
+        assert_eq!((c.len(), c[0].now.clone()), (1, State::Unlisted));
+        let m = merged.marks.iter().rev().find(|(k, _)| k == LK).unwrap().1.clone();
+        assert_eq!((m.by.as_str(), m.seq), ("mia", 12));
+        // A change older than the one this PC knows is dropped.
+        let mut copy = PackCopy::default();
+        copy.got.insert("mia".into(), got(code(vec![file(50)]), 1, "Mia"));
+        copy.marks.insert(LK.into(), Mark { state: State::File { file: "lock:".into(), on: true }, kind: Kind::Locked, by: "sam".into(), name: "Sam".into(), seq: 20, at: 20 });
+        copy.arrive("mia", got(code(vec![file(50), lock("p:5", "", false), lock("p:6", "x", false)]), 10, "Mia"));
+        let here = read(&code(vec![file(50), lock("p:5", "", true)])).unwrap();
+        let (todo, _) = plan(&copy, &here, Some(&here), false, read);
+        assert!(!todo.iter().any(|c| c.key == LK), "Sam's lock at 20 is later than Mia's change at 10: {todo:?}");
+    }
+
+    #[test]
+    fn a_code_without_lock_info_changes_no_lock() {
+        // This PC has p:5 locked. Mia's Hopper doesn't know locks: her codes
+        // list no lock, before and after her change of another mod.
+        let here = vec![file(50), file(60), lock("p:5", "", true)];
+        let (todo, _) = plan_for(&[("mia", vec![file(50)])], &[("mia", 10, vec![file(50), file(60)])], here.clone());
+        assert!(todo.iter().all(|c| lock_target(&c.key).is_none()), "{todo:?}");
+        // The same for the very first code from her: no lock info, no unlock.
+        let (todo, _) = plan_for(&[], &[("mia", 10, vec![file(50), file(60)])], here);
+        assert!(todo.iter().all(|c| lock_target(&c.key).is_none()), "{todo:?}");
+        // And the changes between two such codes list no lock either.
+        let (was, now) = (read(&code(vec![file(50)])).unwrap(), read(&code(vec![file(50), file(60)])).unwrap());
+        assert!(changes(&was, &now).iter().all(|c| lock_target(&c.key).is_none()));
+    }
+
+    #[test]
+    fn a_lock_on_a_version_only_is_kept_apart_from_the_whole_mod_lock() {
+        // Only one update kept out: not locked, a version noted.
+        let m = read(&code(vec![file(50), lock("p:5", "m5-2.jar", false)])).unwrap();
+        assert_eq!(m.state(LK), State::File { file: "lock:m5-2.jar".into(), on: false });
+        assert_eq!(lock_of(&m.state(LK)), (false, "m5-2.jar".into()));
+        let plain = read(&code(vec![file(50), lock("p:5", "", true)])).unwrap();
+        assert_ne!(m.state(LK), plain.state(LK));
+        assert_eq!(read(&code(vec![file(50)])).unwrap().state(LK), State::Unlisted);
+        let c = changes(&plain, &m);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].kind(), Kind::Locked);
+    }
+
+    fn inst_with(tag: &str, locks: &[(u64, bool, &str)]) -> Instance {
+        let root = std::env::temp_dir().join(format!("hopper-gs-lock-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        let addons = locks
+            .iter()
+            .map(|&(p, locked, v)| Addon {
+                project_id: p,
+                file_id: p * 10,
+                file_name: format!("m{p}.jar"),
+                name: format!("M{p}"),
+                enabled: true,
+                locked,
+                locked_version: v.into(),
+                ..Default::default()
+            })
+            .collect();
+        let inst = Instance { root, name: "T".into(), game_version: "1.21.1".into(), loader: "neoforge-21.1.200".into(), addons, ..Default::default() };
+        inst.save().unwrap();
+        inst
+    }
+
+    fn change(was: State, now: State, key: &str) -> Change {
+        Change { key: key.into(), was, now, entry: None }
+    }
+
+    #[test]
+    fn set_locks_locks_unlocks_and_keeps_the_version_note() {
+        let mut inst = inst_with("set", &[(5, false, ""), (6, true, "m6-2.jar"), (7, false, "")]);
+        let mut merged = Merged::default();
+        let lock5 = change(State::Unlisted, State::File { file: "lock:".into(), on: true }, "~lock:p:5");
+        let unlock6 = change(State::File { file: "lock:m6-2.jar".into(), on: true }, State::Unlisted, "~lock:p:6");
+        let note7 = change(State::Unlisted, State::File { file: "lock:m7-3.jar".into(), on: false }, "~lock:p:7");
+        merged.made = vec![("~lock:p:5".into(), Kind::Locked, "Mia".into())];
+        assert!(set_locks(&mut inst, &[lock5, unlock6, note7], &mut merged));
+        assert_eq!((inst.addons[0].locked, inst.addons[0].locked_version.as_str()), (true, ""));
+        assert_eq!((inst.addons[1].locked, inst.addons[1].locked_version.as_str()), (false, ""));
+        assert_eq!((inst.addons[2].locked, inst.addons[2].locked_version.as_str()), (false, "m7-3.jar"));
+        assert_eq!(merged.made.len(), 1, "a real change stays in the list");
+        // An echo (already like that) and a mod this PC hasn't change nothing.
+        let mut merged = Merged { made: vec![("~lock:p:5".into(), Kind::Locked, "Mia".into()), ("~lock:p:99".into(), Kind::Locked, "Mia".into())], ..Default::default() };
+        let echo = change(State::Unlisted, State::File { file: "lock:".into(), on: true }, "~lock:p:5");
+        let absent = change(State::Unlisted, State::File { file: "lock:".into(), on: true }, "~lock:p:99");
+        assert!(!set_locks(&mut inst, &[echo, absent], &mut merged));
+        assert!(merged.made.is_empty());
+        // A mod kept only on this PC keeps its own lock.
+        inst.only_here.insert("p:7".into(), crate::onlyhere::Kept { theirs: None, name: "M7".into() });
+        let lock7 = change(State::Unlisted, State::File { file: "lock:".into(), on: true }, "~lock:p:7");
+        assert!(!set_locks(&mut inst, &[lock7], &mut Merged::default()));
+        assert!(!inst.addons[2].locked);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    /// The whole merge: Mia locks a mod, it is locked here, it says who and
+    /// the file stays; Mia unlocks, and it's unlocked here again.
+    #[test]
+    fn a_member_locking_and_unlocking_is_done_here_by_the_merge() {
+        let inst = inst_with("merge", &[(5, false, ""), (6, false, "")]);
+        let run = |copy: &PackCopy| {
+            let jobs = crate::jobs::Jobs::default();
+            merge(&inst.root, copy, true, false, true, &jobs.start("t")).unwrap()
+        };
+        let mut copy = PackCopy::default();
+        copy.got.insert("mia".into(), got(code(vec![]), 1, "Mia"));
+        copy.sent = code(vec![]);
+        copy.arrive("mia", got(code(vec![lock("p:5", "", true), lock("p:6", "m6-2.jar", false)]), 10, "Mia"));
+        let merged = run(&copy);
+        let now = crate::instances::load(&inst.root).unwrap();
+        assert_eq!((now.addons[0].locked, now.addons[0].locked_version.as_str()), (true, ""));
+        assert_eq!((now.addons[1].locked, now.addons[1].locked_version.as_str()), (false, "m6-2.jar"));
+        assert_eq!(merged.taken.len(), 1);
+        assert!(!merged.made.is_empty(), "the store refreshes the instance");
+        let m = merged.marks.iter().find(|(k, _)| k == "~lock:p:5").unwrap().1.clone();
+        assert_eq!(m.kind.says(&m.name), "Locked by Mia");
+        // This PC's next code carries the locks, so it doesn't undo them.
+        let here = crate::sharecode::make(&now, &crate::jobs::Jobs::default().start("make")).unwrap().share;
+        assert!(here.entries.contains(&lock("p:5", "", true)) && here.entries.contains(&lock("p:6", "m6-2.jar", false)));
+        // Mia unlocks both.
+        let mut copy = PackCopy::default();
+        copy.got.insert("mia".into(), got(code(vec![lock("p:5", "", true), lock("p:6", "m6-2.jar", false)]), 10, "Mia"));
+        copy.sent = crate::sharecode::encode(&here);
+        copy.arrive("mia", got(code(vec![]), 20, "Mia"));
+        let merged = run(&copy);
+        let now = crate::instances::load(&inst.root).unwrap();
+        assert!(now.addons.iter().all(|a| !a.locked && a.locked_version.is_empty()), "{:?}", now.addons);
+        let m = merged.marks.iter().find(|(k, _)| k == "~lock:p:5").unwrap().1.clone();
+        assert_eq!(m.kind.says(&m.name), "Unlocked by Mia");
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    /// A locked mod's file is kept on every PC: a member's update of a mod
+    /// that this PC locks (because Mia just did) is left out as before.
+    #[test]
+    fn what_a_lock_keeps_is_the_file() {
+        let mut inst = inst_with("keeps", &[(5, true, "")]);
+        let update = change(State::File { file: "cf:50".into(), on: true }, State::File { file: "cf:51".into(), on: true }, "p:5");
+        assert!(locked_out(&inst, &update));
+        inst.addons[0].locked = false;
+        assert!(!locked_out(&inst, &update));
         let _ = std::fs::remove_dir_all(&inst.root);
     }
 }

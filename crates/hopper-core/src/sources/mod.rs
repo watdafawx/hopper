@@ -1171,8 +1171,16 @@ fn trust_list() -> Vec<String> {
 
 /// The player already confirmed this source.
 pub fn trusted(src: &ModSource) -> bool {
+    #[cfg(test)]
+    if TEST_TRUSTED.lock().unwrap_or_else(|e| e.into_inner()).contains(&src.key()) {
+        return true;
+    }
     trust_list().contains(&src.key())
 }
+
+/// Sources a test confirmed, without touching the real list on disk.
+#[cfg(test)]
+pub(crate) static TEST_TRUSTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Remembers that the player confirmed this source.
 pub fn trust(src: &ModSource) -> anyhow::Result<()> {
