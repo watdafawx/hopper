@@ -71,6 +71,8 @@ mod smooth_scroll;
 mod revert_ui;
 mod rigsync;
 mod relay_card;
+mod relay_setup;
+mod relays_list;
 mod server_control;
 mod server_delete;
 mod delete_ask;
