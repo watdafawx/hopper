@@ -51,8 +51,8 @@ pub struct Head {
 /// What the control stream carries, one JSON object per line.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Control {
-    /// Servers home carries through this relay. In B2 the relay sends every
-    /// player on its game port to the first one; per-server ports are B7.
+    /// Servers home carries through this relay. The relay picks one for
+    /// each player by the address they typed ([`pick_route`], B7).
     #[serde(default)]
     pub routes: Vec<Route>,
     /// Home asks for the players' pings (B5). The line still carries the
@@ -80,7 +80,7 @@ pub struct Ping {
     pub ms: u32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Route {
     pub server: String,
     #[serde(default)]
@@ -93,7 +93,67 @@ pub struct Route {
     /// passes players' voice packets home. A relay from before B6 ignores it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub voice: bool,
+    /// The addresses players type for this server (exact names, lower
+    /// case), the same ones the relay's Velocity has as forced hosts (B7).
+    /// With several servers on one relay, the relay's front port sends a
+    /// player to the server that lists the address they typed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+    /// The relay's loopback port Velocity sends this server's players on to
+    /// (B7); 0: none set up yet. The relay tags every connection on it with
+    /// this server.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub port: u16,
 }
+
+fn is_zero(p: &u16) -> bool {
+    *p == 0
+}
+
+/// Which route a player who typed `host` goes to (B7). One route takes
+/// every address (players may type the VPS's IP). With several, the route
+/// that lists the address; an address none lists is refused, so a player
+/// never lands on a server they didn't ask for. A home from before B7
+/// names no addresses at all: then the first route, as before.
+pub fn pick_route<'a>(routes: &'a [Route], host: &str) -> Option<&'a Route> {
+    if routes.len() <= 1 || routes.iter().all(|r| r.hosts.is_empty()) {
+        return routes.first();
+    }
+    let host = hopper_core::hosting::router::normalize_host(host);
+    routes.iter().find(|r| r.hosts.iter().any(|h| *h == host))
+}
+
+/// Whether the relay's Velocity can take `rt`'s players: it has a loopback
+/// port of its own, or it's the one server from before B7 (Velocity then
+/// knows one backend, the first port).
+pub fn velocity_knows(routes: &[Route], rt: &Route) -> bool {
+    rt.velocity && (rt.port != 0 || legacy_backend(routes).is_some_and(|l| l.server == rt.server))
+}
+
+/// A home from before B7 names no ports: its one Velocity server is on the
+/// first backend port.
+fn legacy_backend(routes: &[Route]) -> Option<&Route> {
+    if routes.iter().any(|r| r.port != 0) {
+        return None;
+    }
+    let mut v = routes.iter().filter(|r| r.velocity);
+    let one = v.next()?;
+    v.next().is_none().then_some(one)
+}
+
+/// The server a connection from Velocity on loopback `port` is for: the
+/// route given that port (`base` is the first backend port, which a home
+/// from before B7 uses for its one server).
+pub fn backend_route(routes: &[Route], port: u16, base: u16) -> Option<&Route> {
+    if let Some(r) = routes.iter().find(|r| r.velocity && r.port == port) {
+        return Some(r);
+    }
+    if port == base { legacy_backend(routes) } else { None }
+}
+
+/// The most loopback ports one relay hands out to Velocity, from its first
+/// backend port up (one per server).
+pub const MAX_BACKENDS: u16 = 64;
 
 /// The longest control line either end reads.
 pub const MAX_CONTROL_LINE: usize = 64 * 1024;

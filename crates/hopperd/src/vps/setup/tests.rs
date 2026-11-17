@@ -263,13 +263,13 @@ fn velocity_is_pinned_and_set_up_for_the_chain() {
         assert!(p.size > 1_000_000);
     }
     assert!(java("riscv").is_none());
-    let t = velocity_toml(true);
+    let t = velocity_toml(true, &[]);
     assert!(t.contains("player-info-forwarding-mode = \"modern\""));
     assert!(t.contains(&format!("bind = \"127.0.0.1:{VELOCITY_PORT}\"")));
     assert!(t.contains(&format!("home = \"127.0.0.1:{BACKEND_PORT}\"")));
     assert!(t.contains("online-mode = true") && t.contains("haproxy-protocol = true"));
     assert!(t.contains(&format!("forwarding-secret-file = \"{SECRET}\"")));
-    assert!(velocity_toml(false).contains("online-mode = false"));
+    assert!(velocity_toml(false, &[]).contains("online-mode = false"));
     let u = velocity_unit();
     for flag in ["-Dvelocity.max-plugin-message-payload-size.clientbound=16777216", "-Dvelocity.max-plugin-message-payload-size.serverbound=16777216", "-Dvelocity.max-known-packs=1024"] {
         assert!(u.contains(flag), "{flag}");
@@ -320,4 +320,58 @@ fn a_relay_set_up_before_is_offered_its_own_ports() {
     assert_eq!(super::suggested_ports("203.0.113.10:9168", 9167), serde_json::json!({ "game": 9167, "tunnel": 9168 }));
     assert_eq!(super::suggested_ports("[2001:db8::1]:9168", 0), serde_json::json!({ "game": 25565, "tunnel": 9168 }));
     assert_eq!(super::suggested_ports("vps.example.com", 0)["tunnel"], 25566);
+}
+
+fn want(id: &str, name: &str, hosts: &[&str]) -> (String, String, Vec<String>) {
+    (id.into(), name.into(), hosts.iter().map(|h| h.to_string()).collect())
+}
+
+#[test]
+fn two_servers_get_their_own_ports_names_and_forced_hosts() {
+    let b = assign_backends(&[], &[want("a", "Survival", &["dg.example.com"]), want("b", "Creative World!", &["build.example.com", "dg.example.com"])]);
+    assert_eq!(b.len(), 2);
+    assert_eq!((b[0].name.as_str(), b[0].port), ("survival", BACKEND_PORT));
+    assert_eq!((b[1].name.as_str(), b[1].port), ("creative-world", BACKEND_PORT + 1));
+    // An address two servers claim stays with the first.
+    assert_eq!(b[1].hosts, vec!["build.example.com".to_string()]);
+    let t = velocity_toml(true, &b);
+    assert!(t.contains(&format!("survival = \"127.0.0.1:{BACKEND_PORT}\"\n")), "{t}");
+    assert!(t.contains(&format!("creative-world = \"127.0.0.1:{}\"\n", BACKEND_PORT + 1)));
+    assert!(t.contains("try = [\"survival\", \"creative-world\"]\n"));
+    assert!(t.contains("[forced-hosts]\n\"dg.example.com\" = [\"survival\"]\n\"build.example.com\" = [\"creative-world\"]\n"));
+    assert!(!t.contains("home = "));
+    // Names are TOML keys and never Velocity's own "try"; clashes get a number.
+    let b = assign_backends(&[], &[want("a", "try", &[]), want("b", "Try", &[]), want("c", "§§", &[])]);
+    let names: Vec<&str> = b.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["server-try", "server-try-2", "server"]);
+}
+
+#[test]
+fn velocity_config_is_the_same_when_run_again() {
+    let wanted = [want("a", "Survival", &["dg.example.com"]), want("b", "Creative", &["build.example.com"])];
+    let first = assign_backends(&[], &wanted);
+    let again = assign_backends(&first, &wanted);
+    assert_eq!(first, again);
+    assert_eq!(velocity_toml(true, &first), velocity_toml(true, &again));
+    // No servers recorded yet (a relay from before B7): the old file.
+    assert!(velocity_toml(true, &[]).contains(&format!("home = \"127.0.0.1:{BACKEND_PORT}\"\ntry = [\"home\"]\n\n[forced-hosts]\n\n[advanced]")));
+}
+
+#[test]
+fn taking_one_server_off_leaves_the_others_lines() {
+    let all = assign_backends(&[], &[want("a", "Survival", &["dg.example.com"]), want("b", "Creative", &["build.example.com"]), want("c", "Modded", &["mod.example.com"])]);
+    // The middle one goes: the others keep their names and ports.
+    let left = assign_backends(&all, &[want("a", "Survival", &["dg.example.com"]), want("c", "Modded", &["mod.example.com"])]);
+    assert_eq!(left, vec![all[0].clone(), all[2].clone()]);
+    let t = velocity_toml(true, &left);
+    assert!(!t.contains("creative") && !t.contains("build.example.com"));
+    assert!(t.contains(&format!("modded = \"127.0.0.1:{}\"", BACKEND_PORT + 2)));
+    // A new one takes the free port, and doesn't move anyone.
+    let back = assign_backends(&left, &[want("a", "Survival", &["dg.example.com"]), want("c", "Modded", &["mod.example.com"]), want("d", "Creative", &["build.example.com"])]);
+    assert_eq!(&back[..2], &left[..]);
+    assert_eq!((back[2].name.as_str(), back[2].port), ("creative", BACKEND_PORT + 1));
+    // A renamed server keeps its line; a changed address is written.
+    let moved = assign_backends(&all, &[want("a", "Survival 2", &["new.example.com"]), want("b", "Creative", &["build.example.com"]), want("c", "Modded", &["mod.example.com"])]);
+    assert_eq!((moved[0].name.as_str(), moved[0].port), ("survival", BACKEND_PORT));
+    assert_eq!(moved[0].hosts, vec!["new.example.com".to_string()]);
 }

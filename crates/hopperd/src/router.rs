@@ -590,7 +590,8 @@ async fn route<S: PlayerConn>(app: &Arc<App>, sock: &mut S, peer: SocketAddr, pi
     // so a join that didn't come through the relay is turned away (the
     // forwarding mod would refuse it too, with a less helpful message).
     if direct && hs.is_login() && app.vps_forward.mode(&e.id) == hopper_core::hosting::proxy_forward::Mode::Relay {
-        let text = json!({ "text": format!("Join this server through {}.", app.vps.players_address()) });
+        let text = json!({ "text": format!("Join this server through {}.", crate::vps::home::server_players_address(&app, &e.id)) });
+
         return kick(sock, &text).await;
     }
     let state = e.server.state();

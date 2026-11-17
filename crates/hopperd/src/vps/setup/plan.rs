@@ -9,6 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::vps::home::Backend;
+
 /// The relay's system user and group.
 pub const USER: &str = "hopper-relay";
 /// The program and the record of what the setup changed (root's).
@@ -90,9 +92,68 @@ pub fn java(arch: &str) -> Option<Pinned> {
     }
 }
 
+/// Each relayed server's place in the relay's Velocity (B7): `wanted` is
+/// (server id, its name, its exact addresses) in the relay's order. A
+/// server already there keeps its name and loopback port, so adding or
+/// taking off one server leaves the others' lines as they were; a new one
+/// gets the lowest free port from [`BACKEND_PORT`] (the first server keeps
+/// the port a relay from before B7 used). An address two servers claim
+/// stays with the first. Past [`crate::vps::MAX_BACKENDS`] servers the rest
+/// are left out.
+pub fn assign_backends(old: &[Backend], wanted: &[(String, String, Vec<String>)]) -> Vec<Backend> {
+    let max = crate::vps::MAX_BACKENDS;
+    let mut out: Vec<Backend> = Vec::new();
+    let kept: Vec<&Backend> = old.iter().filter(|b| wanted.iter().any(|w| w.0 == b.server) && b.port >= BACKEND_PORT && b.port < BACKEND_PORT + max).collect();
+    let mut used_ports: Vec<u16> = kept.iter().map(|b| b.port).collect();
+    let mut used_names: Vec<String> = kept.iter().map(|b| b.name.clone()).collect();
+    let mut claimed: Vec<String> = Vec::new();
+    for (id, name, hosts) in wanted {
+        let hosts: Vec<String> = hosts.iter().filter(|h| !claimed.contains(h)).cloned().collect();
+        claimed.extend(hosts.iter().cloned());
+        if let Some(b) = kept.iter().find(|b| b.server == *id) {
+            out.push(Backend { hosts, ..(*b).clone() });
+            continue;
+        }
+        let Some(port) = (BACKEND_PORT..BACKEND_PORT + max).find(|p| !used_ports.contains(p)) else { continue };
+        used_ports.push(port);
+        let base = server_key(name);
+        let name = (1..).map(|n| if n == 1 { base.clone() } else { format!("{base}-{n}") }).find(|n| !used_names.contains(n)).expect("a free name");
+        used_names.push(name.clone());
+        out.push(Backend { server: id.clone(), name, port, hosts });
+    }
+    out
+}
+
+/// A server's name as a key in `velocity.toml`: lower case letters, digits,
+/// `-` and `_`, never Velocity's own `try`.
+fn server_key(name: &str) -> String {
+    let mut k: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' }).collect();
+    k = k.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
+    k.truncate(32);
+    let k = k.trim_matches('-').to_string();
+    if k.is_empty() || k == "try" { format!("server-{k}").trim_end_matches('-').to_string() } else { k }
+}
+
 /// Velocity's `velocity.toml`. `online` is false only on a test box
 /// (`HOPPERD_VPS_TEST_OFFLINE`), where test logins have no Mojang account.
-pub fn velocity_toml(online: bool) -> String {
+/// `backends`: one line per relayed server, and its addresses as forced
+/// hosts (B7); none: the one server from before B7, as `home`.
+pub fn velocity_toml(online: bool, backends: &[Backend]) -> String {
+    let (servers, forced) = if backends.is_empty() {
+        (format!("home = \"127.0.0.1:{BACKEND_PORT}\"\ntry = [\"home\"]\n"), String::new())
+    } else {
+        let mut s = String::new();
+        let mut f = String::new();
+        for b in backends {
+            s.push_str(&format!("{} = \"127.0.0.1:{}\"\n", b.name, b.port));
+            for h in &b.hosts {
+                f.push_str(&format!("\"{h}\" = [\"{}\"]\n", b.name));
+            }
+        }
+        let names: Vec<String> = backends.iter().map(|b| format!("\"{}\"", b.name)).collect();
+        s.push_str(&format!("try = [{}]\n", names.join(", ")));
+        (s, f)
+    };
     format!(
         "# Made by Hopper Server's relay setup. Velocity starts from this copy each time.
 config-version = \"2.7\"
@@ -110,12 +171,11 @@ ping-passthrough = \"all\"
 enable-player-address-logging = true
 
 [servers]
-home = \"127.0.0.1:{BACKEND_PORT}\"
-try = [\"home\"]
-
+{servers}
 [forced-hosts]
-
+{forced}
 [advanced]
+
 compression-threshold = 256
 compression-level = -1
 login-ratelimit = 3000

@@ -242,6 +242,8 @@ fn relay_addresses() {
 struct RelayRun {
     relay: Arc<Relay>,
     game: u16,
+    /// Velocity's first backend port (0: none).
+    backend: u16,
     tunnel: u16,
     fingerprint: String,
     task: JoinHandle<()>,
@@ -256,6 +258,11 @@ impl Drop for RelayRun {
 }
 
 async fn run_relay() -> RelayRun {
+    run_relay_with(false).await
+}
+
+/// `backends`: also listen for Velocity on a loopback port (B7).
+async fn run_relay_with(backends: bool) -> RelayRun {
     let dir = std::env::temp_dir().join(format!("hopperd-vps-{}-{}", std::process::id(), crate::auth::random_hex(4)));
     std::fs::create_dir_all(&dir).unwrap();
     let (tls, fingerprint) = relay_end::tls_config(&dir).unwrap();
@@ -264,19 +271,26 @@ async fn run_relay() -> RelayRun {
     let game = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let tunnel = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (gp, tp) = (game.local_addr().unwrap().port(), tunnel.local_addr().unwrap().port());
-    let task = tokio::spawn(relay_end::serve(relay.clone(), game, tunnel, tls, None));
-    RelayRun { relay, game: gp, tunnel: tp, fingerprint, task, dir }
+    let backend = if backends { Some(TcpListener::bind("127.0.0.1:0").await.unwrap()) } else { None };
+    let bp = backend.as_ref().map_or(0, |l| l.local_addr().unwrap().port());
+    let task = tokio::spawn(relay_end::serve(relay.clone(), game, tunnel, tls, backend));
+    RelayRun { relay, game: gp, backend: bp, tunnel: tp, fingerprint, task, dir }
 }
 
 fn home_cfg(r: &RelayRun, port: u16, server: &str) -> home::HomeConfig {
-    home::HomeConfig { enabled: true, address: format!("127.0.0.1:{port}"), fingerprint: r.fingerprint.clone(), key: key(), servers: vec![server.into()], public_address: String::new() }
+    home::HomeConfig { enabled: true, address: format!("127.0.0.1:{port}"), fingerprint: r.fingerprint.clone(), key: key(), servers: vec![server.into()], ..Default::default() }
 }
 
 /// A server list ping (status, then ping): the status JSON and whether the
 /// pong came back with the same payload.
 async fn list_ping(port: u16) -> (Value, bool) {
+    list_ping_as(port, "localhost").await
+}
+
+/// [`list_ping`] for the address `host`.
+async fn list_ping_as(port: u16, host: &str) -> (Value, bool) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-    let mut out = core::handshake_packet(767, "localhost", port, 1);
+    let mut out = core::handshake_packet(767, host, port, 1);
     out.extend(core::packet(0, &[]));
     s.write_all(&out).await.unwrap();
     let mut buf = Vec::new();
@@ -540,7 +554,8 @@ fn proxy_header_carries_the_players_address() {
 /// reads every line as routes) changes nothing; a routes line doesn't ask.
 #[test]
 fn ping_ask_keeps_the_routes() {
-    let routes = vec![super::Route { server: "s1".into(), name: "One".into(), velocity: true, voice: false }];
+    let routes = vec![super::Route { server: "s1".into(), name: "One".into(), velocity: true, ..Default::default() }];
+
     let ask = serde_json::to_value(super::Control { routes: routes.clone(), pings: true }).unwrap();
     assert_eq!(ask["pings"], true);
     #[derive(serde::Deserialize)]
@@ -584,4 +599,256 @@ async fn home_gets_the_relays_ping_readings() {
         assert!(*ms < 1000, "{ms}");
     }
     assert!(t.app.vps.relay_pings("not-relayed").await.is_none());
+}
+
+// ---- B7: several servers behind one relay ------------------------------------------------
+
+fn route(server: &str, hosts: &[&str], velocity: bool, port: u16) -> super::Route {
+    super::Route { server: server.into(), name: server.into(), velocity, hosts: hosts.iter().map(|h| h.to_string()).collect(), port, ..Default::default() }
+}
+
+/// The address a player typed picks the server; one nobody lists is
+/// refused. One server, or a home from before B7, takes every address.
+#[test]
+fn the_address_picks_the_server() {
+    use super::pick_route;
+    let both = [route("a", &["dg.example.com"], false, 0), route("b", &["build.example.com"], false, 0)];
+    assert_eq!(pick_route(&both, "dg.example.com").unwrap().server, "a");
+    assert_eq!(pick_route(&both, "BUILD.example.com.").unwrap().server, "b");
+    assert_eq!(pick_route(&both, "build.example.com\0FML3\0").unwrap().server, "b");
+    assert!(pick_route(&both, "other.example.com").is_none());
+    assert!(pick_route(&both, "203.0.113.5").is_none());
+    assert_eq!(pick_route(&both[..1], "203.0.113.5").unwrap().server, "a");
+    let old = [route("a", &[], false, 0), route("b", &[], false, 0)];
+    assert_eq!(pick_route(&old, "anything").unwrap().server, "a");
+    assert!(pick_route(&[], "x").is_none());
+}
+
+/// Each Velocity port carries one server; a port nobody has, or a server
+/// Velocity doesn't know yet, goes nowhere.
+#[test]
+fn velocity_ports_tag_their_server() {
+    use super::{backend_route, velocity_knows};
+    let base = 25580;
+    let rs = [route("a", &["a.x"], true, base), route("b", &["b.x"], true, base + 1), route("c", &["c.x"], false, 0)];
+    assert_eq!(backend_route(&rs, base, base).unwrap().server, "a");
+    assert_eq!(backend_route(&rs, base + 1, base).unwrap().server, "b");
+    assert!(backend_route(&rs, base + 2, base).is_none());
+    assert!(velocity_knows(&rs, &rs[1]) && !velocity_knows(&rs, &rs[2]));
+    // Set to check accounts through the relay, but not in Velocity yet.
+    let new = [route("a", &["a.x"], true, base), route("d", &["d.x"], true, 0)];
+    assert!(!velocity_knows(&new, &new[1]));
+    // Before B7: one Velocity server, no ports, and the first port is its.
+    let old = [route("a", &[], true, 0), route("c", &[], false, 0)];
+    assert!(velocity_knows(&old, &old[0]));
+    assert_eq!(backend_route(&old, base, base).unwrap().server, "a");
+    assert!(backend_route(&old, base + 1, base).is_none());
+    // Two Velocity servers and no ports: nothing tells them apart.
+    let two = [route("a", &[], true, 0), route("b", &[], true, 0)];
+    assert!(!velocity_knows(&two, &two[0]) && backend_route(&two, base, base).is_none());
+}
+
+/// Exact names only, in the form Velocity compares; the address states.
+#[test]
+fn relay_addresses_and_their_state() {
+    let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert_eq!(home::exact_hosts(&a(&["DG.example.com.", "*.mc.example.com", "dg.example.com", "x\"y", "a:1", ""])), a(&["dg.example.com"]));
+    let mut cfg = home::HomeConfig { servers: a(&["s1"]), ..Default::default() };
+    assert_eq!(home::address_state(&cfg, "s1", true, &[]), "ok", "one server takes every address");
+    cfg.servers = a(&["s1", "s2"]);
+    assert_eq!(home::address_state(&cfg, "s1", false, &[]), "none");
+    assert_eq!(home::address_state(&cfg, "s1", false, &a(&["a.x"])), "ok");
+    assert_eq!(home::address_state(&cfg, "s1", true, &a(&["a.x"])), "stale", "not in Velocity yet");
+    cfg.backends = vec![home::Backend { server: "s1".into(), name: "s1".into(), port: 25580, hosts: a(&["a.x"]) }];
+    assert_eq!(home::address_state(&cfg, "s1", true, &a(&["a.x"])), "ok");
+    assert_eq!(home::address_state(&cfg, "s1", true, &a(&["b.x"])), "stale", "the address changed since");
+}
+
+/// Another server in the test panel: its id.
+fn add_server(t: &crate::cross_origin_tests::T, name: &str) -> String {
+    let root = t.dir.join("servers").join(name);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("server.properties"), format!("motd={name}\n")).unwrap();
+    t.app.rescan();
+    t.app.servers.list().iter().find(|e| e.root == root).expect("the new server").id.clone()
+}
+
+fn set_addresses(t: &crate::cross_origin_tests::T, id: &str, hosts: &[&str]) {
+    let e = t.app.servers.get(id).unwrap();
+    let mut s = crate::router::settings(&e);
+    s.addresses = hosts.iter().map(|h| h.to_string()).collect();
+    s.save(&e.root).unwrap();
+}
+
+/// Streams home has had for `id` so far.
+fn streams(t: &crate::cross_origin_tests::T, id: &str) -> u64 {
+    t.app.vps.tick();
+    t.app.vps.server_status(id)["total"]["streams"].as_u64().unwrap_or(0)
+}
+
+/// A join on the relay's port: the text it's turned away with.
+async fn join_refused(port: u16, host: &str) -> String {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    s.write_all(&core::handshake_packet(767, host, port, 2)).await.unwrap();
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Read::Done((id, body), _) = core::read_packet(&buf, 1 << 20).unwrap() {
+            assert_eq!(id, 0, "a login disconnect");
+            let (text, _) = core::read_string(body, 1 << 20).unwrap();
+            return serde_json::from_str::<Value>(&text).unwrap()["text"].as_str().unwrap_or_default().to_string();
+        }
+        let n = tokio::time::timeout(Duration::from_secs(10), s.read(&mut chunk)).await.expect("an answer in time").unwrap();
+        assert!(n > 0, "closed without a reason");
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// Two servers on one relay: each player reaches the server whose address
+/// they typed, an address neither has is refused at the relay, and taking
+/// one server off leaves the other as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_servers_behind_one_relay() {
+    let t = crate::cross_origin_tests::panel_with(crate::TlsInfo { fingerprint: "AA:BB".into(), ca_pem: String::new() });
+    let a = t.server.clone();
+    let b = add_server(&t, "Creative");
+    set_addresses(&t, &a, &["survival.example.test"]);
+    set_addresses(&t, &b, &["creative.example.test"]);
+    let r = run_relay().await;
+    t.app.vps.set_config(home::HomeConfig { servers: vec![a.clone(), b.clone()], ..home_cfg(&r, r.tunnel, &a) }).unwrap();
+    home::start(t.app.clone());
+    wait_for("both servers on the relay", 15, || r.relay.route_servers() == [a.clone(), b.clone()]).await;
+
+    // Streams reach the right server.
+    let (status, pong) = list_ping_as(r.game, "Survival.Example.test").await;
+    assert_ne!(status["version"]["name"], "Hopper relay", "answered by home: {status}");
+    assert!(pong);
+    wait_for("a stream for the first server", 10, || streams(&t, &a) == 1).await;
+    assert_eq!(streams(&t, &b), 0);
+    let (status, _) = list_ping_as(r.game, "creative.example.test").await;
+    assert_ne!(status["version"]["name"], "Hopper relay", "{status}");
+    wait_for("a stream for the second server", 10, || streams(&t, &b) == 1).await;
+    assert_eq!(streams(&t, &a), 1);
+
+    // An address neither has: the relay answers, home never sees it.
+    let (status, _) = list_ping_as(r.game, "nobody.example.test").await;
+    assert_eq!(status["version"]["name"], "Hopper relay");
+    assert_eq!(status["description"]["text"], "No server goes by this address");
+    assert!(join_refused(r.game, "nobody.example.test").await.contains("No server here goes by this address"));
+    assert_eq!((streams(&t, &a), streams(&t, &b)), (1, 1));
+
+    // The cards give each server its own address.
+    t.app.vps.set_config(home::HomeConfig { backends: vec![home::Backend { server: b.clone(), name: "creative".into(), port: 25581, hosts: vec!["creative.example.test".into()] }], ..t.app.vps.config() }).unwrap();
+    assert!(t.app.vps.players_address_for(&b, &[]).starts_with("creative.example.test"));
+    assert!(!t.app.vps.players_address_for(&a, &[]).starts_with("creative"));
+
+    // The first server comes off: the second keeps working as before.
+    t.app.vps.set_config(home::HomeConfig { servers: vec![b.clone()], ..t.app.vps.config() }).unwrap();
+    wait_for("one server left", 15, || r.relay.route_servers() == [b.clone()]).await;
+    let (status, _) = list_ping_as(r.game, "creative.example.test").await;
+    assert_ne!(status["version"]["name"], "Hopper relay", "{status}");
+    wait_for("the second server's next stream", 10, || streams(&t, &b) == 2).await;
+    assert_eq!(t.app.vps.server_status(&a)["relayed"], false);
+
+}
+
+/// Velocity's way on (B7): each server has its own loopback port on the
+/// relay, opened when home names it, and a connection there reaches only
+/// that server. A server set to check accounts through the relay that
+/// Velocity doesn't have yet is refused at the front port, not let in
+/// without the check.
+#[tokio::test(flavor = "multi_thread")]
+async fn velocity_ports_reach_their_own_server() {
+    use hopper_core::hosting::proxy_forward::{Mode, Record};
+    let t = crate::cross_origin_tests::panel_with(crate::TlsInfo { fingerprint: "AA:BB".into(), ca_pem: String::new() });
+    let a = t.server.clone();
+    let b = add_server(&t, "Creative");
+    for id in [&a, &b] {
+        t.app.vps_forward.set(id, Some(Record { mode: Mode::Relay, ..Default::default() })).unwrap();
+    }
+    set_addresses(&t, &a, &["survival.example.test"]);
+    set_addresses(&t, &b, &["creative.example.test"]);
+
+    let r = run_relay_with(true).await;
+    let base = r.backend;
+    let backends = vec![
+        home::Backend { server: a.clone(), name: "survival".into(), port: base, hosts: vec!["survival.example.test".into()] },
+        home::Backend { server: b.clone(), name: "creative".into(), port: base + 1, hosts: vec!["creative.example.test".into()] },
+    ];
+    t.app.vps.set_config(home::HomeConfig { servers: vec![a.clone(), b.clone()], backends, ..home_cfg(&r, r.tunnel, &a) }).unwrap();
+    let ctl = home::routes(&t.app);
+    assert_eq!(ctl.routes.iter().map(|r| (r.port, r.hosts.clone())).collect::<Vec<_>>(), [(base, vec!["survival.example.test".to_string()]), (base + 1, vec!["creative.example.test".to_string()])]);
+    home::start(t.app.clone());
+    wait_for("both servers on the relay", 15, || r.relay.route_servers().len() == 2).await;
+    let mut open = false;
+    for _ in 0..50 {
+        if TcpStream::connect(("127.0.0.1", base + 1)).await.is_ok() {
+            open = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(open, "the second backend port opened");
+    // Velocity's own address in the handshake doesn't matter here: the port does.
+    let (status, _) = list_ping_as(base + 1, "127.0.0.1").await;
+    assert_ne!(status["version"]["name"], "Hopper relay", "{status}");
+    wait_for("the second server's stream", 10, || streams(&t, &b) >= 1).await;
+    let before_a = streams(&t, &a);
+    let (status, _) = list_ping_as(base, "127.0.0.1").await;
+    assert_ne!(status["version"]["name"], "Hopper relay", "{status}");
+    wait_for("the first server's stream", 10, || streams(&t, &a) > before_a).await;
+
+    // The second server's Velocity line is gone (taken out by hand): its
+    // address is refused at the front port and its old port goes nowhere.
+    let first_only = t.app.vps.config().backends[..1].to_vec();
+    t.app.vps.set_config(home::HomeConfig { backends: first_only, ..t.app.vps.config() }).unwrap();
+    wait_for("the second server without a port", 15, || home::routes(&t.app).routes[1].port == 0).await;
+    let mut refused = String::new();
+    for _ in 0..100 {
+        refused = join_refused(r.game, "creative.example.test").await;
+        if refused.contains("isn't set up on the relay yet") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(refused.contains("isn't set up on the relay yet"), "{refused}");
+    let gone = streams(&t, &b);
+    let mut s = TcpStream::connect(("127.0.0.1", base + 1)).await.unwrap();
+    let _ = s.write_all(&core::handshake_packet(767, "127.0.0.1", base + 1, 1)).await;
+    let _ = s.write_all(&core::packet(0, &[])).await;
+    let mut chunk = [0u8; 64];
+    let n = tokio::time::timeout(Duration::from_secs(10), s.read(&mut chunk)).await.expect("closed in time").unwrap_or(0);
+    assert_eq!(n, 0, "nothing answers on a port no server has");
+    assert_eq!(streams(&t, &b), gone);
+}
+
+/// Taking a server off the relay through the API: refused while it still
+/// checks accounts through the relay, and its Velocity line goes with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn taking_a_server_off_needs_stop_first() {
+    use crate::cross_origin_tests::{OWN, body, call, cookie_login};
+    use hopper_core::hosting::proxy_forward::{Mode, Record};
+    let t = crate::cross_origin_tests::panel_with(crate::TlsInfo { fingerprint: "AA:BB".into(), ca_pem: String::new() });
+    let a = t.server.clone();
+    let b = add_server(&t, "Creative");
+    let backends = vec![home::Backend { server: a.clone(), name: "a".into(), port: 25580, hosts: vec![] }, home::Backend { server: b.clone(), name: "b".into(), port: 25581, hosts: vec![] }];
+    t.app.vps.set_config(home::HomeConfig { servers: vec![a.clone(), b.clone()], backends, ..Default::default() }).unwrap();
+    t.app.vps_forward.set(&b, Some(Record { mode: Mode::Relay, ..Default::default() })).unwrap();
+    let me = cookie_login(&t).await;
+    let put = |servers: Vec<String>| call("PUT", "/api/v1/vps-relay").origin(OWN).h("cookie", format!("hopperd_session={me}")).h("x-hopperd", "1").json(serde_json::json!({ "servers": servers }));
+    let (s, _, got) = put(vec![a.clone()]).send(&t).await;
+    assert_eq!(s, axum::http::StatusCode::BAD_REQUEST);
+    assert!(body(&got)["error"].as_str().unwrap().contains("Stop using the relay for Creative first"), "{}", body(&got));
+    assert_eq!(t.app.vps.config().servers.len(), 2);
+    let (s, _, _) = put(vec![b.clone()]).send(&t).await;
+    assert_eq!(s, axum::http::StatusCode::OK, "a server on its own comes off");
+    let c = t.app.vps.config();
+    assert_eq!(c.servers, [b.clone()]);
+    assert_eq!(c.backends.iter().map(|x| x.server.clone()).collect::<Vec<_>>(), [b.clone()]);
+    // The list in Settings › Relays: owner only.
+    let (s, _, got) = call("GET", "/api/v1/vps-relays").origin(OWN).h("cookie", format!("hopperd_session={me}")).h("x-hopperd", "1").send(&t).await;
+    assert_eq!(s, axum::http::StatusCode::OK);
+    assert_eq!(body(&got)["relays"], serde_json::json!([]), "no relay address set");
+    let (s, _, _) = call("GET", "/api/v1/vps-relays").origin(OWN).send(&t).await;
+    assert_eq!(s, axum::http::StatusCode::UNAUTHORIZED);
 }

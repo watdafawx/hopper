@@ -567,7 +567,7 @@ async fn step_java(c: &mut Ctx<'_>, inst: &mut Installed, arch: &str) -> StepRes
     Ok(("done", "downloaded, checksum ok".into()))
 }
 
-async fn step_velocity(c: &mut Ctx<'_>, inst: &mut Installed) -> StepResult {
+async fn step_velocity(c: &mut Ctx<'_>, inst: &mut Installed, server: &str) -> StepResult {
     let mut did = Vec::new();
     if !c.root(&format!("id -u {VELOCITY_USER}")).await?.ok() {
         c.must(&format!("useradd --system --user-group --no-create-home --home-dir {VELOCITY_DATA} --shell /usr/sbin/nologin {VELOCITY_USER}"), "Making Velocity's user").await?;
@@ -592,13 +592,22 @@ async fn step_velocity(c: &mut Ctx<'_>, inst: &mut Installed) -> StepResult {
         }
         did.push("forwarding secret");
     }
-    let toml = plan::velocity_toml(!offline_test());
+    // Every server on the relay, this one too, each with its own loopback
+    // port and its addresses as forced hosts (B7).
+    let (backends, no_address) = velocity_backends(c.app, server);
+    let toml = plan::velocity_toml(!offline_test(), &backends);
     if c.root(&format!("cat {VELOCITY_TOML} 2>/dev/null")).await?.out != toml {
         let o = c.root_in(&format!("umask 027 && cat > {VELOCITY_TOML}.tmp && chown root:{VELOCITY_USER} {VELOCITY_TOML}.tmp && chmod 0640 {VELOCITY_TOML}.tmp && mv -f {VELOCITY_TOML}.tmp {VELOCITY_TOML}"), toml.as_bytes(), SHORT).await?;
         if !o.ok() {
             return Err(format!("Writing Velocity's settings: {}", o.why()));
         }
         did.push("settings");
+    }
+    // What Velocity now has, so home tells the relay the same.
+    let mut cfg = c.app.vps.config();
+    if cfg.backends != backends {
+        cfg.backends = backends.clone();
+        c.app.vps.set_config(cfg).map_err(|e| format!("Saving the relay settings: {e:#}"))?;
     }
     // Velocity sends usage numbers to bStats unless its file says no; a
     // relay set up for a player doesn't. Written as Velocity's user, since
@@ -620,11 +629,37 @@ async fn step_velocity(c: &mut Ctx<'_>, inst: &mut Installed) -> StepResult {
         .await?;
         did.push("file rights");
     }
+    // Several servers and one without an address of its own: its players
+    // can't pick it. Said here; the relay card says it too.
+    let warn = if no_address.is_empty() { String::new() } else { format!(" · no address of its own, so players can't pick it: {}", no_address.join(", ")) };
+    let count = if backends.len() > 1 { format!(" · {} servers", backends.len()) } else { String::new() };
     if did.is_empty() {
-        return Ok(("ok", format!("{}, already there", VELOCITY.name)));
+        return Ok(("ok", format!("{}, already there{count}{warn}", VELOCITY.name)));
     }
     c.restart_velocity = true;
-    Ok(("done", did.join(", ")))
+    Ok(("done", format!("{}{count}{warn}", did.join(", "))))
+}
+
+/// The relay's Velocity servers (B7): every server on the relay and
+/// `server`, in the relay's order. Also the names of servers that share the
+/// relay without an address of their own.
+fn velocity_backends(app: &Arc<App>, server: &str) -> (Vec<crate::vps::home::Backend>, Vec<String>) {
+    let cfg = app.vps.config();
+    let mut ids = cfg.servers.clone();
+    if !ids.iter().any(|s| s == server) {
+        ids.push(server.to_string());
+    }
+    let live = crate::router::effective(app);
+    let wanted: Vec<(String, String, Vec<String>)> = ids
+        .iter()
+        .filter_map(|id| {
+            let e = app.servers.get(id)?;
+            Some((id.clone(), e.name.clone(), live.get(id).map(|x| crate::vps::home::exact_hosts(&x.addresses)).unwrap_or_default()))
+        })
+        .collect();
+    let backends = plan::assign_backends(&cfg.backends, &wanted);
+    let no_address = if backends.len() > 1 { backends.iter().filter(|b| b.hosts.is_empty()).filter_map(|b| app.servers.get(&b.server).map(|e| e.name.clone())).collect() } else { Vec::new() };
+    (backends, no_address)
 }
 
 async fn step_velocity_service(c: &Ctx<'_>) -> StepResult {
@@ -803,7 +838,8 @@ async fn install(app: &Arc<App>, a: &InstallArgs) -> Result<(), String> {
     save_installed(&c, &inst).await?;
     step!("java", step_java(&mut c, &mut inst, arch).await);
     save_installed(&c, &inst).await?;
-    step!("velocity", step_velocity(&mut c, &mut inst).await);
+    step!("velocity", step_velocity(&mut c, &mut inst, &a.server).await);
+
     save_installed(&c, &inst).await?;
     step!("keys", step_keys(&mut c, &host, a.ports).await);
     step!("service", step_service(&c, a.ports).await);

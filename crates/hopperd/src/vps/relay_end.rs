@@ -22,10 +22,10 @@
 //! The key is printed once, to the console, and never logged; the relay
 //! keeps only its SHA-256 in `relay.json` (owner-only, like the folder).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -117,6 +117,11 @@ pub struct Relay {
     pub velocity_port: u16,
     /// The voice port (B6), when it could be opened.
     pub voice: Option<Arc<super::voice::relay::RelayVoice>>,
+    /// The first loopback port Velocity sends players on to (0: none). With
+    /// several servers (B7) each has its own port from here up.
+    backend_base: AtomicU16,
+    /// The backend ports listening so far, the first one too.
+    backends: Mutex<HashSet<u16>>,
     home: Mutex<Option<HomeLink>>,
     epoch: AtomicU64,
     fails: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
@@ -139,6 +144,8 @@ impl Relay {
             game_port,
             velocity_port: 0,
             voice: None,
+            backend_base: AtomicU16::new(0),
+            backends: Mutex::new(HashSet::new()),
             home: Mutex::new(None),
             epoch: AtomicU64::new(0),
             fails: Mutex::new(HashMap::new()),
@@ -152,6 +159,13 @@ impl Relay {
     pub fn ready(&self) -> bool {
         self.home.lock().unwrap().as_ref().is_some_and(|h| !h.routes.is_empty() && !h.handle.is_dead())
     }
+
+    /// The servers home carries now, in its order.
+    #[cfg(test)]
+    pub fn route_servers(&self) -> Vec<String> {
+        self.home.lock().unwrap().as_ref().map(|h| h.routes.iter().map(|r| r.server.clone()).collect()).unwrap_or_default()
+    }
+
 
     fn blocked(&self, ip: IpAddr) -> bool {
         let mut f = self.fails.lock().unwrap();
@@ -209,21 +223,13 @@ impl rustls::server::ResolvesServerCert for Fixed {
 pub async fn serve(relay: Arc<Relay>, game: TcpListener, tunnel: TcpListener, tls: Arc<rustls::ServerConfig>, backend: Option<TcpListener>) {
     let r = relay.clone();
     let rb = relay.clone();
-    // Velocity's connections on to the server: each is a stream to home.
+    // Velocity's connections on to the servers: each is a stream to home.
     let backends = async move {
         let Some(l) = backend else { return std::future::pending::<()>().await };
-        loop {
-            let Ok((sock, peer)) = l.accept().await else {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                continue;
-            };
-            let r = rb.clone();
-            tokio::spawn(async move {
-                if let Err(e) = backend_conn(&r, sock).await {
-                    log::debug!("relay: Velocity's connection {peer}: {e:#}");
-                }
-            });
-        }
+        let Ok(port) = l.local_addr().map(|a| a.port()) else { return };
+        rb.backend_base.store(port, Ordering::SeqCst);
+        rb.backends.lock().unwrap().insert(port);
+        accept_backends(rb, l, port).await
     };
     let voice = relay.voice.clone();
     let voice = async move {
@@ -261,6 +267,51 @@ pub async fn serve(relay: Arc<Relay>, game: TcpListener, tunnel: TcpListener, tl
         }
     };
     tokio::join!(homes, players, backends, voice);
+}
+
+/// Takes Velocity's connections on one backend port.
+async fn accept_backends(r: Arc<Relay>, l: TcpListener, port: u16) {
+    loop {
+        let Ok((sock, peer)) = l.accept().await else {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        };
+        let r = r.clone();
+        tokio::spawn(async move {
+            if let Err(e) = backend_conn(&r, sock, port).await {
+                log::debug!("relay: Velocity's connection {peer} on {port}: {e:#}");
+            }
+        });
+    }
+}
+
+/// Opens the backend ports home's routes name that aren't open yet (B7):
+/// only on 127.0.0.1, only in the relay's own range above the first one.
+/// They stay open; a port no route names any more is refused per
+/// connection ([`super::backend_route`]).
+fn open_backends(r: &Arc<Relay>, routes: &[Route]) {
+    let base = r.backend_base.load(Ordering::SeqCst);
+    if base == 0 {
+        return;
+    }
+    for port in routes.iter().filter(|rt| rt.velocity).map(|rt| rt.port) {
+        if port <= base || port >= base.saturating_add(super::MAX_BACKENDS) {
+            continue;
+        }
+        if !r.backends.lock().unwrap().insert(port) {
+            continue;
+        }
+        let r = r.clone();
+        tokio::spawn(async move {
+            match TcpListener::bind(("127.0.0.1", port)).await {
+                Ok(l) => accept_backends(r, l, port).await,
+                Err(e) => {
+                    log::warn!("relay: can't listen for Velocity on 127.0.0.1:{port}: {e}");
+                    r.backends.lock().unwrap().remove(&port);
+                }
+            }
+        });
+    }
 }
 
 async fn home_conn(r: Arc<Relay>, acceptor: tokio_rustls::TlsAcceptor, sock: TcpStream, peer: SocketAddr) {
@@ -310,7 +361,7 @@ async fn home_conn(r: Arc<Relay>, acceptor: tokio_rustls::TlsAcceptor, sock: Tcp
             match head.map(|h| h.kind).as_deref() {
                 Some("control") => {
                     let rc = rc.clone();
-                    tokio::spawn(async move { control(&rc, epoch, s).await });
+                    tokio::spawn(async move { control(rc, epoch, s).await });
                 }
                 Some("voice") if rc.voice.is_some() => {
                     tokio::spawn(rc.voice.clone().expect("voice").stream(epoch, s));
@@ -334,7 +385,7 @@ async fn home_conn(r: Arc<Relay>, acceptor: tokio_rustls::TlsAcceptor, sock: Tcp
 
 /// Reads home's control lines: which servers it carries, and asks for the
 /// players' pings (answered on the same stream).
-async fn control(r: &Relay, epoch: u64, s: mux::Stream) {
+async fn control(r: Arc<Relay>, epoch: u64, s: mux::Stream) {
     let mux::Stream { mut rx, mut tx, .. } = s;
     let mut lines = Lines::default();
     while let Ok(Some(chunk)) = rx.recv().await {
@@ -352,6 +403,7 @@ async fn control(r: &Relay, epoch: u64, s: mux::Stream) {
                 if let Some(v) = &r.voice {
                     v.set_enabled(epoch, h.routes.iter().any(|rt| rt.voice));
                 }
+                open_backends(&r, &h.routes);
             }
             if c.pings {
                 let mut out = RelayLine::default();
@@ -428,9 +480,25 @@ async fn player_conn(r: &Relay, mut sock: TcpStream, peer: SocketAddr) -> anyhow
         core::read_handshake(b)
     })
     .await?;
+    // Several servers on one relay (B7): the address the player typed
+    // picks one. An address no server lists is refused, and so is a server
+    // that checks accounts through Velocity while Velocity doesn't know it
+    // yet: sent home directly, its player would skip the account check.
     let target = {
         let h = r.home.lock().unwrap();
-        h.as_ref().filter(|h| !h.handle.is_dead()).and_then(|h| h.routes.first().map(|rt| (h.handle.clone(), rt.server.clone(), rt.velocity)))
+        match h.as_ref().filter(|h| !h.handle.is_dead()) {
+            None => Ok(None),
+            Some(h) => match super::pick_route(&h.routes, &hs.host) {
+                Some(rt) if rt.velocity && !super::velocity_knows(&h.routes, rt) => Err(NOT_SET_UP),
+                Some(rt) => Ok(Some((h.handle.clone(), rt.server.clone(), rt.velocity))),
+                None if h.routes.is_empty() => Ok(None),
+                None => Err(UNKNOWN_HOST),
+            },
+        }
+    };
+    let target = match target {
+        Ok(t) => t,
+        Err(why) => return refuse(&mut sock, buf, &hs, why).await,
     };
     // A joining player: list their socket here, so home's Players tab can
     // show the ping this end measures (B5). Their name is the next packet,
@@ -474,13 +542,15 @@ async fn player_conn(r: &Relay, mut sock: TcpStream, peer: SocketAddr) -> anyhow
 /// the server that checks accounts through the relay. Velocity is only
 /// sent players while home is connected; if home went away since, the
 /// connection ends and Velocity tells the player.
-async fn backend_conn(r: &Relay, sock: TcpStream) -> anyhow::Result<()> {
+async fn backend_conn(r: &Relay, sock: TcpStream, port: u16) -> anyhow::Result<()> {
     let _ = sock.set_nodelay(true);
+    let base = r.backend_base.load(Ordering::SeqCst);
     let target = {
         let h = r.home.lock().unwrap();
-        h.as_ref().filter(|h| !h.handle.is_dead()).and_then(|h| h.routes.iter().find(|rt| rt.velocity).map(|rt| (h.handle.clone(), rt.server.clone())))
+        let h = h.as_ref().filter(|h| !h.handle.is_dead()).context("home isn't connected")?;
+        super::backend_route(&h.routes, port, base).map(|rt| (h.handle.clone(), rt.server.clone()))
     };
-    let (handle, server) = target.context("home isn't connected")?;
+    let (handle, server) = target.with_context(|| format!("no server on backend port {port}"))?;
     let head = Head { kind: "game".into(), server, peer: "velocity".into() };
     let stream = handle.open(serde_json::to_vec(&head).expect("head")).await.map_err(|e| anyhow::anyhow!("tunnel: {e:?}"))?;
     super::pipe(sock, stream, |_| {}, |_| {}).await.map_err(anyhow::Error::msg)
@@ -536,10 +606,26 @@ async fn read_until<T>(sock: &mut TcpStream, buf: &mut Vec<u8>, parse: impl Fn(&
     }
 }
 
+/// What the relay tells a player it can't send anywhere: the line on the
+/// join screen, and the server list's.
+struct Refusal {
+    join: &'static str,
+    list: &'static str,
+}
+
+const OFFLINE: Refusal = Refusal { join: "The home server is offline. Try again in a little while.", list: "Home server is offline" };
+const UNKNOWN_HOST: Refusal = Refusal { join: "No server here goes by this address. Check the address and try again.", list: "No server goes by this address" };
+const NOT_SET_UP: Refusal = Refusal { join: "This server isn't set up on the relay yet. Ask the owner to run the relay setup again.", list: "Not set up on this relay yet" };
+
 /// The relay's own answer while home isn't connected.
 async fn offline(sock: &mut TcpStream, buf: Vec<u8>, hs: &core::Handshake) -> anyhow::Result<()> {
+    refuse(sock, buf, hs, OFFLINE).await
+}
+
+/// Answers a player the relay can't send anywhere, without home.
+async fn refuse(sock: &mut TcpStream, buf: Vec<u8>, hs: &core::Handshake, why: Refusal) -> anyhow::Result<()> {
     if hs.is_login() {
-        let text = json!({ "text": "The home server is offline. Try again in a little while." });
+        let text = json!({ "text": why.join });
         sock.write_all(&core::login_disconnect_packet(&text)).await?;
         sock.flush().await?;
         return Ok(());
@@ -564,7 +650,8 @@ async fn offline(sock: &mut TcpStream, buf: Vec<u8>, hs: &core::Handshake) -> an
     let status = json!({
         "version": { "name": "Hopper relay", "protocol": hs.protocol },
         "players": { "max": 0, "online": 0 },
-        "description": { "text": "Home server is offline" },
+        "description": { "text": why.list },
+
     });
     sock.write_all(&core::status_packet(&status)).await?;
     if let Ok((1, payload)) = take_packet(sock, &mut rest, packet).await {

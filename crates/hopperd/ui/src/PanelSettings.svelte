@@ -10,6 +10,7 @@
     { id: 'panel-folder', label: 'Panel folder', icon: FolderCog, owner: true, blurb: 'Where the servers and the panel’s own data live, servers deleted lately, and how long backups stay.', words: 'servers folder move data deleted restore backups undo hopper-backups clean up retention disk space' },
     { id: 'access', label: 'Access & devices', icon: Shield, owner: true, blurb: 'Pair Hopper desktop, how clients reach this panel, and the devices allowed in.', words: 'pair pairing devices tls certificate sftp https addresses' },
     { id: 'addresses', label: 'Server addresses', icon: Globe, owner: true, blurb: 'Players join by name on one shared Minecraft port.', words: 'domain port router proxy join' },
+    { id: 'relays', label: 'Relays', icon: Globe, owner: true, blurb: 'VPSes your players join through, and which servers use each one.', words: 'relay vps cloud velocity tunnel forced hosts public address voice' },
     { id: 'content', label: 'Mod sources', icon: Compass, owner: true, blurb: 'The CurseForge API key, and mods from GitHub and other links.', words: 'curseforge api key modrinth github maven jenkins link source token' },
     { id: 'security', label: 'Security', icon: Lock, owner: true, blurb: 'Two-factor sign-in, your password, API tokens and the audit log.', words: '2fa two-factor password tokens audit log' },
     { id: 'users', label: 'Users', icon: UsersIcon, owner: true, blurb: 'Others sign in with their own name and password, limited to their role and servers.', words: 'people accounts roles permissions' },
@@ -48,6 +49,7 @@
   import BackupTargets from './BackupTargets.svelte';
   import BackupRetention from './BackupRetention.svelte';
   import Machines from './Machines.svelte';
+  import Relays from './Relays.svelte';
 
   let { cat = '', hello, me, pending = $bindable([]) } = $props();
   const owner = $derived(ownerLike(me));
@@ -93,6 +95,7 @@
         {#if c.id === 'panel-folder'}<ServersFolder /><BackupRetention />
         {:else if c.id === 'access' || c.id === 'account'}<Access {hello} {me} bind:pending />
         {:else if c.id === 'addresses'}<Addresses />
+        {:else if c.id === 'relays'}<Relays />
         {:else if c.id === 'content'}<CfKey /><SourcesSetting /><FilesChangesSetting />
         {:else if c.id === 'security'}<Security />
         {:else if c.id === 'users'}<Users />

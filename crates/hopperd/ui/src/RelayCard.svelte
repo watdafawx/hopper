@@ -141,6 +141,9 @@
       // button and the buttons above say what to do.
       case 'old':
         return 'The relay needs an update for voice.';
+      // B7: the relay has one voice port, already another server's.
+      case 'other':
+        return `${vc.mod} · goes through the relay for ${vc.owner} only`;
       default:
         // (Playing at home shows its own note instead of this row.)
         return mode === 'relay' ? `${vc.mod} · stop and use the relay again to add it` : `${vc.mod} · not through the relay yet`;
@@ -220,10 +223,21 @@
       {#if onSetup}<button class="btn ghost sm icon" title="Relay setup: check, repair or remove it" aria-label="Relay setup" onclick={onSetup}><Settings2 size={14} /></button>{/if}
     </h3>
     <!-- At home the relay's address doesn't reach the server: no account checks there. -->
-    {#if r.address && mode !== 'home'}
+    <!-- With no address of its own (B7) the relay refuses its address, so don't offer it. -->
+    {#if r.address && mode !== 'home' && r.addresses?.state !== 'none'}
       <div class="lbl">Players join</div>
       <div class="addr"><span class="mono">{r.address}</span><button class="btn sm" onclick={copy}><Copy size={13} />Copy</button></div>
     {/if}
+    <!-- Several servers on one relay (B7): players pick this one by its address. -->
+    {#if mode !== 'home' && r.addresses?.state === 'none'}
+      <div class="note bad">This server shares the relay with other servers and has no address of its own, so players can't pick it. Give it one in its Settings › Network & address.</div>
+    {:else if mode !== 'home' && r.addresses?.state === 'stale'}
+      <div class="note bad row">
+        <span class="grow">Its address {r.addresses.hosts?.[0] ?? ''} isn't on the relay yet. Run the relay setup again so players reach it there.</span>
+        {#if onSetup}<button class="btn sm" onclick={onSetup}>Repair</button>{/if}
+      </div>
+    {/if}
+
     {#if fw && mode === 'home'}
       <!-- Playing at home: the way back is offered once the relay is up again. -->
       <div class="note" class:back={up}>{up ? 'The relay is back.' : 'Playing at home while the relay is down.'} Players join with this server's own address and the server checks their accounts.{#if up}{' '}Go back to the relay so players join through it again.{/if}</div>
@@ -353,6 +367,8 @@
   .checks li { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 16px; }
   .checks li span:last-child { min-width: 0; overflow-wrap: anywhere; }
   .note.bad { color: var(--text); background: var(--red-dim); overflow-wrap: anywhere; }
+  .note.row .grow { flex: 1; min-width: 0; }
+  .note.row > :global(.btn) { flex: none; }
   .acts .btn.sm { margin-left: auto; }
   @media (max-width: 520px) { .stats { grid-template-columns: 1fr 1fr; } }
 </style>

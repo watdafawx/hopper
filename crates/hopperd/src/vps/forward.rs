@@ -67,7 +67,7 @@ impl Forward {
         self.saved.lock().unwrap().servers.get(id).cloned().unwrap_or_default()
     }
 
-    fn set(&self, id: &str, r: Option<Record>) -> anyhow::Result<()> {
+    pub(super) fn set(&self, id: &str, r: Option<Record>) -> anyhow::Result<()> {
         let mut s = self.saved.lock().unwrap();
         let mut next = s.clone();
         match r {
@@ -326,7 +326,11 @@ pub fn apply(app: &App, e: &Entry, act: Action, who: hopper_core::actor::Who, jo
             }
         }
     }
-    let to = app.vps.voice_to();
+    // The relay carries one server's voice (B7): while another server's
+    // voice goes through it, this one's voice mod is left as it is.
+    let other_has_voice = super::home::voice_owner(app).is_some_and(|o| o != e.id);
+    let to = if other_has_voice { None } else { app.vps.voice_to() };
+
     let changed = files_step(&e.root, fm, &secret, &p, to.as_ref().map(|(h, p)| (h.as_str(), *p)), &mut rec, since)?;
     if p.to == Mode::Direct {
         // Only empty ones go (remove_dir refuses the rest).

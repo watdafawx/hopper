@@ -85,6 +85,57 @@ pub struct HomeConfig {
     pub servers: Vec<String>,
     /// What players type to join; empty: the relay's host and game port.
     pub public_address: String,
+    /// What the relay setup wrote into the relay's Velocity (B7), one per
+    /// server: its name there, its loopback port, its forced hosts.
+    pub backends: Vec<Backend>,
+}
+
+/// One server in the relay's `velocity.toml` (B7).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct Backend {
+    pub server: String,
+    /// Its name under `[servers]` (never "try").
+    pub name: String,
+    /// The relay's loopback port Velocity sends its players on to.
+    pub port: u16,
+    /// Its `[forced-hosts]` addresses.
+    pub hosts: Vec<String>,
+}
+
+/// The addresses of `addresses` the relay can tell apart: exact names, lower
+/// case, without Forge's marker or a trailing dot (Velocity's forced hosts
+/// take no wildcards). Only name characters, so each goes into
+/// `velocity.toml` as it is.
+pub fn exact_hosts(addresses: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for a in addresses {
+        let h = hopper_core::hosting::router::normalize_host(a);
+        let name_only = h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+        if !h.is_empty() && h.len() <= 253 && name_only && !out.contains(&h) {
+            out.push(h);
+        }
+    }
+    out
+}
+
+/// Whether a relayed server's address is on the relay (B7): "ok"; "none"
+/// (several servers share the relay and this one has no address of its
+/// own, so players can't pick it); "stale" (its players go through the
+/// relay's Velocity, which doesn't have its address yet: the relay setup
+/// writes it).
+pub fn address_state(cfg: &HomeConfig, id: &str, velocity: bool, hosts: &[String]) -> &'static str {
+    if cfg.servers.len() < 2 {
+        return "ok";
+    }
+    if hosts.is_empty() {
+        return "none";
+    }
+    let written = cfg.backends.iter().find(|b| b.server == id);
+    if velocity && written.is_none_or(|b| b.hosts != hosts || b.port == 0) {
+        return "stale";
+    }
+    "ok"
 }
 
 impl HomeConfig {
@@ -308,6 +359,28 @@ impl Home {
         self.pings_in.send_modify(|n| *n += 1);
     }
 
+    /// What players type to join `id` through the relay: with several
+    /// servers on it, the server's own address (B7), the one written into
+    /// the relay's Velocity, else the first of `live` (its addresses now);
+    /// else the relay's.
+    pub fn players_address_for(&self, id: &str, live: &[String]) -> String {
+        let cfg = self.config();
+        if cfg.servers.len() > 1
+            && let Some(h) = cfg.backends.iter().find(|b| b.server == id).and_then(|b| b.hosts.first()).or(live.first())
+        {
+            return match self.status().game_port {
+                0 | 25565 => h.clone(),
+                p => format!("{h}:{p}"),
+            };
+        }
+        self.players_address()
+    }
+
+    /// Players on `id` through the relay right now.
+    pub fn players_on(&self, id: &str) -> usize {
+        self.stats.lock().unwrap().live.get(id).map_or(0, |l| l.players.load(Ordering::Relaxed))
+    }
+
     /// What players type to join through the relay.
     pub fn players_address(&self) -> String {
         let cfg = self.config();
@@ -428,7 +501,7 @@ impl Home {
         let players = st.live.get(id).map_or(0, |l| l.players.load(Ordering::Relaxed));
         drop(st);
         let test = self.last_test.lock().unwrap().get(id).cloned();
-        let address = self.players_address();
+        let address = self.players_address_for(id, &[]);
         let now = unix();
         json!({
             "relayed": true,
@@ -578,11 +651,48 @@ pub(super) async fn connect(cfg: &HomeConfig) -> Result<(Live, link::RelayHello)
     Ok((live, hello))
 }
 
-/// The routes home sends on its control stream.
-fn routes(app: &App) -> Control {
+/// What players type to join `id` through the relay (see
+/// [`Home::players_address_for`]), with its addresses read now.
+pub fn server_players_address(app: &App, id: &str) -> String {
+    let live = if app.vps.config().servers.len() > 1 { crate::router::effective(app).remove(id).map(|x| exact_hosts(&x.addresses)).unwrap_or_default() } else { Vec::new() };
+    app.vps.players_address_for(id, &live)
+}
+
+/// The routes home sends on its control stream. With several servers the
+/// relay picks one by the address a player typed (B7): for one that goes
+/// through the relay's Velocity, the addresses and port the setup wrote
+/// there (so the relay and Velocity agree); for the rest, its addresses now.
+pub(super) fn routes(app: &App) -> Control {
     let cfg = app.vps.config();
     let velocity = |id: &str| app.vps_forward.mode(id) == hopper_core::hosting::proxy_forward::Mode::Relay;
-    Control { routes: cfg.servers.iter().filter_map(|id| app.servers.get(id).map(|e| Route { server: id.clone(), name: e.name.clone(), velocity: velocity(id), voice: has_voice(app, id) })).collect(), pings: false }
+    let live = if cfg.servers.len() > 1 { crate::router::effective(app) } else { HashMap::new() };
+    let routes = cfg
+        .servers
+        .iter()
+        .filter_map(|id| {
+            let e = app.servers.get(id)?;
+            let v = velocity(id);
+            let written = cfg.backends.iter().find(|b| b.server == *id);
+            // One Velocity doesn't have yet keeps its addresses (and no
+            // port), so the relay says it isn't set up rather than unknown.
+            let hosts = match written.filter(|_| v) {
+                Some(b) => b.hosts.clone(),
+                None => live.get(id).map(|x| exact_hosts(&x.addresses)).unwrap_or_default(),
+            };
+
+            let port = if v { written.map_or(0, |b| b.port) } else { 0 };
+            Some(Route { server: id.clone(), name: e.name.clone(), velocity: v, voice: has_voice(app, id), hosts, port })
+        })
+        .collect();
+    Control { routes, pings: false }
+}
+
+/// The one server whose voice goes through the relay (B7): the first on it
+/// with its voice mod pointed there. The relay has one voice port, and a
+/// voice packet doesn't say which server it's for, so other servers' voice
+/// stays as it was.
+pub fn voice_owner(app: &App) -> Option<String> {
+    app.vps.config().servers.into_iter().find(|id| has_voice(app, id))
 }
 
 /// The server's voice mod points players at the relay (set with "Use the
@@ -600,14 +710,12 @@ pub fn server_port(root: &Path) -> u16 {
         .unwrap_or(25565)
 }
 
-/// Where home sends voice packets: the voice mod of the first server on
-/// the relay that has voice, on this PC. The relay passes voice for one
-/// server, like the game port in B2 (per-server ports are B7).
+/// Where home sends voice packets: the voice mod of [`voice_owner`], on
+/// this PC.
 fn voice_target(app: Arc<App>) -> super::voice::home::Target {
     Arc::new(move || {
-        let cfg = app.vps.config();
-        let id = cfg.servers.iter().find(|id| has_voice(&app, id))?;
-        let e = app.servers.get(id)?;
+        let id = voice_owner(&app)?;
+        let e = app.servers.get(&id)?;
         let d = hopper_core::hosting::voice_mods::detect(&e.root, server_port(&e.root))?;
         let ip = d.bind.filter(|b| !b.is_unspecified()).unwrap_or(std::net::IpAddr::from([127, 0, 0, 1]));
         Some(SocketAddr::new(ip, d.port))
@@ -786,6 +894,7 @@ pub fn routes_api() -> Router<Arc<App>> {
     Router::new()
         .route("/api/v1/vps-relay", get(get_config).put(put_config))
         .route("/api/v1/vps-relay/retry", post(retry))
+        .route("/api/v1/vps-relays", get(list_relays))
         .route("/api/v1/servers/{id}/vps-relay", get(server_status))
         .route("/api/v1/servers/{id}/vps-relay/test", post(super::health::test_route))
 }
@@ -858,6 +967,17 @@ async fn put_config(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
                 clean.push(id);
             }
         }
+        // A server that checks accounts through the relay is first put
+        // back on its own (Stop): taken off while set up for the relay, its
+        // players could join neither way.
+        for gone in c.servers.iter().filter(|id| !clean.contains(id)) {
+            if app.vps_forward.mode(gone) != hopper_core::hosting::proxy_forward::Mode::Direct
+                && let Some(e) = app.servers.get(gone)
+            {
+                return Err(bad(format!("Stop using the relay for {} first (its Overview, Relay card), then take it off.", e.name)));
+            }
+        }
+        c.backends.retain(|b| clean.contains(&b.server));
         c.servers = clean;
     }
     if let Some(p) = b.public_address {
@@ -881,13 +1001,96 @@ async fn retry(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) 
     Ok(Json(json!({ "ok": true })))
 }
 
+/// A relayed server's address state for the card and the Relays list:
+/// `{state, hosts}` (see [`address_state`]).
+fn address_json(app: &App, cfg: &HomeConfig, live: &HashMap<String, hopper_core::hosting::router::Effective>, id: &str) -> Value {
+    let hosts = live.get(id).map(|x| exact_hosts(&x.addresses)).unwrap_or_default();
+    let velocity = app.vps_forward.mode(id) == hopper_core::hosting::proxy_forward::Mode::Relay;
+    json!({ "state": address_state(cfg, id, velocity, &hosts), "hosts": hosts })
+}
+
+/// Settings › Relays (B7): the panel's relay and the servers on it. One
+/// relay per panel for now; a list so more can follow.
+async fn list_relays(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    let a = app.clone();
+    let v = tokio::task::spawn_blocking(move || relays_json(&a)).await.unwrap_or_default();
+    Ok(Json(v))
+}
+
+fn relays_json(app: &App) -> Value {
+    let cfg = app.vps.config();
+    if cfg.address.trim().is_empty() {
+        return json!({ "relays": [] });
+    }
+    let s = app.vps.status();
+    let rtt = app.vps.link.lock().unwrap().as_ref().and_then(|(h, _)| h.rtt()).map(|d| d.as_millis() as u64);
+    let live = crate::router::effective(app);
+    let owner = voice_owner(app);
+    let servers: Vec<Value> = cfg
+        .servers
+        .iter()
+        .filter_map(|id| {
+            let e = app.servers.get(id)?;
+            Some(json!({
+                "id": id,
+                "name": e.name,
+                "address": app.vps.players_address_for(id, live.get(id).map(|x| exact_hosts(&x.addresses)).as_deref().unwrap_or_default()),
+                "mode": app.vps_forward.mode(id),
+                "players": app.vps.players_on(id),
+                "addresses": address_json(app, &cfg, &live, id),
+                "voice": owner.as_deref() == Some(id.as_str()),
+            }))
+        })
+        .collect();
+    let host = relay_target(&cfg.address).map(|(h, _)| h).unwrap_or_else(|_| cfg.address.clone());
+    json!({ "relays": [{
+        "address": host,
+        "enabled": cfg.enabled,
+        "state": s.state,
+        "since": s.since,
+        "error": s.error,
+        "rtt_ms": rtt,
+        "relay_version": s.relay_version,
+        "players_address": app.vps.players_address(),
+        "voice_owner": owner.as_ref().and_then(|id| app.servers.get(id)).map(|e| e.name.clone()),
+        "servers": servers,
+    }] })
+}
+
 async fn server_status(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, UrlPath(id): UrlPath<String>) -> ApiResult<Json<Value>> {
     require(&app, &headers, &method)?;
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
     let mut v = app.vps.server_status(&id);
     if v["relayed"] == true {
         let (a, e2, set) = (app.clone(), e.clone(), has_voice(&app, &id));
-        v["voice"] = tokio::task::spawn_blocking(move || a.vps.voice_json(&e2.root, set)).await.unwrap_or_default();
+        let id2 = id.clone();
+        v["voice"] = tokio::task::spawn_blocking(move || {
+            let mut v = a.vps.voice_json(&e2.root, set);
+            // Another server's voice already goes through the relay (B7).
+            if !set
+                && v.is_object()
+                && let Some(o) = voice_owner(&a).filter(|o| *o != id2)
+            {
+                v["state"] = json!("other");
+                v["owner"] = json!(a.servers.get(&o).map(|e| e.name.clone()).unwrap_or_default());
+            }
+            v
+        })
+        .await
+        .unwrap_or_default();
+        let a = app.clone();
+        let id2 = id.clone();
+        let (addresses, address) = tokio::task::spawn_blocking(move || {
+            let live = crate::router::effective(&a);
+            (address_json(&a, &a.vps.config(), &live, &id2), server_players_address(&a, &id2))
+        })
+        .await
+        .unwrap_or_default();
+        v["addresses"] = addresses;
+        v["address"] = json!(address);
+        v["servers_on_relay"] = json!(app.vps.config().servers.len());
+
         let a = app.clone();
         v["forward"] = tokio::task::spawn_blocking(move || super::forward::status_json(&a, &e)).await.unwrap_or_default();
     }

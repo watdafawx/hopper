@@ -410,7 +410,7 @@ token and pin, the VPS unit's hardening.
 | B4 | M | Server changes: PCF install + config, properties, voice host, History group, Stop using the relay, Play at home, router relay-only refusal, Settings lock and wording | Scratch server: History shows each entry, undo restores, direct login refused. |
 | B5 | M | Players tab ping from the VPS front, PROXY v2 to Velocity | Ping column vs a known latency (tc netem on the test VM). |
 | B6 | M | **Done** (see "B6 as built"). Voice relay (UDP, home dials out, kept open by keepalives, AEAD) | Voice works through a test VM; if UDP is blocked, the card says so. |
-| B7 | M | Several servers: forced hosts, per-server loopback ports, relay list in Settings › Relays | Two scratch servers behind one test relay. |
+| B7 | M | **Done** (see "B7 as built"). Several servers: the relay picks the server by the address players type, forced hosts and a loopback port per server in Velocity, Settings › Relays. Voice stays with one server | Two scratch servers behind one loopback relay; Settings › Relays and the card's notes measured in light and dark. |
 | B8 | M | Desktop parity: relay card, ping column, wording, setup through the API | Desktop test build paired with a scratch panel. |
 | B9 | M | Security review + fixes. At most a generic note: "switch an existing hand-made Velocity setup over to Hopper's relay" (not the migration of any one server) | Review table filled in. |
 
@@ -1031,8 +1031,9 @@ so the step rightly added nothing).
 ### Not done (later phases)
 
 - One voice port per relay: several servers with voice behind one relay
-  (B7) need a port each or a mod-level way to tell them apart. Today the
-  first relayed server with a voice mod gets voice.
+  need a port each or a mod-level way to tell them apart. B7 kept the
+  first relayed server with a voice mod as the one with voice and says so
+  on the others' cards (see "B7 as built").
 - Desktop relay card voice row (B8).
 - A server that joined voice while already relayed needs "Stop using the
   relay" and "Use" again to be pointed at it.
@@ -1082,7 +1083,122 @@ No new relay features: the same relay, made easier to set up and to see.
 - Desktop: Hopper desktop shows nothing of the relay for a paired Hopper
   Server's servers (B8, unchanged).
 
+## B7 as built
+
+Several servers behind one relay. Each server keeps its own address (its
+Settings › Network & address, the same Addresses the router at home
+uses); players type that address and the relay sends them to that server.
+
+### How the relay picks the server
+
+- Home's control stream now names, for each relayed server, its exact
+  addresses (`hosts`) and, behind Velocity, its loopback port (`port`).
+  Both are left out when empty, so an older relay or home reads the
+  message as before.
+- The relay's players' port reads the handshake's address
+  (`vps::pick_route`): one route, or no route naming any address (a home
+  from before B7), takes everyone, as before; otherwise the address must
+  match one server's exactly (case and a trailing dot don't matter), else
+  the player gets "No server here goes by this address. Check the address
+  and try again." (server list: "No server goes by this address").
+  Wildcard addresses (`*.example.com`) are not sent: the relay only
+  matches exact names.
+- A server behind Velocity whose loopback port the relay doesn't know yet
+  is refused with "This server isn't set up on the relay yet. Ask the
+  owner to run the relay setup again." It never falls through to another
+  port, so its players never skip the account check. The one exception is
+  a home from before B7 with one Velocity server: it keeps the first port,
+  as Velocity's old config has one backend.
+- The stream still carries the server id; home checks it against its own
+  list as before (the re-check at home is unchanged).
+
+### Ports
+
+| Port | Bound on | What |
+|---|---|---|
+| 25580 (`BACKEND_PORT`) | 127.0.0.1 | First server's Velocity backend (the same port as before B7) |
+| 25581 .. 25643 | 127.0.0.1 | Further servers, opened by the relay when home names them, never outside the 64-port range above the first |
+
+The setup gives each server the lowest free port and keeps it: adding or
+taking off a server leaves the others' names and ports as they were
+(`plan::assign_backends`). An address two servers claim stays with the
+first.
+
+### velocity.toml
+
+`[servers]` gets one line per server (`survival = "127.0.0.1:25580"`, the
+name made safe for TOML; `try` itself becomes `server-try`), `try` lists
+them all, and `[forced-hosts]` maps each address to its server. With no
+servers it writes the old single `home` line. Home saves what it wrote
+(`HomeConfig.backends`) to tell when the VPS is behind (the card's
+"stale" note). Running the setup again with nothing changed writes the
+same file and doesn't restart Velocity; a change restarts it, which drops
+players on the other servers for a few seconds (the step doesn't warn
+about that yet). The step lists servers with no address of their own.
+
+
+### Voice: the first server only
+
+The relay has one voice port. Giving every server its own would mean a
+port range in the firewall, the setup and the cloud provider's rules, for
+a case (two modded servers with Simple Voice Chat on one small VPS) that's
+rare. So the first relayed server with a voice mod keeps voice; the
+others' cards say "Simple Voice Chat · goes through the relay for
+Survival only", and "Use the relay" leaves their voice host alone.
+
+### Server side
+
+- Players' address: with several servers, the card, the kick text and
+  the test use the server's own address (the written one, else its first
+  address now) with the relay's players' port; with one server, the
+  relay's address as before.
+- Card notes: "This server shares the relay with other servers and has no
+  address of its own…" (and the Players join box is hidden, since the
+  relay would refuse it), and "Its address … isn't on the relay yet. Run
+  the relay setup again…" with Repair, when it's behind Velocity and the
+  VPS hasn't been set up for that address.
+- Taking a server off the relay (Settings › Relays › Take off, or any
+  `PUT /api/v1/vps-relay` that drops it) needs
+ "Stop using the relay" first when it's behind
+  Velocity: the API refuses with "Stop using the relay for {name} first
+  (its Overview, Relay card), then take it off." This narrows what the
+  owner could do before (they could take off a relayed server and leave
+  its files pointed at Velocity). History entries stay per server, from
+  Use and Stop, as in B4.
+
+### Settings › Relays
+
+`GET /api/v1/vps-relays` (owner only): each relay (one today) with its
+state, ping, version, the voice owner and its servers (address, mode,
+players, address state). The page lists them in the Other machines row
+pattern; "Take off" shows for servers not behind Velocity. A footer says
+Hopper desktop doesn't show relays yet.
+
+### Tested
+
+- Unit and loopback tests in `vps/tests.rs` and `vps/setup/tests.rs`
+  (two servers behind one relay, streams reach their server, unknown
+  address refused, Velocity ports tag their server, taking one off leaves
+  the other, config the same when run again).
+- A scratch panel and a scratch relay on loopback with two vanilla
+  servers: each address reached its own server's status, an unknown
+  address and a bare IP got the refusal, taking one off left the other,
+  and with one route left every address reached it (the single-route rule
+  above).
+
+### Not done
+
+- Velocity end to end with two servers: only in tests (the forced-hosts
+  config and the per-port tags); not on a VM with real Velocity yet.
+- Voice for more than one server (see above).
+- Several relays: the page and API list relays, but a panel still has one.
+- With one server left, any address reaches it, the old one included.
+  That keeps IP joins working; a server that wants to refuse unknown
+  addresses needs a second server or a later rule.
+- Desktop (B8).
+
 ## Open questions for the maintainer (answered: see Decisions)
+
 
 1. **Voice: built-in UDP relay instead of AmneziaWG?** AmneziaWG needs a
    kernel module (DKMS) on the VPS and a Windows service at home; a UDP

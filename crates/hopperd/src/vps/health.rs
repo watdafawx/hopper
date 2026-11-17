@@ -171,9 +171,12 @@ pub async fn test(app: &Arc<App>, id: &str) -> Value {
         _ => row("link", "fail", if st.error.is_empty() { "Can't reach the relay.".to_string() } else { st.error.clone() }),
     });
     // 2. A player's way in: the players' address, from this PC.
-    let address = app.vps.players_address();
+    // With several servers on the relay, the server's own address (B7).
+    let address = super::home::server_players_address(app, id);
+    let own = address != app.vps.players_address();
     let game_port = if st.game_port != 0 { st.game_port } else { 25565 };
-    match host_port(&address, if cfg.public_address.trim().is_empty() { game_port } else { 25565 }) {
+    match host_port(&address, if own || cfg.public_address.trim().is_empty() { game_port } else { 25565 }) {
+
         None => rows.push(row("players", "fail", "There is no players' address yet. Open the relay setup to finish it.")),
         Some((host, port)) => rows.push(match list_ping(&host, port).await {
             Answer::Home if up => row("players", "ok", format!("Players reach this server at {address}")),
