@@ -1348,6 +1348,8 @@ pub fn restore(root: &Path, f: &Saved) -> anyhow::Result<PathBuf> {
         fs::copy(&f.path, &dest)?;
         fs::remove_file(&f.path)?;
     }
+    // A held original must stay too, even when the copy got a restored name.
+    crate::locked::unqueue(root, &root.join(&f.restore_to));
     // An emptied backup folder goes.
     if let Some(dir) = f.path.parent() {
         drop_if_empty(dir);
@@ -2032,6 +2034,28 @@ mod tests {
         assert_eq!(f.verb(), "put back");
         f.put_back = false;
         assert_eq!(f.verb(), "switched");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn restoring_history_cancels_a_held_jars_removal() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = instance("restore-held");
+        let jar = root.join("mods/a.jar");
+        fs::write(&jar, b"old jar").unwrap();
+        crate::sync::backup_into(&root, &jar).unwrap();
+        let saved = list(&root).remove(0).files.remove(0);
+        fs::write(&jar, b"current jar").unwrap();
+        let held = fs::OpenOptions::new().read(true).share_mode(1 | 2).open(&jar).unwrap();
+        crate::install::move_out(&root, &jar, false).unwrap();
+        assert_eq!(crate::locked::list(&root).len(), 1);
+        let back = restore(&root, &saved).unwrap();
+        assert_eq!(fs::read(&back).unwrap(), b"old jar");
+        assert!(crate::locked::list(&root).is_empty(), "History restore must cancel the pending removal");
+        drop(held);
+        assert_eq!(crate::locked::flush(&root), 0);
+        assert_eq!(fs::read(&jar).unwrap(), b"current jar");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
