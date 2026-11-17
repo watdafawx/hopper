@@ -47,6 +47,15 @@ pub fn pull_button(store: &Entity<Store>, root: &Path, pulling: bool, in_step: b
     b.on_click(move |_, _, cx| store.update(cx, |s, cx| s.pull_group_now(&root, cx)))
 }
 
+/// The line under "Same as the group": the status line without its first
+/// sentence (the title says it), or what Pull now just did, as it is.
+fn in_step_line(detail: &str, from_pull: bool) -> String {
+    if from_pull {
+        return detail.to_string();
+    }
+    detail.strip_prefix("Same as the group. ").unwrap_or("Nothing new to take in.").to_string()
+}
+
 pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Context<V>) -> Option<Notice> {
     let s = store.read(cx);
     let status = s.group_status(root)?;
@@ -63,12 +72,14 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
         return None;
     }
     let (icon, tier) = look(&status);
+    let from_pull = pulled.is_some();
     let detail = pulled.unwrap_or_else(|| status.detail(now));
     // "In step" is a word only we use: say what it means, and don't repeat it
     // in the line under it. Mods match the group; updates are a separate thing.
+    // What Pull now just did ("Took in 2 changes ...") is kept as it is: it
+    // says what the player asked for.
     let (title, detail) = if in_step {
-        let rest = detail.strip_prefix("Same as the group. ").unwrap_or("Nothing new to take in.");
-        ("Same as the group", rest.to_string())
+        ("Same as the group", in_step_line(&detail, from_pull))
     } else {
         (status.label(), detail)
     };
@@ -125,4 +136,21 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     let (store, root) = (store.clone(), root.to_path_buf());
     n = n.action_fit(move |fit| pull_button(&store, &root, pulling, in_step, fit.narrow, "group-pull"));
     Some(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::in_step_line;
+
+    #[test]
+    fn in_step_line_drops_the_repeated_sentence() {
+        assert_eq!(in_step_line("Same as the group. Checked 2 min ago.", false), "Checked 2 min ago.");
+        assert_eq!(in_step_line("Same as the group.", false), "Nothing new to take in.");
+    }
+
+    #[test]
+    fn in_step_line_keeps_what_pull_now_did() {
+        let said = "Took in 3 changes from Mia. Now the same as the group.";
+        assert_eq!(in_step_line(said, true), said);
+    }
 }

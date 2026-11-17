@@ -121,7 +121,7 @@ group's Packs list row. It:
    nothing waits (it retries owed mods, and
    releases jars a closed game left queued);
 4. says what happened in one line next to the button and as a notice: "Took in
-   3 changes from Mia", "Already in step with the group", "Couldn't reach the
+   3 changes from Mia", "Already the same as the group", "Couldn't reach the
    group", or the reason it can't apply.
 
 It does not skip what waits by design: the pack version still waits for the

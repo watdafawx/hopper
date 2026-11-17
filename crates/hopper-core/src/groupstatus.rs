@@ -282,8 +282,8 @@ pub fn pull_says(reached: bool, made: usize, from: &[String], after: &Status, no
         return (format!("{lead}Couldn't reach the group to check for newer changes. Try again in a moment."), true);
     }
     match after {
-        Status::InStep { .. } | Status::Sending | Status::Updating { .. } if took.is_empty() => ("Already in step with the group.".to_string(), false),
-        Status::InStep { .. } | Status::Sending | Status::Updating { .. } => (format!("{took} Now in step with the group."), false),
+        Status::InStep { .. } | Status::Sending | Status::Updating { .. } if took.is_empty() => ("Already the same as the group.".to_string(), false),
+        Status::InStep { .. } | Status::Sending | Status::Updating { .. } => (format!("{took} Now the same as the group."), false),
         other => {
             let lead = if took.is_empty() { String::new() } else { format!("{took} ") };
             (format!("{lead}{}", other.detail(now)), matches!(other, Status::Cant { .. }))
@@ -801,9 +801,9 @@ mod tests {
     fn pull_now_says_what_it_did() {
         let mia = vec!["Mia".to_string()];
         let in_step = Status::InStep { checked: Some(100) };
-        assert_eq!(pull_says(true, 0, &[], &in_step, 100), ("Already in step with the group.".to_string(), false));
-        assert_eq!(pull_says(true, 3, &mia, &in_step, 100), ("Took in 3 changes from Mia. Now in step with the group.".to_string(), false));
-        assert_eq!(pull_says(true, 1, &[], &in_step, 100).0, "Took in 1 change. Now in step with the group.");
+        assert_eq!(pull_says(true, 0, &[], &in_step, 100), ("Already the same as the group.".to_string(), false));
+        assert_eq!(pull_says(true, 3, &mia, &in_step, 100), ("Took in 3 changes from Mia. Now the same as the group.".to_string(), false));
+        assert_eq!(pull_says(true, 1, &[], &in_step, 100).0, "Took in 1 change. Now the same as the group.");
         let (t, bad) = pull_says(false, 0, &[], &Status::Offline { checked: None }, 100);
         assert!(bad && t.starts_with("Couldn't reach the group"), "{t}");
         // Something is still left: the reason is said, and a failure reads as one.
