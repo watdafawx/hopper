@@ -745,6 +745,15 @@ impl Client {
         reply(self.send_via(Lane::Call, |a| a.post(&self.url(path)).header("Authorization", &self.auth()).send_json(&body)))
     }
 
+    /// [`Client::post`] for a call the panel answers late (a relay test or a
+    /// setup step that signs in to a VPS): waits up to `wait`.
+    pub fn post_wait(&self, path: &str, body: Value, wait: Duration) -> anyhow::Result<Value> {
+        let url = self.url(path);
+        reply(self.send_via(Lane::Slow, |slow| {
+            slow.post(&url).config().timeout_global(Some(wait)).build().header("Authorization", &self.auth()).send_json(&body)
+        }))
+    }
+
     pub fn put(&self, path: &str, body: Value) -> anyhow::Result<Value> {
         reply(self.send_via(Lane::Call, |a| a.put(&self.url(path)).header("Authorization", &self.auth()).send_json(&body)))
     }
