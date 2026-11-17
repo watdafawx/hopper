@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 pub struct Gone {
     pub name: String,
     pub version: String,
-    /// "CurseForge" or "Modrinth".
+    /// "CurseForge", "Modrinth", "GitHub" or another link's kind.
     pub site: &'static str,
     /// What the site has for this instance's Minecraft and loader, newest
     /// first.
@@ -65,7 +65,7 @@ pub fn website_file(r: &Ref) -> anyhow::Result<(cf::Mod, cf::File)> {
 }
 
 fn site(r: &Ref) -> &'static str {
-    if r.mr_version.is_empty() { "CurseForge" } else { "Modrinth" }
+    crate::backups::site_of_ref(r)
 }
 
 /// The update that brought `file_name` (a jar in `mods/`, on or off): the

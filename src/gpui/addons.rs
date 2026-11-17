@@ -2081,9 +2081,13 @@ impl AddonsView {
     /// same: one toast for the lot ("Turned off Sodium for Weekend crew"),
     /// whose "Just for me" puts them back for everyone and keeps the change
     /// only on this PC. No question first: most changes are meant for
-    /// everyone, and a dialog every time would be noise. It stays until
-    /// closed (Just for me has no other way back), and a second change while
-    /// it's open joins it rather than stacking a second toast.
+    /// everyone, and a dialog every time would be noise. It goes after the
+    /// usual few seconds (not while the pointer is on it), like the other
+    /// toasts that say what happened and offer an undo; a toast with a button
+    /// never goes by itself unless `autohide(true)` says so, which is why this
+    /// one once sat on screen for minutes. A row's menu has "Only on this PC"
+    /// for later. A second change while it's open joins it rather than
+    /// stacking a second toast.
     fn locked_toast(&mut self, mut change: crate::store::LockedChange, remove: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
         if let Some((r, rm, open)) = self.locked_open.take()
@@ -2141,7 +2145,9 @@ impl AddonsView {
                         }
                         note.dismiss(window, cx);
                     }))
-            });
+            })
+            // Giving the toast a button turned autohide off; back on.
+            .autohide(true);
         window.push_notification(note, cx);
     }
 
@@ -2285,7 +2291,16 @@ impl AddonsView {
         let intro = if self.remote {
             format!("{} the server's backups: undo from the toast or Mods › History.", if files.len() == 1 { "It goes to" } else { "They go to" })
         } else {
-            remove_intro(files.len(), &unknown)
+            let mut s = remove_intro(files.len(), &unknown);
+            // In a pack friends keep the same, it leaves their copy too.
+            let reach = self.root.as_ref().and_then(|r| self.store.read(cx).removal_reach(r, &files));
+            if let Some(w) = reach {
+                if !s.is_empty() {
+                    s.push(' ');
+                }
+                s.push_str(&crate::store::removal_reaches(&w));
+            }
+            s
         };
         let body_focus = cx.focus_handle();
         let peek: Peek = self.dialog_peek(cx);
@@ -4944,19 +4959,25 @@ Change version", a.file_name).into()
                     .icon(IconName::Search)
                     .on_click(move |_, _, cx| v1.update(cx, |this, cx| this.add_content(cx))),
             )
-            .item(PopupMenuItem::new("From GitHub or a link…").icon(IconName::Link).on_click(move |_, window, cx| {
-                let (store, root, class, dest) = {
-                    let this = v2.read(cx);
-                    let dest = this.globals.picked.filter(|_| this.class == cf::CLASS_RESOURCE_PACKS).map(str::to_string);
-                    (this.store.clone(), this.root.clone(), this.class, dest)
-                };
-                match root {
-                    Some(root) if class == cf::CLASS_MODS => crate::source_dialog::open_add(store, root, window, cx),
-                    Some(root) => crate::source_dialog::open_add_pack(store, root, class, dest, window, cx),
-                    None => {}
-                }
-            }))
+            .item(
+                PopupMenuItem::new("From GitHub or a link…")
+                    .icon(IconName::Link)
+                    .on_click(move |_, window, cx| v2.update(cx, |this, cx| this.add_from_link(window, cx))),
+            )
         })
+    }
+
+    /// "From GitHub or a link…": the dialog that adds a mod (or, on the
+    /// Resource packs and Shaders tabs, a pack) from there. The Add content
+    /// menu, the empty tab and the Ctrl K palette all open it.
+    pub(crate) fn add_from_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dest = self.globals.picked.filter(|_| self.class == cf::CLASS_RESOURCE_PACKS).map(str::to_string);
+        let (store, class) = (self.store.clone(), self.class);
+        match self.root.clone() {
+            Some(root) if class == cf::CLASS_MODS => crate::source_dialog::open_add(store, root, window, cx),
+            Some(root) => crate::source_dialog::open_add_pack(store, root, class, dest, window, cx),
+            None => {}
+        }
     }
 
     /// Add content gets its menu (Browse, or from GitHub or a link) with
@@ -6312,14 +6333,33 @@ impl AddonsView {
         // A Hopper Server's data packs are added in its web UI for now
         // (Browse installs into it through its mods route only).
         let can_add = !(self.remote && self.class == cf::CLASS_DATAPACKS);
+        // With mods from links on, the empty tab offers that way too: the
+        // Add content menu that holds it only shows once something is listed.
+        let links = can_add && self.links_menu(cx);
         widgets::empty_state(icon, title, Some(body.into()), cx).when(can_add, |d| {
             d.child(
-                Button::new("empty-add")
-                    .small()
-                    .primary()
-                    .icon(IconName::Plus)
-                    .label(add)
-                    .on_click(cx.listener(|this, _, _, cx| this.add_content(cx))),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Button::new("empty-add")
+                            .small()
+                            .primary()
+                            .icon(IconName::Plus)
+                            .label(add)
+                            .on_click(cx.listener(|this, _, _, cx| this.add_content(cx))),
+                    )
+                    .when(links, |r| {
+                        r.child(
+                            Button::new("empty-add-link")
+                                .small()
+                                .outline()
+                                .icon(IconName::Link)
+                                .label("From GitHub or a link…")
+                                .on_click(cx.listener(|this, _, window, cx| this.add_from_link(window, cx))),
+                        )
+                    }),
             )
         })
     }

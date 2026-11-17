@@ -102,6 +102,8 @@ pub enum InstAct {
     /// Pair it with a server (its Server tab).
     Pair,
     Share,
+    /// Add a mod from GitHub or another link (asks to allow those first).
+    AddFromLink,
 }
 
 /// App-wide actions.
@@ -252,6 +254,7 @@ fn build(app: &AppView, cx: &App) -> (Vec<Item>, Option<SharedString>) {
         v.push(Item::new(S::Actions, IconName::Server, "Host a server…", Target::Inst(r(), InstAct::Host)).words("create server multiplayer host this pc"));
         v.push(Item::new(S::Actions, IconName::Link, "Pair with a server…", Target::Inst(r(), InstAct::Pair)).words("server pair link sync rig compare"));
         v.push(Item::new(S::Actions, IconName::Share2, "Share code", Target::Inst(r(), InstAct::Share)).words("share friend send code copy"));
+        v.push(Item::new(S::Actions, IconName::Link, "Add a mod from GitHub or a link…", Target::Inst(r(), InstAct::AddFromLink)).words("github maven jenkins url download jar release source add mod"));
     }
     // App-wide actions.
     v.push(Item::new(S::Actions, IconName::Plus, "Create instance", Target::Act(Act::Create)).words("new").browse());
@@ -894,6 +897,10 @@ fn run(app: &mut AppView, target: Target, window: &mut Window, cx: &mut Context<
                 open_instance(app, root, Some("server"), cx);
             }
             InstAct::Share => crate::dialogs::open_share(store, root, window, cx),
+            InstAct::AddFromLink => {
+                open_instance(app, root.clone(), Some("mods"), cx);
+                crate::source_dialog::open_add(store, root, window, cx);
+            }
         },
         Target::Act(act) => match act {
             Act::Create => crate::dialogs::open_create(store, window, cx),

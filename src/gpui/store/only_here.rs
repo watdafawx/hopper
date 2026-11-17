@@ -51,6 +51,24 @@ pub fn and_list(names: &[String]) -> String {
     }
 }
 
+/// What the Remove dialog adds when the pack is kept the same as friends:
+/// the mod leaves their copy and their PCs too, not only this one. The
+/// groups' copy and the members' PCs for a group, the friend's PC for a
+/// friend the pack is shared with.
+pub fn removal_reaches(w: &SyncedWith) -> String {
+    let groups = match w.groups.as_slice() {
+        [] => String::new(),
+        [_] => "It also leaves the group's copy and the other members' PCs.".to_string(),
+        _ => "It also leaves the groups' copies and the other members' PCs.".to_string(),
+    };
+    let friends = match w.friends.as_slice() {
+        [] => String::new(),
+        [one] => format!("It's removed for {one} too."),
+        many => format!("It's removed for {} friends too.", many.len()),
+    };
+    [groups, friends].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ")
+}
+
 fn name_or(name: &str, or: &str) -> String {
     if name.trim().is_empty() { or.to_string() } else { name.to_string() }
 }
@@ -82,6 +100,18 @@ impl Store {
             .map(|g| name_or(&g.name, "your group"))
             .collect();
         (!friends.is_empty() || !groups.is_empty()).then_some(SyncedWith { groups, friends })
+    }
+
+    /// Who losing these files reaches, for the Remove dialog: the friends and
+    /// groups that keep the pack the same, unless every one of the mods is
+    /// marked "Only on this PC" (that removal stays here). `None` when nobody.
+    pub fn removal_reach(&self, root: &Path, files: &[String]) -> Option<SyncedWith> {
+        let inst = self.instance(root)?;
+        let shared = inst.addons.iter().filter(|a| files.contains(&a.file_name)).any(|a| !hopper::onlyhere::is_kept(inst, a));
+        if !shared {
+            return None;
+        }
+        self.synced_with(root)
     }
 
     /// Before turning off (`remove`: removing) these files: the locked mods
@@ -150,6 +180,21 @@ mod tests {
         assert_eq!(n(&["Mia", "Sam"]), "Mia and Sam");
         assert_eq!(n(&["Mia", "Sam", "Ana"]), "Mia, Sam and Ana");
         assert_eq!(n(&["Mia", "Sam", "Ana", "Bo", "Cy"]), "Mia, Sam and 3 more");
+    }
+
+    #[test]
+    fn removing_says_who_else_loses_the_mod() {
+        let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let r = |groups: &[&str], friends: &[&str]| super::removal_reaches(&super::SyncedWith { groups: s(groups), friends: s(friends) });
+        assert_eq!(r(&["Testers"], &[]), "It also leaves the group's copy and the other members' PCs.");
+        assert_eq!(r(&["a", "b"], &[]), "It also leaves the groups' copies and the other members' PCs.");
+        assert_eq!(r(&[], &["Mia"]), "It's removed for Mia too.");
+        assert_eq!(r(&[], &["Mia", "Sam"]), "It's removed for 2 friends too.");
+        assert_eq!(
+            r(&["Testers"], &["Mia"]),
+            "It also leaves the group's copy and the other members' PCs. It's removed for Mia too."
+        );
+        assert_eq!(r(&[], &[]), "");
     }
 
     #[test]

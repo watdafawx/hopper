@@ -346,6 +346,7 @@ pub(crate) fn note_save(old: Option<&Instance>, new: &Instance) {
         return;
     }
     let Some(old) = old else { return };
+    note_swaps(&old.addons, &new.addons, &new.root);
     let changes = diff(&old.addons, &new.addons);
     if changes.is_empty() {
         return;
@@ -369,6 +370,29 @@ pub(crate) fn note_save(old: Option<&Instance>, new: &Instance) {
     all.extend(recs);
     let _ = fs::write(&p, serde_json::to_vec_pretty(&all).unwrap_or_default());
     crate::retention::schedule(&new.root);
+}
+
+/// The mods whose file changed from `old` to `new` (an update, a roll back,
+/// another version picked): same mod by key, another file name. Pairs each
+/// with its set-aside file in History, which then says what the swap was.
+fn note_swaps(old: &[Addon], new: &[Addon], root: &Path) {
+    let swaps = swapped(old, new);
+    for (o, n) in swaps {
+        crate::backups::note_swap(root, o, n);
+    }
+}
+
+/// [`note_swaps`]' pairs: (the entry before, the entry after).
+fn swapped<'a>(old: &'a [Addon], new: &'a [Addon]) -> Vec<(&'a Addon, &'a Addon)> {
+    let gone = |a: &Addon| !new.iter().any(|n| base(&n.file_name) == base(&a.file_name));
+    old.iter()
+        .filter(|o| gone(o))
+        .filter_map(|o| {
+            let key = crate::groupsync::addon_key(o);
+            let n = new.iter().find(|n| crate::groupsync::addon_key(n) == key && !old.iter().any(|x| base(&x.file_name) == base(&n.file_name)))?;
+            Some((o, n))
+        })
+        .collect()
 }
 
 /// A History folder's record-only entries.
@@ -439,6 +463,23 @@ mod tests {
         ];
         let got: Vec<(Did, String)> = diff(&old, &new).into_iter().map(|(d, a)| (d, a.file_name)).collect();
         assert_eq!(got, vec![(Did::Off, "b.jar".into()), (Did::Added, "d.jar".into())]);
+    }
+
+    #[test]
+    fn a_new_file_for_the_same_mod_is_a_swap() {
+        let src = |file: &str| {
+            let mut a = addon(file, 7, true);
+            a.source = Some(crate::sources::ModSource { url: "o/r".into(), pattern: "r-#.jar".into(), ..Default::default() });
+            a
+        };
+        let old = vec![src("r-5.1.0.jar"), addon("other.jar", 3, true)];
+        let new = vec![src("r-5.0.4.jar"), addon("other.jar", 3, true)];
+        let s = swapped(&old, &new);
+        assert_eq!(s.len(), 1);
+        assert_eq!((s[0].0.file_name.as_str(), s[0].1.file_name.as_str()), ("r-5.1.0.jar", "r-5.0.4.jar"));
+        // Same file turned off: not a swap. A mod that's simply gone: not one.
+        assert!(swapped(&old, &[src("r-5.1.0.jar.disabled"), addon("other.jar", 3, true)]).is_empty());
+        assert!(swapped(&old, &[addon("other.jar", 3, true)]).is_empty());
     }
 
     #[test]

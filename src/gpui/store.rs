@@ -29,7 +29,7 @@ mod server_offer;
 // Invite and SyncStatus are for the Friends screen being rebuilt on top.
 #[allow(unused_imports)]
 pub use friends::{FollowReq, FollowTarget, GroupMerged, Invite, RecipeApplied, SyncStatus, follow_pack, redeem};
-pub use only_here::{LockedChange, and_list};
+pub use only_here::{LockedChange, and_list, removal_reaches};
 pub use server_offer::{Before, ServerOffer};
 pub use server_mods::{RemoteLoose, remote as on_hopper_server, remote_config_files, remote_config_reset, remote_remove, remote_undo_remove};
 

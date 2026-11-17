@@ -492,7 +492,7 @@ pub fn record(backup_dir: &Path, saved: &Path, original_rel: &str) {
 
 /// A History folder's own notes, not entries.
 fn is_bookkeeping(name: &str) -> bool {
-    matches!(name, ORIGINS | IDS | CHECKED | REASON | PACK | SETTINGS | crate::actor::WHO_FILE)
+    matches!(name, ORIGINS | IDS | CHECKED | REASON | PACK | SETTINGS | VERDICTS | crate::actor::WHO_FILE)
 }
 
 /// Beside a History folder's files: which settings a friend's shared
@@ -580,6 +580,32 @@ pub struct Saved {
     pub record: Option<(crate::actor::Did, String)>,
 }
 
+/// Where a mod's file comes from, as History says it: "GitHub", "Maven",
+/// "Jenkins" or "Link" for a mod from outside the two sites (its own source,
+/// or the project id of one), else "Modrinth" or "CurseForge". Every History
+/// label of a source goes through here, so a GitHub mod never reads
+/// "CurseForge".
+pub fn source_label(project_id: u64, mr_version: &str, source: Option<&crate::sources::ModSource>) -> &'static str {
+    if let Some(s) = source {
+        return s.kind.label();
+    }
+    if crate::sources::is_src(project_id) {
+        return crate::sources::known_source(project_id).map_or("Link", |(s, _)| s.kind.label());
+    }
+    if mr_version.is_empty() { "CurseForge" } else { "Modrinth" }
+}
+
+/// A label [`source_label`] gave, read back from a panel's JSON; "" for any
+/// other text.
+pub fn known_site(s: &str) -> &'static str {
+    ["CurseForge", "Modrinth", "GitHub", "Maven", "Jenkins", "Link"].into_iter().find(|k| *k == s).unwrap_or("")
+}
+
+/// [`source_label`] for the file a note stands for.
+pub fn site_of_ref(r: &Ref) -> &'static str {
+    source_label(r.project_id, &r.mr_version, r.addon.as_ref().and_then(|a| a.source.as_ref()))
+}
+
 /// The order a pack update's mods are listed in: what most players look for
 /// first.
 const PACK_KINDS: [Change; 11] = [
@@ -625,12 +651,11 @@ impl Saved {
         }
     }
 
-    /// "CurseForge" or "Modrinth", where Undo downloads it from; empty for
-    /// a kept copy.
+    /// Where Undo downloads it from, as the player knows it: "CurseForge",
+    /// "Modrinth", "GitHub" or another link; empty for a kept copy.
     pub fn site(&self) -> &'static str {
         match &self.src {
-            Some(r) if !r.mr_version.is_empty() => "Modrinth",
-            Some(_) => "CurseForge",
+            Some(r) => site_of_ref(r),
             None => "",
         }
     }
@@ -764,20 +789,96 @@ pub fn is_text(name: &str) -> bool {
         .any(|e| l.ends_with(e))
 }
 
+/// Whether the file `now` is a newer version than `was` (Greater), an older
+/// one (Less) or the same (Equal), by the versions their names carry. For
+/// mods with no release dates to compare (from GitHub or a link).
+pub fn version_order(was: &str, now: &str) -> std::cmp::Ordering {
+    let (old, new) = crate::install::version_change(was.trim_end_matches(".disabled"), now.trim_end_matches(".disabled"));
+    if old == new {
+        return std::cmp::Ordering::Equal;
+    }
+    crate::scan::compare_versions(&new, &old)
+}
+
+/// A swap of one mod's file for another (an update, a roll back), as it was
+/// when it happened: History judges entries against the instance as it is
+/// now, so a mod removed later would turn every earlier version change into
+/// "removed". Beside a History folder's files, by the name set aside.
+const VERDICTS: &str = ".verdicts.json";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct Verdict {
+    change: String,
+    now: String,
+    now_site: String,
+}
+
+fn read_verdicts(dir: &Path) -> std::collections::BTreeMap<String, Verdict> {
+    fs::read(dir.join(VERDICTS)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// What swapping `old` for `new` is, from their file names and dates.
+fn swap_change(old: &crate::instances::Addon, new: &crate::instances::Addon) -> Change {
+    let dated = !old.file_date.is_empty() && !new.file_date.is_empty() && old.mr_version.is_empty() == new.mr_version.is_empty();
+    let order = if dated { new.file_date.cmp(&old.file_date) } else { version_order(&old.file_name, &new.file_name) };
+    match order {
+        std::cmp::Ordering::Greater => Change::Updated,
+        std::cmp::Ordering::Less => Change::RolledBack,
+        std::cmp::Ordering::Equal => Change::Switched,
+    }
+}
+
+/// Notes in History that `old` (its file just set aside) became `new`.
+/// Called by [`Instance::save`](crate::instances::Instance::save) when a
+/// mod's file name changed. Finds the newest folder of the last ten minutes
+/// that holds the old file; nothing when there is none.
+pub(crate) fn note_swap(root: &Path, old: &crate::instances::Addon, new: &crate::instances::Addon) {
+    let base = old.file_name.trim_end_matches(".disabled");
+    if base.eq_ignore_ascii_case(new.file_name.trim_end_matches(".disabled")) {
+        return;
+    }
+    let now = crate::time::now().max(0) as u64;
+    let mut dirs: Vec<(u64, PathBuf)> = fs::read_dir(root.join(crate::sync::BACKUP_DIR))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| Some((e.file_name().to_str()?.parse::<u64>().ok()?, e.path())))
+        .filter(|(stamp, _)| *stamp + 600 >= now)
+        .collect();
+    dirs.sort_by_key(|(stamp, _)| std::cmp::Reverse(*stamp));
+    let off = format!("{base}.disabled");
+    let Some((_, dir)) = dirs.into_iter().find(|(_, d)| exists(&d.join(base)) || exists(&d.join(&off))) else { return };
+    let mut all = read_verdicts(&dir);
+    let v = Verdict {
+        change: swap_change(old, new).label().to_string(),
+        now: new.file_name.clone(),
+        now_site: source_label(new.project_id, &new.mr_version, new.source.as_ref()).to_string(),
+    };
+    // Whichever of the two names the entry has.
+    all.insert(base.to_string(), v.clone());
+    all.insert(off, v);
+    let _ = fs::write(dir.join(VERDICTS), serde_json::to_vec_pretty(&all).unwrap_or_default());
+}
+
 /// Judges each file against the instance now.
-fn judge(root: &Path, inst: Option<&crate::instances::Instance>, f: &mut Saved) {
+fn judge(root: &Path, inst: Option<&crate::instances::Instance>, verdicts: &std::collections::BTreeMap<String, Verdict>, f: &mut Saved) {
     let here = root.join(&f.restore_to).exists();
     let same = f.src.as_ref().and_then(|r| {
         let addons = &inst?.addons;
         addons.iter().find(|a| a.project_id == r.project_id).or_else(|| addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(&r.file_name)))
     });
     f.now = same.map(|a| a.file_name.clone());
-    f.now_site = same.map_or("", |a| if a.mr_version.is_empty() { "CurseForge" } else { "Modrinth" });
+    f.now_site = same.map_or("", |a| source_label(a.project_id, &a.mr_version, a.source.as_ref()));
     f.change = match (f.src.as_ref(), same) {
         (Some(r), Some(a)) => {
             let old_date = r.addon.as_ref().map(|o| o.file_date.as_str()).unwrap_or("");
             let newer = if !old_date.is_empty() && !a.file_date.is_empty() && r.mr_version.is_empty() == a.mr_version.is_empty() {
                 a.file_date.as_str().cmp(old_date)
+            } else if a.source.is_some() || crate::sources::is_src(a.project_id) {
+                // A mod from GitHub or a link: no dates, and its file ids
+                // don't grow. The two file names' versions say which way.
+                version_order(&r.file_name, &a.file_name)
             } else if r.mr_version.is_empty() && a.mr_version.is_empty() && a.source.is_none() && !crate::sources::is_src(a.project_id) {
                 // Only CurseForge file ids grow with time.
                 a.file_id.cmp(&r.file_id)
@@ -804,6 +905,13 @@ fn judge(root: &Path, inst: Option<&crate::instances::Instance>, f: &mut Saved) 
         (None, _) if here => Change::Replaced,
         (None, _) => Change::Removed,
     };
+    // What the swap was when it happened wins over what the instance looks
+    // like now (the mod may be gone since).
+    if let Some(v) = verdicts.get(&f.name) {
+        f.change = Change::from_label(&v.change);
+        f.now = Some(v.now.clone());
+        f.now_site = known_site(&v.now_site);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -988,11 +1096,7 @@ impl Set {
                 src: serde_json::from_value(f["src"].clone()).ok(),
                 change: Change::from_label(&s(f, "change")),
                 now: f["now"].as_str().map(str::to_string),
-                now_site: match f["now_site"].as_str() {
-                    Some("CurseForge") => "CurseForge",
-                    Some("Modrinth") => "Modrinth",
-                    _ => "",
-                },
+                now_site: known_site(f["now_site"].as_str().unwrap_or_default()),
                 reason: s(f, "reason"),
                 who: serde_json::from_value(f["who"].clone()).ok(),
                 batch: s(f, "batch"),
@@ -1080,6 +1184,7 @@ pub fn list(root: &Path) -> Vec<Set> {
             walk(&dir, &dir, &origins, &ids, &mut files);
             let reason = fs::read_to_string(dir.join(REASON)).unwrap_or_default();
             let tags = crate::actor::read_tags(&dir);
+            let verdicts = read_verdicts(&dir);
             for f in &mut files {
                 f.reason = reason.clone();
                 if let Some(t) = tags.get(&f.name) {
@@ -1087,7 +1192,7 @@ pub fn list(root: &Path) -> Vec<Set> {
                     f.batch = t.batch.clone();
                     f.put_back = t.undo;
                 }
-                judge(root, inst.as_ref(), f);
+                judge(root, inst.as_ref(), &verdicts, f);
             }
             files.sort_by_key(|f| f.name.to_lowercase());
             let pack = read_pack(&dir);
@@ -2019,6 +2124,90 @@ mod tests {
         f.now_site = "Modrinth";
         assert_eq!(f.detail(), "1.21.1 · CurseForge → Modrinth");
         assert_eq!(Change::TurnedOn.label(), "Turned on");
+    }
+
+    fn github_addon(file: &str) -> crate::instances::Addon {
+        let source = crate::sources::ModSource {
+            kind: crate::sources::Kind::GitHub,
+            url: "watdafawx/shapewright".into(),
+            pattern: "shapewright-#+neoforge-#.jar".into(),
+            ..Default::default()
+        };
+        crate::instances::Addon {
+            project_id: crate::sources::src_id(&format!("{}|{}", source.key(), source.pattern)),
+            file_id: 7,
+            file_name: file.into(),
+            name: "shapewright".into(),
+            enabled: true,
+            source: Some(source),
+            ..Default::default()
+        }
+    }
+
+    /// A mod from GitHub or a link says where it is from, never "CurseForge".
+    #[test]
+    fn a_mod_from_github_is_labelled_with_its_source() {
+        let a = github_addon("shapewright-5.1.0+neoforge-1.21.1.jar");
+        assert_eq!(source_label(a.project_id, "", a.source.as_ref()), "GitHub");
+        // Its project id alone says it too (a note made without the entry).
+        assert_eq!(source_label(a.project_id, "", None), "Link");
+        assert_eq!(source_label(5, "", None), "CurseForge");
+        assert_eq!(source_label(5, "abc", None), "Modrinth");
+        let url = crate::sources::ModSource { kind: crate::sources::Kind::Url, ..Default::default() };
+        assert_eq!(source_label(0, "", Some(&url)), "Link");
+        let mut f = saved_of("shapewright-5.1.0+neoforge-1.21.1.jar", "shapewright-5.0.4+neoforge-1.21.1.jar", Change::RolledBack);
+        f.src.as_mut().unwrap().project_id = a.project_id;
+        f.src.as_mut().unwrap().addon = Some(a);
+        f.now_site = "GitHub";
+        assert_eq!(f.site(), "GitHub");
+        assert_eq!(f.detail(), "5.1.0 → 5.0.4 · GitHub");
+        assert_eq!(known_site("GitHub"), "GitHub");
+        assert_eq!(known_site("nope"), "");
+    }
+
+    /// Files with no release dates: the versions in their names say whether
+    /// a swap is an update or a roll back.
+    #[test]
+    fn a_github_swap_is_an_update_or_a_rollback_by_its_versions() {
+        use std::cmp::Ordering::*;
+        let n = |v: &str| format!("shapewright-{v}+neoforge-1.21.1.jar");
+        assert_eq!(version_order(&n("5.1.0"), &n("5.0.4")), Less);
+        assert_eq!(version_order(&n("5.0.4"), &n("5.1.0")), Greater);
+        assert_eq!(version_order(&n("5.1.0"), &format!("{}.disabled", n("5.1.0"))), Equal);
+        assert_eq!(version_order(&n("5.9.0"), &n("5.10.0")), Greater);
+        assert_eq!(swap_change(&github_addon(&n("5.1.0")), &github_addon(&n("5.0.4"))), Change::RolledBack);
+        assert_eq!(swap_change(&github_addon(&n("5.0.4")), &github_addon(&n("5.1.0"))), Change::Updated);
+        assert_eq!(Change::RolledBack.verb(), "rolled back");
+    }
+
+    /// A version swap stays what it was when the mod is removed later; the
+    /// old file's entry used to read "removed" from then on.
+    #[test]
+    fn a_rollback_is_still_a_rollback_after_the_mod_is_removed() {
+        let root = std::env::temp_dir().join(format!("hopper-swap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let stamp = crate::time::now();
+        let dir = root.join(crate::sync::BACKUP_DIR).join(stamp.to_string());
+        fs::create_dir_all(&dir).unwrap();
+        let (old_name, new_name) = ("shapewright-5.1.0+neoforge-1.21.1.jar", "shapewright-5.0.4+neoforge-1.21.1.jar");
+        fs::write(dir.join(old_name), b"jar").unwrap();
+        // A newer, unrelated folder that doesn't hold the file is skipped.
+        fs::create_dir_all(root.join(crate::sync::BACKUP_DIR).join((stamp + 1).to_string())).unwrap();
+        note_swap(&root, &github_addon(old_name), &github_addon(new_name));
+        let v = read_verdicts(&dir);
+        assert_eq!(v[old_name].change, "Rolled back");
+        assert_eq!(v[old_name].now, new_name);
+        assert_eq!(v[old_name].now_site, "GitHub");
+        // Judged with the mod gone from the instance: the verdict wins.
+        let mut f = saved_of(old_name, "", Change::Removed);
+        f.src = None;
+        f.now = None;
+        f.restore_to = format!("mods/{old_name}");
+        judge(&root, None, &v, &mut f);
+        assert_eq!((f.change, f.now.as_deref(), f.now_site), (Change::RolledBack, Some(new_name), "GitHub"));
+        // The same file under another name isn't a swap.
+        note_swap(&root, &github_addon(old_name), &github_addon(&format!("{old_name}.disabled")));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

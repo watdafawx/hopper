@@ -1269,7 +1269,10 @@ fn gone_of(v: &serde_json::Value) -> Option<Gone> {
     Some(Gone {
         name: if s("title").is_empty() { s("name") } else { s("title") },
         version: s("version"),
-        site: if v["site"].as_str() == Some("Modrinth") { "Modrinth" } else { "CurseForge" },
+        site: match hopper::backups::known_site(v["site"].as_str().unwrap_or_default()) {
+            "" => "CurseForge",
+            s => s,
+        },
         choices,
         closest: v["closest"].as_u64().unwrap_or(0) as usize,
     })
