@@ -8,8 +8,8 @@
   import { matches } from './lib/rulesPage.js';
 
   // `hosted`: shown on the Rules page, which has the one Add button and search.
-  let { hosted = false, query = '' } = $props();
-  let hooks = $state([]);
+  // `hooks`: bound by the Rules page, so its counts and failing banner follow every change here.
+  let { hosted = false, query = '', hooks = $bindable([]) } = $props();
   let events = $state([]);
   let servers = $state([]);
   let form = $state(null);

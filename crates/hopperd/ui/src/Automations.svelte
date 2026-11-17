@@ -12,8 +12,8 @@
   import { matches } from './lib/rulesPage.js';
 
   // `hosted`: shown on the Rules page, which has the one Add button and search.
-  let { hosted = false, query = '' } = $props();
-  let rules = $state([]);
+  // `rules`: bound by the Rules page, so its counts and failing banner follow every change here.
+  let { hosted = false, query = '', rules = $bindable([]) } = $props();
   let events = $state([]);
   let minCooldown = $state(5);
   let servers = $state([]);

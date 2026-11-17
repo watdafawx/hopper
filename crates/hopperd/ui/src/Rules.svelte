@@ -4,7 +4,6 @@
   // its own card; this page adds the filter, the search and the Add buttons.
   import { onMount } from 'svelte';
   import { Plus, Search, X, AlertTriangle } from '@lucide/svelte';
-  import { api } from './lib/api.js';
   import { onChange } from './lib/changes.svelte.js';
   import { alerts, refreshAlerts } from './lib/alerts.svelte.js';
   import { live } from './lib/live.svelte.js';
@@ -29,10 +28,7 @@
   const warnShown = $derived(showPart(filter, 'warnings') && warningsMatch(query, hasNodes));
 
   async function load() {
-    try {
-      hooks = (await api('/webhooks')).hooks;
-      rules = (await api('/rules')).rules;
-    } catch {}
+    // The Messages and Actions cards load their own lists (bound below).
     refreshAlerts();
   }
 
@@ -66,9 +62,9 @@
 </div>
 {#if bad}<p class="tiny warn"><AlertTriangle size={12} />{bad === 1 ? '1 rule needs a look' : `${bad} rules need a look`}: it failed the last time it ran.</p>{/if}
 
-<div class:hide={!showPart(filter, 'messages')}><Webhooks bind:this={hook} hosted {query} /></div>
+<div class:hide={!showPart(filter, 'messages')}><Webhooks bind:this={hook} bind:hooks hosted {query} /></div>
 {#if warnShown}<Alerts />{/if}
-<div class:hide={!showPart(filter, 'actions')}><Automations bind:this={act} hosted {query} /></div>
+<div class:hide={!showPart(filter, 'actions')}><Automations bind:this={act} bind:rules hosted {query} /></div>
 
 <style>
   .rbar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
