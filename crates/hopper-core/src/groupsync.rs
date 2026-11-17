@@ -636,6 +636,10 @@ pub enum KeptWhy {
     /// The player locked the mod's version here: sync may turn it on or
     /// off, but never swaps, removes or puts back its file.
     Locked,
+    /// A mod from GitHub or another link, from a source this PC hasn't
+    /// confirmed (Settings › Mod sources): nothing is downloaded from a
+    /// source nobody was asked about.
+    Source,
 }
 
 impl Kept {
@@ -643,7 +647,20 @@ impl Kept {
     pub fn says(&self) -> String {
         let why = match self.why {
             KeptWhy::Locked => "you locked its version",
+            KeptWhy::Source => "you haven't confirmed its source yet (Settings › Mod sources)",
         };
+        if self.why == KeptWhy::Source {
+            let verb = if self.kind == Kind::Updated { "wasn't updated" } else { "wasn't installed" };
+            let what = match self.kind {
+                Kind::Updated => "changed its version",
+                _ => "added it",
+            };
+            return if self.by.is_empty() {
+                format!("{} {verb}: {why}.", self.name)
+            } else {
+                format!("{} {verb}: {why}. {} {what}.", self.name, self.by)
+            };
+        }
         let what = match self.kind {
             Kind::Added => "added it",
             Kind::Removed => "removed it",
@@ -669,6 +686,63 @@ fn file_here(a: &Addon) -> Option<String> {
         return Some(format!("mr:{}", a.mr_version));
     }
     (a.file_id != 0 && !is_mr(a.project_id)).then(|| format!("cf:{}", a.file_id))
+}
+
+/// The mod here (`at`) that already is `pin`'s file: the same link and file
+/// name, with the pinned bytes (its sha256; a pin without one goes by the
+/// release it was installed from). Such a change only needs a switch, so
+/// toggling a mod from GitHub never downloads it again.
+pub(crate) fn pinned_here(inst: &Instance, at: Option<usize>, pin: &crate::sources::carry::Pin) -> Option<usize> {
+    let i = at?;
+    let a = inst.addons.get(i)?;
+    let s = a.source.as_ref()?;
+    let name = |n: &str| n.trim_end_matches(".disabled").to_lowercase();
+    if name(&a.file_name) != name(&pin.file) || s.url != pin.source.url || s.pattern != pin.source.pattern {
+        return None;
+    }
+    let sure = if pin.source.sha256.is_empty() {
+        !pin.source.seen.is_empty() && s.seen == pin.source.seen
+    } else {
+        let twin = Addon { enabled: !a.enabled, ..a.clone() };
+        [inst.addon_path(a), inst.addon_path(&twin)]
+            .iter()
+            .find(|p| p.is_file())
+            .and_then(|p| crate::sources::sha256_file(p).ok())
+            .is_some_and(|h| h.eq_ignore_ascii_case(&pin.source.sha256))
+    };
+    sure.then_some(i)
+}
+
+/// The pin `c` would download here: a mod from a link that isn't here as
+/// that file yet.
+fn pin_to_get<'a>(inst: &Instance, c: &'a Change) -> Option<&'a crate::sources::carry::Pin> {
+    let Some(Entry::Source { pin, .. }) = &c.entry else { return None };
+    if !matches!(c.now, State::File { .. }) {
+        return None;
+    }
+    pinned_here(inst, find_addon(inst, &c.key), pin).is_none().then_some(pin)
+}
+
+/// Leaves out the changes that would install a mod from a source this PC
+/// hasn't confirmed (`skip`: [`crate::sources::carry::auto_skip`]), and
+/// lists them in `merged.kept`: nobody can be asked during a sync, and it
+/// must not read as done. Their marks go too, as for a locked mod.
+fn keep_untrusted(inst: &Instance, mut todo: Vec<Change>, skip: &[crate::sources::carry::Pin], merged: &mut Merged) -> Vec<Change> {
+    todo.retain(|c| {
+        let Some(pin) = pin_to_get(inst, c).filter(|p| skip.contains(p)) else { return true };
+        let by = merged.made.iter().rev().find(|(k, _, _)| *k == c.key).map(|(_, _, n)| n.clone()).unwrap_or_default();
+        let name = format!(
+            "{} ({}: {})",
+            crate::sources::carry::display_name(pin),
+            pin.source.kind.label(),
+            pin.source.publisher
+        );
+        merged.made.retain(|(k, _, _)| *k != c.key);
+        merged.marks.retain(|(k, _)| *k != c.key);
+        merged.kept.push(Kept { key: c.key.clone(), name, kind: c.kind(), by, why: KeptWhy::Source });
+        false
+    });
+    todo
 }
 
 /// Whether `c` would change the file of a mod the player locked here.
@@ -1273,7 +1347,13 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
     // Mods kept only on this PC only learn how the others have them.
     let (todo, kept) = crate::onlyhere::split(&mut inst, todo, &mut merged);
     // A mod the player locked keeps its file, whoever changed it.
-    let mut todo = keep_locked(&inst, todo, &mut merged);
+    let todo = keep_locked(&inst, todo, &mut merged);
+    // A mod from a link this PC hasn't confirmed isn't downloaded unasked;
+    // the player is told which one and why (a switch of one already here
+    // goes through).
+    let wanted: Vec<crate::sources::carry::Pin> = todo.iter().filter_map(|c| pin_to_get(&inst, c).cloned()).collect();
+    let skip = crate::sources::carry::auto_skip(&wanted, allow);
+    let mut todo = keep_untrusted(&inst, todo, &skip, &mut merged);
     // A change to a mod this copy doesn't have (an echo of a removal, a
     // switch of a mod removed here) changes nothing; the task only tells
     // what really changes. Its mark stays, so who changed it last still
@@ -1301,8 +1381,7 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
         }
         false
     });
-    if (kept || loader_set || merged.pack_done.is_some()) && todo.is_empty() {
-        inst.save()?;
+    if (kept || loader_set || merged.pack_done.is_some()) && todo.is_empty() {        inst.save()?;
     }
     if !todo.is_empty() {
         // Only a merge that changes something shows in Tasks; most codes
@@ -1312,14 +1391,6 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
         if let Some(first) = who.first() {
             job.detail(format!("{} change(s) from {first}", todo.len()));
         }
-        let pins: Vec<crate::sources::carry::Pin> = todo
-            .iter()
-            .filter_map(|c| match &c.entry {
-                Some(Entry::Source { pin, .. }) => Some(pin.clone()),
-                _ => None,
-            })
-            .collect();
-        let skip = crate::sources::carry::auto_skip(&pins, allow);
         // History names the member behind each change; only these mods
         // are theirs, whatever else changes here meanwhile.
         let _scope = crate::actor::begin(root, None);
@@ -1582,7 +1653,18 @@ fn file_change(
             (num_id(&v.project_id), num_id(&v.id))
         }
         Entry::Source { pin, enabled } => {
+            // The pinned jar is here already (a member turned it off or on,
+            // or an echo of an update made here): only the switch, with no
+            // download. That needs no trust either, nothing is fetched.
+            if let Some(i) = pinned_here(inst, at, pin) {
+                if inst.addons[i].enabled != *enabled {
+                    let name = inst.addons[i].name.clone();
+                    switch(inst, i, *enabled, &name, job)?;
+                }
+                return Ok(());
+            }
             if skip_sources.iter().any(|s| s.source.url == pin.source.url && s.source.pattern == pin.source.pattern) {
+                job.note(format!("{}: not installed, you haven't confirmed its source on this PC", crate::sources::carry::display_name(pin)));
                 return Ok(());
             }
             crate::sources::install_pinned(inst, pin, *enabled, job)?;
@@ -3437,5 +3519,539 @@ mod tests {
             assert_eq!(sodium[0].mr_sha1, crate::modrinth::sha1(OLD), "{tag}");
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+}
+
+/// Mods from GitHub (and other links) travelling through a group: a code
+/// lists one as `Entry::Source` (the pinned release and sha256), keyed by
+/// its link. These run the real install against a fake GitHub on a
+/// loopback port, so what a PC downloads is counted.
+#[cfg(test)]
+mod source_sync_tests {
+    use super::*;
+    use crate::sources::carry::Pin;
+    use crate::sources::{Kind as SrcKind, ModSource};
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, MutexGuard};
+
+    /// A source nobody ever confirmed on any PC that runs the tests.
+    const REPO: &str = "hopper-test-never-trusted/ezmod";
+    const KEY: &str = "s:hopper-test-never-trusted/ezmod#ezmod-#.jar";
+
+    fn jar(release: &str) -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            z.start_file("release.txt", zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(release.as_bytes()).unwrap();
+            z.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    fn sha(b: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    fn pin_of(repo: &str, tag: &str, file: &str, body: &[u8]) -> Pin {
+        Pin {
+            file: file.into(),
+            source: ModSource {
+                kind: SrcKind::GitHub,
+                url: repo.into(),
+                publisher: repo.into(),
+                pattern: crate::sources::pattern_of(file),
+                seen: tag.into(),
+                sha256: sha(body),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn pin(tag: &str, file: &str, body: &[u8]) -> Pin {
+        pin_of(REPO, tag, file, body)
+    }
+
+    fn src(p: &Pin, on: bool) -> Entry {
+        Entry::Source { pin: p.clone(), enabled: on }
+    }
+
+    fn share_of(entries: Vec<Entry>) -> Share {
+        Share { base: Base::Plain { game_version: "1.21.1".into(), loader: "neoforge".into() }, name: None, loader: None, entries }
+    }
+
+    fn mods_of(entries: Vec<Entry>) -> Mods {
+        mods(&share_of(entries), |_| None)
+    }
+
+    fn code(entries: Vec<Entry>) -> String {
+        crate::sharecode::encode(&share_of(entries))
+    }
+
+    fn dec(c: &str) -> Option<Mods> {
+        crate::sharecode::decode(c).ok().map(|s| mods(&s, |_| None))
+    }
+
+    fn got(c: String, seq: u64, name: &str) -> Got {
+        Got { code: c, seq, at: seq, name: name.into(), ..Default::default() }
+    }
+
+    /// The changes from one code to the next.
+    fn between(was: Vec<Entry>, now: Vec<Entry>) -> Vec<Change> {
+        changes(&mods_of(was), &mods_of(now))
+    }
+
+    struct Fake {
+        web: Arc<AtomicUsize>,
+        api: Arc<AtomicUsize>,
+        _g: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            crate::sources::http::set_test_base(None);
+        }
+    }
+
+    type Answer = (u16, Vec<(&'static str, String)>, Vec<u8>);
+
+    /// A fake GitHub: `answer` gets a website path (`/web/<repo>/...`) or an
+    /// API path (`/api/...`) and says (status, headers, body).
+    fn fake(answer: impl Fn(&str) -> Answer + Send + 'static) -> Fake {
+        let g = crate::sources::http::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::sources::http::reset_for_test();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let (web, api) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (w2, a2) = (web.clone(), api.clone());
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let url = req.url().to_string();
+                if url.starts_with("/api/") { &a2 } else { &w2 }.fetch_add(1, Ordering::SeqCst);
+                let (status, headers, body) = answer(&url);
+                let mut resp = tiny_http::Response::from_data(body).with_status_code(status);
+                for (k, v) in headers {
+                    resp.add_header(tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()).unwrap());
+                }
+                let _ = req.respond(resp);
+            }
+        });
+        crate::sources::http::set_test_base(Some(&base));
+        Fake { web, api, _g: g }
+    }
+
+    /// A fake GitHub holding releases: (tag, file, body).
+    fn releases(list: Vec<(&'static str, &'static str, Vec<u8>)>) -> Fake {
+        fake(move |url| {
+            for (tag, file, body) in &list {
+                if url.ends_with(&format!("/releases/download/{tag}/{file}")) {
+                    return (200, vec![], body.clone());
+                }
+            }
+            (404, vec![], b"not found".to_vec())
+        })
+    }
+
+    fn inst_on_disk(tag: &str) -> Instance {
+        let root = std::env::temp_dir().join(format!("hopper-gs-src-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        let inst = Instance { root, name: "T".into(), game_version: "1.21.1".into(), loader: "neoforge-21.1.200".into(), ..Default::default() };
+        inst.save().unwrap();
+        inst
+    }
+
+    fn run(inst: &mut Instance, todo: &[Change], skip: &[Pin]) -> (anyhow::Result<()>, Vec<String>) {
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        let r = apply(inst, todo, skip, &job);
+        (r, jobs.snapshot().into_iter().flat_map(|j| j.notes).collect())
+    }
+
+    fn mods_dir_files(inst: &Instance) -> Vec<String> {
+        let mut v: Vec<String> =
+            std::fs::read_dir(inst.root.join("mods")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    fn file_state(name: &str, on: bool) -> State {
+        State::File { file: format!("src:{name}"), on }
+    }
+
+    // ---- 1-4: a member's change reaches the others, and ends as theirs ----
+
+    /// A member adds a mod from GitHub, turns it off and on, updates it
+    /// and removes it; another PC follows each step. The jar is downloaded
+    /// twice only: when it is added and when it is updated.
+    #[test]
+    fn a_github_mod_added_switched_updated_and_removed_by_a_member_follows_on_another_pc() {
+        let (j1, j2) = (jar("1.0"), jar("1.1"));
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone()), ("v2", "ezmod-1.1.jar", j2.clone())]);
+        let (p1, p2) = (pin("v1", "ezmod-1.0.jar", &j1), pin("v2", "ezmod-1.1.jar", &j2));
+        let mut inst = inst_on_disk("flow");
+
+        // Added: one change, keyed by the link.
+        let todo = between(vec![], vec![src(&p1, true)]);
+        assert_eq!(todo.len(), 1);
+        assert_eq!((todo[0].key.as_str(), todo[0].kind()), (KEY, Kind::Added));
+        assert_eq!(todo[0].now, file_state("ezmod-1.0.jar", true));
+        let (r, _) = run(&mut inst, &todo, &[]);
+        r.unwrap();
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+        assert_eq!(f.api.load(Ordering::SeqCst), 0, "the pin's own link, no API call");
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        let a = &inst.addons[0];
+        assert!(a.enabled);
+        assert_eq!(addon_key(a), KEY, "the same key the sender's code gave it");
+        let s = a.source.as_ref().unwrap();
+        assert_eq!((s.seen.as_str(), s.sha256.as_str()), ("v1", sha(&j1).as_str()));
+
+        // Turned off, then on again: a switch, no download.
+        let off = between(vec![src(&p1, true)], vec![src(&p1, false)]);
+        assert_eq!(off[0].kind(), Kind::Off);
+        run(&mut inst, &off, &[]).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar.disabled"]);
+        assert!(!inst.addons[0].enabled);
+        let on = between(vec![src(&p1, false)], vec![src(&p1, true)]);
+        assert_eq!(on[0].kind(), Kind::On);
+        run(&mut inst, &on, &[]).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        assert!(inst.addons[0].enabled);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1, "toggling a GitHub mod never downloads it again");
+
+        // Updated: the new release replaces the old, not beside it.
+        let up = between(vec![src(&p1, true)], vec![src(&p2, true)]);
+        assert_eq!(up.len(), 1);
+        assert_eq!((up[0].key.as_str(), up[0].kind()), (KEY, Kind::Updated));
+        run(&mut inst, &up, &[]).0.unwrap();
+        assert_eq!(f.web.load(Ordering::SeqCst), 2);
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.1.jar"], "the old jar isn't left in mods/");
+        assert_eq!(inst.addons.len(), 1, "one mod, not two");
+        let s = inst.addons[0].source.as_ref().unwrap();
+        assert_eq!((s.seen.as_str(), s.sha256.as_str()), ("v2", sha(&j2).as_str()));
+        assert_eq!(addon_key(&inst.addons[0]), KEY, "still the same mod for the group");
+
+        // The same update again (an echo, or a second member's) changes nothing.
+        run(&mut inst, &up, &[]).0.unwrap();
+        assert_eq!(f.web.load(Ordering::SeqCst), 2);
+        assert_eq!(inst.addons.len(), 1);
+
+        // Removed.
+        let gone = between(vec![src(&p2, true)], vec![]);
+        assert_eq!((gone[0].key.as_str(), gone[0].kind()), (KEY, Kind::Removed));
+        assert!(does_something(&inst, &gone[0]));
+        run(&mut inst, &gone, &[]).0.unwrap();
+        assert!(inst.addons.is_empty());
+        assert!(mods_dir_files(&inst).is_empty());
+        assert!(!does_something(&inst, &gone[0]), "a second removal does nothing");
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn a_github_mod_added_turned_off_arrives_off_and_a_download_that_isnt_the_pin_is_not_kept() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let mut inst = inst_on_disk("added-off");
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        run(&mut inst, &between(vec![], vec![src(&p1, false)]), &[]).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar.disabled"]);
+        assert!(!inst.addons[0].enabled);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(&inst.root);
+
+        // The release's file isn't what the pin says (sha256): nothing kept.
+        let mut inst = inst_on_disk("added-wrong");
+        let bad = Pin { source: ModSource { sha256: "0".repeat(64), ..p1.source.clone() }, ..p1.clone() };
+        let (r, _) = run(&mut inst, &between(vec![], vec![src(&bad, true)]), &[]);
+        let e = r.unwrap_err();
+        assert!(format!("{e:#}").contains("checksum"), "{e:#}");
+        assert!(mods_dir_files(&inst).is_empty(), "{:?}", mods_dir_files(&inst));
+        assert!(inst.addons.is_empty());
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    /// A plain follow applies the sender's whole code on every change, with
+    /// all its GitHub mods in it: the ones already here as the pinned file
+    /// are not downloaded (and their old copy not sent to backups) again.
+    #[test]
+    fn a_followed_code_applied_again_downloads_no_github_mod_that_is_already_here() {
+        let (j1, j2) = (jar("1.0"), jar("1.1"));
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone()), ("v2", "ezmod-1.1.jar", j2.clone())]);
+        let (p1, p2) = (pin("v1", "ezmod-1.0.jar", &j1), pin("v2", "ezmod-1.1.jar", &j2));
+        let mut inst = inst_on_disk("follow-again");
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        let apply_code = |inst: &mut Instance, entries: Vec<Entry>, prev: Option<Vec<Entry>>| {
+            let prev = prev.map(share_of);
+            crate::sharecode::apply_existing(inst, &share_of(entries), prev.as_ref(), &job).unwrap();
+        };
+        apply_code(&mut inst, vec![src(&p1, true)], None);
+        assert_eq!((f.web.load(Ordering::SeqCst), mods_dir_files(&inst)), (1, vec!["ezmod-1.0.jar".to_string()]));
+        // The same code again, and again with another change in it.
+        apply_code(&mut inst, vec![src(&p1, true)], Some(vec![src(&p1, true)]));
+        assert_eq!(f.web.load(Ordering::SeqCst), 1, "nothing downloaded for a mod that is here");
+        // Turned off by the sender: off here, still no download.
+        apply_code(&mut inst, vec![src(&p1, false)], Some(vec![src(&p1, true)]));
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar.disabled"]);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+        // Back on.
+        apply_code(&mut inst, vec![src(&p1, true)], Some(vec![src(&p1, false)]));
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+        // A new release is a download, and the only jar after.
+        apply_code(&mut inst, vec![src(&p2, true)], Some(vec![src(&p1, true)]));
+        assert_eq!((f.web.load(Ordering::SeqCst), mods_dir_files(&inst)), (2, vec!["ezmod-1.1.jar".to_string()]));
+        assert_eq!(inst.addons.len(), 1);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    /// A pack mod swapped for a GitHub one reads as the pack's mod taken
+    /// out (by its file name for a Modrinth pack) plus the new source mod.
+    #[test]
+    fn a_pack_mod_swapped_for_a_github_one_and_a_removal_by_file_name_find_the_right_mod() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let mut inst = inst_on_disk("swap");
+        std::fs::write(inst.root.join("mods/oldmod-1.0.jar"), b"old").unwrap();
+        inst.addons.push(Addon {
+            project_id: 77,
+            name: "Old".into(),
+            file_name: "oldmod-1.0.jar".into(),
+            enabled: true,
+            from_pack: true,
+            ..Default::default()
+        });
+        inst.save().unwrap();
+        let todo = between(vec![], vec![Entry::Remove(Target::Named("oldmod-1.0.jar".into())), src(&p1, true)]);
+        assert_eq!(
+            todo.iter().map(|c| (c.key.as_str(), c.kind())).collect::<Vec<_>>(),
+            [("n:oldmod-1.0.jar", Kind::Removed), (KEY, Kind::Added)]
+        );
+        run(&mut inst, &todo, &[]).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        assert_eq!(inst.addons.len(), 1);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+
+        // A removal that names the source mod's jar finds it too.
+        assert_eq!(find_addon(&inst, "n:ezmod-1.0.jar"), Some(0));
+        assert_eq!(find_addon(&inst, KEY), Some(0));
+        let by_name = Change {
+            key: "n:ezmod-1.0.jar".into(),
+            was: State::Unlisted,
+            now: State::Removed,
+            entry: Some(Entry::Remove(Target::Named("ezmod-1.0.jar".into()))),
+        };
+        run(&mut inst, &[by_name], &[]).0.unwrap();
+        assert!(inst.addons.is_empty());
+        assert!(mods_dir_files(&inst).is_empty());
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    // ---- 5: two-way, the latest change wins and says who ----
+
+    #[test]
+    fn two_members_changing_the_same_github_mod_end_on_the_later_one_and_say_who() {
+        let (j1, j2) = (jar("1.0"), jar("1.1"));
+        let (p1, p2) = (pin("v1", "ezmod-1.0.jar", &j1), pin("v2", "ezmod-1.1.jar", &j2));
+        let base = vec![src(&p1, true)];
+        let mia = code(vec![src(&p1, false)]); // seq 10: turned off
+        let sam = code(vec![src(&p2, true)]); // seq 11: updated
+        let start = |copy: &mut PackCopy| {
+            copy.got.insert("mia".into(), got(code(base.clone()), 1, "Mia"));
+            copy.got.insert("sam".into(), got(code(base.clone()), 2, "Sam"));
+        };
+        // A third PC takes both: Sam's is later.
+        let mut third = PackCopy::default();
+        start(&mut third);
+        third.arrive("mia", got(mia.clone(), 10, "Mia"));
+        third.arrive("sam", got(sam.clone(), 11, "Sam"));
+        let here = mods_of(base.clone());
+        let (todo, merged) = plan(&third, &here, None, false, dec);
+        let last = todo.last().unwrap();
+        assert_eq!((last.key.as_str(), last.now.clone()), (KEY, file_state("ezmod-1.1.jar", true)));
+        let mark = merged.marks.iter().rev().find(|(k, _)| k == KEY).map(|(_, m)| m.clone()).unwrap();
+        assert_eq!((mark.kind, mark.name.as_str(), mark.seq), (Kind::Updated, "Sam", 11));
+        assert_eq!(mark.kind.says(&mark.name), "Updated by Sam");
+        // Mia's PC (off, her mark at 10) takes Sam's later update.
+        let mut on_mia = PackCopy::default();
+        start(&mut on_mia);
+        on_mia.got.remove("mia");
+        on_mia.marks.insert(KEY.into(), Mark { state: file_state("ezmod-1.0.jar", false), seq: 10, by: "mia".into(), ..Default::default() });
+        on_mia.arrive("sam", got(sam.clone(), 11, "Sam"));
+        let here = mods_of(vec![src(&p1, false)]);
+        let (todo, _) = plan(&on_mia, &here, Some(&here), false, dec);
+        assert_eq!(todo.iter().map(|c| c.now.clone()).collect::<Vec<_>>(), [file_state("ezmod-1.1.jar", true)]);
+        // Sam's PC (his mark at 11) drops Mia's earlier switch.
+        let mut on_sam = PackCopy::default();
+        start(&mut on_sam);
+        on_sam.got.remove("sam");
+        on_sam.marks.insert(KEY.into(), Mark { state: file_state("ezmod-1.1.jar", true), seq: 11, by: "sam".into(), ..Default::default() });
+        on_sam.arrive("mia", got(mia, 10, "Mia"));
+        let here = mods_of(vec![src(&p2, true)]);
+        let (todo, merged) = plan(&on_sam, &here, Some(&here), false, dec);
+        assert!(todo.is_empty());
+        assert_eq!(merged.taken.len(), 1);
+    }
+
+    // ---- 6: a source this PC hasn't confirmed ----
+
+    fn merge_one(inst: &Instance, was: Vec<Entry>, now: Vec<Entry>, allow: bool) -> (anyhow::Result<Merged>, Vec<String>) {
+        let mut copy = PackCopy::default();
+        copy.got.insert("mia".into(), got(code(was.clone()), 1, "Mia"));
+        copy.sent = code(was);
+        copy.arrive("mia", got(code(now), 10, "Mia"));
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        let r = merge(&inst.root, &copy, allow, false, true, &job);
+        (r, jobs.snapshot().into_iter().flat_map(|j| j.notes).collect())
+    }
+
+    #[test]
+    fn a_github_mod_from_an_unconfirmed_source_is_not_downloaded_and_the_player_is_told() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let inst = inst_on_disk("untrusted");
+        // Mod sources off, and on but never confirmed: the same answer.
+        for allow in [false, true] {
+            let (r, _) = merge_one(&inst, vec![], vec![src(&p1, true)], allow);
+            let merged = r.unwrap();
+            assert_eq!(f.web.load(Ordering::SeqCst), 0, "nothing downloaded (allow {allow})");
+            assert!(mods_dir_files(&inst).is_empty());
+            assert_eq!(merged.taken.len(), 1);
+            assert!(merged.marks.is_empty() && merged.made.is_empty(), "no 'Added by Mia' on a mod that isn't here: {merged:?}");
+            assert_eq!(merged.kept.len(), 1, "{merged:?}");
+            let k = &merged.kept[0];
+            assert_eq!((k.key.as_str(), k.why, k.kind, k.by.as_str()), (KEY, KeptWhy::Source, Kind::Added, "Mia"));
+            assert_eq!(
+                k.says(),
+                format!("ezmod (GitHub: {REPO}) wasn't installed: you haven't confirmed its source yet (Settings › Mod sources). Mia added it.")
+            );
+        }
+        // An update of one already here is left as it is, said as an update.
+        let _ = std::fs::remove_dir_all(&inst.root);
+        let mut here = inst_on_disk("untrusted-update");
+        run(&mut here, &between(vec![], vec![src(&p1, true)]), &[]).0.unwrap();
+        let j2 = jar("1.1");
+        let p2 = pin("v2", "ezmod-1.1.jar", &j2);
+        let before = f.web.load(Ordering::SeqCst);
+        let merged = merge_one(&here, vec![src(&p1, true)], vec![src(&p2, true)], false).0.unwrap();
+        assert_eq!(f.web.load(Ordering::SeqCst), before);
+        assert_eq!(mods_dir_files(&here), ["ezmod-1.0.jar"]);
+        let says = merged.kept[0].says();
+        assert!(says.starts_with("ezmod (GitHub: ") && says.contains("wasn't updated") && says.ends_with("Mia changed its version."), "{says}");
+        let _ = std::fs::remove_dir_all(&here.root);
+    }
+
+    #[test]
+    fn switching_a_github_mod_already_here_needs_no_confirmed_source() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let mut inst = inst_on_disk("untrusted-switch");
+        run(&mut inst, &between(vec![], vec![src(&p1, true)]), &[]).0.unwrap();
+        let merged = merge_one(&inst, vec![src(&p1, true)], vec![src(&p1, false)], false).0.unwrap();
+        assert!(merged.kept.is_empty(), "{merged:?}");
+        assert_eq!(merged.made.len(), 1);
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar.disabled"]);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1, "no second download");
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn apply_given_a_left_out_source_says_so_and_installs_nothing() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let mut inst = inst_on_disk("skip-note");
+        let (r, notes) = run(&mut inst, &between(vec![], vec![src(&p1, true)]), std::slice::from_ref(&p1));
+        r.unwrap();
+        assert!(inst.addons.is_empty() && mods_dir_files(&inst).is_empty());
+        assert_eq!(f.web.load(Ordering::SeqCst), 0);
+        assert_eq!(notes, ["ezmod: not installed, you haven't confirmed its source on this PC"]);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    /// Several GitHub mods arrive while GitHub is limiting: one error for
+    /// the whole sync (so one notice), and GitHub is asked once.
+    #[test]
+    fn a_github_rate_limit_is_one_error_for_all_the_mods_and_asks_github_once() {
+        let reset = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 600;
+        let f = fake(move |url| {
+            if url.starts_with("/api/") {
+                (403, vec![("x-ratelimit-remaining", "0".to_string()), ("x-ratelimit-reset", reset.to_string())], b"{}".to_vec())
+            } else {
+                (404, vec![], b"not found".to_vec())
+            }
+        });
+        let body = jar("1.0");
+        let pins: Vec<Pin> = (0..3).map(|i| pin_of(&format!("hopper-test-never-trusted/m{i}"), "v1", &format!("m{i}-1.0.jar"), &body)).collect();
+        let todo: Vec<Change> = pins.iter().flat_map(|p| between(vec![], vec![src(p, true)])).collect();
+        assert_eq!(todo.len(), 3);
+        let mut inst = inst_on_disk("limit");
+        let (r, _) = run(&mut inst, &todo, &[]);
+        let e = r.unwrap_err();
+        assert!(crate::sources::http::rate_limited(&e).is_some(), "{e:#}");
+        assert_eq!(f.api.load(Ordering::SeqCst), 1, "after the first answer the others wait without asking");
+        assert!(inst.addons.is_empty());
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    // ---- 7: locked and kept-only-here ----
+
+    #[test]
+    fn a_locked_github_mod_still_switches_but_keeps_its_file() {
+        let (j1, j2) = (jar("1.0"), jar("1.1"));
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone()), ("v2", "ezmod-1.1.jar", j2.clone())]);
+        let (p1, p2) = (pin("v1", "ezmod-1.0.jar", &j1), pin("v2", "ezmod-1.1.jar", &j2));
+        let mut inst = inst_on_disk("locked-src");
+        run(&mut inst, &between(vec![], vec![src(&p1, true)]), &[]).0.unwrap();
+        inst.addons[0].locked = true;
+        inst.save().unwrap();
+        let off = between(vec![src(&p1, true)], vec![src(&p1, false)]).remove(0);
+        let up = between(vec![src(&p1, true)], vec![src(&p2, true)]).remove(0);
+        let gone = between(vec![src(&p1, true)], vec![]).remove(0);
+        assert!(!locked_out(&inst, &off), "a switch of the same file goes through");
+        assert!(locked_out(&inst, &up), "another release is left out");
+        assert!(locked_out(&inst, &gone), "so is a removal");
+        let (r, notes) = run(&mut inst, &[up, gone], &[]);
+        r.unwrap();
+        assert_eq!(notes, ["ezmod: kept, you locked its version", "ezmod: kept, you locked its version"]);
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        run(&mut inst, &[off], &[]).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar.disabled"]);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+        // The merge says why, and leaves no 'Updated by Mia' mark.
+        let merged = merge_one(&inst, vec![src(&p1, false)], vec![src(&p2, true)], true).0.unwrap();
+        assert_eq!(merged.kept.len(), 1, "{merged:?}");
+        assert_eq!(merged.kept[0].why, KeptWhy::Locked);
+        assert!(merged.marks.is_empty());
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn a_github_mod_kept_only_here_is_left_alone_by_the_group_and_only_learns_how_friends_have_it() {
+        let (j1, j2) = (jar("1.0"), jar("1.1"));
+        let _f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone()), ("v2", "ezmod-1.1.jar", j2.clone())]);
+        let (p1, p2) = (pin("v1", "ezmod-1.0.jar", &j1), pin("v2", "ezmod-1.1.jar", &j2));
+        let mut inst = inst_on_disk("only-here");
+        run(&mut inst, &between(vec![], vec![src(&p1, true)]), &[]).0.unwrap();
+        inst.only_here.insert(KEY.into(), crate::onlyhere::Kept { theirs: Some(src(&p1, true)), name: "ezmod".into() });
+        inst.save().unwrap();
+        // A member updates it, then removes it.
+        let merged = merge_one(&inst, vec![src(&p1, true)], vec![src(&p2, true)], true).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"], "this PC keeps its own");
+        assert!(merged.kept.is_empty() && merged.made.is_empty(), "{merged:?}");
+        let back = crate::instances::load(&inst.root).unwrap();
+        assert_eq!(back.only_here[KEY].theirs, Some(src(&p2, true)), "friends have 2 now");
+        let merged = merge_one(&back, vec![src(&p2, true)], vec![], true).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        assert!(merged.made.is_empty());
+        assert_eq!(crate::instances::load(&inst.root).unwrap().only_here[KEY].theirs, None);
+        let _ = std::fs::remove_dir_all(&inst.root);
     }
 }

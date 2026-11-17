@@ -919,8 +919,22 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
             && !kept(inst, &source_who(&pin.source))
         {
             job.check_cancelled()?;
+            let key = format!("s:{}#{}", pin.source.url, pin.source.pattern);
+            // Already here as that file: nothing to download (a followed
+            // pack applies again on every change, with all its GitHub mods
+            // in it). Only a switch off is made; one that is off here and on
+            // in the code is `back_on`'s, below.
+            if let Some(i) = crate::groupsync::pinned_here(inst, crate::groupsync::find_addon(inst, &key), pin) {
+                if !*enabled && inst.addons[i].enabled {
+                    crate::actor::claim_key(&key);
+                    if let Err(e) = crate::install::set_enabled_later(inst, i, false) {
+                        job.note(format!("Couldn't turn {} off: {e:#}", inst.addons[i].name));
+                    }
+                }
+                continue;
+            }
             job.detail(format!("Getting {} from {}", pin.file, pin.source.publisher));
-            crate::actor::claim_key(&format!("s:{}#{}", pin.source.url, pin.source.pattern));
+            crate::actor::claim_key(&key);
             if let Err(e) = crate::sources::install_pinned(inst, pin, *enabled, job) {
                 match crate::sources::http::rate_limited(&e) {
                     Some(r) => limited = Some((r, limited.map_or(0, |(_, n)| n) + 1)),
