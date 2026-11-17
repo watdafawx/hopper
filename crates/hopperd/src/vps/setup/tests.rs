@@ -375,3 +375,25 @@ fn taking_one_server_off_leaves_the_others_lines() {
     assert_eq!((moved[0].name.as_str(), moved[0].port), ("survival", BACKEND_PORT));
     assert_eq!(moved[0].hosts, vec!["new.example.com".to_string()]);
 }
+
+/// bStats rewrites a config that lacks its other keys with reports back on
+/// (found on a real Velocity: the setup's one-line file didn't stick, and
+/// every run of the setup restarted Velocity to "turn it off" again).
+#[test]
+fn usage_reports_file_is_whole_and_off() {
+    let id = uuid_v4(&"ab".repeat(16));
+    assert_eq!(id, "abababab-abab-4bab-abab-abababababab");
+    let t = bstats_off(&id);
+    for key in ["enabled=false", "server-uuid=abababab-abab-4bab-abab-abababababab", "log-errors=false", "log-sent-data=false", "log-response-status-text=false"] {
+        assert!(t.lines().any(|l| l == key), "{key}");
+    }
+    assert!(!t.contains("enabled=true") && t.ends_with('\n'));
+    // Short or odd input still gives a well formed id.
+    for hex in ["", "xyz", "00", &"f".repeat(40)] {
+        let u = uuid_v4(hex);
+        let parts: Vec<usize> = u.split('-').map(str::len).collect();
+        assert_eq!(parts, [8, 4, 4, 4, 12], "{u}");
+        assert_eq!(u.as_bytes()[14], b'4', "{u}");
+        assert!(matches!(u.as_bytes()[19], b'8' | b'9' | b'a' | b'b'), "{u}");
+    }
+}

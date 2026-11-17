@@ -248,6 +248,17 @@ struct RelayRun {
     fingerprint: String,
     task: JoinHandle<()>,
     dir: std::path::PathBuf,
+    /// The port just above the first backend port, kept bound so another
+    /// test can't take it (the relay hands out the ports above the first
+    /// one). A test that wants the relay to listen there gives it up with
+    /// [`RelayRun::free_next_backend`].
+    spare: Option<TcpListener>,
+}
+
+impl RelayRun {
+    fn free_next_backend(&mut self) {
+        self.spare = None;
+    }
 }
 
 impl Drop for RelayRun {
@@ -271,10 +282,27 @@ async fn run_relay_with(backends: bool) -> RelayRun {
     let game = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let tunnel = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let (gp, tp) = (game.local_addr().unwrap().port(), tunnel.local_addr().unwrap().port());
-    let backend = if backends { Some(TcpListener::bind("127.0.0.1:0").await.unwrap()) } else { None };
+    // The second backend port is the next one up, so it has to be free
+    // too: with the other tests binding ports at the same time, take a
+    // pair or try again.
+    let (backend, spare) = if backends {
+        let mut got = None;
+        for _ in 0..50 {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let next = l.local_addr().unwrap().port().checked_add(1);
+            if let Some(Ok(n)) = next.map(|p| std::net::TcpListener::bind(("127.0.0.1", p))) {
+                n.set_nonblocking(true).unwrap();
+                got = Some((Some(l), Some(TcpListener::from_std(n).unwrap())));
+                break;
+            }
+        }
+        got.expect("two neighbouring free ports")
+    } else {
+        (None, None)
+    };
     let bp = backend.as_ref().map_or(0, |l| l.local_addr().unwrap().port());
     let task = tokio::spawn(relay_end::serve(relay.clone(), game, tunnel, tls, backend));
-    RelayRun { relay, game: gp, backend: bp, tunnel: tp, fingerprint, task, dir }
+    RelayRun { relay, game: gp, backend: bp, tunnel: tp, fingerprint, task, dir, spare }
 }
 
 fn home_cfg(r: &RelayRun, port: u16, server: &str) -> home::HomeConfig {
@@ -769,7 +797,7 @@ async fn velocity_ports_reach_their_own_server() {
     set_addresses(&t, &a, &["survival.example.test"]);
     set_addresses(&t, &b, &["creative.example.test"]);
 
-    let r = run_relay_with(true).await;
+    let mut r = run_relay_with(true).await;
     let base = r.backend;
     let backends = vec![
         home::Backend { server: a.clone(), name: "survival".into(), port: base, hosts: vec!["survival.example.test".into()] },
@@ -778,10 +806,12 @@ async fn velocity_ports_reach_their_own_server() {
     t.app.vps.set_config(home::HomeConfig { servers: vec![a.clone(), b.clone()], backends, ..home_cfg(&r, r.tunnel, &a) }).unwrap();
     let ctl = home::routes(&t.app);
     assert_eq!(ctl.routes.iter().map(|r| (r.port, r.hosts.clone())).collect::<Vec<_>>(), [(base, vec!["survival.example.test".to_string()]), (base + 1, vec!["creative.example.test".to_string()])]);
+    // The relay may listen on the second port from here on.
+    r.free_next_backend();
     home::start(t.app.clone());
-    wait_for("both servers on the relay", 15, || r.relay.route_servers().len() == 2).await;
+    wait_for("both servers on the relay", 30, || r.relay.route_servers().len() == 2).await;
     let mut open = false;
-    for _ in 0..50 {
+    for _ in 0..150 {
         if TcpStream::connect(("127.0.0.1", base + 1)).await.is_ok() {
             open = true;
             break;
@@ -792,17 +822,17 @@ async fn velocity_ports_reach_their_own_server() {
     // Velocity's own address in the handshake doesn't matter here: the port does.
     let (status, _) = list_ping_as(base + 1, "127.0.0.1").await;
     assert_ne!(status["version"]["name"], "Hopper relay", "{status}");
-    wait_for("the second server's stream", 10, || streams(&t, &b) >= 1).await;
+    wait_for("the second server's stream", 30, || streams(&t, &b) >= 1).await;
     let before_a = streams(&t, &a);
     let (status, _) = list_ping_as(base, "127.0.0.1").await;
     assert_ne!(status["version"]["name"], "Hopper relay", "{status}");
-    wait_for("the first server's stream", 10, || streams(&t, &a) > before_a).await;
+    wait_for("the first server's stream", 30, || streams(&t, &a) > before_a).await;
 
     // The second server's Velocity line is gone (taken out by hand): its
     // address is refused at the front port and its old port goes nowhere.
     let first_only = t.app.vps.config().backends[..1].to_vec();
     t.app.vps.set_config(home::HomeConfig { backends: first_only, ..t.app.vps.config() }).unwrap();
-    wait_for("the second server without a port", 15, || home::routes(&t.app).routes[1].port == 0).await;
+    wait_for("the second server without a port", 30, || home::routes(&t.app).routes[1].port == 0).await;
     let mut refused = String::new();
     for _ in 0..100 {
         refused = join_refused(r.game, "creative.example.test").await;

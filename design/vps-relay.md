@@ -706,7 +706,7 @@ mode).
 | User | `hopper-velocity` (system, no shell), separate from `hopper-relay` so neither can read the other's key |
 | Settings | `/etc/hopper-relay/velocity.toml` and `forwarding.secret`, root:hopper-velocity 0640 in a 0750 folder; data in `/var/lib/hopper-velocity` (0700) |
 | Service | `hopper-velocity.service`, hardened like the relay's; `bind = 127.0.0.1:25577`, `haproxy-protocol = true`, `player-info-forwarding-mode = "modern"`, `online-mode = true` |
-| Usage reports | bStats turned off (`plugins/bStats/config.txt`, `enabled=false`), written as the Velocity user |
+| Usage reports | bStats turned off (`plugins/bStats/config.txt`, `enabled=false` plus its other keys: a one-line file is rewritten with reports on, found in B7's real-Velocity test), written as the Velocity user |
 
 Each part checks before it acts (sha256, the unit text, the toml), so "Run
 again" repairs and changes only what differs; Remove takes out the service,
@@ -1186,10 +1186,70 @@ Hopper desktop doesn't show relays yet.
   and with one route left every address reached it (the single-route rule
   above).
 
+### Tried on a real Velocity
+
+`scripts/vps-relay-multi-e2e.ps1` (the WSL test box reset from its
+snapshot, Velocity 4.3.1 and Java 25 as the setup installs them, offline
+logins, everything on 127.0.0.1, a scratch panel with two Fabric-looking
+servers that are never started: home's router answers their server list
+pings from their own `server.properties`). The "player" is a script that
+sends the Minecraft handshake, status request and login start by hand.
+
+- **Setup in sequence**: the relay set up for Alpha, "Use the relay" on
+  it, then the setup again for Beta on that relay. `velocity.toml` got
+  `alpha = 25580`, `beta = 25581`, `try = ["alpha", "beta"]` and the
+  forced hosts `a.test` → alpha, `b.test` → beta; Alpha kept its name
+  and port; Velocity restarted once for Beta, both backend ports listened.
+- **Who answers**: status pings to the relay's players' port with the
+  address `a.test`, `b.test` and `A.Test.` reached Alpha, Beta and Alpha
+  (through Velocity's ping passthrough to the right router, told apart
+  by each server's motd). With two servers the bare IP and `c.test` got
+  the relay's "No server goes by this address" (status) and "No server
+  here goes by this address…" (login). A login on `a.test` and on
+  `b.test` was let in by Velocity (offline).
+- **Taking one off**: the API refused it until "Stop using the relay" on
+  Beta; after that and a setup run, `velocity.toml` had no beta line,
+  Velocity restarted, Alpha's address still answered, and with one server
+  left the bare IP and the old `b.test` both reached Alpha (IP joins
+  kept, as designed). Running the setup again with nothing changed left
+  Velocity running (same process).
+- **Voice**: both servers had a Simple Voice Chat jar (empty file). The
+  first server with "Use the relay" owned the voice: `GET /api/v1/vps-relays`
+  said so (owner only: 401 without a login) and Beta's card answered
+  `state: "other", owner: "Alpha"`.
+- **Remove**: nothing left on the box.
+
+What this found:
+
+- **Usage reports were never off.** The setup wrote `enabled=false` as the
+  only line of bStats' `config.txt`; Velocity's bStats finds its other keys
+  missing and writes its defaults back, `enabled=true`, at start. So
+  Velocity could report to bstats.org, and every run of the setup found
+  the file wrong again, wrote it, and restarted Velocity ("usage reports
+  off" was in every repair since B4). The setup now writes the whole file
+  (`plan::bstats_off`, with a random id), checks for the id as well, and
+  an unchanged setup leaves Velocity alone (checked above).
+- The `velocity_ports_reach_their_own_server` test was flaky because the
+  relay's second backend port is "the first one plus one", and another
+  test's random port could be exactly that. The test now keeps the
+  neighbour port bound until the relay may take it, and waits longer on a
+  loaded machine.
+
 ### Not done
 
-- Velocity end to end with two servers: only in tests (the forced-hosts
-  config and the per-port tags); not on a VM with real Velocity yet.
+- Not tried: a real Minecraft client or a running Minecraft server behind
+  Velocity. The servers were stopped, so the login was only followed as far
+  as Velocity letting the player in; which server a login would be sent
+  to is shown by the forced-hosts file and by the status pings, not by a
+  join. Mojang logins were not tried either (the box runs Velocity without
+  account checks). "Use the relay" and "Stop using the relay" did run for
+  real on both servers (the forwarding mod and Fabric API came from the
+  internet and went again on Stop), but the mod was never loaded by a
+  running server.
+- Not tried: the relay on a second machine, UDP voice with a real voice
+  mod (only the owner and the "other" answers), several players at once,
+  a server with no address while two share the relay (its card note), and
+  a relay that was set up before B7 (older home or relay).
 - Voice for more than one server (see above).
 - Several relays: the page and API list relays, but a panel still has one.
 - With one server left, any address reaches it, the old one included.

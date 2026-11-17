@@ -613,8 +613,10 @@ async fn step_velocity(c: &mut Ctx<'_>, inst: &mut Installed, server: &str) -> S
     // relay set up for a player doesn't. Written as Velocity's user, since
     // its own folder could hold a link a root write would follow.
     let bstats = format!("{VELOCITY_DATA}/plugins/bStats/config.txt");
-    if !c.root(&format!("grep -qx enabled=false {bstats}")).await?.ok() {
-        let o = c.root_in(&format!("runuser -u {VELOCITY_USER} -- mkdir -p {VELOCITY_DATA}/plugins/bStats && runuser -u {VELOCITY_USER} -- tee {bstats} >/dev/null"), b"enabled=false\n", SHORT).await?;
+    // The whole file, not one line: see `plan::bstats_off`.
+    if !c.root(&format!("grep -qx enabled=false {bstats} && grep -q '^server-uuid=' {bstats}")).await?.ok() {
+        let text = plan::bstats_off(&plan::uuid_v4(&crate::auth::random_hex(16)));
+        let o = c.root_in(&format!("runuser -u {VELOCITY_USER} -- mkdir -p {VELOCITY_DATA}/plugins/bStats && runuser -u {VELOCITY_USER} -- tee {bstats} >/dev/null"), text.as_bytes(), SHORT).await?;
         if !o.ok() {
             return Err(format!("Turning off Velocity's usage reports: {}", o.why()));
         }

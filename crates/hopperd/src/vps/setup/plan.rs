@@ -241,6 +241,29 @@ WantedBy=multi-user.target
     )
 }
 
+/// Velocity's `plugins/bStats/config.txt` with usage reports off. It has to
+/// be the whole file: with only `enabled=false` in it, bStats finds the
+/// other keys missing and writes its defaults back (`enabled=true`) when
+/// Velocity starts, so the reports stayed on and every run of the setup
+/// found them on again and restarted Velocity. `uuid` is any random id; it
+/// is never sent anywhere while reports are off.
+pub fn bstats_off(uuid: &str) -> String {
+    format!("enabled=false\nserver-uuid={uuid}\nlog-errors=false\nlog-sent-data=false\nlog-response-status-text=false\n")
+}
+
+/// A random version 4 id from 16 random bytes in hex (32 digits).
+pub fn uuid_v4(hex: &str) -> String {
+    let h: Vec<char> = hex.chars().filter(char::is_ascii_hexdigit).collect();
+    let h: String = (0..32).map(|i| h.get(i).copied().unwrap_or('0')).collect();
+    let variant = match h.as_bytes()[16] {
+        b'0'..=b'3' => '8',
+        b'4'..=b'7' => '9',
+        b'8'..=b'9' | b'a' | b'A' | b'b' | b'B' => 'a',
+        _ => 'b',
+    };
+    format!("{}-{}-4{}-{variant}{}-{}", &h[0..8], &h[8..12], &h[13..16], &h[17..20], &h[20..32])
+}
+
 /// `stat -c '%n %U %G %a'` of Velocity's folders and files, as the setup leaves them.
 pub fn velocity_files_right(stat: &str) -> bool {
     let want = [
