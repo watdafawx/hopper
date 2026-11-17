@@ -3580,13 +3580,19 @@ fn changed_by(s: &Store, root: &Path, me: &str) -> Option<String> {
     let (key, last) = marks().filter(|(_, m)| m.by != me).max_by_key(|(_, m)| (m.at, m.seq))?;
     // The mods that one change touched the same way (the loader and the
     // pack version aren't mods).
-    let n = marks().filter(|(k, m)| !k.starts_with('~') && m.by == last.by && m.seq == last.seq && m.kind == last.kind).count();
+    // A mod's lock is kept under its own key, and counts as that mod.
+    let is_lock = hopper::groupsync::lock_target(key).is_some();
+    let n = marks()
+        .filter(|(k, m)| (if is_lock { hopper::groupsync::lock_target(k).is_some() } else { !k.starts_with('~') }) && m.by == last.by && m.seq == last.seq && m.kind == last.kind)
+        .count();
     let verb = match last.kind {
         Kind::Added => "added",
         Kind::Removed => "took out",
         Kind::On => "turned on",
         Kind::Off => "turned off",
         Kind::Updated => "updated",
+        Kind::Locked => "locked",
+        Kind::Unlocked => "unlocked",
     };
     let what = if key == LOADER_KEY {
         "the loader".to_string()

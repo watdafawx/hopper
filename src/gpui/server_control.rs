@@ -108,6 +108,11 @@ pub struct ServerControl {
     log_days_input: Entity<InputState>,
     /// The server's relay status, from the panel it runs on (None: no relay).
     relay: Option<hopper::relay_view::RelayView>,
+    /// This PC may manage the panel the relay card is from (Test again,
+    /// Relay setup); read once per server.
+    relay_may: bool,
+    /// "Test again" is running.
+    relay_testing: bool,
     _poll: Option<Task<()>>,
     /// A page about the server shows: poll at [`POLL`], else [`POLL_IDLE`].
     active: bool,
@@ -194,6 +199,8 @@ impl ServerControl {
             delay_input,
             log_days_input,
             relay: None,
+            relay_may: false,
+            relay_testing: false,
             _poll: None,
             active: false,
             polled: std::time::Instant::now(),
@@ -302,6 +309,8 @@ impl ServerControl {
         self.options = None;
         self.opts_loading = false;
         self.relay = None;
+        self.relay_may = false;
+        self.relay_testing = false;
         self._poll = None;
         let Some(panel) = self.the_panel(cx) else {
             cx.notify();
@@ -351,6 +360,12 @@ impl ServerControl {
                 .update(cx, |this, cx| this.remote(cx).and_then(|r| hopper::hopperd::Client::for_remote(&r).ok()).map(Arc::new))
                 .ok()
                 .flatten();
+            // Who this PC is there decides whether the relay card offers
+            // Test again and the setup (one call, not every poll).
+            if let Some(c) = client.clone() {
+                let may = cx.background_spawn(async move { c.get("/auth/me").ok().map(|v| hopper::hopperd::may_manage(&v)) }).await;
+                this.update(cx, |this, _| this.relay_may = may.unwrap_or(false)).ok();
+            }
             loop {
                 let Ok(Some((id, console, full))) = this.update(cx, |this, _| {
                     this.id.clone().map(|id| (id, this.console_open, this.console_full))
@@ -911,11 +926,25 @@ impl ServerControl {
             .clone()
             .filter(|r| crate::server_delete::can_delete(self.store.read(cx), r))
             .map(|r| (self.store.clone(), r));
+        // "Relay through a VPS…" like the web's More menu: only for a PC that
+        // may manage the panel, and for the panel's own servers (not a node's).
+        let relay = self
+            .remote(cx)
+            .filter(|r| self.relay_may && hopper::hopperd::node_of(&r.id).is_none())
+            .map(|r| {
+                let name = self.root.as_ref().and_then(|root| self.store.read(cx).server(root)).map(|s| s.name.clone()).unwrap_or_default();
+                (self.store.clone(), r, name)
+            });
         b.icon(IconName::Ellipsis).dropdown_menu(move |menu, _, _| {
             let (v1, v2) = (menu_view.clone(), menu_view.clone());
             menu.item(PopupMenuItem::new("Back up now").on_click(move |_, window, cx| {
                 v1.update(cx, |this, cx| this.request(PanelAction::Backup, window, cx))
             }))
+            .when_some(relay.clone(), |m, (store, remote, name)| {
+                m.item(PopupMenuItem::new("Relay through a VPS…").icon(IconName::Globe).on_click(move |_, window, cx| {
+                    crate::relay_setup::open(store.clone(), remote.clone(), name.clone(), window, cx)
+                }))
+            })
             .separator()
             .item(PopupMenuItem::new("Kill (no save)").disabled(!running).on_click(move |_, window, cx| {
                 v2.update(cx, |this, cx| this.request(PanelAction::Kill, window, cx))
@@ -1238,10 +1267,57 @@ impl ServerControl {
         )
     }
 
-    /// The read-only relay card, for a server that uses its Hopper Server's
-    /// "Relay through a VPS".
-    pub fn relay_card(&self, cx: &App) -> Option<AnyElement> {
-        self.relay.as_ref().map(|r| crate::relay_card::relay_card(r, cx))
+    /// The relay card, for a server that uses its Hopper Server's "Relay
+    /// through a VPS".
+    pub fn relay_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let r = self.relay.as_ref()?;
+        let (this, this2) = (cx.entity(), cx.entity());
+        let (store, remote, name) = (
+            self.store.clone(),
+            self.remote(cx)?,
+            self.root.as_ref().and_then(|root| self.store.read(cx).server(root)).map(|s| s.name.clone()).unwrap_or_default(),
+        );
+        let actions = crate::relay_card::CardActions {
+            may: self.relay_may,
+            testing: self.relay_testing,
+            on_test: std::rc::Rc::new(move |_, cx| this.update(cx, |ctl, cx| ctl.test_relay(cx))),
+            on_setup: std::rc::Rc::new(move |window, cx| {
+                let _ = &this2;
+                crate::relay_setup::open(store.clone(), remote.clone(), name.clone(), window, cx)
+            }),
+        };
+        Some(crate::relay_card::relay_card(r, &actions, hopper::relay_view::unix_now(), cx))
+    }
+
+    /// "Test again": the panel tries the relay as a player would, keeps the
+    /// answer, and the card shows it.
+    fn test_relay(&mut self, cx: &mut Context<Self>) {
+        let (Some(id), Some(remote)) = (self.id.clone(), self.remote(cx)) else { return };
+        if self.relay_testing {
+            return;
+        }
+        self.relay_testing = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    let c = hopper::hopperd::Client::for_remote(&remote)?;
+                    c.post_wait(&hopper::hopperd::Client::server_path(&id, "/vps-relay/test"), serde_json::json!({}), Duration::from_secs(60))?;
+                    Ok::<_, anyhow::Error>(c.vps_relay(&id))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.relay_testing = false;
+                match r {
+                    Ok(Some(v)) => this.relay = Some(v),
+                    Ok(None) => {}
+                    Err(e) => this.rcon_error = Some(format!("{e:#}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Online players, each with a menu of moderator commands.

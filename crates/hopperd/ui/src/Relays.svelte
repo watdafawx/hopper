@@ -122,7 +122,6 @@
       <div class="card"><div class="skel"><i></i></div><div class="skel"><i></i></div></div>
     {/if}
   {/each}
-  <div class="tiny muted">Hopper desktop doesn't show relays yet.</div>
 </div>
 
 <style>

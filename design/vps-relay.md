@@ -1034,7 +1034,7 @@ so the step rightly added nothing).
   need a port each or a mod-level way to tell them apart. B7 kept the
   first relayed server with a voice mod as the one with voice and says so
   on the others' cards (see "B7 as built").
-- Desktop relay card voice row (B8).
+- Desktop relay card voice row: done in B8 (see "B8 as built").
 - A server that joined voice while already relayed needs "Stop using the
   relay" and "Use" again to be pointed at it.
 
@@ -1080,8 +1080,7 @@ No new relay features: the same relay, made easier to set up and to see.
 
 ### Not done
 
-- Desktop: Hopper desktop shows nothing of the relay for a paired Hopper
-  Server's servers (B8, unchanged).
+- Desktop: done in B8 (see "B8 as built").
 
 ## B7 as built
 
@@ -1255,7 +1254,7 @@ What this found:
 - With one server left, any address reaches it, the old one included.
   That keeps IP joins working; a server that wants to refuse unknown
   addresses needs a second server or a later rule.
-- Desktop (B8).
+- Desktop: done in B8 (see "B8 as built").
 
 ## Open questions for the maintainer (answered: see Decisions)
 
@@ -1275,3 +1274,31 @@ What this found:
 6. **Moving the live Frankfurt setup**: test on a fresh VM first and move
    over in B9 (recommended), or let Hopper take over that VM earlier?
 7. **Fabric servers** (FabricProxy-Lite) in scope?
+
+## B8 as built
+
+Hopper desktop does what the web UI does for the relay, with the same
+words (`crates/hopper-core/src/relay_view.rs` holds the wording and its
+tests; `src/gpui/relay_card.rs`, `relay_setup.rs`, `relays_list.rs` draw it).
+
+- **Relay card** (server Overview): the Relay / Ping from here / Players
+  through it / Last test row, "Test again" (owner-level PCs), the failed
+  rows of the last test, Upload saved / Upload now / Cache hits, the voice
+  row with its UDP note, and the address notes (no address of its own,
+  address not on the relay yet with Repair). Not ported: the sparkline,
+  "Use the relay", "Stop using the relay" and "Play at home" (the card says
+  to turn it on or off in Hopper Server).
+- **Setup** (More › Relay through a VPS…, or the card's gear): the five
+  steps as one dialog over `/vps-relay/setup*`. Whether this PC may use it is
+  `may_manage(GET /auth/me)`, the same check the routes make; a node's
+  servers don't offer it, as on the web. The ssh key, passphrase and password
+  are typed into the dialog, sent once over the paired TLS connection and
+  cleared from the boxes when the panel has them. Nothing is kept here.
+- **Relays list** (Settings › Servers › Relays): each owner-level paired
+  panel's relays and their servers, polled every 5 s while on screen; a
+  server's name opens it; "Take off" asks first.
+- Words that differ from the web: "this panel" is "Hopper Server" in the
+  setup and the Relays list; the web's "since HH:MM" in the card's header is
+  the health row's "Up · 3 h"; a PC that may not manage any paired panel
+  sees "Pair a Hopper Server this PC manages to see its relays here." in
+  place of the list.

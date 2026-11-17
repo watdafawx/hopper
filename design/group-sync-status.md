@@ -60,16 +60,18 @@ Behaviour is unchanged; it is only visible now.
 
 `groupsync::file_change` skips a mod from GitHub or another link when its
 source is not trusted yet (or Settings › Mod sources is off), and the member's
-code is then marked as taken in, so it is never tried again. This is a likely
-way a PC ends up without a mod nobody can see. Now `Merged::skipped` lists
-those mods, `PackCopy::skipped` remembers them (settings), the state says
-"Can't update: EZActions (GitHub: octo/ezactions) is in the group but not on
-this PC. Mods from GitHub and other links are off on this PC", and the next
-merge or Pull now tries them again once the source is trusted. The strip's
-**Allow and install** button opens the existing "Allow mods from other
-sources?" dialog (`incoming_sources::gate`); a yes sets `Skipped::approved`,
-which lets that one mod past the source check on the retry, then pulls. A
-mod the group changed again, or that is on this PC by now, leaves the list.
+code is then marked as taken in, so it is never tried again. This is a
+likely way a PC ends up without a mod nobody can see. `PackCopy::owed`
+(settings, see `groupsync.rs`) now remembers each such change with all it
+needs to make it later. The status reads it (`owed_to_allow()`): "Can't
+update: ezactions (GitHub: octo/ezactions) is in the group but not on this
+PC. Mods from GitHub and other links are off on this PC", and the next
+merge or Pull now makes them once the source is trusted (`owed_ready`). The
+strip's **Allow and install** button opens the existing "Allow mods from
+other sources?" dialog (`incoming_sources::gate`); a yes sets
+`Owed::approved` (`approve_owed`), which lets that one mod past the source
+check on the retry, then pulls. A mod the group changed again, or that is on
+this PC by now, leaves the list.
 
 ## Other members
 
@@ -116,7 +118,7 @@ group's Packs list row. It:
 2. forgets the retry backoff of a failed try, the "waits for the game" timer
    and a given-up state, so the merge runs now;
 3. runs the same merge as the automatic one (`groupsync::merge`), also when
-   nothing waits (it retries mods left out for an untrusted link, and
+   nothing waits (it retries owed mods, and
    releases jars a closed game left queued);
 4. says what happened in one line next to the button and as a notice: "Took in
    3 changes from Mia", "Already in step with the group", "Couldn't reach the
@@ -140,7 +142,7 @@ shows) and Pull now settles what waits. Test builds only, like
 - `crates/hopper-core/src/groupstatus.rs`: `Status`, `Input`, `status()`,
   `waiting_changes()`, `member_status()`, `merge_due()` / `pack_due_ready()`
   (what Pull now skips), `pull_says()`, wording. Tests.
-- `groupsync.rs`: `Merged::skipped`, `PackCopy::skipped`, retry of them.
+- `groupsync.rs`: `Owed::approved`, `owed_to_allow()`, `approve_owed()`, `owed_ready()` counting approved mods.
 - `src/gpui/store/friends.rs`: gathers `Input`, `pull_group_now`.
 - `src/gpui/group_pack.rs` (instance page notice) and `friends.rs` (group
   list rows, chip).

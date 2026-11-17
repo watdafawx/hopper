@@ -52,6 +52,10 @@ pub enum Kind {
     On,
     Off,
     Updated,
+    /// A mod's lock ([`LOCK_PREFIX`]) was set or changed.
+    Locked,
+    /// A mod's lock was taken off.
+    Unlocked,
 }
 
 impl Kind {
@@ -63,7 +67,37 @@ impl Kind {
             Kind::On => format!("Turned on by {who}"),
             Kind::Off => format!("Turned off by {who}"),
             Kind::Updated => format!("Updated by {who}"),
+            Kind::Locked => format!("Locked by {who}"),
+            Kind::Unlocked => format!("Unlocked by {who}"),
         }
+    }
+}
+
+/// What a mod's lock goes by in a group, next to the mods: "~lock:" and the
+/// mod's key. The lock is one more thing the group keeps the same, with the
+/// same rules as the mods (latest change wins, echoes change nothing, the
+/// mark says who). Like [`LOADER_KEY`], not a mod's key in any form.
+pub const LOCK_PREFIX: &str = "~lock:";
+
+/// The mod a lock key is about ("p:123" from "~lock:p:123").
+pub fn lock_target(key: &str) -> Option<&str> {
+    key.strip_prefix(LOCK_PREFIX)
+}
+
+/// A lock as a [`State`]: unlisted when the mod isn't locked at all, else
+/// "lock:<the version kept>" with `on` for the whole-mod lock.
+fn lock_state(version: &str, locked: bool) -> State {
+    if !locked && version.is_empty() {
+        return State::Unlisted;
+    }
+    State::File { file: format!("lock:{version}"), on: locked }
+}
+
+/// The lock a state means: (locked, the version kept).
+pub fn lock_of(state: &State) -> (bool, String) {
+    match state {
+        State::File { file, on } => (*on, file.strip_prefix("lock:").unwrap_or_default().to_string()),
+        _ => (false, String::new()),
     }
 }
 
@@ -190,6 +224,7 @@ pub fn mods(share: &Share, mut project: impl FnMut(&Entry) -> Option<u64>) -> Mo
             ),
             Entry::Remove(t) => (target_key(t), State::Removed),
             Entry::Off(t) => (target_key(t), State::Off),
+            Entry::Lock { key, version, locked } => (format!("{LOCK_PREFIX}{key}"), lock_state(version, *locked)),
         };
         map.insert(key, (state, e.clone()));
     }
@@ -241,6 +276,9 @@ impl Change {
     pub fn kind(&self) -> Kind {
         if self.key == LOADER_KEY || self.key == PACK_KEY {
             return Kind::Updated;
+        }
+        if lock_target(&self.key).is_some() {
+            return if self.now == State::Unlisted { Kind::Unlocked } else { Kind::Locked };
         }
         match (&self.was, &self.now) {
             (_, State::Off) => Kind::Off,
@@ -553,56 +591,108 @@ pub struct PackCopy {
     /// (`configsync`).
     #[serde(skip_serializing_if = "crate::configsync::Configs::is_empty")]
     pub configs: crate::configsync::Configs,
-    /// Mods the group has that this PC left out because they come from a
-    /// link it doesn't trust yet. Their change counts as taken in, so
-    /// without this list nothing would ever try them again, and nobody
-    /// could see the mod is missing ([`crate::groupstatus`]).
+    /// Members' changes to mods from GitHub or another link that this PC
+    /// left out because it hasn't confirmed their source. Their codes are
+    /// taken in all the same, so nothing else would bring them back: they
+    /// are tried again once the player confirms the source.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub skipped: Vec<Skipped>,
+    pub owed: Vec<Owed>,
 }
 
-/// A mod of the group's this PC left out for want of trust in its source.
+/// A member's change that waits for the player to confirm a mod's source
+/// ([`PackCopy::owed`]). Everything needed to make it later, since the
+/// member's code may have moved on.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct Skipped {
+pub struct Owed {
+    /// The mod's key, and what the member's change did to it.
     pub key: String,
-    /// What the player calls it ("EZActions").
-    pub name: String,
-    /// Where it's from, for the player: "GitHub: owner/repo".
-    pub from: String,
-    /// The member who changed it last, by name.
-    pub by: String,
-    /// The group's entry for it: what to install once the source is
-    /// allowed.
+    pub was: State,
+    pub now: State,
     pub entry: Option<Entry>,
-    /// The player said yes to it (from the status's "Allow and install"):
-    /// it goes in whatever Settings › Mod sources and the trust list say.
+    /// Who made it, and when (the relay's number and time), as the mark
+    /// would say.
+    pub by: String,
+    pub name: String,
+    pub seq: u64,
+    pub at: u64,
+    /// The player said yes to this mod ("Allow and install" on the group
+    /// status): it is made whatever Settings › Mod sources and the trust
+    /// list say. Settings saved before this load as not approved.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub approved: bool,
 }
 
-impl Skipped {
-    fn of(c: &Change, by: &str) -> Option<Skipped> {
-        let Some(Entry::Source { pin, .. }) = &c.entry else { return None };
-        Some(Skipped {
-            key: c.key.clone(),
-            name: crate::sources::carry::display_name(pin),
-            from: format!("{}: {}", pin.source.kind.label(), pin.source.publisher),
-            by: by.to_string(),
-            entry: c.entry.clone(),
-            approved: false,
-        })
+impl Owed {
+    /// The change this one waits to make.
+    fn change(&self) -> Change {
+        Change { key: self.key.clone(), was: self.was.clone(), now: self.now.clone(), entry: self.entry.clone() }
     }
 
-    /// The source pin it waits on.
-    pub fn pin(&self) -> Option<&crate::sources::carry::Pin> {
+    /// The pin it would download, when it still would.
+    fn pin(&self) -> Option<&crate::sources::carry::Pin> {
         match &self.entry {
-            Some(Entry::Source { pin, .. }) => Some(pin),
+            Some(Entry::Source { pin, .. }) if matches!(self.now, State::File { .. }) => Some(pin),
             _ => None,
         }
     }
 }
 
 impl PackCopy {
+    /// The mods waiting for the player to confirm their source: (name for
+    /// people, source) of each, for "2 mods waiting for you to confirm their
+    /// source".
+    pub fn owed_sources(&self) -> Vec<(String, crate::sources::ModSource)> {
+        self.owed
+            .iter()
+            .filter_map(Owed::pin)
+            .map(|p| (crate::sources::carry::display_name(p), p.source.clone()))
+            .collect()
+    }
+
+    /// "2 mods waiting for you to confirm their source (Settings › Mod
+    /// sources)." None when nothing is owed.
+    pub fn owed_says(&self) -> Option<String> {
+        let n = self.owed_sources().len();
+        let (what, their) = if n == 1 { ("mod", "its") } else { ("mods", "their") };
+        (n > 0).then(|| format!("{n} {what} waiting for you to confirm {their} source (Settings › Mod sources)."))
+    }
+
+    /// Whether the player confirmed the source of one of the owed mods
+    /// since (`allow`: Settings › Mod sources is on): worth a merge now,
+    /// which makes it. Never true for a source still waiting, so asking
+    /// again and again costs nothing.
+    pub fn owed_ready(&self, allow: bool) -> bool {
+        self.owed.iter().any(|o| o.approved && o.pin().is_some())
+            || (allow && self.owed.iter().filter_map(Owed::pin).any(|p| crate::sources::trusted(&p.source)))
+    }
+
+    /// The owed mods that can be said yes to: (name for people, where it's
+    /// from "GitHub: owner/repo", its source), for the group status's
+    /// "Allow and install".
+    pub fn owed_to_allow(&self) -> Vec<(String, String, crate::sources::carry::Pin)> {
+        self.owed
+            .iter()
+            .filter(|o| !o.approved)
+            .filter_map(Owed::pin)
+            .map(|p| (crate::sources::carry::display_name(p), format!("{}: {}", p.source.kind.label(), p.source.publisher), p.clone()))
+            .collect()
+    }
+
+    /// The player said yes to the owed mods, except `leave_out` (the ones
+    /// they still don't want): they go in on the next merge. Returns
+    /// whether any was marked.
+    pub fn approve_owed(&mut self, leave_out: &[crate::sources::carry::Pin]) -> bool {
+        let mut any = false;
+        for o in &mut self.owed {
+            if !o.approved && o.pin().is_some_and(|p| !leave_out.contains(p)) {
+                o.approved = true;
+                any = true;
+            }
+        }
+        any
+    }
+
     /// A member's code arrived; an older one than already known is ignored.
     pub fn arrive(&mut self, from: &str, g: Got) {
         let known = self.waiting.get(from).or_else(|| self.got.get(from)).map_or(0, |x| x.seq);
@@ -629,6 +719,9 @@ impl PackCopy {
         }
         for m in self.marks.values_mut() {
             m.seq = 0;
+        }
+        for o in &mut self.owed {
+            o.seq = 0;
         }
         self.configs.relay_reset();
         self.sent_seq = 0;
@@ -663,12 +756,8 @@ pub struct Merged {
     /// Members' changes left out on purpose, and why (see [`Kept`]). Their
     /// codes are taken in all the same: the change isn't tried again.
     pub kept: Vec<Kept>,
-    /// Mods left out this time for want of trust in their source (kept in
-    /// [`PackCopy::skipped`] so they're tried again).
-    pub skipped: Vec<Skipped>,
-    /// Keys to take off [`PackCopy::skipped`]: put in now, or changed again
-    /// by the group since, so the old entry no longer applies.
-    pub cleared: Vec<String>,
+    /// The copy's [`PackCopy::owed`] after this merge (None: unchanged).
+    pub owed: Option<Vec<Owed>>,
 }
 
 /// A member's change sync didn't make here, for the player to see.
@@ -689,6 +778,10 @@ pub enum KeptWhy {
     /// The player locked the mod's version here: sync may turn it on or
     /// off, but never swaps, removes or puts back its file.
     Locked,
+    /// A mod from GitHub or another link, from a source this PC hasn't
+    /// confirmed (Settings › Mod sources): nothing is downloaded from a
+    /// source nobody was asked about.
+    Source,
 }
 
 impl Kept {
@@ -696,13 +789,28 @@ impl Kept {
     pub fn says(&self) -> String {
         let why = match self.why {
             KeptWhy::Locked => "you locked its version",
+            KeptWhy::Source => "you haven't confirmed its source yet (Settings › Mod sources)",
         };
+        if self.why == KeptWhy::Source {
+            let verb = if self.kind == Kind::Updated { "wasn't updated" } else { "wasn't installed" };
+            let what = match self.kind {
+                Kind::Updated => "changed its version",
+                _ => "added it",
+            };
+            return if self.by.is_empty() {
+                format!("{} {verb}: {why}.", self.name)
+            } else {
+                format!("{} {verb}: {why}. {} {what}.", self.name, self.by)
+            };
+        }
         let what = match self.kind {
             Kind::Added => "added it",
             Kind::Removed => "removed it",
             Kind::On => "turned it on",
             Kind::Off => "turned it off",
             Kind::Updated => "changed its version",
+            Kind::Locked => "locked it",
+            Kind::Unlocked => "unlocked it",
         };
         if self.by.is_empty() {
             format!("{} stays as it is: {why}.", self.name)
@@ -722,6 +830,70 @@ fn file_here(a: &Addon) -> Option<String> {
         return Some(format!("mr:{}", a.mr_version));
     }
     (a.file_id != 0 && !is_mr(a.project_id)).then(|| format!("cf:{}", a.file_id))
+}
+
+/// The mod here (`at`) that already is `pin`'s file: the same link and file
+/// name, with the pinned bytes (its sha256; a pin without one goes by the
+/// release it was installed from). Such a change only needs a switch, so
+/// toggling a mod from GitHub never downloads it again.
+pub(crate) fn pinned_here(inst: &Instance, at: Option<usize>, pin: &crate::sources::carry::Pin) -> Option<usize> {
+    let i = at?;
+    let a = inst.addons.get(i)?;
+    let s = a.source.as_ref()?;
+    let name = |n: &str| n.trim_end_matches(".disabled").to_lowercase();
+    if name(&a.file_name) != name(&pin.file) || s.url != pin.source.url || s.pattern != pin.source.pattern {
+        return None;
+    }
+    let sure = if pin.source.sha256.is_empty() {
+        !pin.source.seen.is_empty() && s.seen == pin.source.seen
+    } else {
+        let twin = Addon { enabled: !a.enabled, ..a.clone() };
+        [inst.addon_path(a), inst.addon_path(&twin)]
+            .iter()
+            .find(|p| p.is_file())
+            .and_then(|p| crate::sources::sha256_file(p).ok())
+            .is_some_and(|h| h.eq_ignore_ascii_case(&pin.source.sha256))
+    };
+    sure.then_some(i)
+}
+
+/// The pin `c` would download here: a mod from a link that isn't here as
+/// that file yet.
+fn pin_to_get<'a>(inst: &Instance, c: &'a Change) -> Option<&'a crate::sources::carry::Pin> {
+    let Some(Entry::Source { pin, .. }) = &c.entry else { return None };
+    if !matches!(c.now, State::File { .. }) {
+        return None;
+    }
+    pinned_here(inst, find_addon(inst, &c.key), pin).is_none().then_some(pin)
+}
+
+/// Leaves out the changes that would install a mod from a source this PC
+/// hasn't confirmed (`skip`: [`crate::sources::carry::auto_skip`]), and
+/// lists them in `merged.kept`: nobody can be asked during a sync, and it
+/// must not read as done. Their marks go too, as for a locked mod.
+fn keep_untrusted(inst: &Instance, mut todo: Vec<Change>, skip: &[crate::sources::carry::Pin], merged: &mut Merged) -> Vec<Change> {
+    todo.retain(|c| {
+        let Some(pin) = pin_to_get(inst, c).filter(|p| skip.contains(p)) else { return true };
+        let by = merged.made.iter().rev().find(|(k, _, _)| *k == c.key).map(|(_, _, n)| n.clone()).unwrap_or_default();
+        let name = format!(
+            "{} ({}: {})",
+            crate::sources::carry::display_name(pin),
+            pin.source.kind.label(),
+            pin.source.publisher
+        );
+        // Owed to the player: made once they confirm the source (see
+        // `PackCopy::owed`), dated as the member's change was.
+        let mark = merged.marks.iter().rev().find(|(k, _)| *k == c.key).map(|(_, m)| m.clone()).unwrap_or_default();
+        let owed = Owed { key: c.key.clone(), was: c.was.clone(), now: c.now.clone(), entry: c.entry.clone(), by: mark.by, name: mark.name, seq: mark.seq, at: mark.at, approved: false };
+        let list = merged.owed.get_or_insert_with(Vec::new);
+        list.retain(|o| o.key != c.key);
+        list.push(owed);
+        merged.made.retain(|(k, _, _)| *k != c.key);
+        merged.marks.retain(|(k, _)| *k != c.key);
+        merged.kept.push(Kept { key: c.key.clone(), name, kind: c.kind(), by, why: KeptWhy::Source });
+        false
+    });
+    todo
 }
 
 /// Whether `c` would change the file of a mod the player locked here.
@@ -757,6 +929,56 @@ fn keep_locked(inst: &Instance, mut todo: Vec<Change>, merged: &mut Merged) -> V
         false
     });
     todo
+}
+
+/// Makes the group's lock changes here: a mod's lock ([`LOCK_PREFIX`]) is
+/// set or taken off the way the member's change says, so nobody offers the
+/// update to a mod one of the group keeps on its version. A mod this PC
+/// doesn't have, or keeps only here, has nothing to lock (its mark stays,
+/// so who changed it last still counts). True when a lock changed (the
+/// caller saves).
+fn set_locks(inst: &mut Instance, changes: &[Change], merged: &mut Merged) -> bool {
+    let mut touched = false;
+    for c in changes {
+        let at = lock_target(&c.key)
+            .and_then(|k| find_addon(inst, k))
+            .filter(|&i| !crate::onlyhere::is_kept(inst, &inst.addons[i]));
+        let (locked, version) = lock_of(&c.now);
+        match at {
+            Some(i) if (inst.addons[i].locked, &inst.addons[i].locked_version) != (locked, &version) => {
+                inst.addons[i].locked = locked;
+                inst.addons[i].locked_version = version;
+                touched = true;
+            }
+            // Already like that, or nothing to lock here: an echo.
+            _ => merged.made.retain(|(k, _, _)| *k != c.key),
+        }
+    }
+    touched
+}
+
+/// Puts back into `todo` the changes [`PackCopy::owed`] holds, so they are
+/// made now if their source is confirmed since (else they are left out and
+/// owed again, as the first time). Dropped: one a later change of the mod
+/// replaced (a member's, or this PC's own), one this PC changed itself that
+/// isn't sent yet (that one is the later), and one already the way it
+/// says.
+fn revive_owed(copy: &PackCopy, here: &Mods, sent: Option<&Mods>, todo: &mut Vec<Change>, merged: &mut Merged) {
+    let mut marks = copy.marks.clone();
+    marks.extend(merged.marks.iter().cloned());
+    for o in &copy.owed {
+        let later = marks.get(&o.key).is_some_and(|m| m.seq > o.seq) || todo.iter().any(|t| t.key == o.key);
+        let unsent = sent.is_some_and(|s| s.state(&o.key) != here.state(&o.key));
+        if later || unsent || here.state(&o.key) == o.now {
+            continue;
+        }
+        let c = o.change();
+        let kind = c.kind();
+        let mark = Mark { state: o.now.clone(), kind, by: o.by.clone(), name: o.name.clone(), seq: o.seq, at: o.at };
+        merged.marks.push((o.key.clone(), mark));
+        merged.made.push((o.key.clone(), kind, o.name.clone()));
+        todo.push(c);
+    }
 }
 
 /// Decides each waiting code's changes against this copy (`here`: its
@@ -869,6 +1091,15 @@ pub fn plan(
                     will.insert(c.key.clone(), c.now.clone());
                     todo.retain(|t| t.key != c.key);
                     todo.push(c);
+                }
+                // Already the way it says here, but it is later than a change
+                // of the mod left out for its source: that change is
+                // replaced, so it must not come back when the source is
+                // confirmed. Only the mark is kept, nothing is made.
+                Verdict::Same if copy.owed.iter().any(|o| o.key == c.key && o.seq < seq) => {
+                    let m = Mark { state: c.now.clone(), kind: c.kind(), by, name, seq, at: g.at };
+                    marks.insert(c.key.clone(), m.clone());
+                    out.marks.push((c.key.clone(), m));
                 }
                 Verdict::Held if !give_up_held => held = true,
                 Verdict::Held | Verdict::Same | Verdict::Older => {}
@@ -1322,15 +1553,31 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
     // The loader isn't a mod: it is moved here, not through `apply`.
     let (loader_change, todo): (Vec<Change>, Vec<Change>) = todo.into_iter().partition(|c| c.key == LOADER_KEY);
     let loader_set = loader_change.first().is_some_and(|c| move_loader(&mut inst, c, pack_loader.as_deref(), &mut merged, job));
-    // Mods left out earlier for want of trust in their source: put in now
-    // if it is allowed since.
-    let mut todo = todo;
-    retry_skipped(&inst, copy, |p| !crate::sources::carry::auto_skip(std::slice::from_ref(p), allow).is_empty(), &mut todo, &mut merged);
+    // Nor is a lock: it changes no file, so it is set here too.
+    let (lock_changes, mut todo): (Vec<Change>, Vec<Change>) = todo.into_iter().partition(|c| lock_target(&c.key).is_some());
+    let lock_set = set_locks(&mut inst, &lock_changes, &mut merged);
+    // Changes left out before for a source the player hadn't confirmed:
+    // made now when they have, left owed otherwise.
+    revive_owed(copy, &here, sent.as_ref(), &mut todo, &mut merged);
     let todo = keep_pack_mods(&inst, todo, &mut merged, &here_pack, job);
     // Mods kept only on this PC only learn how the others have them.
     let (todo, kept) = crate::onlyhere::split(&mut inst, todo, &mut merged);
     // A mod the player locked keeps its file, whoever changed it.
-    let mut todo = keep_locked(&inst, todo, &mut merged);
+    let todo = keep_locked(&inst, todo, &mut merged);
+    // A mod from a link this PC hasn't confirmed isn't downloaded unasked;
+    // the player is told which one and why (a switch of one already here
+    // goes through).
+    let wanted: Vec<crate::sources::carry::Pin> = todo.iter().filter_map(|c| pin_to_get(&inst, c).cloned()).collect();
+    let mut skip = crate::sources::carry::auto_skip(&wanted, allow);
+    // A mod the player said yes to goes in whatever the sources say.
+    let approved: Vec<crate::sources::carry::Pin> = copy.owed.iter().filter(|o| o.approved).filter_map(Owed::pin).cloned().collect();
+    skip.retain(|p| !approved.contains(p));
+    let mut todo = keep_untrusted(&inst, todo, &skip, &mut merged);
+    // What is still owed is what was left out just now; what was made, or
+    // changed again since, no longer is.
+    if !copy.owed.is_empty() || merged.owed.is_some() {
+        merged.owed = Some(merged.owed.take().unwrap_or_default());
+    }
     // A change to a mod this copy doesn't have (an echo of a removal, a
     // switch of a mod removed here) changes nothing; the task only tells
     // what really changes. Its mark stays, so who changed it last still
@@ -1358,20 +1605,14 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
         }
         false
     });
-    if (kept || loader_set || merged.pack_done.is_some()) && todo.is_empty() {
+    if lock_set && let Err(e) = crate::cf_instance::write_locks(&mut inst) {
+        // So the CurseForge app keeps the same mods back as well; best
+        // effort, as when the player locks one.
+        log::warn!("writing CurseForge locks for {}: {e:#}", inst.name);
+    }
+    if (kept || loader_set || lock_set || merged.pack_done.is_some()) && todo.is_empty() {
         inst.save()?;
     }
-    let pins: Vec<crate::sources::carry::Pin> = todo
-        .iter()
-        .filter_map(|c| match &c.entry {
-            Some(Entry::Source { pin, .. }) => Some(pin.clone()),
-            _ => None,
-        })
-        .collect();
-    // What the player said yes to goes in as asked.
-    let approved: Vec<crate::sources::carry::Pin> = copy.skipped.iter().filter(|s| s.approved).filter_map(|s| s.pin().cloned()).collect();
-    let skip: Vec<crate::sources::carry::Pin> = crate::sources::carry::auto_skip(&pins, allow).into_iter().filter(|p| !approved.contains(p)).collect();
-    note_skipped(&inst, &todo, &skip, &mut merged);
     if !todo.is_empty() {
         // Only a merge that changes something shows in Tasks; most codes
         // are echoes of changes already here.
@@ -1387,55 +1628,6 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
         apply(&mut inst, &todo, &skip, job)?;
     }
     Ok(merged)
-}
-
-/// Puts the mods in `copy.skipped` back into `todo` once their source is
-/// allowed, and takes off the list the ones that are here now or that the
-/// group changed again (`merged.cleared`). A mod still not allowed stays on
-/// the list as it is.
-fn retry_skipped(inst: &Instance, copy: &PackCopy, blocked: impl Fn(&crate::sources::carry::Pin) -> bool, todo: &mut Vec<Change>, merged: &mut Merged) {
-    for s in &copy.skipped {
-        // A newer change of it decides, this merge.
-        if todo.iter().any(|c| c.key == s.key) || merged.marks.iter().any(|(k, _)| *k == s.key) {
-            merged.cleared.push(s.key.clone());
-            continue;
-        }
-        let Some(Entry::Source { pin, enabled }) = &s.entry else {
-            merged.cleared.push(s.key.clone());
-            continue;
-        };
-        let file = format!("src:{}", pin.file.to_lowercase());
-        let here = find_addon(inst, &s.key).and_then(|i| file_here(&inst.addons[i]));
-        if here.as_deref() == Some(file.as_str()) {
-            merged.cleared.push(s.key.clone());
-            continue;
-        }
-        if !s.approved && blocked(pin) {
-            continue;
-        }
-        todo.push(Change { key: s.key.clone(), was: State::Unlisted, now: State::File { file, on: *enabled }, entry: s.entry.clone() });
-        merged.cleared.push(s.key.clone());
-    }
-}
-
-/// Lists in `merged.skipped` the changes in `todo` that [`apply`] leaves out
-/// because their source isn't allowed (`skip`), so the player can see the
-/// mod is missing.
-fn note_skipped(inst: &Instance, todo: &[Change], skip: &[crate::sources::carry::Pin], merged: &mut Merged) {
-    for c in todo {
-        let Some(Entry::Source { pin, .. }) = &c.entry else { continue };
-        if !skip.contains(pin) {
-            continue;
-        }
-        let State::File { file, .. } = &c.now else { continue };
-        if find_addon(inst, &c.key).and_then(|i| file_here(&inst.addons[i])).as_deref() == Some(file.as_str()) {
-            continue;
-        }
-        let by = merged.made.iter().rev().find(|(k, _, _)| *k == c.key).map(|(_, _, n)| n.as_str()).unwrap_or_default();
-        if let Some(s) = Skipped::of(c, by) {
-            merged.skipped.push(s);
-        }
-    }
 }
 
 /// How the pack version step of a [`merge`] went.
@@ -1691,7 +1883,18 @@ fn file_change(
             (num_id(&v.project_id), num_id(&v.id))
         }
         Entry::Source { pin, enabled } => {
+            // The pinned jar is here already (a member turned it off or on,
+            // or an echo of an update made here): only the switch, with no
+            // download. That needs no trust either, nothing is fetched.
+            if let Some(i) = pinned_here(inst, at, pin) {
+                if inst.addons[i].enabled != *enabled {
+                    let name = inst.addons[i].name.clone();
+                    switch(inst, i, *enabled, &name, job)?;
+                }
+                return Ok(());
+            }
             if skip_sources.iter().any(|s| s.source.url == pin.source.url && s.source.pattern == pin.source.pattern) {
+                job.note(format!("{}: not installed, you haven't confirmed its source on this PC", crate::sources::carry::display_name(pin)));
                 return Ok(());
             }
             crate::sources::install_pinned(inst, pin, *enabled, job)?;
@@ -3547,106 +3750,1011 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
+}
 
-    // ---- mods left out for want of trust in their source ----
+/// Mods from GitHub (and other links) travelling through a group: a code
+/// lists one as `Entry::Source` (the pinned release and sha256), keyed by
+/// its link. These run the real install against a fake GitHub on a
+/// loopback port, so what a PC downloads is counted.
+#[cfg(test)]
+mod source_sync_tests {
+    use super::*;
+    use crate::sources::carry::Pin;
+    use crate::sources::{Kind as SrcKind, ModSource};
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, MutexGuard};
 
-    fn pin(name: &str) -> crate::sources::carry::Pin {
-        crate::sources::carry::Pin {
-            file: format!("{name}.jar"),
-            source: crate::sources::ModSource {
-                kind: crate::sources::Kind::GitHub,
-                url: format!("hopper-test-never-trusted/{name}"),
-                publisher: format!("hopper-test-never-trusted/{name}"),
-                pattern: name.to_string(),
+    /// A source nobody ever confirmed on any PC that runs the tests.
+    const REPO: &str = "hopper-test-never-trusted/ezmod";
+    const KEY: &str = "s:hopper-test-never-trusted/ezmod#ezmod-#.jar";
+
+    fn jar(release: &str) -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            z.start_file("release.txt", zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(release.as_bytes()).unwrap();
+            z.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    fn sha(b: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    fn pin_of(repo: &str, tag: &str, file: &str, body: &[u8]) -> Pin {
+        Pin {
+            file: file.into(),
+            source: ModSource {
+                kind: SrcKind::GitHub,
+                url: repo.into(),
+                publisher: repo.into(),
+                pattern: crate::sources::pattern_of(file),
+                seen: tag.into(),
+                sha256: sha(body),
                 ..Default::default()
             },
         }
     }
 
-    fn source_change(name: &str) -> Change {
-        let p = pin(name);
-        Change {
-            key: format!("s:{}#{name}", p.source.url),
-            was: State::Unlisted,
-            now: State::File { file: format!("src:{}.jar", name.to_lowercase()), on: true },
-            entry: Some(Entry::Source { pin: p, enabled: true }),
+    fn pin(tag: &str, file: &str, body: &[u8]) -> Pin {
+        pin_of(REPO, tag, file, body)
+    }
+
+    fn src(p: &Pin, on: bool) -> Entry {
+        Entry::Source { pin: p.clone(), enabled: on }
+    }
+
+    fn share_of(entries: Vec<Entry>) -> Share {
+        Share { base: Base::Plain { game_version: "1.21.1".into(), loader: "neoforge".into() }, name: None, loader: None, entries }
+    }
+
+    fn mods_of(entries: Vec<Entry>) -> Mods {
+        mods(&share_of(entries), |_| None)
+    }
+
+    fn code(entries: Vec<Entry>) -> String {
+        crate::sharecode::encode(&share_of(entries))
+    }
+
+    fn dec(c: &str) -> Option<Mods> {
+        crate::sharecode::decode(c).ok().map(|s| mods(&s, |_| None))
+    }
+
+    fn got(c: String, seq: u64, name: &str) -> Got {
+        Got { code: c, seq, at: seq, name: name.into(), ..Default::default() }
+    }
+
+    /// The changes from one code to the next.
+    fn between(was: Vec<Entry>, now: Vec<Entry>) -> Vec<Change> {
+        changes(&mods_of(was), &mods_of(now))
+    }
+
+    struct Fake {
+        web: Arc<AtomicUsize>,
+        api: Arc<AtomicUsize>,
+        _g: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            crate::sources::http::set_test_base(None);
+            crate::sources::TEST_TRUSTED.lock().unwrap_or_else(|e| e.into_inner()).clear();
         }
     }
 
+    type Answer = (u16, Vec<(&'static str, String)>, Vec<u8>);
+
+    /// A fake GitHub: `answer` gets a website path (`/web/<repo>/...`) or an
+    /// API path (`/api/...`) and says (status, headers, body).
+    fn fake(answer: impl Fn(&str) -> Answer + Send + 'static) -> Fake {
+        let g = crate::sources::http::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::sources::http::reset_for_test();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let (web, api) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (w2, a2) = (web.clone(), api.clone());
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let url = req.url().to_string();
+                if url.starts_with("/api/") { &a2 } else { &w2 }.fetch_add(1, Ordering::SeqCst);
+                let (status, headers, body) = answer(&url);
+                let mut resp = tiny_http::Response::from_data(body).with_status_code(status);
+                for (k, v) in headers {
+                    resp.add_header(tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()).unwrap());
+                }
+                let _ = req.respond(resp);
+            }
+        });
+        crate::sources::http::set_test_base(Some(&base));
+        Fake { web, api, _g: g }
+    }
+
+    /// A fake GitHub holding releases: (tag, file, body).
+    fn releases(list: Vec<(&'static str, &'static str, Vec<u8>)>) -> Fake {
+        fake(move |url| {
+            for (tag, file, body) in &list {
+                if url.ends_with(&format!("/releases/download/{tag}/{file}")) {
+                    return (200, vec![], body.clone());
+                }
+            }
+            (404, vec![], b"not found".to_vec())
+        })
+    }
+
+    fn inst_on_disk(tag: &str) -> Instance {
+        let root = std::env::temp_dir().join(format!("hopper-gs-src-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        let inst = Instance { root, name: "T".into(), game_version: "1.21.1".into(), loader: "neoforge-21.1.200".into(), ..Default::default() };
+        inst.save().unwrap();
+        inst
+    }
+
+    fn run(inst: &mut Instance, todo: &[Change], skip: &[Pin]) -> (anyhow::Result<()>, Vec<String>) {
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        let r = apply(inst, todo, skip, &job);
+        (r, jobs.snapshot().into_iter().flat_map(|j| j.notes).collect())
+    }
+
+    fn mods_dir_files(inst: &Instance) -> Vec<String> {
+        let mut v: Vec<String> =
+            std::fs::read_dir(inst.root.join("mods")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    fn file_state(name: &str, on: bool) -> State {
+        State::File { file: format!("src:{name}"), on }
+    }
+
+    // ---- 1-4: a member's change reaches the others, and ends as theirs ----
+
+    /// A member adds a mod from GitHub, turns it off and on, updates it
+    /// and removes it; another PC follows each step. The jar is downloaded
+    /// twice only: when it is added and when it is updated.
     #[test]
-    fn a_mod_from_an_untrusted_link_is_listed_as_left_out() {
-        let inst = Instance { name: "T".into(), ..Default::default() };
-        let todo = vec![source_change("ezactions")];
-        let skip = crate::sources::carry::auto_skip(&[pin("ezactions")], false);
-        let mut merged = Merged::default();
-        merged.made.push((todo[0].key.clone(), Kind::Added, "Mia".into()));
-        note_skipped(&inst, &todo, &skip, &mut merged);
-        assert_eq!(merged.skipped.len(), 1);
-        let s = &merged.skipped[0];
-        assert_eq!((s.key.as_str(), s.name.as_str(), s.by.as_str()), (todo[0].key.as_str(), "ezactions", "Mia"));
-        assert!(s.from.starts_with("GitHub: "), "{}", s.from);
-        // Allowed: nothing is left out.
-        let mut merged = Merged::default();
-        note_skipped(&inst, &todo, &[], &mut merged);
-        assert!(merged.skipped.is_empty());
+    fn a_github_mod_added_switched_updated_and_removed_by_a_member_follows_on_another_pc() {
+        let (j1, j2) = (jar("1.0"), jar("1.1"));
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone()), ("v2", "ezmod-1.1.jar", j2.clone())]);
+        let (p1, p2) = (pin("v1", "ezmod-1.0.jar", &j1), pin("v2", "ezmod-1.1.jar", &j2));
+        let mut inst = inst_on_disk("flow");
+
+        // Added: one change, keyed by the link.
+        let todo = between(vec![], vec![src(&p1, true)]);
+        assert_eq!(todo.len(), 1);
+        assert_eq!((todo[0].key.as_str(), todo[0].kind()), (KEY, Kind::Added));
+        assert_eq!(todo[0].now, file_state("ezmod-1.0.jar", true));
+        let (r, _) = run(&mut inst, &todo, &[]);
+        r.unwrap();
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+        assert_eq!(f.api.load(Ordering::SeqCst), 0, "the pin's own link, no API call");
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        let a = &inst.addons[0];
+        assert!(a.enabled);
+        assert_eq!(addon_key(a), KEY, "the same key the sender's code gave it");
+        let s = a.source.as_ref().unwrap();
+        assert_eq!((s.seen.as_str(), s.sha256.as_str()), ("v1", sha(&j1).as_str()));
+
+        // Turned off, then on again: a switch, no download.
+        let off = between(vec![src(&p1, true)], vec![src(&p1, false)]);
+        assert_eq!(off[0].kind(), Kind::Off);
+        run(&mut inst, &off, &[]).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar.disabled"]);
+        assert!(!inst.addons[0].enabled);
+        let on = between(vec![src(&p1, false)], vec![src(&p1, true)]);
+        assert_eq!(on[0].kind(), Kind::On);
+        run(&mut inst, &on, &[]).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        assert!(inst.addons[0].enabled);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1, "toggling a GitHub mod never downloads it again");
+
+        // Updated: the new release replaces the old, not beside it.
+        let up = between(vec![src(&p1, true)], vec![src(&p2, true)]);
+        assert_eq!(up.len(), 1);
+        assert_eq!((up[0].key.as_str(), up[0].kind()), (KEY, Kind::Updated));
+        run(&mut inst, &up, &[]).0.unwrap();
+        assert_eq!(f.web.load(Ordering::SeqCst), 2);
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.1.jar"], "the old jar isn't left in mods/");
+        assert_eq!(inst.addons.len(), 1, "one mod, not two");
+        let s = inst.addons[0].source.as_ref().unwrap();
+        assert_eq!((s.seen.as_str(), s.sha256.as_str()), ("v2", sha(&j2).as_str()));
+        assert_eq!(addon_key(&inst.addons[0]), KEY, "still the same mod for the group");
+
+        // The same update again (an echo, or a second member's) changes nothing.
+        run(&mut inst, &up, &[]).0.unwrap();
+        assert_eq!(f.web.load(Ordering::SeqCst), 2);
+        assert_eq!(inst.addons.len(), 1);
+
+        // Removed.
+        let gone = between(vec![src(&p2, true)], vec![]);
+        assert_eq!((gone[0].key.as_str(), gone[0].kind()), (KEY, Kind::Removed));
+        assert!(does_something(&inst, &gone[0]));
+        run(&mut inst, &gone, &[]).0.unwrap();
+        assert!(inst.addons.is_empty());
+        assert!(mods_dir_files(&inst).is_empty());
+        assert!(!does_something(&inst, &gone[0]), "a second removal does nothing");
+        let _ = std::fs::remove_dir_all(&inst.root);
     }
 
     #[test]
-    fn a_left_out_mod_is_tried_again_once_its_source_is_allowed() {
-        let inst = Instance { name: "T".into(), ..Default::default() };
-        let c = source_change("ezactions");
-        let mut copy = PackCopy::default();
-        copy.skipped.push(Skipped::of(&c, "Mia").unwrap());
-        // Still blocked: stays on the list, nothing to do.
-        let (mut todo, mut merged) = (Vec::new(), Merged::default());
-        retry_skipped(&inst, &copy, |_| true, &mut todo, &mut merged);
-        assert!(todo.is_empty() && merged.cleared.is_empty());
-        // Allowed now: it goes back into the changes to make, and comes off
-        // the list.
-        retry_skipped(&inst, &copy, |_| false, &mut todo, &mut merged);
-        assert_eq!(todo.len(), 1);
-        assert_eq!(todo[0].key, c.key);
-        assert_eq!(todo[0].now, c.now);
-        assert_eq!(merged.cleared, vec![c.key.clone()]);
-        // Said yes to by the player: it goes in even though the source is
-        // still not trusted.
-        let mut yes = PackCopy::default();
-        yes.skipped.push(Skipped { approved: true, ..Skipped::of(&c, "Mia").unwrap() });
-        let (mut todo, mut merged) = (Vec::new(), Merged::default());
-        retry_skipped(&inst, &yes, |_| true, &mut todo, &mut merged);
-        assert_eq!(todo.len(), 1);
+    fn a_github_mod_added_turned_off_arrives_off_and_a_download_that_isnt_the_pin_is_not_kept() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let mut inst = inst_on_disk("added-off");
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        run(&mut inst, &between(vec![], vec![src(&p1, false)]), &[]).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar.disabled"]);
+        assert!(!inst.addons[0].enabled);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(&inst.root);
+
+        // The release's file isn't what the pin says (sha256): nothing kept.
+        let mut inst = inst_on_disk("added-wrong");
+        let bad = Pin { source: ModSource { sha256: "0".repeat(64), ..p1.source.clone() }, ..p1.clone() };
+        let (r, _) = run(&mut inst, &between(vec![], vec![src(&bad, true)]), &[]);
+        let e = r.unwrap_err();
+        assert!(format!("{e:#}").contains("checksum"), "{e:#}");
+        assert!(mods_dir_files(&inst).is_empty(), "{:?}", mods_dir_files(&inst));
+        assert!(inst.addons.is_empty());
+        let _ = std::fs::remove_dir_all(&inst.root);
     }
 
+    /// A plain follow applies the sender's whole code on every change, with
+    /// all its GitHub mods in it: the ones already here as the pinned file
+    /// are not downloaded (and their old copy not sent to backups) again.
     #[test]
-    fn a_left_out_mod_the_group_changed_again_or_that_is_here_comes_off_the_list() {
-        let c = source_change("ezactions");
-        let mut copy = PackCopy::default();
-        copy.skipped.push(Skipped::of(&c, "Mia").unwrap());
-        // The group changed it again this merge: that change decides.
-        let inst = Instance { name: "T".into(), ..Default::default() };
-        let (mut todo, mut merged) = (vec![Change { now: State::Removed, entry: None, ..c.clone() }], Merged::default());
-        retry_skipped(&inst, &copy, |_| false, &mut todo, &mut merged);
-        assert_eq!(todo.len(), 1, "the new change only");
-        assert_eq!(merged.cleared, vec![c.key.clone()]);
-        // Already here with that file (the player added it by hand).
-        let mut have = Addon { name: "ezactions".into(), file_name: "ezactions.jar".into(), enabled: true, ..Default::default() };
-        have.source = Some(pin("ezactions").source);
-        let inst = Instance { name: "T".into(), addons: vec![have], ..Default::default() };
-        let (mut todo, mut merged) = (Vec::new(), Merged::default());
-        retry_skipped(&inst, &copy, |_| false, &mut todo, &mut merged);
+    fn a_followed_code_applied_again_downloads_no_github_mod_that_is_already_here() {
+        let (j1, j2) = (jar("1.0"), jar("1.1"));
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone()), ("v2", "ezmod-1.1.jar", j2.clone())]);
+        let (p1, p2) = (pin("v1", "ezmod-1.0.jar", &j1), pin("v2", "ezmod-1.1.jar", &j2));
+        let mut inst = inst_on_disk("follow-again");
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        let apply_code = |inst: &mut Instance, entries: Vec<Entry>, prev: Option<Vec<Entry>>| {
+            let prev = prev.map(share_of);
+            crate::sharecode::apply_existing(inst, &share_of(entries), prev.as_ref(), &job).unwrap();
+        };
+        apply_code(&mut inst, vec![src(&p1, true)], None);
+        assert_eq!((f.web.load(Ordering::SeqCst), mods_dir_files(&inst)), (1, vec!["ezmod-1.0.jar".to_string()]));
+        // The same code again, and again with another change in it.
+        apply_code(&mut inst, vec![src(&p1, true)], Some(vec![src(&p1, true)]));
+        assert_eq!(f.web.load(Ordering::SeqCst), 1, "nothing downloaded for a mod that is here");
+        // Turned off by the sender: off here, still no download.
+        apply_code(&mut inst, vec![src(&p1, false)], Some(vec![src(&p1, true)]));
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar.disabled"]);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+        // Back on.
+        apply_code(&mut inst, vec![src(&p1, true)], Some(vec![src(&p1, false)]));
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+        // A new release is a download, and the only jar after.
+        apply_code(&mut inst, vec![src(&p2, true)], Some(vec![src(&p1, true)]));
+        assert_eq!((f.web.load(Ordering::SeqCst), mods_dir_files(&inst)), (2, vec!["ezmod-1.1.jar".to_string()]));
+        assert_eq!(inst.addons.len(), 1);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    /// A pack mod swapped for a GitHub one reads as the pack's mod taken
+    /// out (by its file name for a Modrinth pack) plus the new source mod.
+    #[test]
+    fn a_pack_mod_swapped_for_a_github_one_and_a_removal_by_file_name_find_the_right_mod() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let mut inst = inst_on_disk("swap");
+        std::fs::write(inst.root.join("mods/oldmod-1.0.jar"), b"old").unwrap();
+        inst.addons.push(Addon {
+            project_id: 77,
+            name: "Old".into(),
+            file_name: "oldmod-1.0.jar".into(),
+            enabled: true,
+            from_pack: true,
+            ..Default::default()
+        });
+        inst.save().unwrap();
+        let todo = between(vec![], vec![Entry::Remove(Target::Named("oldmod-1.0.jar".into())), src(&p1, true)]);
+        assert_eq!(
+            todo.iter().map(|c| (c.key.as_str(), c.kind())).collect::<Vec<_>>(),
+            [("n:oldmod-1.0.jar", Kind::Removed), (KEY, Kind::Added)]
+        );
+        run(&mut inst, &todo, &[]).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        assert_eq!(inst.addons.len(), 1);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+
+        // A removal that names the source mod's jar finds it too.
+        assert_eq!(find_addon(&inst, "n:ezmod-1.0.jar"), Some(0));
+        assert_eq!(find_addon(&inst, KEY), Some(0));
+        let by_name = Change {
+            key: "n:ezmod-1.0.jar".into(),
+            was: State::Unlisted,
+            now: State::Removed,
+            entry: Some(Entry::Remove(Target::Named("ezmod-1.0.jar".into()))),
+        };
+        run(&mut inst, &[by_name], &[]).0.unwrap();
+        assert!(inst.addons.is_empty());
+        assert!(mods_dir_files(&inst).is_empty());
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    // ---- 5: two-way, the latest change wins and says who ----
+
+    #[test]
+    fn two_members_changing_the_same_github_mod_end_on_the_later_one_and_say_who() {
+        let (j1, j2) = (jar("1.0"), jar("1.1"));
+        let (p1, p2) = (pin("v1", "ezmod-1.0.jar", &j1), pin("v2", "ezmod-1.1.jar", &j2));
+        let base = vec![src(&p1, true)];
+        let mia = code(vec![src(&p1, false)]); // seq 10: turned off
+        let sam = code(vec![src(&p2, true)]); // seq 11: updated
+        let start = |copy: &mut PackCopy| {
+            copy.got.insert("mia".into(), got(code(base.clone()), 1, "Mia"));
+            copy.got.insert("sam".into(), got(code(base.clone()), 2, "Sam"));
+        };
+        // A third PC takes both: Sam's is later.
+        let mut third = PackCopy::default();
+        start(&mut third);
+        third.arrive("mia", got(mia.clone(), 10, "Mia"));
+        third.arrive("sam", got(sam.clone(), 11, "Sam"));
+        let here = mods_of(base.clone());
+        let (todo, merged) = plan(&third, &here, None, false, dec);
+        let last = todo.last().unwrap();
+        assert_eq!((last.key.as_str(), last.now.clone()), (KEY, file_state("ezmod-1.1.jar", true)));
+        let mark = merged.marks.iter().rev().find(|(k, _)| k == KEY).map(|(_, m)| m.clone()).unwrap();
+        assert_eq!((mark.kind, mark.name.as_str(), mark.seq), (Kind::Updated, "Sam", 11));
+        assert_eq!(mark.kind.says(&mark.name), "Updated by Sam");
+        // Mia's PC (off, her mark at 10) takes Sam's later update.
+        let mut on_mia = PackCopy::default();
+        start(&mut on_mia);
+        on_mia.got.remove("mia");
+        on_mia.marks.insert(KEY.into(), Mark { state: file_state("ezmod-1.0.jar", false), seq: 10, by: "mia".into(), ..Default::default() });
+        on_mia.arrive("sam", got(sam.clone(), 11, "Sam"));
+        let here = mods_of(vec![src(&p1, false)]);
+        let (todo, _) = plan(&on_mia, &here, Some(&here), false, dec);
+        assert_eq!(todo.iter().map(|c| c.now.clone()).collect::<Vec<_>>(), [file_state("ezmod-1.1.jar", true)]);
+        // Sam's PC (his mark at 11) drops Mia's earlier switch.
+        let mut on_sam = PackCopy::default();
+        start(&mut on_sam);
+        on_sam.got.remove("sam");
+        on_sam.marks.insert(KEY.into(), Mark { state: file_state("ezmod-1.1.jar", true), seq: 11, by: "sam".into(), ..Default::default() });
+        on_sam.arrive("mia", got(mia, 10, "Mia"));
+        let here = mods_of(vec![src(&p2, true)]);
+        let (todo, merged) = plan(&on_sam, &here, Some(&here), false, dec);
         assert!(todo.is_empty());
-        assert_eq!(merged.cleared, vec![c.key.clone()]);
+        assert_eq!(merged.taken.len(), 1);
+    }
+
+    // ---- 6: a source this PC hasn't confirmed ----
+
+    fn merge_one(inst: &Instance, was: Vec<Entry>, now: Vec<Entry>, allow: bool) -> (anyhow::Result<Merged>, Vec<String>) {
+        let mut copy = PackCopy::default();
+        copy.got.insert("mia".into(), got(code(was.clone()), 1, "Mia"));
+        copy.sent = code(was);
+        copy.arrive("mia", got(code(now), 10, "Mia"));
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        let r = merge(&inst.root, &copy, allow, false, true, &job);
+        (r, jobs.snapshot().into_iter().flat_map(|j| j.notes).collect())
     }
 
     #[test]
-    fn the_left_out_list_survives_the_settings_file() {
+    fn a_github_mod_from_an_unconfirmed_source_is_not_downloaded_and_the_player_is_told() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let inst = inst_on_disk("untrusted");
+        // Mod sources off, and on but never confirmed: the same answer.
+        for allow in [false, true] {
+            let (r, _) = merge_one(&inst, vec![], vec![src(&p1, true)], allow);
+            let merged = r.unwrap();
+            assert_eq!(f.web.load(Ordering::SeqCst), 0, "nothing downloaded (allow {allow})");
+            assert!(mods_dir_files(&inst).is_empty());
+            assert_eq!(merged.taken.len(), 1);
+            assert!(merged.marks.is_empty() && merged.made.is_empty(), "no 'Added by Mia' on a mod that isn't here: {merged:?}");
+            assert_eq!(merged.kept.len(), 1, "{merged:?}");
+            let k = &merged.kept[0];
+            assert_eq!((k.key.as_str(), k.why, k.kind, k.by.as_str()), (KEY, KeptWhy::Source, Kind::Added, "Mia"));
+            assert_eq!(
+                k.says(),
+                format!("ezmod (GitHub: {REPO}) wasn't installed: you haven't confirmed its source yet (Settings › Mod sources). Mia added it.")
+            );
+        }
+        // An update of one already here is left as it is, said as an update.
+        let _ = std::fs::remove_dir_all(&inst.root);
+        let mut here = inst_on_disk("untrusted-update");
+        run(&mut here, &between(vec![], vec![src(&p1, true)]), &[]).0.unwrap();
+        let j2 = jar("1.1");
+        let p2 = pin("v2", "ezmod-1.1.jar", &j2);
+        let before = f.web.load(Ordering::SeqCst);
+        let merged = merge_one(&here, vec![src(&p1, true)], vec![src(&p2, true)], false).0.unwrap();
+        assert_eq!(f.web.load(Ordering::SeqCst), before);
+        assert_eq!(mods_dir_files(&here), ["ezmod-1.0.jar"]);
+        let says = merged.kept[0].says();
+        assert!(says.starts_with("ezmod (GitHub: ") && says.contains("wasn't updated") && says.ends_with("Mia changed its version."), "{says}");
+        let _ = std::fs::remove_dir_all(&here.root);
+    }
+
+    #[test]
+    fn switching_a_github_mod_already_here_needs_no_confirmed_source() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let mut inst = inst_on_disk("untrusted-switch");
+        run(&mut inst, &between(vec![], vec![src(&p1, true)]), &[]).0.unwrap();
+        let merged = merge_one(&inst, vec![src(&p1, true)], vec![src(&p1, false)], false).0.unwrap();
+        assert!(merged.kept.is_empty(), "{merged:?}");
+        assert_eq!(merged.made.len(), 1);
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar.disabled"]);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1, "no second download");
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn apply_given_a_left_out_source_says_so_and_installs_nothing() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let mut inst = inst_on_disk("skip-note");
+        let (r, notes) = run(&mut inst, &between(vec![], vec![src(&p1, true)]), std::slice::from_ref(&p1));
+        r.unwrap();
+        assert!(inst.addons.is_empty() && mods_dir_files(&inst).is_empty());
+        assert_eq!(f.web.load(Ordering::SeqCst), 0);
+        assert_eq!(notes, ["ezmod: not installed, you haven't confirmed its source on this PC"]);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    /// Several GitHub mods arrive while GitHub is limiting: one error for
+    /// the whole sync (so one notice), and GitHub is asked once.
+    #[test]
+    fn a_github_rate_limit_is_one_error_for_all_the_mods_and_asks_github_once() {
+        let reset = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 600;
+        let f = fake(move |url| {
+            if url.starts_with("/api/") {
+                (403, vec![("x-ratelimit-remaining", "0".to_string()), ("x-ratelimit-reset", reset.to_string())], b"{}".to_vec())
+            } else {
+                (404, vec![], b"not found".to_vec())
+            }
+        });
+        let body = jar("1.0");
+        let pins: Vec<Pin> = (0..3).map(|i| pin_of(&format!("hopper-test-never-trusted/m{i}"), "v1", &format!("m{i}-1.0.jar"), &body)).collect();
+        let todo: Vec<Change> = pins.iter().flat_map(|p| between(vec![], vec![src(p, true)])).collect();
+        assert_eq!(todo.len(), 3);
+        let mut inst = inst_on_disk("limit");
+        let (r, _) = run(&mut inst, &todo, &[]);
+        let e = r.unwrap_err();
+        assert!(crate::sources::http::rate_limited(&e).is_some(), "{e:#}");
+        assert_eq!(f.api.load(Ordering::SeqCst), 1, "after the first answer the others wait without asking");
+        assert!(inst.addons.is_empty());
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    // ---- 7: locked and kept-only-here ----
+
+    #[test]
+    fn a_locked_github_mod_still_switches_but_keeps_its_file() {
+        let (j1, j2) = (jar("1.0"), jar("1.1"));
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone()), ("v2", "ezmod-1.1.jar", j2.clone())]);
+        let (p1, p2) = (pin("v1", "ezmod-1.0.jar", &j1), pin("v2", "ezmod-1.1.jar", &j2));
+        let mut inst = inst_on_disk("locked-src");
+        run(&mut inst, &between(vec![], vec![src(&p1, true)]), &[]).0.unwrap();
+        inst.addons[0].locked = true;
+        inst.save().unwrap();
+        let off = between(vec![src(&p1, true)], vec![src(&p1, false)]).remove(0);
+        let up = between(vec![src(&p1, true)], vec![src(&p2, true)]).remove(0);
+        let gone = between(vec![src(&p1, true)], vec![]).remove(0);
+        assert!(!locked_out(&inst, &off), "a switch of the same file goes through");
+        assert!(locked_out(&inst, &up), "another release is left out");
+        assert!(locked_out(&inst, &gone), "so is a removal");
+        let (r, notes) = run(&mut inst, &[up, gone], &[]);
+        r.unwrap();
+        assert_eq!(notes, ["ezmod: kept, you locked its version", "ezmod: kept, you locked its version"]);
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        run(&mut inst, &[off], &[]).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar.disabled"]);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+        // The merge says why, and leaves no 'Updated by Mia' mark.
+        let merged = merge_one(&inst, vec![src(&p1, false)], vec![src(&p2, true)], true).0.unwrap();
+        assert_eq!(merged.kept.len(), 1, "{merged:?}");
+        assert_eq!(merged.kept[0].why, KeptWhy::Locked);
+        assert!(merged.marks.is_empty());
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn a_github_mod_kept_only_here_is_left_alone_by_the_group_and_only_learns_how_friends_have_it() {
+        let (j1, j2) = (jar("1.0"), jar("1.1"));
+        let _f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone()), ("v2", "ezmod-1.1.jar", j2.clone())]);
+        let (p1, p2) = (pin("v1", "ezmod-1.0.jar", &j1), pin("v2", "ezmod-1.1.jar", &j2));
+        let mut inst = inst_on_disk("only-here");
+        run(&mut inst, &between(vec![], vec![src(&p1, true)]), &[]).0.unwrap();
+        inst.only_here.insert(KEY.into(), crate::onlyhere::Kept { theirs: Some(src(&p1, true)), name: "ezmod".into() });
+        inst.save().unwrap();
+        // A member updates it, then removes it.
+        let merged = merge_one(&inst, vec![src(&p1, true)], vec![src(&p2, true)], true).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"], "this PC keeps its own");
+        assert!(merged.kept.is_empty() && merged.made.is_empty(), "{merged:?}");
+        let back = crate::instances::load(&inst.root).unwrap();
+        assert_eq!(back.only_here[KEY].theirs, Some(src(&p2, true)), "friends have 2 now");
+        let merged = merge_one(&back, vec![src(&p2, true)], vec![], true).0.unwrap();
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        assert!(merged.made.is_empty());
+        assert_eq!(crate::instances::load(&inst.root).unwrap().only_here[KEY].theirs, None);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    // ---- 8: changes left out for a source stay owed, and come back once it is confirmed ----
+
+    /// A copy that took Mia's code: she added the mod at 10. `merge` runs
+    /// against it like the store does.
+    fn copy_with_mia(was: Vec<Entry>, now: Vec<Entry>) -> PackCopy {
         let mut copy = PackCopy::default();
-        copy.skipped.push(Skipped::of(&source_change("ezactions"), "Mia").unwrap());
+        copy.got.insert("mia".into(), got(code(was.clone()), 1, "Mia"));
+        copy.sent = code(was);
+        copy.arrive("mia", got(code(now), 10, "Mia"));
+        copy
+    }
+
+    fn merge_copy(inst: &Instance, copy: &PackCopy, allow: bool) -> Merged {
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        merge(&inst.root, copy, allow, false, true, &job).unwrap()
+    }
+
+    /// What the store does with a merge's result (`on_group_merged`).
+    fn take(copy: &mut PackCopy, m: &Merged) {
+        for (from, g) in &m.taken {
+            copy.waiting.remove(from);
+            copy.got.insert(from.clone(), g.clone());
+        }
+        for (k, mk) in &m.marks {
+            copy.marks.insert(k.clone(), mk.clone());
+        }
+        if let Some(o) = &m.owed {
+            copy.owed = o.clone();
+        }
+    }
+
+    fn trust_repo() {
+        crate::sources::TEST_TRUSTED.lock().unwrap().push(format!("github:{REPO}"));
+    }
+
+    #[test]
+    fn the_test_trust_key_is_the_sources_own() {
+        let p = pin("v1", "ezmod-1.0.jar", &jar("1.0"));
+        assert_eq!(p.source.key(), format!("github:{REPO}"), "the key the tests confirm");
+    }
+
+    #[test]
+    fn a_mod_left_out_for_its_source_is_owed_and_the_list_survives_settings() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let inst = inst_on_disk("owed-left");
+        let mut copy = copy_with_mia(vec![], vec![src(&p1, true)]);
+        let merged = merge_copy(&inst, &copy, true);
+        assert_eq!(f.web.load(Ordering::SeqCst), 0);
+        let owed = merged.owed.clone().expect("what is owed is said");
+        assert_eq!(owed.len(), 1);
+        let o = &owed[0];
+        assert_eq!((o.key.as_str(), o.by.as_str(), o.name.as_str(), o.seq), (KEY, "mia", "Mia", 10));
+        assert_eq!(o.now, file_state("ezmod-1.0.jar", true));
+        take(&mut copy, &merged);
+        assert_eq!(copy.owed_says().as_deref(), Some("1 mod waiting for you to confirm its source (Settings › Mod sources)."));
+        assert_eq!(copy.owed_sources().len(), 1);
+        assert_eq!(copy.owed_sources()[0].0, "ezmod");
+        // Saved with the settings and read back.
+        let json = serde_json::to_string(&copy).unwrap();
+        let back: PackCopy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.owed, copy.owed);
+        // Settings from before it had the list still load, with nothing owed.
+        let old: PackCopy = serde_json::from_str(r#"{"inst":"a","group":"g","local":"l","sent":"","sent_seq":3}"#).unwrap();
+        assert!(old.owed.is_empty() && old.owed_says().is_none());
+        let st: crate::settings::Settings = serde_json::from_str(r#"{"group_copies":[{"inst":"a","group":"g"}]}"#).unwrap();
+        assert!(st.group_copies[0].owed.is_empty());
+        // Nothing owed writes nothing, so the file doesn't change for others.
+        assert!(!serde_json::to_string(&PackCopy::default()).unwrap().contains("owed"));
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn confirming_the_source_installs_the_mod_once() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let inst = inst_on_disk("owed-confirm");
+        let mut copy = copy_with_mia(vec![], vec![src(&p1, true)]);
+        let first = merge_copy(&inst, &copy, true);
+        take(&mut copy, &first);
+        assert!(copy.waiting.is_empty() && !copy.owed.is_empty());
+        // Not confirmed: nothing to do on a tick, and a merge changes nothing.
+        assert!(!copy.owed_ready(true));
+        let again = merge_copy(&inst, &copy, true);
+        assert_eq!(again.owed.as_ref().map(Vec::len), Some(1), "still owed");
+        assert!(mods_dir_files(&inst).is_empty() && f.web.load(Ordering::SeqCst) == 0);
+        // The player confirms it.
+        trust_repo();
+        assert!(copy.owed_ready(true));
+        assert!(!copy.owed_ready(false), "Settings › Mod sources off: still waiting");
+        let done = merge_copy(&inst, &copy, true);
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+        assert_eq!(done.owed, Some(vec![]), "nothing is owed any more");
+        assert!(done.kept.is_empty(), "{done:?}");
+        let mark = done.marks.iter().find(|(k, _)| k == KEY).map(|(_, m)| m.clone()).expect("marked as Mia's change");
+        assert_eq!((mark.by.as_str(), mark.name.as_str(), mark.seq, mark.kind), ("mia", "Mia", 10, Kind::Added));
+        take(&mut copy, &done);
+        assert!(copy.owed.is_empty() && !copy.owed_ready(true));
+        // A tick that still had the old list (the store hadn't saved yet)
+        // finds the mod there and downloads nothing again.
+        let mut stale = copy.clone();
+        stale.owed = first.owed.clone().unwrap();
+        let third = merge_copy(&inst, &stale, true);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1, "installed once");
+        assert_eq!(third.owed, Some(vec![]));
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn saying_yes_to_an_owed_mod_installs_it_whatever_the_sources_say() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let inst = inst_on_disk("owed-approve");
+        let mut copy = copy_with_mia(vec![], vec![src(&p1, true)]);
+        // Settings › Mod sources is off: the mod is left out and owed.
+        let first = merge_copy(&inst, &copy, false);
+        take(&mut copy, &first);
+        assert_eq!(copy.owed.len(), 1);
+        assert!(!copy.owed_ready(false));
+        let to_allow = copy.owed_to_allow();
+        assert_eq!(to_allow.len(), 1);
+        assert_eq!((to_allow[0].0.as_str(), to_allow[0].1.as_str()), ("ezmod", format!("GitHub: {REPO}").as_str()));
+        // Still off, nothing changes on another merge.
+        let again = merge_copy(&inst, &copy, false);
+        assert!(mods_dir_files(&inst).is_empty() && f.web.load(Ordering::SeqCst) == 0, "{again:?}");
+        // The player says yes to it: it goes in on the next merge, though
+        // the sources are still off, and the list empties.
+        assert!(copy.approve_owed(&[]));
+        assert!(!copy.approve_owed(&[]), "said once");
+        assert!(copy.owed_ready(false));
+        assert!(copy.owed_to_allow().is_empty());
+        // The yes survives the settings file; settings from before load as no.
         let back: PackCopy = serde_json::from_str(&serde_json::to_string(&copy).unwrap()).unwrap();
-        assert_eq!(back, copy);
-        // A copy from an older Hopper has none; one without any writes none.
-        assert!(!serde_json::to_string(&PackCopy::default()).unwrap().contains("skipped"));
-        let old: PackCopy = serde_json::from_str("{\"inst\":\"a\"}").unwrap();
-        assert!(old.skipped.is_empty());
+        assert!(back.owed[0].approved);
+        let old: Owed = serde_json::from_str(r#"{"key":"k"}"#).unwrap();
+        assert!(!old.approved);
+        let done = merge_copy(&inst, &copy, false);
+        assert_eq!(mods_dir_files(&inst), ["ezmod-1.0.jar"]);
+        assert_eq!(f.web.load(Ordering::SeqCst), 1);
+        assert_eq!(done.owed, Some(vec![]));
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn declining_keeps_it_owed_and_downloads_nothing() {
+        let j1 = jar("1.0");
+        let f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let inst = inst_on_disk("owed-decline");
+        let mut copy = copy_with_mia(vec![], vec![src(&p1, true)]);
+        for _ in 0..3 {
+            let m = merge_copy(&inst, &copy, true);
+            take(&mut copy, &m);
+            assert_eq!(copy.owed.len(), 1, "owed once, however many merges");
+            assert!(!copy.owed_ready(true));
+        }
+        assert_eq!(f.web.load(Ordering::SeqCst), 0);
+        assert!(mods_dir_files(&inst).is_empty());
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn the_same_mod_is_owed_once_and_a_newer_change_replaces_the_old_one() {
+        let (j1, j2) = (jar("1.0"), jar("1.1"));
+        let _f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone()), ("v2", "ezmod-1.1.jar", j2.clone())]);
+        let (p1, p2) = (pin("v1", "ezmod-1.0.jar", &j1), pin("v2", "ezmod-1.1.jar", &j2));
+        let inst = inst_on_disk("owed-dup");
+        let mut copy = copy_with_mia(vec![], vec![src(&p1, true)]);
+        let m = merge_copy(&inst, &copy, true);
+        take(&mut copy, &m);
+        // A list that somehow holds it twice comes out with one.
+        copy.owed.push(copy.owed[0].clone());
+        // Mia changes it again, to 1.1, while it is still owed.
+        copy.arrive("mia", got(code(vec![src(&p2, true)]), 20, "Mia"));
+        let m = merge_copy(&inst, &copy, true);
+        let owed = m.owed.clone().unwrap();
+        assert_eq!(owed.len(), 1, "{owed:?}");
+        assert_eq!((owed[0].seq, owed[0].now.clone()), (20, file_state("ezmod-1.1.jar", true)));
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn a_later_change_of_the_mod_drops_what_was_owed() {
+        let j1 = jar("1.0");
+        let _f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let inst = inst_on_disk("owed-later");
+        let mut copy = copy_with_mia(vec![], vec![src(&p1, true)]);
+        let m = merge_copy(&inst, &copy, true);
+        take(&mut copy, &m);
+        assert_eq!(copy.owed.len(), 1);
+        // Sam removed it afterwards (a later change this PC knows).
+        let mut after_sam = copy.clone();
+        after_sam.marks.insert(KEY.into(), Mark { state: State::Unlisted, kind: Kind::Removed, by: "sam".into(), name: "Sam".into(), seq: 15, at: 15 });
+        trust_repo();
+        let m = merge_copy(&inst, &after_sam, true);
+        assert!(mods_dir_files(&inst).is_empty(), "Sam's later removal wins over Mia's earlier add");
+        assert_eq!(m.owed, Some(vec![]));
+        // Or this PC changed the mod itself and hasn't sent it yet.
+        let mut own = copy.clone();
+        own.sent = code(vec![src(&p1, false)]);
+        let m = merge_copy(&inst, &own, true);
+        assert!(mods_dir_files(&inst).is_empty());
+        assert_eq!(m.owed, Some(vec![]));
+        // A waiting code that applies a change of it also replaces it.
+        let mut newer = copy.clone();
+        newer.arrive("sam", got(code(vec![]), 16, "Sam"));
+        newer.got.insert("sam".into(), got(code(vec![src(&p1, true)]), 2, "Sam"));
+        let m = merge_copy(&inst, &newer, true);
+        assert!(mods_dir_files(&inst).is_empty());
+        assert_eq!(m.owed, Some(vec![]));
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn a_relay_reset_renumbers_what_is_owed() {
+        let j1 = jar("1.0");
+        let _f = releases(vec![("v1", "ezmod-1.0.jar", j1.clone())]);
+        let p1 = pin("v1", "ezmod-1.0.jar", &j1);
+        let inst = inst_on_disk("owed-reset");
+        let mut copy = copy_with_mia(vec![], vec![src(&p1, true)]);
+        let m = merge_copy(&inst, &copy, true);
+        take(&mut copy, &m);
+        assert_eq!(copy.owed[0].seq, 10);
+        copy.relay_reset();
+        assert_eq!(copy.owed[0].seq, 0);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+}
+
+#[cfg(test)]
+mod lock_sync_tests {
+    use super::*;
+    use crate::instances::Instance;
+
+    fn share_of(entries: Vec<Entry>) -> Share {
+        Share { base: Base::Plain { game_version: "1.21.1".into(), loader: "neoforge".into() }, name: None, loader: None, entries }
+    }
+
+    fn code(entries: Vec<Entry>) -> String {
+        crate::sharecode::encode(&share_of(entries))
+    }
+
+    /// Mods as the tests have them: CurseForge file `n` is project `n / 10`.
+    fn read(c: &str) -> Option<Mods> {
+        crate::sharecode::decode(c).ok().map(|s| {
+            mods(&s, |e| match e {
+                Entry::CurseFile { file, .. } => Some(file / 10),
+                _ => None,
+            })
+        })
+    }
+
+    fn file(f: u64) -> Entry {
+        Entry::CurseFile { file: f, enabled: true }
+    }
+
+    fn lock(key: &str, version: &str, locked: bool) -> Entry {
+        Entry::Lock { key: key.into(), version: version.into(), locked }
+    }
+
+    fn got(c: String, seq: u64, name: &str) -> Got {
+        Got { code: c, seq, at: seq, name: name.into(), ..Default::default() }
+    }
+
+    const LK: &str = "~lock:p:5";
+
+    /// This PC's copy: it has Mia's and Sam's codes `before`, and what each
+    /// sent now arrives.
+    fn plan_for(before: &[(&str, Vec<Entry>)], now: &[(&str, u64, Vec<Entry>)], here: Vec<Entry>) -> (Vec<Change>, Merged) {
+        let mut copy = PackCopy::default();
+        let name = |who: &str| who[..1].to_uppercase() + &who[1..];
+        for (who, entries) in before {
+            copy.got.insert((*who).into(), got(code(entries.clone()), 1, &name(who)));
+        }
+        for (who, seq, entries) in now {
+            copy.arrive(who, got(code(entries.clone()), *seq, &name(who)));
+        }
+        let here = read(&code(here)).unwrap();
+        plan(&copy, &here, Some(&here), false, read)
+    }
+
+    #[test]
+    fn a_lock_reaches_the_other_members_and_says_who() {
+        let (todo, merged) = plan_for(&[("mia", vec![file(50)])], &[("mia", 10, vec![file(50), lock("p:5", "", true)])], vec![file(50)]);
+        assert_eq!(todo.len(), 1, "{todo:?}");
+        let c = &todo[0];
+        assert_eq!((c.key.as_str(), c.kind()), (LK, Kind::Locked));
+        assert_eq!(lock_of(&c.now), (true, String::new()));
+        let (k, mark) = &merged.marks[0];
+        assert_eq!((k.as_str(), mark.name.as_str(), mark.by.as_str()), (LK, "Mia", "mia"));
+        assert_eq!(mark.kind.says(&mark.name), "Locked by Mia");
+        // The mod's own file isn't a change.
+        assert!(!todo.iter().any(|c| c.key == "p:5"));
+    }
+
+    #[test]
+    fn an_unlock_reaches_the_other_members_too() {
+        let locked = vec![file(50), lock("p:5", "", true)];
+        let (todo, merged) = plan_for(&[("mia", locked.clone())], &[("mia", 10, vec![file(50)])], locked);
+        assert_eq!(todo.len(), 1, "{todo:?}");
+        assert_eq!((todo[0].key.as_str(), todo[0].kind(), todo[0].now.clone()), (LK, Kind::Unlocked, State::Unlisted));
+        assert_eq!(lock_of(&todo[0].now), (false, String::new()));
+        assert_eq!(merged.marks[0].1.kind.says("Mia"), "Unlocked by Mia");
+    }
+
+    #[test]
+    fn the_later_of_two_lock_changes_wins_and_names_who() {
+        let both = vec![file(50), lock("p:5", "", true)];
+        let none = vec![file(50)];
+        // Mia unlocks at 10, Sam locks again with a version at 12.
+        let sam = vec![file(50), lock("p:5", "m5-2.jar", true)];
+        let (todo, merged) = plan_for(&[("mia", both.clone()), ("sam", none.clone())], &[("mia", 10, none.clone()), ("sam", 12, sam)], both.clone());
+        let c: Vec<_> = todo.iter().filter(|c| c.key == LK).collect();
+        assert_eq!(c.len(), 1, "one change per mod");
+        assert_eq!(lock_of(&c[0].now), (true, "m5-2.jar".into()), "Sam's, the later one");
+        let m = merged.marks.iter().rev().find(|(k, _)| k == LK).unwrap().1.clone();
+        assert_eq!((m.by.as_str(), m.name.as_str(), m.seq), ("sam", "Sam", 12));
+        // The other way round: Sam's is the earlier, and Mia's unlock wins.
+        let sam = vec![file(50), lock("p:5", "m5-2.jar", true)];
+        let (todo, merged) = plan_for(&[("mia", both.clone()), ("sam", none.clone())], &[("mia", 12, none.clone()), ("sam", 10, sam)], both);
+        let c: Vec<_> = todo.iter().filter(|c| c.key == LK).collect();
+        assert_eq!((c.len(), c[0].now.clone()), (1, State::Unlisted));
+        let m = merged.marks.iter().rev().find(|(k, _)| k == LK).unwrap().1.clone();
+        assert_eq!((m.by.as_str(), m.seq), ("mia", 12));
+        // A change older than the one this PC knows is dropped.
+        let mut copy = PackCopy::default();
+        copy.got.insert("mia".into(), got(code(vec![file(50)]), 1, "Mia"));
+        copy.marks.insert(LK.into(), Mark { state: State::File { file: "lock:".into(), on: true }, kind: Kind::Locked, by: "sam".into(), name: "Sam".into(), seq: 20, at: 20 });
+        copy.arrive("mia", got(code(vec![file(50), lock("p:5", "", false), lock("p:6", "x", false)]), 10, "Mia"));
+        let here = read(&code(vec![file(50), lock("p:5", "", true)])).unwrap();
+        let (todo, _) = plan(&copy, &here, Some(&here), false, read);
+        assert!(!todo.iter().any(|c| c.key == LK), "Sam's lock at 20 is later than Mia's change at 10: {todo:?}");
+    }
+
+    #[test]
+    fn a_code_without_lock_info_changes_no_lock() {
+        // This PC has p:5 locked. Mia's Hopper doesn't know locks: her codes
+        // list no lock, before and after her change of another mod.
+        let here = vec![file(50), file(60), lock("p:5", "", true)];
+        let (todo, _) = plan_for(&[("mia", vec![file(50)])], &[("mia", 10, vec![file(50), file(60)])], here.clone());
+        assert!(todo.iter().all(|c| lock_target(&c.key).is_none()), "{todo:?}");
+        // The same for the very first code from her: no lock info, no unlock.
+        let (todo, _) = plan_for(&[], &[("mia", 10, vec![file(50), file(60)])], here);
+        assert!(todo.iter().all(|c| lock_target(&c.key).is_none()), "{todo:?}");
+        // And the changes between two such codes list no lock either.
+        let (was, now) = (read(&code(vec![file(50)])).unwrap(), read(&code(vec![file(50), file(60)])).unwrap());
+        assert!(changes(&was, &now).iter().all(|c| lock_target(&c.key).is_none()));
+    }
+
+    #[test]
+    fn a_lock_on_a_version_only_is_kept_apart_from_the_whole_mod_lock() {
+        // Only one update kept out: not locked, a version noted.
+        let m = read(&code(vec![file(50), lock("p:5", "m5-2.jar", false)])).unwrap();
+        assert_eq!(m.state(LK), State::File { file: "lock:m5-2.jar".into(), on: false });
+        assert_eq!(lock_of(&m.state(LK)), (false, "m5-2.jar".into()));
+        let plain = read(&code(vec![file(50), lock("p:5", "", true)])).unwrap();
+        assert_ne!(m.state(LK), plain.state(LK));
+        assert_eq!(read(&code(vec![file(50)])).unwrap().state(LK), State::Unlisted);
+        let c = changes(&plain, &m);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].kind(), Kind::Locked);
+    }
+
+    fn inst_with(tag: &str, locks: &[(u64, bool, &str)]) -> Instance {
+        let root = std::env::temp_dir().join(format!("hopper-gs-lock-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        let addons = locks
+            .iter()
+            .map(|&(p, locked, v)| Addon {
+                project_id: p,
+                file_id: p * 10,
+                file_name: format!("m{p}.jar"),
+                name: format!("M{p}"),
+                enabled: true,
+                locked,
+                locked_version: v.into(),
+                ..Default::default()
+            })
+            .collect();
+        let inst = Instance { root, name: "T".into(), game_version: "1.21.1".into(), loader: "neoforge-21.1.200".into(), addons, ..Default::default() };
+        inst.save().unwrap();
+        inst
+    }
+
+    fn change(was: State, now: State, key: &str) -> Change {
+        Change { key: key.into(), was, now, entry: None }
+    }
+
+    #[test]
+    fn set_locks_locks_unlocks_and_keeps_the_version_note() {
+        let mut inst = inst_with("set", &[(5, false, ""), (6, true, "m6-2.jar"), (7, false, "")]);
+        let mut merged = Merged::default();
+        let lock5 = change(State::Unlisted, State::File { file: "lock:".into(), on: true }, "~lock:p:5");
+        let unlock6 = change(State::File { file: "lock:m6-2.jar".into(), on: true }, State::Unlisted, "~lock:p:6");
+        let note7 = change(State::Unlisted, State::File { file: "lock:m7-3.jar".into(), on: false }, "~lock:p:7");
+        merged.made = vec![("~lock:p:5".into(), Kind::Locked, "Mia".into())];
+        assert!(set_locks(&mut inst, &[lock5, unlock6, note7], &mut merged));
+        assert_eq!((inst.addons[0].locked, inst.addons[0].locked_version.as_str()), (true, ""));
+        assert_eq!((inst.addons[1].locked, inst.addons[1].locked_version.as_str()), (false, ""));
+        assert_eq!((inst.addons[2].locked, inst.addons[2].locked_version.as_str()), (false, "m7-3.jar"));
+        assert_eq!(merged.made.len(), 1, "a real change stays in the list");
+        // An echo (already like that) and a mod this PC hasn't change nothing.
+        let mut merged = Merged { made: vec![("~lock:p:5".into(), Kind::Locked, "Mia".into()), ("~lock:p:99".into(), Kind::Locked, "Mia".into())], ..Default::default() };
+        let echo = change(State::Unlisted, State::File { file: "lock:".into(), on: true }, "~lock:p:5");
+        let absent = change(State::Unlisted, State::File { file: "lock:".into(), on: true }, "~lock:p:99");
+        assert!(!set_locks(&mut inst, &[echo, absent], &mut merged));
+        assert!(merged.made.is_empty());
+        // A mod kept only on this PC keeps its own lock.
+        inst.only_here.insert("p:7".into(), crate::onlyhere::Kept { theirs: None, name: "M7".into() });
+        let lock7 = change(State::Unlisted, State::File { file: "lock:".into(), on: true }, "~lock:p:7");
+        assert!(!set_locks(&mut inst, &[lock7], &mut Merged::default()));
+        assert!(!inst.addons[2].locked);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    /// The whole merge: Mia locks a mod, it is locked here, it says who and
+    /// the file stays; Mia unlocks, and it's unlocked here again.
+    #[test]
+    fn a_member_locking_and_unlocking_is_done_here_by_the_merge() {
+        let inst = inst_with("merge", &[(5, false, ""), (6, false, "")]);
+        let run = |copy: &PackCopy| {
+            let jobs = crate::jobs::Jobs::default();
+            merge(&inst.root, copy, true, false, true, &jobs.start("t")).unwrap()
+        };
+        let mut copy = PackCopy::default();
+        copy.got.insert("mia".into(), got(code(vec![]), 1, "Mia"));
+        copy.sent = code(vec![]);
+        copy.arrive("mia", got(code(vec![lock("p:5", "", true), lock("p:6", "m6-2.jar", false)]), 10, "Mia"));
+        let merged = run(&copy);
+        let now = crate::instances::load(&inst.root).unwrap();
+        assert_eq!((now.addons[0].locked, now.addons[0].locked_version.as_str()), (true, ""));
+        assert_eq!((now.addons[1].locked, now.addons[1].locked_version.as_str()), (false, "m6-2.jar"));
+        assert_eq!(merged.taken.len(), 1);
+        assert!(!merged.made.is_empty(), "the store refreshes the instance");
+        let m = merged.marks.iter().find(|(k, _)| k == "~lock:p:5").unwrap().1.clone();
+        assert_eq!(m.kind.says(&m.name), "Locked by Mia");
+        // This PC's next code carries the locks, so it doesn't undo them.
+        let here = crate::sharecode::make(&now, &crate::jobs::Jobs::default().start("make")).unwrap().share;
+        assert!(here.entries.contains(&lock("p:5", "", true)) && here.entries.contains(&lock("p:6", "m6-2.jar", false)));
+        // Mia unlocks both.
+        let mut copy = PackCopy::default();
+        copy.got.insert("mia".into(), got(code(vec![lock("p:5", "", true), lock("p:6", "m6-2.jar", false)]), 10, "Mia"));
+        copy.sent = crate::sharecode::encode(&here);
+        copy.arrive("mia", got(code(vec![]), 20, "Mia"));
+        let merged = run(&copy);
+        let now = crate::instances::load(&inst.root).unwrap();
+        assert!(now.addons.iter().all(|a| !a.locked && a.locked_version.is_empty()), "{:?}", now.addons);
+        let m = merged.marks.iter().find(|(k, _)| k == "~lock:p:5").unwrap().1.clone();
+        assert_eq!(m.kind.says(&m.name), "Unlocked by Mia");
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    /// A locked mod's file is kept on every PC: a member's update of a mod
+    /// that this PC locks (because Mia just did) is left out as before.
+    #[test]
+    fn what_a_lock_keeps_is_the_file() {
+        let mut inst = inst_with("keeps", &[(5, true, "")]);
+        let update = change(State::File { file: "cf:50".into(), on: true }, State::File { file: "cf:51".into(), on: true }, "p:5");
+        assert!(locked_out(&inst, &update));
+        inst.addons[0].locked = false;
+        assert!(!locked_out(&inst, &update));
+        let _ = std::fs::remove_dir_all(&inst.root);
     }
 }

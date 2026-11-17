@@ -550,6 +550,7 @@ impl AppView {
                     let modrinth = *modrinth;
                     this.browse.update(cx, |b, cx| b.set_source(modrinth, window, cx));
                 }
+                crate::settings_page::SettingsEvent::OpenServer(root) => this.open_server(root.clone(), cx),
             }),
         ];
         let mut view = Self {

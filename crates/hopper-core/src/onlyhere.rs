@@ -127,7 +127,7 @@ pub fn sync_again_does(a: Option<&Addon>, theirs: Option<&Entry>) -> Option<&'st
                 Entry::CurseFile { file, enabled } => (a.file_id == *file && !crate::modrinth::is_mr(a.project_id), *enabled),
                 Entry::ModrinthFile { version, enabled } => (a.mr_version == *version, *enabled),
                 Entry::Source { pin, enabled } => (a.file_name.eq_ignore_ascii_case(&pin.file), *enabled),
-                Entry::Off(_) | Entry::Remove(_) => unreachable!(),
+                Entry::Off(_) | Entry::Remove(_) | Entry::Lock { .. } => unreachable!(),
             };
             if !same {
                 Some("changes to their version")
@@ -176,7 +176,7 @@ fn state_here(a: Option<&Addon>) -> State {
 
 fn state_of(e: Option<&Entry>) -> State {
     match e {
-        None => State::Unlisted,
+        None | Some(Entry::Lock { .. }) => State::Unlisted,
         Some(Entry::Off(_)) => State::Off,
         Some(Entry::Remove(_)) => State::Removed,
         Some(Entry::CurseFile { enabled, .. } | Entry::ModrinthFile { enabled, .. } | Entry::Source { enabled, .. }) => {

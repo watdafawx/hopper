@@ -165,14 +165,14 @@ pub fn status(i: &Input) -> Status {
     // Couldn't: a failed try, the pack version's failed update, or mods from
     // links this PC doesn't trust yet.
     if let Some(f) = i.failure {
-        return Status::Cant { why: f.why.to_string(), again: f.again, mods: skipped_names(i.copy) };
+        return Status::Cant { why: f.why.to_string(), again: f.again, mods: owed_names(i.copy) };
     }
     if let Some(Wait::Failed(why)) = i.pack_due.map(|d| &d.wait) {
         let title = i.pack_due.map(Due::title).unwrap_or_default();
         return Status::Cant { why: format!("{title}, but the update failed: {why}"), again: true, mods: Vec::new() };
     }
-    if !i.copy.skipped.is_empty() {
-        return Status::Cant { why: skipped_says(i.copy, i.allow_sources), again: false, mods: skipped_names(i.copy) };
+    if !i.copy.owed_to_allow().is_empty() {
+        return Status::Cant { why: owed_says(i.copy, i.allow_sources), again: false, mods: owed_names(i.copy) };
     }
     if let Some(d) = i.pack_due.filter(|d| d.wait == Wait::Pick) {
         return Status::WaitsForYou { title: d.title() };
@@ -224,22 +224,23 @@ pub fn waiting_changes(copy: &PackCopy) -> usize {
     keys.len()
 }
 
-fn skipped_names(copy: &PackCopy) -> Vec<String> {
-    copy.skipped.iter().map(|s| s.name.clone()).collect()
+fn owed_names(copy: &PackCopy) -> Vec<String> {
+    copy.owed_to_allow().into_iter().map(|(name, _, _)| name).collect()
 }
 
 /// Why the mods left out aren't here, for the player.
-fn skipped_says(copy: &PackCopy, allow_sources: bool) -> String {
-    let what = match copy.skipped.as_slice() {
-        [one] => format!("{} ({})", one.name, one.from),
+fn owed_says(copy: &PackCopy, allow_sources: bool) -> String {
+    let owed = copy.owed_to_allow();
+    let what = match owed.as_slice() {
+        [(name, from, _)] => format!("{name} ({from})"),
         many => {
-            let names: Vec<String> = many.iter().take(3).map(|s| s.name.clone()).collect();
+            let names: Vec<&str> = many.iter().take(3).map(|(n, _, _)| n.as_str()).collect();
             let more = many.len().saturating_sub(3);
             if more > 0 { format!("{} mods, among them {} and {}", many.len(), names[..2].join(", "), names[2]) } else { format!("{} mods ({})", many.len(), names.join(", ")) }
         }
     };
-    let verb = if copy.skipped.len() == 1 { "is" } else { "are" };
-    let from = if copy.skipped.len() == 1 { "a link" } else { "links" };
+    let verb = if owed.len() == 1 { "is" } else { "are" };
+    let from = if owed.len() == 1 { "a link" } else { "links" };
     let why = if allow_sources {
         format!("This PC hasn't said yes to {from} like that yet.")
     } else {
@@ -446,7 +447,7 @@ pub fn ago(now: u64, at: u64) -> String {
 mod tests {
     use super::*;
     use crate::grouppack::Version;
-    use crate::groupsync::{Got, Skipped, Stamp};
+    use crate::groupsync::{Got, Owed, Stamp};
 
     fn input(copy: &PackCopy) -> Input<'_> {
         Input {
@@ -482,8 +483,26 @@ mod tests {
         copy.waiting.insert(who.into(), Got { code: "x".into(), seq, at: 0, name: name.into(), stamps });
     }
 
-    fn skipped(name: &str) -> Skipped {
-        Skipped { key: format!("s:{name}"), name: name.into(), from: "GitHub: octo/repo".into(), by: "Mia".into(), entry: None, approved: false }
+    /// A mod from the GitHub repo `octo/<name>` that this PC left out until
+    /// its source is confirmed.
+    fn owed(name: &str) -> Owed {
+        let source = crate::sources::ModSource {
+            kind: crate::sources::Kind::GitHub,
+            url: format!("octo/{name}"),
+            pattern: name.into(),
+            publisher: format!("octo/{name}"),
+            ..Default::default()
+        };
+        let file = format!("{name}-1.0.jar");
+        let pin = crate::sources::carry::Pin { file: file.clone(), source };
+        Owed {
+            key: format!("s:{name}"),
+            now: crate::groupsync::State::File { file, on: true },
+            entry: Some(crate::sharecode::Entry::Source { pin, enabled: true }),
+            by: "mia".into(),
+            name: "Mia".into(),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -601,20 +620,20 @@ mod tests {
     #[test]
     fn a_mod_from_an_untrusted_link_is_cant_update_with_its_name() {
         let mut c = PackCopy::default();
-        c.skipped.push(skipped("Sodium Extra"));
+        c.owed.push(owed("Sodium Extra"));
         let mut i = input(&c);
         i.allow_sources = true;
         let s = status(&i);
         assert_eq!(s.label(), "Can't update");
         assert_eq!(
             s.detail(0),
-            "Sodium Extra (GitHub: octo/repo) is in the group but not on this PC. This PC hasn't said yes to a link like that yet."
+            "Sodium Extra (GitHub: octo/Sodium Extra) is in the group but not on this PC. This PC hasn't said yes to a link like that yet."
         );
         i.allow_sources = false;
         assert!(status(&i).detail(0).ends_with("Mods from GitHub and other links are off on this PC."));
-        c.skipped.push(skipped("Jade"));
-        c.skipped.push(skipped("Xaero"));
-        c.skipped.push(skipped("Create"));
+        c.owed.push(owed("Jade"));
+        c.owed.push(owed("Xaero"));
+        c.owed.push(owed("Create"));
         let i = input(&c);
         assert!(status(&i).detail(0).starts_with("4 mods, among them Sodium Extra, Jade and Xaero are in the group"));
     }

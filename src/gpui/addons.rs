@@ -4202,6 +4202,11 @@ impl AddonsView {
         let lock_line = update.is_some() && (vlocked || !breaks.is_empty() || needs.is_some());
         // A group pack kept both ways: who changed this mod last.
         let changed_by = self.root.as_ref().and_then(|r| store.group_mark(r, a));
+        // The lock icon says who locked it, when a group member did.
+        let lock_tip: SharedString = match self.root.as_ref().and_then(|r| store.group_lock_mark(r, a)) {
+            Some(who) => format!("{who}. Updates ignored. Right-click to allow them.").into(),
+            None => "Updates ignored. Right-click to allow them.".into(),
+        };
         // Kept only on this PC; and in a pack friends keep the same, the
         // row menu offers to keep it (or sync it again).
         let kept = !global && self.root.as_ref().and_then(|r| store.instance(r)).is_some_and(|i| hopper::onlyhere::is_kept(i, a));
@@ -4289,12 +4294,7 @@ Details").into()),
                     div()
                         .id(id("locked"))
                         .text_color(theme.muted_foreground)
-                        .tooltip(|w, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(
-                                "Updates ignored. Right-click to allow them.",
-                            )
-                            .build(w, cx)
-                        })
+                        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(lock_tip.clone()).build(w, cx))
                         .child(Icon::new(IconName::Lock).xsmall()),
                 )
             });

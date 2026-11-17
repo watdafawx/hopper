@@ -253,6 +253,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Servers, "server-host", "Server host", "The server PC's name or address, for status pings.", "hostname ping address rig"),
     e(C::Servers, "auto-update", "Update paired servers", "After a pack update, update its paired server too (only while it is offline).", "rig auto update"),
     e(C::Servers, "hopper-panels", "Hopper Servers", "Panels this PC is paired with. Each one is a group in the Servers list, with everything its web page can do.", "hopper server hopperd panels paired remove"),
+    e(C::Servers, "relays", "Relays", "The VPS relays your Hopper Servers use, and the servers behind each. Set one up from a server's page: More › Relay through a VPS.", "relay vps velocity players join proxy"),
     e(C::Servers, "panel-add", "Add a panel", "Crafty Controller 4, MCSS or Pterodactyl, as many as you use. Hopper starts, stops and updates servers through them.", "crafty mcss pterodactyl server panel add several multiple"),
     e(C::Servers, "other-panel", "Your panels", "Hopper starts, stops and updates servers through them. Each server is found on the panel that runs it.", "crafty mcss pterodactyl server panel remove delete none"),
     e(C::Servers, "panel-kind", "Panel", "Crafty, MCSS or Pterodactyl, for the servers folder above: start, stop, console and backups.", "crafty mcss pterodactyl server panel"),
@@ -540,6 +541,8 @@ pub struct SettingsPage {
     java: Entity<JavaForm>,
     window_form: Entity<crate::window_form::WindowForm>,
     launchers: Entity<crate::launchers_list::LaunchersList>,
+    /// Settings › Relays: the relays of the paired Hopper Servers.
+    relays: Entity<crate::relays_list::RelaysList>,
     mc: minecraft::Mc,
     /// The image cache's files and bytes, and when they were counted.
     img_usage: Option<(usize, u64, std::time::Instant)>,
@@ -568,6 +571,8 @@ pub enum SettingsEvent {
     RunSetup,
     /// Browse should search Modrinth (true) or CurseForge.
     BrowseSource(bool),
+    /// Show this server on the Servers page.
+    OpenServer(std::path::PathBuf),
 }
 
 impl EventEmitter<SettingsEvent> for SettingsPage {}
@@ -726,6 +731,11 @@ impl SettingsPage {
         }
         let launchers = cx.new(|_| crate::launchers_list::LaunchersList::new(store.clone()));
         subs.push(cx.observe(&launchers, |_, _, cx| cx.notify()));
+        let relays = cx.new(|cx| crate::relays_list::RelaysList::new(store.clone(), cx));
+        subs.push(cx.observe(&relays, |_, _, cx| cx.notify()));
+        subs.push(cx.subscribe(&relays, |_, _, e: &crate::relays_list::RelaysEvent, cx| match e {
+            crate::relays_list::RelaysEvent::OpenServer(root) => cx.emit(SettingsEvent::OpenServer(root.clone())),
+        }));
         for e in site_form.inputs() {
             subs.push(cx.subscribe_in(e, window, |_, _, ev: &InputEvent, _, cx| {
                 if matches!(ev, InputEvent::Change) {
@@ -778,6 +788,7 @@ impl SettingsPage {
             cf_testing: false,
             installing: false,
             launchers,
+            relays,
             java,
             window_form,
             mc: minecraft::Mc::new(&s, cx),
@@ -1915,6 +1926,7 @@ impl SettingsPage {
                 ],
             ),
             Block::card(Some("Hopper Servers"), self.hopperd_rows(s, cx)),
+            Block::card(Some("Relays"), vec![Row::new("relays").below(self.relays.clone())]),
             Block::card(Some("Other server panels"), {
                 let listed: Vec<AnyElement> = hopper::panel::panels_all(s)
                     .iter()

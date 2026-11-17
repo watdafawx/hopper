@@ -1234,7 +1234,9 @@ impl Store {
     /// for a retry, a rate limit, the pack version's recheck or the
     /// publish of a change made here, and runs even when nothing waits.
     fn group_ready(&self, c: &PackCopy, root: &Path, now: Instant, forced: bool) -> Option<bool> {
-        if self.group_merging.contains(&c.local) || (c.waiting.is_empty() && !forced) {
+        // Nothing waiting, but the player just confirmed the source of a mod
+        // the group's changes left out (or Pull now was asked): make it now.
+        if self.group_merging.contains(&c.local) || (c.waiting.is_empty() && !forced && !c.owed_ready(self.settings.allow_sources)) {
             return None;
         }
         // The group moved the pack and this PC couldn't follow yet: the
@@ -1313,7 +1315,7 @@ impl Store {
     /// The mods the group has that this PC left out for want of trust in
     /// their source.
     pub fn left_out_pins(&self, root: &Path) -> Vec<Pin> {
-        self.group_copy(root).map(|c| c.skipped.iter().filter_map(|s| s.pin().cloned()).collect()).unwrap_or_default()
+        self.group_copy(root).map(|c| c.owed_to_allow().into_iter().map(|(_, _, pin)| pin).collect()).unwrap_or_default()
     }
 
     /// "Allow and install": the player answered about the mods left out
@@ -1322,9 +1324,7 @@ impl Store {
         let Some(local) = self.group_copy(root).map(|c| c.local.clone()) else { return };
         self.update_settings_quietly(|st| {
             let Some(c) = st.group_copies.iter_mut().find(|c| c.local == local) else { return };
-            for s in &mut c.skipped {
-                s.approved = s.pin().is_some_and(|p| !leave_out.contains(p));
-            }
+            c.approve_owed(leave_out);
         });
         self.pull_group_now(root, cx);
     }
@@ -1378,7 +1378,7 @@ impl Store {
     /// offline, sending. Nothing goes to the real service; Pull now settles
     /// what it can.
     pub fn preview_group_sync(&mut self, state: &str, cx: &mut Context<Self>) {
-        use hopper::groupsync::{Kind as Change, Mark, Skipped, Stamp};
+        use hopper::groupsync::{Kind as Change, Mark, Owed, Stamp, State};
         use hopper::sharecode::Entry;
         use hopper::grouppack::{Due, Version, Wait};
         let now = unix_now();
@@ -1459,13 +1459,15 @@ impl Store {
                     ..Default::default()
                 };
                 let pin = Pin { file: "ezactions-1.2.jar".into(), source };
-                copy.skipped.push(Skipped {
+                copy.owed.push(Owed {
                     key: "s:octo/ezactions#ezactions".into(),
-                    name: "EZActions".into(),
-                    from: "GitHub: octo/ezactions".into(),
-                    by: "Mia".into(),
+                    now: State::File { file: "ezactions-1.2.jar".into(), on: true },
                     entry: Some(Entry::Source { pin, enabled: true }),
-                    approved: false,
+                    by: "mia".into(),
+                    name: "Mia".into(),
+                    seq: 24,
+                    at: now - 600,
+                    ..Default::default()
                 });
             }
             "sending" => {
@@ -1566,7 +1568,7 @@ impl Store {
             }
         }
         let copy = self.settings.group_copies.iter().find(|c| c.local == local).cloned();
-        let go = copy.as_ref().filter(|c| !c.waiting.is_empty() || !c.skipped.is_empty()).and_then(|c| self.group_ready(c, &root, Instant::now(), true));
+        let go = copy.as_ref().filter(|c| !c.waiting.is_empty() || !c.owed.is_empty()).and_then(|c| self.group_ready(c, &root, Instant::now(), true));
         match (copy, go) {
             // The result is told when the merge ends (`on_group_merged`).
             (Some(c), Some(ignore_unsent)) => self.merge_group(c, root, ignore_unsent),
@@ -1621,6 +1623,17 @@ impl Store {
         // no longer lists it, which reads as a removal).
         let kind = if matches!(m.kind, Kind::Added | Kind::Removed) && a.from_pack { Kind::Updated } else { m.kind };
         Some(kind.says(&m.name))
+    }
+
+    /// Who in the group locked (or unlocked) this mod last, when it wasn't
+    /// this PC: "Locked by Mia". Not when the mod isn't locked here since.
+    pub fn group_lock_mark(&self, root: &Path, a: &hopper::instances::Addon) -> Option<String> {
+        use groupsync::Kind;
+        let m = self.group_copy(root)?.marks.get(&format!("{}{}", groupsync::LOCK_PREFIX, groupsync::addon_key(a)))?;
+        if m.name.is_empty() || m.by == self.mailbox_id() || !matches!(m.kind, Kind::Locked) {
+            return None;
+        }
+        (a.locked || !a.locked_version.is_empty()).then(|| m.kind.says(&m.name))
     }
 
     /// Keeps the list of group packs kept both ways matching what is
@@ -1738,12 +1751,11 @@ impl Store {
     }
 
     pub(super) fn on_group_merged(&mut self, m: GroupMerged, cx: &mut Context<Self>) {
-        let GroupMerged { local, root, merged } = m;
+        let GroupMerged { local, root, mut merged } = m;
         self.group_merging.remove(&local);
         let made = merged.made.len();
         let mut from: Vec<String> = merged.made.iter().map(|(_, _, n)| n.clone()).filter(|n| !n.is_empty()).collect();
         from.dedup();
-        let mut newly_left_out: Vec<String> = Vec::new();
         if let Some(old) = self.group_retry.remove(&local) {
             self.jobs.dismiss(old.job);
         }
@@ -1763,16 +1775,12 @@ impl Store {
                     c.marks.insert(k, mk);
                 }
             }
-            // Mods left out for want of trust in their source: the list
-            // keeps them until they go in, or the group changes them again.
-            c.skipped.retain(|s| !merged.cleared.contains(&s.key) && !merged.skipped.iter().any(|n| n.key == s.key));
-            for n in &merged.skipped {
-                if !newly_left_out.iter().any(|x| *x == n.name) {
-                    newly_left_out.push(n.name.clone());
-                }
-            }
-            c.skipped.extend(merged.skipped.iter().cloned());
             sent_seq = c.sent_seq;
+            // Mods left out for a source nobody confirmed yet, to make once
+            // they do (`PackCopy::owed`).
+            if let Some(owed) = merged.owed.take() {
+                c.owed = owed;
+            }
             // The sharer's code is in: the follow has it applied now.
             for f in st.followed_recipes.iter_mut().filter(|f| f.local == local) {
                 if let Some((_, code)) = taken.iter().find(|(from, _)| *from == f.peer_id) {
@@ -1797,18 +1805,13 @@ impl Store {
         }
         // Members' changes left out here (a locked mod): the player sees
         // why their copy differs, once per change, in one notice per merge.
-        let kept: Vec<String> = merged.kept.iter().map(|k| k.says()).filter(|s| self.kept_said.insert(format!("{local}|{s}"))).collect();
+        let mut kept: Vec<String> = merged.kept.iter().map(|k| k.says()).filter(|s| self.kept_said.insert(format!("{local}|{s}"))).collect();
+        // Several mods wait for the player to confirm their source: one
+        // line for all of them.
+        let owed = self.settings.group_copies.iter().find(|c| c.local == local).filter(|c| c.owed.len() > 1).and_then(|c| c.owed_says());
+        kept.extend(owed.filter(|s| self.kept_said.insert(format!("{local}|{s}"))));
         if !kept.is_empty() {
             cx.emit(StoreEvent::Notice(kept.join(" "), false));
-        }
-        // Said once, when it first happens: the status says it from then on.
-        let newly_left_out: Vec<String> = newly_left_out.into_iter().filter(|n| self.kept_said.insert(format!("{local}|left out|{n}"))).collect();
-        if !newly_left_out.is_empty() {
-            let (names, verb) = match newly_left_out.as_slice() {
-                [one] => (one.clone(), "isn't"),
-                many => (many.join(", "), "aren't"),
-            };
-            cx.emit(StoreEvent::Notice(format!("{names} from the group {verb} on this PC yet: it comes from a link this PC hasn't said yes to."), false));
         }
         if merged.held {
             if self.group_held.get(&local).is_none_or(|(s, _)| *s != sent_seq) {
@@ -2767,6 +2770,9 @@ fn hash_share(i: &hopper::instances::Instance, h: &mut impl std::hash::Hasher) {
         a.project_id.hash(h);
         a.file_id.hash(h);
         a.enabled.hash(h);
+        // A lock goes out with the pack, so changing one alone must publish.
+        a.locked.hash(h);
+        a.locked_version.hash(h);
         a.mr_version.hash(h);
         a.class_id.hash(h);
         if let Some(s) = &a.source {
