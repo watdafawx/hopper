@@ -2466,6 +2466,9 @@ fn hash_share(i: &hopper::instances::Instance, h: &mut impl std::hash::Hasher) {
         a.project_id.hash(h);
         a.file_id.hash(h);
         a.enabled.hash(h);
+        // A lock goes out with the pack, so changing one alone must publish.
+        a.locked.hash(h);
+        a.locked_version.hash(h);
         a.mr_version.hash(h);
         a.class_id.hash(h);
         if let Some(s) = &a.source {
