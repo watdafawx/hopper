@@ -399,6 +399,12 @@ fn says_code(code: &str) -> Option<&'static str> {
     })
 }
 
+/// An invite code as the relay stores it. The code is shown with a space in
+/// the middle ("AD02 0F8C") and people type or paste it that way.
+pub fn clean_invite_code(code: &str) -> String {
+    code.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_uppercase()
+}
+
 pub struct Mailbox {
     base: String,
     account: Account,
@@ -594,7 +600,7 @@ impl Mailbox {
     pub fn join(&self, code: &str) -> anyhow::Result<(Friend, String)> {
         let v = self.call(
             "/v1/join",
-            serde_json::json!({ "code": code.trim().to_uppercase() }),
+            serde_json::json!({ "code": clean_invite_code(code) }),
         )?;
         let friend = serde_json::from_value(v["friend"].clone()).unwrap_or_default();
         Ok((friend, v["inst"].as_str().unwrap_or("").to_string()))
@@ -945,6 +951,12 @@ fn account_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invite_code_ignores_spaces_and_case() {
+        assert_eq!(clean_invite_code(" ad02 0f8c\n"), "AD020F8C");
+        assert_eq!(clean_invite_code("AD020F8C"), "AD020F8C");
+    }
 
     fn friend(id: &str, name: &str) -> Friend {
         Friend { id: id.into(), name: name.into(), ..Default::default() }

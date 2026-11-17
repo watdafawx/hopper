@@ -675,6 +675,11 @@ impl AddonsView {
         if self.missing.root.as_ref() != Some(&inst.root) || self.missing.list.is_empty() {
             return None;
         }
+        // A group copy already says this in its sync strip, with a button that
+        // also sends the mod to the group: one notice, not two.
+        if matches!(self.store.read(cx).group_status(&inst.root), Some(hopper::groupstatus::Status::NeedsMod { .. })) {
+            return None;
+        }
         let theme = cx.theme();
         let loaded_fine = self.missing.loaded_fine;
         let n = self.missing.list.len();
