@@ -45,6 +45,7 @@ mod history_view;
 mod hopper_versions;
 mod inst_settings;
 mod join_help;
+mod group_needs;
 mod group_pack;
 mod java_form;
 mod window_form;

@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 mod config_sync;
 mod disk_sync;
 mod friends;
+mod group_needs;
 mod only_here;
 mod node_heads;
 mod panel_events;
@@ -30,6 +31,7 @@ mod server_offer;
 #[allow(unused_imports)]
 pub use friends::{FollowReq, FollowTarget, GroupMerged, Invite, RecipeApplied, SyncStatus, follow_pack, redeem};
 pub use only_here::{LockedChange, and_list};
+pub use group_needs::Ask;
 pub use server_offer::{Before, ServerOffer};
 pub use server_mods::{RemoteLoose, remote as on_hopper_server, remote_config_files, remote_config_reset, remote_remove, remote_undo_remove};
 
@@ -68,6 +70,12 @@ pub enum Msg {
     PanelEvents(String, Vec<hopper::hopperd::PanelChange>),
     /// An instance changed on disk; reload it.
     InstanceChanged(PathBuf),
+    /// A mod was added or updated by the player (`Msg::added`): the inner
+    /// message, then, in a group copy, what the new jars need and the pack
+    /// lacks is asked about (`before`: the jars the mods folder had).
+    Added(Box<Msg>, Option<HashSet<String>>),
+    /// A group copy's jars were read for required mods the pack lacks.
+    GroupNeeds(Box<group_needs::Scanned>),
     /// A server's mods were synced while it ran (when it had started):
     /// its pages offer a restart. Then as [`Msg::ServersChanged`].
     SyncedLive(PathBuf, String),
@@ -251,6 +259,9 @@ pub enum StoreEvent {
     /// A group kept in step has a pack this PC never followed: the notice
     /// asks Get (the Follow dialog) or Not now (`group`: the group's id).
     PackOffer { e: Box<hopper::mailbox::Event>, group: String, text: String },
+    /// A mod the player added to a group's pack needs mods the pack lacks:
+    /// the dialog asks whether to add them to the group too.
+    GroupNeeds(Box<group_needs::Ask>),
     /// Open Browse on modpacks to host one (New server's Modpack tab):
     /// None on this PC, else on that paired Hopper Server.
     BrowsePacksFor(Option<String>),
@@ -728,6 +739,8 @@ pub struct Store {
     /// Instances moved to the group's loader while their game ran: the new
     /// loader is installed when it closes.
     group_loader_waiting: HashSet<PathBuf>,
+    /// Required mods the group copies' packs lack (`group_needs`).
+    group_needs: group_needs::State,
     /// Group copies (local ids) whose group moved the pack to a version
     /// this PC couldn't follow yet, with when that was found and the pack
     /// file the instance was on then (see `friends::pack_due_ready`).
@@ -1088,6 +1101,7 @@ impl Store {
             mailbox_checked: None,
             group_preview: None,
             group_loader_waiting: Default::default(),
+            group_needs: Default::default(),
             group_pack_due: Default::default(),
             group_strays: Default::default(),
             cfg: Default::default(),
@@ -1540,6 +1554,17 @@ impl Store {
                 // names and sizes are known.
                 self.fetch_pages(&root, pages, by);
             }
+            Msg::Added(inner, before) => {
+                let root = match &*inner {
+                    Msg::InstanceChanged(r) | Msg::Updated(r, ..) => Some(r.clone()),
+                    _ => None,
+                };
+                self.handle(*inner, cx);
+                if let (Some(root), Some(before)) = (root, before) {
+                    self.ask_group_needs(&root, before);
+                }
+            }
+            Msg::GroupNeeds(s) => self.on_group_needs(*s, cx),
             Msg::Fetch(root, pages, by) => self.fetch_pages(&root, pages, by),
             Msg::Reidentified(root) => {
                 self.handle(Msg::InstanceChanged(root.clone()), cx);
@@ -1570,6 +1595,7 @@ impl Store {
                 self.prune_fetches(&root);
                 self.note_content(&root);
                 self.read_waiting(&root);
+                self.want_group_needs(&root);
             }
             Msg::Disk(changes) => self.disk_changed(changes, cx),
             Msg::DiskLoaded(root, new, area) => self.disk_loaded(root, new, area, cx),
@@ -3681,6 +3707,7 @@ impl Store {
         let wake = self.wake.clone();
         self.spawn_instance_job(&inst.root.clone(), format!("Updating mods in {}", inst.name), move |job| {
             fresh(&mut inst);
+            let jars_before = server_offer::jars_at(&inst.root);
             // No snapshot first: backups are the player's to make. The
             // old jars still go to .hopper-backups, so Undo works.
             let mut clear = ClearQueue(queue.clone(), Some(inst.root.clone()));
@@ -3761,7 +3788,7 @@ impl Store {
                     job.note(warn);
                 }
             });
-            Ok(Msg::Updated(inst.root.clone(), done, pages, None))
+            Ok(Msg::Added(Box::new(Msg::Updated(inst.root.clone(), done, pages, None)), jars_before))
         });
     }
 

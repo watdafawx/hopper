@@ -54,6 +54,10 @@ pub struct Input<'a> {
     pub unsent: bool,
     /// Another member's change waits for that one to go out first.
     pub held: bool,
+    /// Required mods the pack lacks (`groupdeps::needs`, read from the
+    /// jars): the pack can't start without them, whoever added what needs
+    /// them.
+    pub needs: &'a [crate::groupdeps::Need],
 }
 
 /// How one copy stands.
@@ -75,6 +79,9 @@ pub enum Status {
     Cant { why: String, again: bool, mods: Vec<String> },
     /// Not connected: what this PC knows may be out of date.
     Offline { checked: Option<u64> },
+    /// The pack has a mod that needs another mod the pack lacks, so it
+    /// can't start. Group sync can still be "in step": nobody added it.
+    NeedsMod { needs: Vec<crate::groupdeps::Need> },
 }
 
 /// How loud a status is: what colour a chip gets.
@@ -98,6 +105,7 @@ impl Status {
             Status::WaitsForYou { .. } => "Behind: needs you",
             Status::Cant { .. } => "Can't update",
             Status::Offline { .. } => "Offline",
+            Status::NeedsMod { needs } => crate::groupdeps::label(needs.len()),
         }
     }
 
@@ -106,7 +114,7 @@ impl Status {
             Status::InStep { .. } => Tone::Good,
             Status::Updating { .. } | Status::Sending => Tone::Busy,
             Status::WaitsForGame { .. } | Status::WaitsForYou { .. } => Tone::Warn,
-            Status::Cant { .. } => Tone::Bad,
+            Status::Cant { .. } | Status::NeedsMod { .. } => Tone::Bad,
             Status::Offline { .. } => Tone::Quiet,
         }
     }
@@ -116,11 +124,12 @@ impl Status {
     pub fn rank(&self) -> u8 {
         match self {
             Status::Cant { .. } => 0,
-            Status::WaitsForYou { .. } => 1,
-            Status::WaitsForGame { .. } => 2,
-            Status::Offline { .. } => 3,
-            Status::Updating { .. } | Status::Sending => 4,
-            Status::InStep { .. } => 5,
+            Status::NeedsMod { .. } => 1,
+            Status::WaitsForYou { .. } => 2,
+            Status::WaitsForGame { .. } => 3,
+            Status::Offline { .. } => 4,
+            Status::Updating { .. } | Status::Sending => 5,
+            Status::InStep { .. } => 6,
         }
     }
 
@@ -155,6 +164,7 @@ impl Status {
                 Some(at) => format!("Can't reach the group right now, so your copy may be out of date. Last checked {}.", ago(now, *at)),
                 None => "Can't reach the group right now, so your copy may be out of date.".to_string(),
             },
+            Status::NeedsMod { needs } => crate::groupdeps::detail(needs),
         }
     }
 }
@@ -194,6 +204,12 @@ pub fn status(i: &Input) -> Status {
     if i.merging || (waiting && !i.held) {
         let from: Vec<String> = i.copy.waiting.values().map(|g| g.name.clone()).filter(|n| !n.is_empty()).collect();
         return Status::Updating { changes: waiting_changes(i.copy), from };
+    }
+    // Everything is taken in, but the pack can't start: a mod in it needs
+    // one nobody added. Ahead of Offline and Sending: it's what the player
+    // can fix, and it stays true when everything else is "in step".
+    if !i.needs.is_empty() {
+        return Status::NeedsMod { needs: i.needs.to_vec() };
     }
     if !i.connected {
         return Status::Offline { checked: i.checked };
@@ -463,6 +479,7 @@ mod tests {
             jars_waiting: 0,
             unsent: false,
             held: false,
+            needs: &[],
         }
     }
 
@@ -513,6 +530,54 @@ mod tests {
         assert_eq!(s.label(), "In step");
         assert_eq!(s.detail(1120), "Same as the group. Checked 2 min ago.");
         assert_eq!(s.tone(), Tone::Good);
+    }
+
+    fn needs_owo() -> Vec<crate::groupdeps::Need> {
+        vec![crate::groupdeps::Need {
+            id: "owo-lib".into(),
+            name: "owo-lib".into(),
+            versions: "[0.12.15,)".into(),
+            by: vec![("Shapewright".into(), "shapewright.jar".into())],
+            off: None,
+        }]
+    }
+
+    #[test]
+    fn a_missing_required_mod_is_not_in_step() {
+        let c = PackCopy::default();
+        let needs = needs_owo();
+        let mut i = input(&c);
+        i.needs = &needs;
+        let s = status(&i);
+        assert_eq!(s.label(), "Missing a required mod");
+        assert_eq!(s.tone(), Tone::Bad);
+        assert_eq!(s.detail(1120), "Shapewright needs owo-lib, which isn't in the pack. The pack can't start until you add it.");
+        assert!(matches!(s, Status::NeedsMod { .. }));
+    }
+
+    #[test]
+    fn a_missing_required_mod_shows_while_offline_or_sending_but_not_over_what_waits() {
+        let c = PackCopy::default();
+        let needs = needs_owo();
+        let mut i = input(&c);
+        i.needs = &needs;
+        i.connected = false;
+        assert!(matches!(status(&i), Status::NeedsMod { .. }));
+        i.connected = true;
+        i.unsent = true;
+        assert!(matches!(status(&i), Status::NeedsMod { .. }));
+        // A pack version that waits for the game comes first.
+        let d = due(Wait::Game);
+        i.pack_due = Some(&d);
+        assert!(matches!(status(&i), Status::WaitsForGame { .. }));
+    }
+
+    #[test]
+    fn a_missing_required_mod_ranks_after_cant_and_before_the_rest() {
+        let n = Status::NeedsMod { needs: needs_owo() };
+        assert!(Status::Cant { why: String::new(), again: false, mods: Vec::new() }.rank() < n.rank());
+        assert!(n.rank() < Status::WaitsForYou { title: String::new() }.rank());
+        assert!(n.rank() < Status::InStep { checked: None }.rank());
     }
 
     #[test]
