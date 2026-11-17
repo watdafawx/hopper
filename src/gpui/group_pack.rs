@@ -29,6 +29,7 @@ pub fn look(status: &Status) -> (IconName, Tier) {
         Status::WaitsForYou { .. } => (IconName::CircleAlert, Tier::Choice),
         Status::Cant { .. } => (IconName::CircleAlert, Tier::Choice),
         Status::Offline { .. } => (IconName::CircleOff, Tier::Info),
+        Status::NeedsMod { .. } => (IconName::PackageX, Tier::Stop),
     }
 }
 
@@ -76,6 +77,27 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
                 .disabled(busy)
                 .tooltip("Opens the update, where you can see what changes and pick what to keep")
                 .on_click(move |_, window, cx| crate::pack_update::open(store.clone(), root.clone(), file.clone(), window, cx))
+        });
+    } else if let Status::NeedsMod { needs } = &status
+        && needs.iter().any(|n| n.to_get())
+    {
+        // Download what the pack lacks; the group's sync then carries it to
+        // everyone.
+        let ids: Vec<String> = needs.iter().filter(|n| n.to_get()).map(|n| n.id.clone()).collect();
+        let label = if ids.len() == 1 { "Add it" } else { "Add them" };
+        let (store, root) = (store.clone(), root.to_path_buf());
+        n = n.primary(move |fit| {
+            notice_slot::main_button(Button::new("group-add-needed").small(), fit)
+                .icon(IconName::Download)
+                .label(label)
+                .disabled(busy)
+                .tooltip("Downloads it from Modrinth or CurseForge. It goes to the group's pack too")
+                .on_click(move |_, _, cx| {
+                    let (store, root, ids) = (store.clone(), root.clone(), ids.clone());
+                    store.update(cx, |s, _| {
+                        s.add_group_needs(&root, ids);
+                    });
+                })
         });
     } else if matches!(status, Status::Cant { .. }) && !left_out.is_empty() {
         let (store, root) = (store.clone(), root.to_path_buf());

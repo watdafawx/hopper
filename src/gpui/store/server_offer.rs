@@ -13,18 +13,28 @@ use std::path::{Path, PathBuf};
 #[derive(Default)]
 pub struct Before {
     pages: Vec<String>,
+    /// The jars in the mods folder, to tell what the add brought in
+    /// (`None`: not known, so nothing is asked about).
+    jars: Option<std::collections::HashSet<String>>,
 }
 
 impl Before {
     pub fn at(root: &Path) -> Before {
-        Before { pages: hopper::modpack::pending_urls_at(root) }
+        Before { pages: hopper::modpack::pending_urls_at(root), jars: jars_at(root) }
     }
 }
 
+/// The file names in the instance's mods folder.
+pub fn jars_at(root: &Path) -> Option<std::collections::HashSet<String>> {
+    let dir = std::fs::read_dir(root.join("mods")).ok()?;
+    Some(dir.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+}
+
 impl Msg {
-    /// [`Msg::installed`] with the pages that were waiting before.
+    /// [`Msg::installed`] with the pages that were waiting before, for a mod
+    /// the player added: in a group's pack, what it needs is asked about.
     pub fn added(root: PathBuf, before: &Before, by: Option<u64>) -> Msg {
-        Msg::installed(root, &before.pages, by)
+        Msg::Added(Box::new(Msg::installed(root, &before.pages, by)), before.jars.clone())
     }
 }
 

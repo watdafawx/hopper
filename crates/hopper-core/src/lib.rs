@@ -52,6 +52,7 @@ pub mod listorder;
 pub mod namematch;
 pub mod game;
 pub mod grouppack;
+pub mod groupdeps;
 pub mod groupstatus;
 pub mod groupsync;
 pub mod history;

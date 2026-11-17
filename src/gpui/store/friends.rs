@@ -1215,6 +1215,9 @@ impl Store {
             let skip = self.pending_follow.remove(&root).flatten();
             self.apply_follow(root, f.seen.clone(), format!("Updating from {}'s {}", f.peer_name, f.name), skip, cx);
         }
+        // Required mods the packs lack: read once a copy appears (later
+        // reads follow the mods folder changing).
+        self.seed_group_needs();
         // Group packs with other members' changes waiting.
         let mut ready: Vec<(PackCopy, PathBuf, bool)> = Vec::new();
         for c in self.settings.group_copies.iter().filter(|_| self.group_preview.is_none()) {
@@ -1309,6 +1312,7 @@ impl Store {
             jars_waiting,
             unsent: false,
             held: self.group_held.contains_key(&c.local),
+            needs: self.group_needs(root),
         }))
     }
 
@@ -1473,7 +1477,21 @@ impl Store {
             "sending" => {
                 self.group_held.insert(local.clone(), (copy.sent_seq, Instant::now()));
             }
+            // A mod of the pack needs one nobody added.
+            "needs-mod" => self.preview_group_needs(
+                &local,
+                vec![hopper::groupdeps::Need {
+                    id: "owo-lib".into(),
+                    name: "owo-lib".into(),
+                    versions: "[0.12.15,)".into(),
+                    by: vec![("Shapewright".into(), "shapewright.jar".into())],
+                    off: None,
+                }],
+            ),
             _ => {}
+        }
+        if state != "needs-mod" {
+            self.preview_group_needs(&local, Vec::new());
         }
         if state == "failed" {
             let e = anyhow::anyhow!("The mod sites wouldn't give Hopper that file.");
@@ -1753,6 +1771,8 @@ impl Store {
     pub(super) fn on_group_merged(&mut self, m: GroupMerged, cx: &mut Context<Self>) {
         let GroupMerged { local, root, mut merged } = m;
         self.group_merging.remove(&local);
+        // Mods came in or went: what they need may be lacking.
+        self.want_group_needs(&root);
         let made = merged.made.len();
         let mut from: Vec<String> = merged.made.iter().map(|(_, _, n)| n.clone()).filter(|n| !n.is_empty()).collect();
         from.dedup();
@@ -1925,7 +1945,7 @@ impl Store {
             .unwrap_or_else(|| "them".into())
     }
 
-    fn group_name(&self, id: &str) -> String {
+    pub(super) fn group_name(&self, id: &str) -> String {
         self.mailbox_groups
             .iter()
             .find(|g| g.id == id)

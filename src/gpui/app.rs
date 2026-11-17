@@ -292,6 +292,7 @@ impl AppView {
                     });
                     window.push_notification(n, cx);
                 }
+                StoreEvent::GroupNeeds(ask) => crate::group_needs::open(this.store.clone(), (**ask).clone(), window, cx),
                 StoreEvent::PackOffer { e, group, text } => {
                     // One toast per pack, up until answered: Get opens the
                     // usual Follow dialog, Not now never asks again.
