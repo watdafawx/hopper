@@ -3864,8 +3864,8 @@ pub fn confirm_sync_all(store: &Entity<Store>, inst_root: &Path, window: &mut Wi
     let lines: Vec<String> = rows
         .iter()
         .map(|(sv, st)| match st {
-            None if todo.len() < rows.len() => format!("{}: in step, left alone", sv.name),
-            None => format!("{}: in step", sv.name),
+            None if todo.len() < rows.len() => format!("{}: same as the pack, left alone", sv.name),
+            None => format!("{}: same as the pack", sv.name),
             Some(t) => format!("{}: {t}", sv.name),
         })
         .collect();

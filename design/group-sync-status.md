@@ -37,7 +37,7 @@ recipe, publish, sync server).
 
 | State | Label | Detail line | When |
 |---|---|---|---|
-| In step | **In step** | "Same as the group. Checked 2 min ago." | nothing below applies and the PC is connected |
+| Same as the group | **Same as group** | "Same as the group. Checked 2 min ago." | nothing below applies and the PC is connected |
 | Updating | **Updating** | "Taking in 3 changes from Mia." / "Getting the group's changes." | a merge runs, or codes wait and nothing blocks them |
 | Sending | **Sending your changes** | "Your changes reach the group in a moment." | a change made here is not sent yet (and nothing else applies) |
 | Behind, game | **Behind: close the game** | "The pack's new version / the loader / N mods change when you close the game." | `Wait::Game`, loader moved while the game runs, or jars queued in `.hopper-locked.json` |
@@ -47,7 +47,7 @@ recipe, publish, sync server).
 
 When several apply, the first one the player must act on wins: Can't update,
 Behind: needs you, Behind: close the game, Updating, Offline, Sending,
-In step.
+Same as the group.
 
 "Waiting for the game" is shown exactly where sync waits for it today and
 nowhere else: the pack version (`Wait::Game`), a moved loader
@@ -97,7 +97,7 @@ change: the mailbox validates the event's fields and drops unknown ones, see
   or "can't apply: mod from an untrusted link". Their code only shows the
   difference.
 
-Built: per member **In step** / **Behind by N** (tooltip says what it means)
+Built: per member **Same as group** / **Behind by N** (tooltip says what it means)
 or no chip when nothing of theirs has arrived. The rule
 (`groupstatus::member_status`): over the group's marks, a mod marked by
 someone else at relay number *n* counts as behind for a member when their

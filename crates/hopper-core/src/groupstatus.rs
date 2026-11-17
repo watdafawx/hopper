@@ -98,7 +98,7 @@ impl Status {
     /// The short words for a chip.
     pub fn label(&self) -> &'static str {
         match self {
-            Status::InStep { .. } => "In step",
+            Status::InStep { .. } => "Same as group",
             Status::Updating { .. } => "Updating",
             Status::Sending => "Sending your changes",
             Status::WaitsForGame { .. } => "Behind: close the game",
@@ -310,7 +310,7 @@ impl Member {
     pub fn label(&self) -> String {
         match self {
             Member::Unknown => String::new(),
-            Member::InStep => "In step".to_string(),
+            Member::InStep => "Same as group".to_string(),
             Member::Behind { changes: 1 } => "Behind by 1".to_string(),
             Member::Behind { changes } => format!("Behind by {changes}"),
         }
@@ -527,7 +527,7 @@ mod tests {
         let c = PackCopy::default();
         let s = status(&input(&c));
         assert_eq!(s, Status::InStep { checked: Some(1000) });
-        assert_eq!(s.label(), "In step");
+        assert_eq!(s.label(), "Same as group");
         assert_eq!(s.detail(1120), "Same as the group. Checked 2 min ago.");
         assert_eq!(s.tone(), Tone::Good);
     }
@@ -838,7 +838,7 @@ mod tests {
     fn a_member_with_every_change_is_in_step() {
         let c = member_copy(&[("p:1", "mia", 12), ("p:2", "me", 15)], Some((20, &[("p:1", 12), ("p:2", 15)])));
         assert_eq!(member_status(&[&c], "noah"), Member::InStep);
-        assert_eq!(Member::InStep.label(), "In step");
+        assert_eq!(Member::InStep.label(), "Same as group");
     }
 
     #[test]

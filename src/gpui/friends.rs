@@ -3638,7 +3638,14 @@ fn tone_color(tone: Tone, cx: &App) -> Hsla {
 /// How a copy stands with its group, as a chip and then what it means. The
 /// words wrap; the chip never does, so the page never has to give way.
 fn status_line(st: &Status, said: Option<&str>, under_icon: bool, cx: &App) -> Div {
-    let text = said.map(str::to_string).unwrap_or_else(|| st.detail(now()));
+    let text = said.map(str::to_string).unwrap_or_else(|| {
+        // The chip already says "Same as group": the line only adds when.
+        let detail = st.detail(now());
+        match (st, detail.strip_prefix("Same as the group. ")) {
+            (Status::InStep { .. }, Some(rest)) => rest.to_string(),
+            _ => detail,
+        }
+    });
     h_flex()
         .gap_1p5()
         .items_start()

@@ -2865,7 +2865,7 @@ impl LibraryView {
         let tabs = list.into_iter().enumerate().map(|(i, (sroot, name, diff))| {
             let (dot, _, _) = self.server_state(&sroot, cx);
             let chip = diff.map(|n| match n {
-                0 => widgets::chip(success).child("In step"),
+                0 => widgets::chip(success).child("Same as pack"),
                 n => widgets::chip(warning).child(format!("{n} differ")),
             });
             let selected = shown.as_ref().is_some_and(|s| s.0 == sroot);
@@ -2894,7 +2894,7 @@ impl LibraryView {
             .small()
             .icon(IconName::ServerCog)
             .label(if wide { "Sync to all servers…" } else { "Sync all…" })
-            .tooltip("Brings every server paired with this pack in step with it (it asks first)")
+            .tooltip("Brings every server paired with this pack up to match it (it asks first)")
             .on_click(move |_, window, cx| crate::rigsync::confirm_sync_all(&st, &r, window, cx));
         let unpair = shown.map(|(sroot, name)| {
             let st = self.store.clone();
