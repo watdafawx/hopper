@@ -492,7 +492,7 @@ impl Render for ServerSettings {
                                         cx.notify();
                                     })),
                             )
-                            .child(div().w_16().child(Input::new(&self.max_crashes).small()))
+                            .child(crate::widgets::wheel_number(&self.max_crashes, Some(0.), Some(20.), 1., true, Input::new(&self.max_crashes).small()).w_16())
                             .child(div().text_sm().child("times an hour")),
                     ),
                 )

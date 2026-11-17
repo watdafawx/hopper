@@ -25,7 +25,7 @@ use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use hopper::configedit::{self, Edit, Entry, Format, Kind, Restart, Section, Value};
+use hopper::configedit::{self, stepper, Edit, Entry, Format, Kind, Restart, Section, Value};
 use hopper::configindex::{CfgFile, Side};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -241,6 +241,10 @@ pub struct ConfigView {
     /// Values refused on Save, by setting.
     errors: HashMap<String, String>,
     sliders: HashMap<String, Entity<SliderState>>,
+    /// The slider being dragged and the value under the thumb. It's only
+    /// written to the file on release; until then the number beside it
+    /// follows the thumb and the thumb isn't pulled back to the file's value.
+    sliding: Option<(String, Value)>,
     colors: HashMap<String, Entity<ColorPickerState>>,
     /// The Review list is open; unticked edits there are dropped on Save.
     review: bool,
@@ -353,6 +357,7 @@ impl ConfigView {
             hold: cx.focus_handle(),
             errors: HashMap::new(),
             sliders: HashMap::new(),
+            sliding: None,
             colors: HashMap::new(),
             review: false,
             review_off: HashSet::new(),
@@ -1082,32 +1087,71 @@ impl ConfigView {
     /// The setting's slider, made the first time it's drawn.
     fn slider(&mut self, k: &str, e: &Entry, lo: f64, hi: f64, window: &mut Window, cx: &mut Context<Self>) -> Entity<SliderState> {
         let whole = matches!(e.value, Value::Int(_));
-        let now = match e.value {
-            Value::Int(i) => i as f32,
-            Value::Float(f) => f as f32,
-            _ => lo as f32,
-        };
+        let now = e.value.number().unwrap_or(lo).clamp(lo, hi) as f32;
+        let step = if whole { 1.0 } else { stepper::slider_step(hi - lo) };
         if let Some(s) = self.sliders.get(k) {
             let s = s.clone();
-            // Reset, Discard or a typed value moved it.
-            if (s.read(cx).value().start() - now).abs() > f32::EPSILON {
-                s.update(cx, |st, cx| st.set_value(now, window, cx));
+            let st = s.read(cx);
+            // The file changed under it (another range or step): make a new one.
+            let same_scale = (st.min_value() - lo as f32).abs() < f32::EPSILON && (st.max_value() - hi as f32).abs() < f32::EPSILON && (st.step_value() - step as f32).abs() < f32::EPSILON;
+            if same_scale {
+                // Mid-drag the thumb is the player's, not the file's.
+                let dragging = self.sliding.as_ref().is_some_and(|(sk, _)| sk == k);
+                // Reset, Discard or a typed value moved it.
+                if !dragging && (st.value().start() - now).abs() > f32::EPSILON {
+                    s.update(cx, |st, cx| st.set_value(now, window, cx));
+                }
+                return s;
             }
-            return s;
         }
-        let step = if whole { 1.0 } else { ((hi - lo) / 100.0) as f32 };
-        let s = cx.new(|_| SliderState::new().min(lo as f32).max(hi as f32).step(step).default_value(now));
-        let (rel, path, key) = (self.rel.clone(), e.path.clone(), e.key.clone());
-        let sub = cx.subscribe_in(&s, window, move |this, _, ev: &SliderEvent, window, cx| {
-            if let SliderEvent::Release(v) = ev {
-                let x = v.start() as f64;
-                let v = if whole { Value::Int(x.round() as i64) } else { Value::Float((x * 1000.0).round() / 1000.0) };
-                this.set(rel.clone(), path.clone(), key.clone(), v, window, cx);
+        let s = cx.new(|_| SliderState::new().min(lo as f32).max(hi as f32).step(step as f32).default_value(now));
+        let (rel, path, key, kk) = (self.rel.clone(), e.path.clone(), e.key.clone(), k.to_string());
+        let sub = cx.subscribe_in(&s, window, move |this, _, ev: &SliderEvent, window, cx| match ev {
+            // The thumb moves with the pointer: the number follows, nothing is written yet.
+            SliderEvent::Change(v) => {
+                this.sliding = Some((kk.clone(), stepper::from_slider(v.start() as f64, lo, hi, step, whole)));
+                cx.notify();
+            }
+            SliderEvent::Release(v) => {
+                this.sliding = None;
+                this.set(rel.clone(), path.clone(), key.clone(), stepper::from_slider(v.start() as f64, lo, hi, step, whole), window, cx);
+                cx.notify();
             }
         });
         self._subs.push(sub);
         self.sliders.insert(k.to_string(), s.clone());
         s
+    }
+
+    /// A wheel turn over a number: one step a notch (ten with Shift), up when
+    /// the wheel goes up, stopping at the range's ends.
+    fn wheel(&mut self, path: Vec<String>, key: String, ev: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let notches = widgets::wheel_steps(ev) as f64;
+        // The list must not scroll under a value being turned.
+        cx.stop_propagation();
+        if notches == 0.0 {
+            return;
+        }
+        let rel = self.rel.clone();
+        let Some(entry) = self.states.get(&rel).and_then(|s| s.entry(&path, &key)).cloned() else { return };
+        let editing_this = self.editing.as_ref().is_some_and(|(r, p, kk, t)| *r == rel && *p == path && *kk == key && *t == Typing::Value);
+        // A field with text typed in it steps from that text.
+        let from = if editing_this { entry.value.parse_like(self.edit_input.read(cx).value().as_ref()).unwrap_or(entry.value.clone()) } else { entry.value.clone() };
+        if from.number().is_none() {
+            return;
+        }
+        let by = if ev.modifiers.shift { 10.0 } else { 1.0 };
+        let step = stepper::step_for(&entry.value, entry.range);
+        let to = stepper::stepped(&from, notches * by, step, entry.range);
+        if to == from {
+            return;
+        }
+        if editing_this {
+            self.edit_error = None;
+            let text = to.text();
+            self.edit_input.update(cx, |s, cx| s.set_value(text, window, cx));
+        }
+        self.set(rel, path, key, to, window, cx);
     }
 
     fn color(&mut self, k: &str, e: &Entry, window: &mut Window, cx: &mut Context<Self>) -> Entity<ColorPickerState> {
@@ -1183,7 +1227,21 @@ impl ConfigView {
                 .into_any_element()
             }
             Kind::Int | Kind::Float => {
-                let input: AnyElement = if editing.is_some() { field(self, cx) } else { value_button(format!("{id}-v"), e.value.text(), path.clone(), key.clone(), cx) };
+                // While the thumb is dragged the number shows where it is.
+                let live = self.sliding.as_ref().filter(|(sk, _)| *sk == k).map(|(_, v)| v.text());
+                let input: AnyElement = if editing.is_some() { field(self, cx) } else { value_button(format!("{id}-v"), live.unwrap_or_else(|| e.value.text()), path.clone(), key.clone(), cx) };
+                // The wheel turns the number under the pointer; the window's smoother keeps its hands off.
+                let turn = {
+                    let (path, key) = (path.clone(), key.clone());
+                    move |input: AnyElement, cx: &mut Context<Self>| {
+                        let (path, key) = (path.clone(), key.clone());
+                        div()
+                            .relative()
+                            .child(crate::smooth_scroll::stepped_area())
+                            .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, window, cx| this.wheel(path.clone(), key.clone(), ev, window, cx)))
+                            .child(input)
+                    }
+                };
                 if let Some((lo, hi)) = e.slider() {
                     let s = self.slider(&k, e, lo, hi, window, cx);
                     h_flex()
@@ -1191,36 +1249,23 @@ impl ConfigView {
                         .gap_2()
                         .items_start()
                         .child(div().flex_1().min_w_0().pt_2().child(Slider::new(&s).horizontal()))
-                        .child(div().w(rems(5.5)).flex_none().child(input))
+                        .child(turn(input, cx).w(rems(5.5)).flex_none())
                         .into_any_element()
                 } else {
-                    let whole = matches!(e.value, Value::Int(_));
                     let step = |dir: f64| {
-                        let (rel, path, key, v, range) = (rel.clone(), path.clone(), key.clone(), e.value.clone(), e.range);
+                        let (rel, path, key) = (rel.clone(), path.clone(), key.clone());
                         move |this: &mut Self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>| {
-                            let mut nv = match v {
-                                Value::Int(i) => Value::Int(i + dir as i64),
-                                Value::Float(f) => Value::Float(((f + dir * if f.abs() >= 10.0 { 1.0 } else { 0.1 }) * 1000.0).round() / 1000.0),
-                                ref o => o.clone(),
-                            };
-                            // Stops at the ends rather than refusing.
-                            if let Some((lo, hi)) = range {
-                                let clamp = |x: f64| x.max(lo.unwrap_or(f64::MIN)).min(hi.unwrap_or(f64::MAX));
-                                nv = match nv {
-                                    Value::Int(i) => Value::Int(clamp(i as f64) as i64),
-                                    Value::Float(f) => Value::Float(clamp(f)),
-                                    o => o,
-                                };
-                            }
+                            // From what the file holds now, so a quick second click adds to the first.
+                            let Some(e) = this.states.get(&rel).and_then(|s| s.entry(&path, &key)).cloned() else { return };
+                            let nv = stepper::stepped(&e.value, dir, stepper::step_for(&e.value, e.range), e.range);
                             this.set(rel.clone(), path.clone(), key.clone(), nv, window, cx);
                         }
                     };
-                    let _ = whole;
                     h_flex()
                         .w_full()
                         .gap_1()
                         .items_start()
-                        .child(div().flex_1().min_w_0().child(input))
+                        .child(turn(input, cx).flex_1().min_w_0())
                         .child(Button::new(SharedString::from(format!("{id}-dn"))).ghost().small().icon(IconName::Minus).tooltip("Less").on_click(cx.listener(step(-1.0))))
                         .child(Button::new(SharedString::from(format!("{id}-up"))).ghost().small().icon(IconName::Plus).tooltip("More").on_click(cx.listener(step(1.0))))
                         .into_any_element()

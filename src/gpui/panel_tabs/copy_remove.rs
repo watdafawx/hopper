@@ -259,7 +259,7 @@ impl Render for CloneForm {
             .child(
                 h_flex()
                     .gap_3()
-                    .child(v_flex().w(rems(8.)).gap_1().child(lbl("Port")).child(Input::new(&self.port).small()))
+                    .child(v_flex().w(rems(8.)).gap_1().child(lbl("Port")).child(crate::widgets::wheel_number(&self.port, Some(1.), Some(65535.), 1., true, Input::new(&self.port).small())))
                     .when_some(domain, |r, d| {
                         r.child(
                             v_flex().flex_1().gap_1().child(lbl("Address players join")).child(

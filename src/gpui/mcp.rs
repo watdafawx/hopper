@@ -274,6 +274,8 @@ fn input(cmd: Command, window: &mut Window, cx: &mut App) -> Reply {
                     } else {
                         ScrollDelta::Pixels(point(px(0.), px(-dy / scale)))
                     },
+                    // Shift / Ctrl held with `modifiers` count, as for a real wheel.
+                    modifiers: window.modifiers(),
                     ..Default::default()
                 }),
                 cx,

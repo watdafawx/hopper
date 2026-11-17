@@ -8,6 +8,7 @@
   import { RotateCcw, X, Plus, Minus, FileText } from '@lucide/svelte';
   import { valueOf, edited, errorOf, setEdit, same, playersOf, limits, check, listText, listItems, swatchOf, colorText } from './configs.svelte.js';
   import { marks } from './mark.js';
+  import { sliderStep, stepFor, fromSlider, wheelStep, stepText } from './stepper.js';
 
   /** `words`: the search, marked in the name and key; in the description too with `desc`. */
   let { rel, e, stacked = false, onEditText, words = [], desc = false } = $props();
@@ -65,17 +66,24 @@
     }
   }
 
-  const step = $derived(e.kind === 'int' ? 1 : e.slider && e.slider[1] - e.slider[0] <= 2 ? 0.01 : 0.1);
+  // Steps come from hopper-core's rules (see stepper.js), so the wheel, the
+  // buttons and the slider move a setting the same way as on desktop.
+  const whole = $derived(e.kind === 'int');
+  const lo = $derived(e.range?.[0] ?? null);
+  const hi = $derived(e.range?.[1] ?? null);
+  const step = $derived(stepFor(whole, Number(draft ?? value), e.range));
+  const slStep = $derived(e.slider ? (whole ? 1 : sliderStep(e.slider[1] - e.slider[0])) : step);
+  /** A whole float is written with its ".0", as the file has it. */
+  const fmt = (n) => (e.kind === 'float' && Number.isInteger(n) ? `${n}.0` : String(n));
+  /** One notch of the wheel moves the number by its step, Shift by ten; it's taken like a typed value. */
+  const wheel = $derived({ text: () => String(draft ?? value), step, lo, hi, whole, apply: (t) => take(fmtText(t)) });
+  const fmtText = (t) => (e.kind === 'float' && /^-?\d+$/.test(t) ? `${t}.0` : t);
   function bump(dir) {
-    const n = Number(draft ?? value) || 0;
-    let next = e.kind === 'int' ? Math.round(n + dir) : Math.round((n + dir * step) * 1000) / 1000;
-    if (e.range?.[0] != null) next = Math.max(e.range[0], next);
-    if (e.range?.[1] != null) next = Math.min(e.range[1], next);
-    take(e.kind === 'float' && Number.isInteger(next) ? `${next}.0` : String(next));
+    take(fmtText(stepText(draft ?? value, dir, step, lo, hi, whole)));
   }
-  function slide(v) {
-    const n = Number(v);
-    take(e.kind === 'float' ? (Number.isInteger(n) ? `${n}.0` : String(n)) : String(Math.round(n)));
+  /** The thumb moved: the number follows; it's kept when the thumb is let go. */
+  function slideTo(v) {
+    return fmt(fromSlider(Number(v), e.slider[0], e.slider[1], slStep, whole));
   }
 
   const items = $derived(e.kind === 'list' ? (dirty ? listItems(value) : e.list || []) : []);
@@ -127,12 +135,12 @@
       </label>
     {:else if (e.kind === 'int' || e.kind === 'float') && e.slider}
       <div class="sl">
-        <input type="range" min={e.slider[0]} max={e.slider[1]} step={step} value={Number(draft ?? value)} oninput={(ev) => (draft = ev.currentTarget.value)} onchange={(ev) => slide(ev.currentTarget.value)} aria-label={e.label} />
-        <input class="input num mono" value={draft ?? value} onkeydown={fieldKeys} oninput={(ev) => typing(ev.currentTarget.value)} onchange={(ev) => take(ev.currentTarget.value)} onblur={leave} aria-label="{e.label} value" />
+        <input type="range" min={e.slider[0]} max={e.slider[1]} step={slStep} value={Number(draft ?? value)} oninput={(ev) => (draft = slideTo(ev.currentTarget.value))} onchange={(ev) => take(slideTo(ev.currentTarget.value))} aria-label={e.label} />
+        <input class="input num mono" use:wheelStep={wheel} value={draft ?? value} onkeydown={fieldKeys} oninput={(ev) => typing(ev.currentTarget.value)} onchange={(ev) => take(ev.currentTarget.value)} onblur={leave} aria-label="{e.label} value" />
       </div>
     {:else if e.kind === 'int' || e.kind === 'float'}
       <div class="sl">
-        <input class="input num wide mono" value={draft ?? value} onkeydown={fieldKeys} oninput={(ev) => typing(ev.currentTarget.value)} onchange={(ev) => take(ev.currentTarget.value)} onblur={leave} aria-label={e.label} />
+        <input class="input num wide mono" use:wheelStep={wheel} value={draft ?? value} onkeydown={fieldKeys} oninput={(ev) => typing(ev.currentTarget.value)} onchange={(ev) => take(ev.currentTarget.value)} onblur={leave} aria-label={e.label} />
         <button class="btn icon ghost step" title="Less" aria-label="Less" onclick={() => bump(-1)}><Minus size={13} /></button>
         <button class="btn icon ghost step" title="More" aria-label="More" onclick={() => bump(1)}><Plus size={13} /></button>
       </div>

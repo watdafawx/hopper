@@ -744,19 +744,19 @@ impl BackupsTab {
         let line = || h_flex().gap_2().items_center().flex_wrap().text_xs().text_color(theme.muted_foreground);
         let link = |id: &'static str, label: &'static str| Button::new(id).link().xsmall().label(label);
         let keep = if self.keep_edit {
-            let field = |label: &'static str, input: &Entity<InputState>, unit: Option<&'static str>| {
+            let field = |label: &'static str, input: &Entity<InputState>, unit: Option<&'static str>, lo: f64, hi: f64| {
                 h_flex()
                     .gap_1()
                     .items_center()
                     .child(label)
-                    .child(div().w_16().child(Input::new(input).small()))
+                    .child(widgets::wheel_number(input, Some(lo), Some(hi), 1., true, Input::new(input).small()).w_16())
                     .children(unit)
             };
             line()
                 .child("Keep")
-                .child(field("Newest", &self.keep_inputs[0], None))
-                .child(field("One a day for", &self.keep_inputs[1], Some("days")))
-                .child(field("One a week for", &self.keep_inputs[2], Some("weeks")))
+                .child(field("Newest", &self.keep_inputs[0], None, 1., 500.))
+                .child(field("One a day for", &self.keep_inputs[1], Some("days"), 0., 366.))
+                .child(field("One a week for", &self.keep_inputs[2], Some("weeks"), 0., 520.))
                 .child(
                     Button::new("keep-cancel").outline().xsmall().label("Cancel").on_click(cx.listener(|t, _, _, cx| {
                         t.keep_edit = false;

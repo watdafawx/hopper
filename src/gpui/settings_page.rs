@@ -1548,7 +1548,7 @@ impl SettingsPage {
         let num = |t: Text, unit: &'static str, cx: &mut Context<Self>| {
             h_flex()
                 .gap_2()
-                .child(div().w(rems(5.)).child(Input::new(&self.texts[&t]).small()))
+                .child(widgets::wheel_number(&self.texts[&t], Some(0.), if t == Text::KeepGb { Some(100_000.) } else { None }, 1., t != Text::KeepGb, Input::new(&self.texts[&t]).small()).w(rems(5.)))
                 .child(div().w(rems(3.5)).text_sm().text_color(cx.theme().muted_foreground).child(unit))
         };
         let backups = Block::card(
@@ -3117,7 +3117,7 @@ impl SettingsPage {
         if s.mcp_enabled {
             mcp_rows.push(
                 Row::new("mcp-port")
-                    .control(div().w(rems(8.)).child(Input::new(&self.texts[&Text::McpPort]).small()))
+                    .control(widgets::wheel_number(&self.texts[&Text::McpPort], Some(1.), Some(65535.), 1., true, Input::new(&self.texts[&Text::McpPort]).small()).w(rems(8.)))
                     .note(self.note(Text::McpPort, cx)),
             );
             mcp_rows.push(Row::new("mcp-changes").control(self.switch(

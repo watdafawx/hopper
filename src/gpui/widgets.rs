@@ -269,6 +269,69 @@ pub fn cf_key_fix(id: impl Into<ElementId>, error: &str) -> Option<Button> {
     })
 }
 
+thread_local! {
+    /// Wheel pixels (a touchpad) not yet worth a step.
+    static WHEEL_PX: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+
+/// How many steps a wheel event is worth (positive: wheel up). A mouse notch
+/// arrives as a few lines whatever Windows' lines-per-notch setting is, and is
+/// one step; a touchpad's or free-spinning wheel's small deltas add up, a
+/// step for every 40 pixels. Ctrl + wheel is the window's zoom: no steps.
+pub fn wheel_steps(ev: &ScrollWheelEvent) -> f32 {
+    if ev.modifiers.control || ev.modifiers.platform {
+        return 0.0;
+    }
+    let (delta, unit) = match ev.delta {
+        ScrollDelta::Lines(l) if l.y.abs() >= 1.0 => {
+            WHEEL_PX.with(|w| w.set(0.0));
+            return l.y.signum();
+        }
+        ScrollDelta::Lines(l) => (l.y * 40.0, 40.0),
+        ScrollDelta::Pixels(p) => (f32::from(p.y), 40.0),
+    };
+    WHEEL_PX.with(|w| {
+        let total = w.get() + delta;
+        let n = (total / unit).trunc();
+        w.set(total - n * unit);
+        n
+    })
+}
+
+/// A number field that the mouse wheel turns while the pointer is over it:
+/// one `step` a notch (ten with Shift), up when the wheel goes up, stopping
+/// at `lo` and `hi`. The page doesn't scroll under it. `whole` keeps the
+/// text a whole number. Wrap the `Input` in it: `widgets::wheel_number(&state, ..., Input::new(&state))`.
+pub fn wheel_number(
+    state: &Entity<gpui_kit::component::input::InputState>,
+    lo: Option<f64>,
+    hi: Option<f64>,
+    step: f64,
+    whole: bool,
+    input: impl IntoElement,
+) -> Div {
+    let state = state.clone();
+    div()
+        .relative()
+        // The window's smoother passes notches over this untouched.
+        .child(crate::smooth_scroll::stepped_area())
+        .on_scroll_wheel(move |ev: &ScrollWheelEvent, window, cx| {
+            // The list or page behind must not scroll under a value being turned.
+            cx.stop_propagation();
+            let notches = wheel_steps(ev);
+            if notches == 0.0 {
+                return;
+            }
+            let by = if ev.modifiers.shift { 10.0 } else { 1.0 };
+            let text = state.read(cx).value().to_string();
+            let to = hopper::configedit::stepper::step_text(&text, notches as f64 * by, step, lo, hi, whole);
+            if to != text.trim() {
+                state.update(cx, |s, cx| s.replace_all(to, window, cx));
+            }
+        })
+        .child(input)
+}
+
 /// A muted, small caption line.
 pub fn caption(text: impl Into<SharedString>, cx: &App) -> Div {
     div()

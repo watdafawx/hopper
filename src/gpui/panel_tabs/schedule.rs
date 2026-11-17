@@ -276,7 +276,7 @@ impl Render for ScheduleTab {
                                     cx.notify();
                                 })),
                         )
-                        .child(div().w_16().child(Input::new(&self.max_crashes).small()))
+                        .child(widgets::wheel_number(&self.max_crashes, Some(0.), Some(20.), 1., true, Input::new(&self.max_crashes).small()).w_16())
                         .child(div().text_sm().child("times an hour")),
                 ),
         );
@@ -306,13 +306,13 @@ impl Render for ScheduleTab {
                         Some(a) => format!("Hours, while the server runs. 0: off. Last scheduled backup {a}."),
                         None => "Hours, while the server runs. 0: off.".to_string(),
                     })
-                    .child(div().w_24().child(Input::new(&self.backup_hours).small())),
+                    .child(widgets::wheel_number(&self.backup_hours, Some(0.), Some(168.), 1., true, Input::new(&self.backup_hours).small()).w_24()),
             )
             .child(
                 Field::new()
                     .label("Backups kept")
                     .description("Older scheduled backups are deleted.")
-                    .child(div().w_24().child(Input::new(&self.backup_keep).small())),
+                    .child(widgets::wheel_number(&self.backup_keep, Some(1.), Some(500.), 1., true, Input::new(&self.backup_keep).small()).w_24()),
             )
             .child(
                 Field::new().label("What they hold").child(div().w_48().child(widgets::picker(

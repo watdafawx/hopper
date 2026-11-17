@@ -1115,7 +1115,7 @@ impl WorldsView {
                                             window.refresh();
                                         }),
                                 )
-                                .child(div().w_24().child(Input::new(&radius).small()))
+                                .child(widgets::wheel_number(&radius, Some(16.), Some(100_000.), 100., true, Input::new(&radius).small()).w_24())
                                 .child(widgets::caption(format!("≈ {} chunks", fmt_thousands(chunks)), cx)),
                         )
                         .child(div().font_semibold().child("Center"))

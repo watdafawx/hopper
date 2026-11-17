@@ -2054,7 +2054,7 @@ impl ServerControl {
                                                     cx.notify();
                                                 })),
                                         )
-                                        .child(div().w_16().child(Input::new(&self.delay_input).small()))
+                                        .child(widgets::wheel_number(&self.delay_input, Some(0.), Some(3600.), 1., true, Input::new(&self.delay_input).small()).w_16())
                                         .child(div().text_sm().child("seconds")),
                                 ),
                             )
@@ -2069,7 +2069,7 @@ impl ServerControl {
                                     h_flex()
                                         .gap_3()
                                         .child(div().text_sm().child("Delete after"))
-                                        .child(div().w_16().child(Input::new(&self.log_days_input).small()))
+                                        .child(widgets::wheel_number(&self.log_days_input, Some(0.), Some(3650.), 1., true, Input::new(&self.log_days_input).small()).w_16())
                                         .child(div().text_sm().child("days (empty keeps them all)")),
                                 ),
                             )

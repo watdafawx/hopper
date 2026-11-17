@@ -1928,7 +1928,7 @@ impl Render for HostForm {
                                     .w_full()
                                     .min_w_0()
                                     .gap_1p5()
-                                    .child(div().w_32().child(Input::new(&self.port)))
+                                    .child(widgets::wheel_number(&self.port, Some(1.), Some(65535.), 1., true, Input::new(&self.port)).w_32())
                                     .children(port_warning),
                             ),
                     )

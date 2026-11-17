@@ -1382,7 +1382,7 @@ impl SettingsTab {
                     this.sleep_on = *v;
                     cx.notify();
                 })))
-                .child(div().w(rems(4.5)).child(Input::new(&self.sleep_min).small().disabled(!self.sleep_on)))
+                .child(widgets::wheel_number(&self.sleep_min, Some(1.), Some(1440.), 1., true, Input::new(&self.sleep_min).small().disabled(!self.sleep_on)).w(rems(4.5)))
                 .child(div().text_sm().child("min")),
         );
         // Sleep off: the wake options below stay in view but greyed, so people

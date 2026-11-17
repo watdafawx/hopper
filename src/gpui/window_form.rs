@@ -87,9 +87,9 @@ impl Render for WindowForm {
                 c.child(
                     h_flex()
                         .gap_2()
-                        .child(div().w_24().child(Input::new(&self.width)))
+                        .child(widgets::wheel_number(&self.width, Some(640.), Some(7680.), 10., true, Input::new(&self.width)).w_24())
                         .child(widgets::caption("×", cx))
-                        .child(div().w_24().child(Input::new(&self.height))),
+                        .child(widgets::wheel_number(&self.height, Some(480.), Some(4320.), 10., true, Input::new(&self.height)).w_24()),
                 )
             })
             .child(widgets::caption(hint, cx).text_xs())

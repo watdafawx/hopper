@@ -13,6 +13,7 @@ use std::path::Path;
 
 pub mod hints;
 pub mod label;
+pub mod stepper;
 mod toml_fmt;
 mod forge_cfg;
 mod snbt;
@@ -66,7 +67,7 @@ impl Value {
         }
     }
 
-    fn number(&self) -> Option<f64> {
+    pub fn number(&self) -> Option<f64> {
         match self {
             Value::Int(i) => Some(*i as f64),
             Value::Float(f) => Some(*f),
