@@ -750,6 +750,7 @@ impl AppView {
         if let Some(d) = value("--dialog") {
             let want = value("--instance").unwrap_or_default().to_lowercase();
             let m = value("--mod").unwrap_or_default().to_lowercase();
+            let state = value("--state").unwrap_or_else(|| "in-step".into());
             cx.defer_in(window, move |this, window, cx| match d.as_str() {
                 "new" => crate::dialogs::open_create(this.store.clone(), window, cx),
                 // The toasts with a button, with sample words, to check
@@ -793,6 +794,9 @@ impl AppView {
                         None => this.store.update(cx, |s, cx| s.preview_given_up(root, cx)),
                     }
                 }
+                // A made-up friends group, with the first two instances as its
+                // packs: `--dialog group-sync --state left-out --page friends`.
+                "group-sync" => this.store.update(cx, |s, cx| s.preview_group_sync(&state, cx)),
                 // After the server comparison has had time to finish.
                 "side" => cx
                     .spawn_in(window, async move |this, cx| {

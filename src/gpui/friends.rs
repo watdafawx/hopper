@@ -23,6 +23,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use hopper::groupstatus::{self, Member, Status, Tone};
 use hopper::groupsync::Kind;
 use hopper::instances::Instance;
 use hopper::mailbox::{Event, Friend, Group, Met};
@@ -1246,10 +1247,15 @@ impl FriendsPanel {
             Some((root, ..)) if s.group_copy(root).is_some() => "the group".to_string(),
             _ => sender.clone(),
         };
+        // A copy kept in step with a group says how it stands, in its own
+        // line; the copy's other notes would only repeat it.
+        let group = shown.as_ref().and_then(|f| Some((f.0.clone(), s.group_status(&f.0)?, s.group_pulling(&f.0))));
+        let pulled = group.as_ref().and_then(|g| s.group_pulled(&g.0)).map(|(t, _)| t.to_string());
         let sub = match &shown {
             Some((_, local, CopyState::Updating)) => format!("Getting {who}'s changes · your copy: {local}"),
             // The note under it says what's wrong: not "up to date".
             Some((_, local, CopyState::Failed(..) | CopyState::Held(_))) => format!("Your copy: {local}"),
+            Some((_, local, _)) if group.is_some() => format!("Your copy: {local}"),
             Some((_, local, _)) => format!("Your copy: {local} · up to date"),
             None if e.at > 0 => format!("Updated {}", ago(e.at)),
             None => String::new(),
@@ -1258,7 +1264,7 @@ impl FriendsPanel {
             Some((root, _, CopyState::Held(_))) => Some(root.clone()),
             _ => None,
         };
-        let copy_note = shown.as_ref().and_then(|f| f.2.note(&who));
+        let copy_note = shown.as_ref().filter(|_| group.is_none()).and_then(|f| f.2.note(&who));
         let changed = shown.as_ref().and_then(|f| changed_by(s, &f.0, &s.mailbox_id()));
         let sub = match by {
             Some(by) if sub.is_empty() => format!("From {by}"),
@@ -1281,6 +1287,17 @@ impl FriendsPanel {
         let two_way = !e.groups.is_empty();
         let action: AnyElement = match (&waiting, follows.is_empty()) {
             (Some(root), _) => self.update_button(format!("their-update:{key}").into(), e, root.clone(), down, cx).into_any_element(),
+            // Pull now stays out of sight on a copy in step, and shows when
+            // there is something to pull.
+            (None, false) if group.is_some() => {
+                let (root, st, pulling) = group.clone().expect("checked");
+                let b = self.pull_button(SharedString::from(format!("pull:{key}")), root, pulling, cx);
+                if matches!(st, Status::InStep { .. }) {
+                    widgets::reveal_on_hover(row_id.clone(), SharedString::from(format!("pull-at:{key}")), b, window, cx).into_any_element()
+                } else {
+                    b.into_any_element()
+                }
+            }
             (None, false) => div()
                 .id(SharedString::from(format!("following:{key}")))
                 .flex_none()
@@ -1350,12 +1367,25 @@ impl FriendsPanel {
                         )
                     })
                     .when_some(changed, |c, t| c.child(widgets::caption(t, cx).text_xs().truncate().pl(rems(1.625))))
+                    .when_some(group.as_ref(), |c, g| c.child(status_line(&g.1, pulled.as_deref(), cx)))
                     .when_some(copy_note, |c, t| c.child(warn_line(t, cx)))
                     .when(missing > 0, |c| c.child(warn_line(hand_added_line(&e.left_out, &sender), cx))),
             )
             .child(action)
             .children(hide)
             .into_any_element()
+    }
+
+    /// Pull now: checks the group and takes its changes in at once.
+    fn pull_button(&self, id: SharedString, root: PathBuf, pulling: bool, cx: &mut Context<Self>) -> Button {
+        Button::new(id)
+            .xsmall()
+            .outline()
+            .icon(IconName::RefreshCw)
+            .label(if pulling { "Checking..." } else { "Pull now" })
+            .disabled(pulling)
+            .tooltip("Checks the group for newer changes and takes them in now")
+            .on_click(cx.listener(move |this, _, _, cx| this.store.update(cx, |s, cx| s.pull_group_now(&root, cx))))
     }
 
     /// Update: brings a followed copy to the friend's newest version, after
@@ -1653,6 +1683,22 @@ impl FriendsPanel {
         // You first, then whoever made it, then the rest.
         let mut members: Vec<_> = g.members.iter().filter(|m| !self.leaving(&g.id, &m.id)).cloned().collect();
         members.sort_by_key(|m| (m.id != me, m.id != g.owner));
+        // How each member's copy stands (what this PC knows of theirs), and
+        // this PC's own, for the chips.
+        let (member_state, my_state): (Vec<Member>, Option<Status>) = {
+            let s = self.store.read(cx);
+            let copies: Vec<&hopper::groupsync::PackCopy> = s.settings().group_copies.iter().filter(|c| c.group == g.id).collect();
+            let states = members
+                .iter()
+                .map(|m| if m.id == me || !m.joined { Member::Unknown } else { groupstatus::member_status(&copies, &m.id) })
+                .collect();
+            let mine = copies
+                .iter()
+                .filter_map(|c| s.instances().iter().find(|i| i.id == c.local))
+                .filter_map(|i| s.group_status(&i.root))
+                .min_by_key(|st| st.rank());
+            (states, mine)
+        };
         let member_rows: Vec<AnyElement> = members
             .iter()
             .enumerate()
@@ -1695,10 +1741,35 @@ impl FriendsPanel {
                 } else {
                     row
                 };
+                // In step or behind: this PC's own copy for "You", the last
+                // thing a member sent for the others.
+                let (label, tone, tip) = if you {
+                    match &my_state {
+                        Some(st) => (st.label().to_string(), st.tone(), st.detail(now())),
+                        None => (String::new(), Tone::Quiet, String::new()),
+                    }
+                } else {
+                    let ms = &member_state[mi];
+                    (ms.label(), ms.tone(), ms.detail(&name))
+                };
+                let chip = (!label.is_empty()).then(|| {
+                    let tip: SharedString = tip.into();
+                    div()
+                        .id(SharedString::from(format!("gm-state:{mi}")))
+                        .flex_none()
+                        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                        .child(widgets::chip(tone_color(tone, cx)).child(label))
+                });
                 row.child(f)
-                    .child(div().flex_1().min_w_0().truncate().text_sm().child(name))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().text_sm().child(name.clone()))
+                            .when(!status.is_empty(), |c| c.child(widgets::caption(status, cx).text_xs())),
+                    )
                     .when(!m.joined, |r| r.child(widgets::chip(theme.muted_foreground).child("Invited")))
-                    .when(!status.is_empty(), |r| r.child(widgets::caption(status, cx).text_xs().flex_none()))
+                    .children(chip)
                     .children(menu)
                     .into_any_element()
             })
@@ -1712,13 +1783,31 @@ impl FriendsPanel {
             .collect();
         let in_step = g.me.in_step;
         let step_id = g.id.clone();
+        let pack_state: Vec<Option<(Status, bool, Option<String>)>> = {
+            let s = self.store.read(cx);
+            my_packs
+                .iter()
+                .map(|(root, _)| s.group_status(root).map(|st| (st, s.group_pulling(root), s.group_pulled(root).map(|(t, _)| t.to_string()))))
+                .collect()
+        };
         let my_rows: Vec<AnyElement> = my_packs
             .iter()
             .enumerate()
             .map(|(pi, (root, name))| {
                 let root = root.clone();
+                let state = pack_state[pi].clone();
+                let row_id = SharedString::from(format!("gp-mine:{pi}"));
+                let pull = state.as_ref().map(|(st, pulling, _)| {
+                    let b = self.pull_button(SharedString::from(format!("gp-pull:{pi}")), root.clone(), *pulling, cx);
+                    if matches!(st, Status::InStep { .. }) {
+                        widgets::reveal_on_hover(row_id.clone(), SharedString::from(format!("gp-pull-at:{pi}")), b, window, cx).into_any_element()
+                    } else {
+                        b.into_any_element()
+                    }
+                });
                 h_flex()
-                    .id(SharedString::from(format!("gp-mine:{pi}")))
+                    .id(row_id.clone())
+                    .group(row_id)
                     .gap_2()
                     .px_3()
                     .py_1()
@@ -1737,8 +1826,10 @@ impl FriendsPanel {
                                     .child(name.clone())
                                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(FriendsEvent::Show(root.clone())))),
                             )
-                            .child(widgets::caption("Yours", cx).text_xs()),
+                            .child(widgets::caption("Yours", cx).text_xs())
+                            .when_some(state.as_ref(), |c, (st, _, said)| c.child(status_line(st, said.as_deref(), cx))),
                     )
+                    .children(pull)
                     .child(
                         Button::new(SharedString::from(format!("gp-change:{pi}")))
                             .xsmall()
@@ -3415,6 +3506,9 @@ fn copy_state(s: &Store, f: &hopper::settings::FollowedRecipe, root: &Path) -> C
     if let Some((why, again)) = s.follow_error(root) {
         return CopyState::Failed(why.to_string(), again);
     }
+    if let Some(Status::Cant { why, again, .. }) = s.group_status(root) {
+        return CopyState::Failed(why, again);
+    }
     if s.follow_updating(root) {
         return CopyState::Updating;
     }
@@ -3514,6 +3608,34 @@ fn warn_line(text: String, cx: &App) -> Div {
         .child(Icon::new(IconName::TriangleAlert).xsmall().flex_none().mt(px(2.)).text_color(cx.theme().warning))
         // Wraps instead of cutting off: the end says whether Hopper tries
         // again, which the player needs to read.
+        .child(div().flex_1().min_w_0().text_xs().text_color(cx.theme().muted_foreground).child(text))
+}
+
+/// The colour of a status chip: green in step, blue busy, amber behind, red
+/// when it can't, grey for the rest.
+fn tone_color(tone: Tone, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    match tone {
+        Tone::Good => theme.success,
+        Tone::Busy => theme.primary,
+        Tone::Warn => theme.warning,
+        // Red text on its own dark tint reads too dim (3.8:1): lift it, as
+        // the header's chip does.
+        Tone::Bad if theme.mode.is_dark() => hsla(theme.danger.h, theme.danger.s, theme.danger.l.max(0.68), 1.),
+        Tone::Bad => theme.danger,
+        Tone::Quiet => theme.muted_foreground,
+    }
+}
+
+/// How a copy stands with its group, as a chip and then what it means. The
+/// words wrap; the chip never does, so the page never has to give way.
+fn status_line(st: &Status, said: Option<&str>, cx: &App) -> Div {
+    let text = said.map(str::to_string).unwrap_or_else(|| st.detail(now()));
+    h_flex()
+        .gap_1p5()
+        .items_start()
+        .pl(rems(1.625))
+        .child(widgets::chip(tone_color(st.tone(), cx)).child(st.label()))
         .child(div().flex_1().min_w_0().text_xs().text_color(cx.theme().muted_foreground).child(text))
 }
 

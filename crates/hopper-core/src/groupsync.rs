@@ -553,6 +553,53 @@ pub struct PackCopy {
     /// (`configsync`).
     #[serde(skip_serializing_if = "crate::configsync::Configs::is_empty")]
     pub configs: crate::configsync::Configs,
+    /// Mods the group has that this PC left out because they come from a
+    /// link it doesn't trust yet. Their change counts as taken in, so
+    /// without this list nothing would ever try them again, and nobody
+    /// could see the mod is missing ([`crate::groupstatus`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<Skipped>,
+}
+
+/// A mod of the group's this PC left out for want of trust in its source.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Skipped {
+    pub key: String,
+    /// What the player calls it ("EZActions").
+    pub name: String,
+    /// Where it's from, for the player: "GitHub: owner/repo".
+    pub from: String,
+    /// The member who changed it last, by name.
+    pub by: String,
+    /// The group's entry for it: what to install once the source is
+    /// allowed.
+    pub entry: Option<Entry>,
+    /// The player said yes to it (from the status's "Allow and install"):
+    /// it goes in whatever Settings › Mod sources and the trust list say.
+    pub approved: bool,
+}
+
+impl Skipped {
+    fn of(c: &Change, by: &str) -> Option<Skipped> {
+        let Some(Entry::Source { pin, .. }) = &c.entry else { return None };
+        Some(Skipped {
+            key: c.key.clone(),
+            name: crate::sources::carry::display_name(pin),
+            from: format!("{}: {}", pin.source.kind.label(), pin.source.publisher),
+            by: by.to_string(),
+            entry: c.entry.clone(),
+            approved: false,
+        })
+    }
+
+    /// The source pin it waits on.
+    pub fn pin(&self) -> Option<&crate::sources::carry::Pin> {
+        match &self.entry {
+            Some(Entry::Source { pin, .. }) => Some(pin),
+            _ => None,
+        }
+    }
 }
 
 impl PackCopy {
@@ -616,6 +663,12 @@ pub struct Merged {
     /// Members' changes left out on purpose, and why (see [`Kept`]). Their
     /// codes are taken in all the same: the change isn't tried again.
     pub kept: Vec<Kept>,
+    /// Mods left out this time for want of trust in their source (kept in
+    /// [`PackCopy::skipped`] so they're tried again).
+    pub skipped: Vec<Skipped>,
+    /// Keys to take off [`PackCopy::skipped`]: put in now, or changed again
+    /// by the group since, so the old entry no longer applies.
+    pub cleared: Vec<String>,
 }
 
 /// A member's change sync didn't make here, for the player to see.
@@ -1269,6 +1322,10 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
     // The loader isn't a mod: it is moved here, not through `apply`.
     let (loader_change, todo): (Vec<Change>, Vec<Change>) = todo.into_iter().partition(|c| c.key == LOADER_KEY);
     let loader_set = loader_change.first().is_some_and(|c| move_loader(&mut inst, c, pack_loader.as_deref(), &mut merged, job));
+    // Mods left out earlier for want of trust in their source: put in now
+    // if it is allowed since.
+    let mut todo = todo;
+    retry_skipped(&inst, copy, |p| !crate::sources::carry::auto_skip(std::slice::from_ref(p), allow).is_empty(), &mut todo, &mut merged);
     let todo = keep_pack_mods(&inst, todo, &mut merged, &here_pack, job);
     // Mods kept only on this PC only learn how the others have them.
     let (todo, kept) = crate::onlyhere::split(&mut inst, todo, &mut merged);
@@ -1304,6 +1361,17 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
     if (kept || loader_set || merged.pack_done.is_some()) && todo.is_empty() {
         inst.save()?;
     }
+    let pins: Vec<crate::sources::carry::Pin> = todo
+        .iter()
+        .filter_map(|c| match &c.entry {
+            Some(Entry::Source { pin, .. }) => Some(pin.clone()),
+            _ => None,
+        })
+        .collect();
+    // What the player said yes to goes in as asked.
+    let approved: Vec<crate::sources::carry::Pin> = copy.skipped.iter().filter(|s| s.approved).filter_map(|s| s.pin().cloned()).collect();
+    let skip: Vec<crate::sources::carry::Pin> = crate::sources::carry::auto_skip(&pins, allow).into_iter().filter(|p| !approved.contains(p)).collect();
+    note_skipped(&inst, &todo, &skip, &mut merged);
     if !todo.is_empty() {
         // Only a merge that changes something shows in Tasks; most codes
         // are echoes of changes already here.
@@ -1312,14 +1380,6 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
         if let Some(first) = who.first() {
             job.detail(format!("{} change(s) from {first}", todo.len()));
         }
-        let pins: Vec<crate::sources::carry::Pin> = todo
-            .iter()
-            .filter_map(|c| match &c.entry {
-                Some(Entry::Source { pin, .. }) => Some(pin.clone()),
-                _ => None,
-            })
-            .collect();
-        let skip = crate::sources::carry::auto_skip(&pins, allow);
         // History names the member behind each change; only these mods
         // are theirs, whatever else changes here meanwhile.
         let _scope = crate::actor::begin(root, None);
@@ -1327,6 +1387,55 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
         apply(&mut inst, &todo, &skip, job)?;
     }
     Ok(merged)
+}
+
+/// Puts the mods in `copy.skipped` back into `todo` once their source is
+/// allowed, and takes off the list the ones that are here now or that the
+/// group changed again (`merged.cleared`). A mod still not allowed stays on
+/// the list as it is.
+fn retry_skipped(inst: &Instance, copy: &PackCopy, blocked: impl Fn(&crate::sources::carry::Pin) -> bool, todo: &mut Vec<Change>, merged: &mut Merged) {
+    for s in &copy.skipped {
+        // A newer change of it decides, this merge.
+        if todo.iter().any(|c| c.key == s.key) || merged.marks.iter().any(|(k, _)| *k == s.key) {
+            merged.cleared.push(s.key.clone());
+            continue;
+        }
+        let Some(Entry::Source { pin, enabled }) = &s.entry else {
+            merged.cleared.push(s.key.clone());
+            continue;
+        };
+        let file = format!("src:{}", pin.file.to_lowercase());
+        let here = find_addon(inst, &s.key).and_then(|i| file_here(&inst.addons[i]));
+        if here.as_deref() == Some(file.as_str()) {
+            merged.cleared.push(s.key.clone());
+            continue;
+        }
+        if !s.approved && blocked(pin) {
+            continue;
+        }
+        todo.push(Change { key: s.key.clone(), was: State::Unlisted, now: State::File { file, on: *enabled }, entry: s.entry.clone() });
+        merged.cleared.push(s.key.clone());
+    }
+}
+
+/// Lists in `merged.skipped` the changes in `todo` that [`apply`] leaves out
+/// because their source isn't allowed (`skip`), so the player can see the
+/// mod is missing.
+fn note_skipped(inst: &Instance, todo: &[Change], skip: &[crate::sources::carry::Pin], merged: &mut Merged) {
+    for c in todo {
+        let Some(Entry::Source { pin, .. }) = &c.entry else { continue };
+        if !skip.contains(pin) {
+            continue;
+        }
+        let State::File { file, .. } = &c.now else { continue };
+        if find_addon(inst, &c.key).and_then(|i| file_here(&inst.addons[i])).as_deref() == Some(file.as_str()) {
+            continue;
+        }
+        let by = merged.made.iter().rev().find(|(k, _, _)| *k == c.key).map(|(_, _, n)| n.as_str()).unwrap_or_default();
+        if let Some(s) = Skipped::of(c, by) {
+            merged.skipped.push(s);
+        }
+    }
 }
 
 /// How the pack version step of a [`merge`] went.
@@ -3437,5 +3546,107 @@ mod tests {
             assert_eq!(sodium[0].mr_sha1, crate::modrinth::sha1(OLD), "{tag}");
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    // ---- mods left out for want of trust in their source ----
+
+    fn pin(name: &str) -> crate::sources::carry::Pin {
+        crate::sources::carry::Pin {
+            file: format!("{name}.jar"),
+            source: crate::sources::ModSource {
+                kind: crate::sources::Kind::GitHub,
+                url: format!("hopper-test-never-trusted/{name}"),
+                publisher: format!("hopper-test-never-trusted/{name}"),
+                pattern: name.to_string(),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn source_change(name: &str) -> Change {
+        let p = pin(name);
+        Change {
+            key: format!("s:{}#{name}", p.source.url),
+            was: State::Unlisted,
+            now: State::File { file: format!("src:{}.jar", name.to_lowercase()), on: true },
+            entry: Some(Entry::Source { pin: p, enabled: true }),
+        }
+    }
+
+    #[test]
+    fn a_mod_from_an_untrusted_link_is_listed_as_left_out() {
+        let inst = Instance { name: "T".into(), ..Default::default() };
+        let todo = vec![source_change("ezactions")];
+        let skip = crate::sources::carry::auto_skip(&[pin("ezactions")], false);
+        let mut merged = Merged::default();
+        merged.made.push((todo[0].key.clone(), Kind::Added, "Mia".into()));
+        note_skipped(&inst, &todo, &skip, &mut merged);
+        assert_eq!(merged.skipped.len(), 1);
+        let s = &merged.skipped[0];
+        assert_eq!((s.key.as_str(), s.name.as_str(), s.by.as_str()), (todo[0].key.as_str(), "ezactions", "Mia"));
+        assert!(s.from.starts_with("GitHub: "), "{}", s.from);
+        // Allowed: nothing is left out.
+        let mut merged = Merged::default();
+        note_skipped(&inst, &todo, &[], &mut merged);
+        assert!(merged.skipped.is_empty());
+    }
+
+    #[test]
+    fn a_left_out_mod_is_tried_again_once_its_source_is_allowed() {
+        let inst = Instance { name: "T".into(), ..Default::default() };
+        let c = source_change("ezactions");
+        let mut copy = PackCopy::default();
+        copy.skipped.push(Skipped::of(&c, "Mia").unwrap());
+        // Still blocked: stays on the list, nothing to do.
+        let (mut todo, mut merged) = (Vec::new(), Merged::default());
+        retry_skipped(&inst, &copy, |_| true, &mut todo, &mut merged);
+        assert!(todo.is_empty() && merged.cleared.is_empty());
+        // Allowed now: it goes back into the changes to make, and comes off
+        // the list.
+        retry_skipped(&inst, &copy, |_| false, &mut todo, &mut merged);
+        assert_eq!(todo.len(), 1);
+        assert_eq!(todo[0].key, c.key);
+        assert_eq!(todo[0].now, c.now);
+        assert_eq!(merged.cleared, vec![c.key.clone()]);
+        // Said yes to by the player: it goes in even though the source is
+        // still not trusted.
+        let mut yes = PackCopy::default();
+        yes.skipped.push(Skipped { approved: true, ..Skipped::of(&c, "Mia").unwrap() });
+        let (mut todo, mut merged) = (Vec::new(), Merged::default());
+        retry_skipped(&inst, &yes, |_| true, &mut todo, &mut merged);
+        assert_eq!(todo.len(), 1);
+    }
+
+    #[test]
+    fn a_left_out_mod_the_group_changed_again_or_that_is_here_comes_off_the_list() {
+        let c = source_change("ezactions");
+        let mut copy = PackCopy::default();
+        copy.skipped.push(Skipped::of(&c, "Mia").unwrap());
+        // The group changed it again this merge: that change decides.
+        let inst = Instance { name: "T".into(), ..Default::default() };
+        let (mut todo, mut merged) = (vec![Change { now: State::Removed, entry: None, ..c.clone() }], Merged::default());
+        retry_skipped(&inst, &copy, |_| false, &mut todo, &mut merged);
+        assert_eq!(todo.len(), 1, "the new change only");
+        assert_eq!(merged.cleared, vec![c.key.clone()]);
+        // Already here with that file (the player added it by hand).
+        let mut have = Addon { name: "ezactions".into(), file_name: "ezactions.jar".into(), enabled: true, ..Default::default() };
+        have.source = Some(pin("ezactions").source);
+        let inst = Instance { name: "T".into(), addons: vec![have], ..Default::default() };
+        let (mut todo, mut merged) = (Vec::new(), Merged::default());
+        retry_skipped(&inst, &copy, |_| false, &mut todo, &mut merged);
+        assert!(todo.is_empty());
+        assert_eq!(merged.cleared, vec![c.key.clone()]);
+    }
+
+    #[test]
+    fn the_left_out_list_survives_the_settings_file() {
+        let mut copy = PackCopy::default();
+        copy.skipped.push(Skipped::of(&source_change("ezactions"), "Mia").unwrap());
+        let back: PackCopy = serde_json::from_str(&serde_json::to_string(&copy).unwrap()).unwrap();
+        assert_eq!(back, copy);
+        // A copy from an older Hopper has none; one without any writes none.
+        assert!(!serde_json::to_string(&PackCopy::default()).unwrap().contains("skipped"));
+        let old: PackCopy = serde_json::from_str("{\"inst\":\"a\"}").unwrap();
+        assert!(old.skipped.is_empty());
     }
 }

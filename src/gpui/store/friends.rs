@@ -261,13 +261,10 @@ pub struct PackDue {
     pub code: String,
 }
 
-/// How long a group pack version whose update failed waits before it is
-/// tried again by itself.
-const PACK_RETRY: std::time::Duration = std::time::Duration::from_secs(600);
-
-/// How soon a group pack version that waited for the game looks again
-/// once the game seems closed.
-const GAME_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
+/// Now, in unix seconds.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
 
 /// The newest waiting code's number, which a failed try is kept against.
 fn newest_waiting(c: &PackCopy) -> String {
@@ -365,6 +362,9 @@ impl Store {
     // ---- What the Friends screen reads -----------------------------------
 
     pub fn sync_status(&self) -> SyncStatus {
+        if let Some(reaches) = self.group_preview {
+            return if reaches { SyncStatus::Ok } else { SyncStatus::Down("Can't reach the friends service.".into()) };
+        }
         if !self.settings.peer_sync || self.settings.mailbox_url.trim().is_empty() {
             SyncStatus::Off
         } else if let Some(e) = &self.mailbox_error {
@@ -930,6 +930,7 @@ impl Store {
                                 s.mailbox_seq = seq.max(after);
                                 s.mailbox_error = None;
                                 s.mailbox_heard = true;
+                                s.mailbox_checked = Some(unix_now());
                                 // A changed friend list is read on the next
                                 // publish tick (half a second).
                                 s.friend_reads.heard(friends);
@@ -1216,40 +1217,44 @@ impl Store {
         }
         // Group packs with other members' changes waiting.
         let mut ready: Vec<(PackCopy, PathBuf, bool)> = Vec::new();
-        for c in &self.settings.group_copies {
-            if c.waiting.is_empty() || self.group_merging.contains(&c.local) {
-                continue;
-            }
+        for c in self.settings.group_copies.iter().filter(|_| self.group_preview.is_none()) {
             let Some(root) = self.instances.iter().find(|i| i.id == c.local).map(|i| i.root.clone()) else { continue };
-            // The group moved the pack and this PC couldn't follow yet: the
-            // members' other changes wait for it too.
-            if !self.pack_due_ready(c, &root, now) {
-                continue;
-            }
-            // Waiting for a change made here to be sent; after a while the
-            // others' changes go in anyway.
-            let ignore_unsent = match self.group_held.get(&c.local) {
-                Some((seq, t)) if *seq == c.sent_seq => {
-                    if t.elapsed() < HELD_FOR {
-                        continue;
-                    }
-                    true
-                }
-                _ => false,
-            };
-            let due = match self.group_retry.get(&c.local) {
-                // GitHub's limit: a newer code would fail the same way.
-                Some(r) if r.waits_for_limit(now) => false,
-                Some(r) if r.code == newest_waiting(c) => r.next.is_some_and(|t| now >= t),
-                _ => true,
-            };
-            if due && !self.follow_busy(&root) && root.is_dir() {
+            if let Some(ignore_unsent) = self.group_ready(c, &root, now, false) {
                 ready.push((c.clone(), root, ignore_unsent));
             }
         }
         for (c, root, ignore_unsent) in ready {
             self.merge_group(c, root, ignore_unsent);
         }
+    }
+
+    /// Whether the group copy `c` at `root` takes in its waiting changes
+    /// now; the answer is whether a change made here that isn't sent yet
+    /// is ignored (its wait is over). `forced`: Pull now, which doesn't wait
+    /// for a retry, a rate limit, the pack version's recheck or the
+    /// publish of a change made here, and runs even when nothing waits.
+    fn group_ready(&self, c: &PackCopy, root: &Path, now: Instant, forced: bool) -> Option<bool> {
+        if self.group_merging.contains(&c.local) || (c.waiting.is_empty() && !forced) {
+            return None;
+        }
+        // The group moved the pack and this PC couldn't follow yet: the
+        // members' other changes wait for it too.
+        if !self.pack_due_ready(c, root, now, forced) {
+            return None;
+        }
+        // Waiting for a change made here to be sent; after a while the
+        // others' changes go in anyway.
+        let ignore_unsent = match self.group_held.get(&c.local) {
+            Some((seq, t)) if *seq == c.sent_seq => {
+                if !forced && t.elapsed() < HELD_FOR {
+                    return None;
+                }
+                !forced
+            }
+            _ => false,
+        };
+        let due = hopper::groupstatus::merge_due(self.group_retry.get(&c.local), &newest_waiting(c), now, forced);
+        (due && !self.follow_busy(root) && root.is_dir()).then_some(ignore_unsent)
     }
 
     // ---- Group packs kept both ways ---------------------------------------
@@ -1263,41 +1268,290 @@ impl Store {
         (inst.pack.as_ref().map_or(0, |p| p.file_id) == d.file).then_some(&d.due)
     }
 
-    /// "Try again" on a group pack version whose update failed: tried now
-    /// instead of after the wait. The notice stays up meanwhile.
-    pub fn retry_group_pack(&mut self, root: &Path, cx: &mut Context<Self>) {
-        let Some(id) = self.instance(root).map(|i| i.id.clone()) else { return };
-        if let Some(d) = self.group_pack_due.get_mut(&id) {
-            d.at = Instant::now().checked_sub(PACK_RETRY).unwrap_or(d.at);
-        }
-        self.follow_tick(cx);
-        cx.notify();
-    }
-
-    /// The group pack version at `root` is being tried right now.
-    pub fn group_pack_trying(&self, root: &Path) -> bool {
-        self.instance(root).is_some_and(|i| self.group_merging.contains(&i.id))
-    }
-
     /// Whether a group copy may take in its members' changes now, when
     /// the pack version they moved to couldn't go in last time: the game
     /// closed, the player updated the pack (from the notice), another code
     /// came, or a failed try waited a while. Picking per file is the
     /// player's, in the update dialog.
-    fn pack_due_ready(&self, c: &PackCopy, root: &Path, now: Instant) -> bool {
-        use hopper::grouppack::Wait;
+    fn pack_due_ready(&self, c: &PackCopy, root: &Path, now: Instant, forced: bool) -> bool {
         let Some(d) = self.group_pack_due.get(&c.local) else { return true };
         let file = self.instance(root).and_then(|i| i.pack.as_ref()).map_or(0, |p| p.file_id);
         if file != d.file || newest_waiting(c) != d.code {
             return true;
         }
-        match &d.due.wait {
-            // The merge looks at the processes itself, so it can see a game
-            // the store's map doesn't list yet: not every tick, then.
-            Wait::Game => self.running(root).is_none() && now.duration_since(d.at) >= GAME_RECHECK,
-            Wait::Pick => false,
-            Wait::Failed(_) => now.duration_since(d.at) >= PACK_RETRY,
+        // The merge looks at the processes itself, so it can see a game the
+        // store's map doesn't list yet: not every tick, then.
+        hopper::groupstatus::pack_due_ready(&d.due.wait, self.running(root).is_some(), now.duration_since(d.at), forced)
+    }
+
+    /// How this PC's copy of the group pack at `root` stands with the group
+    /// (`hopper::groupstatus`), or `None` when it isn't a group copy.
+    pub fn group_status(&self, root: &Path) -> Option<hopper::groupstatus::Status> {
+        use hopper::groupstatus::{Failure, Input};
+        let c = self.group_copy(root)?;
+        let failure = self.follow_error(root).map(|(why, again)| Failure { why, again });
+        let playing = self.running(root).is_some();
+        // What a running game holds open: removals, renames and switches
+        // that happen when it closes. Read only while it runs.
+        let jars_waiting = if playing { hopper::locked::list(root).len() } else { 0 };
+        Some(hopper::groupstatus::status(&Input {
+            copy: c,
+            connected: matches!(self.sync_status(), SyncStatus::Ok),
+            checked: self.mailbox_checked,
+            now: unix_now(),
+            merging: self.group_merging.contains(&c.local) || self.group_pulling.contains_key(&c.local),
+            pack_due: self.group_pack_due(root),
+            failure,
+            allow_sources: self.settings.allow_sources,
+            loader_waits: self.group_loader_waiting.contains(root),
+            jars_waiting,
+            unsent: false,
+            held: self.group_held.contains_key(&c.local),
+        }))
+    }
+
+    /// The mods the group has that this PC left out for want of trust in
+    /// their source.
+    pub fn left_out_pins(&self, root: &Path) -> Vec<Pin> {
+        self.group_copy(root).map(|c| c.skipped.iter().filter_map(|s| s.pin().cloned()).collect()).unwrap_or_default()
+    }
+
+    /// "Allow and install": the player answered about the mods left out
+    /// (`leave_out`: the ones they still don't want). The rest go in now.
+    pub fn approve_left_out(&mut self, root: &Path, leave_out: &[Pin], cx: &mut Context<Self>) {
+        let Some(local) = self.group_copy(root).map(|c| c.local.clone()) else { return };
+        self.update_settings_quietly(|st| {
+            let Some(c) = st.group_copies.iter_mut().find(|c| c.local == local) else { return };
+            for s in &mut c.skipped {
+                s.approved = s.pin().is_some_and(|p| !leave_out.contains(p));
+            }
+        });
+        self.pull_group_now(root, cx);
+    }
+
+    /// Pull now is checking the group or taking its changes in.
+    pub fn group_pulling(&self, root: &Path) -> bool {
+        self.group_copy(root).is_some_and(|c| self.group_pulling.contains_key(&c.local))
+    }
+
+    /// What the last Pull now at `root` did (and whether it reads as a
+    /// problem), for a couple of minutes after.
+    pub fn group_pulled(&self, root: &Path) -> Option<(&str, bool)> {
+        let c = self.group_copy(root)?;
+        let (text, bad, at) = self.group_pulled.get(&c.local)?;
+        (at.elapsed() < Duration::from_secs(120)).then_some((text.as_str(), *bad))
+    }
+
+    /// "Pull now": asks the group's server for everyone's latest state
+    /// (not only what the feed brought by itself), then takes in all that
+    /// is waiting at once, without the waits a failed try or the pack
+    /// version's recheck have. Says what it did, or why it couldn't.
+    pub fn pull_group_now(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let Some(c) = self.group_copy(root).cloned() else { return };
+        if self.group_pulling.contains_key(&c.local) || self.group_merging.contains(&c.local) {
+            return;
         }
+        if self.group_preview.is_some() {
+            self.preview_pull(c, root, cx);
+            return;
+        }
+        let Some(mb) = self.mailbox_or_say(cx) else { return };
+        self.group_pulling.insert(c.local.clone(), true);
+        self.group_pulled.remove(&c.local);
+        // A failed try's wait is over: this is the next try.
+        if let Some(r) = self.group_retry.remove(&c.local) {
+            self.jobs.dismiss(r.job);
+        }
+        cx.notify();
+        let (local, inst, root) = (c.local, c.inst, root.to_path_buf());
+        cx.spawn(async move |this, cx| {
+            let r = cx.background_spawn(async move { mb.feed(0, 0, "") }).await;
+            this.update(cx, |s, cx| s.pulled_feed(local, inst, root, r, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// `--dialog group-sync --state NAME`: a made-up group of four (you, Mia,
+    /// Noah, Ava) with the first instance as a copy of Mia's pack and the
+    /// second as a pack of yours, to see every status without a friend or a
+    /// server. NAME: in-step, updating, game, pick, left-out, failed,
+    /// offline, sending. Nothing goes to the real service; Pull now settles
+    /// what it can.
+    pub fn preview_group_sync(&mut self, state: &str, cx: &mut Context<Self>) {
+        use hopper::groupsync::{Kind as Change, Mark, Skipped, Stamp};
+        use hopper::sharecode::Entry;
+        use hopper::grouppack::{Due, Version, Wait};
+        let now = unix_now();
+        let ids: Vec<(PathBuf, String)> = self.instances.iter().filter(|i| !i.id.is_empty()).take(2).map(|i| (i.root.clone(), i.id.clone())).collect();
+        let Some((root, local)) = ids.first().cloned() else { return };
+        let mine = ids.get(1).cloned();
+        let friend = |id: &str, name: &str, online: bool, seen: u64| mailbox::Friend { id: id.into(), name: name.into(), mc_id: String::new(), online, last_seen: seen };
+        self.mailbox_friends = vec![friend("mia", "Mia", true, now), friend("noah", "Noah", true, now), friend("ava", "Ava", false, now - 3 * 86400)];
+        let member = |f: &mailbox::Friend| mailbox::GroupMember { id: f.id.clone(), name: f.name.clone(), mc_id: String::new(), online: f.online, last_seen: f.last_seen, joined: true, in_step: true };
+        let mut members = vec![mailbox::GroupMember { id: String::new(), name: "You".into(), online: true, last_seen: now, joined: true, in_step: true, ..Default::default() }];
+        members.extend(self.mailbox_friends.iter().map(member));
+        self.mailbox_groups = vec![Group {
+            id: "g-preview".into(),
+            name: "Skyblock crew".into(),
+            owner: "mia".into(),
+            me: mailbox::GroupMe { joined: true, in_step: true },
+            members,
+            ..Default::default()
+        }];
+        let pack = Event {
+            from: "mia".into(),
+            from_name: "Mia".into(),
+            inst: "preview-pack".into(),
+            name: "Mia's Skyblock".into(),
+            groups: vec!["g-preview".into()],
+            at: now - 3600,
+            seq: 30,
+            ..Default::default()
+        };
+        self.mailbox_recipes = vec![pack];
+        let got = |name: &str, seq: u64| Got { code: String::new(), seq, at: now - 600, name: name.into(), stamps: Default::default() };
+        let mark = |by: &str, name: &str, seq: u64, kind: Change| Mark { by: by.into(), name: name.into(), seq, at: now - 900, kind, ..Default::default() };
+        let mut copy = PackCopy { inst: "preview-pack".into(), group: "g-preview".into(), local: local.clone(), ..Default::default() };
+        copy.got.insert("mia".into(), got("Mia", 22));
+        // Noah's last message is older than two changes the group made.
+        copy.got.insert("noah".into(), got("Noah", 11));
+        copy.marks.insert("p:101".into(), mark("mia", "Mia", 20, Change::Off));
+        copy.marks.insert("p:102".into(), mark("mia", "Mia", 21, Change::Added));
+        let newest = |c: &PackCopy| c.waiting.values().map(|g| g.seq).max().unwrap_or(0).to_string();
+        let due = |wait: Wait| Due { to: Version::Curse { project: 1, file: 86 }, file: None, version: "8.6".into(), pack: "Mia's Skyblock".into(), who: "Mia".into(), back: false, wait };
+        self.group_preview = Some(state != "offline");
+        self.mailbox_checked = Some(now - 120);
+        self.group_pulling.clear();
+        self.group_pulled.clear();
+        self.group_pack_due.clear();
+        self.group_retry.clear();
+        self.group_held.clear();
+        match state {
+            "updating" | "failed" => {
+                let stamps = [("p:103", Stamp { seq: 23, by: "mia".into() }), ("p:104", Stamp { seq: 0, by: "mia".into() })];
+                copy.waiting.insert("mia".into(), Got { stamps: stamps.into_iter().map(|(k, v)| (k.to_string(), v)).collect(), ..got("Mia", 24) });
+            }
+            "game" => {
+                copy.waiting.insert("mia".into(), got("Mia", 24));
+                let code = newest(&copy);
+                self.group_pack_due.insert(local.clone(), PackDue { due: due(Wait::Game), at: Instant::now(), file: 0, code });
+            }
+            "pick" => {
+                copy.waiting.insert("mia".into(), got("Mia", 24));
+                let code = newest(&copy);
+                self.group_pack_due.insert(local.clone(), PackDue { due: due(Wait::Pick), at: Instant::now(), file: 0, code });
+            }
+            "left-out" => {
+                let source = hopper::sources::ModSource {
+                    kind: hopper::sources::Kind::GitHub,
+                    url: "octo/ezactions".into(),
+                    pattern: "ezactions".into(),
+                    publisher: "octo/ezactions".into(),
+                    ..Default::default()
+                };
+                let pin = Pin { file: "ezactions-1.2.jar".into(), source };
+                copy.skipped.push(Skipped {
+                    key: "s:octo/ezactions#ezactions".into(),
+                    name: "EZActions".into(),
+                    from: "GitHub: octo/ezactions".into(),
+                    by: "Mia".into(),
+                    entry: Some(Entry::Source { pin, enabled: true }),
+                    approved: false,
+                });
+            }
+            "sending" => {
+                self.group_held.insert(local.clone(), (copy.sent_seq, Instant::now()));
+            }
+            _ => {}
+        }
+        if state == "failed" {
+            let e = anyhow::anyhow!("The mod sites wouldn't give Hopper that file.");
+            let r = hopper::recipe::Retry::failed(None, &newest(&copy), &e, 0, Instant::now());
+            self.group_retry.insert(local.clone(), r);
+        }
+        let mut copies = vec![copy];
+        if let Some((_, mine_id)) = &mine {
+            copies.push(PackCopy { inst: mine_id.clone(), group: "g-preview".into(), local: mine_id.clone(), ..Default::default() });
+        }
+        let (root2, mine2) = (root.to_string_lossy().into_owned(), mine.clone());
+        self.update_settings_quietly(|st| {
+            st.peer_sync = true;
+            st.group_copies = copies;
+            st.followed_recipes.retain(|f| f.peer_id != "mia");
+            st.followed_recipes.push(FollowedRecipe {
+                peer_id: "mia".into(),
+                peer_name: "Mia".into(),
+                inst: "preview-pack".into(),
+                name: "Mia's Skyblock".into(),
+                root: root2,
+                local: local.clone(),
+                code: "c1".into(),
+                seen: "c1".into(),
+                at: now - 3600,
+                group: "g-preview".into(),
+                ..Default::default()
+            });
+            st.shared_with.retain(|s| s.group != "g-preview");
+            if let Some((_, id)) = mine2 {
+                st.shared_with.push(hopper::settings::SharedPack { inst: id, group: "g-preview".into(), ..Default::default() });
+            }
+        });
+        cx.notify();
+    }
+
+    /// Pull now in the made-up group: what is waiting goes in, as it would.
+    fn preview_pull(&mut self, c: PackCopy, root: &Path, cx: &mut Context<Self>) {
+        self.group_pulling.insert(c.local.clone(), true);
+        let made = hopper::groupstatus::waiting_changes(&c);
+        let from: Vec<String> = c.waiting.values().map(|g| g.name.clone()).collect();
+        self.update_settings_quietly(|st| {
+            let Some(x) = st.group_copies.iter_mut().find(|x| x.local == c.local) else { return };
+            for (k, g) in std::mem::take(&mut x.waiting) {
+                x.got.insert(k, g);
+            }
+        });
+        // A pack version that waits for the game or the player still does.
+        self.group_retry.remove(&c.local);
+        self.group_held.remove(&c.local);
+        self.mailbox_checked = Some(unix_now());
+        self.finish_pull(&c.local, root, made, from, cx);
+        cx.notify();
+    }
+
+    /// The server's answer to Pull now: its latest codes go in as the feed's
+    /// do, then everything waiting is taken in.
+    fn pulled_feed(&mut self, local: String, inst: String, root: PathBuf, r: anyhow::Result<mailbox::Feed>, cx: &mut Context<Self>) {
+        match r {
+            Ok(feed) => {
+                self.mailbox_checked = Some(unix_now());
+                let ours: Vec<Event> = feed.events.into_iter().filter(|e| e.kind() == Kind::Recipe && e.inst == inst).collect();
+                for e in newest_codes_only(ours) {
+                    self.mailbox_event(e, false, cx);
+                }
+            }
+            Err(e) => {
+                log::warn!("Pull now couldn't reach the group: {e:#}");
+                self.group_pulling.insert(local.clone(), false);
+            }
+        }
+        let copy = self.settings.group_copies.iter().find(|c| c.local == local).cloned();
+        let go = copy.as_ref().filter(|c| !c.waiting.is_empty() || !c.skipped.is_empty()).and_then(|c| self.group_ready(c, &root, Instant::now(), true));
+        match (copy, go) {
+            // The result is told when the merge ends (`on_group_merged`).
+            (Some(c), Some(ignore_unsent)) => self.merge_group(c, root, ignore_unsent),
+            _ => self.finish_pull(&local, &root, 0, Vec::new(), cx),
+        }
+        cx.notify();
+    }
+
+    /// Tells what Pull now did: `made` changes went in (from `from`), and
+    /// the copy stands as `group_status` says now.
+    fn finish_pull(&mut self, local: &str, root: &Path, made: usize, from: Vec<String>, cx: &mut Context<Self>) {
+        let Some(reached) = self.group_pulling.remove(local) else { return };
+        let Some(after) = self.group_status(root) else { return };
+        let (text, bad) = hopper::groupstatus::pull_says(reached, made, &from, &after, unix_now());
+        self.group_pulled.insert(local.to_string(), (text.clone(), bad, Instant::now()));
+        cx.emit(StoreEvent::Notice(text, bad));
     }
 
     /// The copy of a group pack at `root`, when it is kept both ways.
@@ -1455,6 +1709,10 @@ impl Store {
     pub(super) fn on_group_merged(&mut self, m: GroupMerged, cx: &mut Context<Self>) {
         let GroupMerged { local, root, merged } = m;
         self.group_merging.remove(&local);
+        let made = merged.made.len();
+        let mut from: Vec<String> = merged.made.iter().map(|(_, _, n)| n.clone()).filter(|n| !n.is_empty()).collect();
+        from.dedup();
+        let mut newly_left_out: Vec<String> = Vec::new();
         if let Some(old) = self.group_retry.remove(&local) {
             self.jobs.dismiss(old.job);
         }
@@ -1474,6 +1732,15 @@ impl Store {
                     c.marks.insert(k, mk);
                 }
             }
+            // Mods left out for want of trust in their source: the list
+            // keeps them until they go in, or the group changes them again.
+            c.skipped.retain(|s| !merged.cleared.contains(&s.key) && !merged.skipped.iter().any(|n| n.key == s.key));
+            for n in &merged.skipped {
+                if !newly_left_out.iter().any(|x| *x == n.name) {
+                    newly_left_out.push(n.name.clone());
+                }
+            }
+            c.skipped.extend(merged.skipped.iter().cloned());
             sent_seq = c.sent_seq;
             // The sharer's code is in: the follow has it applied now.
             for f in st.followed_recipes.iter_mut().filter(|f| f.local == local) {
@@ -1503,9 +1770,18 @@ impl Store {
         if !kept.is_empty() {
             cx.emit(StoreEvent::Notice(kept.join(" "), false));
         }
+        // Said once, when it first happens: the status says it from then on.
+        let newly_left_out: Vec<String> = newly_left_out.into_iter().filter(|n| self.kept_said.insert(format!("{local}|left out|{n}"))).collect();
+        if !newly_left_out.is_empty() {
+            let (names, verb) = match newly_left_out.as_slice() {
+                [one] => (one.clone(), "isn't"),
+                many => (many.join(", "), "aren't"),
+            };
+            cx.emit(StoreEvent::Notice(format!("{names} from the group {verb} on this PC yet: it comes from a link this PC hasn't said yes to."), false));
+        }
         if merged.held {
             if self.group_held.get(&local).is_none_or(|(s, _)| *s != sent_seq) {
-                self.group_held.insert(local, (sent_seq, Instant::now()));
+                self.group_held.insert(local.clone(), (sent_seq, Instant::now()));
             }
         } else {
             self.group_held.remove(&local);
@@ -1521,8 +1797,9 @@ impl Store {
             }
         }
         if !merged.made.is_empty() {
-            self.handle(Msg::InstanceChanged(root), cx);
+            self.handle(Msg::InstanceChanged(root.clone()), cx);
         }
+        self.finish_pull(&local, &root, made, from, cx);
         cx.notify();
     }
 
@@ -1537,7 +1814,15 @@ impl Store {
         let r = hopper::recipe::Retry::failed(prev, &key, &e, job, Instant::now());
         log::warn!("taking group changes into {local}: {e:#} (try {})", r.failures);
         let root = self.instances.iter().find(|i| i.id == local).map(|i| (i.root.clone(), i.name.clone()));
-        if r.limited.is_some() {
+        if let Some(reached) = self.group_pulling.remove(&local) {
+            // Pull now was asked: it says why it didn't work, not the quiet
+            // once-only line.
+            let name = root.as_ref().map(|(_, n)| n.as_str()).unwrap_or("this pack");
+            let lead = if reached { "" } else { "Couldn't reach the group to check for newer changes. " };
+            let text = format!("{lead}Couldn't update {name} with the group's changes. {}", r.error);
+            self.group_pulled.insert(local.clone(), (text.clone(), true, Instant::now()));
+            cx.emit(StoreEvent::Notice(text, true));
+        } else if r.limited.is_some() {
             self.tell_github_limit(&r, cx);
         } else if r.tell
             && let Some((_, name)) = &root

@@ -714,6 +714,17 @@ pub struct Store {
     /// each pack and retry it holds up doesn't say it again.
     github_limit_told: Option<Instant>,
     group_held: HashMap<String, (u64, Instant)>,
+    /// Group copies (local ids) where Pull now is checking the group or
+    /// taking its changes in (the value: whether the group answered), and the
+    /// last answer it gave for each, with its text, whether it reads as a
+    /// problem, and when.
+    group_pulling: HashMap<String, bool>,
+    group_pulled: HashMap<String, (String, bool, Instant)>,
+    /// When this PC last heard from the group's server (unix seconds).
+    mailbox_checked: Option<u64>,
+    /// `--dialog group-sync`: a made-up group is shown (the value: whether it
+    /// reaches its server), and nothing goes to the real one.
+    group_preview: Option<bool>,
     /// Instances moved to the group's loader while their game ran: the new
     /// loader is installed when it closes.
     group_loader_waiting: HashSet<PathBuf>,
@@ -1072,6 +1083,10 @@ impl Store {
             group_retry: Default::default(),
             github_limit_told: None,
             group_held: Default::default(),
+            group_pulling: Default::default(),
+            group_pulled: Default::default(),
+            mailbox_checked: None,
+            group_preview: None,
             group_loader_waiting: Default::default(),
             group_pack_due: Default::default(),
             group_strays: Default::default(),

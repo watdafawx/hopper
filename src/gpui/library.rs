@@ -3002,7 +3002,7 @@ impl LibraryView {
         let cf_change = self.cf_change_bar(&inst, cx);
         let pending = self.pending_banner(&inst, cx);
         let pre_join = crate::join_help::pre_join_bar(&self.store, &inst.root, cx);
-        let group_pack = crate::group_pack::group_pack_bar(&self.store, &inst.root, cx);
+        let group_pack = crate::group_pack::group_status_bar(&self.store, &inst.root, cx);
         let stuck = {
             let view = cx.entity().downgrade();
             let root = inst.root.clone();
