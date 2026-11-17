@@ -33,8 +33,9 @@ pub fn look(status: &Status) -> (IconName, Tier) {
     }
 }
 
-/// The "Pull now" button; icon only when the page is narrow.
-pub fn pull_button(store: &Entity<Store>, root: &Path, pulling: bool, narrow: bool, id: &'static str) -> Button {
+/// The "Pull now" button; icon only when the page is narrow. In step there
+/// is nothing to pull, so it reads "Check now".
+pub fn pull_button(store: &Entity<Store>, root: &Path, pulling: bool, in_step: bool, narrow: bool, id: &'static str) -> Button {
     let (store, root) = (store.clone(), root.to_path_buf());
     let b = Button::new(id)
         .small()
@@ -42,7 +43,7 @@ pub fn pull_button(store: &Entity<Store>, root: &Path, pulling: bool, narrow: bo
         .icon(IconName::RefreshCw)
         .disabled(pulling)
         .tooltip("Checks the group for newer changes and takes them in now");
-    let b = if narrow { b } else { b.label(if pulling { "Checking..." } else { "Pull now" }) };
+    let b = if narrow { b } else { b.label(if pulling { "Checking..." } else if in_step { "Check now" } else { "Pull now" }) };
     b.on_click(move |_, _, cx| store.update(cx, |s, cx| s.pull_group_now(&root, cx)))
 }
 
@@ -63,7 +64,15 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     }
     let (icon, tier) = look(&status);
     let detail = pulled.unwrap_or_else(|| status.detail(now));
-    let mut n = Notice::new("group-status", tier, status.label()).icon(icon).subject(detail);
+    // "In step" is a word only we use: say what it means, and don't repeat it
+    // in the line under it. Mods match the group; updates are a separate thing.
+    let (title, detail) = if in_step {
+        let rest = detail.strip_prefix("Same as the group. ").unwrap_or("Nothing new to take in.");
+        ("Same as the group", rest.to_string())
+    } else {
+        (status.label(), detail)
+    };
+    let mut n = Notice::new("group-status", tier, title).icon(icon).subject(detail);
     if in_step {
         n = n.dismiss_key(store, key);
     }
@@ -114,6 +123,6 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
         });
     }
     let (store, root) = (store.clone(), root.to_path_buf());
-    n = n.action_fit(move |fit| pull_button(&store, &root, pulling, fit.narrow, "group-pull"));
+    n = n.action_fit(move |fit| pull_button(&store, &root, pulling, in_step, fit.narrow, "group-pull"));
     Some(n)
 }

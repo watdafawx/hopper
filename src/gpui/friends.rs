@@ -1291,7 +1291,7 @@ impl FriendsPanel {
             // there is something to pull.
             (None, false) if group.is_some() => {
                 let (root, st, pulling) = group.clone().expect("checked");
-                let b = self.pull_button(SharedString::from(format!("pull:{key}")), root, pulling, cx);
+                let b = self.pull_button(SharedString::from(format!("pull:{key}")), root, pulling, matches!(st, Status::InStep { .. }), cx);
                 if matches!(st, Status::InStep { .. }) {
                     widgets::reveal_on_hover(row_id.clone(), SharedString::from(format!("pull-at:{key}")), b, window, cx).into_any_element()
                 } else {
@@ -1377,12 +1377,12 @@ impl FriendsPanel {
     }
 
     /// Pull now: checks the group and takes its changes in at once.
-    fn pull_button(&self, id: SharedString, root: PathBuf, pulling: bool, cx: &mut Context<Self>) -> Button {
+    fn pull_button(&self, id: SharedString, root: PathBuf, pulling: bool, in_step: bool, cx: &mut Context<Self>) -> Button {
         Button::new(id)
             .xsmall()
             .outline()
             .icon(IconName::RefreshCw)
-            .label(if pulling { "Checking..." } else { "Pull now" })
+            .label(if pulling { "Checking..." } else if in_step { "Check now" } else { "Pull now" })
             .disabled(pulling)
             .tooltip("Checks the group for newer changes and takes them in now")
             .on_click(cx.listener(move |this, _, _, cx| this.store.update(cx, |s, cx| s.pull_group_now(&root, cx))))
@@ -1800,7 +1800,7 @@ impl FriendsPanel {
                 let state = pack_state[pi].clone();
                 let row_id = SharedString::from(format!("gp-mine:{pi}"));
                 let pull = state.as_ref().map(|(st, pulling, _)| {
-                    let b = self.pull_button(SharedString::from(format!("gp-pull:{pi}")), root.clone(), *pulling, cx);
+                    let b = self.pull_button(SharedString::from(format!("gp-pull:{pi}")), root.clone(), *pulling, matches!(st, Status::InStep { .. }), cx);
                     if matches!(st, Status::InStep { .. }) {
                         widgets::reveal_on_hover(row_id.clone(), SharedString::from(format!("gp-pull-at:{pi}")), b, window, cx).into_any_element()
                     } else {
