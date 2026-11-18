@@ -857,6 +857,8 @@ impl AppView {
                         crate::dialogs::open_share(this.store.clone(), r, window, cx);
                     }
                 }
+                // `--dialog relay-host-key --state first|how|changed|changed-ticked|signed-in`
+                "relay-host-key" => crate::relay_setup::open_preview(&state, window, cx),
                 "redeem" => crate::dialogs::open_redeem(this.store.clone(), window, cx),
                 "accounts" => crate::accounts::open(this.store.clone(), window, cx),
                 _ => {}

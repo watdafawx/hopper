@@ -133,6 +133,56 @@ fn row_mark(state: &str, cx: &App) -> AnyElement {
 pub fn open(_store: Entity<Store>, remote: Remote, server_name: String, window: &mut Window, cx: &mut App) {
     let server_id = remote.id.clone();
     let form = cx.new(|cx| RelaySetup::new(remote, server_id, server_name, window, cx));
+    show(form, window, cx);
+}
+
+/// `--dialog relay-host-key --state NAME`, for scripted screenshots: the
+/// dialog with made-up data and no Hopper Server behind it (nothing is
+/// called until a button is pressed, and then it only shows an error).
+/// States: form, first, how, changed, changed-ticked, signed-in.
+pub fn open_preview(state: &str, window: &mut Window, cx: &mut App) {
+    let remote = Remote { base: "https://127.0.0.1:1".into(), id: "preview".into(), ca: String::new(), panel: "preview".into() };
+    let state = state.to_string();
+    let form = cx.new(|cx| {
+        let mut this = RelaySetup::build(remote, "preview".into(), "Preview".into(), window, cx);
+        const NEW: &str = "SHA256:9fQ2hVxk3mZ0Lw8nYdT5aRbU7cJe1oPiGsK4vHqXzBw";
+        const OLD: &str = "SHA256:Zt1uWm6yNe0cAq3DfRv8bHj2kXs9LpOiG5gYlTx7CwE";
+        this.st = Some(json!({}));
+        this.stage = Stage::Connect;
+        this.sign = SignIn::Password;
+        this.host.update(cx, |i, cx| i.set_value("203.0.113.10", window, cx));
+        this.user.update(cx, |i, cx| i.set_value("ubuntu", window, cx));
+        this.password.update(cx, |i, cx| i.set_value("preview", window, cx));
+        let check = |changed: bool| Some(HostCheck { host_key: NEW.into(), known: if changed { OLD.into() } else { String::new() }, changed });
+        match state.as_str() {
+            "first" => this.host_check = check(false),
+            "how" => {
+                this.host_check = check(false);
+                this.show_how = true;
+            }
+            "changed" => this.host_check = check(true),
+            "changed-ticked" => {
+                this.host_check = check(true);
+                this.reinstalled = true;
+            }
+            "signed-in" => {
+                this.stage = Stage::Check;
+                this.st = Some(json!({
+                    "login": { "host": "203.0.113.10", "port": 22, "user": "ubuntu", "host_key": NEW },
+                    "check": { "ok": true, "ports": { "game": 25565, "tunnel": 25566 }, "rows": [
+                        { "id": "os", "state": "ok", "text": "Ubuntu 24.04" },
+                        { "id": "ports", "state": "ok", "text": "Ports 25565 and 25566 are free." },
+                    ] },
+                }));
+            }
+            _ => {}
+        }
+        this
+    });
+    show(form, window, cx);
+}
+
+fn show(form: Entity<RelaySetup>, window: &mut Window, cx: &mut App) {
     window.open_dialog(cx, move |dialog, window, _| {
         dialog
             .title("Relay through a VPS")
@@ -144,7 +194,13 @@ pub fn open(_store: Entity<Store>, remote: Remote, server_name: String, window: 
 
 impl RelaySetup {
     fn new(remote: Remote, server_id: String, server_name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = |placeholder: &str, value: &str, masked: bool, window: &mut Window, cx: &mut Context<Self>| {
+        let mut this = Self::build(remote, server_id, server_name, window, cx);
+        this.load(window, cx);
+        this
+    }
+
+    fn build(remote: Remote, server_id: String, server_name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let input =|placeholder: &str, value: &str, masked: bool, window: &mut Window, cx: &mut Context<Self>| {
             let (p, v) = (placeholder.to_string(), value.to_string());
             cx.new(|cx| InputState::new(window, cx).masked(masked).placeholder(p).default_value(v))
         };
@@ -161,7 +217,7 @@ impl RelaySetup {
                 .auto_grow(3, 6)
                 .placeholder("Paste the key (-----BEGIN …) or choose a file")
         });
-        let mut this = Self {
+        Self {
             remote,
             server_id,
             server_name,
@@ -188,9 +244,7 @@ impl RelaySetup {
             tunnel_port,
             public_address,
             polling: false,
-        };
-        this.load(window, cx);
-        this
+        }
     }
 
     // ---- what the panel said --------------------------------------------------
@@ -802,12 +856,15 @@ impl RelaySetup {
         v_flex()
             .gap_3()
             .child(if changed {
-                self.note(
-                    "This VPS shows a different host key than before. That is normal if you reinstalled it. If you didn't, something else may be answering at this address: don't continue.",
-                    false,
-                    cx,
-                )
-                .bg(theme.danger.opacity(widgets::alpha::TINT))
+                // The web view bolds the first sentence; here it is its own line.
+                v_flex()
+                    .px_3()
+                    .py_2()
+                    .rounded(theme.radius)
+                    .text_xs()
+                    .bg(theme.danger.opacity(widgets::alpha::TINT))
+                    .child(div().font_weight(FontWeight::BOLD).child("This VPS shows a different host key than before."))
+                    .child("That is normal if you reinstalled it. If you didn't, something else may be answering at this address: don't continue.")
             } else {
                 div().text_sm().text_color(theme.muted_foreground).child(format!(
                     "Hopper reached {host}. Before it signs in, make sure this host key matches the one your VPS provider shows (often on the VPS's page or in its console). If it doesn't, something else is answering at this address: stop and check the address."
