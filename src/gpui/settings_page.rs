@@ -56,6 +56,7 @@ pub enum Category {
     Minecraft,
     Servers,
     Content,
+    Friends,
     Discord,
     Appearance,
     Updates,
@@ -63,7 +64,7 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 12] = [
+    pub const ALL: [Category; 13] = [
         Category::General,
         Category::Accounts,
         Category::Folders,
@@ -72,6 +73,7 @@ impl Category {
         Category::Minecraft,
         Category::Servers,
         Category::Content,
+        Category::Friends,
         Category::Discord,
         Category::Appearance,
         Category::Updates,
@@ -88,6 +90,7 @@ impl Category {
             Category::Minecraft => "Minecraft",
             Category::Servers => "Servers",
             Category::Content => "Mod sources",
+            Category::Friends => "Friends",
             Category::Discord => "Discord",
             Category::Appearance => "Appearance",
             Category::Updates => "Updates & install",
@@ -105,6 +108,7 @@ impl Category {
             Category::Minecraft => IconName::Gamepad2,
             Category::Servers => IconName::Server,
             Category::Content => IconName::Compass,
+            Category::Friends => IconName::Users,
             Category::Discord => IconName::MessageCircle,
             Category::Appearance => IconName::Palette,
             Category::Updates => IconName::Download,
@@ -123,6 +127,7 @@ impl Category {
             Category::Minecraft => "Your usual in-game options: sound, mouse, view and keys. Hopper sets them in each instance before it starts.",
             Category::Servers => "Your server packs, servers hosted on this PC, and the panel that runs them.",
             Category::Content => "The CurseForge API key, where Browse looks first, mods from GitHub, and mod links from other apps.",
+            Category::Friends => "How your packs stay the same as your friends' and groups'.",
             Category::Discord => "What your Discord profile shows friends while you use Hopper.",
             Category::Appearance => "Theme and size.",
             Category::Updates => "Hopper's version, its updates, and installing it.",
@@ -284,6 +289,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Content, "open-links", "Open mod links in Hopper", "Clicked CurseForge and Modrinth links open in Hopper. Every other link goes straight to your browser.", "browser default apps link click curseforge modrinth open"),
     e(C::Content, "open-links-browser", "Other links open in", "Your browser before Hopper.", "browser chrome firefox edge default"),
     e(C::Content, "open-links-windows", "Pick Hopper in Windows", "", "default apps windows settings browser"),
+    e(C::Friends, "push-by-hand", "Share my changes", "With your groups and the friends you share packs with. When I press Push: your changes stay on this PC until you send them, from the pack's page or the Friends panel. You still get everyone else's.", "friends groups sync share push send changes manual right away hold"),
     e(C::Discord, "discord", "Show what I'm doing on Discord", "Needs the Discord app open on this PC, with Discord's own activity sharing on. Hopper only talks to Discord on this PC.", "discord rich presence status activity profile friends playing"),
     e(C::Discord, "discord-pack", "Show the pack", "Its name and icon. Off, friends see \"Playing Minecraft\".", "discord pack name icon modpack"),
     e(C::Discord, "discord-browsing", "Show what I'm browsing", "\"Browsing modpacks on CurseForge\", or the mod you're looking at. Never what you search for.", "discord browse search mods"),
@@ -2779,6 +2785,21 @@ impl SettingsPage {
         vec![Block::card(None, rows), self.mod_links(s, rem, cx)]
     }
 
+    fn friends(&self, s: &hopper::settings::Settings, _cx: &mut Context<Self>) -> Vec<Block> {
+        let store = self.store.clone();
+        let push = Row::new("push-by-hand").control(
+            widgets::Segmented::new("push-by-hand")
+                .selected_index(usize::from(s.push_by_hand))
+                .child(widgets::SegItem::new().label("Right away"))
+                .child(widgets::SegItem::new().label("When I press Push"))
+                .on_click(move |ix: &usize, _, cx| {
+                    let on = *ix == 1;
+                    store.update(cx, |s, cx| s.set_push_by_hand(on, cx));
+                }),
+        );
+        vec![Block::card(None, vec![push])]
+    }
+
     fn discord(&self, s: &hopper::settings::Settings, cx: &mut Context<Self>) -> Vec<Block> {
         let d = &s.discord;
         let off = !d.enabled;
@@ -3584,6 +3605,7 @@ impl Render for SettingsPage {
             Category::Minecraft => self.minecraft(&s, window, cx),
             Category::Servers => self.servers(&s, window, cx),
             Category::Content => self.content(&s, window.rem_size(), cx),
+            Category::Friends => self.friends(&s, cx),
             Category::Discord => self.discord(&s, cx),
             Category::Appearance => self.appearance(&s, window, cx),
             Category::Updates => self.updates(cx),
