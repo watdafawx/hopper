@@ -95,6 +95,10 @@ pub struct Notice {
     /// A short line after the title ("· Create 6.0.6 needs Flywheel…");
     /// dropped when the page is narrow (it's in the title's tooltip then).
     pub subject: Option<SharedString>,
+    /// The subject drawn with inline elements (mod names with their icons,
+    /// each opening the mod's page) in place of its plain text, which stays
+    /// for the tooltip and narrow layouts. See [`Notice::subject_rich`].
+    pub rich: Option<AnyElement>,
     /// Its main action: the one kept in the "N more" list too.
     pub primary: Option<Act>,
     /// Its other actions, on the strip.
@@ -118,6 +122,7 @@ impl Notice {
             icon: None,
             title: title.into(),
             subject: None,
+            rich: None,
             primary: None,
             actions: Vec::new(),
             details: None,
@@ -135,6 +140,17 @@ impl Notice {
     pub fn subject(mut self, s: impl Into<SharedString>) -> Self {
         let s: SharedString = s.into();
         self.subject = (!s.is_empty()).then_some(s);
+        self
+    }
+
+    /// A subject whose words include mods: `plain` is its text (tooltip,
+    /// and where the strip is too narrow for a subject), `rich` is what the
+    /// strip draws, one line of inline elements that is clipped, not
+    /// wrapped, at the strip's edge. Build the mod names with
+    /// `widgets::mod_link` so each has its icon and opens its page.
+    pub fn subject_rich(mut self, plain: impl Into<SharedString>, rich: impl IntoElement) -> Self {
+        self = self.subject(plain);
+        self.rich = self.subject.is_some().then(|| rich.into_any_element());
         self
     }
 
@@ -327,8 +343,11 @@ fn toggle(state: &Entity<SlotState>, id: SharedString, cx: &mut App) {
 
 /// One notice as a one-line strip: icon, title, subject, its buttons, and
 /// on the last strip the "N more" button. Its details open under it.
-fn strip(n: Notice, fit: Fit, subjects: bool, more: Option<AnyElement>, state: &Entity<SlotState>, open: &HashSet<SharedString>, cx: &mut App) -> AnyElement {
+fn strip(mut n: Notice, fit: Fit, subjects: bool, more: Option<AnyElement>, state: &Entity<SlotState>, open: &HashSet<SharedString>, cx: &mut App) -> AnyElement {
     let theme = cx.theme().clone();
+    // No room for the subject on the strip: its mod names (links with icons)
+    // go in the details instead of only the tooltip.
+    let rich_below = if subjects { None } else { n.rich.take() };
     let color = n.tier.color(cx);
     // The title on the strip's own tint (`bg` below), readable in any theme.
     let ink = crate::theme::ink_over(color, theme.background, 0.08);
@@ -338,7 +357,7 @@ fn strip(n: Notice, fit: Fit, subjects: bool, more: Option<AnyElement>, state: &
     let actions: Vec<AnyElement> = n.actions.into_iter().map(|a| a(Fit { narrow, lead: false })).collect();
     let tucked = narrow && !actions.is_empty();
     let (actions, tucked_actions) = if narrow { (Vec::new(), actions) } else { (actions, Vec::new()) };
-    let has_details = n.details.is_some() || tucked;
+    let has_details = n.details.is_some() || tucked || rich_below.is_some();
     let is_open = has_details && open.contains(&id);
     let tip: SharedString = match &n.subject {
         Some(s) => format!("{}\n{s}", n.title).into(),
@@ -391,8 +410,21 @@ fn strip(n: Notice, fit: Fit, subjects: bool, more: Option<AnyElement>, state: &
                 .child(n.title.clone())
                 .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)),
         )
-        .when_some(n.subject.filter(|_| subjects), |r, s| {
-            r.child(div().flex_1().min_w(rems(4.)).truncate().text_sm().text_color(theme.muted_foreground).child(format!("· {s}")))
+        .when_some(n.subject.filter(|_| subjects), |r, s| match n.rich {
+            // Mod names with their icons: one line, clipped at the edge.
+            Some(rich) => r.child(
+                h_flex()
+                    .flex_1()
+                    .min_w(rems(4.))
+                    .overflow_hidden()
+                    .gap_1()
+                    .items_center()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(div().flex_none().child("·"))
+                    .child(rich),
+            ),
+            None => r.child(div().flex_1().min_w(rems(4.)).truncate().text_sm().text_color(theme.muted_foreground).child(format!("· {s}"))),
         })
         .child(
             h_flex()
@@ -425,6 +457,7 @@ fn strip(n: Notice, fit: Fit, subjects: bool, more: Option<AnyElement>, state: &
                     .border_1()
                     .border_color(color.opacity(0.25))
                     .bg(color.opacity(0.04))
+                    .children(rich_below.map(|r| h_flex().w_full().overflow_hidden().text_sm().text_color(theme.muted_foreground).child(r)))
                     .when(!tucked_actions.is_empty(), |c| c.child(h_flex().flex_wrap().gap_1().children(tucked_actions)))
                     .children(n.details)
                     .overflow_y_scrollbar(),
@@ -476,7 +509,12 @@ fn list_row(n: Notice, state: &Entity<SlotState>, open: &HashSet<SharedString>, 
                         .flex_1()
                         .min_w_0()
                         .child(div().text_sm().font_semibold().truncate().child(n.title.clone()))
-                        .when_some(n.subject.clone(), |c, s| c.child(widgets::caption(s, cx).text_xs())),
+                        .when_some(n.subject.clone(), |c, s| match n.rich {
+                            Some(rich) => c.child(
+                                h_flex().min_w_0().overflow_hidden().items_center().gap_1().text_xs().text_color(theme.muted_foreground).child(rich),
+                            ),
+                            None => c.child(widgets::caption(s, cx).text_xs()),
+                        }),
                 )
                 .child(
                     h_flex()

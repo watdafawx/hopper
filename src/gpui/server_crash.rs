@@ -201,36 +201,41 @@ impl CrashStrip {
         let name_of = |f: &str| crate::rigsync::crash_addon(&addons, f, local.as_deref());
         let stopped = stopped_change(&c);
         let mut name = String::new();
-        let (subject, what): (String, Option<AnyElement>) = match &stopped {
+        // (the strip's text, the mod named with its icon for the strip and
+        // for Details).
+        let (subject, what): (String, Option<(AnyElement, AnyElement)>) = match &stopped {
             Some((file, _)) => {
                 let (n, a) = name_of(file);
                 name = n.clone();
                 let icon = a.and_then(|a| self.store.read(cx).image(&a.icon)).map(Path::to_path_buf);
                 let (store, pack) = (self.store.clone(), pack.clone());
                 // The mod named with its icon, opening its page.
-                let el = h_flex()
-                    .gap_1p5()
-                    .min_w_0()
-                    .text_sm()
-                    .child(
-                        widgets::mod_link(
-                            ElementId::Name("srv-strip-mod".into()),
-                            n.clone(),
-                            icon.as_deref(),
-                            if pack.is_some() { a.map_or(0, |a| a.project_id) } else { 0 },
-                            move |project, _, cx| {
-                                if let Some(root) = pack.clone() {
-                                    store.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Peek { root, project }));
-                                }
-                            },
-                            cx,
+                let el = |id: &'static str, cx: &App| {
+                    let (store, pack) = (store.clone(), pack.clone());
+                    h_flex()
+                        .gap_1p5()
+                        .min_w_0()
+                        .text_sm()
+                        .child(
+                            widgets::mod_link(
+                                ElementId::Name(id.into()),
+                                n.clone(),
+                                icon.as_deref(),
+                                if pack.is_some() { a.map_or(0, |a| a.project_id) } else { 0 },
+                                move |project, _, cx| {
+                                    if let Some(root) = pack.clone() {
+                                        store.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Peek { root, project }));
+                                    }
+                                },
+                                cx,
+                            )
+                            .flex_none()
+                            .font_semibold(),
                         )
-                        .flex_none()
-                        .font_semibold(),
-                    )
-                    .child(div().child("stopped it from starting"))
-                    .into_any_element();
-                (format!("{n} stopped it from starting"), Some(el))
+                        .child(div().child("stopped it from starting"))
+                        .into_any_element()
+                };
+                (format!("{n} stopped it from starting"), Some((el("srv-strip-mod-line", cx), el("srv-strip-mod", cx))))
             }
             None => (crate::rigsync::crash_reason(&c), None),
         };
@@ -238,10 +243,11 @@ impl CrashStrip {
         let changed = stopped.and_then(|(_, ch)| ch);
         let view = cx.entity().downgrade();
         let busy = self.busy;
-        let mut n = Notice::new("srv-crash", Tier::Stop, "The server crashed").subject(subject).since(c.when);
-        if let Some(el) = what {
-            n = n.details(el);
-        }
+        let mut n = Notice::new("srv-crash", Tier::Stop, "The server crashed").since(c.when);
+        n = match what {
+            Some((line, details)) => n.subject_rich(subject, line).details(details),
+            None => n.subject(subject),
+        };
         if let Some(ch) = changed {
             let who = if name.is_empty() { "the mod".to_string() } else { name.clone() };
             let label = if ch.from.is_empty() { format!("Roll back {who}") } else { format!("Roll back {who} to {}", ch.from) };

@@ -123,13 +123,81 @@ enum RollBack {
     Undo { name: String, file: String, saved: hopper::backups::Saved, when: i64 },
 }
 
+/// What a notice's subject names of `items`: each distinct one by its `key`
+/// (an empty key drops it), all of them up to three, else the first two and
+/// how many more there are.
+pub(crate) fn brief_split<T>(items: Vec<T>, key: impl Fn(&T) -> String) -> (Vec<T>, usize) {
+    let mut seen = std::collections::HashSet::new();
+    let mut items: Vec<T> = items
+        .into_iter()
+        .filter(|i| {
+            let k = key(i);
+            !k.is_empty() && seen.insert(k)
+        })
+        .collect();
+    match items.len() {
+        0..=3 => (items, 0),
+        k => {
+            items.truncate(2);
+            (items, k - 2)
+        }
+    }
+}
+
 /// A notice's subject from a list of names: "A, B, C" or "A, B and 4 more".
 pub(crate) fn brief_names(names: Vec<String>) -> String {
-    let mut seen = std::collections::HashSet::new();
-    let names: Vec<String> = names.into_iter().filter(|n| !n.is_empty() && seen.insert(n.clone())).collect();
-    match names.len() {
-        0..=3 => names.join(", "),
-        k => format!("{}, {} and {} more", names[0], names[1], k - 2),
+    let (shown, more) = brief_split(names, |n| n.clone());
+    match more {
+        0 => shown.join(", "),
+        k => format!("{}, {} and {k} more", shown[0], shown[1]),
+    }
+}
+
+/// A notice's subject naming mods by their jars: the plain text for its
+/// tooltip ("A, B and 4 more", as [`brief_names`]) and the line the strip
+/// draws, each mod with its icon, opening its page beside the list. `mods` are
+/// (name, jar file) pairs; `key` keeps the elements' ids apart.
+pub(crate) fn mods_subject(
+    store: &Entity<crate::store::Store>,
+    root: &std::path::Path,
+    mods: Vec<(String, String)>,
+    key: &str,
+    cx: &App,
+) -> (String, AnyElement) {
+    let plain = brief_names(mods.iter().map(|(n, _)| n.clone()).collect());
+    let (shown, more) = brief_split(mods, |(n, _)| n.clone());
+    let n = shown.len();
+    // No gap: the words carry their own spaces, so a comma sits against the
+    // mod before it.
+    let mut line = h_flex().min_w_0().items_center();
+    for (i, (_, file)) in shown.iter().enumerate() {
+        line = line.child(crate::logs::mod_ref(store, root, file, &format!("{key}:{i}"), cx));
+        if i + 1 < n || more > 0 {
+            line = line.child(div().flex_none().whitespace_nowrap().child(if i + 1 < n { ", " } else { " and " }));
+        }
+    }
+    if more > 0 {
+        line = line.child(div().flex_none().whitespace_nowrap().child(format!("{more} more")));
+    }
+    (plain, line.into_any_element())
+}
+
+/// One thing a "required mod is missing" notice names: a mod the pack lacks
+/// and the mod that asks for it.
+struct Lack {
+    /// The missing mod's id, as the jar names it.
+    id: String,
+    /// Its project's name once looked up, else its id.
+    name: String,
+    /// The jar that asks for it: its name and file.
+    by: String,
+    by_file: String,
+}
+
+impl Lack {
+    /// "Sophisticated Core (for Sophisticated Backpacks)".
+    fn text(&self) -> String {
+        format!("{} (for {})", self.name, self.by)
     }
 }
 
@@ -538,6 +606,13 @@ impl AddonsView {
             let title = format!("{n} mod{} in twice: the game won't start with both", if n == 1 { " is" } else { "s are" });
             let what = if n == 1 { dups[0].name.clone() } else { format!("{n} older duplicates") };
             let keep = cx.listener(move |this, _: &ClickEvent, window, cx| this.remove(extra.clone(), what.clone(), window, cx));
+            let (subject, rich) = mods_subject(
+                &self.store,
+                &inst.root,
+                dups.iter().map(|d| (d.name.clone(), d.files.first().cloned().unwrap_or_default())).collect(),
+                "dups-strip",
+                cx,
+            );
             let details = v_flex()
                 .gap_2()
                 .when(queued > 0, |c| {
@@ -549,7 +624,7 @@ impl AddonsView {
                 .children(rows);
             out.push(
                 Notice::new("dups", Tier::Stop, title)
-                    .subject(brief_names(dups.iter().map(|d| d.name.clone()).collect()))
+                    .subject_rich(subject, rich)
                     .primary(move |fit| {
                         notice_slot::main_button(Button::new("keep-newest-all").small(), fit)
                             .label(if n > 1 { "Keep newest of all" } else { "Keep newest" })
@@ -914,20 +989,23 @@ impl AddonsView {
             return None;
         }
         // "Sophisticated Core (for Sophisticated Backpacks), …": what's
-        // missing and what asks for it.
-        let subject = {
+        // missing and what asks for it. Every mod named has its icon and
+        // opens its page beside the list; the plain text is the tooltip.
+        let lacks: Vec<Lack> = {
             let known = self.dep_projects.borrow();
-            brief_names(
-                self.missing
-                    .list
-                    .iter()
-                    .map(|m| {
-                        let name = known.get(&m.needs).cloned().flatten().map_or_else(|| m.needs.clone(), |(_, n, _)| n);
-                        format!("{name} (for {})", m.mod_name)
-                    })
-                    .collect(),
-            )
+            self.missing
+                .list
+                .iter()
+                .map(|m| Lack {
+                    id: m.needs.clone(),
+                    name: known.get(&m.needs).cloned().flatten().map_or_else(|| m.needs.clone(), |(_, n, _)| n),
+                    by: m.mod_name.clone(),
+                    by_file: m.file_name.clone(),
+                })
+                .collect()
         };
+        let subject = brief_names(lacks.iter().map(Lack::text).collect());
+        let rich = self.lacks_line(inst, lacks, cx);
         let hover = cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h);
         let details = div()
             .id("missing-rows")
@@ -940,7 +1018,7 @@ impl AddonsView {
             );
         let mut notice = Notice::new("missing", if loaded_fine.is_some() { Tier::Info } else { Tier::Stop }, title)
             .icon(IconName::PackageX)
-            .subject(subject)
+            .subject_rich(subject, rich)
             .details(details);
         if !installable.is_empty() {
             let k = installable.len();
@@ -957,6 +1035,81 @@ impl AddonsView {
             notice = notice.dismiss_key(&self.store, key);
         }
         Some(notice)
+    }
+
+    /// The notice's subject line as elements: "[icon] Arcane Framework (for
+    /// [icon] Spell Atlas), …". A mod whose project is known opens it beside
+    /// the list; one that isn't yet shows its id and looks the project up on
+    /// click (Browse searches for it when there is none). A jar the pack didn't
+    /// get from a site has no page: its name and icon only.
+    fn lacks_line(&self, inst: &Instance, lacks: Vec<Lack>, cx: &mut Context<Self>) -> AnyElement {
+        let (shown, more) = brief_split(lacks, Lack::text);
+        let view = cx.entity();
+        let root = inst.root.clone();
+        let store = self.store.clone();
+        // The page opens through the store, as the dialogs' links do: the
+        // Overview tab has no panel of its own, so the Library moves to Mods.
+        let open = move |root: std::path::PathBuf, project: u64, cx: &mut App| {
+            store.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Peek { root, project }));
+        };
+        let st = self.store.read(cx);
+        let known = self.dep_projects.borrow();
+        // No gap: the words carry their own spaces.
+        let mut line = h_flex().min_w_0().items_center();
+        let n = shown.len();
+        for (i, l) in shown.into_iter().enumerate() {
+            let project = known.get(&l.id).cloned().flatten();
+            let dep_icon = project.as_ref().and_then(|(_, _, ic)| st.image(ic)).map(std::path::Path::to_path_buf);
+            let v = view.clone();
+            let (open1, root1) = (open.clone(), root.clone());
+            let dep = match project {
+                Some((pid, ..)) => widgets::mod_link(
+                    SharedString::from(format!("miss-dep:{i}")),
+                    l.name.clone(),
+                    dep_icon.as_deref(),
+                    pid,
+                    move |p, _, cx| open1(root1.clone(), p, cx),
+                    cx,
+                )
+                .font_semibold(),
+                None => {
+                    let id = l.id.clone();
+                    widgets::mod_link_lookup(
+                        SharedString::from(format!("miss-dep:{i}")),
+                        l.name.clone(),
+                        dep_icon.as_deref(),
+                        move |_, cx| v.update(cx, |this, cx| this.peek_mod_id(id.clone(), cx)),
+                        cx,
+                    )
+                    .font_semibold()
+                }
+            };
+            let jar = inst
+                .addons
+                .iter()
+                .find(|a| a.file_name.eq_ignore_ascii_case(&l.by_file))
+                .or_else(|| inst.addons.iter().find(|a| a.name == l.by));
+            let by_icon = jar.and_then(|a| st.image(&a.icon)).map(std::path::Path::to_path_buf);
+            let (open2, root2) = (open.clone(), root.clone());
+            let by = widgets::mod_link(
+                SharedString::from(format!("miss-by:{i}")),
+                l.by.clone(),
+                by_icon.as_deref(),
+                jar.map_or(0, |a| a.project_id),
+                move |p, _, cx| open2(root2.clone(), p, cx),
+                cx,
+            )
+            .font_semibold();
+            line = line
+                .child(dep)
+                .child(div().flex_none().whitespace_nowrap().child(" (for "))
+                .child(by)
+                .child(div().flex_none().whitespace_nowrap().child(if i + 1 < n || more > 0 { "), " } else { ")" }));
+        }
+        if more > 0 {
+            line = line.child(div().flex_none().whitespace_nowrap().child(format!("and {more} more")));
+        }
+        line.into_any_element()
     }
 
     /// Downloads mods jars ask for by id; one that can't be found is
@@ -990,7 +1143,10 @@ impl AddonsView {
                 .background_spawn(async move { hopper::install::project_for_mod_id(&inst, &id) })
                 .await;
             this.update(cx, |this, cx| match r {
-                Ok(Some(m)) => this.open_peek(m.id, cx),
+                Ok(Some(m)) => {
+                    let project = m.id;
+                    this.store.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Peek { root, project }));
+                }
                 _ => cx.emit(AddonsEvent::Find { root, text: mod_id }),
             })
             .ok();
@@ -1877,4 +2033,44 @@ fn loaded_fine_note(at: i64) -> String {
         "The game loaded fine with these exact mods {}, so this is probably nothing: some mods stand in for others while the game loads, which their files don't show.",
         hopper::time::relative_secs(at)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Lack, brief_names, brief_split};
+
+    fn lack(id: &str, name: &str, by: &str) -> Lack {
+        Lack { id: id.into(), name: name.into(), by: by.into(), by_file: format!("{by}.jar") }
+    }
+
+    #[test]
+    fn a_short_list_names_everything_once() {
+        let names: Vec<String> = ["A", "B", "A", ""].iter().map(|s| s.to_string()).collect();
+        assert_eq!(brief_names(names), "A, B");
+    }
+
+    #[test]
+    fn a_long_list_names_two_and_counts_the_rest() {
+        let names: Vec<String> = ["A", "B", "C", "D", "E"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(brief_names(names.clone()), "A, B and 3 more");
+        let (shown, more) = brief_split(names, |n| n.clone());
+        assert_eq!((shown.len(), more), (2, 3));
+    }
+
+    /// The strip draws these items as links; the tooltip says the same words.
+    #[test]
+    fn the_links_and_the_plain_text_name_the_same_mods() {
+        let lacks = vec![
+            lack("arcane_framework", "arcane_framework", "Spell Atlas"),
+            lack("arcane_framework", "arcane_framework", "Spell Atlas"),
+            lack("owo-lib", "owo-lib", "Shapewright"),
+        ];
+        let plain = brief_names(lacks.iter().map(Lack::text).collect());
+        let (shown, more) = brief_split(lacks, Lack::text);
+        assert_eq!(more, 0);
+        assert_eq!(shown.len(), 2, "the same pair is named once");
+        let drawn: Vec<String> = shown.iter().map(Lack::text).collect();
+        assert_eq!(drawn.join(", "), plain);
+        assert_eq!(plain, "arcane_framework (for Spell Atlas), owo-lib (for Shapewright)");
+    }
 }
