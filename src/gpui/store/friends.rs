@@ -1479,6 +1479,7 @@ impl Store {
             }
             // A mod of the pack needs one nobody added.
             "needs-mod" => self.preview_group_needs(
+                &root,
                 &local,
                 vec![hopper::groupdeps::Need {
                     id: "owo-lib".into(),
@@ -1491,7 +1492,7 @@ impl Store {
             _ => {}
         }
         if state != "needs-mod" {
-            self.preview_group_needs(&local, Vec::new());
+            self.preview_group_needs(&root, &local, Vec::new());
         }
         if state == "failed" {
             let e = anyhow::anyhow!("The mod sites wouldn't give Hopper that file.");

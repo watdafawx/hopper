@@ -126,10 +126,10 @@ fn top(r: &StuckReport) -> Option<&hopper::crashdetect::Suspect> {
 }
 
 /// "<mod> [Likely]"; the reason is in its tooltip.
-fn blamed(link: AnyElement, s: &hopper::crashdetect::Suspect, cx: &App) -> AnyElement {
+fn blamed(id: &'static str, link: AnyElement, s: &hopper::crashdetect::Suspect, cx: &App) -> AnyElement {
     let why = SharedString::from(s.why.clone());
     h_flex()
-        .id("stuck-blamed")
+        .id(id)
         .gap_1p5()
         .min_w_0()
         .text_sm()
@@ -152,11 +152,17 @@ pub fn stuck_bar<V: 'static>(
     let confirming = s.stuck.confirm.contains_key(root);
     let title = r.headline.split(" (").next().unwrap_or(&r.headline).to_string();
     let subject = top(&r).map(|x| format!("{} ({})", r.name_of(x), x.certainty.label()));
-    let what = top(&r).map(|x| blamed(crate::logs::mod_ref(store, root, &x.file_name, "stuck-top", cx), x, cx));
+    let what = top(&r).map(|x| blamed("stuck-blamed", crate::logs::mod_ref(store, root, &x.file_name, "stuck-top", cx), x, cx));
+    // The strip's own line: the same mod with its icon, opening its page.
+    let line = top(&r).map(|x| blamed("stuck-blamed-line", crate::logs::mod_ref(store, root, &x.file_name, "stuck-top-line", cx), x, cx));
     let (st, rt) = (store.clone(), root.to_path_buf());
     let (st2, rt2) = (store.clone(), root.to_path_buf());
     let dump = r.dump.clone();
-    let mut n = Notice::new("stuck", Tier::Stop, title).icon(IconName::Clock).since(r.when).subject(subject.unwrap_or_default());
+    let mut n = Notice::new("stuck", Tier::Stop, title).icon(IconName::Clock).since(r.when);
+    n = match line {
+        Some(line) => n.subject_rich(subject.unwrap_or_default(), line),
+        None => n.subject(subject.unwrap_or_default()),
+    };
     if confirming {
         n = n
             .primary(move |_| {
@@ -246,7 +252,7 @@ pub fn server_stuck_bar(
     let doing = r.headline.split(" looks stuck ").nth(1).and_then(|t| t.split(" (").next()).unwrap_or("while starting");
     let title = format!("{} looks stuck {doing}", file_name(root));
     let subject = top(&r).map(|x| format!("{} ({})", r.name_of(x), x.certainty.label()));
-    let what = top(&r).map(|x| blamed(widgets::mod_name("srv-stuck-top", r.name_of(x), None, cx).into_any_element(), x, cx));
+    let what = top(&r).map(|x| blamed("stuck-blamed", widgets::mod_name("srv-stuck-top", r.name_of(x), None, cx).into_any_element(), x, cx));
     let rel = dump_rel(&r);
     let ctl = control.clone();
     let (st, rt, when) = (store.clone(), root.to_path_buf(), r.when);

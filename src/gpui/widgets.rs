@@ -2832,6 +2832,23 @@ pub fn mod_link(
     })
 }
 
+/// [`mod_name`] for a mod whose project isn't known (yet): it is always
+/// clickable, and `open` finds the project (a lookup by the mod's id) and
+/// opens its page, or searches Browse for it when none is found.
+pub fn mod_link_lookup(
+    id: impl Into<ElementId>,
+    name: impl Into<SharedString>,
+    icon: Option<&Path>,
+    open: impl Fn(&mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Stateful<Div> {
+    let accent = cx.theme().primary;
+    mod_name(id, name, icon, cx)
+        .clickable(cx)
+        .hover(move |s| s.text_color(crate::theme::ink(accent)))
+        .on_click(move |_, window, cx| open(window, cx))
+}
+
 /// What a [`DescView`] shows.
 enum Shown {
     /// A project, its description and the description's images.

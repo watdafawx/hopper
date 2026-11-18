@@ -1167,6 +1167,31 @@ impl BrowseView {
         cx.notify();
     }
 
+    /// Everything the author of `project` made, in the peek beside the page
+    /// of the instance at `root` (the author link of a mod row). The panel
+    /// is Browse's own author panel, so each project in it opens the way it
+    /// does there.
+    pub fn peek_author(&mut self, root: PathBuf, project: u64, cx: &mut Context<Self>) {
+        self.set_target(root, cx);
+        self.error = None;
+        self.peeks += 1;
+        cx.spawn(async move |this, cx| {
+            let r = cx.background_spawn(async move { hopper::source::get_mod(project) }).await;
+            this.update(cx, |this, cx| match r {
+                Ok(m) => this.open_author(m, cx),
+                Err(e) => {
+                    this.error = Some(cf::explain(&e, |e| {
+                        format!("Couldn't load that author. Check your connection and try again. ({e:#})")
+                    }));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Like [`Self::peek_project`], for a Back or Forward step: the project
     /// comes back scrolled as far as it was, on the tab it was on.
     pub fn peek_back(&mut self, root: PathBuf, project: Option<u64>, cx: &mut Context<Self>) {
@@ -2257,8 +2282,9 @@ impl BrowseView {
         cx.notify();
     }
 
-    /// "by …", opening the author's projects.
-    fn author_link(&self, m: &cf::Mod, id: ElementId, cx: &Context<Self>) -> AnyElement {
+    /// "by …", opening the author's projects. `small` for the compact bar
+    /// over the open project.
+    fn author_link(&self, m: &cf::Mod, id: ElementId, small: bool, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         if m.author().is_empty() {
             return div().into_any_element();
@@ -2271,7 +2297,8 @@ impl BrowseView {
             .flex_shrink(8.)
             .min_w(rems(3.))
             .truncate()
-            .text_sm()
+            .when(small, |d| d.text_xs())
+            .when(!small, |d| d.text_sm())
             .text_color(theme.muted_foreground)
             .clickable(cx)
             .hover(move |s| s.text_color(hover).underline())
@@ -3273,7 +3300,7 @@ impl BrowseView {
                         h_flex()
                             .gap_2()
                             .child(div().font_semibold().truncate().child(m.name.clone()))
-                            .child(self.author_link(m, id("author"), cx))
+                            .child(self.author_link(m, id("author"), false, cx))
                             .children(widgets::featured_chip(m, cx))
                             // The saved list mixes both sites.
                             .when(self.bookmarked, |r| {
@@ -3970,7 +3997,7 @@ impl BrowseView {
                     .children(widgets::featured_chip(m, cx).map(|c| h_flex().mt_1().child(c)))
                     .child(div().mt_0p5().child(match &origin {
                         Some(o) => source_byline(m, o, cx),
-                        None => self.author_link(m, "detail-author".into(), cx),
+                        None => self.author_link(m, "detail-author".into(), false, cx),
                     }))
                     .child(match &origin {
                         Some(o) => source_stats(o, cx).flex_wrap().gap_y_2().mt_2(),
@@ -5143,7 +5170,6 @@ impl BrowseView {
         let wants = tab_wants(m);
         let icon = m.icon().and_then(|u| self.store.read(cx).image(u)).map(Path::to_path_buf);
         let theme = cx.theme();
-        let author = m.authors.first().map(|a| format!("by {}", a.name));
         // Narrow panels drop the downloads first; the name and author
         // truncate; Install and the tabs always stay.
         let show_downloads = width >= 30.;
@@ -5179,7 +5205,7 @@ impl BrowseView {
                             .flex_1()
                             .min_w_0()
                             .child(div().text_sm().font_semibold().truncate().child(m.name.clone()))
-                            .children(author.map(|a| widgets::caption(a, cx).text_xs().truncate())),
+                            .child(h_flex().child(self.author_link(m, "sticky-author".into(), true, cx))),
                     )
                     .when(show_downloads, |r| {
                         r.child(stat(IconName::Download, human_count(m.download_count), cx).text_xs())
@@ -6127,6 +6153,7 @@ impl BrowseView {
             } else {
                 this.stash_peek();
                 this.selected = None;
+                this.author = None;
                 this.error = None;
                 cx.notify();
             }
@@ -6140,6 +6167,7 @@ impl BrowseView {
                 if this.peeks == at {
                     this.stash_peek();
                     this.selected = None;
+                    this.author = None;
                     this.error = None;
                     cx.notify();
                 }

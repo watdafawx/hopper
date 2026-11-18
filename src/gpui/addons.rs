@@ -1081,6 +1081,13 @@ impl AddonsView {
         }
     }
 
+    /// The peek's list of everything the author of `project` made.
+    pub(crate) fn open_author(&mut self, project: u64, cx: &mut Context<Self>) {
+        if let Some(root) = self.root.clone() {
+            self.peek.update(cx, |p, cx| p.peek_author(root, project, cx));
+        }
+    }
+
     /// Shows only the mods with an update (the header pill links here).
     pub fn show_updates(&mut self, cx: &mut Context<Self>) {
         self.show = Show::Updates;
@@ -4791,13 +4798,32 @@ Change version", a.file_name).into()
                 } else {
                     a.author.clone()
                 };
+                // Its author's other projects, when the mod is a project on
+                // CurseForge or Modrinth (a jar from nowhere, or from GitHub
+                // or a link, has no author page to list).
+                let by_pid = (!a.author.is_empty() && a.project_id != 0 && !hopper::sources::is_src(a.project_id)).then_some(a.project_id);
+                let accent = theme.primary;
+                let author_text = div()
+                    .id(id("author-link"))
+                    .min_w_0()
+                    .max_w_full()
+                    .truncate()
+                    .when_some(by_pid, |d, pid| {
+                        d.clickable(cx)
+                            .hover(move |s| s.text_color(crate::theme::ink(accent)).underline())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                // Not a click on the row under it.
+                                cx.stop_propagation();
+                                this.open_author(pid, cx);
+                            }))
+                    })
+                    .child(author);
                 cells.push((Col::Author,
                     col_author()
                         .id(id("author"))
                         .text_sm()
-                        .truncate()
                         .text_color(theme.muted_foreground)
-                        .child(author)
+                        .child(h_flex().child(author_text))
                         .when_some(from, |d, from| {
                             d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(from.clone()).build(w, cx))
                         })
@@ -5057,7 +5083,7 @@ Change version", a.file_name).into()
             return None;
         }
         let n = client.len();
-        let names: Vec<String> = client.iter().map(|a| a.name.clone()).collect();
+        let names: Vec<(String, String)> = client.iter().map(|a| (a.name.clone(), a.file_name.clone())).collect();
         let title = format!(
             "{} only change{} your own game. Keep {} only on this PC?",
             if n == 1 { "1 mod".to_string() } else { format!("{n} mods") },
@@ -5069,10 +5095,11 @@ Change version", a.file_name).into()
             return None;
         }
         let files: Vec<String> = client.iter().map(|a| a.file_name.clone()).collect();
+        let (subject, rich) = crate::addons_extra::mods_subject(&self.store, &inst.root, names, "only-here", cx);
         let view = cx.entity().downgrade();
         Some(
             Notice::new("only-here", Tier::Info, title)
-                .subject(crate::addons_extra::brief_names(names))
+                .subject_rich(subject, rich)
                 .primary(move |fit| {
                     crate::notice_slot::main_button(Button::new("only-here-review").small(), fit)
                         .label("Review")

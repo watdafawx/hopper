@@ -160,8 +160,34 @@ impl Store {
         self.group_needs.list.get(&c.local).map_or(&[], |r| r.needs.as_slice())
     }
 
+    /// The project behind a needed mod id once it was looked up: (project id,
+    /// icon url). The id is 0 when no project was found for it.
+    pub fn group_need_project(&self, id: &str) -> Option<(u64, String)> {
+        self.group_needs.names.get(id).map(|(_, project, icon)| (*project, icon.clone()))
+    }
+
     /// `--dialog group-sync --state needs-mod`: the made-up copy lacks these.
-    pub(super) fn preview_group_needs(&mut self, local: &str, needs: Vec<Need>) {
+    ///
+    /// With the preview's instance at `root`: the need is looked up on
+    /// Modrinth for its real name and icon (this blocks, in the harness
+    /// only), and the mod that needs it is the instance's first mod from a
+    /// site, so its icon and page are real too.
+    pub(super) fn preview_group_needs(&mut self, root: &Path, local: &str, mut needs: Vec<Need>) {
+        let inst = self.instance(root).cloned();
+        for n in &mut needs {
+            let Some(inst) = &inst else { break };
+            if let Some(a) = inst.addons.iter().find(|a| a.project_id != 0) {
+                n.by = vec![(a.name.clone(), a.file_name.clone())];
+            }
+            if let Ok(Some(m)) = hopper::install::project_for_mod_id(inst, &n.id) {
+                let icon = m.icon().unwrap_or_default().to_string();
+                n.name = m.name.clone();
+                if !icon.is_empty() {
+                    self.want_image(&icon);
+                }
+                self.group_needs.names.insert(n.id.clone(), (m.name, m.id, icon));
+            }
+        }
         self.group_needs.list.insert(local.to_string(), Read { mtime: None, needs });
     }
 

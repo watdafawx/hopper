@@ -14,7 +14,7 @@ use crate::notice_slot::{self, Notice, Tier};
 use crate::store::Store;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::{Disableable as _, Sizable as _};
+use gpui_kit::component::{Disableable as _, Sizable as _, StyledExt as _, h_flex};
 use gpui_kit::*;
 use hopper::groupstatus::Status;
 use std::path::Path;
@@ -83,7 +83,12 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     } else {
         (status.label(), detail)
     };
-    let mut n = Notice::new("group-status", tier, title).icon(icon).subject(detail);
+    let mut n = Notice::new("group-status", tier, title).icon(icon);
+    n = match &status {
+        // The mods it names are links with their icons.
+        Status::NeedsMod { needs } if !from_pull => n.subject_rich(detail, needs_line(store, root, needs, cx)),
+        _ => n.subject(detail),
+    };
     if in_step {
         n = n.dismiss_key(store, key);
     }
@@ -136,6 +141,53 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     let (store, root) = (store.clone(), root.to_path_buf());
     n = n.action_fit(move |fit| pull_button(&store, &root, pulling, in_step, fit.narrow, "group-pull"));
     Some(n)
+}
+
+/// The "Missing a required mod" strip's line as elements: the mods it names
+/// (the missing ones and the ones that need them) with their icons, each
+/// opening its page beside the instance. A missing mod no site has a page
+/// for shows its id and doesn't open.
+fn needs_line<V: 'static>(store: &Entity<Store>, root: &Path, needs: &[hopper::groupdeps::Need], cx: &mut Context<V>) -> AnyElement {
+    use hopper::groupdeps::Piece;
+    let wanted: Vec<String> = needs.iter().filter_map(|n| store.read(cx).group_need_project(&n.id)).map(|(_, icon)| icon).filter(|i| !i.is_empty()).collect();
+    store.update(cx, |s, _| wanted.iter().for_each(|i| s.want_image(i)));
+    let s = store.read(cx);
+    let inst = s.instance(root);
+    let peek = |id: String, name: String, icon: Option<std::path::PathBuf>, project: u64, cx: &App| {
+        let (store, root) = (store.clone(), root.to_path_buf());
+        crate::widgets::mod_link(
+            SharedString::from(id),
+            name,
+            icon.as_deref(),
+            project,
+            move |project, _, cx| {
+                let root = root.clone();
+                store.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Peek { root, project }));
+            },
+            cx,
+        )
+        .font_semibold()
+        .into_any_element()
+    };
+    // No gap: the words carry their own spaces, so a comma sits against the
+    // mod before it.
+    let mut line = h_flex().min_w_0().items_center();
+    for (i, piece) in hopper::groupdeps::detail_pieces(needs).into_iter().enumerate() {
+        line = match piece {
+            Piece::Text(t) => line.child(div().flex_none().whitespace_nowrap().child(t)),
+            Piece::Need(k) => {
+                let n = &needs[k];
+                let (project, icon) = s.group_need_project(&n.id).unwrap_or_default();
+                line.child(peek(format!("need-dep:{i}"), n.name.clone(), s.image(&icon).map(Path::to_path_buf), project, cx))
+            }
+            Piece::By(name) => {
+                let jar = needs.iter().flat_map(|n| n.by.iter()).find(|(by, _)| *by == name).map(|(_, f)| f.as_str());
+                let a = jar.and_then(|f| inst.and_then(|i| i.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(f))));
+                line.child(peek(format!("need-by:{i}"), name, a.and_then(|a| s.image(&a.icon)).map(Path::to_path_buf), a.map_or(0, |a| a.project_id), cx))
+            }
+        };
+    }
+    line.into_any_element()
 }
 
 #[cfg(test)]

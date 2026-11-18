@@ -160,36 +160,72 @@ pub fn label(n: usize) -> &'static str {
     if n == 1 { "Missing a required mod" } else { "Missing required mods" }
 }
 
-/// The strip's line under the label: what is missing, what needs it, and
-/// what to do.
-pub fn detail(needs: &[Need]) -> String {
-    let get: Vec<&Need> = needs.iter().filter(|n| n.to_get()).collect();
-    let off: Vec<&Need> = needs.iter().filter(|n| !n.to_get()).collect();
-    let mut out = String::new();
+/// One piece of the strip's line: words, a missing mod (an index into the
+/// needs the line was made from) or the mod that needs it (by its name).
+/// The strip draws mods as links with their icons; [`detail`] is the same
+/// line as plain text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Piece {
+    Text(String),
+    /// The need at this index.
+    Need(usize),
+    /// A mod in the pack that needs one, by name.
+    By(String),
+}
+
+/// "A", "A and B", "A, B and C" as pieces.
+fn list_pieces(items: Vec<Piece>) -> Vec<Piece> {
+    let n = items.len();
+    let mut out = Vec::new();
+    for (i, p) in items.into_iter().enumerate() {
+        if i > 0 {
+            out.push(Piece::Text(if i + 1 == n { " and ".into() } else { ", ".into() }));
+        }
+        out.push(p);
+    }
+    out
+}
+
+/// The strip's line under the label as pieces: what is missing, what needs
+/// it, and what to do.
+pub fn detail_pieces(needs: &[Need]) -> Vec<Piece> {
+    let text = |s: &str| Piece::Text(s.to_string());
+    let get: Vec<(usize, &Need)> = needs.iter().enumerate().filter(|(_, n)| n.to_get()).collect();
+    let off: Vec<(usize, &Need)> = needs.iter().enumerate().filter(|(_, n)| !n.to_get()).collect();
+    let mut out: Vec<Piece> = Vec::new();
     if !get.is_empty() {
-        let owned: Vec<Need> = get.iter().map(|n| (*n).clone()).collect();
-        let names: Vec<String> = owned.iter().map(|n| n.name.clone()).collect();
-        let (isnt, it) = if owned.len() == 1 { ("isn't", "it") } else { ("aren't", "them") };
-        out.push_str(&format!(
-            "{} {} {}, which {isnt} in the pack. The pack can't start until you add {it}.",
-            and_list(&needers(&owned)),
-            if needers(&owned).len() == 1 { "needs" } else { "need" },
-            and_list(&names)
-        ));
+        let owned: Vec<Need> = get.iter().map(|(_, n)| (*n).clone()).collect();
+        let by = needers(&owned);
+        let (isnt, it) = if get.len() == 1 { ("isn't", "it") } else { ("aren't", "them") };
+        out.extend(list_pieces(by.into_iter().map(Piece::By).collect()));
+        out.push(text(if needers(&owned).len() == 1 { " needs " } else { " need " }));
+        out.extend(list_pieces(get.iter().map(|(i, _)| Piece::Need(*i)).collect()));
+        out.push(Piece::Text(format!(", which {isnt} in the pack. The pack can't start until you add {it}.")));
     }
     if !off.is_empty() {
         if !out.is_empty() {
-            out.push(' ');
+            out.push(text(" "));
         }
-        let names: Vec<String> = off.iter().map(|n| n.name.clone()).collect();
-        out.push_str(&format!(
-            "{} {} in the pack but turned off. Turn {} on in the Mods tab.",
-            and_list(&names),
+        out.extend(list_pieces(off.iter().map(|(i, _)| Piece::Need(*i)).collect()));
+        out.push(Piece::Text(format!(
+            " {} in the pack but turned off. Turn {} on in the Mods tab.",
             if off.len() == 1 { "is" } else { "are" },
             if off.len() == 1 { "it" } else { "them" }
-        ));
+        )));
     }
     out
+}
+
+/// The strip's line under the label: what is missing, what needs it, and
+/// what to do.
+pub fn detail(needs: &[Need]) -> String {
+    detail_pieces(needs)
+        .into_iter()
+        .map(|p| match p {
+            Piece::Text(t) | Piece::By(t) => t,
+            Piece::Need(i) => needs[i].name.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -247,6 +283,47 @@ version=\"0.12.15\"
 ");
         assert!(needs(&crate::deps::missing(&dir)).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_strip_line_is_words_and_mods() {
+        let mut n = needs(&[missing("Spell Atlas", "atlas.jar", "arcane_framework")]);
+        n[0].name = "Arcane Framework".into();
+        assert_eq!(
+            detail_pieces(&n),
+            vec![
+                Piece::By("Spell Atlas".into()),
+                Piece::Text(" needs ".into()),
+                Piece::Need(0),
+                Piece::Text(", which isn't in the pack. The pack can't start until you add it.".into()),
+            ]
+        );
+        assert_eq!(detail(&n), "Spell Atlas needs Arcane Framework, which isn't in the pack. The pack can't start until you add it.");
+    }
+
+    #[test]
+    fn the_strip_line_lists_several_and_names_what_is_turned_off() {
+        let mut off = missing("Create", "create.jar", "flywheel");
+        off.disabled_provider = Some("flywheel.jar.disabled".into());
+        let mut n = needs(&[
+            missing("Shapewright", "s.jar", "owo-lib"),
+            missing("Other", "o.jar", "owo-lib"),
+            missing("Shapewright", "s.jar", "azurelib"),
+            off,
+        ]);
+        for x in &mut n {
+            x.name = x.id.clone();
+        }
+        let line = detail(&n);
+        assert_eq!(
+            line,
+            "Shapewright and Other need azurelib and owo-lib, which aren't in the pack. The pack can't start until you add them. flywheel is in the pack but turned off. Turn it on in the Mods tab."
+        );
+        // The mods in the line are the needs, each once, in order.
+        let pieces = detail_pieces(&n);
+        let needs_in_line: Vec<usize> = pieces.iter().filter_map(|p| if let Piece::Need(i) = p { Some(*i) } else { None }).collect();
+        assert_eq!(needs_in_line.len(), 3);
+        assert!(pieces.contains(&Piece::By("Other".into())));
     }
 
     #[test]
