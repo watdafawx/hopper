@@ -4244,7 +4244,7 @@ impl AddonsView {
                 changed_by: changed_by.as_deref(),
                 only_here: kept,
                 env: resolved.as_ref().map_or("", |s| s.side.as_str()),
-                env_from_modrinth: resolved.as_ref().is_some_and(|s| s.from == hopper::modsides::From::Modrinth),
+                env_from: resolved.as_ref().map(|s| s.from),
                 // Narrow, the categories give the version chip room.
                 categories: if self.compact { &[] } else { store.categories(a) },
                 modrinth: !a.mr_project.is_empty(),

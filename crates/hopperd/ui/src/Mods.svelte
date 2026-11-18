@@ -800,7 +800,7 @@
   const SIDE_UNKNOWN = [CircleQuestionMark, "Side unknown: the mod doesn't say if it's needed on the server"];
   const sideOf = (m) => SIDE[m.side] || SIDE_UNKNOWN;
   // CurseForge doesn't tag it, Modrinth does: say so where the side shows.
-  const fromMr = (m) => (m.side_from === 'modrinth' && SIDE[m.side] ? ' (from Modrinth)' : '');
+  const fromMr = (m) => (SIDE[m.side] ? ({ modrinth: ' (from Modrinth)', jar: ' (from the jar)' }[m.side_from] ?? '') : '');
   const sideTip = (m) => (fromMr(m) ? sideOf(m)[1].replace(/^[^:]*/, (h) => h + fromMr(m)) : sideOf(m)[1]);
   // Desktop's tags: Client only (gold), Server only (blue), Client + server.
   const SIDE_TAG = { client: ['Client only', 'warnc'], server: ['Server only', 'info'], both: ['Client + server', ''] };

@@ -33,8 +33,8 @@ pub struct SideCard {
     pub anyway: bool,
 }
 
-/// The side icon and what it means, saying when only Modrinth tags it
-/// ("Client only (from Modrinth)").
+/// The side icon and what it means, saying when only Modrinth or the jar
+/// tags it ("Client only (from Modrinth)", "(from the jar)").
 pub fn side_of(s: Option<&hopper::modsides::Side>) -> Option<(IconName, String)> {
     let s = s?;
     let icon = match s.side.as_str() {
