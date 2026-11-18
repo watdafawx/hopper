@@ -775,6 +775,31 @@ pub fn tps_chip(id: impl Into<ElementId>, t: &hopper::panel::Tps, cx: &App) -> S
         .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
 }
 
+/// "3/16" with the people icon: how many players a running server has,
+/// as a quiet figure beside its ping and TPS. Callers show it only while
+/// the server runs and its panel reports a limit
+/// (`PanelStats::players_shown`). `icon: false` leaves the icon out where
+/// the words around it already say it's players (a button with a tooltip).
+/// `color` is the muted grey on a plain card; a selected button needs more.
+pub fn players_figure(online: u32, max: u32, icon: bool, color: Hsla) -> Div {
+    h_flex()
+        .flex_none()
+        .gap_1()
+        .items_center()
+        .text_sm()
+        .text_color(color)
+        .when(icon, |r| r.child(Icon::new(IconName::Users).xsmall().text_color(color)))
+        .child(format!("{online}/{max}"))
+}
+
+/// [`players_figure`] in the card's muted grey with its own "Players online"
+/// tooltip, for places that have no tooltip of their own around it.
+pub fn players_count(id: impl Into<ElementId>, online: u32, max: u32, cx: &App) -> Stateful<Div> {
+    players_figure(online, max, true, cx.theme().muted_foreground)
+        .id(id)
+        .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Players online").build(w, cx))
+}
+
 /// A small figure with a caption under it, on a faint tile.
 pub fn stat_tile(value: impl Into<SharedString>, label: &str, cx: &App) -> Div {
     let theme = cx.theme();

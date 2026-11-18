@@ -255,6 +255,13 @@ impl PanelStats {
         }
     }
 
+    /// (online, max) players while the server runs and its panel reports a
+    /// limit; None while it starts, stops or is down, when a count would
+    /// say nothing (Crafty and others send 0/0 then).
+    pub fn players_shown(&self) -> Option<(u32, u32)> {
+        (self.running && !self.starting && self.max > 0).then_some((self.online, self.max))
+    }
+
     pub fn state(&self) -> &'static str {
         if self.wake_failed && !self.running {
             "Couldn't wake"
@@ -1275,6 +1282,11 @@ mod tests {
         assert_eq!(s.state(), "Running");
         assert_eq!(s.players, vec!["Alex", "Steve"]);
         assert_eq!((s.online, s.max), (2, 20));
+        assert_eq!(s.players_shown(), Some((2, 20)));
+        let down = PanelStats { running: false, ..s.clone() };
+        assert_eq!(down.players_shown(), None);
+        assert_eq!(PanelStats { starting: true, ..s.clone() }.players_shown(), None);
+        assert_eq!(PanelStats { max: 0, ..s.clone() }.players_shown(), None);
         assert_eq!(parse_stats(&json!({ "crashed": true })).state(), "Crashed");
         assert_eq!(s.mem, "4.1GB");
         assert_eq!(parse_stats(&json!({ "mem": "17668972544.0" })).mem, "16.5 GB");

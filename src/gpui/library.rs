@@ -2092,9 +2092,10 @@ impl LibraryView {
         // stopped, red when its last start crashed). The name opens the
         // Server tab, ▾ the server's actions. Unpaired: "Pair a server…".
         let paired = store.server_of(&inst.root).map(|s| {
+            let count = store.panel_stats(&s.root).and_then(|p| p.players_shown());
             let players = store
                 .panel_stats(&s.root)
-                .filter(|p| p.running && !p.starting && p.max > 0)
+                .filter(|p| p.players_shown().is_some())
                 .map(|p| {
                     // TPS and ping too, where they're known.
                     let tps = p.tps.map(|t| format!(", {} TPS", t.text())).unwrap_or_default();
@@ -2102,7 +2103,7 @@ impl LibraryView {
                     let ping = ms.map(|m| format!(", {} ping", hopper::server::ping_text(m))).unwrap_or_default();
                     format!(", {}/{} players{tps}{ping}", p.online, p.max)
                 });
-            (s.root.clone(), s.name.clone(), players.unwrap_or_default())
+            (s.root.clone(), s.name.clone(), players.unwrap_or_default(), count)
         });
         let can_pair = paired.is_none() && !store.servers().is_empty();
         let on_server_tab = self.tab == InstTab::Server;
@@ -2110,8 +2111,9 @@ impl LibraryView {
         let paired = paired.filter(|_| store.server_tools());
         let can_pair = can_pair && store.server_tools();
         let sync_to: Option<AnyElement> = match paired {
-            Some((sroot, name, players)) => {
+            Some((sroot, name, players, count)) => {
                 key_parts.push(name.clone());
+                key_parts.push(format!("{count:?}"));
                 let (dot, word, reason) = self.server_state(&sroot, cx);
                 let tip = match (&reason, word) {
                     (Some(r), "unreachable") => r.clone(),
@@ -2123,7 +2125,19 @@ impl LibraryView {
                     .outline()
                     .selected(on_server_tab)
                     // Narrow: the state dot alone; the tooltip names it.
-                    .child(h_flex().gap_2().items_center().child(widgets::status_dot(dot)).when(lv < 5, |r| r.child(name)))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(widgets::status_dot(dot))
+                            // A long name gives way before the count does.
+                            .when(lv < 5, |r| r.child(div().min_w_0().max_w(rems(12.)).truncate().child(name)))
+                            // The first thing to go when the header is tight, so it never
+                            // folds Folder or Settings into the menu sooner than before.
+                            .when_some(count.filter(|_| lv == 0), |r, (on, max)| {
+                                r.child(widgets::players_figure(on, max, false, cx.theme().foreground.opacity(0.85)))
+                            }),
+                    )
                     .tooltip(tip)
                     .on_click(cx.listener(|this, _, _, cx| this.set_tab(InstTab::Server, cx)));
                 let view = cx.entity();
