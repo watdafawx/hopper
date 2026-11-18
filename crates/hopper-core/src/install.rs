@@ -575,12 +575,33 @@ fn slug_tries(mod_id: &str) -> Vec<String> {
     tries
 }
 
+/// A project name without its subtitle: "Arcane Framework - Library for the
+/// Almanac Mods" is "Arcane Framework". Only a dash, bar, colon or bracket
+/// set apart by spaces counts, so "Cyclops Core Addon" keeps its tail.
+fn name_head(name: &str) -> &str {
+    const SEPARATORS: &[&str] = &[" - ", " \u{2013} ", " \u{2014} ", " | ", ": ", " ("];
+    let end = SEPARATORS.iter().filter_map(|sep| name.find(sep)).min().unwrap_or(name.len());
+    name[..end].trim()
+}
+
 /// Whether a search hit's slug or name is the mod id. A trailing version
-/// tail on the slug is allowed (CurseForge's "codechicken-lib-1-8").
+/// tail on the slug is allowed (CurseForge's "codechicken-lib-1-8"), and so
+/// is a subtitle on the name ("Arcane Framework - Library for ...").
 fn hit_is_mod_id(want: &str, slug: &str, name: &str) -> bool {
     let slug_sq = squash_id(slug);
     let slug_trimmed = slug.trim_end_matches(|c: char| c.is_ascii_digit() || c == '-');
-    slug_sq == want || squash_id(name) == want || (slug_trimmed.len() < slug.len() && squash_id(slug_trimmed) == want)
+    let head = name_head(name);
+    slug_sq == want
+        || squash_id(name) == want
+        || (!head.is_empty() && squash_id(head) == want)
+        || (slug_trimmed.len() < slug.len() && squash_id(slug_trimmed) == want)
+}
+
+/// What to type into a site search for a mod id: its words, as page titles
+/// have them ("arcane_framework" -> "arcane framework"). A raw id finds
+/// nothing, as search engines match whole words.
+pub fn search_text_for_mod_id(mod_id: &str) -> String {
+    mod_id.replace(['_', '-', '.'], " ").split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
 pub fn project_for_mod_id(inst: &Instance, mod_id: &str) -> anyhow::Result<Option<cf::Mod>> {
@@ -610,9 +631,18 @@ pub fn project_for_mod_id(inst: &Instance, mod_id: &str) -> anyhow::Result<Optio
             return Ok(Some(crate::modrinth::project_to_mod(&p, "")));
         }
     }
+    // A CurseForge page whose slug is the id: asked for by slug, as a
+    // popularity-sorted search can bury a young project.
+    for slug in slug_tries(mod_id).into_iter().take(2) {
+        if let Ok(Some(m)) = cf::by_slug(Some(cf::CLASS_MODS), &slug)
+            && hit_is_mod_id(&want, &m.slug, &m.name)
+        {
+            return Ok(Some(m));
+        }
+    }
     // Search the id as typed, then with a glued-on ending split off
     // ("cyclops core"), as search engines match whole words.
-    let mut texts = vec![mod_id.replace(['_', '-'], " ")];
+    let mut texts = vec![search_text_for_mod_id(mod_id)];
     if let Some((head, suf)) = split_id_suffix(mod_id) {
         texts.push(format!("{} {suf}", head.replace(['_', '-'], " ")));
     }
@@ -2208,6 +2238,41 @@ mod mod_id_lookup {
         }
     }
 
+    /// A project whose page title and slug carry a subtitle ("Arcane
+    /// Framework - Library for the Almanac Mods"). `cargo test --lib real_arcane_framework -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_arcane_framework() {
+        let inst = crate::instances::Instance {
+            game_version: "1.21.1".into(),
+            loader: "neoforge-21.1.256".into(),
+            ..Default::default()
+        };
+        let search = crate::cf::Search {
+            class_id: crate::cf::CLASS_MODS,
+            text: "arcane framework".into(),
+            game_version: inst.game_version.clone(),
+            loader: super::loader_of(&inst),
+            ..Default::default()
+        };
+        for modrinth in [true, false] {
+            match crate::source::search(&search, modrinth) {
+                Ok((hits, p)) => {
+                    println!("search modrinth={modrinth}: {} hits of {}", hits.len(), p.total_count);
+                    for (i, m) in hits.iter().enumerate() {
+                        let flag = if m.slug.contains("arcane-framework") { " <==" } else { "" };
+                        println!("  {i:2} {} | {}{flag}", m.slug, m.name);
+                    }
+                }
+                Err(e) => println!("search modrinth={modrinth}: {e:#}"),
+            }
+        }
+        println!("by_slug: {:?}", crate::cf::by_slug(Some(crate::cf::CLASS_MODS), "arcane-framework").map(|m| m.map(|m| (m.name, m.id))));
+        let m = super::project_for_mod_id(&inst, "arcane_framework").unwrap();
+        println!("project_for_mod_id -> {:?}", m.as_ref().map(|m| (&m.name, &m.slug, m.id)));
+        assert!(m.is_some_and(|m| m.slug == "arcane-framework-library-for-the-almanac-mods"));
+    }
+
     /// Library ids that glue "core"/"lib" onto the name, which the slug
     /// splits off. `cargo test --lib glued_suffix_ids_resolve -- --ignored --nocapture`
     #[test]
@@ -2259,13 +2324,45 @@ mod mod_id_lookup {
     }
 
     #[test]
+    fn names_lose_their_subtitle() {
+        use super::name_head as h;
+        assert_eq!(h("Arcane Framework - Library for the Almanac Mods"), "Arcane Framework");
+        assert_eq!(h("Balm: Library"), "Balm");
+        assert_eq!(h("Balm (Forge)"), "Balm");
+        assert_eq!(h("Cyclops Core Addon"), "Cyclops Core Addon");
+        // A hyphen inside a word is not a subtitle.
+        assert_eq!(h("Cloth-Config API"), "Cloth-Config API");
+    }
+
+    #[test]
+    fn search_text_is_the_id_words() {
+        use super::search_text_for_mod_id as t;
+        assert_eq!(t("arcane_framework"), "arcane framework");
+        assert_eq!(t("Cloth-Config"), "cloth config");
+        assert_eq!(t("geckolib"), "geckolib");
+        assert_eq!(t("a__b"), "a b");
+    }
+
+    #[test]
     fn hits_match_by_slug_name_or_versioned_slug() {
         use super::hit_is_mod_id as hit;
         assert!(hit("cyclopscore", "cyclops-core", "Cyclops Core"));
         assert!(hit("codechickenlib", "codechicken-lib-1-8", "CodeChicken Lib"));
         assert!(hit("codechickenlib", "codechicken-lib-1-8", "Something Else"));
         assert!(hit("balm", "balm", "Balm"));
+        // A long page title and slug: the name's subtitle is dropped.
+        assert!(hit(
+            "arcaneframework",
+            "arcane-framework-library-for-the-almanac-mods",
+            "Arcane Framework - Library for the Almanac Mods"
+        ));
+        assert!(hit("arcaneframework", "arcane-framework", "Something Else"));
+        assert!(hit("balm", "balm-forge", "Balm: Library"));
+        assert!(hit("balm", "other", "Balm (Forge)"));
         // Lookalikes don't count.
+        assert!(!hit("arcaneframework", "arcane-framework-addon", "Arcane Framework Addon"));
+        assert!(!hit("arcane", "arcane-framework-library", "Arcane Framework - Library"));
+        assert!(!hit("framework", "arcane-framework", "Arcane Framework - Library"));
         assert!(!hit("codechickenlib", "codechickenlib-unofficial", "CodeChickenLib Unofficial 1.7.10"));
         assert!(!hit("cyclopscore", "cyclops-core-addon", "Cyclops Core Addon"));
         assert!(!hit("balm", "balmy", "Balmy"));

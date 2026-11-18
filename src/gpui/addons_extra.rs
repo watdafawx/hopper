@@ -1147,7 +1147,8 @@ impl AddonsView {
                     let project = m.id;
                     this.store.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Peek { root, project }));
                 }
-                _ => cx.emit(AddonsEvent::Find { root, text: mod_id }),
+                // Browse matches whole words: "arcane framework", not "arcane_framework".
+                _ => cx.emit(AddonsEvent::Find { root, text: hopper::install::search_text_for_mod_id(&mod_id) }),
             })
             .ok();
         })
