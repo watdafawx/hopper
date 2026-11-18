@@ -58,6 +58,12 @@ pub struct Input<'a> {
     /// jars): the pack can't start without them, whoever added what needs
     /// them.
     pub needs: &'a [crate::groupdeps::Need],
+    /// The group takes changes only from its maker (`syncmode`): their id
+    /// and name. Other members' codes wait for the player to pull them.
+    pub only_from: Option<(&'a str, &'a str)>,
+    /// This PC shares its changes when the player presses Push, and this
+    /// pack has some held back: about how many (0: can't tell).
+    pub to_push: Option<usize>,
 }
 
 /// How one copy stands.
@@ -82,6 +88,11 @@ pub enum Status {
     /// The pack has a mod that needs another mod the pack lacks, so it
     /// can't start. Group sync can still be "in step": nobody added it.
     NeedsMod { needs: Vec<crate::groupdeps::Need> },
+    /// Other members' changes wait for the player to pull them: the group
+    /// takes changes only from its maker (`only`, their name).
+    Parked { from: Vec<crate::syncmode::Parked>, only: String },
+    /// Changes made here wait for the player to press Push.
+    ToPush { changes: usize },
 }
 
 /// How loud a status is: what colour a chip gets.
@@ -106,14 +117,16 @@ impl Status {
             Status::Cant { .. } => "Can't update",
             Status::Offline { .. } => "Offline",
             Status::NeedsMod { needs } => crate::groupdeps::label(needs.len()),
+            Status::Parked { .. } => "Changes to pull",
+            Status::ToPush { .. } => "Not sent yet",
         }
     }
 
     pub fn tone(&self) -> Tone {
         match self {
             Status::InStep { .. } => Tone::Good,
-            Status::Updating { .. } | Status::Sending => Tone::Busy,
-            Status::WaitsForGame { .. } | Status::WaitsForYou { .. } => Tone::Warn,
+            Status::Updating { .. } | Status::Sending | Status::ToPush { .. } => Tone::Busy,
+            Status::WaitsForGame { .. } | Status::WaitsForYou { .. } | Status::Parked { .. } => Tone::Warn,
             Status::Cant { .. } | Status::NeedsMod { .. } => Tone::Bad,
             Status::Offline { .. } => Tone::Quiet,
         }
@@ -127,9 +140,11 @@ impl Status {
             Status::NeedsMod { .. } => 1,
             Status::WaitsForYou { .. } => 2,
             Status::WaitsForGame { .. } => 3,
-            Status::Offline { .. } => 4,
-            Status::Updating { .. } | Status::Sending => 5,
-            Status::InStep { .. } => 6,
+            Status::Parked { .. } => 4,
+            Status::ToPush { .. } => 5,
+            Status::Offline { .. } => 6,
+            Status::Updating { .. } | Status::Sending => 7,
+            Status::InStep { .. } => 8,
         }
     }
 
@@ -165,8 +180,41 @@ impl Status {
                 None => "Can't reach the group right now, so your copy may be out of date.".to_string(),
             },
             Status::NeedsMod { needs } => crate::groupdeps::detail(needs),
+            Status::Parked { from, only } => parked_says(from, only),
+            Status::ToPush { changes: 0 } => "You changed this pack. The group gets your changes when you press Push.".to_string(),
+            Status::ToPush { changes } => {
+                format!("You made {}. The group gets them when you press Push.", crate::syncmode::changes_words(*changes))
+            }
         }
     }
+
+    /// The short title for the notice strip: "Changes from Mia", "Changes
+    /// from 2 people"; the label otherwise.
+    pub fn title(&self) -> String {
+        match self {
+            Status::Parked { from, .. } => {
+                let names: Vec<String> = from.iter().map(|p| p.name.clone()).collect();
+                format!("Changes from {}", people(&names))
+            }
+            other => other.label().to_string(),
+        }
+    }
+}
+
+/// "Mia made 3 changes. You take changes only from Noah, so they wait
+/// until you pull them." / "Mia made 3 changes, Ava 1. ..."
+fn parked_says(from: &[crate::syncmode::Parked], only: &str) -> String {
+    let what = |p: &crate::syncmode::Parked, first: bool| match p.changes {
+        0 if first => format!("{} made changes", p.name),
+        0 => format!("{} some", p.name),
+        n if first => format!("{} made {}", p.name, crate::syncmode::changes_words(n)),
+        n => format!("{} {n}", p.name),
+    };
+    let lead: Vec<String> = from.iter().take(3).enumerate().map(|(i, p)| what(p, i == 0)).collect();
+    let more = from.len().saturating_sub(3);
+    let lead = if more > 0 { format!("{} and {more} more", lead.join(", ")) } else { lead.join(", ") };
+    let only = if only.is_empty() { "the group's maker".to_string() } else { only.to_string() };
+    format!("{lead}. You take changes only from {only}, so they wait until you pull them.")
 }
 
 /// Works out how the copy stands. When several things apply, what needs the
@@ -200,10 +248,14 @@ pub fn status(i: &Input) -> Status {
     if !game.is_empty() {
         return Status::WaitsForGame { what: game };
     }
-    let waiting = !i.copy.waiting.is_empty();
-    if i.merging || (waiting && !i.held) {
-        let from: Vec<String> = i.copy.waiting.values().map(|g| g.name.clone()).filter(|n| !n.is_empty()).collect();
-        return Status::Updating { changes: waiting_changes(i.copy), from };
+    // With changes taken only from the group's maker, the others' codes
+    // wait for the player: they don't make the copy "Updating".
+    let only = i.only_from.map(|(id, _)| id);
+    let taken: Vec<&crate::groupsync::Got> =
+        i.copy.waiting.iter().filter(|(from, _)| crate::syncmode::takes(only, from)).map(|(_, g)| g).collect();
+    if i.merging || (!taken.is_empty() && !i.held) {
+        let from: Vec<String> = taken.iter().map(|g| g.name.clone()).filter(|n| !n.is_empty()).collect();
+        return Status::Updating { changes: waiting_changes_from(i.copy, only), from };
     }
     // Everything is taken in, but the pack can't start: a mod in it needs
     // one nobody added. Ahead of Offline and Sending: it's what the player
@@ -213,6 +265,16 @@ pub fn status(i: &Input) -> Status {
     }
     if !i.connected {
         return Status::Offline { checked: i.checked };
+    }
+    let parked = crate::syncmode::parked(i.copy, only);
+    if !parked.is_empty() {
+        return Status::Parked { from: parked, only: i.only_from.map(|(_, n)| n.to_string()).unwrap_or_default() };
+    }
+    // Held back for Push: what waits for this PC's own change to go out
+    // waits for the Push too (or is taken in after a while, the change
+    // here kept).
+    if let Some(changes) = i.to_push {
+        return Status::ToPush { changes };
     }
     if i.unsent || i.held {
         return Status::Sending;
@@ -225,16 +287,15 @@ pub fn status(i: &Input) -> Status {
 /// say so, as `groupsync::plan` reads them), each mod once. 0 when the
 /// codes carry none (an older Hopper).
 pub fn waiting_changes(copy: &PackCopy) -> usize {
+    waiting_changes_from(copy, None)
+}
+
+/// [`waiting_changes`] of the codes this PC takes in by itself (`only`:
+/// the group takes changes only from that member).
+pub fn waiting_changes_from(copy: &PackCopy, only: Option<&str>) -> usize {
     let mut keys: HashSet<&str> = HashSet::new();
-    for (from, g) in &copy.waiting {
-        let had = copy.got.get(from).map_or(0, |p| p.seq);
-        for (k, s) in &g.stamps {
-            let made_now = s.seq == 0 && s.by == *from;
-            let since = s.seq > had && s.seq <= g.seq;
-            if made_now || since {
-                keys.insert(k.as_str());
-            }
-        }
+    for (from, g) in copy.waiting.iter().filter(|(from, _)| crate::syncmode::takes(only, from)) {
+        keys.extend(crate::syncmode::code_changes(copy, from, g));
     }
     // The loader and the pack version aren't mods but are changes.
     keys.len()
@@ -284,6 +345,10 @@ pub fn pull_says(reached: bool, made: usize, from: &[String], after: &Status, no
     match after {
         Status::InStep { .. } | Status::Sending | Status::Updating { .. } if took.is_empty() => ("Already the same as the group.".to_string(), false),
         Status::InStep { .. } | Status::Sending | Status::Updating { .. } => (format!("{took} Now the same as the group."), false),
+        // Only this PC's own changes wait, to go out: the copy has the
+        // group's.
+        Status::ToPush { .. } if took.is_empty() => ("You have the group's latest changes. Yours go out when you press Push.".to_string(), false),
+        Status::ToPush { .. } => (format!("{took} Yours go out when you press Push."), false),
         other => {
             let lead = if took.is_empty() { String::new() } else { format!("{took} ") };
             (format!("{lead}{}", other.detail(now)), matches!(other, Status::Cant { .. }))
@@ -480,6 +545,8 @@ mod tests {
             unsent: false,
             held: false,
             needs: &[],
+            only_from: None,
+            to_push: None,
         }
     }
 
@@ -877,6 +944,64 @@ mod tests {
         // Stamp seq 0 = made in this very code (seq 40): newer than the mark.
         let c = member_copy(&[("p:1", "mia", 30)], Some((40, &[("p:1", 0)])));
         assert_eq!(member_status(&[&c], "noah"), Member::InStep);
+    }
+
+    // ---- Take changes from / Share my changes ----------------------------------------
+
+    #[test]
+    fn only_the_maker_waits_for_the_player_with_whose_and_how_many() {
+        let mut c = PackCopy::default();
+        waiting_from(&mut c, "mia", "Mia", 12, &[("p:2", 0, "mia"), ("p:3", 0, "mia"), ("p:4", 0, "mia")]);
+        waiting_from(&mut c, "ava", "Ava", 14, &[("p:5", 0, "ava")]);
+        let mut i = input(&c);
+        // Taking from everyone: both are on their way in.
+        assert!(matches!(status(&i), Status::Updating { changes: 4, .. }));
+        i.only_from = Some(("noah", "Noah"));
+        let s = status(&i);
+        let Status::Parked { from, only } = &s else { panic!("{s:?}") };
+        assert_eq!(from.iter().map(|p| (p.name.as_str(), p.changes)).collect::<Vec<_>>(), [("Mia", 3), ("Ava", 1)]);
+        assert_eq!(only, "Noah");
+        assert_eq!(s.title(), "Changes from Mia and Ava");
+        assert_eq!(s.detail(0), "Mia made 3 changes, Ava 1. You take changes only from Noah, so they wait until you pull them.");
+        assert_eq!(s.tone(), Tone::Warn);
+    }
+
+    #[test]
+    fn the_makers_own_code_still_comes_in_by_itself() {
+        let mut c = PackCopy::default();
+        waiting_from(&mut c, "noah", "Noah", 12, &[("p:2", 0, "noah")]);
+        waiting_from(&mut c, "mia", "Mia", 14, &[("p:5", 0, "mia")]);
+        let mut i = input(&c);
+        i.only_from = Some(("noah", "Noah"));
+        assert_eq!(status(&i), Status::Updating { changes: 1, from: vec!["Noah".into()] });
+    }
+
+    #[test]
+    fn held_back_changes_read_as_not_sent_yet_and_say_how_to_send_them() {
+        let c = PackCopy::default();
+        let mut i = input(&c);
+        i.to_push = Some(3);
+        let s = status(&i);
+        assert_eq!(s, Status::ToPush { changes: 3 });
+        assert_eq!(s.label(), "Not sent yet");
+        assert_eq!(s.detail(0), "You made 3 changes. The group gets them when you press Push.");
+        // A member's change waiting on one of those (held) reads the same:
+        // it isn't on its way while the player keeps theirs.
+        i.held = true;
+        assert_eq!(status(&i), Status::ToPush { changes: 3 });
+        // Pull now says the copy has the group's.
+        let (says, bad) = pull_says(true, 0, &[], &s, 0);
+        assert!(!bad && says.contains("press Push"), "{says}");
+    }
+
+    /// Holding back never stops this PC taking the others' changes in.
+    #[test]
+    fn holding_back_doesnt_stop_others_changes_coming_in() {
+        let mut c = PackCopy::default();
+        waiting_from(&mut c, "mia", "Mia", 12, &[("p:2", 0, "mia")]);
+        let mut i = input(&c);
+        i.to_push = Some(2);
+        assert!(matches!(status(&i), Status::Updating { changes: 1, .. }));
     }
 
     #[test]

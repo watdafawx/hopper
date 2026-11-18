@@ -1291,7 +1291,7 @@ impl FriendsPanel {
             // there is something to pull.
             (None, false) if group.is_some() => {
                 let (root, st, pulling) = group.clone().expect("checked");
-                let b = self.pull_button(SharedString::from(format!("pull:{key}")), root, pulling, matches!(st, Status::InStep { .. }), cx);
+                let b = self.pull_button(SharedString::from(format!("pull:{key}")), root, pulling, &st, cx);
                 if matches!(st, Status::InStep { .. }) {
                     widgets::reveal_on_hover(row_id.clone(), SharedString::from(format!("pull-at:{key}")), b, window, cx).into_any_element()
                 } else {
@@ -1377,7 +1377,35 @@ impl FriendsPanel {
     }
 
     /// Pull now: checks the group and takes its changes in at once.
-    fn pull_button(&self, id: SharedString, root: PathBuf, pulling: bool, in_step: bool, cx: &mut Context<Self>) -> Button {
+    /// The row's sync button: "Pull from Mia" when a member's changes wait
+    /// for the player, "Push 3 changes" when this PC's own do, else Pull
+    /// now ("Check now" in step).
+    fn pull_button(&self, id: SharedString, root: PathBuf, pulling: bool, st: &Status, cx: &mut Context<Self>) -> Button {
+        if let Status::Parked { from, .. } = st
+            && let Some(who) = from.first()
+        {
+            let (name, who) = (who.name.clone(), who.id.clone());
+            return Button::new(id)
+                .xsmall()
+                .outline()
+                .icon(IconName::Download)
+                .label(format!("Pull from {name}"))
+                .disabled(pulling)
+                .tooltip(format!("Takes in {name}'s changes now. Other people's keep waiting"))
+                .on_click(cx.listener(move |this, _, _, cx| this.store.update(cx, |s, cx| s.pull_group_from(&root, &who, cx))));
+        }
+        if let Status::ToPush { changes } = st {
+            let pushing = self.store.read(cx).pushing_at(&root);
+            return Button::new(id)
+                .xsmall()
+                .outline()
+                .icon(IconName::Upload)
+                .label(if pushing { "Pushing...".to_string() } else { hopper::syncmode::push_label(*changes) })
+                .disabled(pushing)
+                .tooltip("Sends your changes to the people you share with")
+                .on_click(cx.listener(move |this, _, _, cx| this.store.update(cx, |s, cx| s.push_changes(std::slice::from_ref(&root), cx))));
+        }
+        let in_step = matches!(st, Status::InStep { .. });
         Button::new(id)
             .xsmall()
             .outline()
@@ -1800,7 +1828,7 @@ impl FriendsPanel {
                 let state = pack_state[pi].clone();
                 let row_id = SharedString::from(format!("gp-mine:{pi}"));
                 let pull = state.as_ref().map(|(st, pulling, _)| {
-                    let b = self.pull_button(SharedString::from(format!("gp-pull:{pi}")), root.clone(), *pulling, matches!(st, Status::InStep { .. }), cx);
+                    let b = self.pull_button(SharedString::from(format!("gp-pull:{pi}")), root.clone(), *pulling, st, cx);
                     if matches!(st, Status::InStep { .. }) {
                         widgets::reveal_on_hover(row_id.clone(), SharedString::from(format!("gp-pull-at:{pi}")), b, window, cx).into_any_element()
                     } else {
@@ -1866,26 +1894,83 @@ impl FriendsPanel {
             None
         };
         let card = |c: Div| c.mx_3().mt_3().p_3().rounded(theme.radius_lg).border_1().border_color(theme.border);
-        let setting = g.me.joined.then(|| {
-            card(h_flex().gap_3().items_start())
+        let (owner_only, push_by_hand) = {
+            let s = self.store.read(cx);
+            (s.group_owner_only(&g.id), s.push_by_hand())
+        };
+        // "Take changes from": not on the maker's own PC, where it means
+        // nothing.
+        let take_from = owner_only.map(|only| {
+            let gid = g.id.clone();
+            let says = if only {
+                format!("Only {owner_name}: other people's changes wait until you pull them.")
+            } else {
+                "Everyone: anyone's change comes to your copy by itself.".to_string()
+            };
+            h_flex()
+                .gap_3()
+                .items_center()
                 .child(
                     v_flex()
                         .flex_1()
                         .min_w_0()
                         .gap_0p5()
-                        .child(div().text_sm().font_medium().child("Keep my packs the same as the group"))
-                        .child(widgets::fine_print(
-                            "Hopper asks before getting a pack someone shares with the group. Once you have one, when anyone changes a mod in it, your copy changes too. Your other instances don't change.",
-                            cx,
-                        )),
+                        .child(div().text_sm().font_medium().child("Take changes from"))
+                        .child(widgets::fine_print(says, cx)),
                 )
-                .child(crate::switch::Switch::new("group-step").checked(in_step).on_click({
-                    let store = self.store.clone();
-                    move |v: &bool, _, cx| {
-                        let (id, v) = (step_id.clone(), *v);
-                        store.update(cx, |s, cx| s.set_in_step(&id, v, cx))
-                    }
-                }))
+                .child(
+                    widgets::Segmented::new("group-take-from")
+                        .selected_index(usize::from(only))
+                        .child(widgets::SegItem::new().label("Everyone"))
+                        .child(widgets::SegItem::new().label(format!("Only {owner_name}")))
+                        .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                            let (gid, on) = (gid.clone(), *ix == 1);
+                            this.store.update(cx, |s, cx| s.set_group_owner_only(&gid, on, cx));
+                        })),
+                )
+        });
+        // The per-PC choice lives in Settings; the group page says it.
+        let push_line = push_by_hand.then(|| {
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(div().flex_1().min_w_0().child(widgets::fine_print("Your changes go out when you press Push.", cx)))
+                .child(
+                    Button::new("group-push-setting")
+                        .xsmall()
+                        .outline()
+                        .icon(IconName::Settings)
+                        .label("Change in Settings")
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::app::OpenPushSetting), cx)),
+                )
+        });
+        let setting = g.me.joined.then(|| {
+            card(v_flex().gap_3())
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .items_start()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_0p5()
+                                .child(div().text_sm().font_medium().child("Keep my packs the same as the group"))
+                                .child(widgets::fine_print(
+                                    "Hopper asks before getting a pack someone shares with the group. Once you have one, when anyone changes a mod in it, your copy changes too. Your other instances don't change.",
+                                    cx,
+                                )),
+                        )
+                        .child(crate::switch::Switch::new("group-step").checked(in_step).on_click({
+                            let store = self.store.clone();
+                            move |v: &bool, _, cx| {
+                                let (id, v) = (step_id.clone(), *v);
+                                store.update(cx, |s, cx| s.set_in_step(&id, v, cx))
+                            }
+                        })),
+                )
+                .children(take_from)
+                .children(push_line)
         });
         let ask = (!g.me.joined).then(|| self.invitation(0, g, down, cx));
         let zone = self.take_out_zone(g, cx);
@@ -2800,6 +2885,7 @@ impl Render for FriendsPanel {
         let groups: Vec<Group> = s.mailbox_groups().to_vec();
         let down = matches!(status, SyncStatus::Down(_));
         let unsent = s.unsent_line();
+        let to_push = s.packs_to_push();
         let given_up = s.given_up();
         let live = s.friends_live();
         let body: AnyElement = match &status {
@@ -2866,6 +2952,43 @@ impl Render for FriendsPanel {
                                     .px_3()
                                     .items_start()
                                     .child(div().flex_1().min_w_0().text_sm().child(t)),
+                            ),
+                        )
+                    })
+                    // "Share my changes: When I press Push": what waits to
+                    // go out, and one button for all of it.
+                    .when(!to_push.is_empty(), |c| {
+                        let text = match to_push.as_slice() {
+                            [(_, name, 0)] => format!("{name} has changes you haven't sent."),
+                            [(_, name, n)] => format!("{name} has {} you haven't sent.", hopper::syncmode::changes_words(*n)),
+                            many => format!("{} packs have changes you haven't sent.", many.len()),
+                        };
+                        let label = match to_push.as_slice() {
+                            [(_, _, n)] => hopper::syncmode::push_label(*n),
+                            _ => "Push all".to_string(),
+                        };
+                        let roots: Vec<PathBuf> = to_push.iter().map(|(r, _, _)| r.clone()).collect();
+                        let store = self.store.clone();
+                        c.child(
+                            div().p_3().flex_none().child(
+                                widgets::notice_bar(theme.primary, IconName::Upload, cx).px_3().items_start().child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap_2()
+                                        .child(div().text_sm().child(text))
+                                        .child(
+                                            h_flex().justify_end().child(
+                                                Button::new("friends-push-all")
+                                                    .small()
+                                                    .outline()
+                                                    .icon(IconName::Upload)
+                                                    .label(label)
+                                                    .tooltip("Sends your changes to the people you share with")
+                                                    .on_click(move |_, _, cx| store.update(cx, |s, cx| s.push_changes(&roots, cx))),
+                                            ),
+                                        ),
+                                ),
                             ),
                         )
                     })

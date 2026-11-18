@@ -55,6 +55,7 @@ pub mod grouppack;
 pub mod groupdeps;
 pub mod groupstatus;
 pub mod groupsync;
+pub mod syncmode;
 pub mod history;
 pub mod hopperd;
 pub mod hopperd_nodes;

@@ -8,6 +8,10 @@
 //! closed, settings both sides changed, or a failed try), or say yes to
 //! mods from links this PC doesn't trust yet. "Pull now" is always there:
 //! it checks the group and takes everything in at once.
+//!
+//! With the sync choices of `hopper::syncmode` it also carries "Pull from
+//! Mia" (one button per member whose changes wait for the player) and
+//! "Push 3 changes" (this PC's own, held back until pressed).
 
 use crate::incoming_sources;
 use crate::notice_slot::{self, Notice, Tier};
@@ -30,7 +34,42 @@ pub fn look(status: &Status) -> (IconName, Tier) {
         Status::Cant { .. } => (IconName::CircleAlert, Tier::Choice),
         Status::Offline { .. } => (IconName::CircleOff, Tier::Info),
         Status::NeedsMod { .. } => (IconName::PackageX, Tier::Stop),
+        Status::Parked { .. } => (IconName::Users, Tier::Choice),
+        Status::ToPush { .. } => (IconName::Upload, Tier::Info),
     }
+}
+
+/// "Pull from Mia": takes in that member's waiting changes. Just the name
+/// when the page is narrow.
+pub fn pull_from_button(store: &Entity<Store>, root: &Path, who: &hopper::syncmode::Parked, pulling: bool, fit: notice_slot::Fit, ix: usize) -> Button {
+    let (store, root, id) = (store.clone(), root.to_path_buf(), who.id.clone());
+    // Two people's buttons must never both read "Pull".
+    let label = if fit.narrow { who.name.clone() } else { format!("Pull from {}", who.name) };
+    notice_slot::main_button(Button::new(("group-pull-from", ix)).small(), fit)
+        .icon(IconName::Download)
+        .label(label)
+        .disabled(pulling)
+        .tooltip(format!("Takes in {}'s changes now. Other people's keep waiting", who.name))
+        .on_click(move |_, _, cx| store.update(cx, |s, cx| s.pull_group_from(&root, &id, cx)))
+}
+
+/// "Push 3 changes": sends the changes held back at `roots`. Just "Push"
+/// when narrow.
+pub fn push_button(store: &Entity<Store>, roots: Vec<std::path::PathBuf>, changes: usize, pushing: bool, fit: notice_slot::Fit, id: &'static str) -> Button {
+    let store = store.clone();
+    let label = if pushing {
+        "Pushing...".to_string()
+    } else if fit.narrow {
+        "Push".to_string()
+    } else {
+        hopper::syncmode::push_label(changes)
+    };
+    notice_slot::main_button(Button::new(id).small(), fit)
+        .icon(IconName::Upload)
+        .label(label)
+        .disabled(pushing)
+        .tooltip("Sends your changes to the people you share with")
+        .on_click(move |_, _, cx| store.update(cx, |s, cx| s.push_changes(&roots, cx)))
 }
 
 /// The "Pull now" button; icon only when the page is narrow. In step there
@@ -79,9 +118,9 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     // What Pull now just did ("Took in 2 changes ...") is kept as it is: it
     // says what the player asked for.
     let (title, detail) = if in_step {
-        ("Same as the group", in_step_line(&detail, from_pull))
+        ("Same as the group".to_string(), in_step_line(&detail, from_pull))
     } else {
-        (status.label(), detail)
+        (status.title(), detail)
     };
     let mut n = Notice::new("group-status", tier, title).icon(icon).subject(detail);
     if in_step {
@@ -119,6 +158,20 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
                     });
                 })
         });
+    } else if let Status::Parked { from, .. } = &status {
+        // One button per member whose changes wait; the first leads.
+        for (ix, who) in from.iter().take(3).enumerate() {
+            let (store, root, who) = (store.clone(), root.to_path_buf(), who.clone());
+            if ix == 0 {
+                n = n.primary(move |fit| pull_from_button(&store, &root, &who, pulling, fit, ix));
+            } else {
+                n = n.action_fit(move |fit| pull_from_button(&store, &root, &who, pulling, notice_slot::Fit { lead: false, ..fit }, ix));
+            }
+        }
+    } else if let Status::ToPush { changes } = status {
+        let (store, root) = (store.clone(), root.to_path_buf());
+        let pushing = s.pushing_at(&root);
+        n = n.primary(move |fit| push_button(&store, vec![root.clone()], changes, pushing, fit, "group-push"));
     } else if matches!(status, Status::Cant { .. }) && !left_out.is_empty() {
         let (store, root) = (store.clone(), root.to_path_buf());
         n = n.primary(move |fit| {
@@ -133,8 +186,10 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
                 })
         });
     }
+    // Only the player's buttons bring the rest in: Pull now checks.
+    let nothing_to_pull = in_step || matches!(status, Status::Parked { .. } | Status::ToPush { .. });
     let (store, root) = (store.clone(), root.to_path_buf());
-    n = n.action_fit(move |fit| pull_button(&store, &root, pulling, in_step, fit.narrow, "group-pull"));
+    n = n.action_fit(move |fit| pull_button(&store, &root, pulling, nothing_to_pull, fit.narrow, "group-pull"));
     Some(n)
 }
 

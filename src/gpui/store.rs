@@ -27,6 +27,7 @@ mod panel_events;
 mod panel_slow;
 mod server_mods;
 mod server_offer;
+mod sync_modes;
 // Invite and SyncStatus are for the Friends screen being rebuilt on top.
 #[allow(unused_imports)]
 pub use friends::{FollowReq, FollowTarget, GroupMerged, Invite, RecipeApplied, SyncStatus, follow_pack, redeem};
@@ -688,6 +689,16 @@ pub struct Store {
     unsent: Vec<String>,
     /// A publish is on its way to the mailbox.
     publishing: bool,
+    /// "Share my changes: When I press Push": packs (instance ids) the
+    /// player pressed Push for, until they go out; what each held-back
+    /// pack has to send, as worked out for its look then (`share_sig`);
+    /// and the packs being worked out now.
+    push_now: HashSet<String>,
+    to_push: HashMap<String, sync_modes::ToPush>,
+    to_push_busy: HashSet<String>,
+    /// Group copies (local ids) taking in the changes of the members the
+    /// player pressed "Pull from" for, by those members' ids.
+    group_pull_from: HashMap<String, Vec<String>>,
     /// The last failed send the player was told about, so a retry that
     /// fails the same way doesn't say it again.
     publish_said: Option<String>,
@@ -1098,6 +1109,10 @@ impl Store {
             group_held: Default::default(),
             group_pulling: Default::default(),
             group_pulled: Default::default(),
+            push_now: Default::default(),
+            to_push: Default::default(),
+            to_push_busy: Default::default(),
+            group_pull_from: Default::default(),
             mailbox_checked: None,
             group_preview: None,
             group_loader_waiting: Default::default(),

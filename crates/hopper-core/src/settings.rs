@@ -2,7 +2,7 @@
 //! folder.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -138,6 +138,20 @@ pub struct FriendGroup {
     /// Group packs ("<from>/<inst>") this PC stopped following, so keeping
     /// in step doesn't follow them again.
     pub stopped: Vec<String>,
+    /// "Take changes from: Only <maker>": this PC takes in by itself only
+    /// what the group's maker sends; the others' changes wait until the
+    /// player pulls them (`crate::syncmode`). Means nothing on the maker's
+    /// own PC.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub owner_only: bool,
+}
+
+impl FriendGroup {
+    /// The member whose changes alone this PC takes in by itself, when the
+    /// group is set so (`me`: this PC's mailbox id).
+    pub fn only_from(&self, me: &str) -> Option<&str> {
+        (self.owner_only && !self.owner.is_empty() && self.owner != me).then_some(self.owner.as_str())
+    }
 }
 
 /// One pack to send to the relay: the friends and groups it goes to.
@@ -212,6 +226,16 @@ pub struct Settings {
     /// [`crate::groupsync`]).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub group_copies: Vec<crate::groupsync::PackCopy>,
+    /// "Share my changes: When I press Push": packs already shared keep
+    /// their changes on this PC until the player sends them
+    /// (`crate::syncmode`). Off: they go out right away.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub push_by_hand: bool,
+    /// The last code sent for each pack shared outside a group copy
+    /// (instance id to code): what a held-back pack is compared with to say
+    /// what a Push would send. Group copies keep theirs (`PackCopy::sent`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub pushed_codes: BTreeMap<String, String>,
     /// The newest mailbox event acted on once (a friend joining with a
     /// pack's invite, notices). Every start reads the whole feed again to
     /// list friends' packs; events up to here aren't acted on twice.
@@ -728,6 +752,8 @@ impl Default for Settings {
             mailbox_sent: Vec::new(),
             friend_groups: Vec::new(),
             group_copies: Vec::new(),
+            push_by_hand: false,
+            pushed_codes: BTreeMap::new(),
             mailbox_handled: 0,
             shared_instances: Vec::new(),
             share_prompt_done: false,
@@ -1130,6 +1156,7 @@ impl Settings {
         for g in &mut groups {
             if let Some(old) = self.friend_groups.iter().find(|o| o.id == g.id) {
                 g.stopped = old.stopped.clone();
+                g.owner_only = old.owner_only;
             }
         }
         let before = self.shared_with.len();
@@ -2082,6 +2109,33 @@ mod tests {
         // Out of the group: its shares go.
         assert!(s.set_friend_groups(Vec::new()));
         assert!(!s.shares_with_group("id-pizza", "crew"));
+    }
+
+    #[test]
+    fn take_changes_from_the_maker_is_kept_and_means_nothing_to_the_maker() {
+        let mut s = Settings::default();
+        let crew = FriendGroup { id: "crew".into(), members: vec!["me".into(), "sam".into()], owner: "sam".into(), ..Default::default() };
+        s.set_friend_groups(vec![crew.clone()]);
+        s.friend_groups[0].owner_only = true;
+        // The relay knows nothing of it: a refresh keeps this PC's choice.
+        s.set_friend_groups(vec![crew]);
+        assert!(s.friend_groups[0].owner_only);
+        assert_eq!(s.friend_groups[0].only_from("me"), Some("sam"));
+        assert_eq!(s.friend_groups[0].only_from("sam"), None, "the maker takes from everyone");
+    }
+
+    /// Held-back changes live in the pack and in the last code sent, both
+    /// saved: a restart finds them again, nothing kept only in memory.
+    #[test]
+    fn push_by_hand_and_the_last_codes_sent_survive_a_restart() {
+        let mut s = Settings { push_by_hand: true, ..Default::default() };
+        s.pushed_codes.insert("id-pizza".into(), "HOP1-code".into());
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(back.push_by_hand);
+        assert_eq!(back.pushed_codes.get("id-pizza").map(String::as_str), Some("HOP1-code"));
+        // An older settings file has neither: changes go out right away.
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!old.push_by_hand && old.pushed_codes.is_empty());
     }
 }
 

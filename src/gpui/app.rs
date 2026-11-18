@@ -36,6 +36,7 @@ gpui_kit::actions!(
         OpenSettings,
         ToggleAppearance,
         OpenCfKey,
+        OpenPushSetting,
         GoBack,
         GoForward,
         ClosePanel
@@ -1762,6 +1763,7 @@ impl Render for AppView {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::toggle_appearance))
             .on_action(cx.listener(|this, _: &OpenCfKey, _, cx| this.open_settings_at("cf-key", cx)))
+            .on_action(cx.listener(|this, _: &OpenPushSetting, _, cx| this.open_settings_at("push-by-hand", cx)))
             .on_action(cx.listener(|this, _: &GoLibrary, _, cx| this.go(Page::Library, cx)))
             .on_action(cx.listener(|this, _: &GoBack, window, cx| this.nav_step(true, window, cx)))
             .on_action(cx.listener(|this, _: &ClosePanel, _, cx| this.close_panel(cx)))
