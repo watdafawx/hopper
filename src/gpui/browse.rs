@@ -5852,7 +5852,7 @@ fn facts(m: &cf::Mod, target: Option<&Instance>, cx: &App) -> Option<Div> {
         }
         (None, None) => m.side(),
     };
-    // CurseForge doesn't say: what Modrinth says about the installed mod.
+    // CurseForge doesn't say: what Modrinth, else the jar, says about the installed mod.
     let mut from_modrinth = None;
     if env.is_none()
         && let Some(s) = addon.and_then(hopper::modsides::side_of)

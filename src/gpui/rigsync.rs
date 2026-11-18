@@ -3252,7 +3252,7 @@ cx.listener(move |this, e: &ClickEvent, window, cx| {
                         } else {
                             tags.side.as_ref().map_or("", |s| s.side.as_str())
                         },
-                        env_from_modrinth: tags.side.as_ref().is_some_and(|s| s.from == hopper::modsides::From::Modrinth),
+                        env_from: tags.side.as_ref().map(|s| s.from),
                         categories: &tags.categories,
                         modrinth: tags.modrinth,
                         ..Default::default()

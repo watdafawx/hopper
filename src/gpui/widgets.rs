@@ -479,9 +479,9 @@ pub struct ModTags<'a> {
     pub only_here: bool,
     /// "client" | "server" | "both" | "".
     pub env: &'a str,
-    /// Only Modrinth says where it runs (CurseForge doesn't): its chip's
-    /// tooltip says so.
-    pub env_from_modrinth: bool,
+    /// Who said where it runs, when it isn't CurseForge's tag (Modrinth, or
+    /// the jar): its chip's tooltip says so.
+    pub env_from: Option<hopper::modsides::From>,
     pub categories: &'a [String],
     pub modrinth: bool,
     /// Named in the instance's last game crash: why.
@@ -527,8 +527,8 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
             .id(ElementId::Name(format!("side-tag:{}", t.key).into()))
             .flex_none()
             .child(chip(color).child(label))
-            .when(t.env_from_modrinth, |d| {
-                let tip = SharedString::from(format!("{} (from Modrinth)", hopper::modsides::label(t.env)));
+            .when_some(t.env_from.and_then(|f| f.note()), |d, note| {
+                let tip = SharedString::from(format!("{} ({note})", hopper::modsides::label(t.env)));
                 d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
             });
         (label, el)

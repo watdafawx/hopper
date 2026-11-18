@@ -370,11 +370,13 @@ async fn list(
             }
             known.insert(a.file_name.to_lowercase());
             let s = scanned.get(&a.file_name.to_lowercase());
-            // CurseForge's tag, else the jar's own word, else Modrinth's.
+            // CurseForge's tag, else the jar's own word, else Modrinth's, else
+            // what the jar's dependencies declare.
             let (side, side_from) = match (side_label(&a.env), s.map(|s| s.side.as_str()).filter(|v| !v.is_empty())) {
                 ("", Some(own)) => (own.to_string(), ""),
                 ("", None) => match hopper_core::modsides::side_of(a) {
                     Some(r) if r.from == hopper_core::modsides::From::Modrinth => (r.side, "modrinth"),
+                    Some(r) if r.from == hopper_core::modsides::From::Jar => (r.side, "jar"),
                     _ => (String::new(), ""),
                 },
                 (cf, _) => (cf.to_string(), ""),

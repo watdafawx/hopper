@@ -94,8 +94,10 @@ pub struct Annotation {
 /// author keeps off servers. Authoritative signal: the pack's own server pack.
 /// Fallback: the mod's "Client"-only tag on CurseForge. Mods the user added
 /// are flagged only when their jar is silent and CurseForge's tags (or the
-/// same mod on Modrinth) say client-only; `sync_anyway` holds project ids the
-/// user overrode.
+/// same mod on Modrinth) say client-only; failing those, a jar whose
+/// dependencies declare it client-only ([`crate::deps::jar_side`], for mods
+/// that are on neither site, like GitHub ones). `sync_anyway` holds project
+/// ids the user overrode.
 pub fn annotate(
     mods: &mut [crate::model::ModInfo],
     inst: &crate::instances::Instance,
@@ -108,11 +110,13 @@ pub fn annotate(
         &|p| crate::synctiming::time_res("server pack list", "", 0, || current(p)),
         &crate::modrinth::sides_of,
         &crate::modrinth::sides_by_slug,
+        &|p| Some(crate::modsides::jar_side(p)).filter(|s| !s.is_empty()),
     )
 }
 
-/// [`annotate`] with the network parts passed in (the server pack's list and
-/// Modrinth's sides by jar and by slug), so tests can stand in for them.
+/// [`annotate`] with the outside parts passed in (the server pack's list,
+/// Modrinth's sides by jar and by slug, and what a jar says about its side),
+/// so tests can stand in for them.
 fn annotate_with(
     mods: &mut [crate::model::ModInfo],
     inst: &crate::instances::Instance,
@@ -120,6 +124,7 @@ fn annotate_with(
     server_pack: &dyn Fn(&crate::instances::PackRef) -> anyhow::Result<ServerPackSet>,
     sides_of: &dyn Fn(&[PathBuf]) -> HashMap<String, String>,
     sides_by_slug: &dyn Fn(&[(String, String)]) -> HashMap<String, String>,
+    jar_side: &dyn Fn(&std::path::Path) -> Option<String>,
 ) -> Annotation {
     let mut out = Annotation::default();
     let matcher = match &inst.pack {
@@ -198,6 +203,28 @@ fn annotate_with(
         }
     }
     guessed.extend(more);
+
+    // Neither site says (a mod from GitHub, say): what the jar itself
+    // declares, the last resort. Same handling as Modrinth's word: a tracked
+    // mod's client-only verdict is a won't-sync the user can override, an
+    // untracked one's is its side. Mods CurseForge tagged are settled above.
+    for m in mods.iter_mut() {
+        if !m.side.is_empty() || guessed.contains_key(&m.file_name) {
+            continue;
+        }
+        let tracked = inst.addon_by_file(&m.file_name);
+        if tracked.is_some_and(|a| !asks(a) || !a.env.is_empty()) {
+            continue;
+        }
+        let Some(side) = jar_side(&inst.mods_dir().join(&m.file_name)).filter(|s| matches!(s.as_str(), "client" | "server")) else {
+            continue;
+        };
+        if tracked.is_some() {
+            guessed.insert(m.file_name.clone(), (side, "Client-only (from the jar)"));
+        } else {
+            m.side = side;
+        }
+    }
 
     for m in mods.iter_mut() {
         let Some(a) = inst.addon_by_file(&m.file_name) else {
@@ -611,9 +638,10 @@ mod tests {
                 .collect()
         };
         let no_slugs = |_: &[(String, String)]| HashMap::new();
+        let no_jar = |_: &std::path::Path| -> Option<String> { None };
 
         let mut mods = fresh();
-        let a = annotate_with(&mut mods, &inst, &HashSet::new(), &gone, &modrinth, &no_slugs);
+        let a = annotate_with(&mut mods, &inst, &HashSet::new(), &gone, &modrinth, &no_slugs, &no_jar);
         assert_eq!(mods[0].wont_sync.as_deref(), Some("Client-only on Modrinth"));
         assert_eq!(mods[0].side, "client");
         // CurseForge's own tag says the server needs it: it outranks Modrinth.
@@ -624,7 +652,7 @@ mod tests {
 
         // "Sync anyway" still wins.
         let mut mods = fresh();
-        annotate_with(&mut mods, &inst, &HashSet::from([10]), &gone, &modrinth, &no_slugs);
+        annotate_with(&mut mods, &inst, &HashSet::from([10]), &gone, &modrinth, &no_slugs, &no_jar);
         assert_eq!(mods[0].wont_sync, None);
 
         // With a readable server pack, it alone decides for pack mods.
@@ -632,9 +660,77 @@ mod tests {
             Ok(ServerPackSet { jars: ["ipn.jar".to_string()].into(), ..Default::default() })
         };
         let mut mods = fresh();
-        annotate_with(&mut mods, &inst, &HashSet::new(), &pack, &modrinth, &no_slugs);
+        annotate_with(&mut mods, &inst, &HashSet::new(), &pack, &modrinth, &no_slugs, &no_jar);
         assert_eq!(mods[0].wont_sync, None);
         assert!(mods[1].wont_sync.is_some() && mods[2].wont_sync.is_some());
+    }
+
+    /// A mod on GitHub only: neither site knows it, but its jar says it is
+    /// client-only (Mob Map Icons). It stays off the server like a
+    /// Modrinth-says-client one, "Sync anyway" still sends it, and a site's
+    /// word outranks the jar.
+    #[test]
+    fn a_jar_that_says_client_only_stays_off_the_server() {
+        use crate::instances::{Addon, Instance, PackRef};
+        let mut inst = Instance::default();
+        inst.pack = Some(PackRef { project_id: 1, file_id: 2, server_pack_file_id: 0, ..Default::default() });
+        let addon = |id: u64, file: &str, env: &str, from_pack: bool| Addon {
+            project_id: id,
+            file_name: file.into(),
+            from_pack,
+            enabled: true,
+            env: env.into(),
+            class_id: cf::CLASS_MODS,
+            ..Default::default()
+        };
+        inst.addons = vec![
+            addon(20, "mob-map-icons.jar", "", false),
+            addon(21, "cf-says-both.jar", "both", false),
+            addon(22, "mr-says-both.jar", "", false),
+            addon(23, "pack-mod.jar", "", true),
+        ];
+        let fresh = || -> Vec<crate::model::ModInfo> {
+            ["mob-map-icons.jar", "cf-says-both.jar", "mr-says-both.jar", "pack-mod.jar", "loose.jar"]
+                .map(|f| crate::model::ModInfo { file_name: f.into(), ..Default::default() })
+                .to_vec()
+        };
+        let gone = |_: &PackRef| -> anyhow::Result<ServerPackSet> { Err(anyhow!("404")) };
+        let modrinth = |paths: &[PathBuf]| -> HashMap<String, String> {
+            paths
+                .iter()
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .filter(|n| n == "mr-says-both.jar")
+                .map(|n| (n, "both".to_string()))
+                .collect()
+        };
+        let no_slugs = |_: &[(String, String)]| HashMap::new();
+        // Every jar claims client-only; the sites above must still win.
+        let jar = |_: &std::path::Path| Some("client".to_string());
+
+        let mut mods = fresh();
+        annotate_with(&mut mods, &inst, &HashSet::new(), &gone, &modrinth, &no_slugs, &jar);
+        // Tracked, on neither site: a won't-sync the user can override.
+        assert_eq!(mods[0].wont_sync.as_deref(), Some("Client-only (from the jar)"));
+        assert_eq!(mods[0].side, "client");
+        // CurseForge and Modrinth say the server needs it: the jar doesn't outrank them.
+        assert_eq!(mods[1].wont_sync, None);
+        assert_eq!(mods[2].wont_sync, None);
+        assert_eq!(mods[2].side, "both");
+        // A pack mod with no tag follows the same rule when there is no server pack.
+        assert_eq!(mods[3].wont_sync.as_deref(), Some("Client-only (from the jar)"));
+        // Not in the instance's list at all: its side is the jar's word.
+        assert_eq!(mods[4].side, "client");
+
+        // "Sync anyway" still sends it.
+        let mut mods = fresh();
+        annotate_with(&mut mods, &inst, &HashSet::from([20]), &gone, &modrinth, &no_slugs, &jar);
+        assert_eq!(mods[0].wont_sync, None);
+        assert_eq!(mods[0].side, "");
+
+        // A jar that says nothing leaves it alone.
+        let mut mods = fresh();
+        annotate_with(&mut mods, &inst, &HashSet::new(), &gone, &modrinth, &no_slugs, &|_| None);
+        assert!(mods.iter().all(|m| m.wont_sync.is_none()));
     }
 
     #[test]

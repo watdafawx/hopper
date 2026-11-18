@@ -399,6 +399,55 @@ fn jar(path: &Path) -> Option<Arc<JarInfo>> {
     Some(info)
 }
 
+/// Where a (Neo)Forge mod runs, from its mods.toml: "client" when every
+/// mod in the file declares `side = "CLIENT"` on all of its dependencies
+/// on Minecraft and the loader. A mod with no such dependency, or one that
+/// says BOTH or SERVER (or nothing: the loader's default is BOTH), isn't
+/// judged: `None`, never a guess of "both".
+fn side_from_mods_toml(t: &Toml) -> Option<&'static str> {
+    if t.mods.is_empty() {
+        return None;
+    }
+    let all_client = t.mods.iter().all(|m| {
+        let own: Vec<&TomlDep> = t
+            .dependencies
+            .iter()
+            .filter(|(owner, _)| owner.eq_ignore_ascii_case(m.mod_id.trim()))
+            .flat_map(|(_, deps)| deps)
+            .filter(|d| matches!(d.mod_id.trim().to_lowercase().as_str(), "minecraft" | "neoforge" | "forge"))
+            .collect();
+        !own.is_empty() && own.iter().all(|d| d.side.trim().eq_ignore_ascii_case("CLIENT"))
+    });
+    all_client.then_some("client")
+}
+
+/// Where a Fabric or Quilt mod runs, from its fabric.mod.json
+/// `environment`: "client" or "server"; `*` or none isn't judged.
+fn side_from_fabric_json(text: &str) -> Option<&'static str> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    match v["environment"].as_str()?.trim().to_ascii_lowercase().as_str() {
+        "client" => Some("client"),
+        "server" => Some("server"),
+        _ => None,
+    }
+}
+
+/// Where the jar says its mod runs: "client" or "server", `None` when it
+/// doesn't say (see [`side_from_mods_toml`], [`side_from_fabric_json`]). The
+/// mods.toml wins when a jar has both files, as the loader reads it. Reads
+/// only those small entries, not nested jars.
+pub fn jar_side(path: &Path) -> Option<&'static str> {
+    let mut z = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
+    for meta in ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"] {
+        if let Some(t) = read(&mut z, meta).and_then(|x| toml::from_str::<Toml>(&x).ok())
+            && !t.mods.is_empty()
+        {
+            return side_from_mods_toml(&t);
+        }
+    }
+    read(&mut z, "fabric.mod.json").and_then(|t| side_from_fabric_json(&t))
+}
+
 /// The mod ids a jar provides (nested jars included).
 pub fn provides(path: &Path) -> Vec<String> {
     jar(path).map(|j| j.provides.clone()).unwrap_or_default()
@@ -1844,6 +1893,137 @@ version=\"4.5\"
                 println!("  {} [{}] {}", x.mod_name, x.file_name, x.text());
             }
         }
+    }
+
+    /// A NeoForge mods.toml for mod `id` with these dependency blocks
+    /// (mod id of the dependency, side).
+    fn neo_toml(id: &str, deps: &[(&str, &str)]) -> String {
+        let mut t = format!("modLoader=\"javafml\"
+loaderVersion=\"[1,)\"
+[[mods]]
+modId=\"{id}\"
+version=\"1\"
+");
+        for (dep, side) in deps {
+            t += &format!("[[dependencies.{id}]]
+modId=\"{dep}\"
+type=\"required\"
+versionRange=\"[1,)\"
+");
+            if !side.is_empty() {
+                t += &format!("side=\"{side}\"
+");
+            }
+        }
+        t
+    }
+
+    fn toml_side(text: &str) -> Option<&'static str> {
+        side_from_mods_toml(&toml::from_str::<Toml>(text).unwrap())
+    }
+
+    #[test]
+    fn mods_toml_side_is_client_only_when_every_loader_dependency_says_so() {
+        // Mob Map Icons: minecraft and neoforge, both CLIENT.
+        let client = neo_toml("mob_map_icons", &[("neoforge", "CLIENT"), ("minecraft", "CLIENT")]);
+        assert_eq!(toml_side(&client), Some("client"));
+        // Case of the side doesn't matter.
+        assert_eq!(toml_side(&neo_toml("m", &[("minecraft", "client")])), Some("client"));
+        // Mixed, BOTH, SERVER or no side (the loader's default is BOTH): not judged.
+        assert_eq!(toml_side(&neo_toml("m", &[("neoforge", "CLIENT"), ("minecraft", "BOTH")])), None);
+        assert_eq!(toml_side(&neo_toml("m", &[("minecraft", "BOTH")])), None);
+        assert_eq!(toml_side(&neo_toml("m", &[("minecraft", "SERVER")])), None);
+        assert_eq!(toml_side(&neo_toml("m", &[("neoforge", "CLIENT"), ("minecraft", "")])), None);
+        // No dependencies at all.
+        assert_eq!(toml_side(&neo_toml("m", &[])), None);
+        // A dependency on another mod says nothing about this one.
+        assert_eq!(toml_side(&neo_toml("m", &[("jei", "CLIENT")])), None);
+        // ...and doesn't spoil a client-only one: only minecraft and the loader count.
+        let mut with_other = neo_toml("m", &[("minecraft", "CLIENT")]);
+        with_other += "[[dependencies.m]]
+modId=\"jei\"
+type=\"optional\"
+versionRange=\"[1,)\"
+side=\"BOTH\"
+";
+        assert_eq!(toml_side(&with_other), Some("client"));
+    }
+
+    #[test]
+    fn mods_toml_side_ignores_other_mods_dependency_blocks() {
+        // Blocks under another modid (a bundled library) aren't this mod's.
+        let mut t = neo_toml("mine", &[("minecraft", "CLIENT")]);
+        t += "[[dependencies.other]]
+modId=\"minecraft\"
+type=\"required\"
+versionRange=\"[1,)\"
+side=\"BOTH\"
+";
+        assert_eq!(toml_side(&t), Some("client"));
+        // The other way round: this mod has no block of its own.
+        let t = neo_toml("other", &[("minecraft", "CLIENT")]).replacen("modId=\"other\"", "modId=\"mine\"", 1);
+        assert_eq!(toml_side(&t), None);
+        // Forge: mods.toml with `mandatory` and a `forge` dependency.
+        let forge = "modLoader=\"javafml\"
+[[mods]]
+modId=\"f\"
+[[dependencies.f]]
+modId=\"forge\"
+mandatory=true
+versionRange=\"[47,)\"
+side=\"CLIENT\"
+[[dependencies.f]]
+modId=\"minecraft\"
+mandatory=true
+versionRange=\"[1.20.1]\"
+side=\"CLIENT\"
+";
+        assert_eq!(toml_side(forge), Some("client"));
+        // No [[mods]] at all.
+        assert_eq!(toml_side("[[dependencies.x]]
+modId=\"minecraft\"
+side=\"CLIENT\"
+"), None);
+    }
+
+    #[test]
+    fn fabric_environment_decides_the_side() {
+        let env = |v: &str| side_from_fabric_json(&format!(r#"{{"id":"x","environment":{v}}}"#));
+        assert_eq!(env(r#""client""#), Some("client"));
+        assert_eq!(env(r#""server""#), Some("server"));
+        assert_eq!(env(r#""*""#), None);
+        assert_eq!(env(r#""Client ""#), Some("client"));
+        assert_eq!(env("1"), None);
+        assert_eq!(side_from_fabric_json(r#"{"id":"x"}"#), None);
+        assert_eq!(side_from_fabric_json("not json"), None);
+    }
+
+    #[test]
+    fn jar_side_reads_the_jars_own_files() {
+        let dir = std::env::temp_dir().join(format!("hopper-deps-side-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = neo_toml("mob_map_icons", &[("neoforge", "CLIENT"), ("minecraft", "CLIENT")]);
+        let both = neo_toml("m", &[("minecraft", "BOTH")]);
+        let write = |name: &str, files: &[(&str, &str)]| {
+            let p = dir.join(name);
+            jar(&p, files);
+            p
+        };
+        assert_eq!(jar_side(&write("neo.jar", &[("META-INF/neoforge.mods.toml", &client)])), Some("client"));
+        assert_eq!(jar_side(&write("forge.jar", &[("META-INF/mods.toml", &client)])), Some("client"));
+        assert_eq!(jar_side(&write("mixed.jar", &[("META-INF/neoforge.mods.toml", &both)])), None);
+        assert_eq!(jar_side(&write("fab.jar", &[("fabric.mod.json", r#"{"id":"f","environment":"client"}"#)])), Some("client"));
+        assert_eq!(jar_side(&write("srv.jar", &[("fabric.mod.json", r#"{"id":"f","environment":"server"}"#)])), Some("server"));
+        assert_eq!(jar_side(&write("star.jar", &[("fabric.mod.json", r#"{"id":"f","environment":"*"}"#)])), None);
+        // A jar with both files is read by its mods.toml, as the loader does.
+        let multi = write("multi.jar", &[("META-INF/neoforge.mods.toml", &both), ("fabric.mod.json", r#"{"id":"f","environment":"client"}"#)]);
+        assert_eq!(jar_side(&multi), None);
+        // Not a zip, missing, or no metadata at all.
+        std::fs::write(dir.join("junk.jar"), "nope").unwrap();
+        assert_eq!(jar_side(&dir.join("junk.jar")), None);
+        assert_eq!(jar_side(&dir.join("gone.jar")), None);
+        assert_eq!(jar_side(&write("empty.jar", &[("readme.txt", "hi")])), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
