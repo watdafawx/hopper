@@ -6,6 +6,7 @@
 
 use crate::drag_pick;
 use crate::peers::PeersView;
+use crate::shared_settings;
 use crate::store::{FollowReq, FollowTarget, Store, SyncStatus};
 use crate::widgets::{self, Clickable as _};
 use crate::widgets::ToastAction as _;
@@ -1872,7 +1873,7 @@ impl FriendsPanel {
             })
             .collect();
         let n_packs = pack_rows.len() + my_rows.len();
-        let settings_rows = self.shared_settings_rows(g, cx);
+        let settings_block = self.shared_settings_block(g, cx);
         let gid = g.id.clone();
         // Only the group's maker adds people; say who, where it can't be done.
         let add = if g.me.joined {
@@ -1991,66 +1992,162 @@ impl FriendsPanel {
                     cx,
                 )))
             })
-            .when(!settings_rows.is_empty(), |c| c.child(cap("Shared settings", Some(settings_rows.len()), None, cx)).children(settings_rows))
+            .children(settings_block)
             .child(cap("People", Some(member_rows.len()), add.map(|b| b.into_any_element()), cx))
             .children(member_rows)
             .into_any_element();
         (Some(top), body)
     }
 
-    /// The mods whose settings the group shares, in this PC's copies of
-    /// its packs: who started sharing each, and Stop.
-    fn shared_settings_rows(&self, g: &Group, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let s = self.store.read(cx);
-        if !s.settings_sharing() {
+    /// The "Shared settings" section: one row per shared mod while there
+    /// are a few, a summary card with Manage and Stop all once there are
+    /// many (a row is ~60 px, so twenty would push People out of view).
+    fn shared_settings_block(&self, g: &Group, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let items = shared_settings::shared_mods(self.store.read(cx), &g.id);
+        if items.is_empty() {
             return Vec::new();
         }
-        let me = s.mailbox_id();
-        let mut out = Vec::new();
-        for c in s.settings().group_copies.iter().filter(|c| c.group == g.id) {
-            let Some(inst) = s.instances().iter().find(|i| i.id == c.local) else { continue };
-            for (m, mc) in c.configs.shared() {
-                let a = inst.addons.iter().find(|a| hopper::groupsync::addon_key(a) == *m);
-                let (name, icon, pid) = match a {
-                    Some(a) => (a.name.clone(), s.image(&a.icon).map(Path::to_path_buf), a.project_id),
-                    None => ("A mod you don't have".to_string(), None, 0),
-                };
-                let n = c.configs.count(m);
-                let who = if mc.shared.by == me { "you".to_string() } else { name_or(&mc.shared.name, "a friend") };
-                let what = match n {
-                    0 => format!("Shared by {who} · no settings changed yet"),
-                    1 => format!("Shared by {who} · 1 setting changed"),
-                    n => format!("Shared by {who} · {n} settings changed"),
-                };
-                let kept = s.settings_kept(&inst.root, m);
-                let ix = out.len();
-                let (root, key, store, view) = (inst.root.clone(), m.clone(), self.store.clone(), cx.entity());
-                out.push(
+        if !shared_settings::summarised(items.len()) {
+            return std::iter::once(cap("Shared settings", Some(items.len()), None, cx).into_any_element())
+                .chain(self.shared_settings_rows(&items, cx))
+                .collect();
+        }
+        let theme = cx.theme().clone();
+        let n = items.len();
+        let (gid, gname) = (g.id.clone(), g.name.clone());
+        // Overlapping icons: each sits in a slot narrower than itself, so the
+        // next one covers its edge and the row's width is the real one (a
+        // negative margin leaves the row too wide). Each is ringed in the
+        // panel's colour so the edges stay apart.
+        let shown = items.len().min(shared_settings::ICONS_SHOWN);
+        let icons = items.iter().take(shown).enumerate().map(|(i, m)| {
+            div()
+                .flex_none()
+                .w(px(if i + 1 == shown { shared_settings::ICON_RING } else { shared_settings::ICON_STRIDE }))
+                .child(
+                    div()
+                        .size(px(shared_settings::ICON_RING))
+                        .flex_none()
+                        .rounded(theme.radius)
+                        .border_2()
+                        .border_color(theme.background)
+                        .child(widgets::thumb(m.icon.as_deref(), rems(1.5), cx)),
+                )
+        });
+        let targets: Vec<(PathBuf, String)> = items.iter().map(|m| (m.root.clone(), m.key.clone())).collect();
+        let (g2, n2) = (gname.clone(), n);
+        vec![
+            cap_with("Shared settings", Some(format!("{n} mods")), None, cx).into_any_element(),
+            v_flex()
+                .mx_3()
+                .mt_1()
+                .p_3()
+                .gap_2()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.border)
+                .child(
                     h_flex()
-                        .id(SharedString::from(format!("gs:{ix}")))
                         .gap_2()
-                        .px_3()
-                        .py_1()
-                        .hover(|s| widgets::row_hover(s, cx))
+                        .items_center()
+                        .child(h_flex().items_center().children(icons))
+                        .children(shared_settings::more_label(n).map(|t| widgets::caption(t, cx).text_xs())),
+                )
+                .child(div().text_sm().child(shared_settings::changed_line(shared_settings::total_changed(&items))))
+                .child(
+                    h_flex()
+                        .gap_2()
                         .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .child(div().text_sm().child(widgets::mod_link(("gs-name", ix), name, icon.as_deref(), pid, move |p, _, cx| view.update(cx, |_, cx| cx.emit(FriendsEvent::Project(p))), cx)))
-                                .child(widgets::caption(format!("{what} · {}", inst.name), cx).text_xs().truncate()),
-                        )
-                        .when(kept, |r| r.child(widgets::chip(cx.theme().muted_foreground).child("Keeping yours")))
-                        .child(
-                            Button::new(SharedString::from(format!("gs-stop:{ix}")))
+                            Button::new("gs-manage")
                                 .xsmall()
                                 .outline()
-                                .label("Stop")
-                                .tooltip("Stop sharing this mod's settings. Everyone keeps theirs as they are now.")
-                                .on_click(move |_, _, cx| store.update(cx, |s, cx| s.set_settings_shared(&root, &key, false, cx))),
+                                .label("Manage...")
+                                .tooltip("See every shared mod and stop several at once")
+                                .on_click(cx.listener(move |this, _, window, cx| this.manage_shared(gid.clone(), gname.clone(), window, cx))),
                         )
-                        .into_any_element(),
-                );
-            }
+                        .child(
+                            Button::new("gs-stop-all")
+                                .xsmall()
+                                .outline()
+                                .text_color(theme.muted_foreground)
+                                .label("Stop all")
+                                .tooltip("Stop sharing every mod's settings with this group")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    let targets = targets.clone();
+                                    this.confirm_group(
+                                        format!("Stop sharing settings for {n2} mods?"),
+                                        format!(
+                                            "Hopper stops sharing the settings of {n2} mods with {g2}. Everyone keeps their settings as they are now, yours too."
+                                        ),
+                                        "Stop all",
+                                        Rc::new(move |s: &mut Store, cx: &mut Context<Store>| {
+                                            for (root, key) in &targets {
+                                                s.set_settings_shared(root, key, false, cx);
+                                            }
+                                        }),
+                                        window,
+                                        cx,
+                                    )
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        ]
+    }
+
+    /// Opens the Manage dialog for the group's shared settings.
+    fn manage_shared(&mut self, gid: String, gname: String, window: &Window, cx: &mut Context<Self>) {
+        let handle = window.window_handle();
+        let (store, panel) = (self.store.clone(), cx.entity());
+        cx.defer(move |cx| {
+            handle.update(cx, |_, window, cx| shared_settings::open(store, panel, gid, gname, window, cx)).ok();
+        });
+    }
+
+    /// One row per shared mod: who started sharing it, and Stop.
+    fn shared_settings_rows(&self, items: &[shared_settings::SharedMod], cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let s = self.store.read(cx);
+        let mut out = Vec::new();
+        for (ix, m) in items.iter().enumerate() {
+            let what = match m.changed {
+                0 => format!("Shared by {} \u{b7} no settings changed yet", m.who),
+                1 => format!("Shared by {} \u{b7} 1 setting changed", m.who),
+                n => format!("Shared by {} \u{b7} {n} settings changed", m.who),
+            };
+            let kept = s.settings_kept(&m.root, &m.key);
+            let (root, key, store, view) = (m.root.clone(), m.key.clone(), self.store.clone(), cx.entity());
+            out.push(
+                h_flex()
+                    .id(SharedString::from(format!("gs:{ix}")))
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .hover(|s| widgets::row_hover(s, cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_sm().child(widgets::mod_link(
+                                ("gs-name", ix),
+                                m.name.clone(),
+                                m.icon.as_deref(),
+                                m.project,
+                                move |p, _, cx| view.update(cx, |_, cx| cx.emit(FriendsEvent::Project(p))),
+                                cx,
+                            )))
+                            .child(widgets::caption(format!("{what} \u{b7} {}", m.instance), cx).text_xs().truncate()),
+                    )
+                    .when(kept, |r| r.child(widgets::chip(cx.theme().muted_foreground).child("Keeping yours")))
+                    .child(
+                        Button::new(SharedString::from(format!("gs-stop:{ix}")))
+                            .xsmall()
+                            .outline()
+                            .label("Stop")
+                            .tooltip("Stop sharing this mod's settings. Everyone keeps theirs as they are now.")
+                            .on_click(move |_, _, cx| store.update(cx, |s, cx| s.set_settings_shared(&root, &key, false, cx))),
+                    )
+                    .into_any_element(),
+            );
         }
         out
     }
@@ -3118,13 +3215,18 @@ fn hits(text: &str, words: &[String]) -> bool {
 /// A section's caption: its title and count, and something on the right
 /// (a sort menu).
 fn cap(title: &'static str, count: Option<usize>, right: Option<AnyElement>, cx: &App) -> Div {
+    cap_with(title, count.map(|n| n.to_string()), right, cx)
+}
+
+/// [`cap`] with words beside the title ("14 mods") instead of a number.
+fn cap_with(title: &'static str, note: Option<String>, right: Option<AnyElement>, cx: &App) -> Div {
     h_flex()
         .gap_1p5()
         .px_3()
         .pt_2p5()
         .pb_1()
         .child(widgets::caption(title, cx).text_xs().font_medium())
-        .children(count.map(|n| widgets::caption(n.to_string(), cx).text_xs()))
+        .children(note.map(|n| widgets::caption(n, cx).text_xs()))
         .child(div().flex_1())
         .children(right)
 }
@@ -3575,7 +3677,7 @@ fn now() -> u64 {
 }
 
 /// "5 min ago", "2 h ago", "3 days ago", "4 months ago".
-fn ago(at: u64) -> String {
+pub(crate) fn ago(at: u64) -> String {
     let d = now().saturating_sub(at);
     let (n, unit) = match d {
         0..60 => return "just now".into(),
@@ -4246,7 +4348,7 @@ pub fn hand_added_line(names: &[String], who: &str) -> String {
     }
 }
 
-fn name_or(name: &str, or: &str) -> String {
+pub(crate) fn name_or(name: &str, or: &str) -> String {
     if name.trim().is_empty() { or.to_string() } else { name.to_string() }
 }
 

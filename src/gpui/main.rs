@@ -35,6 +35,7 @@ mod job_toast;
 #[cfg(windows)]
 mod fetch_window;
 mod friends;
+mod shared_settings;
 mod crash_help;
 mod crash_view;
 mod hero;
