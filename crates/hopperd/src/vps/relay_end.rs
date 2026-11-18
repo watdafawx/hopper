@@ -49,7 +49,7 @@ const MAX_FAILS: usize = 10;
 const FAIL_WINDOW: Duration = Duration::from_secs(600);
 /// Player connections at once from one /24 or /64 (a stream each, out of the
 /// tunnel's 256).
-const MAX_PER_IP: usize = 8;
+const MAX_PER_IP: usize = 16;
 const MAX_AUTH_IP: usize = 4;
 const MAX_AUTH: usize = 64;
 const MAX_LOGINS: usize = 192;

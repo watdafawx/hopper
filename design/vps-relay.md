@@ -535,7 +535,7 @@ through the codec, `tests.rs`), the router's new entry
   server id (one server per relay until B7). Home re-checks the tag
   against its own list of relayed servers and drops anything else, so the
   relay can't reach a server that isn't set to use it.
-- **Players per address**: at most 8 at once from one IP on the game port;
+- **Players per address**: at most 16 at once from one /24 (IPv6 /64) on the game port;
   the tunnel carries at most 256 streams (window 256 KiB each).
 - **The card sits at the top of the Overview's main column**, above the
   console, not in the 290 px rail: three numbers side by side don't fit
@@ -567,7 +567,7 @@ through the codec, `tests.rs`), the router's new entry
 | What | Where | Access |
 |---|---|---|
 | Relay tunnel port (25566) | VPS | TLS with the relay's own CA, ALPN `hopper-relay`, then the relay key; per-IP failure limit |
-| Relay game port (25565) | VPS | Players; bytes only ever go to the paired home's router, or the relay's own "offline" answer; 8 at once per IP |
+| Relay game port (25565) | VPS | Players; bytes only ever go to the paired home's router, or the relay's own "offline" answer; 16 at once per /24 |
 | `GET/PUT /api/v1/vps-relay` | home panel | `require_owner`; the key is write-only (`has_key`), fingerprint and key format checked, servers must exist |
 | `POST /api/v1/vps-relay/retry` | home panel | `require_owner` |
 | `GET /api/v1/servers/{id}/vps-relay` | home panel | `require`, plus the per-server access check every `/servers/{id}/` route gets |
