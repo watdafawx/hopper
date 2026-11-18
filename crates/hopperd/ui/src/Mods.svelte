@@ -20,6 +20,7 @@
   import { onDestroy } from 'svelte';
   import DropJars from './DropJars.svelte';
   import ModPeek from './ModPeek.svelte';
+  import AuthorPeek from './AuthorPeek.svelte';
   import ModVersions from './ModVersions.svelte';
   import ReviewUpdates from './ReviewUpdates.svelte';
   import ModBackups from './ModBackups.svelte';
@@ -91,6 +92,8 @@
   let cfgPick = $state(null);
   // The mod whose config shows in the side panel (in place of its details).
   let cfgFor = $state(null);
+  // The author whose projects show in the side panel: `{ pid, name, source }`, from one of their mods.
+  let authorFor = $state(null);
   const cfgMod = $derived(cfgFor && cfg.sid === sid ? modForFile(cfgFor.file) : null);
   // Which mods have config files, and changed ones (the icon on each row).
   $effect(() => {
@@ -100,6 +103,7 @@
   function openCfg(m, e) {
     e?.stopPropagation();
     picked = null;
+    authorFor = null;
     cfgFor = cfgFor?.file === m.file ? null : m;
   }
   let loaderOpen = $state(false);
@@ -559,7 +563,16 @@
   function peek(m, e) {
     e?.stopPropagation();
     cfgFor = null;
+    authorFor = null;
     picked = picked?.file === m.file ? null : peekOf(m);
+  }
+
+  /** Opens (or closes) the side panel with everything this mod's author made. */
+  function openAuthor(m, e) {
+    e?.stopPropagation();
+    cfgFor = null;
+    picked = null;
+    authorFor = authorFor?.pid === m.project_id ? null : { pid: m.project_id, name: m.author, source: m.source };
   }
 
   /** Moves the key cursor (clamped) and scrolls its row into view. */
@@ -593,7 +606,7 @@
     else if (e.key === 'Home') moveCursor(0);
     else if (e.key === 'End') moveCursor(shown.length - 1);
     else if (e.key === ' ' && shown[cursor]) toggle(shown[cursor]);
-    else if (e.key === 'Enter' && shown[cursor]) picked = peekOf(shown[cursor]);
+    else if (e.key === 'Enter' && shown[cursor]) (authorFor = null, picked = peekOf(shown[cursor]));
     else return;
     e.preventDefault();
   }
@@ -754,6 +767,7 @@
 
   async function first() {
     picked = null;
+    authorFor = null;
     updates = null;
     data = null;
     selected = new Set();
@@ -800,6 +814,8 @@
   const browseOf = (m) => (m.source === 'modrinth' ? m.mr_project : onSite(m) ? m.project_id : '');
   // A mod named in an update's "breaks X", for its icon and side panel.
   const byName = (n) => mods.find((m) => m.name === n) || null;
+  // The author is a link when the mod is a CurseForge or Modrinth project (the panel lists their projects from it).
+  const authorLink = (m) => !!m.author && onSite(m) && !!m.project_id && m.project_id !== '0';
   const nameTip = (m) => [m.author ? `by ${m.author}` : '', 'Details'].filter(Boolean).join('\n');
 
   // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
@@ -824,7 +840,7 @@
 
 <!-- A row's cell in a movable column. -->
 {#snippet modCell(c, m, ix, swOn)}
-  {#if c === 'author'}<span class="c-author muted ell" title={m.author}>{m.author}</span>
+  {#if c === 'author'}{#if authorLink(m)}<button class="c-author by ell" class:on={authorFor?.pid === m.project_id} title="Everything {m.author} made" onclick={(e) => openAuthor(m, e)}>{m.author}</button>{:else}<span class="c-author muted ell" title={m.author}>{m.author}</span>{/if}
   {:else if c === 'side'}{@const I = sideOf(m)[0]}<span class="c-side muted" class:unk={!SIDE[m.side]} title={sideTip(m)}><I size={13} /></span>
   {:else if c === 'on'}<span class="c-on"><label class="switch" class:pend={swOn !== m.enabled} title={m.enabled ? 'Turn off' : 'Turn on'} onpointerdown={(e) => switchDown(e, m, ix)}><input type="checkbox" checked={swOn} onclick={(e) => toggle(m, e)} /><span></span></label></span>
   {:else}<span class="c-added muted" title={dateOf(m.date_added)}>{ago(m.date_added)}</span>{/if}
@@ -998,8 +1014,9 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
           {/if}
         {/if}
       </div>
-      {#if cfgFor && cfgMod}<ModConfigPanel {server} mod={cfgFor} cmod={cfgMod} onClose={() => (cfgFor = null)} onOpenPage={openConfigs ? () => openConfigs(cfgMod.key) : null} />
-      {:else if pickedMod}<ModPeek {server} mod={pickedMod} onClose={() => (picked = null)} onChanged={changed} onUpdate={(m) => applyUpdates([m.project_id])} onFollow={(m) => (sourceFor = { follow: m })} onConfig={cfg.sid === sid && modForFile(pickedMod.file) ? () => openCfg(pickedMod) : null} />{/if}
+      {#if authorFor}<AuthorPeek project={authorFor.pid} name={authorFor.name} source={authorFor.source} {mods} onClose={() => (authorFor = null)} onOpenMod={(m) => { authorFor = null; picked = peekOf(m); }} />
+      {:else if cfgFor && cfgMod}<ModConfigPanel {server} mod={cfgFor} cmod={cfgMod} onClose={() => (cfgFor = null)} onOpenPage={openConfigs ? () => openConfigs(cfgMod.key) : null} />
+      {:else if pickedMod}<ModPeek {server} mod={pickedMod} onClose={() => (picked = null)} onChanged={changed} onUpdate={(m) => applyUpdates([m.project_id])} onFollow={(m) => (sourceFor = { follow: m })} onAuthor={authorLink(pickedMod) ? () => openAuthor(pickedMod) : null} onConfig={cfg.sid === sid && modForFile(pickedMod.file) ? () => openCfg(pickedMod) : null} />{/if}
     </div>
 
     {#if selMods.length}
@@ -1158,6 +1175,9 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .thumb { display: grid; border-radius: var(--radius); }
   .mod img { border-radius: var(--radius); background: var(--raise); flex: none; display: block; }
   .nm { font-weight: 500; display: flex; gap: 6px; align-items: center; min-width: 0; }
+  /* The author in a row: quiet like the other cells, a link on hover. */
+  .by { text-align: left; padding: 0; color: var(--muted); cursor: pointer; }
+  .by:hover, .by.on { color: var(--acc); text-decoration: underline; }
   .nmlink { text-align: left; font-weight: 500; cursor: pointer; }
   .nm .nmlink:hover { color: var(--acc); }
   .side-in { display: none; }

@@ -27,8 +27,9 @@
   // "Install into"); `busy`: what its install of this project is doing.
   // `onBack`: shown as a peek beside a dialog, which closes it; projects
   // opened from it (a dependency, the author's) open in place.
+  // `backLabel`: what the back button says when there's no project to go back to.
   // `onCategory(name)`: filters Browse by a category, when `canFilter(name)`.
-  let { source, id, type = 'modpacks', target = null, mc = '', loader = '', back = '/browse', busy = '', onMake, onInstall, onBack = null, onCategory = null, canFilter = null } = $props();
+  let { source, id, type = 'modpacks', target = null, mc = '', loader = '', back = '/browse', busy = '', onMake, onInstall, onBack = null, backLabel = '', onCategory = null, canFilter = null } = $props();
 
   // The project shown: the one asked for, or one opened from it in a peek.
   let cur = $state(untrack(() => ({ source, id, type })));
@@ -342,7 +343,7 @@
 {/snippet}
 
 <div class="pack">
-  <div class="row"><button class="btn sm ghost" onclick={goBack}><ArrowLeft size={14} />{onBack ? (trail.length ? `Back to ${trail[trail.length - 1].name}` : 'Close') : 'Browse'}</button>
+  <div class="row"><button class="btn sm ghost" onclick={goBack}><ArrowLeft size={14} />{onBack ? (trail.length ? `Back to ${trail[trail.length - 1].name}` : backLabel || 'Close') : 'Browse'}</button>
     <span class="tiny muted">{T.label}{filterText ? ` · ${filterText}` : ''}{target && !packs ? ` · into ${target.name}` : ''}</span></div>
 
   {#if error}
@@ -664,12 +665,13 @@
   .pkbr img, .pkbr .pico { width: 28px; height: 28px; border-radius: var(--radius); flex: none; background: var(--raise); }
   .pkbr .col { gap: 0; min-width: 0; }
   .sdl { display: inline-flex; align-items: center; gap: 4px; color: var(--blue); flex: none; }
-  .stabs { border-bottom: 0; margin-top: 2px; }
+  .stabs { border-bottom: 0; margin-top: 2px; flex-wrap: nowrap; }
   /* Narrow: the downloads go first; name and author truncate. */
   @container (max-width: 460px) { .sdl { display: none; } }
   @media (prefers-reduced-motion: reduce) { .pkbar { transition: none; } }
   .fold { height: 0; margin-top: -16px; }
-  .tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--line); }
+  /* In a narrow peek the tabs go on a second line instead of running off the side. */
+  .tabs { display: flex; flex-wrap: wrap; gap: 0 18px; border-bottom: 1px solid var(--line); }
   .tabs button { padding: 7px 0; color: var(--subtle); }
   .tabs button:hover { color: var(--text); }
   .desc { max-width: 860px; }
