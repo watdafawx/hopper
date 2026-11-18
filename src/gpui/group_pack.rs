@@ -104,6 +104,8 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     let pulling = s.group_pulling(root);
     let pulled = s.group_pulled(root).map(|(t, _)| t.to_string());
     let left_out = s.left_out_pins(root);
+    // Read before `cx` is borrowed mutably for the mod links below.
+    let pushing = s.pushing_at(root);
     let in_step = matches!(status, Status::InStep { .. });
     // In step is good news the player may not want to see every time.
     let key = hopper::settings::notice_key(&root.to_string_lossy(), "group-in-step", "in step");
@@ -175,7 +177,6 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
         }
     } else if let Status::ToPush { changes } = status {
         let (store, root) = (store.clone(), root.to_path_buf());
-        let pushing = s.pushing_at(&root);
         n = n.primary(move |fit| push_button(&store, vec![root.clone()], changes, pushing, fit, "group-push"));
     } else if matches!(status, Status::Cant { .. }) && !left_out.is_empty() {
         let (store, root) = (store.clone(), root.to_path_buf());
