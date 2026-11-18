@@ -32,8 +32,11 @@
   let keyName = $state('');
   let passphrase = $state('');
   let password = $state('');
-  let trustNew = $state(false);
-  let keyChanged = $state(false);
+  // The VPS's host key, read before anything secret is sent: { host_key,
+  // known, changed }. The owner checks it against the provider and confirms.
+  let hostCheck = $state(null);
+  let reinstalled = $state(false);
+  let showHow = $state(false);
   let filePick = $state();
   let field = $state();
 
@@ -130,28 +133,44 @@
 
   const connect = (e) => {
     e?.preventDefault();
-    return act('connect', async () => {
-      const body = { host: host.trim(), port: Number(sshPort) || 22, user: user.trim(), mode: mode === 'saved' ? 'key' : mode, trust_new: trustNew };
-      if (mode === 'key') Object.assign(body, { key: keyText, passphrase });
-      if (mode === 'password') body.password = password;
-      if (mode === 'saved') throw new Error('Pick how to sign in.');
-      try {
-        await post('/vps-relay/setup/connect', body, { ...H, timeout: 90000 });
-      } catch (e) {
-        keyChanged = /host key changed/i.test(e.message);
-        throw e;
-      }
-      // Nothing secret stays in the page once it's saved on the panel.
-      password = '';
-      keyText = '';
-      passphrase = '';
-      trustNew = false;
-      keyChanged = false;
-      await load();
-      stage = 'check';
-      await doCheck();
-    });
+    return act('connect', () => signIn());
   };
+
+  // Signs in. Without a confirmed host key the panel refuses before it
+  // sends anything, and this reads the key for the owner to check first.
+  async function signIn(confirmed) {
+    const body = { host: host.trim(), port: Number(sshPort) || 22, user: user.trim(), mode: mode === 'saved' ? 'key' : mode };
+    if (mode === 'key') Object.assign(body, { key: keyText, passphrase });
+    if (mode === 'password') body.password = password;
+    if (mode === 'saved') throw new Error('Pick how to sign in.');
+    if (confirmed) Object.assign(body, { host_key: confirmed.host_key, trust_new: confirmed.changed });
+    try {
+      await post('/vps-relay/setup/connect', body, { ...H, timeout: 90000 });
+    } catch (e) {
+      if (!confirmed && /host key (first|changed)/i.test(e.message)) return readKey();
+      throw e;
+    }
+    // Nothing secret stays in the page once it's saved on the panel.
+    password = '';
+    keyText = '';
+    passphrase = '';
+    hostCheck = null;
+    reinstalled = false;
+    await load();
+    stage = 'check';
+    await doCheck();
+  }
+
+  // Reads the VPS's host key without signing in (nothing is sent to it).
+  async function readKey() {
+    const r = await post('/vps-relay/setup/host-key', { host: host.trim(), port: Number(sshPort) || 22 }, { ...H, timeout: 40000 });
+    hostCheck = { host_key: r.host_key, known: r.known, changed: !!r.known && r.known !== r.host_key };
+    reinstalled = false;
+    showHow = false;
+  }
+
+  const confirmKey = () => act('connect', () => signIn(hostCheck));
+  const CHECK_CMD = 'for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$f"; done';
 
   async function doCheck() {
     const r = await post('/vps-relay/setup/check', { game_port: Number(gamePort), tunnel_port: Number(tunnelPort) }, { ...H, timeout: 120000 });
@@ -291,6 +310,41 @@
           <button class="btn pri" onclick={toConnect}>I have one: connect</button>
         </div>
       </div>
+    {:else if stage === 'connect' && hostCheck}
+      <div class="f">
+        {#if hostCheck.changed}
+          <div class="fix" role="alert"><b>This VPS shows a different host key than before.</b> That is normal if you reinstalled it. If you didn't, something else may be answering at this address: don't continue.</div>
+        {:else}
+          <p class="small subtle">Hopper reached <b class="mono">{host.trim()}</b>. Before it signs in, make sure this host key matches the one your VPS provider shows (often on the VPS's page or in its console). If it doesn't, something else is answering at this address: stop and check the address.</p>
+        {/if}
+        <div class="fps">
+          <span class="tiny muted">{hostCheck.changed ? 'Host key now' : 'Host key'}</span>
+          <div class="fp"><span class="mono">{hostCheck.host_key}</span><button type="button" class="btn sm" onclick={() => copy(hostCheck.host_key, 'the host key')}><Copy size={13} />Copy</button></div>
+          {#if hostCheck.changed}
+            <span class="tiny muted">Saved before</span>
+            <div class="fp"><span class="mono">{hostCheck.known}</span></div>
+          {/if}
+        </div>
+        <div class="tiny muted">Nothing has been sent to the VPS yet: the sign-in only goes out after you confirm.</div>
+        <button type="button" class="linkish tiny" onclick={() => (showHow = !showHow)}>{showHow ? 'Hide how to check' : 'How do I check this?'}</button>
+        {#if showHow}
+          <div class="col">
+            <span class="tiny muted">Open the VPS's web console (your provider's page has one) and run this. One of the lines it prints is this key:</span>
+            <pre class="cmds mono">{CHECK_CMD}</pre>
+            <div class="row"><button type="button" class="btn sm" onclick={() => copy(CHECK_CMD, 'the command')}><Copy size={13} />Copy command</button></div>
+          </div>
+        {/if}
+        {#if hostCheck.changed}
+          <label class="tick small"><input type="checkbox" bind:checked={reinstalled} />I reinstalled the VPS: trust this new host key</label>
+        {/if}
+        {#if err}<div class="fix" role="alert">{err}</div>{/if}
+        <div class="row end">
+          <button type="button" class="btn ghost" disabled={!!busy} onclick={() => ((hostCheck = null), (err = ''))}>Back</button>
+          <span class="sp"></span>
+          <button type="button" class="btn" disabled={!!busy} onclick={onClose}>Cancel</button>
+          <button type="button" class="btn pri" disabled={!!busy || (hostCheck.changed && !reinstalled)} onclick={confirmKey}>{#if busy === 'connect'}<LoaderCircle size={13} class="spin" />Signing in…{:else}{hostCheck.changed ? 'Trust the new key and sign in' : 'It matches: sign in'}{/if}</button>
+        </div>
+      </div>
     {:else if stage === 'connect'}
       <form class="f" onsubmit={connect}>
         <p class="small subtle">Players join the VPS; this panel sends the game to it over one connection it opens itself, so nothing needs opening at home. Hopper signs in to the VPS over ssh to set it up.</p>
@@ -339,9 +393,6 @@
             <span class="tiny muted">The key Hopper saved for {login.user}@{login.host}. To change it, pick another way.</span>
           {/if}
         </div>
-        {#if keyChanged}
-          <label class="tick small"><input type="checkbox" bind:checked={trustNew} />I reinstalled the VPS: trust its new host key</label>
-        {/if}
         {@render hostKey()}
         <div class="note">
           {#if mode === 'password'}The password is used once, to put a new key on the VPS, and isn't kept. Hopper keeps that key for repair and removal.{:else}Hopper keeps the key on this panel, readable by the owner only, to repair or remove the relay later. The user needs sudo.{/if}
@@ -513,6 +564,10 @@
   .seg button.on { background: var(--acc-dim); color: var(--text); font-weight: 500; }
   .seg button:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
   .tick { display: flex; align-items: center; gap: 8px; }
+  .fps { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .fp { display: flex; align-items: center; gap: 8px; background: var(--base); border: 1px solid var(--line2); border-radius: var(--radius); padding: 5px 5px 5px 10px; min-width: 0; }
+  .fp .mono { font-size: 12px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .fp .btn { flex: none; }
   .hk { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .hk .nw { white-space: nowrap; flex: none; }
   .hk .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

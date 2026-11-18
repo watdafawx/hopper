@@ -10,8 +10,11 @@
 //!   is used once to put a new key on the VPS and is never kept. Nothing of
 //!   the private key, the password or the relay key goes into a log, an
 //!   error, the audit log or an API answer.
-//! - The VPS's host key is learnt on the first connection, shown in the
-//!   dialog, and must match on every later one.
+//! - The VPS's host key is read first with nothing sent (`host-key`), shown
+//!   for the owner to check against the provider, and only then does a
+//!   sign-in go out, pinned to that key: no password, key or relay secret
+//!   reaches a host whose key the owner hasn't confirmed. It must match on
+//!   every later connection; a new one needs the new key named again.
 //! - Every command is fixed text from [`plan`], shown under "Show the
 //!   commands". Secrets go on the command's stdin.
 //!
@@ -30,6 +33,8 @@ pub mod plan;
 pub mod ssh;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod host_key_tests;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -193,6 +198,9 @@ async fn connect_saved(app: &Arc<App>) -> Result<Ctx<'_>, String> {
     let l = app.vps_setup.login();
     if l.host.is_empty() || l.private_key.is_empty() {
         return Err("Connect to the VPS first.".into());
+    }
+    if l.host_key.is_empty() {
+        return Err("The VPS's host key isn't saved. Connect to the VPS again and check its host key.".into());
     }
     let ssh = Ssh::connect(&l.host, l.port, &l.user, Auth::Key(ssh::decode(&l.private_key)?), &l.host_key).await?;
     let root = ssh.run("id -u", None, SHORT).await.map(|o| o.out.trim() == "0").unwrap_or(false);
@@ -1022,6 +1030,7 @@ pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/v1/vps-relay/setup", get(get_setup))
         .route("/api/v1/vps-relay/setup/new-key", post(new_key))
+        .route("/api/v1/vps-relay/setup/host-key", post(host_key))
         .route("/api/v1/vps-relay/setup/connect", post(connect))
         .route("/api/v1/vps-relay/setup/check", post(check))
         .route("/api/v1/vps-relay/setup/install", post(start_install))
@@ -1096,9 +1105,56 @@ struct ConnectBody {
     passphrase: String,
     #[serde(default)]
     password: String,
-    /// Forget the saved host key (the VPS was reinstalled).
+    /// The host key the owner checked and confirmed ("SHA256:…", from
+    /// `host-key`). Needed on the first connection to a VPS; no password or
+    /// key is offered to a host that shows another one.
+    #[serde(default)]
+    host_key: String,
+    /// The VPS was reinstalled: take `host_key` (the new one, named here
+    /// on purpose) in place of the saved one.
     #[serde(default)]
     trust_new: bool,
+}
+
+/// The host key a sign-in must see before it offers anything. Never empty
+/// and never "any": the owner's confirmed key for a VPS not signed in to
+/// before, the saved one for the same VPS again, and the new confirmed key
+/// only with `trust_new`.
+fn pin_for(saved: &Login, host: &str, port: u16, confirmed: &str, trust_new: bool) -> Result<String, String> {
+    let confirmed = if confirmed.trim().is_empty() { None } else { Some(ssh::clean_host_key(confirmed).ok_or("That isn't a host key fingerprint (SHA256: and 43 characters). Check the VPS's host key again.")?) };
+    let same = saved.host == host && saved.port == port && !saved.host_key.is_empty();
+    match (trust_new, same, confirmed) {
+        (true, _, Some(c)) => Ok(c),
+        (true, _, None) => Err("Say which new host key to trust: check it first.".into()),
+        (false, true, Some(c)) if c != saved.host_key => Err(format!(
+            "The VPS's host key changed (now {c}, saved {}). If you reinstalled it, confirm the new key; otherwise something else answers at that address.",
+            saved.host_key
+        )),
+        (false, true, _) => Ok(saved.host_key.clone()),
+        (false, false, Some(c)) => Ok(c),
+        (false, false, None) => Err("Check the VPS's host key first: nothing is sent to it until you've confirmed it.".into()),
+    }
+}
+
+#[derive(Deserialize)]
+struct HostKeyBody {
+    host: String,
+    port: Option<u16>,
+}
+
+/// Reads the VPS's host key without signing in (no password or key is sent)
+/// for the owner to check. `known`: the key saved for this same address.
+async fn host_key(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<HostKeyBody>) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    let host = plan::valid_host(&b.host).map_err(bad)?;
+    let port = b.port.unwrap_or(22);
+    if port == 0 {
+        return Err(bad("The ssh port is a number from 1 to 65535."));
+    }
+    let key = Ssh::host_key_of(&host, port).await.map_err(bad)?;
+    let saved = app.vps_setup.login();
+    let known = if saved.host == host && saved.port == port { saved.host_key } else { String::new() };
+    Ok(Json(json!({ "host_key": key, "known": known })))
 }
 
 async fn connect(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<ConnectBody>) -> ApiResult<Json<Value>> {
@@ -1113,7 +1169,8 @@ async fn connect(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
         return Err(bad("The ssh port is a number from 1 to 65535."));
     }
     let saved = app.vps_setup.login();
-    let pinned = if !b.trust_new && saved.host == host && saved.port == port { saved.host_key.clone() } else { String::new() };
+    // Before anything is read or sent: which host key this sign-in accepts.
+    let pinned = pin_for(&saved, &host, port, &b.host_key, b.trust_new).map_err(bad)?;
     let (private, public, added) = match b.mode.as_str() {
         "key" => {
             let (p, q) = ssh::read_key(&b.key, &b.passphrase).map_err(bad)?;
@@ -1144,8 +1201,7 @@ async fn connect(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
         }
         _ => return Err(bad("Pick how to sign in.")),
     };
-    let pin = pinned.clone();
-    let s = Ssh::connect(&host, port, &user, Auth::Key(ssh::decode(&private).map_err(bad)?), &pin).await.map_err(|e| {
+    let s = Ssh::connect(&host, port, &user, Auth::Key(ssh::decode(&private).map_err(bad)?), &pinned).await.map_err(|e| {
         if b.mode == "new" && e.contains("refused") { bad("The VPS doesn't take the new key yet. Add the public key below to the VPS (your cloud's ssh keys page, or ~/.ssh/authorized_keys), then connect again.") } else { bad(e) }
     })?;
     let root = s.run("id -u", None, SHORT).await.map(|o| o.out.trim() == "0").unwrap_or(false);

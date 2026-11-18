@@ -201,7 +201,7 @@ it again (repair) only does what is missing:
 
 | Step | Check | Act |
 |---|---|---|
-| Connect | ssh login works; the host key fingerprint is shown and must match what the cloud page says (or "trust on first use", saved) | |
+| Connect | the host key is read first (nothing sent) and shown; the owner confirms it matches the cloud page, then the ssh login goes out pinned to that key and it works | |
 | System | `/etc/os-release`, `uname -m`, free memory (≥ 2 GB; under 4 GB of RAM the relay uses the 512 MB cache), disk (≥ 2 GB), `sudo -n true` | |
 | Ports | 25565/tcp, 25566/tcp, 24454/udp not in use (`ss -lntu`) | Offer another port |
 | User and folders | `hopper-relay` exists | `useradd --system --no-create-home --shell /usr/sbin/nologin hopper-relay`; `/opt/hopper-relay` (root, 0755), `/var/lib/hopper-relay` (hopper-relay, 0700), `/etc/hopper-relay` (root:hopper-relay, 0750) |
@@ -650,8 +650,9 @@ and **Remove the relay**, from the done screen or from Check.
 - The ssh login is kept in panel data `vps-ssh.json` (0600 / owner-only
   ACL): host, user, the pinned host key, the private key. A typed password
   is used once and never kept; a key Hopper added with it is removed again
-  by Remove. The host key is trusted on first use, shown, then must match;
-  a changed one needs the "trust the new host key" tick.
+  by Remove. The host key is read before any sign-in and shown; the owner
+  confirms it, and the password or key is only offered to that key. Later
+  it must match; a changed one needs the owner to confirm the new key.
 
 ### Limits found while testing
 

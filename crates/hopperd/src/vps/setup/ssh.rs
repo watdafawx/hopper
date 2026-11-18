@@ -1,6 +1,8 @@
 //! The ssh connection the relay setup runs its commands over (russh, as
-//! the SFTP code uses it). The VPS's host key is learnt on the first
-//! connection and must match on every later one.
+//! the SFTP code uses it). Nothing is sent to a VPS before its host key is
+//! known to be the one the owner confirmed: [`Ssh::host_key_of`] only reads
+//! the key (it ends the connection at the key check, before any sign-in),
+//! and [`Ssh::connect`] refuses to sign in without a key to match.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -9,7 +11,9 @@ use russh::ChannelMsg;
 use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 
 struct KeyCheck {
-    want: String,
+    /// The host key the sign-in must see. `None`: only read it, then end the
+    /// connection (nothing is sent to a host nobody has checked).
+    want: Option<String>,
     seen: Arc<Mutex<String>>,
 }
 
@@ -21,8 +25,16 @@ impl russh::client::Handler for KeyCheck {
             PublicKeyOrCertificate::Certificate(c) => c.public_key().fingerprint(HashAlg::Sha256).to_string(),
         };
         *self.seen.lock().unwrap_or_else(|e| e.into_inner()) = fp.clone();
-        Ok(self.want.is_empty() || self.want == fp)
+        Ok(self.want.as_deref() == Some(fp.as_str()))
     }
+}
+
+/// A host key as `ssh-keygen -l` prints it ("SHA256:" and 43 base64 digits),
+/// or `None` if `s` isn't one. Trims spaces.
+pub fn clean_host_key(s: &str) -> Option<String> {
+    let s = s.trim();
+    let rest = s.strip_prefix("SHA256:")?;
+    (rest.len() == 43 && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')).then(|| s.to_string())
 }
 
 pub enum Auth {
@@ -58,31 +70,35 @@ impl Out {
 }
 
 impl Ssh {
-    /// Signs in. `pinned`: the host key it must have, empty to learn it.
+    /// Reads the VPS's host key and ends the connection at once: no user
+    /// name, key or password is offered. The owner checks what comes back
+    /// before anything secret is sent anywhere.
+    pub async fn host_key_of(host: &str, port: u16) -> Result<String, String> {
+        match open(host, port, None).await {
+            // The key check said no on purpose; what it saw is the answer.
+            Err((key, _)) if !key.is_empty() => Ok(key),
+            Err((_, e)) => Err(e),
+            Ok(_) => Err("The VPS's key couldn't be read.".into()),
+        }
+    }
+
+    /// Signs in. `pinned`: the host key it must have; it can't be empty, so
+    /// the password or key is only ever offered to a host whose key was
+    /// confirmed.
     pub async fn connect(host: &str, port: u16, user: &str, auth: Auth, pinned: &str) -> Result<Ssh, String> {
-        let seen = Arc::new(Mutex::new(String::new()));
-        let check = KeyCheck { want: pinned.trim().to_string(), seen: seen.clone() };
-        let cfg = Arc::new(russh::client::Config { inactivity_timeout: Some(Duration::from_secs(300)), keepalive_interval: Some(Duration::from_secs(20)), ..Default::default() });
-        let target = format!("{}:{port}", if host.contains(':') { format!("[{host}]") } else { host.to_string() });
-        let connected = tokio::time::timeout(Duration::from_secs(20), russh::client::connect(cfg, (host, port), check)).await;
-        let mut h = match connected {
-            Err(_) => return Err(format!("{target} didn't answer. Check the address, and that the cloud's firewall lets ssh in.")),
-            Ok(Err(e)) => {
-                let key = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                if !pinned.is_empty() && !key.is_empty() && key != pinned.trim() {
-                    return Err(format!(
-                        "The VPS's host key changed (now {key}, saved {pinned}). If you reinstalled it, connect again with \"Trust the new key\"; otherwise something else answers at that address."
-                    ));
-                }
-                return Err(match e {
-                    russh::Error::IO(io) if io.kind() == std::io::ErrorKind::ConnectionRefused => format!("{target} refused the connection: is ssh on port {port}?"),
-                    russh::Error::IO(io) => format!("Can't reach {target}: {io}"),
-                    e => format!("ssh to {target} failed: {e}"),
-                });
+        let pinned = pinned.trim();
+        if pinned.is_empty() {
+            return Err("Check the VPS's host key first: nothing is sent to it until you've confirmed it.".into());
+        }
+        let (mut h, host_key) = match open(host, port, Some(pinned.to_string())).await {
+            Ok(x) => x,
+            Err((key, _)) if !key.is_empty() && key != pinned => {
+                return Err(format!(
+                    "The VPS's host key changed (now {key}, saved {pinned}). If you reinstalled it, confirm the new key; otherwise something else answers at that address."
+                ));
             }
-            Ok(Ok(h)) => h,
+            Err((_, e)) => return Err(e),
         };
-        let host_key = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let user = user.to_string();
         let auth = match auth {
             Auth::Key(k) => {
@@ -129,6 +145,29 @@ impl Ssh {
 
     pub async fn close(&self) {
         let _ = self.h.disconnect(russh::Disconnect::ByApplication, "", "en").await;
+    }
+}
+
+/// Opens the connection and runs the key exchange. `want`: the host key to
+/// accept (`None`: accept none, to read it). On failure: the host key seen
+/// (empty if none was) and what to tell the player.
+async fn open(host: &str, port: u16, want: Option<String>) -> Result<(russh::client::Handle<KeyCheck>, String), (String, String)> {
+    let seen = Arc::new(Mutex::new(String::new()));
+    let check = KeyCheck { want, seen: seen.clone() };
+    let cfg = Arc::new(russh::client::Config { inactivity_timeout: Some(Duration::from_secs(300)), keepalive_interval: Some(Duration::from_secs(20)), ..Default::default() });
+    let target = format!("{}:{port}", if host.contains(':') { format!("[{host}]") } else { host.to_string() });
+    let key = || seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    match tokio::time::timeout(Duration::from_secs(20), russh::client::connect(cfg, (host, port), check)).await {
+        Err(_) => Err((key(), format!("{target} didn't answer. Check the address, and that the cloud's firewall lets ssh in."))),
+        Ok(Err(e)) => Err((
+            key(),
+            match e {
+                russh::Error::IO(io) if io.kind() == std::io::ErrorKind::ConnectionRefused => format!("{target} refused the connection: is ssh on port {port}?"),
+                russh::Error::IO(io) => format!("Can't reach {target}: {io}"),
+                e => format!("ssh to {target} failed: {e}"),
+            },
+        )),
+        Ok(Ok(h)) => Ok((h, key())),
     }
 }
 
