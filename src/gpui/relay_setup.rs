@@ -40,6 +40,29 @@ enum SignIn {
     NewKey,
 }
 
+/// The VPS's host key as the panel read it (nothing was sent to the VPS),
+/// waiting for the owner to check it against the provider.
+#[derive(Clone)]
+struct HostCheck {
+    host_key: String,
+    /// The key saved for this same address, "" if none.
+    known: String,
+    /// It differs from the saved one: the VPS was reinstalled, or something
+    /// else answers there.
+    changed: bool,
+}
+
+/// What a sign-in attempt came to.
+enum Signed {
+    /// The panel wants the owner to check this host key first.
+    Check(HostCheck),
+    /// Signed in; the panel's state with its first check.
+    In(Value),
+}
+
+/// Run in the VPS's console: prints every host key it has.
+const CHECK_CMD: &str = "for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf \"$f\"; done";
+
 /// A question asked in place of the buttons.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Ask {
@@ -59,8 +82,9 @@ pub struct RelaySetup {
     show_cmds: bool,
     sign: SignIn,
     key_name: String,
-    trust_new: bool,
-    key_changed: bool,
+    host_check: Option<HostCheck>,
+    reinstalled: bool,
+    show_how: bool,
     ask: Option<Ask>,
     ask_tick: bool,
     test: Option<Value>,
@@ -148,8 +172,9 @@ impl RelaySetup {
             show_cmds: false,
             sign: SignIn::Key,
             key_name: String::new(),
-            trust_new: false,
-            key_changed: false,
+            host_check: None,
+            reinstalled: false,
+            show_how: false,
             ask: None,
             ask_tick: false,
             test: None,
@@ -290,10 +315,7 @@ impl RelaySetup {
                 this.busy = None;
                 match r {
                     Ok(v) => done(this, v, window, cx),
-                    Err(e) => {
-                        this.key_changed = what == "connect" && e.to_lowercase().contains("host key changed");
-                        this.err = e;
-                    }
+                    Err(e) => this.err = e,
                 }
                 cx.notify();
             })
@@ -382,10 +404,23 @@ impl RelaySetup {
     }
 
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sign_in(None, window, cx);
+    }
+
+    /// The owner checked the host key shown and confirms it.
+    fn confirm_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let confirmed = self.host_check.clone();
+        self.sign_in(confirmed, window, cx);
+    }
+
+    /// Signs in. Without a confirmed host key the panel refuses before it
+    /// sends anything to the VPS; this then asks it to read the key (still
+    /// sending nothing) and shows it for the owner to check first.
+    fn sign_in(&mut self, confirmed: Option<HostCheck>, window: &mut Window, cx: &mut Context<Self>) {
         let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
         let (host, user) = (text(&self.host), text(&self.user));
         let port = text(&self.ssh_port).parse::<u64>().ok().filter(|p| *p != 0).unwrap_or(22);
-        let mut body = json!({ "host": host, "port": port, "user": user, "trust_new": self.trust_new });
+        let mut body = json!({ "host": host, "port": port, "user": user });
         match self.sign {
             SignIn::Saved => {
                 self.err = "Pick how to sign in.".into();
@@ -403,25 +438,46 @@ impl RelaySetup {
             }
             SignIn::NewKey => body["mode"] = json!("new"),
         }
+        if let Some(c) = &confirmed {
+            body["host_key"] = json!(c.host_key);
+            body["trust_new"] = json!(c.changed);
+        }
+        let probe = json!({ "host": host, "port": port });
         let ports = json!({ "game_port": self.port(&self.game_port, cx), "tunnel_port": self.port(&self.tunnel_port, cx) });
         self.act(
             "connect",
             window,
             cx,
             move |c| {
-                c.post_wait("/vps-relay/setup/connect", body, Duration::from_secs(90))?;
+                if let Err(e) = c.post_wait("/vps-relay/setup/connect", body, Duration::from_secs(90)) {
+                    let m = format!("{e:#}").to_lowercase();
+                    if confirmed.is_none() && (m.contains("host key first") || m.contains("host key changed")) {
+                        let r = c.post_wait("/vps-relay/setup/host-key", probe, Duration::from_secs(40))?;
+                        let (host_key, known) = (s(&r, "host_key"), s(&r, "known"));
+                        let changed = !known.is_empty() && known != host_key;
+                        return Ok(Signed::Check(HostCheck { host_key, known, changed }));
+                    }
+                    return Err(e);
+                }
                 let mut st = c.get("/vps-relay/setup")?;
                 st["check"] = c.post_wait("/vps-relay/setup/check", ports, Duration::from_secs(120))?;
-                Ok(st)
+                Ok(Signed::In(st))
             },
-            |this, st, window, cx| {
-                this.secrets_cleared(window, cx);
-                this.trust_new = false;
-                this.key_changed = false;
-                this.key_name.clear();
-                this.st = Some(st);
-                this.stage = Stage::Check;
-                cx.notify();
+            |this, out, window, cx| match out {
+                Signed::Check(h) => {
+                    this.host_check = Some(h);
+                    this.reinstalled = false;
+                    this.show_how = false;
+                }
+                Signed::In(st) => {
+                    this.secrets_cleared(window, cx);
+                    this.host_check = None;
+                    this.reinstalled = false;
+                    this.key_name.clear();
+                    this.st = Some(st);
+                    this.stage = Stage::Check;
+                    cx.notify();
+                }
             },
         );
     }
@@ -713,6 +769,126 @@ impl RelaySetup {
             )
     }
 
+    /// A host key in a box, with a Copy button when `copy` names it.
+    fn key_box(&self, label: &'static str, key: String, copy: Option<&'static str>, cx: &App) -> Div {
+        let theme = cx.theme();
+        let k = key.clone();
+        v_flex().gap_1().child(widgets::fine_print(label, cx)).child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .px_3()
+                .py_1p5()
+                .rounded(theme.radius)
+                .border_1()
+                .border_color(theme.border)
+                .child(div().flex_1().min_w_0().text_xs().font_family("Consolas").child(key))
+                .children(copy.map(|id| {
+                    Button::new(id).small().outline().icon(IconName::Copy).label("Copy").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(k.clone())))
+                })),
+        )
+    }
+
+    /// The step between Connect and signing in: the owner checks the host
+    /// key the VPS showed, with nothing sent to it yet.
+    fn host_check_stage(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let _ = window;
+        let Some(hc) = self.host_check.clone() else { return div() };
+        let busy = self.busy.is_some();
+        let theme = cx.theme().clone();
+        let host = self.host.read(cx).value().trim().to_string();
+        let changed = hc.changed;
+        let show_how = self.show_how;
+        v_flex()
+            .gap_3()
+            .child(if changed {
+                self.note(
+                    "This VPS shows a different host key than before. That is normal if you reinstalled it. If you didn't, something else may be answering at this address: don't continue.",
+                    false,
+                    cx,
+                )
+                .bg(theme.danger.opacity(widgets::alpha::TINT))
+            } else {
+                div().text_sm().text_color(theme.muted_foreground).child(format!(
+                    "Hopper reached {host}. Before it signs in, make sure this host key matches the one your VPS provider shows (often on the VPS's page or in its console). If it doesn't, something else is answering at this address: stop and check the address."
+                ))
+            })
+            .child(self.key_box(if changed { "Host key now" } else { "Host key" }, hc.host_key.clone(), Some("rs-copy-hk"), cx))
+            .when(changed, |c| c.child(self.key_box("Saved before", hc.known.clone(), None, cx)))
+            .child(widgets::fine_print("Nothing has been sent to the VPS yet: the sign-in only goes out after you confirm.", cx))
+            .child(
+                h_flex().child(
+                    Button::new("rs-how")
+                        .ghost()
+                        .xsmall()
+                        .label(if show_how { "Hide how to check" } else { "How do I check this?" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_how = !this.show_how;
+                            cx.notify();
+                        })),
+                ),
+            )
+            .when(show_how, |c| {
+                c.child(
+                    v_flex()
+                        .gap_1p5()
+                        .child(widgets::fine_print("Open the VPS's web console (your provider's page has one) and run this. One of the lines it prints is this key:", cx))
+                        .child(div().px_3().py_2().rounded(theme.radius).bg(theme.foreground.opacity(widgets::alpha::HOVER)).text_xs().font_family("Consolas").child(CHECK_CMD))
+                        .child(h_flex().child(
+                            Button::new("rs-copy-cmd")
+                                .small()
+                                .outline()
+                                .icon(IconName::Copy)
+                                .label("Copy command")
+                                .on_click(|_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(CHECK_CMD.to_string()))),
+                        )),
+                )
+            })
+            .when(changed, |c| {
+                c.child(
+                    Checkbox::new("rs-reinstalled")
+                        .label("I reinstalled the VPS: trust this new host key")
+                        .checked(self.reinstalled)
+                        .on_change(cx.listener(|this, v: &bool, _, cx| {
+                            this.reinstalled = *v;
+                            cx.notify();
+                        })),
+                )
+            })
+            .children(self.err_note(cx))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("rs-hk-back")
+                            .ghost()
+                            .label("Back")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.host_check = None;
+                                this.err.clear();
+                                cx.notify();
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .child(Button::new("rs-hk-cancel").outline().label("Cancel").disabled(busy).on_click(|_, window, cx| window.close_dialog(cx)))
+                    .child(
+                        Button::new("rs-hk-go")
+                            .primary()
+                            .label(if self.busy == Some("connect") {
+                                "Signing in…"
+                            } else if changed {
+                                "Trust the new key and sign in"
+                            } else {
+                                "It matches: sign in"
+                            })
+                            .loading(self.busy == Some("connect"))
+                            .disabled(busy || (changed && !self.reinstalled))
+                            .on_click(cx.listener(|this, _, window, cx| this.confirm_key(window, cx))),
+                    ),
+            )
+    }
+
     fn connect_stage(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let rem = window.rem_size();
         let busy = self.busy.is_some();
@@ -822,17 +998,6 @@ impl RelaySetup {
                         ))
                     }),
             )
-            .when(self.key_changed, |c| {
-                c.child(
-                    Checkbox::new("rs-trust")
-                        .label("I reinstalled the VPS: trust its new host key")
-                        .checked(self.trust_new)
-                        .on_change(cx.listener(|this, v: &bool, _, cx| {
-                            this.trust_new = *v;
-                            cx.notify();
-                        })),
-                )
-            })
             .children(self.host_key(cx))
             .child(self.note(note, false, cx).text_color(theme.muted_foreground))
             .children(self.err_note(cx))
@@ -1239,6 +1404,7 @@ impl Render for RelaySetup {
         } else {
             match self.stage {
                 Stage::Before => self.before(cx).into_any_element(),
+                Stage::Connect if self.host_check.is_some() => self.host_check_stage(window, cx).into_any_element(),
                 Stage::Connect => self.connect_stage(window, cx).into_any_element(),
                 Stage::Check => self.check_stage(window, cx).into_any_element(),
                 Stage::Run => self.run_stage(cx).into_any_element(),
