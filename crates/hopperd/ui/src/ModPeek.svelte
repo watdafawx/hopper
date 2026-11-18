@@ -13,7 +13,7 @@
   import SourceAbout from './SourceAbout.svelte';
   import { resetConfig, setLocked, removeMods, switchSource, versionLocked, problems } from './lib/modops.js';
 
-  let { server, mod, onClose, onChanged, onUpdate, onFollow, onConfig = null } = $props();
+  let { server, mod, onClose, onChanged, onUpdate, onFollow, onConfig = null, onAuthor = null } = $props();
   let busy = $state('');
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
@@ -53,7 +53,7 @@
 <aside class="peek card col">
   <div class="row top">
     {#if mod.icon}<img src={mod.icon} alt="" width="40" height="40" />{:else}<span class="ph"></span>{/if}
-    <div class="grow"><div class="nm">{mod.name}</div><div class="tiny muted">{mod.author ? `by ${mod.author}` : mod.source || (shown ? 'from the pack' : 'unknown source')}{shown && mod.author ? ' · from the pack' : ''}{linked && mod.src_publisher && mod.src_publisher !== mod.author ? ` · ${mod.src_publisher}` : ''}{mod.side ? ` · ${sideText[mod.side] || mod.side}${mod.side_from === 'modrinth' ? ' (from Modrinth)' : ''}` : ''}</div></div>
+    <div class="grow"><div class="nm">{mod.name}</div><div class="tiny muted">{#if mod.author && onAuthor}<button class="by" title="Everything {mod.author} made" onclick={onAuthor}>by {mod.author}</button>{:else}{mod.author ? `by ${mod.author}` : mod.source || (shown ? 'from the pack' : 'unknown source')}{/if}{shown && mod.author ? ' · from the pack' : ''}{linked && mod.src_publisher && mod.src_publisher !== mod.author ? ` · ${mod.src_publisher}` : ''}{mod.side ? ` · ${sideText[mod.side] || mod.side}${mod.side_from === 'modrinth' ? ' (from Modrinth)' : ''}` : ''}</div></div>
     <button class="btn sm ghost icon" title="Close" onclick={onClose}><X size={14} /></button>
   </div>
   <div class="row wrap">
@@ -95,6 +95,8 @@
   .top img, .ph { width: 40px; height: 40px; border-radius: var(--radius); background: var(--raise); flex: none; }
   .nm { font-weight: 600; font-size: 14px; }
   .grow { flex: 1; min-width: 0; }
+  .by { padding: 0; color: inherit; font-size: inherit; cursor: pointer; }
+  .by:hover { color: var(--acc); text-decoration: underline; }
   .wrap { flex-wrap: wrap; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .icon { padding: 3px 5px; }
@@ -102,5 +104,5 @@
   .warnline { gap: 6px; align-items: flex-start; color: var(--gold); }
   .warnline :global(svg) { flex: none; margin-top: 2px; }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
-  @media (max-width: 1150px) { .peek { position: fixed; right: 12px; top: 64px; bottom: 12px; max-height: none; z-index: 40; box-shadow: 0 20px 60px #000c; } }
+  @media (max-width: 1150px) { .peek { position: fixed; right: 12px; top: 64px; bottom: 12px; max-height: none; z-index: 40; box-shadow: 0 20px 60px #000c; max-width: calc(100vw - 24px); } }
 </style>
