@@ -166,6 +166,12 @@ impl Relay {
         self.home.lock().unwrap().as_ref().map(|h| h.routes.iter().map(|r| r.server.clone()).collect()).unwrap_or_default()
     }
 
+    /// The routes installed here, rather than home's pending settings.
+    #[cfg(test)]
+    pub fn routes(&self) -> Vec<Route> {
+        self.home.lock().unwrap().as_ref().map(|h| h.routes.clone()).unwrap_or_default()
+    }
+
 
     fn blocked(&self, ip: IpAddr) -> bool {
         let mut f = self.fails.lock().unwrap();

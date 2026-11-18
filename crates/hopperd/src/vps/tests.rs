@@ -726,14 +726,47 @@ async fn join_refused(port: u16, host: &str) -> String {
             let (text, _) = core::read_string(body, 1 << 20).unwrap();
             return serde_json::from_str::<Value>(&text).unwrap()["text"].as_str().unwrap_or_default().to_string();
         }
-        // No answer yet (the relay may still be learning its routes) reads as
-        // an empty text, so callers that retry can try again.
-        let Ok(Ok(n)) = tokio::time::timeout(Duration::from_secs(3), s.read(&mut chunk)).await else { return String::new() };
-        if n == 0 {
-            return String::new();
-        }
+        let n = tokio::time::timeout(Duration::from_secs(10), s.read(&mut chunk)).await.expect("an answer in time").unwrap();
+        assert!(n > 0, "closed without a reason");
         buf.extend_from_slice(&chunk[..n]);
     }
+}
+
+/// Control replies acknowledge route installation. Keep home silent between
+/// updates, so joins before setup and after removal cannot race a new route.
+#[tokio::test(flavor = "multi_thread")]
+async fn joins_are_refused_before_routes_and_after_removal() {
+    use super::{Control, Route};
+    let r = run_relay().await;
+    let (mut live, _) = home::connect(&home_cfg(&r, r.tunnel, "srv")).await.unwrap();
+    let mut ctl = live.tunnel.handle.open(head("control", "")).await.unwrap();
+    let route = |id: &str, port| Route {
+        server: id.into(), hosts: vec![format!("{id}.test")], velocity: true, port, ..Default::default()
+    };
+    let stages = [
+        (vec![], "home server is offline"),
+        // Known address, but Velocity has no port for it yet.
+        (vec![route("srv", 0), route("other", 25581), route("third", 25582)], "isn't set up on the relay yet"),
+        // Install its port, then remove it again before the next join.
+        (vec![route("srv", 25580), route("other", 25581), route("third", 25582)], ""),
+        (vec![route("srv", 0), route("other", 25581), route("third", 25582)], "isn't set up on the relay yet"),
+        (vec![route("other", 25581), route("third", 25582)], "No server here goes by this address"),
+        (vec![], "home server is offline"),
+    ];
+    for (routes, reason) in stages {
+        let mut line = serde_json::to_vec(&Control { routes: routes.clone(), pings: true }).unwrap();
+        line.push(b'\n');
+        ctl.tx.send(&line).await.unwrap();
+        // The same control handler answers only after installing these routes.
+        tokio::time::timeout(Duration::from_secs(10), ctl.rx.recv()).await.expect("control reply in time").unwrap().expect("control reply");
+        assert_eq!(r.relay.routes(), routes);
+        if !reason.is_empty() {
+            // No Login Start: a refusal must answer the handshake itself.
+            let refused = join_refused(r.game, "srv.test").await;
+            assert!(refused.contains(reason), "expected {reason:?}, got {refused:?}");
+        }
+    }
+    assert!(live.tunnel.incoming.try_recv().is_err(), "refused joins never reach home");
 }
 
 /// Two servers on one relay: each player reaches the server whose address
@@ -836,15 +869,12 @@ async fn velocity_ports_reach_their_own_server() {
     // address is refused at the front port and its old port goes nowhere.
     let first_only = t.app.vps.config().backends[..1].to_vec();
     t.app.vps.set_config(home::HomeConfig { backends: first_only, ..t.app.vps.config() }).unwrap();
-    wait_for("the second server without a port", 30, || home::routes(&t.app).routes[1].port == 0).await;
-    let mut refused = String::new();
-    for _ in 0..100 {
-        refused = join_refused(r.game, "creative.example.test").await;
-        if refused.contains("isn't set up on the relay yet") {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    let expected = home::routes(&t.app).routes;
+    assert_eq!(expected[1].port, 0);
+    // Home changes immediately; its control line reaches the relay later.
+    // A handshake-only probe on the old route waits for Login Start.
+    wait_for("the relay installed the routes without the second port", 30, || r.relay.routes() == expected).await;
+    let refused = join_refused(r.game, "creative.example.test").await;
     assert!(refused.contains("isn't set up on the relay yet"), "{refused}");
     let gone = streams(&t, &b);
     let mut s = TcpStream::connect(("127.0.0.1", base + 1)).await.unwrap();
