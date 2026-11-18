@@ -233,6 +233,11 @@
     loadVersions();
   }
 
+  // What the top "Back" button says in a peek, and the same button in the
+  // compact bar (an X when it just closes the peek), so either state can leave.
+  const backIsClose = $derived(!!onBack && !trail.length && !backLabel);
+  const backTip = $derived(trail.length ? `Back to ${trail[trail.length - 1].name}` : backLabel || 'Close');
+
   function goBack() {
     if (onBack && trail.length) {
       const prev = trail[trail.length - 1];
@@ -360,6 +365,7 @@
             <div class="col grow"><b class="small ell">{p.name}</b>{#if p.author}<span class="tiny muted ell">by {p.author}</span>{/if}</div>
             <span class="dl tiny sdl"><Download size={11} />{count(p.downloads)}</span>
             {#if !packs && target}{@render act()}{/if}
+            {#if onBack}<button class="btn sm ghost icon pkx" title={backTip} aria-label={backTip} onclick={goBack}>{#if backIsClose}<X size={14} />{:else}<ArrowLeft size={14} />{/if}</button>{/if}
           </div>
           <div class="tabs stabs">
             <button class:tab-sel={tab === 'description'} onclick={() => pickTab('description')}>Description</button>
@@ -664,6 +670,7 @@
   .pkbr { gap: 10px; align-items: center; }
   .pkbr img, .pkbr .pico { width: 28px; height: 28px; border-radius: var(--radius); flex: none; background: var(--raise); }
   .pkbr .col { gap: 0; min-width: 0; }
+  .pkx { flex: none; padding: 3px 5px; }
   .sdl { display: inline-flex; align-items: center; gap: 4px; color: var(--blue); flex: none; }
   .stabs { border-bottom: 0; margin-top: 2px; flex-wrap: nowrap; }
   /* Narrow: the downloads go first; name and author truncate. */

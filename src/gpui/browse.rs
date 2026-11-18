@@ -2282,6 +2282,17 @@ impl BrowseView {
         cx.notify();
     }
 
+    /// The panel's close X: the full header, the compact bar and the author
+    /// page all build it here, so it looks and works the same in each.
+    fn close_button(&self, id: &'static str, cx: &Context<Self>) -> Button {
+        Button::new(id).ghost().small().icon(IconName::X).tooltip("Close").on_click(cx.listener(|this, _, _, cx| {
+            this.stash_peek();
+            this.selected = None;
+            this.author = None;
+            cx.notify();
+        }))
+    }
+
     /// "by …", opening the author's projects. `small` for the compact bar
     /// over the open project.
     fn author_link(&self, m: &cf::Mod, id: ElementId, small: bool, cx: &Context<Self>) -> AnyElement {
@@ -3993,7 +4004,7 @@ impl BrowseView {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_xl().font_semibold().line_height(rems(1.5)).pr(rems(6.)).child(m.name.clone()))
+                    .child(div().text_xl().font_semibold().line_height(rems(1.5)).pr(rems(6.)).child(widgets::selectable_text(ElementId::Name(format!("detail-name:{}", m.id).into()), m.name.clone())))
                     .children(widgets::featured_chip(m, cx).map(|c| h_flex().mt_1().child(c)))
                     .child(div().mt_0p5().child(match &origin {
                         Some(o) => source_byline(m, o, cx),
@@ -4079,19 +4090,7 @@ impl BrowseView {
                         )
                     })
                     .child(self.bookmark_button(m, "detail-bookmark".into(), cx))
-                    .child(
-                        Button::new("close-detail")
-                            .ghost()
-                            .small()
-                            .icon(IconName::X)
-                            .tooltip("Close")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.stash_peek();
-                                this.selected = None;
-                                this.author = None;
-                                cx.notify();
-                            })),
-                    ),
+                    .child(self.close_button("close-detail", cx)),
             );
 
         // The tabs' labels, here and in the compact bar.
@@ -4998,7 +4997,7 @@ impl BrowseView {
                     .flex_1()
                     .min_w_0()
                     .gap_1()
-                    .child(div().text_xl().font_semibold().truncate().child(a.name.clone()))
+                    .child(div().text_xl().font_semibold().truncate().child(widgets::selectable_text(ElementId::Name(format!("author-name:{}", a.of.id).into()), a.name.clone())))
                     .child(widgets::caption(summary, cx))
                     .children(url.map(|u| {
                         h_flex().pt_1().child(
@@ -5012,19 +5011,7 @@ impl BrowseView {
                         )
                     })),
             )
-            .child(
-                Button::new("close-author")
-                    .ghost()
-                    .small()
-                    .icon(IconName::X)
-                    .tooltip("Close")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.stash_peek();
-                        this.author = None;
-                        this.selected = None;
-                        cx.notify();
-                    })),
-            );
+            .child(self.close_button("close-author", cx));
 
         let body: AnyElement = match &a.projects {
             Load::Loading => h_flex()
@@ -5204,13 +5191,15 @@ impl BrowseView {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_sm().font_semibold().truncate().child(m.name.clone()))
+                            .child(div().text_sm().font_semibold().truncate().child(widgets::selectable_text(ElementId::Name(format!("sticky-name:{}", m.id).into()), m.name.clone())))
                             .child(h_flex().child(self.author_link(m, "sticky-author".into(), true, cx))),
                     )
                     .when(show_downloads, |r| {
                         r.child(stat(IconName::Download, human_count(m.download_count), cx).text_xs())
                     })
-                    .children(action),
+                    .children(action)
+                    // The same X as the full header's, at the same right gap.
+                    .child(self.close_button("sticky-close", cx).flex_none()),
             )
             .child(
                 TabBar::new("sticky-tabs")

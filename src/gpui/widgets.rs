@@ -332,6 +332,14 @@ pub fn wheel_number(
         .child(input)
 }
 
+/// Plain text a pick with the mouse can select and copy (a project's name
+/// in its panel). It takes the font, size and colour of the element it sits
+/// in, so style the parent, not this. It wants a stable `id`. Don't put it
+/// inside something clickable: the press would start a pick, not a click.
+pub fn selectable_text(id: impl Into<ElementId>, text: impl Into<SharedString>) -> gpui_kit::base::SelectableText {
+    gpui_kit::base::SelectableText::new(id, text)
+}
+
 /// A muted, small caption line.
 pub fn caption(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
