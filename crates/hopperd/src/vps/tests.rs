@@ -432,6 +432,14 @@ async fn home_routes_by_tag_and_refuses_others() {
     assert!(serde_json::from_str::<Value>(&status).unwrap().get("description").is_some(), "{status}");
     assert!(!matches!(ask("someone-else", "game").await, Ok(Some(_))), "a server not set to use the relay");
     assert!(!matches!(ask(id, "control").await, Ok(Some(_))), "a non-game stream from the relay");
+    use hopper_core::hosting::proxy_forward::{Mode, Record};
+    t.app.vps_forward.set(id, Some(Record { mode: Mode::Relay, ..Default::default() })).unwrap();
+    assert!(!matches!(ask(id, "game").await, Ok(Some(_))), "Relay mode requires the Velocity peer");
+    let mut s = relay.open(serde_json::to_vec(&super::Head { kind: "game".into(), server: id.into(), peer: "velocity".into() }).unwrap()).await.unwrap();
+    let mut out = core::handshake_packet(767, "nothing.example", 25565, 1);
+    out.extend(core::packet(0, &[]));
+    s.tx.send(&out).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(30), s.rx.recv()).await.unwrap().unwrap().is_some(), "Velocity peer still reaches Relay mode");
 }
 
 /// A TCP proxy in front of the relay's tunnel port that the test can switch
@@ -748,7 +756,7 @@ async fn joins_are_refused_before_routes_and_after_removal() {
         // Known address, but Velocity has no port for it yet.
         (vec![route("srv", 0), route("other", 25581), route("third", 25582)], "isn't set up on the relay yet"),
         // Install its port, then remove it again before the next join.
-        (vec![route("srv", 25580), route("other", 25581), route("third", 25582)], ""),
+        (vec![route("srv", 25580), route("other", 25581), route("third", 25582)], "isn't set up on the relay yet"),
         (vec![route("srv", 0), route("other", 25581), route("third", 25582)], "isn't set up on the relay yet"),
         (vec![route("other", 25581), route("third", 25582)], "No server here goes by this address"),
         (vec![], "home server is offline"),
@@ -915,4 +923,29 @@ async fn taking_a_server_off_needs_stop_first() {
     assert_eq!(body(&got)["relays"], serde_json::json!([]), "no relay address set");
     let (s, _, _) = call("GET", "/api/v1/vps-relays").origin(OWN).send(&t).await;
     assert_eq!(s, axum::http::StatusCode::UNAUTHORIZED);
+}
+
+/// A pending TLS socket must not hold a slot for authenticated homes.
+/// Control acknowledgements prove each takeover completed before reconnect.
+#[tokio::test(flavor = "multi_thread")]
+async fn home_reconnects_with_a_half_open_peer_and_clears_failures() {
+    let r = run_relay().await;
+    let _half_open = TcpStream::connect(("127.0.0.1", r.tunnel)).await.unwrap();
+    let mut cfg = home_cfg(&r, r.tunnel, "srv");
+    cfg.key = format!("hrt_{}", "cd".repeat(32));
+    for _ in 0..3 { assert!(home::connect(&cfg).await.is_err()); }
+    cfg.key = key();
+    let mut homes = Vec::new();
+    for _ in 0..12 {
+        let (live, _) = home::connect(&cfg).await.expect("home reconnects");
+        let mut ctl = live.tunnel.handle.open(head("control", "")).await.unwrap();
+        let mut line = serde_json::to_vec(&super::Control { routes: vec![route("srv", &[], false, 0)], pings: true }).unwrap();
+        line.push(b'\n');
+        ctl.tx.send(&line).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), ctl.rx.recv()).await.unwrap().unwrap().unwrap();
+        homes.push((live, ctl));
+        cfg.key = format!("hrt_{}", "cd".repeat(32));
+        assert!(home::connect(&cfg).await.is_err());
+        cfg.key = key();
+    }
 }

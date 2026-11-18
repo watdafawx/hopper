@@ -844,6 +844,10 @@ pub(super) async fn stream(app: &Arc<App>, s: mux::Stream) {
         log::info!("relay: refused a stream for {:?}, which isn't set to use the relay", head.server);
         return;
     }
+    if app.vps_forward.mode(&head.server) == hopper_core::hosting::proxy_forward::Mode::Relay && head.peer != "velocity" {
+        log::info!("relay: refused a stream without Velocity for {:?}", head.server);
+        return;
+    }
     let live = app.vps.server_live(&head.server);
     live.open.fetch_add(1, Ordering::Relaxed);
     live.streams.fetch_add(1, Ordering::Relaxed);

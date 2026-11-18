@@ -47,9 +47,13 @@ const FILE: &str = "relay.json";
 /// Failed tunnel attempts from one address before it is dropped unread.
 const MAX_FAILS: usize = 10;
 const FAIL_WINDOW: Duration = Duration::from_secs(600);
-/// Player connections at once from one address (a stream each, out of the
+/// Player connections at once from one /24 or /64 (a stream each, out of the
 /// tunnel's 256).
 const MAX_PER_IP: usize = 8;
+const MAX_AUTH_IP: usize = 4;
+const MAX_AUTH: usize = 64;
+const MAX_LOGINS: usize = 192;
+const LOGIN_WINDOW: Duration = Duration::from_secs(10);
 
 /// `relay.json` in the relay's data folder.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -126,6 +130,9 @@ pub struct Relay {
     epoch: AtomicU64,
     fails: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
     players: Mutex<HashMap<IpAddr, usize>>,
+    authenticating: Mutex<HashMap<IpAddr, usize>>,
+    logins: Mutex<HashMap<u64, Instant>>,
+    next_login: AtomicU64,
     /// Mux settings (tests shorten the timers).
     pub mux: mux::Config,
 }
@@ -150,6 +157,9 @@ impl Relay {
             epoch: AtomicU64::new(0),
             fails: Mutex::new(HashMap::new()),
             players: Mutex::new(HashMap::new()),
+            authenticating: Mutex::new(HashMap::new()),
+            logins: Mutex::new(HashMap::new()),
+            next_login: AtomicU64::new(0),
             mux: link::mux_config(),
         })
     }
@@ -189,8 +199,12 @@ impl Relay {
     fn failed(&self, ip: IpAddr) {
         let mut f = self.fails.lock().unwrap();
         // Bounded: a flood of addresses can't grow this without end.
-        if f.len() > 10_000 {
+        if f.len() >= 10_000 {
             f.retain(|_, q| q.back().is_some_and(|t| t.elapsed() < FAIL_WINDOW));
+        }
+        if f.len() >= 10_000 && !f.contains_key(&ip) {
+            let oldest = f.iter().filter_map(|(ip, q)| q.back().map(|at| (*ip, *at))).min_by_key(|(_, at)| *at).map(|(ip, _)| ip);
+            if let Some(oldest) = oldest { f.remove(&oldest); }
         }
         let q = f.entry(ip).or_default();
         q.push_back(Instant::now());
@@ -254,8 +268,9 @@ pub async fn serve(relay: Arc<Relay>, game: TcpListener, tunnel: TcpListener, tl
             if r.blocked(peer.ip()) {
                 continue;
             }
+            let Some(slot) = AuthSlot::take(r.clone(), peer.ip()) else { continue };
             let (r, acceptor) = (r.clone(), acceptor.clone());
-            tokio::spawn(async move { home_conn(r, acceptor, sock, peer).await });
+            tokio::spawn(async move { home_conn(r, acceptor, sock, peer, slot).await });
         }
     };
     let players = async move {
@@ -320,7 +335,7 @@ fn open_backends(r: &Arc<Relay>, routes: &[Route]) {
     }
 }
 
-async fn home_conn(r: Arc<Relay>, acceptor: tokio_rustls::TlsAcceptor, sock: TcpStream, peer: SocketAddr) {
+async fn home_conn(r: Arc<Relay>, acceptor: tokio_rustls::TlsAcceptor, sock: TcpStream, peer: SocketAddr, slot: AuthSlot) {
     let _ = sock.set_nodelay(true);
     let tls = match tokio::time::timeout(Duration::from_secs(15), acceptor.accept(sock)).await {
         Ok(Ok(t)) => t,
@@ -348,6 +363,8 @@ async fn home_conn(r: Arc<Relay>, acceptor: tokio_rustls::TlsAcceptor, sock: Tcp
             return;
         }
     };
+    r.fails.lock().unwrap().remove(&peer.ip());
+    drop(slot);
     let mux::Tunnel { handle, mut incoming, done, .. } = live.tunnel;
     let epoch = r.epoch.fetch_add(1, Ordering::SeqCst) + 1;
     let old = r.home.lock().unwrap().replace(HomeLink { epoch, handle: handle.clone(), routes: Vec::new() });
@@ -450,6 +467,67 @@ impl Lines {
     }
 }
 
+/// Pre-auth sockets own their slot, including when their task is cancelled.
+struct AuthSlot(Arc<Relay>, IpAddr);
+
+impl AuthSlot {
+    fn take(r: Arc<Relay>, ip: IpAddr) -> Option<Self> {
+        let mut p = r.authenticating.lock().unwrap();
+        if p.values().sum::<usize>() >= MAX_AUTH || p.get(&ip).copied().unwrap_or(0) >= MAX_AUTH_IP {
+            return None;
+        }
+        *p.entry(ip).or_default() += 1;
+        drop(p);
+        Some(Self(r, ip))
+    }
+}
+
+impl Drop for AuthSlot {
+    fn drop(&mut self) {
+        let mut p = self.0.authenticating.lock().unwrap();
+        let n = p.get_mut(&self.1).expect("auth slot");
+        *n -= 1;
+        if *n == 0 { p.remove(&self.1); }
+    }
+}
+
+/// Group rotating addresses from the same player network together.
+fn player_network(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(ip) => IpAddr::V4((u32::from(ip) & 0xffffff00).into()),
+        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
+            Some(ip) => player_network(IpAddr::V4(ip)),
+            None => IpAddr::V6((u128::from(ip) & (u128::MAX << 64)).into()),
+        },
+    }
+}
+
+/// Leave room for established players and control/voice streams. The ten
+/// second window is an admission bound, not a claim that login succeeded.
+struct LoginSlot<'a>(&'a Relay, u64);
+
+impl<'a> LoginSlot<'a> {
+    fn take(r: &'a Relay, now: Instant) -> Option<Self> {
+        let mut p = r.logins.lock().unwrap();
+        p.retain(|_, at| now.duration_since(*at) < LOGIN_WINDOW);
+        if p.len() >= MAX_LOGINS { return None; }
+        let id = r.next_login.fetch_add(1, Ordering::Relaxed);
+        p.insert(id, now);
+        Some(Self(r, id))
+    }
+}
+
+impl Drop for LoginSlot<'_> {
+    fn drop(&mut self) { self.0.logins.lock().unwrap().remove(&self.1); }
+}
+
+fn open_refusal(e: &mux::StreamError) -> Refusal {
+    match e {
+        mux::StreamError::Reset(crate::tunnel::frame::code::REFUSED) => FULL,
+        _ => OFFLINE,
+    }
+}
+
 /// Counts a player's connection against its address while it lasts.
 struct PlayerSlot<'a>(&'a Relay, IpAddr);
 
@@ -466,14 +544,15 @@ impl Drop for PlayerSlot<'_> {
 }
 
 async fn player_conn(r: &Relay, mut sock: TcpStream, peer: SocketAddr) -> anyhow::Result<()> {
+    let network = player_network(peer.ip());
     let _slot = {
         let mut p = r.players.lock().unwrap();
-        let n = p.entry(peer.ip()).or_default();
+        let n = p.entry(network).or_default();
         if *n >= MAX_PER_IP {
             anyhow::bail!("too many connections from this address");
         }
         *n += 1;
-        PlayerSlot(r, peer.ip())
+        PlayerSlot(r, network)
     };
     let _ = sock.set_nodelay(true);
     // The handshake says whether it's the server list or a join; the
@@ -495,7 +574,7 @@ async fn player_conn(r: &Relay, mut sock: TcpStream, peer: SocketAddr) -> anyhow
         match h.as_ref().filter(|h| !h.handle.is_dead()) {
             None => Ok(None),
             Some(h) => match super::pick_route(&h.routes, &hs.host) {
-                Some(rt) if rt.velocity && !super::velocity_knows(&h.routes, rt) => Err(NOT_SET_UP),
+                Some(rt) if rt.velocity && (r.velocity_port == 0 || !super::velocity_knows(&h.routes, rt)) => Err(NOT_SET_UP),
                 Some(rt) => Ok(Some((h.handle.clone(), rt.server.clone(), rt.velocity))),
                 None if h.routes.is_empty() => Ok(None),
                 None => Err(UNKNOWN_HOST),
@@ -535,10 +614,14 @@ async fn player_conn(r: &Relay, mut sock: TcpStream, peer: SocketAddr) -> anyhow
     }
     if let Some((handle, server, _)) = target {
         let head = Head { kind: "game".into(), server, peer: peer.to_string() };
-        if let Ok(mut stream) = handle.open(serde_json::to_vec(&head).expect("head")).await {
-            stream.tx.send(&buf).await.map_err(|e| anyhow::anyhow!("tunnel: {e:?}"))?;
-            // Borrowed, so the socket outlives `_listed`.
-            return super::pipe(&mut sock, stream, |_| {}, |_| {}).await.map_err(anyhow::Error::msg);
+        let Some(_login) = LoginSlot::take(r, Instant::now()) else { return refuse(&mut sock, buf, &hs, FULL).await };
+        match handle.open(serde_json::to_vec(&head).expect("head")).await {
+            Ok(mut stream) => {
+                stream.tx.send(&buf).await.map_err(|e| anyhow::anyhow!("tunnel: {e:?}"))?;
+                // Borrowed, so the socket outlives `_listed`.
+                return super::pipe(&mut sock, stream, |_| {}, |_| {}).await.map_err(anyhow::Error::msg);
+            }
+            Err(e) => return refuse(&mut sock, buf, &hs, open_refusal(&e)).await,
         }
     }
     offline(&mut sock, buf, &hs).await
@@ -619,6 +702,7 @@ struct Refusal {
     list: &'static str,
 }
 
+const FULL: Refusal = Refusal { join: "The server is full right now, try again in a minute.", list: "Server is full right now" };
 const OFFLINE: Refusal = Refusal { join: "The home server is offline. Try again in a little while.", list: "Home server is offline" };
 const UNKNOWN_HOST: Refusal = Refusal { join: "No server here goes by this address. Check the address and try again.", list: "No server goes by this address" };
 const NOT_SET_UP: Refusal = Refusal { join: "This server isn't set up on the relay yet. Ask the owner to run the relay setup again.", list: "Not set up on this relay yet" };
@@ -834,4 +918,139 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod availability_tests {
+    use super::*;
+
+    #[test]
+    fn auth_slots_bound_each_ip_and_total_and_release_on_drop() {
+        let r = Relay::new([0; 32], Codec::quiet(), 0);
+        let ip = "192.0.2.1".parse().unwrap();
+        let mut slots: Vec<_> = (0..MAX_AUTH_IP).map(|_| AuthSlot::take(r.clone(), ip).unwrap()).collect();
+        assert!(AuthSlot::take(r.clone(), ip).is_none());
+        slots.pop();
+        assert!(AuthSlot::take(r.clone(), ip).is_some());
+        for n in 1..=MAX_AUTH - slots.len() {
+            slots.push(AuthSlot::take(r.clone(), IpAddr::V4([198, 51, 100, n as u8].into())).unwrap());
+        }
+        assert!(AuthSlot::take(r.clone(), "203.0.113.1".parse().unwrap()).is_none());
+        drop(slots);
+        assert!(r.authenticating.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn player_limits_group_v4_v6_and_mapped_networks() {
+        for (a, b, other) in [
+            ("192.0.2.1", "192.0.2.254", "192.0.3.1"),
+            ("2001:db8:1:2::1", "2001:db8:1:2:ffff::1", "2001:db8:1:3::1"),
+            ("::ffff:192.0.2.1", "192.0.2.254", "192.0.3.1"),
+        ] {
+            assert_eq!(player_network(a.parse().unwrap()), player_network(b.parse().unwrap()));
+            assert_ne!(player_network(a.parse().unwrap()), player_network(other.parse().unwrap()));
+        }
+    }
+
+    #[test]
+    fn login_reserve_releases_on_end_or_expiry() {
+        let r = Relay::new([0; 32], Codec::quiet(), 0);
+        let now = Instant::now();
+        let mut slots: Vec<_> = (0..MAX_LOGINS).map(|_| LoginSlot::take(&r, now).unwrap()).collect();
+        assert!(LoginSlot::take(&r, now).is_none());
+        slots.pop();
+        slots.push(LoginSlot::take(&r, now).unwrap());
+        let fresh = LoginSlot::take(&r, now + LOGIN_WINDOW).expect("older players leave capacity for a new login");
+        drop(slots);
+        assert_eq!(r.logins.lock().unwrap().len(), 1, "old guards cannot release a new slot");
+        drop(fresh);
+        assert!(r.logins.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn full_mux_is_not_reported_as_offline() {
+        assert_eq!(open_refusal(&mux::StreamError::Reset(crate::tunnel::frame::code::REFUSED)).join, FULL.join);
+        assert_eq!(open_refusal(&mux::StreamError::Closed).join, OFFLINE.join);
+    }
+
+    #[tokio::test]
+    async fn mux_and_login_capacity_answer_full_instead_of_offline() {
+        let mut cfg = super::super::tests::quick();
+        cfg.max_streams = 2;
+        let mut pair = super::super::tests::pair(cfg).await;
+        let r = Relay::new([0; 32], Codec::quiet(), 0);
+        *r.home.lock().unwrap() = Some(HomeLink {
+            epoch: 1, handle: pair.relay.tunnel.handle.clone(),
+            routes: vec![Route { server: "srv".into(), ..Default::default() }],
+        });
+        let now = Instant::now();
+        let slots: Vec<_> = (0..MAX_LOGINS).map(|_| LoginSlot::take(&r, now).unwrap()).collect();
+        // First refusal comes from admission, second from the actual mux cap.
+        let mut streams = Vec::new();
+        for admission in [true, false] {
+            if !admission {
+                for _ in 0..2 {
+                    streams.push(pair.relay.tunnel.handle.open(Vec::new()).await.unwrap());
+                    streams.push(pair.home.tunnel.incoming.recv().await.unwrap());
+                }
+                r.logins.lock().unwrap().clear();
+            }
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            let client = async {
+                let mut sock = TcpStream::connect(addr).await.unwrap();
+                let mut request = core::handshake_packet(767, "srv.test", addr.port(), 1);
+                request.extend(core::packet(0, &[]));
+                request.extend(core::packet(1, &0i64.to_be_bytes()));
+                sock.write_all(&request).await.unwrap();
+                let mut answer = Vec::new();
+                sock.read_to_end(&mut answer).await.unwrap();
+                assert!(String::from_utf8_lossy(&answer).contains(FULL.list), "{answer:?}");
+            };
+            let server = async {
+                let (sock, peer) = l.accept().await.unwrap();
+                player_conn(&r, sock, peer).await.unwrap();
+            };
+            tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(client, server); }).await.unwrap();
+        }
+        drop(slots);
+        pair.cut.abort();
+    }
+
+    #[tokio::test]
+    async fn velocity_players_can_use_reserved_capacity() {
+        let mut pair = super::super::tests::pair(super::super::tests::quick()).await;
+        let r = Relay::new([0; 32], Codec::quiet(), 0);
+        r.backend_base.store(25580, Ordering::SeqCst);
+        *r.home.lock().unwrap() = Some(HomeLink {
+            epoch: 1, handle: pair.relay.tunnel.handle.clone(),
+            routes: vec![Route { server: "srv".into(), velocity: true, port: 25580, ..Default::default() }],
+        });
+        let slots: Vec<_> = (0..MAX_LOGINS).map(|_| LoginSlot::take(&r, Instant::now()).unwrap()).collect();
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(l.local_addr().unwrap()).await.unwrap();
+        let (sock, _) = l.accept().await.unwrap();
+        let relay = r.clone();
+        let backend = tokio::spawn(async move { backend_conn(&relay, sock, 25580).await });
+        let mut stream = tokio::time::timeout(Duration::from_secs(10), pair.home.tunnel.incoming.recv()).await.unwrap().unwrap();
+        let head: Head = serde_json::from_slice(&stream.head).unwrap();
+        assert_eq!(head.peer, "velocity");
+        stream.tx.send(b"ok").await.unwrap();
+        let mut answer = [0; 2];
+        tokio::time::timeout(Duration::from_secs(10), client.read_exact(&mut answer)).await.unwrap().unwrap();
+        assert_eq!(&answer, b"ok");
+        backend.abort();
+        let _ = backend.await;
+        drop(slots);
+        pair.cut.abort();
+    }
+
+    #[test]
+    fn recent_failures_cannot_grow_map_past_cap() {
+        let r = Relay::new([0; 32], Codec::quiet(), 0);
+        for n in 0..10_100u32 { r.failed(IpAddr::V4(n.into())); }
+        assert_eq!(r.fails.lock().unwrap().len(), 10_000);
+        r.failed(IpAddr::V4(10_099.into()));
+        assert_eq!(r.fails.lock().unwrap()[&IpAddr::V4(10_099.into())].len(), 2);
+    }
 }
