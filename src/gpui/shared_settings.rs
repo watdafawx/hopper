@@ -26,7 +26,7 @@ use std::rc::Rc;
 /// From this many shared mods on, the panel shows a summary card instead of
 /// one row per mod (a row is ~60 px: twenty of them push the People list off
 /// the screen).
-pub(crate) const SUMMARY_FROM: usize = 5;
+pub(crate) const SUMMARY_FROM: usize = 3;
 /// How many mod icons the summary card shows before "+K more".
 pub(crate) const ICONS_SHOWN: usize = 6;
 /// An icon with its 2 px ring, and how far apart the icons sit: each
@@ -556,9 +556,11 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn summary_starts_at_five() {
-        assert!(!summarised(4));
-        assert!(summarised(5));
+    fn summary_starts_at_three() {
+        assert!(!summarised(0));
+        assert!(!summarised(2));
+        assert!(summarised(3));
+        assert!(summarised(4));
         assert!(summarised(20));
     }
 
