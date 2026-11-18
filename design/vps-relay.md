@@ -1302,3 +1302,84 @@ tests; `src/gpui/relay_card.rs`, `relay_setup.rs`, `relays_list.rs` draw it).
   the health row's "Up · 3 h"; a PC that may not manage any paired panel
   sees "Pair a Hopper Server this PC manages to see its relays here." in
   place of the list.
+
+## Switching a hand-made Velocity proxy over to the Hopper relay
+
+For an owner who already runs their own Velocity or BungeeCord on a VPS in
+front of a server at home (with WireGuard, frp, playit or a port forward
+to reach home), and wants Hopper's relay to do that job instead. Generic
+steps, not the migration of any one server. Plan about 30 minutes and do
+it when nobody is playing: players are dropped twice (when the old proxy
+stops and when the server restarts on the relay).
+
+### What changes
+
+- Hopper's setup installs **its own Velocity** on the VPS
+  (`/opt/hopper-relay`, settings in `/etc/hopper-relay`, service
+  `hopper-velocity`, user `hopper-velocity`). It listens on
+  `127.0.0.1:25577` only and reaches each server on `127.0.0.1:25580` and
+  up. Your old proxy can't stay on those ports.
+- The **players' port** (25565 by default) and the **tunnel port** (25566
+  by default) belong to the relay (`hopper-relay` service). Home dials out
+  to the tunnel port, so the old tunnel to home (WireGuard, frp, a port
+  forward on the router) is no longer needed.
+- **"Use the relay"** on each server writes Hopper's forwarding secret into
+  the PCF or FabricProxy-Lite config, and sets `online-mode=false`,
+  `enforce-secure-profile=false`, `network-compression-threshold=-1`,
+  `server-ip=127.0.0.1`. The config and values from before are kept in
+  History and put back by "Stop using the relay".
+- **Forced hosts** come from each server's address in Hopper Server, not
+  from your old `velocity.toml`.
+- Hopper's Velocity runs **no plugins**. LuckPerms, a maintenance or
+  whitelist plugin, a lobby, Geyser and so on are not carried over. Use the
+  servers' own whitelists and bans. Forge and NeoForge 1.20.1 and older
+  need a Velocity plugin (Ambassador) and can't use the relay's account
+  checks yet.
+- **Voice** (Simple Voice Chat) goes through the relay's UDP port 24454
+  for the first relayed server with a voice mod only.
+
+### What to keep
+
+- The VPS itself, its ssh login and its DNS name. If the relay runs on the
+  same VPS and the same players' port, the address players type doesn't
+  change. An SRV record that points at another port needs updating.
+- The old proxy's folder and config, untouched, for going back.
+- The old tunnel's config (WireGuard keys, frp settings), switched off but
+  not deleted, until the relay has run for a while.
+- The servers' whitelists, ops and bans: they live on the servers and keep
+  working.
+
+### Steps
+
+1. Note down what the old proxy does that players rely on (plugins,
+   forced hosts, the ports in its config) so you can check them after.
+2. In Hopper Server, give each server the address players use for it
+   (Settings of that server), so the relay can tell them apart.
+3. On the VPS, stop the old proxy and turn off its autostart, for example
+   `sudo systemctl disable --now velocity` (or stop its screen, tmux or
+   Docker container and its restart policy). Don't delete it.
+4. Stop the old tunnel to home the same way (on the VPS and at home).
+5. In Hopper Server, run **Relay through a VPS** setup. Its check names
+   any port still taken ("maybe another Velocity"): stop that program and
+   check again.
+6. On each server's Overview, Relay card, click **Use the relay**. If you
+   installed PCF or FabricProxy-Lite by hand, it stays; Hopper writes its
+   own secret into the config. Take out any other forwarding plugin or mod
+   you added by hand (BungeeGuard and the like) yourself.
+7. Join through the usual address, then click **Test again** on the Relay
+   card. Check voice if the server has it.
+8. After a few days of play, remove the firewall rules you made for the
+   old proxy and tunnel (the setup only adds and removes its own), and the
+   old proxy's folder if you no longer want it.
+
+### Going back
+
+1. On each server's Relay card, click **Stop using the relay**. The
+   config and `server.properties` values from before come back from
+   History.
+2. In the relay setup, click **Remove the relay**. It takes out Hopper's
+   services, users, folders and the firewall rules it added, nothing else.
+3. Start the old proxy and the old tunnel again and turn their autostart
+   back on (`sudo systemctl enable --now velocity`).
+4. If you took out a plugin or mod in step 6, put it back from the
+   server's History.
