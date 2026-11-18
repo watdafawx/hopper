@@ -771,13 +771,18 @@ pub fn tps_color(t: &hopper::panel::Tps, cx: &App) -> Hsla {
     }
 }
 
+/// What a TPS reading's tooltip says: the time a tick takes and that 20 is
+/// full speed.
+pub fn tps_tip(t: &hopper::panel::Tps) -> SharedString {
+    t.mspt_text()
+        .map_or_else(|| "Ticks per second; 20 is full speed".to_string(), |m| format!("{m}; 20 TPS is full speed"))
+        .into()
+}
+
 /// "TPS 19.9" as a tinted chip in the reading's color, with the time a
 /// tick takes on hover (server rows and the Library's Server tab).
 pub fn tps_chip(id: impl Into<ElementId>, t: &hopper::panel::Tps, cx: &App) -> Stateful<Div> {
-    let tip: SharedString = t
-        .mspt_text()
-        .map_or_else(|| "Ticks per second; 20 is full speed".to_string(), |m| format!("{m}; 20 TPS is full speed"))
-        .into();
+    let tip = tps_tip(t);
     pill(format!("TPS {}", t.text()), tps_color(t, cx), false)
         .id(id)
         .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
@@ -798,14 +803,6 @@ pub fn players_figure(online: u32, max: u32, icon: bool, color: Hsla) -> Div {
         .text_color(color)
         .when(icon, |r| r.child(Icon::new(IconName::Users).xsmall().text_color(color)))
         .child(format!("{online}/{max}"))
-}
-
-/// [`players_figure`] in the card's muted grey with its own "Players online"
-/// tooltip, for places that have no tooltip of their own around it.
-pub fn players_count(id: impl Into<ElementId>, online: u32, max: u32, cx: &App) -> Stateful<Div> {
-    players_figure(online, max, true, cx.theme().muted_foreground)
-        .id(id)
-        .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Players online").build(w, cx))
 }
 
 /// A small figure with a caption under it, on a faint tile.
@@ -834,6 +831,81 @@ pub fn stat_tile(value: impl Into<SharedString>, label: &str, cx: &App) -> Div {
                 .text_color(theme.muted_foreground)
                 .child(label.to_uppercase()),
         )
+}
+
+/// One vital of a running server on the Server tab's card ("Players",
+/// "TPS", "Ping"): a small muted label over the figure, on a quiet fill.
+/// Tiles in one row share its width equally; a long figure is cut, not
+/// pushed past its tile. `color` tints the figure (the TPS reading's
+/// color, darkened on light themes); `tip` says more on hover.
+pub fn vital_tile(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    value: impl Into<SharedString>,
+    color: Option<Hsla>,
+    tip: impl Into<SharedString>,
+    cx: &App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    let tip: SharedString = tip.into();
+    let value: SharedString = value.into();
+    // Three equal tiles in a narrow side panel: a long figure ("100/100",
+    // "123 ms") steps down in size so it still fits, and the row keeps its
+    // height (same line height).
+    let size = if value.chars().count() >= 6 { rems(0.875) } else { rems(1.0625) };
+    v_flex()
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .gap_0p5()
+        .px_2()
+        .py_2()
+        .rounded(theme.radius)
+        .bg(theme.foreground.opacity(alpha::HOVER))
+        .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(label))
+        .child(
+            div()
+                .text_size(size)
+                .line_height(rems(1.375))
+                .font_semibold()
+                .text_color(color.map_or(theme.foreground, crate::theme::ink))
+                .truncate()
+                .child(value),
+        )
+        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+}
+
+/// The same figures as [`vital_tile`]s, for a column too narrow for three
+/// side by side: one quiet block, a line each (the name on the left, the
+/// figure at the end).
+pub fn vital_lines(rows: Vec<(&'static str, String, Option<Hsla>, SharedString)>, cx: &App) -> Div {
+    let theme = cx.theme();
+    v_flex()
+        .w_full()
+        .gap_1()
+        .px_2()
+        .py_2()
+        .rounded(theme.radius)
+        .bg(theme.foreground.opacity(alpha::HOVER))
+        .children(rows.into_iter().map(|(label, value, color, tip)| {
+            h_flex()
+                .id(format!("vital-line-{label}"))
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .justify_between()
+                .child(div().text_xs().text_color(theme.muted_foreground).child(label))
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(rems(0.875))
+                        .font_semibold()
+                        .text_color(color.map_or(theme.foreground, crate::theme::ink))
+                        .truncate()
+                        .child(value),
+                )
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+        }))
 }
 
 /// A hovered row, nav item or icon button: the theme's quiet list wash

@@ -1637,15 +1637,15 @@ impl SyncPanel {
             .then(|| self.control.update(cx, |c, cx| c.controls_compact(cx)));
         let live = self.restart_line(true, cx);
         let online = self.online(cx);
-        let (dot, word) = self.state(cx);
-        // While starting or stopping, the pill's words: "starting 45%".
-        let word: String = self
-            .control
-            .read(cx)
-            .stats_of(&server.root)
-            .and_then(|s| s.progress.as_ref())
-            .map(|p| p.pill().to_lowercase())
-            .unwrap_or_else(|| word.to_string());
+        let (_, word) = self.state(cx);
+        let (pill_color, pill) = {
+            let ctl = self.control.read(cx);
+            let stats = ctl.stats_of(&server.root).or_else(|| self.store.read(cx).panel_stats(&server.root));
+            crate::server_control::pill_of(word, stats, ctl.busy(), ctl.configured(cx) && ctl.is_unreachable(), cx)
+        };
+        // A panel that can't be asked says nothing about players or TPS.
+        let unreachable = pill == "Unreachable";
+        let busy = self.control.read(cx).busy().is_some();
         let view = cx.entity();
         let theme = cx.theme().clone();
         let card = || {
@@ -1663,45 +1663,58 @@ impl SyncPanel {
         let reason = self.crash.as_ref().filter(|_| !online).map(crash_reason);
         let ping = self.store.read(cx).status(&server.root).and_then(|s| s.ms());
         let (tps, players) = self.live_figures(&server.root, cx);
+        // While it runs: players, TPS and ping as three equal tiles, each
+        // only when known (a panel may report no players or TPS). Ping shows
+        // "—" beside others until the first answer.
+        let vitals = (word == "running" && !unreachable && (ping.is_some() || tps.is_some() || players.is_some())).then(|| {
+            // Narrower than the default column the three tiles can't hold
+            // "100/100" or "123 ms": the figures stack as lines instead.
+            let stacked = self.side_panel.layout(self.store.read(cx).settings(), window).width < 17.0;
+            let mut figs: Vec<(&'static str, String, Option<gpui::Hsla>, SharedString)> = Vec::new();
+            if let Some((on, max)) = players {
+                figs.push(("Players", format!("{on}/{max}"), None, "Players online".into()));
+            }
+            if let Some(t) = tps {
+                figs.push(("TPS", t.text(), Some(widgets::tps_color(&t, cx)), widgets::tps_tip(&t)));
+            }
+            figs.push((
+                "Ping",
+                ping.map_or_else(|| "—".to_string(), hopper::server::ping_text),
+                None,
+                "How long the server takes to answer".into(),
+            ));
+            if stacked {
+                widgets::vital_lines(figs, cx).into_any_element()
+            } else {
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .children(figs.into_iter().map(|(label, value, color, tip)| {
+                        widgets::vital_tile(format!("vital-{label}"), label, value, color, tip, cx)
+                    }))
+                    .into_any_element()
+            }
+        });
+        // Down and under Hopper's control: say what Start brings back.
+        let down_note = (pill == "Stopped" && controls.is_some() && self.control.read(cx).stats_of(&server.root).is_some())
+            // Wraps instead of clipping: at the narrowest column it takes two lines.
+            .then(|| div().text_xs().text_color(theme.muted_foreground).child("Start it to see players, TPS and ping."));
         let server_card = card()
+            .gap_3()
             .child(
                 h_flex()
                     .gap_2()
-                    .child(widgets::status_dot(dot))
-                    .child(div().min_w_0().font_semibold().truncate().child(server.name.clone()))
-                    .when(!word.is_empty(), |r| {
-                        r.child(widgets::caption(format!("· {word}"), cx).text_xs().flex_none().text_color(dot))
-                    })
+                    .child(widgets::status_dot(pill_color))
+                    // The name gives way first; the state pill keeps its words.
+                    .child(div().flex_1().min_w_0().font_semibold().truncate().child(server.name.clone()))
                     // The last crash is still being read (it comes after the
-                    // list): said in place, on the row, so nothing moves.
-                    .when(self.checking_crash, |r| r.child(Spinner::new().small()))
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("rescan")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::RefreshCw)
-                            .tooltip("Compare again")
-                            .loading(self.comparing)
-                            .disabled(self.running || self.comparing)
-                            .on_click(cx.listener(|this, _, _, cx| this.rescan(cx))),
-                    ),
+                    // list), or an action is under way: said in place, beside
+                    // the pill, so nothing moves.
+                    .when(self.checking_crash || busy, |r| r.child(Spinner::new().xsmall()))
+                    .when(!pill.is_empty(), |r| r.child(widgets::chip(pill_color).child(pill))),
             )
-            // Its ping, players and TPS on their own line, so the name keeps its room.
-            .when(ping.is_some() || tps.is_some() || players.is_some(), |c| {
-                c.child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .pl_4()
-                        .when_some(ping, |r, ms| {
-                            r.child(crate::servers::ping_bars(&server.root, ms, cx))
-                                .child(widgets::caption(hopper::server::ping_text(ms), cx).text_xs())
-                        })
-                        .when_some(players, |r, (on, max)| r.child(widgets::players_count("server-players", on, max, cx)))
-                        .when_some(tps, |r, t| r.child(widgets::tps_chip("server-tps", &t, cx))),
-                )
-            })
+            .children(vitals)
+            .children(down_note)
             .when_some(reason, |c, r| c.child(div().text_xs().text_color(theme.danger).child(r)))
             .children(controls)
             .children(live);
@@ -2426,6 +2439,21 @@ impl SyncPanel {
                             this.selected.clear();
                             cx.notify();
                         })),
+                )
+            })
+            // Beside the instance's Server tab the page has no header row to
+            // hold it (a pairing page's header has its own): the comparison's
+            // own refresh sits next to the button that applies it.
+            .when(self.in_instance, |r| {
+                r.child(
+                    Button::new("rescan")
+                        .ghost()
+                        .small()
+                        .icon(IconName::RefreshCw)
+                        .tooltip("Compare again")
+                        .loading(self.comparing)
+                        .disabled(self.running || self.comparing)
+                        .on_click(cx.listener(|this, _, _, cx| this.rescan(cx))),
                 )
             })
             .children(sync);

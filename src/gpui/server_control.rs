@@ -123,6 +123,9 @@ pub struct ServerControl {
     rcon_turning: bool,
     rcon_done: Option<String>,
     rcon_error: Option<String>,
+    /// The Server tab card's button row: Stop and Restart with their words,
+    /// or as icons when the side panel is too narrow for them.
+    card_fit: widgets::Fit,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -207,6 +210,7 @@ impl ServerControl {
             rcon_turning: false,
             rcon_done: None,
             rcon_error: None,
+            card_fit: widgets::Fit::default(),
             _subscriptions: subs,
         }
     }
@@ -678,8 +682,9 @@ impl ServerControl {
         self.controls_in(false, true, true, cx)
     }
 
-    /// The same, narrow: Stop and Restart as icons with tooltips, for a
-    /// side column.
+    /// The Server tab's card: Stop / Restart / Start with their words and
+    /// Console and ⋯ as icons (see [`Self::card_controls`]); the card has
+    /// its own state pill.
     pub fn controls_compact(&self, cx: &mut Context<Self>) -> AnyElement {
         self.controls_in(true, false, true, cx)
     }
@@ -730,6 +735,10 @@ impl ServerControl {
         if let Some(p) = stats.as_ref().and_then(|s| s.progress.clone()) {
             return self.progress_controls(&p, compact, hero, running, cx);
         }
+        // The Server tab's card names the state in its own pill.
+        if compact {
+            return self.card_controls(busy, running, cx);
+        }
         let (tag, state) = match (&stats, busy) {
             (_, Some(a)) => (
                 widgets::chip(cx.theme().warning),
@@ -752,11 +761,9 @@ impl ServerControl {
         let success = theme.success;
         h_flex()
             .gap_2()
-            // A narrow column wraps instead of pushing buttons out.
-            .when(compact, |r| r.flex_wrap())
-            // Compact (a card that names the state already) and the
-            // header (its pill does): only a transition shows.
-            .when((!compact && !hero) || busy.is_some(), |r| {
+            // The hero (its page's pill names the state): only a transition
+            // shows.
+            .when(!hero || busy.is_some(), |r| {
                 r.child(
                     h_flex()
                         .gap_1p5()
@@ -764,7 +771,7 @@ impl ServerControl {
                         .child(tag.small().child(state)),
                 )
             })
-            .when(!compact && !hero, |r| r.child(div().w_px().h_5().bg(theme.border)))
+            .when(!hero, |r| r.child(div().w_px().h_5().bg(theme.border)))
             .map(|r| {
                 if running {
                     r.child(
@@ -818,27 +825,87 @@ impl ServerControl {
                     )
                 }
             })
-            .when(compact, |r| {
-                // With the state chip or Stop / Restart showing, the row
-                // is full: Console shrinks to a ghost icon so it fits.
-                let tight = running || busy.is_some();
-                r.child(
-                    Button::new("panel-console")
-                        .small()
-                        .icon(IconName::SquareTerminal)
-                        .map(|b| {
-                            if tight {
-                                b.ghost().tooltip("Console")
-                            } else {
-                                b.outline().label("Console")
-                            }
-                        })
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ControlEvent::Console))),
-                )
-            })
             // The header puts ⋯ last, after its own buttons.
             .when(!hero, |r| r.child(self.more_menu(Button::new("panel-more").small().ghost(), running, cx)))
             .into_any_element()
+    }
+
+    /// Console as a ghost icon (the Server tab card's end of the row).
+    fn console_icon(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("panel-console")
+            .small()
+            .ghost()
+            .icon(IconName::SquareTerminal)
+            .tooltip("Console")
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(ControlEvent::Console)))
+            .into_any_element()
+    }
+
+    /// ⋯ as a ghost icon (the Server tab card's end of the row).
+    fn more_icon(&self, running: bool, cx: &mut Context<Self>) -> AnyElement {
+        self.more_menu(Button::new("panel-more").small().ghost().tooltip("More"), running, cx)
+    }
+
+    /// The Server tab card's buttons: Stop and Restart with their words
+    /// (Start when it's down), room, then Console and ⋯ as ghost icons. In a
+    /// narrow side panel Stop and Restart give up their words (named on
+    /// hover) instead of wrapping or being cut. The card's pill says the
+    /// state, so there is no chip here.
+    fn card_controls(&self, busy: Option<PanelAction>, running: bool, cx: &mut Context<Self>) -> AnyElement {
+        let success = cx.theme().success;
+        let words = self.card_fit.level() == 0;
+        let row = h_flex()
+            .w_full()
+            .gap_2()
+            .map(|r| {
+                if running {
+                    r.child(
+                        Button::new("panel-stop")
+                            .small()
+                            .outline()
+                            .icon(IconName::Square)
+                            .map(|b| if words { b.label("Stop") } else { b.tooltip("Stop") })
+                            .disabled(busy.is_some())
+                            .on_click(cx.listener(|this, _, window, cx| this.request(PanelAction::Stop, window, cx))),
+                    )
+                    .child(
+                        Button::new("panel-restart")
+                            .small()
+                            .outline()
+                            .icon(IconName::RotateCcw)
+                            .map(|b| if words { b.label("Restart") } else { b.tooltip("Restart") })
+                            .disabled(busy.is_some())
+                            .on_click(cx.listener(|this, _, window, cx| this.request(PanelAction::Restart, window, cx))),
+                    )
+                } else {
+                    // Outline: Play is the only green button. The icon keeps
+                    // the color.
+                    r.child(
+                        Button::new("panel-start")
+                            .small()
+                            .outline()
+                            .icon(gpui_kit::component::Icon::new(IconName::Play).text_color(success))
+                            .label("Start")
+                            .disabled(busy.is_some())
+                            .on_click(cx.listener(|this, _, window, cx| this.request(PanelAction::Start, window, cx))),
+                    )
+                }
+            })
+            .child(div().flex_1())
+            .child(self.console_icon(cx))
+            .child(self.more_icon(running, cx));
+        let key = widgets::fit_key([if running { "up" } else { "down" }]);
+        self.card_fit.wrap("server-card-fit", row, 1, key, cx.entity_id()).into_any_element()
+    }
+
+    /// The panel is set up but can't be asked: the list or the stats failed
+    /// (what [`Self::controls_compact`] shows as "Can't reach …").
+    pub fn is_unreachable(&self) -> bool {
+        match (&self.listed, &self.id) {
+            (Some(Err(_)), _) => true,
+            (Some(Ok(_)), Some(_)) => matches!(self.stats, Some(Err(_))),
+            _ => false,
+        }
     }
 
     /// A start or stop under way, in place of the buttons: the step, a bar
@@ -867,7 +934,9 @@ impl ServerControl {
         } else if p.kind == ProgressKind::Start {
             Some(
                 size(Button::new("panel-stop"))
-                    .map(|b| if compact { b.ghost().icon(IconName::Square).tooltip("Stop") } else { b.outline().icon(IconName::Square).label("Stop") })
+                    .outline()
+                    .icon(IconName::Square)
+                    .label("Stop")
                     .on_click(cx.listener(|this, _, window, cx| this.request(PanelAction::Stop, window, cx)))
                     .into_any_element(),
             )
@@ -876,7 +945,8 @@ impl ServerControl {
         };
         if compact {
             // A narrow card: the bar gets the whole width, the buttons
-            // their usual row under it.
+            // their usual row under it (Stop or Kill… with its word, room,
+            // then Console and ⋯ as icons).
             return v_flex()
                 .w_full()
                 .min_w_0()
@@ -884,17 +954,12 @@ impl ServerControl {
                 .child(crate::server_progress::block("srv-progress", p, true, cx))
                 .child(
                     h_flex()
+                        .w_full()
                         .gap_2()
                         .children(button)
-                        .child(
-                            Button::new("panel-console")
-                                .small()
-                                .ghost()
-                                .icon(IconName::SquareTerminal)
-                                .tooltip("Console")
-                                .on_click(cx.listener(|_, _, _, cx| cx.emit(ControlEvent::Console))),
-                        )
-                        .child(self.more_menu(Button::new("panel-more").small().ghost(), running, cx)),
+                        .child(div().flex_1())
+                        .child(self.console_icon(cx))
+                        .child(self.more_icon(running, cx)),
                 )
                 .into_any_element();
         }
@@ -2280,6 +2345,68 @@ pub fn state_of(
     }
 }
 
+/// How loudly a state pill speaks: the colour family of its words.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PillTone {
+    Quiet,
+    Ok,
+    Wait,
+    Bad,
+}
+
+/// The state pill of the Server tab's card: the words [`state_of`] gives
+/// (capitalised), plus the states only a panel can tell (asleep, wouldn't
+/// wake), a backup under way, and a panel that can't be reached. An empty
+/// label means nothing is known yet (no pill).
+pub fn pill_label(
+    word: &str,
+    stats: Option<&PanelStats>,
+    busy: Option<PanelAction>,
+    unreachable: bool,
+) -> (PillTone, &'static str) {
+    if unreachable {
+        return (PillTone::Wait, "Unreachable");
+    }
+    match busy {
+        Some(PanelAction::Backup) => return (PillTone::Wait, "Backing up"),
+        Some(PanelAction::Kill) => return (PillTone::Wait, "Killing"),
+        _ => {}
+    }
+    match word {
+        "not stopping" => (PillTone::Bad, "Not stopping"),
+        "starting" => (PillTone::Wait, "Starting"),
+        "stopping" => (PillTone::Wait, "Stopping"),
+        "restarting" => (PillTone::Wait, "Restarting"),
+        "running" => (PillTone::Ok, "Running"),
+        "crashed" | "crashed at start" => (PillTone::Bad, "Crashed"),
+        "stopped" => match stats {
+            Some(s) if s.wake_failed && !s.running => (PillTone::Bad, "Couldn't wake"),
+            Some(s) if s.sleeping() => (PillTone::Wait, "Sleeping"),
+            _ => (PillTone::Quiet, "Stopped"),
+        },
+        _ => (PillTone::Quiet, ""),
+    }
+}
+
+/// [`pill_label`] with its colour from the theme.
+pub fn pill_of(
+    word: &str,
+    stats: Option<&PanelStats>,
+    busy: Option<PanelAction>,
+    unreachable: bool,
+    cx: &App,
+) -> (Hsla, &'static str) {
+    let theme = cx.theme();
+    let (tone, label) = pill_label(word, stats, busy, unreachable);
+    let color = match tone {
+        PillTone::Quiet => theme.muted_foreground,
+        PillTone::Ok => theme.success,
+        PillTone::Wait => theme.warning,
+        PillTone::Bad => theme.danger,
+    };
+    (color, label)
+}
+
 /// How a console line reads, as the web console sorts it
 /// (hopperd ui/src/lib/consoleKit.js `kind`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2378,6 +2505,48 @@ mod console_tests {
         assert!(ConsoleFilter::Errors.fits(LineKind::Frame));
         assert!(!ConsoleFilter::Errors.fits(LineKind::Warn));
         assert!(!ConsoleFilter::Chat.fits(LineKind::Join));
+    }
+}
+
+#[cfg(test)]
+mod pill_tests {
+    use super::{PillTone, pill_label};
+    use hopper::panel::{PanelAction, PanelStats};
+
+    #[test]
+    fn the_pill_says_what_state_of_says() {
+        let words = [
+            ("running", PillTone::Ok, "Running"),
+            ("stopped", PillTone::Quiet, "Stopped"),
+            ("starting", PillTone::Wait, "Starting"),
+            ("stopping", PillTone::Wait, "Stopping"),
+            ("restarting", PillTone::Wait, "Restarting"),
+            ("crashed", PillTone::Bad, "Crashed"),
+            ("crashed at start", PillTone::Bad, "Crashed"),
+            ("not stopping", PillTone::Bad, "Not stopping"),
+            ("", PillTone::Quiet, ""),
+        ];
+        for (word, tone, label) in words {
+            assert_eq!(pill_label(word, None, None, false), (tone, label), "{word}");
+        }
+    }
+
+    #[test]
+    fn a_panel_only_states_show_on_a_stopped_server() {
+        let asleep = PanelStats { sleep_minutes: 10, ..Default::default() };
+        assert_eq!(pill_label("stopped", Some(&asleep), None, false), (PillTone::Wait, "Sleeping"));
+        let failed = PanelStats { wake_failed: true, sleep_minutes: 10, ..Default::default() };
+        assert_eq!(pill_label("stopped", Some(&failed), None, false), (PillTone::Bad, "Couldn't wake"));
+        // Running (or crashed) is not asleep, whatever the sleep timer says.
+        let up = PanelStats { running: true, sleep_minutes: 10, ..Default::default() };
+        assert_eq!(pill_label("running", Some(&up), None, false), (PillTone::Ok, "Running"));
+    }
+
+    #[test]
+    fn unreachable_and_backups_override_the_state() {
+        assert_eq!(pill_label("running", None, None, true), (PillTone::Wait, "Unreachable"));
+        assert_eq!(pill_label("running", None, Some(PanelAction::Backup), false), (PillTone::Wait, "Backing up"));
+        assert_eq!(pill_label("stopping", None, Some(PanelAction::Kill), false), (PillTone::Wait, "Killing"));
     }
 }
 
