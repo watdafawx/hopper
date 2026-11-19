@@ -18,7 +18,6 @@
 
   let cols = 0, rows = 0, dpr = 1, cellW = 9;
   let grid = new Uint8Array(0); // which letter sits in each cell
-  let base = new Float32Array(0); // each cell's patch brightness from the last full frame
   // Retain unchanged cells. Positions use measured space advances so drawing
   // one glyph matches its position in the original full-row text exactly.
   let painted = new Uint8Array(0), letters = new Uint8Array(0), dirty = new Uint16Array(0), advances = [];
@@ -85,7 +84,6 @@
     rows = Math.ceil(h / CELL_H) + 1;
     advances = Array.from({ length: cols + 1 }, (_, c) => ctx.measureText(' '.repeat(c)).width);
     grid = new Uint8Array(cols * rows);
-    base = new Float32Array(cols * rows);
     painted = new Uint8Array(cols * rows).fill(255);
     letters = new Uint8Array(cols * rows);
     dirty = new Uint16Array(cols);
@@ -93,10 +91,7 @@
     if (still) frame(4000);
   }
 
-  // `cheap` is a frame drawn while the page scrolls: the patches and the
-  // shimmer keep the last full frame's look (the noise is the expensive part)
-  // and only the ripples and the pointer move.
-  function frame(ms, cheap) {
+  function frame(ms) {
     const t = ms / 1000;
     const scroll = scrollY * 0.25; // slow parallax, in px
     for (let i = ripples.length - 1; i >= 0; i--) {
@@ -109,7 +104,7 @@
     pAmp *= 0.93;
 
     // A few letters change every frame: the shimmer.
-    if (!still && !cheap) for (let k = (grid.length * 0.015) | 0; k > 0; k--) {
+    if (!still) for (let k = (grid.length * 0.015) | 0; k > 0; k--) {
       grid[(Math.random() * grid.length) | 0] = (Math.random() * CHARS.length) | 0;
     }
 
@@ -121,12 +116,8 @@
         const cx = c * cellW;
         // Patches: noise in page space, drifting slowly, cut with a soft edge.
         const i = r * cols + c;
-        let lit;
-        if (cheap) lit = base[i];
-        else {
-          const n = fbm(cx * 0.0056 + drift, (cy + scroll) * 0.0074 - drift * 0.6);
-          base[i] = lit = smooth(0.48, 0.78, n);
-        }
+        const n = fbm(cx * 0.0056 + drift, (cy + scroll) * 0.0074 - drift * 0.6);
+        let lit = smooth(0.48, 0.78, n);
 
         let glow = 0;
         for (const rp of ripples) {
@@ -185,11 +176,10 @@
     }
   }
 
-  // The field holds still while the page scrolls (and a moment after), so
-  // redrawing never competes with scrolling; it's a fixed backdrop anyway.
-  // The exception is a ripple still travelling: it keeps moving, on cheap
-  // frames at ~20 fps, so a click's wave doesn't freeze mid-way. On a slow
-  // machine the gap grows with what a frame costs, so scrolling stays smooth.
+  // While the page scrolls (and a moment after) the field keeps moving but
+  // redraws at ~20 fps instead of ~30, so it never freezes and then jumps to
+  // the new parallax position when the scrolling stops. On a slow machine the
+  // gap grows with what a frame costs, so scrolling stays smooth.
   let calmUntil = 0;
   addEventListener('scroll', () => { calmUntil = performance.now() + 200; }, { passive: true });
 
@@ -197,11 +187,10 @@
   function loop(ms) {
     raf = requestAnimationFrame(loop);
     const scrolling = ms < calmUntil;
-    if (scrolling && !ripples.length) return;
     if (ms - last < (scrolling ? Math.max(50, cost * 5) : 33)) return; // ~20 fps while scrolling, else ~30
     last = ms;
     const began = performance.now();
-    frame(ms, scrolling);
+    frame(ms);
     cost = performance.now() - began;
   }
 
