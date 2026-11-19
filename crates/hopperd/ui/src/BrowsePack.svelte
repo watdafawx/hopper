@@ -686,11 +686,18 @@
   .tabs button { padding: 7px 0; color: var(--subtle); flex: none; white-space: nowrap; }
   .tabs button + button { margin-left: 18px; }
   .ti { display: none; }
+  /* Svelte trims the space at the start of the count's span, so the gap to the label is drawn here. */
+  .tn::before { content: '\00a0'; }
   @container (max-width: 520px) { .tn { display: none; } }
   @container (max-width: 440px) {
     .tabs button + button { margin-left: 10px; }
     .tabs button:not(.tab-sel) .tl { display: none; }
     .tabs button:not(.tab-sel) .ti { display: inline-flex; align-items: center; padding: 0 4px; }
+  }
+  /* A phone-wide panel (about 290 px or less): five tabs (the open label + four icons) still fit without scrolling. */
+  @container (max-width: 230px) {
+    .tabs button + button { margin-left: 6px; }
+    .tabs button:not(.tab-sel) .ti { padding: 0 3px; }
   }
   .tabs button:hover { color: var(--text); }
   .desc { max-width: 860px; }
