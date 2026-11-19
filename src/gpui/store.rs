@@ -3784,7 +3784,15 @@ impl Store {
                 pages.extend(install::apply_updates_with(&mut inst, &batch, job, &on).map_err(install::explain_locked)?);
             }
             let done = std::mem::take(&mut *done.lock().unwrap_or_else(|e| e.into_inner()));
-            job.detail(format!("Updated {} file{}", done.len(), if done.len() == 1 { "" } else { "s" }));
+            // One file: its name, so a pack with a second copy elsewhere
+            // (Paxi's, updated by its own task) says which one this was.
+            let one = (done.len() == 1)
+                .then(|| inst.addons.iter().find(|a| a.project_id == done[0]).map(|a| a.file_name.clone()))
+                .flatten();
+            job.detail(match one {
+                Some(f) => format!("Updated to {}", f.trim_end_matches(".disabled")),
+                None => format!("Updated {} file{}", done.len(), if done.len() == 1 { "" } else { "s" }),
+            });
             // Notes on a finished job still show in the task list.
             let job = job.clone();
             std::thread::spawn(move || {

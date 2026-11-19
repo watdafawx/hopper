@@ -397,6 +397,68 @@ pub(crate) const ROW_H: f32 = 3.5;
 /// A row's hover group, for controls shown only on the hovered row.
 pub(crate) const ROW_GROUP: &str = "addon-row";
 
+/// The updates the table offers. Mods: one per project. Packs and shaders:
+/// one per file, because one project can sit in several folders (the
+/// instance's resourcepacks and Paxi's), each copy at its own version, and
+/// each row must show and update its own copy only.
+#[derive(Default, Clone)]
+pub(crate) struct Offers {
+    by_pid: HashMap<u64, Update>,
+    by_file: Option<HashMap<String, Update>>,
+}
+
+impl Offers {
+    pub(crate) fn by_project(m: HashMap<u64, Update>) -> Self {
+        Self { by_pid: m, by_file: None }
+    }
+
+    /// Keyed by the file each offer replaces (see `pack_where::row_key`).
+    pub(crate) fn by_file(m: HashMap<String, Update>) -> Self {
+        Self { by_pid: HashMap::new(), by_file: Some(m) }
+    }
+
+    pub(crate) fn get(&self, a: &Addon) -> Option<&Update> {
+        match &self.by_file {
+            Some(m) => m.get(&hopper::pack_where::row_key(&a.file_name)),
+            None => self.by_pid.get(&a.project_id),
+        }
+    }
+
+    pub(crate) fn contains(&self, a: &Addon) -> bool {
+        self.get(a).is_some()
+    }
+
+    pub(crate) fn values(&self) -> Box<dyn Iterator<Item = &Update> + '_> {
+        match &self.by_file {
+            Some(m) => Box::new(m.values()),
+            None => Box::new(self.by_pid.values()),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.by_file.as_ref().map_or(self.by_pid.is_empty(), HashMap::is_empty)
+    }
+
+    /// Adds one offer: by the file it replaces, or by project for mods.
+    pub(crate) fn add(&mut self, u: Update) {
+        match &mut self.by_file {
+            Some(m) => {
+                m.insert(hopper::pack_where::row_key(&u.from), u);
+            }
+            None => {
+                self.by_pid.insert(u.project_id, u);
+            }
+        }
+    }
+
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&mut Update) -> bool) {
+        match &mut self.by_file {
+            Some(m) => m.retain(|_, u| keep(u)),
+            None => self.by_pid.retain(|_, u| keep(u)),
+        }
+    }
+}
+
 /// What the table shows, built from the store and the disk when the
 /// instance, its updates or the jobs change, and kept between frames: the
 /// store redraws every 50 ms while jobs run, and scrolling redraws every
@@ -406,8 +468,8 @@ pub(crate) struct Table {
     /// Fingerprint of the store state it was built from.
     pub(crate) sig: Option<u64>,
     pub(crate) inst: Option<Rc<Instance>>,
-    /// Pending updates of this tab's class, by project.
-    pub(crate) updates: Rc<HashMap<u64, Update>>,
+    /// Pending updates of this tab's class (see [`Offers`]).
+    pub(crate) updates: Rc<Offers>,
     /// Projects whose installed file the author archived.
     pub(crate) archived: Rc<HashSet<u64>>,
     /// Lower-case resource pack files switched on in game.
@@ -1313,7 +1375,7 @@ impl AddonsView {
         // An offer made for an old copy left off is for the copy shown: kept
         // when that one is older than the offer, else there's nothing to do.
         let mut updates = updates;
-        updates.retain(|_, u| {
+        updates.retain(|u| {
             let Some(shown) = extra.iter().find(|(_, v)| v.contains(&u.from)).map(|(k, _)| k) else { return true };
             match inst.addons.iter().find(|a| &a.file_name == shown) {
                 Some(a) if u.file.age().newer_than(&hopper::file_age::Age::of_addon(a)) => {
@@ -1489,16 +1551,38 @@ impl AddonsView {
         });
     }
 
-    /// Pending updates of this tab's class, by project, with the ones just
-    /// done (shown as Updated for a moment).
-    pub(crate) fn updates(&self, inst: &Instance, cx: &App) -> HashMap<u64, Update> {
-        let mut out = self.pending_updates(inst, cx);
-        for (pid, u) in &self.recent {
-            if inst.addons.iter().any(|a| a.project_id == *pid && in_class(a, self.class)) {
-                out.insert(*pid, u.clone());
+    /// Pending updates of this tab's class, with the ones just done (shown
+    /// as Updated for a moment).
+    pub(crate) fn updates(&self, inst: &Instance, cx: &App) -> Offers {
+        let pending = self.pending_updates(inst, cx);
+        let recent = self
+            .recent
+            .values()
+            .filter(|u| inst.addons.iter().any(|a| a.project_id == u.project_id && in_class(a, self.class)));
+        if self.class == cf::CLASS_MODS {
+            let mut out = pending;
+            for u in recent {
+                out.insert(u.project_id, u.clone());
             }
+            return Offers::by_project(out);
         }
-        out
+        // One just done sits under its new file, where its row is now; a
+        // second copy of it elsewhere keeps its own offer.
+        let mut out = hopper::pack_where::offers_by_file(pending.values());
+        for u in recent {
+            out.insert(hopper::pack_where::row_key(&u.file.file_name), u.clone());
+        }
+        Offers::by_file(out)
+    }
+
+    /// Whether row `a` is one an update just changed: its own file, not
+    /// another copy of the same project. `own` is a row of the instance's
+    /// tracked file, which still has its old name until the list reloads.
+    pub(crate) fn just_updated(&self, a: &Addon, own: bool) -> bool {
+        if self.class == cf::CLASS_MODS {
+            return self.recent.contains_key(&a.project_id);
+        }
+        hopper::pack_where::just_updated(self.recent.get(&a.project_id), a.project_id, &a.file_name, own)
     }
 
     fn pending_updates(&self, inst: &Instance, cx: &App) -> HashMap<u64, Update> {
@@ -1726,7 +1810,7 @@ impl AddonsView {
         (!icon.is_empty()).then_some(icon)
     }
 
-    fn rows(&self, inst: &Instance, updates: &HashMap<u64, Update>) -> Vec<Row> {
+    fn rows(&self, inst: &Instance, updates: &Offers) -> Vec<Row> {
         let q = &self.query;
         let mut rows: Vec<(usize, String)> = inst
             .addons
@@ -1738,7 +1822,7 @@ impl AddonsView {
             .filter(|(_, a)| !self.added_only || inst.pack.is_none() || !a.from_pack)
             .filter(|(_, a)| !self.cfg_changed_only || self.cfg_index.as_ref().is_some_and(|i| i.mod_changed(a.file_name.trim_end_matches(".disabled")) > 0))
             .filter(|(_, a)| match self.show {
-                Show::Updates => updates.contains_key(&a.project_id),
+                Show::Updates => updates.contains(a),
                 Show::Disabled => !self.row_on(a),
                 Show::InGame => matches!(
                     self.where_group(&a.file_name),
@@ -1763,7 +1847,7 @@ impl AddonsView {
         rows.sort_by(|(ia, na), (ib, nb)| {
             let (a, b) = (&inst.addons[*ia], &inst.addons[*ib]);
             let facts = |x: &Addon| hopper::listorder::Facts {
-                update: updates.contains_key(&x.project_id),
+                update: updates.contains(x),
                 yours: has_pack && !x.from_pack,
             };
             let lead = lead.cmp(facts(a), facts(b));
@@ -2623,9 +2707,11 @@ impl AddonsView {
         if updates.is_empty() {
             return;
         }
-        // Untracked packs update in place, like a global folder's.
+        // Untracked packs update in place, like a global folder's: by the
+        // file the update replaces, so a tracked file of the same project
+        // still goes through the update job.
         let (loose, updates): (Vec<Update>, Vec<Update>) =
-            updates.into_iter().partition(|u| self.loose_pid(u.project_id));
+            updates.into_iter().partition(|u| self.is_loose(&u.from));
         if let (false, Some(dir)) = (loose.is_empty(), self.own_dir()) {
             self.update_global(dir, loose, cx);
         }
@@ -2647,9 +2733,18 @@ impl AddonsView {
         let store = self.store.read(cx);
         let mut skip = HashSet::new();
         let mut held = HashSet::new();
-        let mut rows: Vec<ReviewRow> = all
+        // Copies of one pack (the instance's and Paxi's) are one row: its
+        // tick updates each copy in its own folder.
+        let mut grouped: Vec<(Update, Vec<Update>)> = Vec::new();
+        for u in all {
+            match grouped.iter_mut().find(|(f, _)| f.project_id != 0 && f.project_id == u.project_id) {
+                Some((_, more)) => more.push(u),
+                None => grouped.push((u, Vec::new())),
+            }
+        }
+        let mut rows: Vec<ReviewRow> = grouped
             .into_iter()
-            .map(|u| {
+            .map(|(u, more)| {
                 let a = inst.addons.iter().find(|a| a.project_id == u.project_id);
                 let risk = Risk::of(&u);
                 // A test version in place of a release is left out at first.
@@ -2673,20 +2768,23 @@ impl AddonsView {
                     held.insert(u.project_id);
                 }
                 let (from, to) = u.versions();
+                let name = a.map_or(u.name.clone(), |a| a.name.clone());
                 ReviewRow {
                     icon: a.and_then(|a| store.image(&a.icon)).map(Path::to_path_buf),
-                    name: a.map_or(u.name.clone(), |a| a.name.clone()),
+                    name: if more.is_empty() { name } else { format!("{name} ({} copies)", more.len() + 1) },
                     from,
                     to,
                     risk,
                     issues,
                     missing: missing.into_iter().map(|id| (id, None)).collect(),
                     update: u,
+                    more,
                 }
             })
             .collect();
         rows.sort_by_key(|r| r.name.to_lowercase());
-        let total = rows.len();
+        // Every file that changes, like Update all's count.
+        let total: usize = rows.iter().map(|r| 1 + r.more.len()).sum();
         // Required mods the instance lacks are known only by id: their
         // names come from the sites, and one installed from the other site
         // (another id) turns out fine.
@@ -2943,21 +3041,20 @@ impl AddonsView {
     fn toolbar(
         &self,
         inst: &Instance,
-        updates: &HashMap<u64, Update>,
+        updates: &Offers,
         hint: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         // How far the bar has given way to a narrow page (BAR_FIT_MAX).
         let lv = self.bar_fit.level();
-        let pending: HashMap<u64, Update> = updates
-            .iter()
-            .filter(|(k, _)| !self.recent.contains_key(k))
-            .map(|(k, v)| (*k, v.clone()))
-            .collect();
+        // Less the ones just done (another copy of the same project still
+        // counts: it replaces a different file).
+        let mut pending = updates.clone();
+        pending.retain(|u| !self.recent.get(&u.project_id).is_some_and(|r| r.from.eq_ignore_ascii_case(&u.from)));
         let updates = &pending;
         let of_class = || inst.addons.iter().filter(|a| in_class(a, self.class) && !hidden_copy(&self.table.extra, &a.file_name));
         let n_up = of_class()
-            .filter(|a| updates.contains_key(&a.project_id))
+            .filter(|a| updates.contains(a))
             .count();
         let n_off = of_class().filter(|a| !self.row_on(a)).count();
         let n_added = of_class().filter(|a| !a.from_pack).count();
@@ -3290,7 +3387,7 @@ impl AddonsView {
     fn bulk_bar(
         &self,
         inst: &Instance,
-        updates: &HashMap<u64, Update>,
+        updates: &Offers,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if self.selected.is_empty() {
@@ -3300,7 +3397,7 @@ impl AddonsView {
         let ups: Vec<Update> = files
             .iter()
             .filter_map(|f| inst.addon_by_file(f))
-            .filter_map(|a| updates.get(&a.project_id).cloned())
+            .filter_map(|a| updates.get(a).cloned())
             .collect();
         // Lock unless every picked mod is locked already.
         let all_locked = files
@@ -3686,7 +3783,7 @@ impl AddonsView {
         &mut self,
         row: &Row,
         inst: &Instance,
-        updates: &HashMap<u64, Update>,
+        updates: &Offers,
         active_rp: &HashSet<String>,
         active_shader: &Option<String>,
         now: i64,
@@ -3710,7 +3807,7 @@ impl AddonsView {
                         new,
                         rank: self.table.rank.get(i).copied(),
                     };
-                    self.addon_row(a, updates.get(&a.project_id), flags, cx)
+                    self.addon_row(a, updates.get(a), flags, cx)
                 }
                 Row::Section(title, hint) => self.section_row(title, hint, cx),
                 Row::Group(g, n) => self.group_row(g, *n, cx),
@@ -3950,13 +4047,20 @@ impl AddonsView {
         Some((a.file_name.clone(), self.row_on(a)))
     }
 
+    /// A row whose file isn't the instance's tracked one: a global folder's
+    /// pack, an untracked one, or one only Paxi or a world holds. Its update
+    /// runs in place, apart from the instance's update job.
+    pub(crate) fn copy_elsewhere(&self, a: &Addon) -> bool {
+        self.global_dir().is_some() || self.is_loose(&a.file_name) || self.rep_dir(&a.file_name).is_some()
+    }
+
     /// Row `ix`'s update, when its Update button would run now.
     fn row_update(&self, ix: usize, cx: &App) -> Option<(String, Update)> {
         let inst = self.table.inst.as_ref()?;
         let Row::Addon(i) = self.table.rows.get(ix)? else { return None };
         let a = inst.addons.get(*i)?;
-        let u = self.table.updates.get(&a.project_id)?;
-        if self.recent.contains_key(&a.project_id) {
+        let u = self.table.updates.get(a)?;
+        if self.just_updated(a, !self.copy_elsewhere(a)) {
             return None;
         }
         // Locked out, or it would stop another mod loading: only on purpose.
@@ -4132,15 +4236,16 @@ impl AddonsView {
         });
         let store = self.store.read(cx);
         let theme = cx.theme();
-        // `Some(true)` downloading now, `Some(false)` queued.
-        let updating = self.root.as_ref().and_then(|r| store.update_state(r, a.project_id));
+        // A global folder's pack, or one the instance doesn't track.
+        let global = self.copy_elsewhere(a);
+        // `Some(true)` downloading now, `Some(false)` queued. The instance's
+        // update job: a copy elsewhere of the same project isn't in it.
+        let updating = self.root.as_ref().filter(|_| !global).and_then(|r| store.update_state(r, a.project_id));
         // Its new file is with the download window (the author allows
         // downloads from CurseForge's website only).
         let from_web = a.project_id != 0
             && self.root.as_ref().is_some_and(|r| store.pending(r).iter().any(|p| p.project_id == a.project_id));
         // A Paxi pack no site knows shows its own pack.png.
-        // A global folder's pack, or one the instance doesn't track.
-        let global = self.global_dir().is_some() || self.is_loose(&a.file_name) || self.rep_dir(&a.file_name).is_some();
         let icon = store.image(&a.icon).map(Path::to_path_buf).or_else(|| {
             (global && !a.icon.starts_with("http")).then(|| PathBuf::from(&a.icon)).filter(|p| p.is_file())
         });
@@ -4355,7 +4460,8 @@ Details").into()),
                     })),
             )
         });
-        let done = self.recent.contains_key(&a.project_id);
+        // Updated: this row's own file changed, not another copy's.
+        let done = self.just_updated(a, !global);
         let breaking = (!breaks.is_empty() || needs.is_some()) && !vlocked;
         // A drag across switches or Update buttons: what letting go does.
         let sweep = self.pick.sweeping();
@@ -5825,6 +5931,9 @@ impl RiskUi for Risk {
 /// One update in the review.
 struct ReviewRow {
     update: Update,
+    /// The same update for other copies of the pack (Paxi's, a world's),
+    /// each replacing its own file.
+    more: Vec<Update>,
     risk: Risk,
     name: String,
     icon: Option<PathBuf>,
@@ -5888,7 +5997,7 @@ impl UpdateReview {
         self.rows
             .iter()
             .filter(|r| !self.skip.contains(&r.update.project_id))
-            .map(|r| r.update.clone())
+            .flat_map(|r| std::iter::once(&r.update).chain(&r.more).cloned())
             .collect()
     }
 

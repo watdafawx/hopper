@@ -1220,7 +1220,7 @@ impl AddonsView {
                 continue;
             }
             if let Some(u) = u {
-                updates.insert(u.project_id, u);
+                updates.add(u);
             }
             set.insert(key);
             inst.addons.push(a);

@@ -105,11 +105,20 @@ pub fn check_versions(packs: &[PackFile], inst: &Instance) -> bool {
 
 /// Replaces `p` with its newer file in the same folder, as a job on the
 /// instance (the old file goes to backups). A website-only file comes
-/// through the download window and lands in that same folder.
-pub fn update(store: &Entity<Store>, root: PathBuf, p: &PackFile, f: &Found, cx: &mut App) {
+/// through the download window and lands in that same folder. `place`
+/// names the folder (Paxi, a world) when the project has a copy in more
+/// than one, so the job says which file it changes.
+pub fn update(store: &Entity<Store>, root: PathBuf, p: &PackFile, f: &Found, place: Option<&str>, cx: &mut App) {
     let Some(file) = f.version.update.clone() else { return };
     let (old, project) = (p.path.clone(), f.project.clone());
-    let title = format!("Updating {}", project.name);
+    let title = match place {
+        Some(place) => format!(
+            "Updating {} in {place} ({})",
+            project.name,
+            old.file_name().unwrap_or_default().to_string_lossy()
+        ),
+        None => format!("Updating {}", project.name),
+    };
     store.read(cx).spawn_instance_job(&root.clone(), title, move |job| {
         match instance_ops::update_pack(&root, &old, &project, &file, job)? {
             instance_ops::Placed::File(new) => {

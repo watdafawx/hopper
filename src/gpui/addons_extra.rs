@@ -493,11 +493,12 @@ impl AddonsView {
             return;
         };
         let mut inst = real.clone_header();
-        let mut updates = std::collections::HashMap::new();
+        // By file: a folder can hold two files of one project.
+        let mut updates = crate::addons::Offers::by_file(std::collections::HashMap::new());
         for p in &packs {
             let (a, u) = pack_addon(p, class, true);
             if let Some(u) = u {
-                updates.insert(u.project_id, u);
+                updates.add(u);
             }
             inst.addons.push(a);
         }
@@ -551,18 +552,24 @@ impl AddonsView {
     }
 
     /// Updates packs in the global folder in place (the old file goes to
-    /// backups).
+    /// backups). Each update replaces the file it was offered for, not
+    /// whichever file of the project comes first.
     pub(crate) fn update_global(&mut self, dir: PathBuf, updates: Vec<Update>, cx: &mut Context<Self>) {
+        let jobs = updates.into_iter().map(|u| (Self::global_path(&dir, u.from.trim_end_matches(".disabled")), u, None)).collect();
+        self.update_paths(jobs, cx);
+    }
+
+    /// Updates each file at its path, in place: `(path, update, folder name
+    /// for the job's title)`.
+    pub(crate) fn update_paths(&mut self, jobs: Vec<(PathBuf, Update, Option<String>)>, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
-        let Some(inst) = self.table.inst.clone() else { return };
-        for u in updates {
-            let Some(a) = inst.addons.iter().find(|a| a.project_id == u.project_id) else { continue };
-            let p = PackFile { path: Self::global_path(&dir, &a.file_name), ..Default::default() };
+        for (path, u, place) in jobs {
+            let p = PackFile { path, ..Default::default() };
             // The project the lookup found (its slug and class name the
             // website's download page); else a stand-in the update looks up.
-            let project = crate::pack_lookup::found_project(&p.path, a.project_id).unwrap_or_else(|| cf::Mod {
-                id: a.project_id,
-                name: a.name.clone(),
+            let project = crate::pack_lookup::found_project(&p.path, u.project_id).unwrap_or_else(|| cf::Mod {
+                id: u.project_id,
+                name: u.name.clone(),
                 class_id: Some(self.class),
                 ..Default::default()
             });
@@ -570,7 +577,7 @@ impl AddonsView {
                 project,
                 version: hopper::instance_ops::PackVersion { installed: None, update: Some(u.file.clone()) },
             };
-            crate::pack_lookup::update(&self.store, root.clone(), &p, &found, cx);
+            crate::pack_lookup::update(&self.store, root.clone(), &p, &found, place.as_deref(), cx);
         }
     }
 

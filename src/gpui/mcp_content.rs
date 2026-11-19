@@ -198,7 +198,15 @@ fn list_packs(inst: &Instance, updates: &[hopper::install::Update], args: &Value
                         _ => Some(json!(enabled)),
                     };
                     let addon = inst.addons.iter().find(|a| a.class_id == class && a.file_name.eq_ignore_ascii_case(&file));
-                    let upd = addon.and_then(|a| updates.iter().find(|u| u.project_id == a.project_id && a.project_id != 0));
+                    // The offer for this file: another copy of the project
+                    // (Paxi's, at another version) has its own.
+                    let upd = addon.and_then(|a| {
+                        updates.iter().find(|u| {
+                            u.project_id == a.project_id
+                                && a.project_id != 0
+                                && hopper::pack_where::row_key(&u.from) == hopper::pack_where::row_key(&file)
+                        })
+                    });
                     // A pack added from GitHub or a link: its source and newer version.
                     if let Some((r, installed, newer)) = sources::packs::update_of(&p) {
                         return json!({
