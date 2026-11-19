@@ -578,6 +578,70 @@ pub fn reorder(names: &[String], file: &str, at: usize) -> Vec<String> {
     v
 }
 
+// ---- updates, one per copy ------------------------------------------------
+
+/// A row's key in a pack list: its file name in lower case, without
+/// ".disabled". Updates and "Updated" go by it, not by project: one project
+/// can be listed twice (the player's copy in resourcepacks/ and the
+/// modpack's own in Paxi, under other names), and each copy has its version.
+pub fn row_key(file: &str) -> String {
+    canon(file).to_lowercase()
+}
+
+/// The update offered on each row, by [`row_key`]: an offer belongs to the
+/// file it replaces (`Update::from`) and to no other copy of the project.
+pub fn offers_by_file<'a>(offers: impl IntoIterator<Item = &'a crate::install::Update>) -> HashMap<String, crate::install::Update> {
+    offers.into_iter().map(|u| (row_key(&u.from), u.clone())).collect()
+}
+
+/// Where updates of a pack list go.
+#[derive(Debug, Default)]
+pub struct Routed {
+    /// For the instance's tracked packs: the update job replaces them and
+    /// keeps the instance's records (and History) in step.
+    pub tracked: Vec<crate::install::Update>,
+    /// Every other copy, replaced where it is (Paxi's stays in Paxi).
+    pub in_place: Vec<(PathBuf, crate::install::Update)>,
+}
+
+/// Sends each update to every copy of the file it replaces, each in its own
+/// folder: a row with two copies of one file ("2 copies, using Paxi's")
+/// updates both, and a row only updates its own file, never another copy of
+/// the project. `tracked` holds the row keys of the instance's tracked packs.
+/// An update for a file no entry lists goes to the update job as before.
+pub fn route_updates(entries: &[Entry], tracked: &HashSet<String>, updates: Vec<crate::install::Update>) -> Routed {
+    let mut out = Routed::default();
+    for u in updates {
+        let key = row_key(&u.from);
+        let Some(e) = entries.iter().find(|e| e.file.to_lowercase() == key) else {
+            out.tracked.push(u);
+            continue;
+        };
+        let mut job = false;
+        for c in &e.copies {
+            if c.key == INSTANCE && tracked.contains(&key) {
+                job = true;
+            } else {
+                out.in_place.push((c.path.clone(), u.clone()));
+            }
+        }
+        if job {
+            out.tracked.push(u);
+        }
+    }
+    out
+}
+
+/// Whether the row for `file` (project `pid`) is a file an update just put
+/// in, so it shows Updated. `own` says the row is the instance's tracked
+/// copy, which may still carry the old name until the instance is read again.
+pub fn just_updated<'a>(recent: impl IntoIterator<Item = &'a crate::install::Update>, pid: u64, file: &str, own: bool) -> bool {
+    let key = row_key(file);
+    recent
+        .into_iter()
+        .any(|u| u.project_id == pid && (row_key(&u.file.file_name) == key || (own && row_key(&u.from) == key)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,6 +737,83 @@ mod tests {
         let v = list(&i, CLASS_RESOURCE_PACKS, &locs);
         let fp = |f: &str| v.iter().find(|e| e.file == f).unwrap().from_pack;
         assert!(fp("Shipped.zip") && fp("Folder") && !fp("Mine.zip"));
+        let _ = fs::remove_dir_all(&i.root);
+    }
+
+    fn offer(pid: u64, from: &str, to: &str) -> crate::install::Update {
+        crate::install::Update {
+            project_id: pid,
+            name: "Fresh Waystones Texture".into(),
+            from: from.into(),
+            file: crate::cf::File { file_name: to.into(), ..Default::default() },
+        }
+    }
+
+    fn placed(r: &Routed) -> Vec<(PathBuf, String)> {
+        r.in_place.iter().map(|(p, u)| (p.clone(), u.from.clone())).collect()
+    }
+
+    /// TNP Limitless 8: the player's copy in resourcepacks/ was updated, the
+    /// modpack's copy in Paxi is still the old file. Each row shows its own
+    /// offer, Update on the Paxi row replaces the Paxi file in Paxi, and only
+    /// the new file shows as Updated.
+    #[test]
+    fn two_copies_of_one_project_update_each_in_its_own_folder() {
+        let mut i = tmp("twocopies");
+        i.pack = Some(Default::default());
+        touch(&i.root.join("resourcepacks/waystones_update_7.zip"));
+        touch(&i.root.join("config/paxi/resourcepacks/waystones_1.21.1.zip"));
+        let locs = packs::locations(&i, CLASS_RESOURCE_PACKS);
+        let v = list(&i, CLASS_RESOURCE_PACKS, &locs);
+        assert_eq!(v.len(), 2, "two files, two rows");
+        let paxi_copy = i.root.join("config/paxi/resourcepacks/waystones_1.21.1.zip");
+        // Only the Paxi copy has an offer (the tracked one is the newest).
+        let paxi_offer = offer(860903, "waystones_1.21.1.zip", "waystones_update_7.zip");
+        let offers = offers_by_file([&paxi_offer]);
+        assert!(offers.contains_key("waystones_1.21.1.zip"));
+        assert!(!offers.contains_key("waystones_update_7.zip"), "the updated row offers nothing");
+        let tracked = HashSet::from(["waystones_update_7.zip".to_string()]);
+        let r = route_updates(&v, &tracked, vec![paxi_offer.clone()]);
+        assert!(r.tracked.is_empty(), "the tracked copy is left alone: {r:?}");
+        assert_eq!(placed(&r), [(paxi_copy.clone(), "waystones_1.21.1.zip".to_string())]);
+        // The tracked copy's update just ran: its row is Updated, the
+        // Paxi row (another file of the same project) is not.
+        let done = [offer(860903, "waystones_1.21.1.zip", "waystones_update_7.zip")];
+        assert!(just_updated(&done, 860903, "waystones_update_7.zip", true));
+        assert!(!just_updated(&done, 860903, "waystones_1.21.1.zip", false));
+        let _ = fs::remove_dir_all(&i.root);
+    }
+
+    /// Before that update: the same file name in both folders is one row
+    /// ("2 copies"). Its Update replaces both: the tracked one through the
+    /// update job, Paxi's in Paxi. A copy of another file stays as it is.
+    #[test]
+    fn one_row_with_two_copies_updates_both() {
+        let mut i = tmp("samename");
+        i.pack = Some(Default::default());
+        touch(&i.root.join("resourcepacks/waystones_1.21.1.zip"));
+        touch(&i.root.join("config/paxi/resourcepacks/waystones_1.21.1.zip"));
+        touch(&i.root.join("config/paxi/resourcepacks/Other.zip"));
+        let locs = packs::locations(&i, CLASS_RESOURCE_PACKS);
+        let v = list(&i, CLASS_RESOURCE_PACKS, &locs);
+        let u = offer(860903, "waystones_1.21.1.zip", "waystones_update_7.zip");
+        let tracked = HashSet::from([row_key("waystones_1.21.1.zip")]);
+        let r = route_updates(&v, &tracked, vec![u.clone()]);
+        assert_eq!(r.tracked.iter().map(|u| u.from.as_str()).collect::<Vec<_>>(), ["waystones_1.21.1.zip"]);
+        assert_eq!(placed(&r), [(i.root.join("config/paxi/resourcepacks/waystones_1.21.1.zip"), "waystones_1.21.1.zip".to_string())]);
+        // A switched-off copy is updated too, and stays off (the path is the file as it is).
+        fs::rename(
+            i.root.join("config/paxi/resourcepacks/waystones_1.21.1.zip"),
+            i.root.join("config/paxi/resourcepacks/waystones_1.21.1.zip.disabled"),
+        )
+        .unwrap();
+        let v = list(&i, CLASS_RESOURCE_PACKS, &locs);
+        let r = route_updates(&v, &tracked, vec![u.clone()]);
+        assert_eq!(r.in_place[0].0, i.root.join("config/paxi/resourcepacks/waystones_1.21.1.zip.disabled"));
+        // A file nothing lists (a stale offer) goes to the update job as before.
+        let stale = offer(5, "gone.zip", "new.zip");
+        let r = route_updates(&v, &tracked, vec![stale]);
+        assert_eq!((r.tracked.len(), r.in_place.len()), (1, 0));
         let _ = fs::remove_dir_all(&i.root);
     }
 

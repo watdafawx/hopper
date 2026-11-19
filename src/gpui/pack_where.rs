@@ -324,7 +324,8 @@ impl AddonsView {
         // Resource packs: the instance's own (tracked, then the untracked
         // ones read from its folder); data packs live only in folders.
         let mut inst = if rp { real.clone() } else { real.clone_header() };
-        let mut updates = if rp { self.updates(&inst, cx) } else { HashMap::new() };
+        // One offer per file: a copy in Paxi is its own row with its own update.
+        let mut updates = if rp { self.updates(&inst, cx) } else { crate::addons::Offers::by_file(HashMap::new()) };
         let mut loose = HashSet::new();
         if rp && let (Some(dir), Some((d, _, packs))) = (self.own_dir(), self.loose_packs.as_ref()) && *d == dir {
             let tracked: HashSet<String> =
@@ -338,7 +339,7 @@ impl AddonsView {
                     continue;
                 }
                 if let Some(u) = u {
-                    updates.insert(u.project_id, u);
+                    updates.add(u);
                 }
                 loose.insert(key);
                 inst.addons.push(a);
@@ -374,7 +375,7 @@ impl AddonsView {
             let (mut a, u) = pack_addon(&p, class, e.from_pack);
             a.file_name = e.file.clone();
             if let Some(u) = u {
-                updates.insert(u.project_id, u);
+                updates.add(u);
             }
             if let Some(dir) = copy.path.parent() {
                 rep.insert(k, dir.to_path_buf());
@@ -1353,23 +1354,32 @@ impl AddonsView {
         rest
     }
 
-    /// Updates for rows whose file is in another place: updated there, in
-    /// place. Returns the rest.
+    /// Each update runs on the file it replaces, in every folder that file
+    /// is in: the instance's tracked copy through the update job (returned),
+    /// every other copy (Paxi, a world, an untracked one) in place, in its
+    /// own folder. Another file of the same project is left alone: it has
+    /// its own row and its own update.
     pub(crate) fn where_updates(&mut self, updates: Vec<hopper::install::Update>, cx: &mut Context<Self>) -> Vec<hopper::install::Update> {
-        let Some(inst) = self.table.inst.clone() else { return updates };
-        let mut by: HashMap<PathBuf, Vec<hopper::install::Update>> = HashMap::new();
-        let mut rest = Vec::new();
-        for u in updates {
-            let dir = inst.addons.iter().find(|a| a.project_id == u.project_id).and_then(|a| self.rep_dir(&a.file_name));
-            match dir {
-                Some(d) => by.entry(d).or_default().push(u),
-                None => rest.push(u),
-            }
+        // A Hopper Server's packs update on the server, through its job.
+        if self.remote {
+            return updates;
         }
-        for (dir, ups) in by {
-            self.update_global(dir, ups, cx);
-        }
-        rest
+        let Some(real) = self.root.as_ref().and_then(|r| self.store.read(cx).instance(r)).cloned() else { return updates };
+        let class = self.class;
+        let tracked: HashSet<String> =
+            real.addons.iter().filter(|a| in_class(a, class)).map(|a| pw::row_key(&a.file_name)).collect();
+        let entries: Vec<pw::Entry> = self.wh.entries.values().cloned().collect();
+        let routed = pw::route_updates(&entries, &tracked, updates);
+        // The job says which copy: the folder's name, and the file.
+        let labels: HashMap<&PathBuf, &str> =
+            entries.iter().flat_map(|e| e.copies.iter().map(|c| (&c.path, c.label.as_str()))).collect();
+        let jobs = routed
+            .in_place
+            .iter()
+            .map(|(p, u)| (p.clone(), u.clone(), labels.get(p).map(|l| l.to_string())))
+            .collect();
+        self.update_paths(jobs, cx);
+        routed.tracked
     }
 }
 
