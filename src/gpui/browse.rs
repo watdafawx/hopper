@@ -16,7 +16,7 @@ use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMen
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
@@ -3928,7 +3928,7 @@ impl BrowseView {
 
     // ---- detail --------------------------------------------------------
 
-    fn detail(&self, m: &cf::Mod, target: Option<&Instance>, width: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn detail(&self, m: &cf::Mod, target: Option<&Instance>, width: f32, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let banner = self.link_banner(m, target, cx);
         // Built only while its tab is open.
         let mut comments = (self.detail_tab == COMMENTS_TAB && has_comments(m)).then(|| self.comments_tab(m, cx));
@@ -4317,14 +4317,7 @@ impl BrowseView {
                         div()
                             .relative()
                             .child(
-                                TabBar::new("detail-tabs")
-                                    .underline()
-                                    .selected_index(tab)
-                                    .child(Tab::new().label("Description"))
-                                    .child(Tab::new().label(files_label.clone()))
-                                    .child(Tab::new().label(format!("Dependencies {n_deps}")))
-                                    .when(has_comments(m), |t| t.child(Tab::new().label(self.comments_label(m.id))))
-                                    .when(wants.issues.is_some(), |t| t.child(Tab::new().label("Issues")))
+                                self.peek_tabs("detail-tabs", m, &files_label, n_deps, width, window, cx)
                                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                                         this.detail_tab = *ix;
                                         this.tab_picked(&wants, *ix, cx);
@@ -4414,7 +4407,7 @@ impl BrowseView {
             _ => 0.,
         };
         let bar = (fade > 0. || self.sticky.shown.get())
-            .then(|| self.sticky_bar(m, target, width, fade, files_label, n_deps, cx));
+            .then(|| self.sticky_bar(m, target, width, fade, files_label, n_deps, window, cx));
         // While it fades, draw the next frame too.
         let fading = self.sticky.flipped.get().is_some_and(|at| at.elapsed() < STICKY_FADE);
         // A scroll handle of Browse's own, so Back can put the panel's
@@ -4440,6 +4433,29 @@ impl BrowseView {
 }
 
 impl BrowseView {
+    /// The project panel's tab row (Description, Files, Dependencies,
+    /// Comments, Issues), here and in its compact bar. `width` is the panel's
+    /// in rem; the row gets that less the page's side padding, and shrinks
+    /// to icons (`widgets::fit_tabs`) rather than cutting its last tab off.
+    fn peek_tabs(&self, id: &'static str, m: &cf::Mod, files_label: &str, n_deps: usize, width: f32, window: &Window, cx: &App) -> TabBar {
+        let rem: f32 = window.rem_size().into();
+        // The page's `px_5` on both sides, and the dock's 1px left border.
+        let avail = (width - 2. * 1.25) * rem - 1.;
+        let tab = |label: String, icon| widgets::FitTab { label: label.into(), icon };
+        let mut tabs = vec![
+            tab("Description".into(), IconName::FileText),
+            tab(files_label.to_string(), IconName::Download),
+            tab(format!("Dependencies {n_deps}"), IconName::Layers),
+        ];
+        if has_comments(m) {
+            tabs.push(tab(self.comments_label(m.id), IconName::MessageCircle));
+        }
+        if tab_wants(m).issues.is_some() {
+            tabs.push(tab("Issues".into(), IconName::Bug));
+        }
+        widgets::fit_tabs(id, tabs, self.detail_tab, avail, window, cx)
+    }
+
     /// The Comments tab's label: the total once the first page is in, else
     /// no number (not 0).
     fn comments_label(&self, id: u64) -> String {
@@ -5151,6 +5167,7 @@ impl BrowseView {
         fade: f32,
         files_label: String,
         n_deps: usize,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let action = self.sticky_action(m, target, cx);
@@ -5202,15 +5219,8 @@ impl BrowseView {
                     .child(self.close_button("sticky-close", cx).flex_none()),
             )
             .child(
-                TabBar::new("sticky-tabs")
-                    .underline()
+                self.peek_tabs("sticky-tabs", m, &files_label, n_deps, width, window, cx)
                     .px_5()
-                    .selected_index(self.detail_tab)
-                    .child(Tab::new().label("Description"))
-                    .child(Tab::new().label(files_label))
-                    .child(Tab::new().label(format!("Dependencies {n_deps}")))
-                    .when(has_comments(m), |t| t.child(Tab::new().label(self.comments_label(m.id))))
-                    .when(wants.issues.is_some(), |t| t.child(Tab::new().label("Issues")))
                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                         this.detail_tab = *ix;
                         this.tab_picked(&wants, *ix, cx);
@@ -6203,7 +6213,7 @@ impl BrowseView {
                 }
                 self.desc.update(cx, |v, _| v.show(id, segments, images));
             }
-            let body = self.detail(&m, target, width, cx);
+            let body = self.detail(&m, target, width, window, cx);
             return Some(self.frame(ElementId::Name(format!("detail:{}", m.id).into()), body, window, cx));
         }
         // A peek whose project didn't load says why.
