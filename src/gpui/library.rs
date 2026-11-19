@@ -332,6 +332,14 @@ pub struct LibraryView {
     /// A config button was pressed: the panel is made on the next draw.
     pending_config: Option<(PathBuf, String)>,
     config_sub: Option<Subscription>,
+    /// Bumped whenever the right-hand dock changes hands, so a click beside
+    /// a panel that opens another one doesn't close the new one too (see
+    /// `dismissable`).
+    dock_gen: u64,
+    /// `dock_gen` at the last left press outside the docked panel.
+    dock_armed: Option<u64>,
+    /// "Not saved yet" is to be shown on the next draw, which has a window.
+    notice_unsaved: bool,
     /// Instances whose linked Hopper Server was asked for config pushes
     /// (and sent this PC's settings) this session.
     config_synced: HashSet<PathBuf>,
@@ -354,6 +362,16 @@ pub struct LibraryView {
     _subscriptions: Vec<Subscription>,
 }
 
+/// What can fill the right-hand dock: one at a time.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Dock {
+    /// A mod's config file, from its config button.
+    Config,
+    /// A mod's (or an author's) page.
+    Peek,
+    Friends,
+}
+
 impl LibraryView {
     /// Whether the Friends panel is docked beside the page.
     pub fn friends_open(&self) -> bool {
@@ -362,7 +380,149 @@ impl LibraryView {
 
     /// Friends is open and has the dock (no config file or mod page in it).
     pub fn friends_shown(&self, cx: &App) -> bool {
-        self.friends_open && self.config_shown().is_none() && self.peek_shown(cx).is_none()
+        self.dock_tenant(cx) == Some(Dock::Friends)
+    }
+
+    /// Who is drawn in the right-hand dock. The three never stay open
+    /// together (`take_dock`); the order is only for the frame in between.
+    fn dock_tenant(&self, cx: &App) -> Option<Dock> {
+        if self.config_shown().is_some() {
+            Some(Dock::Config)
+        } else if self.peek_shown(cx).is_some() {
+            Some(Dock::Peek)
+        } else if self.friends_open {
+            Some(Dock::Friends)
+        } else {
+            None
+        }
+    }
+
+    /// Makes `who` the dock's only tenant: the other two close, so nothing
+    /// waits underneath to pop back. False, and nothing changes, when a
+    /// config file with unsaved edits is open: the edits are never dropped
+    /// for another panel (or for the same panel on another mod).
+    fn take_dock(&mut self, who: Dock, cx: &mut Context<Self>) -> bool {
+        if self.config_unsaved(cx) {
+            self.refuse_unsaved(cx);
+            return false;
+        }
+        self.dock_gen += 1;
+        if who != Dock::Config && self.config_panel.is_some() {
+            self.close_config_panel(cx);
+        }
+        if who != Dock::Friends && self.friends_open {
+            self.friends_open = false;
+            self.friends.update(cx, |f, cx| f.shown(false, cx));
+        }
+        if who != Dock::Peek {
+            let peek = self.addons.read(cx).peek().clone();
+            if peek.read(cx).is_open() {
+                peek.update(cx, |p, cx| p.dismiss_peek(cx));
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// The mod page's open state changed: when it opened, it takes the dock.
+    fn peek_changed(&mut self, cx: &mut Context<Self>) {
+        let peek = self.addons.read(cx).peek().clone();
+        if peek.read(cx).is_open() && !self.take_dock(Dock::Peek, cx) {
+            peek.update(cx, |p, cx| p.dismiss_peek(cx));
+        }
+        cx.notify();
+    }
+
+    /// The open config file has edits that aren't saved.
+    fn config_unsaved(&self, cx: &App) -> bool {
+        self.config_panel.as_ref().is_some_and(|p| p.read(cx).unsaved(cx) > 0)
+    }
+
+    /// Says "Not saved yet" on the next draw, and brings the panel back
+    /// into view if another tab is hiding it. The one place that rule's
+    /// answer comes from, whatever tried to close or replace the panel.
+    fn refuse_unsaved(&mut self, cx: &mut Context<Self>) {
+        if self.config_shown().is_none() && self.selected.is_some() {
+            self.set_tab(InstTab::Mods, cx);
+        }
+        self.notice_unsaved = true;
+        cx.notify();
+    }
+
+    /// Closes the config panel, unless it holds unsaved edits.
+    fn request_close_config(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.config_unsaved(cx) {
+            self.refuse_unsaved(cx);
+            return false;
+        }
+        self.close_config_panel(cx);
+        true
+    }
+
+    /// A click beside the docked panel `who` (not the mod page: its view
+    /// has its own, `BrowseView::frame`, which Browse uses too).
+    fn dismiss_dock(&mut self, who: Dock, cx: &mut Context<Self>) {
+        match who {
+            Dock::Config => {
+                self.request_close_config(cx);
+            }
+            Dock::Friends => self.set_friends(false, cx),
+            Dock::Peek => {
+                let peek = self.addons.read(cx).peek().clone();
+                peek.update(cx, |p, cx| p.dismiss_peek(cx));
+            }
+        }
+    }
+
+    /// `panel` (the docked Friends or config panel, `width` rem wide) closing on
+    /// a click anywhere else, as the mod page does: a left press outside
+    /// arms it, and the release closes it only if the dock is still the same
+    /// (a click that opens another panel swaps instead), a right press closes
+    /// it at once. Not while a dialog is up, or for the popovers Friends
+    /// draws beyond its edge. The strip over the resize handle counts as
+    /// inside, so dragging the edge never dismisses.
+    fn dismissable(&self, who: Dock, width: f32, panel: impl IntoElement, cx: &mut Context<Self>) -> Div {
+        // The handle sticks out of the panel by this much (`widgets::side_panel`).
+        const HANDLE: f32 = 0.25;
+        let arm = cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+            if this.dock_ignores_press(who, window, cx) {
+                return;
+            }
+            if e.button == MouseButton::Left {
+                this.dock_armed = Some(this.dock_gen);
+            } else {
+                this.dismiss_dock(who, cx);
+            }
+        });
+        let release = cx.listener(move |this, _: &MouseUpEvent, window, cx| {
+            let Some(at) = this.dock_armed.take() else { return };
+            if this.dock_ignores_press(who, window, cx) {
+                return;
+            }
+            // After the click's own handlers, which may open another panel.
+            cx.defer_in(window, move |this, _, cx| {
+                if this.dock_gen == at && this.dock_tenant(cx) == Some(who) {
+                    this.dismiss_dock(who, cx);
+                }
+            });
+        });
+        div()
+            .flex_none()
+            .h_full()
+            .w(rems(width + HANDLE))
+            .ml(rems(-HANDLE))
+            .pl(rems(HANDLE))
+            .on_mouse_down_out(arm)
+            .on_mouse_up_out(MouseButton::Left, release)
+            .child(panel)
+    }
+
+    /// A press that isn't a click beside the panel: inside a dialog or sheet
+    /// (opened from a panel, say), or in one of Friends' popovers.
+    fn dock_ignores_press(&self, who: Dock, window: &mut Window, cx: &mut App) -> bool {
+        window.has_active_dialog(cx)
+            || window.has_active_sheet(cx)
+            || (who == Dock::Friends && self.friends.read(cx).popover_busy())
     }
 
     /// The title bar's Friends button: dock or hide the panel.
@@ -379,6 +539,10 @@ impl LibraryView {
     }
 
     fn set_friends(&mut self, open: bool, cx: &mut Context<Self>) {
+        if open && !self.take_dock(Dock::Friends, cx) {
+            return;
+        }
+        self.dock_gen += 1;
         self.friends_open = open;
         self.friends.update(cx, |f, cx| f.shown(open, cx));
         cx.notify();
@@ -534,7 +698,8 @@ impl LibraryView {
                 }
                 cx.notify()
             }),
-            crate::browse::observe_peek(&peek, cx, |_, cx| cx.notify()),
+            // A mod's page that opens takes the dock from the others.
+            crate::browse::observe_peek(&peek, cx, |this, cx| this.peek_changed(cx)),
             cx.subscribe(&addons, |this, _, event, cx| this.addons_event(event, cx)),
             // The notice slot above the tabs shows the table's notices.
             cx.observe(&addons, |this, addons, cx| {
@@ -614,6 +779,9 @@ impl LibraryView {
             config_panel: None,
             pending_config: None,
             config_sub: None,
+            dock_gen: 0,
+            dock_armed: None,
+            notice_unsaved: false,
             config_synced: HashSet::new(),
             shots,
             settings,
@@ -3194,11 +3362,18 @@ impl Render for LibraryView {
         if let Some((root, file)) = self.pending_config.take() {
             self.make_config_panel(root, file, window, cx);
         }
+        if std::mem::take(&mut self.notice_unsaved) {
+            struct Unsaved;
+            window.push_notification(
+                gpui_kit::component::notification::Notification::info(crate::config_view::UNSAVED_NOTICE).id::<Unsaved>(),
+                cx,
+            );
+        }
+        // One dock on the right, one tenant (`take_dock`): a config file, a
+        // mod's page, or Friends. The filters only cover the frame between
+        // a panel opening and the others closing.
         let config_panel = self.config_shown();
         let peek = self.peek_shown(cx).filter(|_| config_panel.is_none());
-        // One dock on the right: a config file, else a mod's page, else
-        // Friends. A mod opened from Friends takes the dock; Friends is
-        // back when it closes.
         let friends_shown = self.friends_shown(cx);
         // The page keeps PAGE_MIN beside the dock: the dock gives way
         // first, down to its minimum, then the instance list folds to its
@@ -3206,13 +3381,7 @@ impl Render for LibraryView {
         // share alone left the page nothing at 960 px with the dock at its
         // widest.
         let win = window.viewport_size().width / window.rem_size();
-        let dock_min = if config_panel.is_some() {
-            crate::configs_tab::PANEL.min
-        } else if peek.is_some() || friends_shown {
-            widgets::DOCK.min
-        } else {
-            0.0
-        };
+        let dock_min = if config_panel.is_some() || peek.is_some() || friends_shown { widgets::DOCK.min } else { 0.0 };
         let squeeze = self.drag_width.is_none() && side > RAIL && dock_min > 0. && win - side - dock_min < PAGE_MIN;
         if squeeze != self.squeezed {
             self.squeezed = squeeze;
@@ -3233,7 +3402,6 @@ impl Render for LibraryView {
             }
             p.read(cx).panel_width(window, cx)
         });
-        let peek_w = peek_w + config_w;
         // Friends too: its saved width could leave the page a sliver.
         let friends_w = if friends_shown {
             if self.friends.read(cx).cap_to(dock_cap) {
@@ -3243,7 +3411,7 @@ impl Render for LibraryView {
         } else {
             0.0
         };
-        self.detail_w = win - side - peek_w - friends_w;
+        self.detail_w = win - side - peek_w - config_w - friends_w;
         // The page's header, tabs and toolbars fit themselves to this in
         // the same frame, so they keep up with a dragged edge. After the
         // dock cap and the list fold: that's the room the page really gets.
@@ -3287,7 +3455,8 @@ impl Render for LibraryView {
         let peek = peek.map(|p| {
             AnyView::from(p).cached(StyleRefinement::default().w(rems(peek_w)).flex_none().h_full())
         });
-        let friends_panel = friends_shown.then(|| self.friends.clone());
+        let friends_panel = friends_shown.then(|| self.dismissable(Dock::Friends, friends_w, self.friends.clone(), cx));
+        let config_panel = config_panel.map(|c| self.dismissable(Dock::Config, config_w, c, cx));
         h_flex()
             .id("library")
             .relative()
@@ -3321,7 +3490,7 @@ impl LibraryView {
             && p.read(cx).key == file
             && p.read(cx).root(cx) == root
         {
-            self.close_config_panel(cx);
+            self.request_close_config(cx);
             return;
         }
         self.pending_config = Some((root, file));
@@ -3329,8 +3498,9 @@ impl LibraryView {
     }
 
     fn make_config_panel(&mut self, root: PathBuf, file: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.config_panel.as_ref().is_some_and(|p| p.read(cx).unsaved(cx) > 0) {
-            window.push_notification(gpui_kit::component::notification::Notification::info("Save or discard the open config's changes first."), cx);
+        // Another mod's config over one with unsaved edits would drop them.
+        if self.config_unsaved(cx) {
+            self.refuse_unsaved(cx);
             return;
         }
         let store = self.store.clone();
@@ -3341,14 +3511,19 @@ impl LibraryView {
         }
         let panel = cx.new(|cx| crate::configs_tab::ConfigPanel::new(store, root, file.clone(), name, icon, files, window, cx));
         self.config_sub = Some(cx.subscribe(&panel, |this, _, e: &crate::configs_tab::ConfigPanelEvent, cx| match e {
-            crate::configs_tab::ConfigPanelEvent::Close => this.close_config_panel(cx),
+            crate::configs_tab::ConfigPanelEvent::Close => {
+                this.request_close_config(cx);
+            }
             crate::configs_tab::ConfigPanelEvent::OpenInTab(k) => {
                 let k = k.clone();
-                this.close_config_panel(cx);
-                this.configs.update(cx, |c, cx| c.pick_mod(k, cx));
-                this.set_tab(InstTab::Configs, cx);
+                if this.request_close_config(cx) {
+                    this.configs.update(cx, |c, cx| c.pick_mod(k, cx));
+                    this.set_tab(InstTab::Configs, cx);
+                }
             }
         }));
+        // It's the panel now: Friends and the mod's page make room.
+        self.take_dock(Dock::Config, cx);
         self.config_panel = Some(panel);
         self.addons.update(cx, |a, cx| {
             a.config_open = Some(file);
@@ -3357,6 +3532,7 @@ impl LibraryView {
     }
 
     fn close_config_panel(&mut self, cx: &mut Context<Self>) {
+        self.dock_gen += 1;
         self.config_panel = None;
         self.addons.update(cx, |a, cx| {
             a.config_open = None;

@@ -66,6 +66,11 @@ pub struct ServerSide {
     pub running: bool,
 }
 
+/// What is said when something would close or replace a config file whose
+/// edits aren't saved: they are never dropped (the panel beside the Mods tab
+/// and the dialog share it).
+pub const UNSAVED_NOTICE: &str = "Not saved yet: Save, or Discard.";
+
 pub enum ConfigViewEvent {
     /// The panel's close button.
     Close,
@@ -1918,7 +1923,7 @@ impl Render for ConfigView {
                     this.cancel_edit(window, cx);
                 } else if this.host == Host::Dialog {
                     if this.unsaved() > 0 {
-                        window.push_notification(Notification::info("Not saved yet: Save, or Discard."), cx);
+                        window.push_notification(Notification::info(UNSAVED_NOTICE), cx);
                     } else {
                         window.close_dialog(cx);
                     }

@@ -136,6 +136,8 @@ pub struct FriendsPanel {
     page_since: u64,
     /// The header's + popover (invite, join, new group) is open.
     plus_pop: bool,
+    /// When a popover last closed (see `popover_busy`).
+    pop_closed: Option<Instant>,
     /// Where the Invite button was last drawn, for its popover.
     plus_anchor: Rc<RefCell<Option<Bounds<Pixels>>>>,
     /// The popover was opened from "Got a code?": only the join part, under
@@ -191,6 +193,7 @@ impl FriendsPanel {
             nearby,
             page_since: 0,
             plus_pop: false,
+            pop_closed: None,
             plus_anchor: Rc::default(),
             join_only: false,
             join_anchor: Rc::default(),
@@ -225,6 +228,9 @@ impl FriendsPanel {
             self.set_plus(false, cx);
         }
         if self.share_pop != pop {
+            if pop.is_none() {
+                self.pop_closed = Some(Instant::now());
+            }
             self.share_pop = pop;
             cx.emit(FriendsEvent::Popover);
         }
@@ -239,10 +245,22 @@ impl FriendsPanel {
             self.join_only = false;
         }
         if self.plus_pop != open {
+            if !open {
+                self.pop_closed = Some(Instant::now());
+            }
             self.plus_pop = open;
             cx.emit(FriendsEvent::Popover);
         }
         cx.notify();
+    }
+
+    /// A popover (share, invite) is open or closed just now. The Library
+    /// doesn't read a click inside one, or the click that closes it, as a
+    /// click outside the panel: the popovers are drawn over the whole
+    /// window, beyond the panel's edge, and close before the panel hears
+    /// the press.
+    pub fn popover_busy(&self) -> bool {
+        self.plus_pop || self.share_pop.is_some() || self.pop_closed.is_some_and(|t| t.elapsed() < Duration::from_millis(200))
     }
 
     /// Opens "On this network" for this instance (the Library's ⋯ menu).

@@ -55,8 +55,6 @@ enum Pick {
 
 // ---- the side panel ---------------------------------------------------------------------
 
-pub(crate) const PANEL: widgets::PanelSpec = widgets::PanelSpec::new("config.panel", 30., 24., 48.).trailing();
-
 pub enum ConfigPanelEvent {
     Close,
     /// Open the Configs tab at this mod.
@@ -90,7 +88,9 @@ impl ConfigPanel {
             ConfigViewEvent::OpenInTab => cx.emit(ConfigPanelEvent::OpenInTab(k.clone())),
             ConfigViewEvent::Changed => cx.notify(),
         });
-        Self { store, view, panel: widgets::SidePanel::new(PANEL), key, _sub: sub }
+        // The right-hand dock's spec, like the mod page and Friends: one
+        // width for all three, and a drag on any of them moves the others.
+        Self { store, view, panel: widgets::SidePanel::new(widgets::DOCK), key, _sub: sub }
     }
 
     pub fn unsaved(&self, cx: &App) -> usize {
@@ -114,9 +114,11 @@ impl ConfigPanel {
 
 impl Render for ConfigPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The dock's border and sidebar fill, sliding in when the mod
+        // changes; the config view keeps its own page-coloured body.
         let theme = cx.theme().clone();
-        let content = div().size_full().bg(theme.background).border_l_1().border_color(theme.border).child(self.view.clone());
-        widgets::side_panel("cfg-panel-edge", &self.panel, |t: &mut Self| &mut t.panel, &self.store, content, window, cx)
+        let content = div().size_full().bg(theme.background).child(self.view.clone());
+        widgets::dock(SharedString::from(format!("cfg-dock:{}", self.key)), &self.panel, |t: &mut Self| &mut t.panel, &self.store, content, window, cx)
     }
 }
 

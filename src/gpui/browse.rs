@@ -1143,6 +1143,18 @@ impl BrowseView {
         self.selected.is_some() || self.author.is_some() || (self.peek && self.error.is_some())
     }
 
+    /// Closes the project panel, whatever it shows (a project, an author, a
+    /// load error). The one way to shut a peek from outside its own X: a
+    /// click beside it, or another panel taking the dock. Keeps how far
+    /// it was scrolled, as its own close does.
+    pub fn dismiss_peek(&mut self, cx: &mut Context<Self>) {
+        self.stash_peek();
+        self.selected = None;
+        self.author = None;
+        self.error = None;
+        cx.notify();
+    }
+
     /// What a page with this peek docked beside it lays out by: whether
     /// it's open, and on which project.
     fn shown_key(&self) -> (bool, Option<u64>) {
@@ -6150,11 +6162,7 @@ impl BrowseView {
             if e.button == MouseButton::Left {
                 this.blur_armed = Some(this.peeks);
             } else {
-                this.stash_peek();
-                this.selected = None;
-                this.author = None;
-                this.error = None;
-                cx.notify();
+                this.dismiss_peek(cx);
             }
         });
         let blur = cx.listener(move |this, _: &MouseUpEvent, window, cx| {
@@ -6164,11 +6172,7 @@ impl BrowseView {
             }
             cx.defer_in(window, move |this, _, cx| {
                 if this.peeks == at {
-                    this.stash_peek();
-                    this.selected = None;
-                    this.author = None;
-                    this.error = None;
-                    cx.notify();
+                    this.dismiss_peek(cx);
                 }
             });
         });
