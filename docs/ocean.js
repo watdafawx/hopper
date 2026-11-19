@@ -15,11 +15,13 @@
   // Brightness bands for the letters, then two for ripples.
   const INK = [.035, .06, .09, .13, .18].map(a => `rgba(200,205,215,${a})`);
   const GLOW = ['rgba(249,115,22,.45)', 'rgba(253,170,100,.75)'];
-  const bands = INK.length + GLOW.length;
 
   let cols = 0, rows = 0, dpr = 1, cellW = 9;
   let grid = new Uint8Array(0); // which letter sits in each cell
   let base = new Float32Array(0); // each cell's patch brightness from the last full frame
+  // Retain unchanged cells. Positions use measured space advances so drawing
+  // one glyph matches its position in the original full-row text exactly.
+  let painted = new Uint8Array(0), letters = new Uint8Array(0), dirty = new Uint16Array(0), advances = [];
   const ripples = [];
   let px = -1e4, py = -1e4, pAmp = 0;
 
@@ -75,15 +77,18 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.font = FONT_CSS;
     ctx.textBaseline = 'top';
-    // Rows are drawn as single strings, so columns sit at the font's real
-    // advance plus the letter spacing (where the browser supports it).
+    // Keep the original row text's font advance and optional letter spacing.
     const spaced = 'letterSpacing' in ctx;
     if (spaced) ctx.letterSpacing = GAP + 'px';
     cellW = ctx.measureText('0123456789').width / 10 || 9;
     cols = Math.ceil(w / cellW) + 1;
     rows = Math.ceil(h / CELL_H) + 1;
+    advances = Array.from({ length: cols + 1 }, (_, c) => ctx.measureText(' '.repeat(c)).width);
     grid = new Uint8Array(cols * rows);
     base = new Float32Array(cols * rows);
+    painted = new Uint8Array(cols * rows).fill(255);
+    letters = new Uint8Array(cols * rows);
+    dirty = new Uint16Array(cols);
     for (let i = 0; i < grid.length; i++) grid[i] = (Math.random() * CHARS.length) | 0;
     if (still) frame(4000);
   }
@@ -94,7 +99,13 @@
   function frame(ms, cheap) {
     const t = ms / 1000;
     const scroll = scrollY * 0.25; // slow parallax, in px
-    for (let i = ripples.length - 1; i >= 0; i--) if (t - ripples[i].t > 3.4) ripples.splice(i, 1);
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const rp = ripples[i], age = t - rp.t;
+      if (age > 3.4) { ripples.splice(i, 1); continue; }
+      rp.front = age * 300;
+      rp.fade = Math.max(0, 1 - age / 3.2) * rp.a;
+      rp.reach = (rp.front + 30) * rp.extent + 1;
+    }
     pAmp *= 0.93;
 
     // A few letters change every frame: the shimmer.
@@ -102,12 +113,10 @@
       grid[(Math.random() * grid.length) | 0] = (Math.random() * CHARS.length) | 0;
     }
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    const buf = Array.from({ length: bands }, () => new Array(cols));
     const drift = t * 0.035;
     for (let r = 0; r < rows; r++) {
-      for (let b = 0; b < bands; b++) buf[b].fill(' ');
       const cy = r * CELL_H;
+      let changed = 0;
       for (let c = 0; c < cols; c++) {
         const cx = c * cellW;
         // Patches: noise in page space, drifting slowly, cut with a soft edge.
@@ -121,10 +130,12 @@
 
         let glow = 0;
         for (const rp of ripples) {
-          const age = t - rp.t;
-          const off = shapeDist(rp, cx - rp.x, cy - rp.y) - age * 300;
+          if (!rp.fade) continue;
+          const dx = cx - rp.x, dy = cy - rp.y;
+          if (Math.abs(dx) > rp.reach || Math.abs(dy) > rp.reach) continue;
+          const off = shapeDist(rp, dx, dy) - rp.front;
           if (off > 30 || off < -90) continue;
-          glow += Math.exp(-(off * off) / 700) * Math.max(0, 1 - age / 3.2) * rp.a;
+          glow += Math.exp(-(off * off) / 700) * rp.fade;
         }
         if (pAmp > 0.01) {
           const d = Math.hypot(cx - px, cy - py);
@@ -135,16 +146,40 @@
         if (glow > 0.3) band = INK.length + (glow > 0.7 ? 1 : 0);
         else {
           lit += glow;
-          if (lit < 0.06) continue;
-          band = Math.min(INK.length - 1, (lit * INK.length) | 0);
+          band = lit < 0.06 ? 255 : Math.min(INK.length - 1, (lit * INK.length) | 0);
         }
-        buf[band][c] = CHARS[grid[i]];
+        if (painted[i] === band && (band === 255 || letters[i] === grid[i])) continue;
+        painted[i] = band;
+        letters[i] = grid[i];
+        dirty[changed++] = c;
       }
-      for (let b = 0; b < bands; b++) {
-        const s = buf[b].join('');
-        if (s.trim()) {
-          ctx.fillStyle = b < INK.length ? INK[b] : GLOW[b - INK.length];
-          ctx.fillText(s, 0, cy);
+      if (!changed) continue;
+      const top = Math.floor(cy * dpr), height = (Math.floor((cy + CELL_H) * dpr) - top) / dpr;
+      // A broad ripple can change most of a row: batching is cheaper then.
+      if (changed > cols / 8) {
+        ctx.clearRect(0, top / dpr, canvas.width, height);
+        for (let band = 0; band < INK.length + GLOW.length; band++) {
+          let text = '';
+          for (let c = 0; c < cols; c++) {
+            const i = r * cols + c;
+            text += painted[i] === band ? CHARS[letters[i]] : ' ';
+          }
+          text = text.trimEnd();
+          if (!text) continue;
+          ctx.fillStyle = band < INK.length ? INK[band] : GLOW[band - INK.length];
+          ctx.fillText(text, 0, cy);
+        }
+        continue;
+      }
+      for (let k = 0; k < changed; k++) {
+        const c = dirty[k], i = r * cols + c, band = painted[i];
+        // Shared pixel boundaries prevent a clear from erasing its neighbor.
+        const left = Math.floor(advances[c] * dpr);
+        ctx.clearRect(left / dpr, top / dpr,
+          (Math.floor(advances[c + 1] * dpr) - left) / dpr, height);
+        if (band !== 255) {
+          ctx.fillStyle = band < INK.length ? INK[band] : GLOW[band - INK.length];
+          ctx.fillText(CHARS[grid[i]], advances[c], cy);
         }
       }
     }
@@ -181,6 +216,11 @@
       cos: Math.cos(rot), sin: Math.sin(rot),
       sx: stretch, sy: 1 / Math.sqrt(stretch),
     });
+    const rp = ripples[ripples.length - 1];
+    // Conservative shape bounds skip cells the wave cannot reach. The extra
+    // pixel in frame() keeps floating-point boundaries inside the old test.
+    const radius = [1, 1 / 0.78, Math.SQRT2, 1 / Math.cos(Math.PI / rp.n), 1.32, 1.14];
+    rp.extent = radius[SHAPES.indexOf(rp.shape)] * Math.max(rp.sx, rp.sy);
     if (ripples.length > 8) ripples.shift();
     if (still) frame(performance.now());
   }
