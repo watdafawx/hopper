@@ -1503,13 +1503,16 @@ mod tests {
         let (secret, uri) = a.two_factor_begin(None, "rig");
         assert!(uri.starts_with("otpauth://totp/") && uri.contains(&secret));
         let key = base32_decode(&secret).unwrap();
-        let code = || format!("{:06}", totp(&key, now() / 30));
-        assert!(a.two_factor_enable(None, "000000").is_err() || code() == "000000");
-        a.two_factor_enable(None, &code()).unwrap();
+        // Work out the code once: the sign-in below is slow enough that the
+        // 30-second window can turn over, and a freshly computed code would
+        // then be a new one rather than the reused one this test checks.
+        let code = format!("{:06}", totp(&key, now() / 30));
+        assert!(a.two_factor_enable(None, "000000").is_err() || code == "000000");
+        a.two_factor_enable(None, &code).unwrap();
         assert!(a.two_factor_on(None));
         assert_eq!(a.login_2fa("password1", None, IP, true).unwrap_err(), LoginError::NeedCode);
         // The code used to turn it on can't be reused.
-        assert!(matches!(a.login_2fa("password1", Some(&code()), net, false), Err(LoginError::Refused(_))));
+        assert!(matches!(a.login_2fa("password1", Some(&code), net, false), Err(LoginError::Refused(_))));
         let next = format!("{:06}", totp(&key, now() / 30 + 1));
         assert!(a.login_2fa("password1", Some(&next), net, false).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
