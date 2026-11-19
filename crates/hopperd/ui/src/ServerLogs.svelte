@@ -14,6 +14,7 @@
   import ServerCrash from './ServerCrash.svelte';
   import LogText from './LogText.svelte';
   import ModPeek from './ModPeek.svelte';
+  import ProjectPeek from './lib/ProjectPeek.svelte';
   import SelectionBar from './lib/SelectionBar.svelte';
   import { Selection } from './lib/selection.svelte.js';
 
@@ -38,6 +39,8 @@
   let read = $state(null);
   let readErr = $state('');
   let peek = $state(null);
+  // A mod the server doesn't have (a crash says it needs it): its site page.
+  let projectPeek = $state(null);
 
   // The panel works out a few verdicts per ask; ask again until done.
   let more = 0;
@@ -254,7 +257,7 @@
         {:else if read?.crash}
           <!-- A report the card can't draw still gets a card, never an empty side. -->
           <svelte:boundary onerror={(e) => console.error('crash card', e)}>
-            <ServerCrash {server} given={read} times={timesOf(pickedRow)} fixes={picked === list?.[0]?.path && settled} onPeek={(m) => (peek = m)} {onShare} {openFile} />
+            <ServerCrash {server} given={read} times={timesOf(pickedRow)} fixes={picked === list?.[0]?.path && settled} onPeek={(m) => ((projectPeek = null), (peek = m))} onProject={(p) => ((peek = null), (projectPeek = p))} {onShare} {openFile} />
             {#snippet failed(error)}
               <div class="card col">
                 <b class="small">Hopper couldn't show this report</b>
@@ -280,6 +283,7 @@
         {/if}
       </div>
       {#if peek}<ModPeek {server} mod={peek} onClose={() => (peek = null)} onChanged={() => {}} onUpdate={() => { peek = null; openMods(); }} />{/if}
+      {#if projectPeek}<ProjectPeek source={projectPeek.source} id={projectPeek.id} onClose={() => (projectPeek = null)} />{/if}
     </div>
   {:else if view === 'older'}
     <div class="older card col" role="listbox" tabindex="-1" aria-multiselectable="true" aria-label="Older logs" onkeydown={oldKey}>

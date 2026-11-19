@@ -61,6 +61,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/mods/search", get(search))
         .route("/api/v1/servers/{id}/mods/install", post(install_mod))
         .route("/api/v1/servers/{id}/mods/install-needed", post(install_needed))
+        .route("/api/v1/servers/{id}/mods/for-ids", get(for_ids))
         .route("/api/v1/servers/{id}/mods/updates", get(updates))
         .route("/api/v1/servers/{id}/mods/update", post(update))
         .route("/api/v1/settings/curseforge", get(cf_key_status).put(set_cf_key))
@@ -742,6 +743,63 @@ async fn install_needed(
         Ok(json!({ "added": added }))
     });
     Ok(Json(json!({ "job": job })))
+}
+
+/// How long a site's answer for a mod id is kept: a project that was found
+/// stays found; one that wasn't is asked again sooner (the site may have been
+/// down), as every open of the crash card would otherwise search again.
+const ID_FOUND_FOR: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+const ID_MISSED_FOR: std::time::Duration = std::time::Duration::from_secs(2 * 60);
+/// Most ids one ask may carry (a crash names a few).
+const MOST_IDS: usize = 12;
+
+type IdAnswers = HashMap<(String, String, String), (std::time::Instant, Option<hopper_core::modref::ProjectRef>)>;
+static ID_PROJECTS: std::sync::Mutex<Option<IdAnswers>> = std::sync::Mutex::new(None);
+
+/// The project a site lists under a mod id, for this server's game and loader.
+fn cached_project(inst: &Instance, id: &str) -> Option<hopper_core::modref::ProjectRef> {
+    let key = (inst.game_version.clone(), inst.loader.clone(), id.to_string());
+    let hit = ID_PROJECTS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(&key).cloned();
+    if let Some((at, p)) = hit
+        && at.elapsed() < if p.is_some() { ID_FOUND_FOR } else { ID_MISSED_FOR }
+    {
+        return p;
+    }
+    let p = hopper_core::modref::project_for_id(inst, id);
+    ID_PROJECTS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(key, (std::time::Instant::now(), p.clone()));
+    p
+}
+
+/// What mod ids a crash names stand for here (`?ids=a,b`): the jar this
+/// server has, the game or loader, or the project a mod site lists, so the
+/// crash card can show a mod's name and icon instead of its id. Read access,
+/// like the crash it belongs to; nothing changes.
+async fn for_ids(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let mut ids: Vec<String> = Vec::new();
+    for i in q.get("ids").map(String::as_str).unwrap_or("").split(',').map(str::trim).filter(|i| !i.is_empty()) {
+        if !is_mod_id(i) {
+            return Err(bad("That isn't a mod id."));
+        }
+        if !ids.iter().any(|x| x == i) {
+            ids.push(i.to_string());
+        }
+    }
+    if ids.len() > MOST_IDS {
+        return Err(bad("Too many mods at once."));
+    }
+    let found = blocking(move || {
+        let inst = instance(&e)?;
+        Ok(hopper_core::modref::resolve(&inst, &ids, cached_project))
+    })
+    .await?;
+    Ok(Json(json!({ "ids": found })))
 }
 
 /// A mod the paired pack ships: the pack sets its version (updating it

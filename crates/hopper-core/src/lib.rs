@@ -88,6 +88,7 @@ pub mod mcp;
 pub mod mcprofile;
 pub mod model;
 pub mod modmeta;
+pub mod modref;
 pub mod modconfig;
 pub mod modfetch;
 pub mod modindex;

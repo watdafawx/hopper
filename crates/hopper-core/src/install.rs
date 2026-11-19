@@ -578,7 +578,7 @@ fn slug_tries(mod_id: &str) -> Vec<String> {
 /// A project name without its subtitle: "Arcane Framework - Library for the
 /// Almanac Mods" is "Arcane Framework". Only a dash, bar, colon or bracket
 /// set apart by spaces counts, so "Cyclops Core Addon" keeps its tail.
-fn name_head(name: &str) -> &str {
+pub fn name_head(name: &str) -> &str {
     const SEPARATORS: &[&str] = &[" - ", " \u{2013} ", " \u{2014} ", " | ", ": ", " ("];
     let end = SEPARATORS.iter().filter_map(|sep| name.find(sep)).min().unwrap_or(name.len());
     name[..end].trim()

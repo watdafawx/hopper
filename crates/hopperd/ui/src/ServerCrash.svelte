@@ -19,10 +19,15 @@
   import { exactLabel, fullDate } from './lib/worlds.js';
   import CrashTurnOff from './CrashTurnOff.svelte';
   import PushPlayers from './lib/PushPlayers.svelte';
+  import { untrack } from 'svelte';
+  import { ModIds } from './lib/modids.svelte.js';
+  import { readIds, LOADERS } from './lib/modids.js';
 
   // times: {n, first} when the picked report's failure came more than once.
+  // onPeek(mod): an installed mod's panel; onProject({source, id}): a mod the
+  // server doesn't have, as its site lists it.
   import { canShareLog } from './lib/nodes.js';
-  let { server, onPeek, onShare, openFile, given = null, fixes = false, times = null } = $props();
+  let { server, onPeek, onProject = null, onShare, openFile, given = null, fixes = false, times = null } = $props();
   // Fixes (put back, turn off) are for the crash the server last had: a
   // picked report shows them only when it is that one (`fixes`).
   const canFix = $derived(!given || fixes);
@@ -103,6 +108,7 @@
 
   $effect(() => {
     sid;
+    ids.reset();
     if (given) loadGiven(given);
     else if (settled) load();
     else {
@@ -110,6 +116,32 @@
       crash = null;
       checking = false;
     }
+  });
+
+  // What each mod id the card names stands for here (its name and icon, or
+  // the project a mod site lists), asked of the panel once per id.
+  const ids = new ModIds();
+  const wantIds = $derived.by(() => {
+    const want = new Set();
+    for (const s of crash?.suspects || []) {
+      for (const [id] of s.needs || []) want.add(id);
+      // A reason names its mod by id; a report whose jar is gone has no name for it.
+      if (s.mod_id && !modOf(s.file_name) && !given?.names?.[s.file_name]) want.add(s.mod_id);
+    }
+    for (const sw of [...(crash?.switches || []), ...(crash?.switched_off || [])]) if (sw.mod_id && !fileOfMod(sw.mod_id)) want.add(sw.mod_id);
+    return [...want];
+  });
+  $effect(() => {
+    const list = wantIds;
+    if (list.length) untrack(() => ids.ask(base, list));
+  });
+  // The name a card says for an id, once known.
+  const idName = (id) => ids.nameOf(id, (f) => nameOf(f));
+  // Each id a reason or step names that has a name, read as that name.
+  const needNames = $derived.by(() => {
+    const m = new Map();
+    for (const s of crash?.suspects || []) for (const [id] of s.needs || []) if (idName(id)) m.set(id, idName(id));
+    return m;
   });
 
   const needState = (id) => needsNow[id] || 'missing';
@@ -127,9 +159,11 @@
     adding = { ...adding, [id]: 'Adding…' };
     try {
       const { job } = await post(`${base}/mods/install-needed`, { mod_id: id });
-      const r = await followJob(job, (st) => (adding = { ...adding, [id]: st.detail || 'Adding…' }));
+      // The job says "Looking up arcane_framework": by its name once known.
+      const r = await followJob(job, (st) => (adding = { ...adding, [id]: readIds(st.detail, new Map([[id, idName(id)]])) || 'Adding…' }));
       needsNow = { ...needsNow, [id]: 'installed' };
-      say(`Added ${(r?.added || [id]).join(', ')}. Start the server to try again.`);
+      say(`Added ${(r?.added?.length ? r.added : [idName(id) || id]).join(', ')}. Start the server to try again.`);
+      ids.ask(base, [id], true);
       try {
         mods = (await api(`${base}/mods/list`)).mods || mods;
       } catch {
@@ -185,7 +219,8 @@
   );
   const versions = (ch) => (ch.from && ch.to ? ` (${ch.from} → ${ch.to})` : '');
   // Mod ids in a reason read as names.
-  const named = (why) => suspects.reduce((w, s) => (s.mod_id && (modOf(s.file_name) || given?.names?.[s.file_name]) ? w.replaceAll(` ${s.mod_id} `, ` ${nameOf(s.file_name)} `).replaceAll(` ${s.mod_id},`, ` ${nameOf(s.file_name)},`).replaceAll(` ${s.mod_id}.`, ` ${nameOf(s.file_name)}.`) : w), why || '');
+  // The ids of mods it says are missing too (their names come from the panel).
+  const named = (why) => readIds(suspects.reduce((w, s) => (s.mod_id && (modOf(s.file_name) || given?.names?.[s.file_name]) ? w.replaceAll(` ${s.mod_id} `, ` ${nameOf(s.file_name)} `).replaceAll(` ${s.mod_id},`, ` ${nameOf(s.file_name)},`).replaceAll(` ${s.mod_id}.`, ` ${nameOf(s.file_name)}.`) : w), why || ''), needNames);
 
   // Only the mods ticked in the list "Turn off…" opened.
   async function turnOff(files) {
@@ -283,6 +318,23 @@
   {/if}
 {/snippet}
 
+<!-- A mod the crash names by id ("needs arcane_framework"): the jar the server
+     has (the same name and icon), the project a mod site lists (its page opens
+     beside the card), the game or loader by its name; the id itself, quieter,
+     only while the panel is still looking or when nothing is found. -->
+{#snippet idMod(id)}
+  {@const r = ids.refs[id]}
+  {#if r?.kind === 'installed'}
+    {@render mod(r.file)}
+  {:else if r?.kind === 'project'}
+    <button class="mod" title="Open {r.name}" onclick={() => onProject?.(r)}>{#if r.icon}<img src={r.icon} alt="" width="18" height="18" loading="lazy" />{:else}<span class="ph"></span>{/if}<b>{r.name}</b></button>
+  {:else if r?.kind === 'loader' || LOADERS[id]}
+    <span class="mod"><b>{LOADERS[id] || id}</b></span>
+  {:else}
+    <code class="rawid" title={r ? 'Hopper found no mod with this id' : 'Looking this mod up…'}>{id}</code>
+  {/if}
+{/snippet}
+
 {#snippet tag(c)}
   <span class="chip tag {c.toLowerCase()}">{c}</span>
 {/snippet}
@@ -314,7 +366,7 @@
       {#each s.needs || [] as [id, ver] (id)}
         {@const ns = needState(id)}
         <div class="tiny need">
-          <span>Needs {id}{ver ? ` ${ver}` : ''}</span>
+          <span>Needs</span>{@render idMod(id)}{#if ver}<span class="ver">{ver}</span>{/if}
           {#if ns === 'installed'}
             <span class="done"><Check size={12} />Installed</span>
           {:else if ns === 'loader'}
@@ -370,7 +422,7 @@
     <div class="sw">
       {#if isItem(sw)}
         <div class="line">
-          <span>{(i === 0 && !first && (toTurnOff.length || changed)) || (first && i > 0) ? 'Or keep' : 'Keep'}</span>{#if fileOfMod(sw.mod_id)}{@render mod(fileOfMod(sw.mod_id))}{:else}<b>{sw.mod_id}</b>{/if}<span>and turn off only the item that broke:</span><code>{sw.key} = true</code><span class="tiny muted">in {sw.file}, line {sw.line}</span>
+          <span>{(i === 0 && !first && (toTurnOff.length || changed)) || (first && i > 0) ? 'Or keep' : 'Keep'}</span>{#if fileOfMod(sw.mod_id)}{@render mod(fileOfMod(sw.mod_id))}{:else}{@render idMod(sw.mod_id)}{/if}<span>and turn off only the item that broke:</span><code>{sw.key} = true</code><span class="tiny muted">in {sw.file}, line {sw.line}</span>
         </div>
         <div class="row acts">
           <button class="btn sm" disabled={busy || alive} title={alive ? 'Stop the server first: it may write its config back when it stops.' : 'Sets it to false after you confirm. The old config goes to Backups.'} onclick={() => switchOff(sw)}><PowerOff size={13} />Turn off {sw.label}…</button>
@@ -379,7 +431,7 @@
         <div class="tiny warnline"><b>Existing {sw.label} will be deleted.</b> Every {sw.label} already in the worlds goes away the next time they load.</div>
       {:else}
         <div class="line strong">
-          <span>{sw.kind === 'limit' ? `Raise ${sw.label} in` : `Turn off ${sw.label} in`}</span>{#if fileOfMod(sw.mod_id)}{@render mod(fileOfMod(sw.mod_id))}{:else}<b>{sw.mod_id}</b>{/if}{#if sw.kind === 'limit'}<span>to {toText(sw)}</span>{/if}<span class="tiny muted">({sw.file} · {sw.key})</span>
+          <span>{sw.kind === 'limit' ? `Raise ${sw.label} in` : `Turn off ${sw.label} in`}</span>{#if fileOfMod(sw.mod_id)}{@render mod(fileOfMod(sw.mod_id))}{:else}{@render idMod(sw.mod_id)}{/if}{#if sw.kind === 'limit'}<span>to {toText(sw)}</span>{/if}<span class="tiny muted">({sw.file} · {sw.key})</span>
         </div>
         {#if sw.why}<div class="tiny muted">{sw.why}</div>{/if}
         <div class="row acts">
@@ -549,9 +601,11 @@
   .grade { flex: none; width: 5rem; }
   .why { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
   .why .tiny, .quote, .steps .tiny { white-space: normal; overflow-wrap: anywhere; }
-  .need { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--gold); font-family: var(--mono, monospace); }
-  .need .done { font-family: inherit; }
-  .need .muted { font-family: inherit; color: var(--muted); }
+  .need { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--ink-gold); }
+  .need .ver { font-family: var(--mono, monospace); }
+  .need .muted { color: var(--muted); }
+  /* An id nothing was found for (or not yet): quiet, in the code style. */
+  .rawid { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
   .morebtn { align-self: flex-start; gap: 4px; padding: 0 6px; }
   .whybtn { align-self: flex-start; gap: 4px; padding: 0 4px; margin-left: -4px; }
   .facts { list-style: none; margin: 2px 0 0; padding: 6px 8px; display: flex; flex-direction: column; gap: 2px; border-radius: var(--radius); background: var(--raise); }
