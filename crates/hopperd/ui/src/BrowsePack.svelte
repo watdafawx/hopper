@@ -7,7 +7,7 @@
   // Gallery. A modpack shows which versions have server files and "Make a
   // server from this".
   import { onMount, untrack } from 'svelte';
-  import { ArrowLeft, Download, RefreshCw, Clock, ExternalLink, Server, Hammer, Plus, ChevronDown, ChevronRight, ChevronLeft, X, Scale, Check, Monitor, Box, Blocks, Tag, Code, Copy, Bug, BookOpen, MessageCircle, Layers, CircleCheck, RotateCcw, TriangleAlert, Info } from '@lucide/svelte';
+  import { ArrowLeft, Download, RefreshCw, Clock, ExternalLink, Server, Hammer, Plus, ChevronDown, ChevronRight, ChevronLeft, X, Scale, Check, Monitor, Box, Blocks, Tag, Code, Copy, Bug, BookOpen, MessageCircle, Layers, Images, FileText, CircleCheck, RotateCcw, TriangleAlert, Info } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { session } from './lib/me.svelte.js';
   import { SITE, TYPES, SIDE, LOADER_NAME, count, ago, date, preset, size, andList, browseHash, store } from './lib/browse.js';
@@ -339,6 +339,19 @@
   </button>
 {/snippet}
 
+<!-- The tab buttons, for the page row and the compact bar. Narrow rows drop the counts, then
+     show the other tabs as icons (desktop's widgets::fit_tabs); the open tab keeps its label. -->
+{#snippet tabBtns(pick)}
+  {#snippet tb(id, Icon, label, n)}
+    <button class:tab-sel={tab === id} title={n ? `${label} ${n}` : label} aria-label={n ? `${label} ${n}` : label} onclick={() => pick(id)}><span class="ti"><Icon size={16} /></span><span class="tl">{label}</span>{#if n !== '' && n != null}<span class="tn"> {n}</span>{/if}</button>
+  {/snippet}
+  {@render tb('description', FileText, 'Description', '')}
+  {@render tb('versions', Download, 'Versions', versions ? versions.length : '')}
+  {#if !packs}{@render tb('deps', Layers, 'Dependencies', Array.isArray(deps) ? deps.length : '')}{/if}
+  {#if p.gallery.length}{@render tb('gallery', Images, 'Gallery', p.gallery.length)}{/if}
+  {#if hasComments}{@render tb('comments', MessageCircle, 'Comments', commentsLabel(p.num).slice('Comments'.length).trim())}{/if}
+  {#if issuesRepo}{@render tb('issues', Bug, 'Issues', '')}{/if}
+{/snippet}
 <!-- The install card's button; the compact bar shows the same one. -->
 {#snippet act()}
   {#if busy}<span class="busy small"><span class="spinner"></span><span class="ell">{busy}</span></span>
@@ -368,12 +381,7 @@
             {#if onBack}<button class="btn sm ghost icon pkx" title={backTip} aria-label={backTip} onclick={goBack}>{#if backIsClose}<X size={14} />{:else}<ArrowLeft size={14} />{/if}</button>{/if}
           </div>
           <div class="tabs stabs">
-            <button class:tab-sel={tab === 'description'} onclick={() => pickTab('description')}>Description</button>
-            <button class:tab-sel={tab === 'versions'} onclick={() => pickTab('versions')}>Versions{versions ? ` ${versions.length}` : ''}</button>
-            {#if !packs}<button class:tab-sel={tab === 'deps'} onclick={() => pickTab('deps')}>Dependencies{Array.isArray(deps) ? ` ${deps.length}` : ''}</button>{/if}
-            {#if p.gallery.length}<button class:tab-sel={tab === 'gallery'} onclick={() => pickTab('gallery')}>Gallery {p.gallery.length}</button>{/if}
-            {#if hasComments}<button class:tab-sel={tab === 'comments'} onclick={() => pickTab('comments')}>{commentsLabel(p.num)}</button>{/if}
-            {#if issuesRepo}<button class:tab-sel={tab === 'issues'} onclick={() => pickTab('issues')}>Issues</button>{/if}
+            {@render tabBtns(pickTab)}
           </div>
         </div>
       </div>
@@ -509,12 +517,7 @@
       </div>
     {:else}
       <div class="tabs" bind:this={tabsEl}>
-        <button class:tab-sel={tab === 'description'} onclick={() => (tab = 'description')}>Description</button>
-        <button class:tab-sel={tab === 'versions'} onclick={() => (tab = 'versions')}>Versions{versions ? ` ${versions.length}` : ''}</button>
-        {#if !packs}<button class:tab-sel={tab === 'deps'} onclick={() => (tab = 'deps')}>Dependencies{Array.isArray(deps) ? ` ${deps.length}` : ''}</button>{/if}
-        {#if p.gallery.length}<button class:tab-sel={tab === 'gallery'} onclick={() => (tab = 'gallery')}>Gallery {p.gallery.length}</button>{/if}
-        {#if hasComments}<button class:tab-sel={tab === 'comments'} onclick={() => (tab = 'comments')}>{commentsLabel(p.num)}</button>{/if}
-        {#if issuesRepo}<button class:tab-sel={tab === 'issues'} onclick={() => (tab = 'issues')}>Issues</button>{/if}
+        {@render tabBtns((t) => (tab = t))}
       </div>
 
       {#if tab === 'description'}
@@ -677,9 +680,18 @@
   @container (max-width: 460px) { .sdl { display: none; } }
   @media (prefers-reduced-motion: reduce) { .pkbar { transition: none; } }
   .fold { height: 0; margin-top: -16px; }
-  /* In a narrow peek the tabs go on a second line instead of running off the side. */
-  .tabs { display: flex; flex-wrap: wrap; gap: 0 18px; border-bottom: 1px solid var(--line); }
-  .tabs button { padding: 7px 0; color: var(--subtle); }
+  /* One line at any width, never wrapped or clipped: the counts go first, then the tabs that aren't open
+     shrink to icons (desktop's widgets::fit_tabs). Scrolling is only the last resort. */
+  .tabs { display: flex; flex-wrap: nowrap; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; container-type: inline-size; }
+  .tabs button { padding: 7px 0; color: var(--subtle); flex: none; white-space: nowrap; }
+  .tabs button + button { margin-left: 18px; }
+  .ti { display: none; }
+  @container (max-width: 520px) { .tn { display: none; } }
+  @container (max-width: 440px) {
+    .tabs button + button { margin-left: 10px; }
+    .tabs button:not(.tab-sel) .tl { display: none; }
+    .tabs button:not(.tab-sel) .ti { display: inline-flex; align-items: center; padding: 0 4px; }
+  }
   .tabs button:hover { color: var(--text); }
   .desc { max-width: 860px; }
   .cbl { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--subtle); cursor: pointer; }

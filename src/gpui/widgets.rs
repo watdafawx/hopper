@@ -980,6 +980,103 @@ pub fn underline_tab(id: ElementId, selected: bool, cx: &App) -> Stateful<Div> {
         .whitespace_nowrap()
 }
 
+/// One tab of [`fit_tabs`]: its label (a count may be part of it) and the icon
+/// it shrinks to.
+pub struct FitTab {
+    pub label: SharedString,
+    pub icon: IconName,
+}
+
+/// How much of a tab row fits (see [`tabs_fit`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabsFit {
+    /// Every label.
+    Full,
+    /// Only the open tab keeps its label; the rest are icons with a tooltip.
+    Icons,
+    /// Icons, and the kit's overflow menu lists every tab, for a row that
+    /// still doesn't fit.
+    Menu,
+}
+
+// The kit's underline tab bar: tabs sit 16px apart with no padding of their own.
+const TAB_GAP: f32 = 16.;
+/// An icon-only tab: wide enough to hit, the icon in the middle.
+const TAB_ICON_W: f32 = 24.;
+const TAB_ICON: f32 = 16.;
+/// Between the open tab's icon and its label.
+const TAB_ICON_GAP: f32 = 6.;
+/// Kept free at the end of the row, for text that measures a little narrow.
+const TAB_SLACK: f32 = 8.;
+
+/// How a row of tabs with labels `widths` (px, as laid out) draws in `avail`
+/// px with tab `selected` open: every label, then icons for all but the open
+/// tab, then the overflow menu. Whole rows only: a tab is never half cut off.
+pub fn tabs_fit(widths: &[f32], selected: usize, avail: f32) -> TabsFit {
+    if widths.is_empty() {
+        return TabsFit::Full;
+    }
+    let gaps = TAB_GAP * (widths.len() - 1) as f32;
+    let full = widths.iter().sum::<f32>() + gaps;
+    if full + TAB_SLACK <= avail {
+        return TabsFit::Full;
+    }
+    let icons = gaps
+        + widths
+            .iter()
+            .enumerate()
+            .map(|(i, w)| if i == selected { TAB_ICON + TAB_ICON_GAP + w } else { TAB_ICON_W })
+            .sum::<f32>();
+    if icons + TAB_SLACK <= avail { TabsFit::Icons } else { TabsFit::Menu }
+}
+
+/// The width of `text` in a tab's font.
+fn tab_label_width(text: &str, window: &Window, cx: &App) -> f32 {
+    let theme = cx.theme();
+    let mut font = gpui::font(theme.font_family.clone());
+    // The open tab is medium weight; measure every label as it, so the row
+    // doesn't change size when another tab opens.
+    font.weight = FontWeight::MEDIUM;
+    let run = TextRun { len: text.len(), font, color: theme.foreground, background_color: None, underline: None, strikethrough: None };
+    // The kit's tabs are `text_sm` (0.875 rem).
+    window.text_system().layout_line(text, window.rem_size() * 0.875, &[run], None).width.into()
+}
+
+/// The kit's underline tab bar for a row that has to fit `avail` px (the
+/// space the row gets, e.g. a side panel's width less its padding): full
+/// labels while they fit, then icons with the open tab's label, then the
+/// kit's overflow menu on top of that, never a tab cut off or wrapped.
+/// The caller adds the padding and `.on_click`. Used by the mod peek's tab
+/// row and its compact bar.
+pub fn fit_tabs(id: impl Into<ElementId>, tabs: Vec<FitTab>, selected: usize, avail: f32, window: &Window, cx: &App) -> gpui_kit::component::tab::TabBar {
+    use gpui_kit::component::tab::{Tab, TabBar};
+    let widths: Vec<f32> = tabs.iter().map(|t| tab_label_width(&t.label, window, cx)).collect();
+    let fit = tabs_fit(&widths, selected, avail);
+    let bar = TabBar::new(id).underline().selected_index(selected).menu(fit == TabsFit::Menu);
+    bar.children(tabs.into_iter().enumerate().map(|(i, t)| {
+        if fit == TabsFit::Full {
+            return Tab::new().label(t.label);
+        }
+        let tip = t.label.clone();
+        let icon = Icon::new(t.icon).small();
+        // The open tab keeps its words; the rest shrink to their icon, with
+        // the label as the tooltip and the accessible name.
+        let inner = if i == selected {
+            h_flex().gap(px(TAB_ICON_GAP)).child(icon).child(t.label.clone()).into_any_element()
+        } else {
+            div()
+                .id(ElementId::Name(format!("fit-tab-tip:{i}").into()))
+                .w(px(TAB_ICON_W))
+                .flex()
+                .justify_center()
+                .child(icon)
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                .into_any_element()
+        };
+        Tab::new().aria_label(t.label).child(inner)
+    }))
+}
+
 /// One option of a [`Segmented`] control. Built like gpui_kit's `Tab`
 /// (`SegItem::new().label("Slim").disabled(busy)`), and an interactive
 /// element itself, so drag-pick's `paint_option` can hook its press.
@@ -4157,6 +4254,39 @@ mod short_label_tests {
         // No space left before the ellipsis, and counted in characters.
         assert_eq!(short_label("Drunk Gamblers Server", 7), "Drunk…");
         assert_eq!(short_label("ÄÖÜäöüßÄÖÜ!", 10), "ÄÖÜäöüßÄÖ…");
+    }
+}
+
+#[cfg(test)]
+mod fit_tabs_tests {
+    use super::{TabsFit, tabs_fit};
+
+    // Widths (px) of "Description", "Files 87", "Dependencies 0", "Comments 0", "Issues".
+    const W: [f32; 5] = [80., 55., 100., 85., 45.];
+
+    #[test]
+    fn full_labels_while_they_fit() {
+        // 365 of labels + 4 gaps of 16 = 429.
+        assert_eq!(tabs_fit(&W, 0, 500.), TabsFit::Full);
+        assert_eq!(tabs_fit(&W, 0, 437.), TabsFit::Full);
+        // Needs 8px free at the end: one pixel less and it shrinks.
+        assert_eq!(tabs_fit(&W, 0, 436.), TabsFit::Icons);
+    }
+
+    #[test]
+    fn icons_keep_the_open_tab_label() {
+        // Open tab: 16 + 6 + 80, four icons of 24, four gaps: 262.
+        assert_eq!(tabs_fit(&W, 0, 352.), TabsFit::Icons);
+        assert_eq!(tabs_fit(&W, 0, 270.), TabsFit::Icons);
+        assert_eq!(tabs_fit(&W, 0, 269.), TabsFit::Menu);
+        // A longer open label needs more room.
+        assert_eq!(tabs_fit(&W, 2, 280.), TabsFit::Menu);
+    }
+
+    #[test]
+    fn menu_when_even_icons_do_not_fit() {
+        assert_eq!(tabs_fit(&W, 0, 120.), TabsFit::Menu);
+        assert_eq!(tabs_fit(&[], 0, 0.), TabsFit::Full);
     }
 }
 
