@@ -230,8 +230,12 @@ impl Status {
                     0 => "You changed this pack. The group gets your changes when you press Push.".to_string(),
                     n => format!("You made {}. The group gets them when you press Push.", crate::syncmode::changes_words(*n)),
                 };
+                // What waits for the push comes second, and short: the strip
+                // cuts the line with an ellipsis first, and the old wording
+                // (counts, then "the group gets them…", then this) lost the
+                // whole sentence in the middle widths.
                 match after {
-                    Some(a) => format!("{yours} {}", a.then_says()),
+                    Some(a) => format!("Push to share yours, then {}.", a.then_body()),
                     None => yours,
                 }
             }
@@ -321,6 +325,13 @@ impl After {
     /// After "The group gets them when you press Push.": "Then Mia's
     /// version of Sodium goes in."
     pub fn then_says(&self) -> String {
+        format!("Then {}.", self.then_body())
+    }
+
+    /// [`then_says`] without the "Then" and the full stop, for a sentence
+    /// that already leads into it: "Push to share yours, then Mia's version
+    /// of Sodium goes in."
+    pub fn then_body(&self) -> String {
         let of = if self.versions { "of" } else { "to" };
         let (noun, verb) = match (self.versions, self.mods.len() == 1) {
             (true, true) => ("version", "goes in"),
@@ -328,7 +339,7 @@ impl After {
             (false, true) => ("change", "goes in"),
             (false, false) => ("changes", "go in"),
         };
-        format!("Then {} {noun} {of} {} {verb}.", self.whose(), self.mods_say())
+        format!("{} {noun} {of} {} {verb}", self.whose(), self.mods_say())
     }
 }
 
@@ -1279,7 +1290,7 @@ mod tests {
         let s = status(&i);
         assert_eq!(s, Status::ToPush { changes: 1, after: After::of(&c) });
         assert_eq!(s.label(), "Not sent yet");
-        assert_eq!(s.detail(0), "You made 1 change. The group gets them when you press Push. Then Mia's version of Sodium goes in.");
+        assert_eq!(s.detail(0), "Push to share yours, then Mia's version of Sodium goes in.");
         // Pull now doesn't claim the copy has the group's latest then.
         let (says, _) = pull_says(true, 0, &[], &s, 0);
         assert_eq!(says, s.detail(0));
