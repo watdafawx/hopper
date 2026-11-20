@@ -220,7 +220,7 @@ mod tests {
             let state = State::File { file: f.to_string(), on: *on };
             map.insert(k.to_string(), (state, Entry::CurseFile { file: 1, enabled: *on }));
         }
-        Mods { map, unsure: false, loader: None, pack: State::Unlisted, ships: None, names: BTreeMap::new() }
+        Mods { map, unsure: false, loader: None, pack: State::Unlisted, ships: None, names: BTreeMap::new(), unknown: Vec::new() }
     }
 
     #[test]

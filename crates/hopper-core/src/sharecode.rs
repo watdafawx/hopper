@@ -765,6 +765,103 @@ pub fn without(share: &Share, skip: &[crate::sources::carry::Pin]) -> (Share, Op
     (s, crate::sources::carry::skipped_note(skip))
 }
 
+// ── what a saved code may claim ─────────────────────────────────────
+//
+// Group sync keeps, per member, the last code this PC "took in" and later
+// works out their changes as the difference between that code and their next
+// one. So a saved code must never claim more than reality: an entry in it
+// that didn't land (a file that failed to download, a mod whose project
+// couldn't be looked up, a mod from a source nobody confirmed) would never
+// show up as a difference again, and the mod would be missing here for good,
+// with every screen saying the copy is in step. One rule for both places
+// that save one (a follow's first install, a merge): take out of the code
+// what didn't land before it is kept. What's left out then shows as a
+// difference the next time the member's code is read, and goes in.
+
+/// `share` without the entries `gone` picks, and those entries.
+pub fn pruned(share: &Share, gone: impl Fn(&Entry) -> bool) -> (Share, Vec<Entry>) {
+    let mut out = Vec::new();
+    let mut s = share.clone();
+    s.entries.retain(|e| {
+        let go = gone(e);
+        if go {
+            out.push(e.clone());
+        }
+        !go
+    });
+    (s, out)
+}
+
+/// [`pruned`] for a code as text. None when nothing is taken out (or the
+/// code doesn't read: then it is kept as it is).
+pub fn pruned_code(code: &str, gone: impl Fn(&Entry) -> bool) -> Option<(String, Vec<Entry>)> {
+    let (s, out) = pruned(&decode(code).ok()?, gone);
+    (!out.is_empty()).then(|| (encode(&s), out))
+}
+
+/// Whether the file an entry names is in `inst`, matched the way
+/// [`apply_existing`] finds a file that is here already: a CurseForge or
+/// Modrinth file by its id, a mod from a link by its pin (the same file and
+/// bytes). Anything else a code lists (a removal, a switch off, a lock) has
+/// no file to land.
+fn on_disk(inst: &Instance, e: &Entry) -> bool {
+    match e {
+        Entry::CurseFile { file, .. } => inst.addons.iter().any(|a| a.file_id == *file && !is_mr(a.project_id)),
+        Entry::ModrinthFile { version, .. } => {
+            inst.addons.iter().any(|a| a.mr_version == *version || (is_mr(a.project_id) && a.file_id == num_id(version)))
+        }
+        Entry::Source { pin, .. } => {
+            let key = format!("s:{}#{}", pin.source.url, pin.source.pattern);
+            crate::groupsync::pinned_here(inst, crate::groupsync::find_addon(inst, &key), pin).is_some()
+        }
+        Entry::Remove(_) | Entry::Off(_) | Entry::Lock { .. } => true,
+    }
+}
+
+/// A code after it was applied to `inst` (as saved: its mods folder is what
+/// counts).
+pub struct Landed {
+    /// The code without the entries that didn't land: what the follow, and
+    /// the group copy that starts from it, may say it has.
+    pub code: String,
+    /// The entries that didn't land (a download failed, or the player
+    /// didn't allow the source).
+    pub missing: Vec<Entry>,
+}
+
+/// What of `share` landed in `inst` after [`apply_existing`]. The apply
+/// notes a file it couldn't put in and goes on, so only the folder says.
+pub fn landed(inst: &Instance, share: &Share) -> Landed {
+    let (kept, missing) = pruned(share, |e| !on_disk(inst, e));
+    Landed { code: if missing.is_empty() { encode(share) } else { encode(&kept) }, missing }
+}
+
+/// An entry for people, in a note: a mod's name when the code has one (a
+/// pin), else what it is.
+pub fn entry_says(e: &Entry) -> String {
+    match e {
+        Entry::CurseFile { file, .. } => format!("a CurseForge mod (file {file})"),
+        Entry::ModrinthFile { version, .. } => format!("a Modrinth mod (version {version})"),
+        Entry::Source { pin, .. } => crate::sources::carry::display_name(pin),
+        Entry::Remove(_) | Entry::Off(_) | Entry::Lock { .. } => String::new(),
+    }
+}
+
+/// [`entry_says`] for several: "a CurseForge mod (file 51), Foo and 2 more".
+pub fn entries_say(entries: &[Entry]) -> String {
+    const SHOWN: usize = 3;
+    let names: Vec<String> = entries.iter().map(entry_says).filter(|n| !n.is_empty()).collect();
+    let mut list: Vec<String> = names.iter().take(SHOWN).cloned().collect();
+    if names.len() > SHOWN {
+        list.push(format!("{} more", names.len() - SHOWN));
+    }
+    match list.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// [`install`] for a decoded code.
 pub fn install_share(instances_root: &Path, share: &Share, job: &Job) -> anyhow::Result<Instance> {
     install_share_then(instances_root, share, job, |_| {})
@@ -1532,5 +1629,82 @@ mod real_tests {
         let disk = crate::instances::load(&at).expect("the instance stays");
         assert_eq!(disk.id, id);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- what a saved code may claim ---------------------------------
+
+    fn a_share(entries: Vec<Entry>) -> Share {
+        Share { base: Base::Plain { game_version: "1.21.1".into(), loader: "neoforge".into() }, name: None, loader: None, entries }
+    }
+
+    fn a_pin() -> Entry {
+        Entry::Source {
+            pin: crate::sources::carry::Pin {
+                file: "ezmod-1.0.jar".into(),
+                source: crate::sources::ModSource { url: "owner/ezmod".into(), publisher: "owner/ezmod".into(), ..Default::default() },
+            },
+            enabled: true,
+        }
+    }
+
+    fn on_disk_as(files: &[(u64, u64)]) -> Instance {
+        let addons = files
+            .iter()
+            .map(|(p, f)| Addon { project_id: *p, file_id: *f, file_name: format!("mod{p}.jar"), ..Default::default() })
+            .collect();
+        Instance { addons, ..Default::default() }
+    }
+
+    fn cf_entry(file: u64) -> Entry {
+        Entry::CurseFile { file, enabled: true }
+    }
+
+    #[test]
+    fn a_code_is_kept_without_the_file_that_did_not_land() {
+        // Three files; the install of the second failed and went on.
+        let share = a_share(vec![cf_entry(11), cf_entry(21), cf_entry(31), Entry::Remove(Target::Curse(9)), Entry::Off(Target::Curse(8))]);
+        let inst = on_disk_as(&[(1, 11), (3, 31)]);
+        let l = landed(&inst, &share);
+        let kept = decode(&l.code).unwrap();
+        assert_eq!(
+            kept.entries,
+            vec![cf_entry(11), cf_entry(31), Entry::Remove(Target::Curse(9)), Entry::Off(Target::Curse(8))],
+            "the other files stay, and what isn't a file to land (a removal, a switch) stays too"
+        );
+        assert_eq!(l.missing, vec![cf_entry(21)], "the skipped file is named");
+        assert_eq!(entries_say(&l.missing), "a CurseForge mod (file 21)");
+    }
+
+    #[test]
+    fn a_code_that_landed_whole_is_kept_whole() {
+        let share = a_share(vec![cf_entry(11), cf_entry(21)]);
+        let l = landed(&on_disk_as(&[(1, 11), (2, 21)]), &share);
+        assert!(l.missing.is_empty());
+        assert_eq!(l.code, encode(&share));
+    }
+
+    #[test]
+    fn modrinth_files_and_mods_from_links_are_matched_like_the_apply_does() {
+        let share = a_share(vec![Entry::ModrinthFile { version: "abc12345".into(), enabled: true }, a_pin()]);
+        // Neither is here.
+        let l = landed(&on_disk_as(&[]), &share);
+        assert_eq!(l.missing.len(), 2);
+        assert_eq!(entries_say(&l.missing), "a Modrinth mod (version abc12345) and ezmod");
+        assert_eq!(decode(&l.code).unwrap().entries, Vec::<Entry>::new());
+        // The Modrinth version is here.
+        let mut inst = on_disk_as(&[]);
+        inst.addons.push(Addon { project_id: 5, file_name: "m.jar".into(), mr_version: "abc12345".into(), ..Default::default() });
+        let l = landed(&inst, &share);
+        assert_eq!(l.missing, vec![a_pin()]);
+    }
+
+    #[test]
+    fn pruned_code_only_answers_when_it_took_something_out() {
+        let code = encode(&a_share(vec![cf_entry(11), cf_entry(21)]));
+        assert!(pruned_code(&code, |_| false).is_none());
+        let (without, gone) = pruned_code(&code, |e| *e == cf_entry(21)).unwrap();
+        assert_eq!(gone, vec![cf_entry(21)]);
+        assert_eq!(decode(&without).unwrap().entries, vec![cf_entry(11)]);
+        assert!(pruned_code("not a code", |_| true).is_none());
     }
 }

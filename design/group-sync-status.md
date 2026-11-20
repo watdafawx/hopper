@@ -73,6 +73,32 @@ other sources?" dialog (`incoming_sources::gate`); a yes sets
 check on the retry, then pulls. A mod the group changed again, or that is on
 this PC by now, leaves the list.
 
+### The "taken in" baseline never claims more than is on disk
+
+Group sync diffs a member's new code against `copy.got[member]`, the last code
+taken from them, never against the files. So `got` must not claim a mod that
+did not land, or that mod never shows as a change again and the PC stays
+without it, silently. Two places used to break this and now share one rule
+(prune the code, keep the rest):
+
+- **A lookup failed** (CurseForge / Modrinth down, rate limit): `plan()` used to
+  skip the entry and still mark the whole code taken. Now the failed entries
+  (`Mods::unknown`, new in the code and not in the previous one) are cut out of
+  the code stored in `got` (`sharecode::pruned_code`), so the next read of that
+  member's code sees them as new again. The rest of the code applies at once;
+  a lookup that never succeeds (file deleted on the site) blocks nothing and
+  costs one retry per read. The task says "Couldn't look up N mods just now, so they weren't added. Hopper tries them again ...".
+- **A follow's first install** (`recipe::applied_code`): a file that did not
+  come in used to stay in the follow's code, and `reconcile()` then seeded
+  `got[member]` with it. Now the stored code has only the files that are on the
+  instance (`sharecode::landed`), the missing ones go to `left_out` and the
+  task notes them.
+
+Repair happens when the member's code arrives again: their next publish, a
+restart, or Check now. There is no timer. Not covered: a member's first code
+with a failed lookup, and baselines that were already wrong before this
+change (those need a check against the disk).
+
 ## Other members
 
 Phase 2. What the data already tells without a new message:
@@ -117,9 +143,10 @@ group's Packs list row. It:
    same path as an arriving event, so it is safe to repeat);
 2. forgets the retry backoff of a failed try, the "waits for the game" timer
    and a given-up state, so the merge runs now;
-3. runs the same merge as the automatic one (`groupsync::merge`), also when
-   nothing waits (it retries owed mods, and
-   releases jars a closed game left queued);
+3. runs the same merge as the automatic one (`groupsync::merge`), only when
+   something waits (a code in `waiting`, an owed mod that is ready, or a
+   queued jar): with nothing waiting it just says "Already the same as the
+   group";
 4. says what happened in one line next to the button and as a notice: "Took in
    3 changes from Mia", "Already the same as the group", "Couldn't reach the
    group", or the reason it can't apply.

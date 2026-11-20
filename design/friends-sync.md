@@ -108,6 +108,13 @@ number of its own, later event. A member's first code is taken in only for
 its stamped mods, since an unstamped difference may just be that member
 being behind. Without stamps it all works as before.
 
+What a copy keeps as "taken in" from a member (`got`) is pruned to what landed:
+an entry whose CurseForge / Modrinth lookup failed, and a file a follow's
+first install could not put on the instance, are cut out of the stored code,
+so the next read of that member's code still sees them as new (see
+`group-sync-status.md`, "The taken in baseline never claims more than is on
+disk").
+
 The loader is one more thing a group copy keeps, under the key `~loader`
 (`groupsync::LOADER_KEY`), with the same rules as a mod: it is read from the
 code (a plain code's loader, else the code's own loader, else "the pack's

@@ -233,6 +233,51 @@ pub fn apply_to(
     Ok(inst)
 }
 
+/// What a follow kept in step with a group may call its applied code once
+/// `code` was applied to `inst` ([`applied_code`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppliedCode {
+    /// `code` without the files that didn't land ([`sharecode::landed`]).
+    /// `code` itself when everything did.
+    pub code: String,
+    /// The files that failed to come in, for people ("a CurseForge mod
+    /// (file 51)"), for the follow's `left_out`. Mods the player chose not
+    /// to install are out of the code but not listed here (the apply said so).
+    pub missing: Vec<String>,
+}
+
+/// The code a group pack's follow keeps as applied, after [`apply_to`] (or
+/// the install of a new follow): only what landed. An apply notes a file it
+/// couldn't put in and goes on, but the group copy starts from this code
+/// (`groupsync::reconcile`) and works out what's new from it, so a file
+/// named in it that never came in would never be fetched again, with every
+/// screen saying the copy is in step. Left out of it, the file shows as an
+/// added mod the next time the sender's code is read, and goes in then.
+/// `skip`: the sources the apply left out on purpose. Said in the task and
+/// the log; a follow that isn't kept in step with a group keeps the code
+/// whole (it is applied again by itself until it matches: don't call this).
+pub fn applied_code(inst: &Instance, code: &str, skip: &[crate::sources::carry::Pin], job: &Job) -> AppliedCode {
+    let whole = AppliedCode { code: code.to_string(), missing: Vec::new() };
+    let Ok(share) = sharecode::decode(code) else { return whole };
+    let l = sharecode::landed(inst, &share);
+    if l.missing.is_empty() {
+        return whole;
+    }
+    let failed: Vec<sharecode::Entry> =
+        l.missing.iter().filter(|e| !matches!(e, sharecode::Entry::Source { pin, .. } if skip.contains(pin))).cloned().collect();
+    if !failed.is_empty() {
+        let what = sharecode::entries_say(&failed);
+        log::warn!("followed pack at {}: {} file(s) didn't come in, kept out of the applied code: {what}", inst.root.display(), failed.len());
+        job.show();
+        job.note(format!(
+            "{} didn't come in: {what}. Hopper counts {} as not received and tries again when it next reads the group's changes.",
+            if failed.len() == 1 { "1 file" } else { "Some files" },
+            if failed.len() == 1 { "it" } else { "them" },
+        ));
+    }
+    AppliedCode { code: l.code, missing: failed.iter().map(sharecode::entry_says).filter(|n| !n.is_empty()).collect() }
+}
+
 /// [`apply_to`] refused: the code doesn't fit this instance any more (see
 /// [`Fit::Different`]). Trying the same code again can't help.
 #[derive(Debug)]
@@ -737,5 +782,42 @@ mod tests {
         assert!(!due(&f, Some(&stuck), false, t0 + Duration::from_secs(3600)));
         let newer = FollowedRecipe { seen: "HOP-3".into(), ..f.clone() };
         assert!(due(&newer, Some(&stuck), false, t0));
+    }
+
+    #[test]
+    fn a_follow_kept_in_step_keeps_only_the_files_that_came_in() {
+        let jobs = Jobs::new(Arc::new(|| {}));
+        let job = jobs.start_quiet("test");
+        let code = sharecode::encode(&Share {
+            base: Base::Plain { game_version: "1.21.1".into(), loader: "neoforge".into() },
+            name: None,
+            loader: None,
+            entries: vec![
+                Entry::CurseFile { file: 11, enabled: true },
+                Entry::CurseFile { file: 21, enabled: true },
+                Entry::CurseFile { file: 31, enabled: true },
+            ],
+        });
+        // File 21 failed to come in; the apply noted it and went on.
+        let inst = Instance { addons: vec![addon(1, 11, "a"), addon(3, 31, "c")], ..Default::default() };
+        let a = applied_code(&inst, &code, &[], &job);
+        let kept: Vec<u64> = sharecode::decode(&a.code)
+            .unwrap()
+            .entries
+            .iter()
+            .filter_map(|e| if let Entry::CurseFile { file, .. } = e { Some(*file) } else { None })
+            .collect();
+        assert_eq!(kept, [11, 31], "the code the copy starts from has only what arrived");
+        assert_eq!(a.missing, ["a CurseForge mod (file 21)"], "and the missing file is named");
+        let notes = &jobs.snapshot()[0].notes;
+        assert_eq!(notes.len(), 1, "said in the task, not silent: {notes:?}");
+        assert!(notes[0].contains("file 21"), "{notes:?}");
+        // All of it came in: the code is kept as it is, nothing said.
+        let jobs = Jobs::new(Arc::new(|| {}));
+        let job = jobs.start_quiet("test");
+        let all = Instance { addons: vec![addon(1, 11, "a"), addon(2, 21, "b"), addon(3, 31, "c")], ..Default::default() };
+        let a = applied_code(&all, &code, &[], &job);
+        assert_eq!(a, AppliedCode { code: code.clone(), missing: Vec::new() });
+        assert_eq!(job.note_count(), 0);
     }
 }

@@ -242,6 +242,12 @@ pub struct RecipeApplied {
     /// The player's answer about those mods (`hopper::recipe::pin_key`s to
     /// skip), when they were asked.
     pub declined: Option<Vec<String>>,
+    /// A follow kept in step with a group keeps only what landed as its
+    /// applied code (`hopper::recipe::applied_code`): the code applied
+    /// before that, when files of it didn't come in.
+    pub pruned_from: Option<String>,
+    /// The files that didn't come in, named for the follow's `left_out`.
+    pub missing: Vec<String>,
 }
 
 /// Other members' changes taken into a group copy (`hopper::groupsync`).
@@ -1017,7 +1023,7 @@ impl Store {
 
     /// A followed pack's code was applied at its root.
     pub(super) fn on_recipe_applied(&mut self, r: RecipeApplied, cx: &mut Context<Self>) {
-        let RecipeApplied { root, code, held, declined } = r;
+        let RecipeApplied { root, code, held, declined, pruned_from, missing } = r;
         self.follow_applying.remove(&root);
         // It worked: the failed tries before it are done with.
         if let Some(old) = self.follow_retry.remove(&root) {
@@ -1036,6 +1042,22 @@ impl Store {
                     f.held = held.clone();
                     if let Some(d) = &declined {
                         f.declined = d.clone();
+                    }
+                    // Some files didn't come in: the code kept says so (it
+                    // is what the group copy starts from), and the follow
+                    // names them. The newest code seen stays newer only if
+                    // a code arrived meanwhile; else it's this one, so
+                    // nothing counts as waiting and this isn't applied
+                    // again and again.
+                    if let Some(full) = &pruned_from {
+                        if f.seen == *full {
+                            f.seen = code.clone();
+                        }
+                        for m in &missing {
+                            if !f.left_out.contains(m) {
+                                f.left_out.push(m.clone());
+                            }
+                        }
                     }
                 }
             },
@@ -1835,9 +1857,16 @@ impl Store {
         self.update_settings_quietly(|st| {
             let Some(c) = st.group_copies.iter_mut().find(|c| c.local == local) else { return };
             let mut taken: Vec<(String, String)> = Vec::new();
+            // Codes kept without the files that couldn't be looked up
+            // (`groupsync::Merged::unresolved`): (member, the code as it
+            // came).
+            let mut cut: Vec<(String, String)> = Vec::new();
             for (from, g) in merged.taken {
-                if c.waiting.get(&from).is_some_and(|w| w.seq == g.seq) {
-                    c.waiting.remove(&from);
+                if c.waiting.get(&from).is_some_and(|w| w.seq == g.seq)
+                    && let Some(w) = c.waiting.remove(&from)
+                    && w.code != g.code
+                {
+                    cut.push((from.clone(), w.code));
                 }
                 taken.push((from.clone(), g.code.clone()));
                 c.got.insert(from, g);
@@ -1857,6 +1886,11 @@ impl Store {
             for f in st.followed_recipes.iter_mut().filter(|f| f.local == local) {
                 if let Some((_, code)) = taken.iter().find(|(from, _)| *from == f.peer_id) {
                     f.code = code.clone();
+                    // Kept without a file that couldn't be looked up: the
+                    // code seen is this one, so nothing waits on the follow.
+                    if cut.iter().any(|(from, full)| *from == f.peer_id && f.seen == *full) {
+                        f.seen = code.clone();
+                    }
                 }
             }
         });
@@ -2299,6 +2333,10 @@ impl Store {
                 let (share, note) = hopper::sharecode::without(&share, &skip);
                 let base = PathBuf::from(&self.settings.instances_root);
                 let f = req.recipe(Path::new(""), "", &req.code, group);
+                // Reached through a group: its copy starts from the code kept
+                // below, so only what landed may be in it.
+                let bound = !group.is_empty() || !req.groups.is_empty();
+                let (full, left_to_ask) = (req.code.clone(), skip.clone());
                 let (tx, wake) = (self.tx.clone(), self.wake.clone());
                 self.spawn_job(title, move |job| {
                     job.announce();
@@ -2333,6 +2371,23 @@ impl Store {
                     job.detail(format!("Installed {}", inst.name));
                     if let Some(n) = note {
                         job.note(n);
+                    }
+                    let mut f = f;
+                    if bound {
+                        // The follow's code is what the group copy starts
+                        // from: the files that didn't come in (and the mods
+                        // left out for their source) aren't in it, so they
+                        // show as changes later and go in then.
+                        let a = hopper::recipe::applied_code(&inst, &full, &left_to_ask, job);
+                        if a.code != full {
+                            f.seen = a.code.clone();
+                            f.code = a.code;
+                            for m in a.missing {
+                                if !f.left_out.contains(&m) {
+                                    f.left_out.push(m);
+                                }
+                            }
+                        }
                     }
                     Ok(Msg::Followed(Box::new(FollowedRecipe {
                         root: inst.root.to_string_lossy().into_owned(),
@@ -2389,6 +2444,12 @@ impl Store {
             let mc = self.mailbox_friends().iter().find(|m| m.id == f.peer_id).map(|m| m.mc_id.clone()).unwrap_or_default();
             hopper::actor::Who::friend(&f.peer_name, &f.peer_id, &f.group, &f.name).with_face(&mc)
         });
+        // Followed through a group (or a group copy exists for it): see
+        // `recipe::applied_code`. Not for a plain friend's pack, which is
+        // applied again until its code matches and would never stop.
+        let bound = self
+            .follow_at(&root)
+            .is_some_and(|f| !f.group.is_empty() || self.settings.group_copies.iter().any(|c| c.inst == f.inst && c.local == f.local));
         let (tx, r2) = (self.tx.clone(), root.clone());
         self.spawn_instance_job(&root, title, move |job| {
             let work = || -> anyhow::Result<RecipeApplied> {
@@ -2412,8 +2473,17 @@ impl Store {
                     }
                 };
                 let _who = hopper::actor::begin(&r2, who.clone());
-                hopper::recipe::apply_to(&r2, &code, &prev, &skip, job)?;
-                Ok(RecipeApplied { root: r2.clone(), code: code.clone(), held, declined: answer })
+                let inst = hopper::recipe::apply_to(&r2, &code, &prev, &skip, job)?;
+                // A pack kept in step with a group starts its copy from this
+                // code: only what landed may be in it.
+                let (kept, pruned_from, missing) = if bound {
+                    let a = hopper::recipe::applied_code(&inst, &code, &skip, job);
+                    let pruned = (a.code != code).then(|| code.clone());
+                    (a.code, pruned, a.missing)
+                } else {
+                    (code.clone(), None, Vec::new())
+                };
+                Ok(RecipeApplied { root: r2.clone(), code: kept, held, declined: answer, pruned_from, missing })
             };
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("Hopper hit a bug and stopped this task.")));

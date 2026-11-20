@@ -184,9 +184,18 @@ pub struct Mods {
     /// The file names of its mods, by key, where known: a jar the new pack
     /// version ships by name is found by it.
     pub names: BTreeMap<String, String>,
+    /// The entries left out of `map` because their project couldn't be
+    /// looked up (the reason `unsure` is set): their mods are in the code
+    /// but unknown here, not gone from it.
+    pub unknown: Vec<Entry>,
 }
 
 impl Mods {
+    /// Whether this code lists `e`, looked up or not.
+    fn lists(&self, e: &Entry) -> bool {
+        self.unknown.contains(e) || self.map.values().any(|(_, x)| x == e)
+    }
+
     /// What `key` is in this code: a mod's state, or the loader's.
     pub fn state(&self, key: &str) -> State {
         if key == LOADER_KEY {
@@ -202,12 +211,14 @@ impl Mods {
 pub fn mods(share: &Share, mut project: impl FnMut(&Entry) -> Option<u64>) -> Mods {
     let mut map = BTreeMap::new();
     let mut unsure = false;
+    let mut unknown = Vec::new();
     for e in &share.entries {
         let (key, state) = match e {
             Entry::CurseFile { file, enabled } => match project(e) {
                 Some(p) => (format!("p:{p}"), State::File { file: format!("cf:{file}"), on: *enabled }),
                 None => {
                     unsure = true;
+                    unknown.push(e.clone());
                     continue;
                 }
             },
@@ -215,6 +226,7 @@ pub fn mods(share: &Share, mut project: impl FnMut(&Entry) -> Option<u64>) -> Mo
                 Some(p) => (format!("p:{p}"), State::File { file: format!("mr:{version}"), on: *enabled }),
                 None => {
                     unsure = true;
+                    unknown.push(e.clone());
                     continue;
                 }
             },
@@ -228,7 +240,7 @@ pub fn mods(share: &Share, mut project: impl FnMut(&Entry) -> Option<u64>) -> Mo
         };
         map.insert(key, (state, e.clone()));
     }
-    Mods { map, unsure, loader: loader_of(share), pack: crate::grouppack::pack_state(&share.base), ships: None, names: BTreeMap::new() }
+    Mods { map, unsure, loader: loader_of(share), pack: crate::grouppack::pack_state(&share.base), ships: None, names: BTreeMap::new(), unknown }
 }
 
 pub use crate::grouppack::PACK_KEY;
@@ -758,6 +770,9 @@ pub struct Merged {
     pub kept: Vec<Kept>,
     /// The copy's [`PackCopy::owed`] after this merge (None: unchanged).
     pub owed: Option<Vec<Owed>>,
+    /// Files of the taken codes that couldn't be looked up, so their mods
+    /// weren't made and the codes were kept without them ([`baseline`]).
+    pub unresolved: Vec<Entry>,
 }
 
 /// A member's change sync didn't make here, for the player to see.
@@ -1022,9 +1037,11 @@ pub fn plan(
             out.taken.push((from, g));
             continue;
         };
-        let found: Vec<Change> = match copy.got.get(&from).and_then(|p| decode(&p.code).map(|m| (m, p.seq))) {
+        let prev = copy.got.get(&from).and_then(|p| decode(&p.code).map(|m| (m, p.seq)));
+        let found: Vec<Change> = match &prev {
             Some((prev, prev_seq)) => {
-                let mut found = changes(&prev, &now);
+                let prev_seq = *prev_seq;
+                let mut found = changes(prev, &now);
                 // The same as in the last code taken from them, but changed
                 // since: they changed it and back in codes this PC never
                 // got (the relay keeps the newest only), so here it may
@@ -1108,10 +1125,56 @@ pub fn plan(
         if held {
             out.held = true;
         } else {
+            let g = baseline(g, &now, prev.as_ref().map(|(m, _)| m), &from, &mut out.unresolved);
             out.taken.push((from, g));
         }
     }
     (todo, out)
+}
+
+/// The task's note for files that couldn't be looked up ([`baseline`]).
+fn unresolved_says(entries: &[Entry]) -> String {
+    let what = crate::sharecode::entries_say(entries);
+    let n = entries.len();
+    if n == 1 {
+        format!("Couldn't look up {what} just now, so it wasn't added. Hopper tries it again the next time it reads the group's changes (Check now, or when Hopper starts).")
+    } else {
+        format!("Couldn't look up {n} mods just now ({what}), so they weren't added. Hopper tries them again the next time it reads the group's changes (Check now, or when Hopper starts).")
+    }
+}
+
+/// The code to keep as the last one taken from `from` (see
+/// [`crate::sharecode::landed`] for why a saved code must not claim more
+/// than reality): `g`, without the entries of it whose file couldn't be
+/// looked up while reading it (`now`). Such a mod is no change this time,
+/// since nobody knows whose it is, and kept in the code it would never be
+/// one again. Left out, it shows up as an added mod the next time the
+/// member's code is read (a start, Check now, their next publish) and goes
+/// in then. The rest of the code is taken as always: one lookup that failed
+/// never holds the others back.
+///
+/// Only what is new in this code: an entry the last one listed too is kept
+/// (it was taken then, and an unchanged mod isn't an add), and a member's
+/// first code is kept whole (nothing to compare with: it is a starting
+/// point, and only its stamped mods are taken from it, as always).
+/// `unresolved` gets the entries left out, for the task's note.
+fn baseline(mut g: Got, now: &Mods, prev: Option<&Mods>, from: &str, unresolved: &mut Vec<Entry>) -> Got {
+    let Some(prev) = prev else { return g };
+    let fresh: Vec<&Entry> = now.unknown.iter().filter(|e| !prev.lists(e)).collect();
+    if fresh.is_empty() {
+        return g;
+    }
+    if let Some((code, left_out)) = crate::sharecode::pruned_code(&g.code, |e| fresh.contains(&e)) {
+        log::warn!(
+            "group sync: {} file(s) in {}'s code couldn't be looked up, so they weren't taken: {}. Tried again when their code is read next.",
+            left_out.len(),
+            from,
+            crate::sharecode::entries_say(&left_out)
+        );
+        g.code = code;
+        unresolved.extend(left_out);
+    }
+    g
 }
 
 /// Whose a code's file is: from the instance's own mods when it has that
@@ -1137,8 +1200,15 @@ pub fn projects_of(inst: &Instance, shares: &[&Share]) -> HashMap<String, u64> {
                     }
                     if let Some(a) = inst.addons.iter().find(|a| a.mr_version == *version || (is_mr(a.project_id) && a.file_id == num_id(version))) {
                         out.insert(k, a.project_id);
-                    } else if let Ok(v) = crate::modrinth::version(version) {
-                        out.insert(k, num_id(&v.project_id));
+                    } else {
+                        match crate::modrinth::version(version) {
+                            Ok(v) => {
+                                out.insert(k, num_id(&v.project_id));
+                            }
+                            // Not silent: the mod is left out of this read
+                            // and kept out of the baseline (see `baseline`).
+                            Err(e) => log::warn!("group sync: looking up Modrinth version {version}: {e:#}"),
+                        }
                     }
                 }
                 _ => {}
@@ -1148,10 +1218,13 @@ pub fn projects_of(inst: &Instance, shares: &[&Share]) -> HashMap<String, u64> {
     ask_cf.sort_unstable();
     ask_cf.dedup();
     for chunk in ask_cf.chunks(500) {
-        if let Ok(files) = crate::cf::get_files(chunk) {
-            for f in files {
-                out.insert(format!("cf:{}", f.id), f.mod_id);
+        match crate::cf::get_files(chunk) {
+            Ok(files) => {
+                for f in files {
+                    out.insert(format!("cf:{}", f.id), f.mod_id);
+                }
             }
+            Err(e) => log::warn!("group sync: looking up {} CurseForge file(s): {e:#}", chunk.len()),
         }
     }
     out
@@ -1533,6 +1606,11 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
         fill_packs(&inst, &mut every, job);
     }
     let (todo, mut merged) = plan(copy, &here, sent.as_ref(), ignore_unsent, |c| codes.get(c).cloned());
+    if !merged.unresolved.is_empty() {
+        // Said where the player can see it: the mods aren't in, and why.
+        job.show();
+        job.note(unresolved_says(&merged.unresolved));
+    }
     // The pack version goes first: a member's mod changes are relative to
     // their version, and the update may bring or take out mods itself.
     let (pack_change, todo): (Vec<Change>, Vec<Change>) = todo.into_iter().partition(|c| c.key == PACK_KEY);
@@ -2234,6 +2312,12 @@ mod tests {
         cursor: u64,
         /// Merges that changed something, with their changes.
         merges: Vec<Vec<Change>>,
+        /// Knob: files whose project can't be looked up (CurseForge or
+        /// Modrinth didn't answer, or the file is gone for good).
+        lookup_fails: std::collections::BTreeSet<u64>,
+        /// Knob: files an apply doesn't get in (a failed download): the
+        /// first install of a follow notes them and goes on.
+        skip_apply: std::collections::BTreeSet<u64>,
     }
 
     #[derive(Default)]
@@ -2264,7 +2348,69 @@ mod tests {
             let local = if sharer { PACK.to_string() } else { format!("{id}-local") };
             let mods = start.iter().map(|(p, f, on)| (*p, (*f, *on))).collect();
             let copy = PackCopy { inst: PACK.into(), group: GROUP.into(), local, ..Default::default() };
-            Pc { id: id.into(), mods, loader: LOADER.into(), copy, follow_code: String::new(), cursor: 0, merges: Vec::new() }
+            Pc {
+                id: id.into(),
+                mods,
+                loader: LOADER.into(),
+                copy,
+                follow_code: String::new(),
+                cursor: 0,
+                merges: Vec::new(),
+                lookup_fails: Default::default(),
+                skip_apply: Default::default(),
+            }
+        }
+        /// Reads a code the way a merge on this PC does: a file in
+        /// `lookup_fails` has no project.
+        fn decoder(&self) -> Box<dyn Fn(&str) -> Option<Mods>> {
+            let fails = self.lookup_fails.clone();
+            Box::new(move |c: &str| {
+                crate::sharecode::decode(c).ok().map(|s| {
+                    mods(&s, |e| match e {
+                        Entry::CurseFile { file, .. } if fails.contains(file) => None,
+                        _ => project_of_file(e),
+                    })
+                })
+            })
+        }
+        /// This PC's instance as the mods folder holds it.
+        fn instance(&self) -> Instance {
+            let addons = self
+                .mods
+                .iter()
+                .map(|(p, (f, on))| Addon { project_id: *p, file_id: *f, enabled: *on, file_name: format!("mod{p}.jar"), ..Default::default() })
+                .collect();
+            Instance { addons, ..Default::default() }
+        }
+        /// A new follow of the sharer's `code`: every file goes in except
+        /// those `skip_apply` holds back (noted, the install goes on), and
+        /// the follow keeps what [`crate::sharecode::landed`] says came in.
+        fn follow_first(&mut self, code: &str) {
+            let share = crate::sharecode::decode(code).unwrap();
+            for e in &share.entries {
+                if let Entry::CurseFile { file, enabled } = e
+                    && !self.skip_apply.contains(file)
+                {
+                    self.mods.insert(file / 10, (*file, *enabled));
+                }
+            }
+            self.follow_code = crate::sharecode::landed(&self.instance(), &share).code;
+            // The follow's first version is in: the copy starts from it, as
+            // `reconcile` does for a pack the store follows.
+            use crate::settings::FriendGroup;
+            let mut st = Settings::default();
+            st.friend_groups.push(FriendGroup { id: GROUP.into(), ..Default::default() });
+            st.followed_recipes.push(FollowedRecipe {
+                peer_id: "A".into(),
+                inst: PACK.into(),
+                local: self.copy.local.clone(),
+                code: self.follow_code.clone(),
+                group: GROUP.into(),
+                ..Default::default()
+            });
+            let mut copies = Vec::new();
+            reconcile(&mut copies, &st, |_| Vec::new());
+            self.copy = copies.remove(0);
         }
         fn entries(&self) -> Vec<Entry> {
             self.mods.values().map(|(f, on)| cf(*f, *on)).collect()
@@ -2333,7 +2479,7 @@ mod tests {
             }
             let here = self.mods();
             let sent = dec(&self.copy.sent);
-            let (todo, merged) = plan(&self.copy, &here, sent.as_ref(), false, dec);
+            let (todo, merged) = plan(&self.copy, &here, sent.as_ref(), false, self.decoder());
             for c in &todo {
                 if c.key == LOADER_KEY {
                     // As `merge` does.
@@ -2440,6 +2586,142 @@ mod tests {
 
     fn the_end() -> BTreeMap<u64, (u64, bool)> {
         [(1, (11, false)), (2, (21, false)), (3, (31, false)), (4, (42, true))].into_iter().collect()
+    }
+
+    /// The files a code lists, for what a stored baseline claims.
+    fn files_of(code: &str) -> Vec<u64> {
+        let mut v: Vec<u64> = crate::sharecode::decode(code)
+            .unwrap()
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::CurseFile { file, .. } => Some(*file),
+                _ => None,
+            })
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    // ---- Baseline never claims more than reality ---------------------
+
+    #[test]
+    fn a_lookup_that_fails_loses_no_mod_and_the_copy_does_not_claim_it() {
+        let (mut relay, mut a, mut b, _c) = group();
+        // A updates mod 2 and adds mod 5, in one code.
+        a.set(2, 22, true);
+        a.set(5, 51, true);
+        a.publish(&mut relay, &ALL, true);
+        // Merge 1: CurseForge doesn't answer for file 51 on B's PC.
+        b.lookup_fails.insert(51);
+        b.read(&relay);
+        b.merge();
+        assert_eq!(b.mods.get(&2), Some(&(22, true)), "the rest of the code goes in");
+        assert!(!b.mods.contains_key(&5), "its project is unknown here, so it isn't made");
+        assert!(b.copy.waiting.is_empty(), "the code is taken, not held back");
+        assert_eq!(files_of(&b.copy.got["A"].code), [11, 22, 31, 41], "the baseline doesn't claim a mod that didn't come in");
+        // Merge 2: it answers. The code is read again (a restart, Check now,
+        // or A's next publish) and the mod comes in.
+        b.lookup_fails.clear();
+        b.restart();
+        b.read(&relay);
+        b.merge();
+        assert_eq!(b.mods.get(&5), Some(&(51, true)), "the mod arrives once its lookup works");
+        assert_eq!(files_of(&b.copy.got["A"].code), [11, 22, 31, 41, 51]);
+        // And only that: nothing else was touched.
+        assert_eq!(b.merges.len(), 2);
+        assert_eq!(b.merges[1].iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), ["p:5"]);
+    }
+
+    #[test]
+    fn a_mod_the_lookup_never_finds_blocks_nothing_and_never_spins() {
+        let (mut relay, mut a, mut b, _c) = group();
+        // File 51 is gone from CurseForge for good.
+        b.lookup_fails.insert(51);
+        a.set(5, 51, true);
+        a.publish(&mut relay, &ALL, true);
+        online(&mut b, &mut relay);
+        assert!(!b.mods.contains_key(&5));
+        assert!(b.copy.waiting.is_empty());
+        // A's later codes still apply in full.
+        a.set(1, 11, false);
+        a.set(3, 32, true);
+        a.publish(&mut relay, &ALL, true);
+        online(&mut b, &mut relay);
+        assert_eq!(b.mods.get(&1), Some(&(11, false)));
+        assert_eq!(b.mods.get(&3), Some(&(32, true)));
+        assert!(!b.mods.contains_key(&5));
+        assert_eq!(files_of(&b.copy.got["A"].code), [11, 21, 32, 41], "a file nobody can look up is never claimed");
+        // Each read of the same codes (a start, Check now) tries once, finds
+        // the same, and leaves nothing waiting and nothing more to do.
+        let merges = b.merges.len();
+        for _ in 0..3 {
+            b.restart();
+            b.read(&relay);
+            b.merge();
+            assert!(b.copy.waiting.is_empty());
+        }
+        assert_eq!(b.merges.len(), merges, "no change is made over and over");
+        // B publishing doesn't spread a removal of mod 5 (it never had it).
+        b.publish(&mut relay, &ALL, true);
+        online(&mut a, &mut relay);
+        assert_eq!(a.mods.get(&5), Some(&(51, true)));
+    }
+
+    #[test]
+    fn a_file_the_lookup_missed_that_was_already_taken_is_not_taken_again() {
+        // File 21 is in the baseline already (looked up then). The lookup
+        // misses it now, in a code that changes something else: it stays in
+        // the baseline, so a mod B took out meanwhile isn't put back later.
+        let (mut relay, mut a, mut b, _c) = group();
+        b.mods.remove(&2);
+        b.publish(&mut relay, &ALL, true);
+        b.lookup_fails.insert(21);
+        a.set(1, 11, false);
+        a.publish(&mut relay, &ALL, true);
+        online(&mut b, &mut relay);
+        assert_eq!(files_of(&b.copy.got["A"].code), [11, 21, 31, 41], "an unchanged entry stays in the baseline");
+        b.lookup_fails.clear();
+        b.restart();
+        b.read(&relay);
+        b.merge();
+        assert!(!b.mods.contains_key(&2), "B's own removal of mod 2 isn't undone by a lookup that missed once");
+    }
+
+    #[test]
+    fn a_first_install_that_missed_a_file_does_not_call_it_complete() {
+        let mut relay = Relay::default();
+        let mut a = Pc::new("A", true, &base());
+        a.set(5, 51, true);
+        let mut b = Pc::new("B", false, &[]);
+        a.publish(&mut relay, &["A", "B"], true);
+        // B follows A's pack; the download of file 41 fails and the install
+        // goes on without it.
+        b.skip_apply.insert(41);
+        b.follow_first(&a.code());
+        assert!(!b.mods.contains_key(&4));
+        assert_eq!(files_of(&b.follow_code), [11, 21, 31, 51], "the follow keeps only what landed");
+        assert_eq!(files_of(&b.copy.got["A"].code), [11, 21, 31, 51], "so the copy starts from what arrived");
+        // The next read of A's code brings the missing mod once it downloads.
+        b.skip_apply.clear();
+        b.restart();
+        b.read(&relay);
+        b.merge();
+        assert_eq!(b.mods.get(&4), Some(&(41, true)), "the missed mod comes in later");
+        assert_eq!(b.mods.len(), 5);
+    }
+
+    #[test]
+    fn a_first_install_that_got_everything_claims_everything() {
+        let mut relay = Relay::default();
+        let mut a = Pc::new("A", true, &base());
+        let mut b = Pc::new("B", false, &[]);
+        a.publish(&mut relay, &["A", "B"], true);
+        b.follow_first(&a.code());
+        assert_eq!(files_of(&b.copy.got["A"].code), [11, 21, 31, 41]);
+        b.read(&relay);
+        b.merge();
+        assert!(b.merges.is_empty(), "nothing is left to do");
     }
 
     #[test]
