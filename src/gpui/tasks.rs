@@ -206,7 +206,22 @@ impl TasksButton {
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
-                                .child(div().text_sm().font_medium().truncate().child(j.title.clone()))
+                                .child(
+                                    div()
+                                        .id(ElementId::Name(format!("task-title-{id}").into()))
+                                        .text_sm()
+                                        .font_medium()
+                                        .truncate()
+                                        .child(j.title.clone())
+                                        // A narrow list cuts the instance name first;
+                                        // the whole title stays a hover away.
+                                        .tooltip({
+                                            let title = j.title.clone();
+                                            move |window, cx| {
+                                                gpui_kit::component::tooltip::Tooltip::new(title.clone()).build(window, cx)
+                                            }
+                                        }),
+                                )
                                 // One line while it runs; a finished task's
                                 // summary (what it changed, why it failed) wraps.
                                 .child(
