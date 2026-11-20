@@ -97,6 +97,11 @@ impl ConfigPanel {
         self.view.read(cx).unsaved()
     }
 
+    /// Says "Not saved yet" inside the panel (see `ConfigView::flash_unsaved`).
+    pub fn flash_unsaved(&mut self, cx: &mut Context<Self>) {
+        self.view.update(cx, |v, cx| v.flash_unsaved(cx));
+    }
+
     pub fn root(&self, cx: &App) -> PathBuf {
         self.view.read(cx).root().to_path_buf()
     }

@@ -6152,9 +6152,7 @@ impl BrowseView {
         // A peek closes on a click anywhere else (not in a dialog it opened),
         // on release and after the click's own handlers: a click on another
         // mod swaps the panel's project instead of closing it first.
-        fn in_dialog(window: &mut Window, cx: &mut App) -> bool {
-            window.has_active_dialog(cx) || window.has_active_sheet(cx)
-        }
+        let in_dialog = widgets::press_is_modal;
         let arm = cx.listener(move |this, e: &MouseDownEvent, window, cx| {
             if in_dialog(window, cx) {
                 return;
@@ -6170,8 +6168,10 @@ impl BrowseView {
             if in_dialog(window, cx) {
                 return;
             }
-            cx.defer_in(window, move |this, _, cx| {
-                if this.peeks == at {
+            cx.defer_in(window, move |this, window, cx| {
+                // Checked again: the click may have opened the palette or a
+                // dialog, which the page stays under.
+                if this.peeks == at && !in_dialog(window, cx) {
                     this.dismiss_peek(cx);
                 }
             });

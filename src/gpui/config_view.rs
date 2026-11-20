@@ -243,6 +243,10 @@ pub struct ConfigView {
     /// Where the keyboard rests when a field lets go, so Escape and Enter
     /// still reach this view (and its dialog).
     hold: FocusHandle,
+    /// "Not saved yet" shows in the panel, above the Save row (`flash_unsaved`).
+    notice: bool,
+    /// Bumped on each flash, so an older timer doesn't hide a newer one.
+    notice_gen: u64,
     /// Values refused on Save, by setting.
     errors: HashMap<String, String>,
     sliders: HashMap<String, Entity<SliderState>>,
@@ -360,6 +364,8 @@ impl ConfigView {
             edit_error: None,
             edit_from: None,
             hold: cx.focus_handle(),
+            notice: false,
+            notice_gen: 0,
             errors: HashMap::new(),
             sliders: HashMap::new(),
             sliding: None,
@@ -501,6 +507,43 @@ impl ConfigView {
     /// Unsaved edits across the files.
     pub fn unsaved(&self) -> usize {
         self.states.values().map(|s| if s.typed && s.text != s.base { s.edits.len().max(1) } else { s.edits.len() }).sum()
+    }
+
+    /// Something tried to close or replace this panel while edits are
+    /// unsaved: says `UNSAVED_NOTICE` in the panel, above the Save row, for a
+    /// few seconds. (A window toast sat over the panel's own close button.)
+    /// It goes early when the edits are saved or dropped.
+    pub fn flash_unsaved(&mut self, cx: &mut Context<Self>) {
+        self.notice = true;
+        self.notice_gen += 1;
+        let at = self.notice_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(6)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.notice_gen == at {
+                    this.notice = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The notice's strip, inside the panel just above the Save row.
+    fn unsaved_notice(&self, cx: &App) -> Div {
+        let theme = cx.theme();
+        h_flex()
+            .flex_none()
+            .gap_2()
+            .px_3()
+            .py_1p5()
+            .border_t_1()
+            .border_color(theme.info.opacity(0.45))
+            .bg(theme.info.opacity(0.14))
+            .text_sm()
+            .child(Icon::new(IconName::Info).small().flex_none().text_color(theme.info))
+            .child(div().min_w_0().child(UNSAVED_NOTICE))
     }
 
     /// Opens `rel`: one that reads as settings opens on Settings, the rest
@@ -1913,6 +1956,11 @@ impl Render for ConfigView {
         let narrow = self.host == Host::Panel;
         let search = (!self.text_view && readable).then(|| widgets::search_input(&self.search).small().cleanable(true));
         let share = self.share_bar(cx);
+        // Saved or discarded: the notice has nothing left to say.
+        if self.unsaved() == 0 {
+            self.notice = false;
+        }
+        let notice = self.notice && narrow;
         v_flex()
             .size_full()
             .min_h_0()
@@ -1956,6 +2004,7 @@ impl Render for ConfigView {
             )
             .when(narrow, |d| d.when_some(search_panel(&self.search, !self.text_view && readable), |d, s| d.child(div().px_3().pb_2().child(s))))
             .child(div().flex_1().min_h_0().border_t_1().border_color(theme.border).child(body))
+            .when(notice, |d| d.child(self.unsaved_notice(cx)))
             .child(self.save_bar(cx))
             .when(self.host == Host::Dialog, |d| {
                 let p = path.clone();

@@ -338,8 +338,6 @@ pub struct LibraryView {
     dock_gen: u64,
     /// `dock_gen` at the last left press outside the docked panel.
     dock_armed: Option<u64>,
-    /// "Not saved yet" is to be shown on the next draw, which has a window.
-    notice_unsaved: bool,
     /// Instances whose linked Hopper Server was asked for config pushes
     /// (and sent this PC's settings) this session.
     config_synced: HashSet<PathBuf>,
@@ -438,14 +436,17 @@ impl LibraryView {
         self.config_panel.as_ref().is_some_and(|p| p.read(cx).unsaved(cx) > 0)
     }
 
-    /// Says "Not saved yet" on the next draw, and brings the panel back
-    /// into view if another tab is hiding it. The one place that rule's
-    /// answer comes from, whatever tried to close or replace the panel.
+    /// Says "Not saved yet" inside the config panel (a toast sat over its
+    /// close button), and brings the panel back into view if another tab is
+    /// hiding it. The one place that rule's answer comes from, whatever
+    /// tried to close or replace the panel.
     fn refuse_unsaved(&mut self, cx: &mut Context<Self>) {
         if self.config_shown().is_none() && self.selected.is_some() {
             self.set_tab(InstTab::Mods, cx);
         }
-        self.notice_unsaved = true;
+        if let Some(p) = self.config_panel.clone() {
+            p.update(cx, |p, cx| p.flash_unsaved(cx));
+        }
         cx.notify();
     }
 
@@ -500,8 +501,10 @@ impl LibraryView {
                 return;
             }
             // After the click's own handlers, which may open another panel.
-            cx.defer_in(window, move |this, _, cx| {
-                if this.dock_gen == at && this.dock_tenant(cx) == Some(who) {
+            cx.defer_in(window, move |this, window, cx| {
+                // Checked again: the click may have opened the palette (its
+                // title-bar button) or a dialog, which the panel stays under.
+                if this.dock_gen == at && this.dock_tenant(cx) == Some(who) && !this.dock_ignores_press(who, window, cx) {
                     this.dismiss_dock(who, cx);
                 }
             });
@@ -517,11 +520,10 @@ impl LibraryView {
             .child(panel)
     }
 
-    /// A press that isn't a click beside the panel: inside a dialog or sheet
-    /// (opened from a panel, say), or in one of Friends' popovers.
+    /// A press that isn't a click beside the panel: inside a dialog, sheet or
+    /// the palette (`widgets::press_is_modal`), or in one of Friends' popovers.
     fn dock_ignores_press(&self, who: Dock, window: &mut Window, cx: &mut App) -> bool {
-        window.has_active_dialog(cx)
-            || window.has_active_sheet(cx)
+        widgets::press_is_modal(window, cx)
             || (who == Dock::Friends && self.friends.read(cx).popover_busy())
     }
 
@@ -533,7 +535,9 @@ impl LibraryView {
     /// Opens the Friends panel on "On this network", working on this
     /// instance.
     pub fn open_nearby(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        self.select(root.clone(), cx);
+        if !self.select(root.clone(), cx) {
+            return;
+        }
         self.set_friends(true, cx);
         self.friends.update(cx, |f, cx| f.show_nearby(Some(root), cx));
     }
@@ -557,7 +561,9 @@ impl LibraryView {
         use crate::friends::FriendsEvent;
         match e {
             FriendsEvent::Close => self.set_friends(false, cx),
-            FriendsEvent::Show(root) => self.select(root.clone(), cx),
+            FriendsEvent::Show(root) => {
+                self.select(root.clone(), cx);
+            }
             FriendsEvent::Project(id) => {
                 // The project page docks beside the content tabs.
                 if self.tab.class().is_none() {
@@ -599,8 +605,8 @@ impl LibraryView {
     }
 
     /// Selects an instance (from elsewhere in the app).
-    pub fn open(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        self.select(root, cx);
+    pub fn open(&mut self, root: PathBuf, cx: &mut Context<Self>) -> bool {
+        self.select(root, cx)
     }
 
     /// Picks the instance `delta` places up or down the list.
@@ -781,7 +787,6 @@ impl LibraryView {
             config_sub: None,
             dock_gen: 0,
             dock_armed: None,
-            notice_unsaved: false,
             config_synced: HashSet::new(),
             shots,
             settings,
@@ -822,8 +827,12 @@ impl LibraryView {
                 .iter()
                 .find(|i| i.name.to_lowercase().contains(&name))
                 .map(|i| i.root.clone());
-            if let Some(r) = root {
-                self.select(r, cx);
+            // Refused (unsaved config edits): stay put, don't go on to the
+            // other instance's tab.
+            if let Some(r) = root
+                && !self.select(r, cx)
+            {
+                return;
             }
         }
         if let Some(t) = tab {
@@ -943,11 +952,26 @@ impl LibraryView {
             self.ordered(cx).into_iter().flat_map(|(_, l)| l).next()
         };
         if let Some(root) = pick {
-            self.select(root, cx);
+            self.switch_to(root, cx);
         }
     }
 
-    fn select(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+    /// Shows the instance at `root`. False, and nothing changes, when that
+    /// would drop unsaved config edits (the same "Not saved yet" as every
+    /// other way of closing or replacing the panel): callers that go on to
+    /// do something for `root` stop on false.
+    fn select(&mut self, root: PathBuf, cx: &mut Context<Self>) -> bool {
+        if self.selected.as_ref().is_some_and(|s| *s != root) && self.config_unsaved(cx) {
+            self.refuse_unsaved(cx);
+            return false;
+        }
+        self.switch_to(root, cx);
+        true
+    }
+
+    /// `select` without the unsaved-edits guard, for when the instance on
+    /// show is gone and there is nothing left to keep the panel for.
+    fn switch_to(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let _t = crate::frame_log::span("lib.select");
         // The docked panels belong to the instance they were opened on: a
         // config file or mod page left up would show the old instance's data.
@@ -979,8 +1003,8 @@ impl LibraryView {
     /// Opens a project's page docked beside an instance, on the Mods tab
     /// unless the tab shown already has the panel.
     pub fn peek(&mut self, root: PathBuf, project: u64, cx: &mut Context<Self>) {
-        if self.selected.as_ref() != Some(&root) {
-            self.select(root.clone(), cx);
+        if self.selected.as_ref() != Some(&root) && !self.select(root.clone(), cx) {
+            return;
         }
         if self.tab.class().is_none() && !matches!(self.tab, InstTab::Server | InstTab::Datapacks) {
             self.set_tab(InstTab::Mods, cx);
@@ -1017,8 +1041,9 @@ impl LibraryView {
     ) {
         if let Some(r) = inst
             && self.selected.as_ref() != Some(&r)
+            && !self.select(r, cx)
         {
-            self.select(r, cx);
+            return;
         }
         self.set_tab(tab, cx);
         let Some(root) = self.selected.clone() else { return };
@@ -1431,7 +1456,9 @@ impl LibraryView {
                         .tooltip(move |w, cx| {
                             gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(w, cx)
                         })
-                        .on_click(cx.listener(move |this, _, _, cx| this.select(r.clone(), cx)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.select(r.clone(), cx);
+                        }))
                         .context_menu({
                             let (view, root) = (view.clone(), root.clone());
                             move |menu, window, cx| instance_menu(menu, &view, &root, None, window, cx)
@@ -1831,7 +1858,9 @@ impl LibraryView {
             .clickable(cx)
             .when(picked, |r| widgets::row_selected(r, cx))
             .when(!picked, |r| r.hover(|s| widgets::row_hover(s, cx)))
-            .on_click(cx.listener(move |this, _, _, cx| this.select(select_root.clone(), cx)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.select(select_root.clone(), cx);
+            }))
             .child(thumb)
             .child(
                 v_flex()
@@ -1879,8 +1908,8 @@ impl LibraryView {
                                         .when_some(open, |d, tab| {
                                             d.on_click(cx.listener(move |this, _, _, cx| {
                                                 cx.stop_propagation();
-                                                if this.selected.as_ref() != Some(&root) {
-                                                    this.select(root.clone(), cx);
+                                                if this.selected.as_ref() != Some(&root) && !this.select(root.clone(), cx) {
+                                                    return;
                                                 }
                                                 this.open_updates(tab, cx);
                                             }))
@@ -1960,8 +1989,9 @@ impl LibraryView {
         let (r1, r2) = (inst.root.clone(), inst.root.clone());
         let go = cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.store.update(cx, |s, cx| s.set_server_tools(true, cx));
-            this.select(r1.clone(), cx);
-            this.set_tab(InstTab::Server, cx);
+            if this.select(r1.clone(), cx) {
+                this.set_tab(InstTab::Server, cx);
+            }
         });
         let store = self.store.clone();
         Some(
@@ -3362,13 +3392,6 @@ impl Render for LibraryView {
         if let Some((root, file)) = self.pending_config.take() {
             self.make_config_panel(root, file, window, cx);
         }
-        if std::mem::take(&mut self.notice_unsaved) {
-            struct Unsaved;
-            window.push_notification(
-                gpui_kit::component::notification::Notification::info(crate::config_view::UNSAVED_NOTICE).id::<Unsaved>(),
-                cx,
-            );
-        }
         // One dock on the right, one tenant (`take_dock`): a config file, a
         // mod's page, or Friends. The filters only cover the frame between
         // a panel opening and the others closing.
@@ -3760,8 +3783,9 @@ fn instance_menu(
         let (v, r) = vr();
         m.item(PopupMenuItem::new("Settings").icon(IconName::SlidersHorizontal).on_click(move |_, _, cx| {
             v.update(cx, |this, cx| {
-                this.select(r.clone(), cx);
-                this.set_tab(InstTab::Settings, cx);
+                if this.select(r.clone(), cx) {
+                    this.set_tab(InstTab::Settings, cx);
+                }
             })
         }))
         .when(!fold.history, |m| m.separator())
@@ -3819,8 +3843,9 @@ fn instance_menu(
                 .on_click(move |_, _, cx| {
                     st2.update(cx, |st, cx| st.set_server_tools(true, cx));
                     v.update(cx, |this, cx| {
-                        this.select(s.clone(), cx);
-                        this.set_tab(InstTab::Server, cx);
+                        if this.select(s.clone(), cx) {
+                            this.set_tab(InstTab::Server, cx);
+                        }
                     })
                 }),
         )

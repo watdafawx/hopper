@@ -789,6 +789,7 @@ impl Open {
     }
 
     pub fn close(self, window: &mut Window, cx: &mut App) {
+        crate::widgets::overlay_closed(cx);
         window.focus(&self.restore, cx);
     }
 }
@@ -797,6 +798,8 @@ impl Open {
 /// `fallback`.
 pub fn open(app: &AppView, fallback: FocusHandle, window: &mut Window, cx: &mut Context<AppView>) -> Open {
     let restore = window.focused(cx).unwrap_or(fallback);
+    // Docked panels leave clicks in the palette alone until `close`.
+    crate::widgets::overlay_opened(cx);
     let (items, context) = build(app, cx);
     let view = cx.new(|cx| Palette::new(items, context, window, cx));
     let input = view.read(cx).input.clone();
@@ -841,7 +844,10 @@ fn set_theme(store: &Entity<Store>, name: String, cx: &mut App) {
 fn open_instance(app: &mut AppView, root: PathBuf, tab: Option<&str>, cx: &mut Context<AppView>) {
     app.go(Page::Library, cx);
     app.library.update(cx, |l, cx| {
-        l.open(root, cx);
+        // Refused for unsaved config edits ("Not saved yet"): stay where we are.
+        if !l.open(root, cx) {
+            return;
+        }
         if tab.is_some() {
             l.navigate(None, tab, cx);
         }

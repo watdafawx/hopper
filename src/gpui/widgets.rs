@@ -3440,6 +3440,75 @@ pub const DOCK: PanelSpec = PanelSpec::new("dock", 32., 26., 64.).trailing().sha
 /// its rail.
 pub const PAGE_MIN: f32 = 30.0;
 
+/// How many app-level overlays that are not gpui dialogs are up (today the
+/// Ctrl+K palette). `window.has_active_dialog` can't see them, so a click in
+/// one would count as "a click beside the panel" for a docked panel.
+#[derive(Default)]
+struct Overlays(usize);
+impl Global for Overlays {}
+
+impl Overlays {
+    fn opened(&mut self) {
+        self.0 += 1;
+    }
+
+    /// A stray close (more closes than opens) never goes below none up.
+    fn closed(&mut self) {
+        self.0 = self.0.saturating_sub(1);
+    }
+
+    fn any(&self) -> bool {
+        self.0 > 0
+    }
+}
+
+/// An overlay that is not a gpui dialog opened. Pair every call with
+/// [`overlay_closed`].
+pub fn overlay_opened(cx: &mut App) {
+    cx.default_global::<Overlays>().opened();
+}
+
+/// The overlay closed.
+pub fn overlay_closed(cx: &mut App) {
+    cx.default_global::<Overlays>().closed();
+}
+
+/// A press that belongs to something drawn over the page: a dialog or sheet
+/// (opened from a docked panel, say) or an overlay counted by
+/// [`overlay_opened`]. A docked panel that closes on a click beside it
+/// ignores these presses (`LibraryView::dock_ignores_press`, the mod page's
+/// `BrowseView::frame`); the overlay's own backdrop handles them.
+pub fn press_is_modal(window: &mut Window, cx: &mut App) -> bool {
+    use gpui_kit::component::WindowExt as _;
+    window.has_active_dialog(cx)
+        || window.has_active_sheet(cx)
+        || cx.try_global::<Overlays>().is_some_and(Overlays::any)
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::Overlays;
+
+    #[test]
+    fn counts_overlays_and_never_goes_negative() {
+        let mut o = Overlays::default();
+        assert!(!o.any());
+        o.opened();
+        assert!(o.any());
+        // Two overlays up: closing one leaves the other.
+        o.opened();
+        o.closed();
+        assert!(o.any());
+        o.closed();
+        assert!(!o.any());
+        // A stray close must not make the next open look closed.
+        o.closed();
+        assert!(!o.any());
+        o.opened();
+        assert!(o.any());
+    }
+}
+
 /// A panel in the right-hand dock ([`DOCK`]): [`side_panel`] with the dock's
 /// border and background, sliding in whenever `id` changes. `content`
 /// fills its height and scrolls its own body.
