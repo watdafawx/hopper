@@ -257,6 +257,11 @@ pub struct GroupMerged {
     pub local: String,
     pub root: PathBuf,
     pub merged: groupsync::Merged,
+    /// How the pack looked (`share_sig`) and the number of its last publish
+    /// when this merge started: what it saw, for `Store::held_due`. Not what
+    /// they are when it ends: a publish that lands meanwhile must get
+    /// another look.
+    pub seen: (Option<u64>, u64),
 }
 
 /// A pack version from the group that couldn't go in (see
@@ -1869,6 +1874,7 @@ impl Store {
             _ => format!("Updating {name} with the group's changes"),
         };
         let (tx, local, r2) = (self.tx.clone(), copy.local.clone(), root.clone());
+        let seen = (self.share_sig(&copy.local), copy.sent_seq);
         // A pack update while the game runs would pull files out from under
         // it: the group's pack version waits for it to close.
         let pack_ok = self.running(&root).is_none();
@@ -1876,7 +1882,7 @@ impl Store {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| groupsync::merge(&r2, &copy, allow, ignore_unsent, pack_ok, job)))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("Hopper hit a bug and stopped this task.")));
             match r {
-                Ok(merged) => Ok(Msg::GroupMerged(Box::new(GroupMerged { local, root: r2, merged }))),
+                Ok(merged) => Ok(Msg::GroupMerged(Box::new(GroupMerged { local, root: r2, merged, seen }))),
                 Err(e) => {
                     let text = format!("{e:#}");
                     let _ = tx.send(Msg::GroupMergeFailed(local, e, job.id()));
@@ -1887,7 +1893,7 @@ impl Store {
     }
 
     pub(super) fn on_group_merged(&mut self, m: GroupMerged, cx: &mut Context<Self>) {
-        let GroupMerged { local, root, mut merged } = m;
+        let GroupMerged { local, root, mut merged, seen } = m;
         self.group_merging.remove(&local);
         // Mods came in or went: what they need may be lacking.
         self.want_group_needs(&root);
@@ -1976,9 +1982,8 @@ impl Store {
             self.group_held.remove(&local);
         }
         // Changes kept aside for this PC's own were looked at as the pack
-        // and its last publish stand now (`held_due`).
+        // and its last publish stood when the merge started (`held_due`).
         if self.settings.group_copies.iter().any(|c| c.local == local && !c.held.is_empty()) {
-            let seen = (self.share_sig(&local), sent_seq);
             self.group_held_seen.insert(local.clone(), seen);
         } else {
             self.group_held_seen.remove(&local);
