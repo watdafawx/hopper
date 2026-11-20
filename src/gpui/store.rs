@@ -740,6 +740,12 @@ pub struct Store {
     /// each pack and retry it holds up doesn't say it again.
     github_limit_told: Option<Instant>,
     group_held: HashMap<String, (u64, Instant)>,
+    /// Group copies (local ids) that keep members' changes aside until this
+    /// PC's own change of the same mod is out (`PackCopy::held`): how the
+    /// pack looked (`share_sig`) and the number of its last publish when
+    /// they were last looked at. They are looked at again when either
+    /// changes, which is when such a change can go in.
+    group_held_seen: HashMap<String, (Option<u64>, u64)>,
     /// Group copies (local ids) where Pull now is checking the group or
     /// taking its changes in (the value: whether the group answered), and the
     /// last answer it gave for each, with its text, whether it reads as a
@@ -1113,6 +1119,7 @@ impl Store {
             group_retry: Default::default(),
             github_limit_told: None,
             group_held: Default::default(),
+            group_held_seen: Default::default(),
             group_pulling: Default::default(),
             group_pulled: Default::default(),
             push_now: Default::default(),

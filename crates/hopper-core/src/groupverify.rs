@@ -297,6 +297,12 @@ pub fn verify(f: &Facts, now: u64) -> Verified {
         if unsent {
             continue;
         }
+        // A member's change of it is kept aside until this PC's own is sent
+        // or taken back ([`PackCopy::held`]): the merge makes it then, and
+        // the status says so. Not a mod the copy lacks.
+        if f.copy.held.iter().any(|h| h.key == key) {
+            continue;
+        }
         let Some(row) = row_of(f, key, &w, a, &here) else { continue };
         let first = match at {
             Some(i) => seen_at.insert(i),
@@ -714,6 +720,24 @@ mod tests {
         // Sent without it (a plain miss): still missing.
         let sent = read(vec![]);
         assert_eq!(only(&run(&inst(vec![]), &copy, &codes, Some(&sent), &[])).why, Why::Missing);
+    }
+
+    #[test]
+    fn a_change_kept_aside_for_this_pcs_own_is_not_called_different() {
+        // Mia moved mod 1 to file 13 while this PC had it changed and
+        // unsent; the wait ran out and her code was taken in. This PC took
+        // its change back since (file 11 again, as last sent). Her update is
+        // kept aside and the next merge makes it: not a mod to repair.
+        let (mut copy, codes) = group(vec![("mia", 5, vec![cf(13, true)])]);
+        let sent = read(vec![cf(11, true)]);
+        let i = inst(vec![addon(1, 11, true)]);
+        copy.held.push(groupsync::HeldChange { key: "p:1".into(), now: cf_state(13, true), entry: Some(cf(13, true)), by: "mia".into(), name: "Mia".into(), seq: 5, ..Default::default() });
+        let v = run(&i, &copy, &codes, Some(&sent), &[]);
+        assert!(v.rows.is_empty(), "{:?}", v.rows);
+        // Without it (as before the fix, when the change was dropped) the
+        // same copy reads as behind.
+        copy.held.clear();
+        assert_eq!(only(&run(&i, &copy, &codes, Some(&sent), &[])).why, Why::Different);
     }
 
     #[test]

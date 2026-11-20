@@ -42,7 +42,9 @@ const FRIENDS_ON_FOCUS: Duration = Duration::from_secs(60);
 /// Packs from friends kept for the Friends screen.
 const RECIPES_KEPT: usize = 200;
 /// How long other members' changes wait for a change made here to be
-/// sent before they go in anyway (see `groupsync::Verdict::Held`).
+/// sent before they go in anyway (see `groupsync::Verdict::Held`). Their
+/// change to the very mod changed here doesn't: it is kept aside
+/// (`PackCopy::held`) until the change here is sent or taken back.
 const HELD_FOR: Duration = Duration::from_secs(10);
 
 /// How the sync service is doing, for the Friends screen's status line.
@@ -1273,7 +1275,9 @@ impl Store {
     fn group_ready(&self, c: &PackCopy, root: &Path, now: Instant, forced: bool) -> Option<bool> {
         // Nothing waiting, but the player just confirmed the source of a mod
         // the group's changes left out (or Pull now was asked): make it now.
-        if self.group_merging.contains(&c.local) || self.group_verify.repairing.contains(&c.local) || (c.waiting.is_empty() && !forced && !c.owed_ready(self.settings.allow_sources)) {
+        // Or a member's change kept aside for this PC's own may go in now.
+        let idle = c.waiting.is_empty() && !forced && !c.owed_ready(self.settings.allow_sources) && !self.held_due(c);
+        if self.group_merging.contains(&c.local) || self.group_verify.repairing.contains(&c.local) || idle {
             return None;
         }
         // The group moved the pack and this PC couldn't follow yet: the
@@ -1294,6 +1298,15 @@ impl Store {
         };
         let due = hopper::groupstatus::merge_due(self.group_retry.get(&c.local), &newest_waiting(c), now, forced);
         (due && !self.follow_busy(root) && root.is_dir()).then_some(ignore_unsent)
+    }
+
+    /// Whether the copy `c` keeps members' changes aside for this PC's own
+    /// (`PackCopy::held`) that are worth another look: the pack or its last
+    /// publish changed since the last one, so the change here may be sent
+    /// or taken back by now. Never true otherwise, so asking on every tick
+    /// costs nothing and starts no task.
+    fn held_due(&self, c: &PackCopy) -> bool {
+        !c.held.is_empty() && self.group_held_seen.get(&c.local) != Some(&(self.share_sig(&c.local), c.sent_seq))
     }
 
     // ---- Group packs kept both ways ---------------------------------------
@@ -1418,7 +1431,9 @@ impl Store {
     /// Noah, Ava) with the first instance as a copy of Mia's pack and the
     /// second as a pack of yours, to see every status without a friend or a
     /// server. NAME: in-step, updating, game, pick, left-out, failed,
-    /// offline, sending; parked and parked-one (the group takes changes
+    /// offline, sending, after-yours and after-yours-push (Mia changed a mod
+    /// you changed too and haven't shared yet; with -push, you share when
+    /// you press Push); parked and parked-one (the group takes changes
     /// only from Mia, and Noah's and Ava's, or Noah's, wait); to-push
     /// (changes are shared when you press Push, and both packs hold some).
     /// Nothing goes to the real service; Pull now settles what it can.
@@ -1523,6 +1538,20 @@ impl Store {
             "sending" => {
                 self.group_held.insert(local.clone(), (copy.sent_seq, Instant::now()));
             }
+            // Mia updated a mod this PC changed too and hasn't shared yet
+            // (after-yours-push: and it shares when the player presses Push).
+            "after-yours" | "after-yours-push" => {
+                copy.held.push(hopper::groupsync::HeldChange {
+                    key: "p:103".into(),
+                    now: State::File { file: "cf:9001".into(), on: true },
+                    by: "mia".into(),
+                    name: "Mia".into(),
+                    seq: 24,
+                    at: now - 600,
+                    mod_name: "Sodium".into(),
+                    ..Default::default()
+                });
+            }
             "parked" | "parked-one" => {
                 let stamp = |by: &str| Stamp { seq: 0, by: by.into() };
                 let noah = [("p:105", stamp("noah")), ("p:106", stamp("noah"))];
@@ -1564,7 +1593,7 @@ impl Store {
         }
         let (root2, mine2) = (root.to_string_lossy().into_owned(), mine.clone());
         let owner_only = state.starts_with("parked");
-        let push_by_hand = state == "to-push";
+        let push_by_hand = state == "to-push" || state == "after-yours-push";
         self.update_settings_quietly(|st| {
             st.peer_sync = true;
             st.push_by_hand = push_by_hand;
@@ -1661,7 +1690,7 @@ impl Store {
             }
         }
         let copy = self.settings.group_copies.iter().find(|c| c.local == local).map(|c| self.merge_view(c));
-        let go = copy.as_ref().filter(|c| !c.waiting.is_empty() || !c.owed.is_empty()).and_then(|c| self.group_ready(c, &root, Instant::now(), true));
+        let go = copy.as_ref().filter(|c| !c.waiting.is_empty() || !c.owed.is_empty() || !c.held.is_empty()).and_then(|c| self.group_ready(c, &root, Instant::now(), true));
         match (copy, go) {
             // The result is told when the merge ends (`on_group_merged`).
             (Some(c), Some(ignore_unsent)) => self.merge_group(c, root, ignore_unsent),
@@ -1777,6 +1806,7 @@ impl Store {
         let back: Vec<PackCopy> = gone.into_iter().filter(|c| c.local != c.inst).collect();
         for c in &back {
             self.group_held.remove(&c.local);
+            self.group_held_seen.remove(&c.local);
             self.group_pack_due.remove(&c.local);
             if let Some(r) = self.group_retry.remove(&c.local) {
                 self.jobs.dismiss(r.job);
@@ -1896,6 +1926,11 @@ impl Store {
             if let Some(owed) = merged.owed.take() {
                 c.owed = owed;
             }
+            // Members' changes to mods this PC changed too and hasn't sent:
+            // kept until its own change is out (`PackCopy::held`).
+            if let Some(held) = merged.held_changes.take() {
+                c.held = held;
+            }
             // The sharer's code is in: the follow has it applied now.
             for f in st.followed_recipes.iter_mut().filter(|f| f.local == local) {
                 if let Some((_, code)) = taken.iter().find(|(from, _)| *from == f.peer_id) {
@@ -1939,6 +1974,14 @@ impl Store {
             }
         } else {
             self.group_held.remove(&local);
+        }
+        // Changes kept aside for this PC's own were looked at as the pack
+        // and its last publish stand now (`held_due`).
+        if self.settings.group_copies.iter().any(|c| c.local == local && !c.held.is_empty()) {
+            let seen = (self.share_sig(&local), sent_seq);
+            self.group_held_seen.insert(local.clone(), seen);
+        } else {
+            self.group_held_seen.remove(&local);
         }
         // The group moved this instance to another loader version (saved by
         // the merge). Installed like a change in its Settings, but a running

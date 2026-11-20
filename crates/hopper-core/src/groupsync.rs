@@ -616,6 +616,65 @@ pub struct PackCopy {
     /// are tried again once the player confirms the source.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub owed: Vec<Owed>,
+    /// Members' changes to mods this PC changed too and hadn't sent when
+    /// the wait for its own publish ran out ([`HeldChange`]), one per mod.
+    /// Their codes are taken in all the same, so nothing else would bring
+    /// the changes back: each is made once this PC's own change of that mod
+    /// is out, or was taken back.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<HeldChange>,
+}
+
+/// Another member's change to a mod this PC changed too and hadn't sent
+/// yet ([`Verdict::Held`]), kept when the wait for this PC's publish ran
+/// out ([`PackCopy::held`]). Dropping it there lost it for good: a change
+/// taken back here before it was sent left this PC on the old file, and one
+/// sent much later (offline, a send that kept failing, "When I press Push")
+/// went out as the newest and undid the member's change for the whole group.
+///
+/// It is made once this PC's own change of the mod is resolved: sent, and
+/// then it goes in after it, dated later, so every PC ends on the member's
+/// change; or taken back, and then it goes in as it came. Never while the
+/// change here is still unsent, so the two can't swap back and forth. One
+/// per mod: a later change of the mod replaces it ([`plan`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct HeldChange {
+    /// The mod's key, what the member's change made it, and the entry to
+    /// make it from.
+    pub key: String,
+    pub now: State,
+    pub entry: Option<Entry>,
+    /// Who made it, and when (the relay's number and time).
+    pub by: String,
+    pub name: String,
+    pub seq: u64,
+    pub at: u64,
+    /// The pack version of the code it came in (see [`Merged::packs`]).
+    pub pack: State,
+    /// The mod in this copy's last published code when the wait ran out.
+    /// Once the published code has it another way, this PC's own change
+    /// went out.
+    pub sent: State,
+    /// The mod's name here, for the status ("" when not known).
+    pub mod_name: String,
+}
+
+impl HeldChange {
+    /// Whether the member's change leaves the mod on with a file of theirs
+    /// (an update or an added mod), as against turning it off or taking it
+    /// out: "Mia's version".
+    pub fn is_version(&self) -> bool {
+        matches!(self.now, State::File { on: true, .. })
+    }
+}
+
+/// Whether a change of `key` that waited too long for this PC's own is kept
+/// ([`PackCopy::held`]). Mods only: the loader, the pack version and a lock
+/// are dropped as before (moving a whole pack back by itself, after this PC
+/// just updated it, is more than a wait should do).
+fn keeps_held(key: &str) -> bool {
+    !key.starts_with('~')
 }
 
 /// A member's change that waits for the player to confirm a mod's source
@@ -742,6 +801,9 @@ impl PackCopy {
         for o in &mut self.owed {
             o.seq = 0;
         }
+        for h in &mut self.held {
+            h.seq = 0;
+        }
         self.configs.relay_reset();
         self.sent_seq = 0;
     }
@@ -777,6 +839,8 @@ pub struct Merged {
     pub kept: Vec<Kept>,
     /// The copy's [`PackCopy::owed`] after this merge (None: unchanged).
     pub owed: Option<Vec<Owed>>,
+    /// The copy's [`PackCopy::held`] after this merge (None: unchanged).
+    pub held_changes: Option<Vec<HeldChange>>,
     /// Files of the taken codes that couldn't be looked up, so their mods
     /// weren't made and the codes were kept without them ([`baseline`]).
     pub unresolved: Vec<Entry>,
@@ -1007,9 +1071,17 @@ fn revive_owed(copy: &PackCopy, here: &Mods, sent: Option<&Mods>, todo: &mut Vec
 /// mods now, `sent`: as last published), oldest first, and returns the
 /// changes to make. `decode` reads a code into mods (None: unreadable,
 /// then that code is dropped). `give_up_held`: a change made here has
-/// waited too long for its publish; the others' changes to that mod are
-/// dropped (the change here goes out later, so it wins anyway) and their
-/// codes are done with.
+/// waited too long for its publish; the others' codes are done with, and
+/// their changes to that mod are kept aside ([`PackCopy::held`], returned
+/// in [`Merged::held_changes`]) instead of being made now.
+///
+/// A change kept aside is made here once this copy's own change of the mod
+/// is no longer unsent: sent (then it is dated right after that publish, so
+/// it wins on every PC, this one included) or taken back (then it keeps its
+/// own number). Until then the newest change of the mod is the one kept: a
+/// later one that goes in, or that already is what's here, ends it, and a
+/// later one that loses only to this copy's own publish takes its place. So
+/// a mod the group removed later never comes back from an older update.
 ///
 /// A change is dated by its stamp when the code has one (the member only
 /// passed it on), else by the code's own number (the member made it).
@@ -1028,6 +1100,15 @@ pub fn plan(
     // What this copy will be once the changes so far are made.
     let mut will: HashMap<String, State> = HashMap::new();
     let state_of = |m: &Mods, k: &str| m.state(k);
+    // Changed here since the last code sent, unless the group's last change
+    // of it is what's here: that was taken in from a member, not made here
+    // (a publish that didn't get out yet, as `sent_marks` sees it too).
+    let unsent_here = |k: &str| {
+        sent.is_some_and(|s| state_of(s, k) != state_of(here, k)) && copy.marks.get(k).is_none_or(|m| m.state != state_of(here, k))
+    };
+    // The changes kept aside for this copy's own (`PackCopy::held`), as
+    // this merge leaves them.
+    let mut aside: Vec<HeldChange> = copy.held.clone();
     // A member's name by id, from what this copy got from them.
     let name_of = |id: &str| -> String {
         copy.got
@@ -1077,12 +1158,7 @@ pub fn plan(
         let mut held = false;
         for c in found {
             let cur = will.get(&c.key).cloned().unwrap_or_else(|| state_of(here, &c.key));
-            // Changed here since the last code sent, unless the group's
-            // last change of it is what's here: that was taken in from
-            // a member, not made here (a publish that didn't get out yet,
-            // as `sent_marks` sees it too).
-            let unsent = sent.is_some_and(|s| state_of(s, &c.key) != state_of(here, &c.key))
-                && copy.marks.get(&c.key).is_none_or(|m| m.state != state_of(here, &c.key));
+            let unsent = unsent_here(&c.key);
             // A stamp "made in this code" dates the change by the code.
             let own = Stamp { seq: g.seq, by: from.clone() };
             let stamp = g.stamps.get(&c.key).map(|s| if s.seq == 0 && s.by == from { &own } else { s }).filter(|s| s.seq > 0 && s.seq <= g.seq);
@@ -1097,8 +1173,18 @@ pub fn plan(
             if stamp.is_some() && v != Verdict::Same && marks.get(&c.key).is_some_and(|m| m.seq >= seq) {
                 v = Verdict::Older;
             }
+            // A later change of the mod that already is what's here ends the
+            // one kept aside: that one is the older. Not an echo of a change
+            // known here at that number (this copy's own, sent since and
+            // passed back by a member): the one kept aside waits for exactly
+            // that.
+            if v == Verdict::Same && marks.get(&c.key).is_none_or(|m| m.seq < seq || m.state != c.now) {
+                aside.retain(|h| h.key != c.key || h.seq >= seq);
+            }
             match v {
                 Verdict::Apply => {
+                    // It goes in, so it replaces an older one kept aside.
+                    aside.retain(|h| h.key != c.key || h.seq >= seq);
                     let kind = c.kind();
                     let m = Mark { state: c.now.clone(), kind, by, name: name.clone(), seq, at: g.at };
                     marks.insert(c.key.clone(), m.clone());
@@ -1119,7 +1205,33 @@ pub fn plan(
                     out.marks.push((c.key.clone(), m));
                 }
                 Verdict::Held if !give_up_held => held = true,
-                Verdict::Held | Verdict::Same | Verdict::Older => {}
+                // The wait is over and the code is done with. The change
+                // isn't: kept aside until the one here is sent or taken
+                // back, the newest per mod.
+                Verdict::Held if keeps_held(&c.key) => {
+                    let was_sent = sent.map(|s| state_of(s, &c.key)).unwrap_or_default();
+                    log::info!("group sync: {name}'s change of {} is kept until this PC's own change of it is sent or taken back", c.key);
+                    let h = HeldChange { key: c.key.clone(), now: c.now, entry: c.entry, by, name, seq, at: g.at, pack: now.pack.clone(), sent: was_sent, mod_name: String::new() };
+                    match aside.iter_mut().find(|x| x.key == h.key) {
+                        Some(x) if x.seq <= h.seq => *x = HeldChange { mod_name: std::mem::take(&mut x.mod_name), ..h },
+                        Some(_) => {}
+                        None => aside.push(h),
+                    }
+                }
+                Verdict::Held => {
+                    log::warn!("group sync: {name}'s change of {} waited too long for this PC's own and was dropped", c.key);
+                }
+                // It lost to a later change known here. With one kept aside
+                // that it is newer than, that later change is this copy's own
+                // publish (a member's would have ended the one kept aside):
+                // this is the group's newest change of the mod then, and the
+                // one to make after it.
+                Verdict::Older => {
+                    if let Some(x) = aside.iter_mut().find(|x| x.key == c.key && x.seq < seq) {
+                        *x = HeldChange { key: c.key.clone(), now: c.now, entry: c.entry, by, name, seq, at: g.at, pack: now.pack.clone(), sent: x.sent.clone(), mod_name: std::mem::take(&mut x.mod_name) };
+                    }
+                }
+                Verdict::Same => {}
             }
         }
         if held {
@@ -1128,6 +1240,49 @@ pub fn plan(
             let g = baseline(g, &now, prev.as_ref().map(|(m, _)| m), here, &from, &mut out.unresolved);
             out.taken.push((from, g));
         }
+    }
+    // The changes kept aside whose wait is over: this copy's own change of
+    // the mod is sent, or was taken back.
+    let mut still: Vec<HeldChange> = Vec::new();
+    for h in aside {
+        if unsent_here(&h.key) {
+            still.push(h);
+            continue;
+        }
+        let cur = will.get(&h.key).cloned().unwrap_or_else(|| state_of(here, &h.key));
+        // Already that way here (the player made it so, or it came in by
+        // another member's code): nothing left to make.
+        if cur == h.now {
+            continue;
+        }
+        // After this copy's own change went out, the one kept aside is
+        // dated right after it: the others took that publish as the newest
+        // change of the mod, and an older number would lose to it there
+        // while it went in here. Taken back instead, it keeps its own.
+        let known = marks.get(&h.key).map_or(0, |m| m.seq);
+        let went_out = sent.is_some_and(|s| state_of(s, &h.key) != h.sent);
+        let seq = if known > h.seq {
+            known + 1
+        } else if went_out {
+            h.seq.max(copy.sent_seq + 1)
+        } else {
+            h.seq
+        };
+        let c = Change { key: h.key.clone(), was: cur, now: h.now.clone(), entry: h.entry };
+        let kind = c.kind();
+        let m = Mark { state: h.now.clone(), kind, by: h.by, name: h.name.clone(), seq, at: h.at };
+        marks.insert(h.key.clone(), m.clone());
+        out.marks.retain(|(k, _)| *k != h.key);
+        out.marks.push((h.key.clone(), m));
+        out.made.retain(|(k, _, _)| *k != h.key);
+        out.made.push((h.key.clone(), kind, h.name));
+        out.packs.insert(h.key.clone(), h.pack);
+        will.insert(h.key.clone(), h.now);
+        todo.retain(|t| t.key != h.key);
+        todo.push(c);
+    }
+    if still != copy.held {
+        out.held_changes = Some(still);
     }
     (todo, out)
 }
@@ -1199,6 +1354,17 @@ fn first_changes(
         found.push(Change { key: k.clone(), was, now: to.clone(), entry: Some(e.clone()) });
     }
     found
+}
+
+/// The name of the mod a change kept aside is about, as this instance has
+/// it ("" when it isn't here and the change doesn't say).
+fn held_name(inst: &Instance, h: &HeldChange) -> String {
+    let here = find_addon(inst, &h.key).map(|i| inst.addons[i].name.clone()).filter(|n| !n.is_empty());
+    here.or_else(|| match &h.entry {
+        Some(Entry::Source { pin, .. }) => Some(crate::sources::carry::display_name(pin)),
+        _ => None,
+    })
+    .unwrap_or_default()
 }
 
 /// The task's note for files that couldn't be looked up ([`baseline`]).
@@ -1643,7 +1809,9 @@ fn move_loader(inst: &mut Instance, c: &Change, pack: Option<&str>, merged: &mut
 /// member's changes and makes the ones that win here. Runs off the UI
 /// thread. `allow`: mods from other links may be put in by themselves.
 /// `ignore_unsent`: a change here waited for its publish too long; the
-/// other members' changes to that mod are dropped and the rest go in.
+/// other members' changes to that mod are kept aside ([`PackCopy::held`])
+/// and the rest go in. With nothing waiting, the ones kept aside before are
+/// still looked at: each goes in once the change here is sent or taken back.
 ///
 /// A pack version a member moved to (and that wins) goes in first, as a
 /// whole pack update that keeps this player's edits; `pack_ok` false (the
@@ -1694,6 +1862,10 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
         fill_packs(&inst, &mut every, job);
     }
     let (todo, mut merged) = plan(copy, &here, sent.as_ref(), ignore_unsent, |c| codes.get(c).cloned());
+    // The status names the mods whose changes wait for this PC's own.
+    for h in merged.held_changes.iter_mut().flatten().filter(|h| h.mod_name.is_empty()) {
+        h.mod_name = held_name(&inst, h);
+    }
     if !merged.unresolved.is_empty() {
         // Said where the player can see it: the mods aren't in, and why.
         job.show();
@@ -2588,12 +2760,25 @@ mod tests {
             }
         }
         fn merge(&mut self) {
-            if self.copy.waiting.is_empty() {
+            self.merge_as(false);
+        }
+        /// The merge the app runs once a change made here has kept the
+        /// others' codes waiting for its publish too long (`HELD_FOR`, 10 s):
+        /// offline, a send that keeps failing, or changes shared only when
+        /// the player presses Push. The codes are taken in; their changes to
+        /// the mods changed here are kept aside (`PackCopy::held`).
+        fn merge_gave_up(&mut self) {
+            self.merge_as(true);
+        }
+        fn merge_as(&mut self, give_up_held: bool) {
+            // As `group_ready` does: something waits, or a change kept aside
+            // may go in now.
+            if self.copy.waiting.is_empty() && self.copy.held.is_empty() {
                 return;
             }
             let here = self.mods();
             let sent = dec(&self.copy.sent);
-            let (todo, merged) = plan(&self.copy, &here, sent.as_ref(), false, self.decoder());
+            let (todo, merged) = plan(&self.copy, &here, sent.as_ref(), give_up_held, self.decoder());
             for c in &todo {
                 if c.key == LOADER_KEY {
                     // As `merge` does.
@@ -2628,6 +2813,9 @@ mod tests {
                 if self.copy.marks.get(&k).is_none_or(|x| x.seq <= mk.seq) {
                     self.copy.marks.insert(k, mk);
                 }
+            }
+            if let Some(held) = merged.held_changes {
+                self.copy.held = held;
             }
             if !todo.is_empty() {
                 self.merges.push(todo);
@@ -3410,6 +3598,275 @@ mod tests {
         let (todo, merged) = plan(&copy, &here, Some(&sent), true, dec);
         assert_eq!(todo.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), ["p:2"], "the change here stays");
         assert!(!merged.held && merged.taken.len() == 1);
+        // Changed with the fix for a held change being lost (audit mode 5):
+        // the code is still done with and the change here still stays, but
+        // Mia's change of mod 1 is no longer dropped. It is kept aside
+        // (`PackCopy::held`) and made once the change here is sent or taken
+        // back; before, nothing remembered it.
+        let kept = merged.held_changes.expect("Mia's change is kept aside");
+        assert_eq!(kept.len(), 1);
+        assert_eq!((kept[0].key.as_str(), &kept[0].now, kept[0].by.as_str(), kept[0].name.as_str(), kept[0].seq), ("p:1", &st(11, false), "mia", "Mia", 10));
+        assert_eq!(kept[0].sent, st(11, true), "what this copy last published, to tell when its change went out");
+    }
+
+    // ---- A change kept aside for this PC's own (audit mode 5) ----------
+    //
+    // B changes mod 1 and can't send it (offline, a send that fails, or
+    // "When I press Push"). A updates the same mod meanwhile. After 10 s
+    // the app stops waiting for B's publish (`merge_gave_up`).
+
+    /// A updates mod 1 to file 13 and C takes it, while B has it on file
+    /// 12, unsent. B's wait for its own publish runs out.
+    fn a_clash_b_gave_up_on() -> (Relay, Pc, Pc, Pc) {
+        let (mut relay, mut a, mut b, mut c) = group();
+        b.set(1, 12, true);
+        a.set(1, 13, true);
+        a.publish(&mut relay, &ALL, true);
+        online(&mut c, &mut relay);
+        assert_eq!(c.mods[&1], (13, true));
+        b.read(&relay);
+        b.merge();
+        assert_eq!(b.copy.waiting.len(), 2, "A's change and C's echo of it wait for B's publish");
+        b.merge_gave_up();
+        assert!(b.copy.waiting.is_empty(), "the codes are done with");
+        assert_eq!(b.mods[&1], (12, true), "B's own change stays");
+        (relay, a, b, c)
+    }
+
+    /// Everyone online until nothing changes any more.
+    fn settle(relay: &mut Relay, pcs: &mut [&mut Pc]) {
+        for _ in 0..4 {
+            for pc in pcs.iter_mut() {
+                online(pc, relay);
+            }
+        }
+        let before: Vec<usize> = pcs.iter().map(|pc| pc.merges.len()).collect();
+        for pc in pcs.iter_mut() {
+            online(pc, relay);
+        }
+        assert_eq!(pcs.iter().map(|pc| pc.merges.len()).collect::<Vec<_>>(), before, "settled: nothing swaps back and forth");
+    }
+
+    #[test]
+    fn a_change_kept_aside_lands_when_this_pc_takes_its_own_change_back() {
+        let (mut relay, mut a, mut b, mut c) = a_clash_b_gave_up_on();
+        let kept: Vec<(String, String)> = b.copy.held.iter().map(|h| (h.key.clone(), h.by.clone())).collect();
+        // B puts mod 1 back to the file it last sent: nothing of B's own is
+        // left to send, and no code of A's or C's will ever say 13 again.
+        b.set(1, 11, true);
+        online(&mut b, &mut relay);
+        assert_eq!(b.mods[&1], (13, true), "A's update goes in now");
+        assert_eq!(kept, [("p:1".to_string(), "A".to_string())], "it was kept aside meanwhile");
+        assert!(b.copy.held.is_empty(), "and is done with");
+        assert_eq!((b.copy.marks["p:1"].by.as_str(), b.copy.marks["p:1"].kind), ("A", Kind::Updated));
+        assert_eq!(b.merges.last().unwrap().iter().map(|c| (c.key.as_str(), c.now.clone())).collect::<Vec<_>>(), [("p:1", st(13, true))]);
+        settle(&mut relay, &mut [&mut a, &mut b, &mut c]);
+        for pc in [&a, &b, &c] {
+            assert_eq!(pc.mods[&1], (13, true), "on {}", pc.id);
+        }
+    }
+
+    /// The whole of mode 5 in one run: a clash, the wait running out, and a
+    /// publish that comes late (B was offline, or presses Push much later).
+    #[test]
+    fn a_change_kept_aside_goes_in_after_this_pcs_late_publish_and_nothing_is_lost() {
+        let (mut relay, mut a, mut b, mut c) = a_clash_b_gave_up_on();
+        // While B's change is unsent, A's stays aside however often B looks.
+        for _ in 0..3 {
+            online_but_unsent(&mut b, &relay);
+            assert_eq!(b.mods[&1], (12, true));
+        }
+        // B's change finally goes out. It is the newest change of mod 1, so
+        // A and C take it: for a moment the group is on B's file.
+        b.publish(&mut relay, &ALL, true);
+        online(&mut a, &mut relay);
+        online(&mut c, &mut relay);
+        assert_eq!((a.mods[&1], c.mods[&1]), ((12, true), (12, true)));
+        // B's own change is out, so A's goes in on B, after it.
+        b.read(&relay);
+        b.merge();
+        assert_eq!(b.mods[&1], (13, true), "A's update lands on B once B's own is shared");
+        assert!(b.copy.held.is_empty());
+        let mark = &b.copy.marks["p:1"];
+        assert_eq!(mark.by, "A", "it is A's change, not one B made");
+        assert!(mark.seq > a.copy.marks["p:1"].seq && mark.seq > c.copy.marks["p:1"].seq, "dated after B's publish as A and C know it, so it wins there");
+        // Nothing of B's own is left to send: with "When I press Push" the
+        // code goes out by itself, as any change taken from a member does.
+        assert_eq!(crate::syncmode::own_changes(&dec(&b.copy.sent).unwrap(), &b.mods(), &b.copy.marks), 0);
+        b.publish(&mut relay, &ALL, true);
+        settle(&mut relay, &mut [&mut a, &mut b, &mut c]);
+        for pc in [&a, &b, &c] {
+            assert_eq!(pc.mods[&1], (13, true), "A's update is not undone on {}", pc.id);
+            assert_eq!(pc.mods.len(), 4);
+        }
+        // B's own file was shared too (A and C had it), then replaced.
+        assert!(a.merges.iter().flatten().any(|c| c.key == "p:1" && c.now == st(12, true)));
+        assert_eq!(c.copy.marks["p:1"].by, "A");
+    }
+
+    /// B looks at the group without sending: reads and takes in, as a PC
+    /// that holds its changes back for Push (or can't send) does.
+    fn online_but_unsent(pc: &mut Pc, relay: &Relay) {
+        pc.read(relay);
+        pc.merge();
+    }
+
+    #[test]
+    fn a_later_change_of_the_mod_replaces_the_one_kept_aside() {
+        let (mut relay, mut a, mut b, mut c) = a_clash_b_gave_up_on();
+        // C moves mod 1 on again, to file 14, after the clash.
+        c.set(1, 14, true);
+        c.publish(&mut relay, &ALL, true);
+        online(&mut a, &mut relay);
+        b.read(&relay);
+        b.merge();
+        b.merge_gave_up();
+        let kept: Vec<(State, String)> = b.copy.held.iter().map(|h| (h.now.clone(), h.by.clone())).collect();
+        // B's own goes out late; then C's file goes in, never A's older one.
+        b.publish(&mut relay, &ALL, true);
+        settle(&mut relay, &mut [&mut a, &mut b, &mut c]);
+        for pc in [&a, &b, &c] {
+            assert_eq!(pc.mods[&1], (14, true), "on {}", pc.id);
+        }
+        assert!(!b.merges.iter().flatten().any(|c| c.now == st(13, true)), "A's older update never comes back on B");
+        assert_eq!(kept, [(st(14, true), "C".to_string())], "one per mod: the newest change of it");
+    }
+
+    #[test]
+    fn a_later_change_that_arrives_after_this_pcs_publish_still_replaces_the_one_kept_aside() {
+        let (mut relay, mut a, mut b, mut c) = a_clash_b_gave_up_on();
+        // C moves mod 1 to file 14. B doesn't read it before its own change
+        // goes out, so on B it loses to B's later publish.
+        c.set(1, 14, true);
+        c.publish(&mut relay, &ALL, true);
+        b.publish(&mut relay, &ALL, true);
+        online(&mut b, &mut relay);
+        assert_eq!(b.mods[&1], (14, true), "the group's newest change of the mod goes in after B's own, not A's older one");
+        assert_eq!(b.copy.marks["p:1"].by, "C");
+        settle(&mut relay, &mut [&mut a, &mut b, &mut c]);
+        for pc in [&a, &b, &c] {
+            assert_eq!(pc.mods[&1], (14, true), "on {}", pc.id);
+        }
+    }
+
+    #[test]
+    fn a_mod_the_group_removed_later_is_not_brought_back_by_the_one_kept_aside() {
+        // Removed while B's change is still unsent: the removal is the one
+        // kept, and it is what goes in after B's publish.
+        let (mut relay, mut a, mut b, mut c) = a_clash_b_gave_up_on();
+        c.remove(1);
+        c.publish(&mut relay, &ALL, true);
+        online(&mut a, &mut relay);
+        b.read(&relay);
+        b.merge();
+        b.merge_gave_up();
+        let kept: Vec<(State, String)> = b.copy.held.iter().map(|h| (h.now.clone(), h.by.clone())).collect();
+        b.publish(&mut relay, &ALL, true);
+        settle(&mut relay, &mut [&mut a, &mut b, &mut c]);
+        for pc in [&a, &b, &c] {
+            assert!(!pc.mods.contains_key(&1), "on {}", pc.id);
+        }
+        assert_eq!(kept, [(State::Unlisted, "C".to_string())]);
+        // Removed after B took its own change back, in the same look that
+        // would have made A's update: the removal is newer, so it wins and
+        // A's update is done with.
+        let (mut relay, mut a, mut b, mut c) = a_clash_b_gave_up_on();
+        c.remove(1);
+        c.publish(&mut relay, &ALL, true);
+        b.set(1, 11, true);
+        online(&mut b, &mut relay);
+        assert!(!b.mods.contains_key(&1), "the removal goes in");
+        assert!(b.copy.held.is_empty(), "A's older update is done with");
+        settle(&mut relay, &mut [&mut a, &mut b, &mut c]);
+        for pc in [&a, &b, &c] {
+            assert!(!pc.mods.contains_key(&1), "on {}", pc.id);
+        }
+    }
+
+    #[test]
+    fn a_change_kept_aside_that_never_resolves_stays_on_record_and_in_the_status() {
+        use crate::groupstatus::{After, Check, Input, Status, status};
+        let (relay, _a, mut b, _c) = a_clash_b_gave_up_on();
+        // B never sends: however often it looks, and across a restart, the
+        // change is still kept and still said.
+        for _ in 0..3 {
+            online_but_unsent(&mut b, &relay);
+        }
+        b.restart();
+        online_but_unsent(&mut b, &relay);
+        assert_eq!(b.copy.held.len(), 1, "one record, not one per look");
+        assert_eq!(b.mods[&1], (12, true));
+        b.copy.held[0].mod_name = "Sodium".into();
+        let input = Input {
+            copy: &b.copy,
+            connected: true,
+            checked: None,
+            now: 0,
+            merging: false,
+            pack_due: None,
+            failure: None,
+            allow_sources: true,
+            loader_waits: false,
+            jars_waiting: 0,
+            unsent: false,
+            held: false,
+            needs: &[],
+            only_from: None,
+            to_push: None,
+            check: Check::Matches,
+        };
+        let s = status(&input);
+        assert_eq!(s, Status::AfterYours { after: After::of(&b.copy).unwrap(), offline: false });
+        assert_eq!(s.detail(0), "Waiting for your change to Sodium to be shared, then A's version goes in.");
+        // The check of the copy doesn't call the mod "different" in the
+        // moment between B taking its change back and the merge that makes
+        // A's: the status already says what happens to it.
+        b.set(1, 11, true);
+        let inst = b.instance();
+        let codes: BTreeMap<String, Mods> = b.copy.got.iter().map(|(k, g)| (k.clone(), dec(&g.code).unwrap())).collect();
+        let sent = dec(&b.copy.sent);
+        let facts = crate::groupverify::Facts { inst: &inst, copy: &b.copy, codes: &codes, sent: sent.as_ref(), pack: Some(&State::Unlisted), skip: &[] };
+        assert!(crate::groupverify::verify(&facts, 0).rows.is_empty());
+    }
+
+    #[test]
+    fn an_echo_of_this_pcs_own_publish_does_not_end_the_change_kept_aside() {
+        // B sent file 12 as seq 20. Sam passes it on (his code carries B's
+        // stamp): on B that is no later change of the mod, so Mia's update
+        // kept aside still goes in, dated after B's own.
+        let mut copy = PackCopy { sent_seq: 20, ..Default::default() };
+        copy.got.insert("sam".into(), got(code(vec![cf(11, true)]), 2, "Sam"));
+        copy.marks.insert("p:1".into(), Mark { state: st(12, true), kind: Kind::Updated, by: "me".into(), seq: 20, ..Default::default() });
+        copy.held.push(HeldChange { key: "p:1".into(), now: st(13, true), entry: Some(cf(13, true)), by: "mia".into(), name: "Mia".into(), seq: 10, at: 10, sent: st(11, true), ..Default::default() });
+        let mut g = got(code(vec![cf(12, true)]), 25, "Sam");
+        g.stamps.insert("p:1".into(), Stamp { seq: 20, by: "me".into() });
+        copy.arrive("sam", g);
+        let here = m(vec![cf(12, true)]);
+        let (todo, merged) = plan(&copy, &here, Some(&here), false, dec);
+        assert_eq!(planned(&todo), [("p:1", st(13, true), Kind::Updated)]);
+        assert_eq!(marked(&merged, "p:1"), ("mia", "Mia", 21));
+        assert_eq!(merged.held_changes, Some(Vec::new()));
+        // Still unsent here: it stays aside and nothing is made.
+        let sent = m(vec![cf(11, true)]);
+        let mut unsent = copy.clone();
+        unsent.marks.clear();
+        unsent.waiting.clear();
+        let (todo, merged) = plan(&unsent, &here, Some(&sent), false, dec);
+        assert!(todo.is_empty() && merged.held_changes.is_none(), "nothing changes while B's own is unsent");
+    }
+
+    #[test]
+    fn only_mods_are_kept_aside_and_a_relay_that_starts_over_renumbers_them() {
+        assert!(keeps_held("p:1") && keeps_held("s:octo/x#x") && keeps_held("n:a.jar"));
+        assert!(!keeps_held(LOADER_KEY) && !keeps_held(PACK_KEY) && !keeps_held("~lock:p:1"));
+        let mut copy = PackCopy::default();
+        copy.held.push(HeldChange { key: "p:1".into(), now: st(13, true), seq: 900, ..Default::default() });
+        // Saved with the copy, and left out of the settings when empty.
+        let back: PackCopy = serde_json::from_str(&serde_json::to_string(&copy).unwrap()).unwrap();
+        assert_eq!(back.held, copy.held);
+        assert!(!serde_json::to_string(&PackCopy::default()).unwrap().contains("held"));
+        copy.relay_reset();
+        assert_eq!(copy.held[0].seq, 0);
     }
 
     #[test]

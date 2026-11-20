@@ -1413,7 +1413,7 @@ impl FriendsPanel {
                 .tooltip(format!("Takes in {name}'s changes now. Other people's keep waiting"))
                 .on_click(cx.listener(move |this, _, _, cx| this.store.update(cx, |s, cx| s.pull_group_from(&root, &who, cx))));
         }
-        if let Status::ToPush { changes } = st {
+        if let Status::ToPush { changes, .. } = st {
             let pushing = self.store.read(cx).pushing_at(&root);
             return Button::new(id)
                 .xsmall()

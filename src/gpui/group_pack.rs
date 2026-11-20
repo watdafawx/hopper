@@ -36,6 +36,7 @@ pub fn look(status: &Status) -> (IconName, Tier) {
         Status::NeedsMod { .. } => (IconName::PackageX, Tier::Stop),
         Status::Parked { .. } => (IconName::Users, Tier::Choice),
         Status::ToPush { .. } => (IconName::Upload, Tier::Info),
+        Status::AfterYours { .. } => (IconName::Clock, Tier::Info),
         Status::Behind { .. } | Status::CantCheck => (IconName::CircleAlert, Tier::Choice),
         Status::Checking => (IconName::RefreshCw, Tier::Info),
     }
@@ -329,7 +330,7 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
                 n = n.action_fit(move |fit| pull_from_button(&store, &root, &who, pulling, notice_slot::Fit { lead: false, ..fit }, ix));
             }
         }
-    } else if let Status::ToPush { changes } = status {
+    } else if let Status::ToPush { changes, .. } = status {
         let (store, root) = (store.clone(), root.to_path_buf());
         n = n.primary(move |fit| push_button(&store, vec![root.clone()], changes, pushing, fit, "group-push"));
     } else if matches!(status, Status::Cant { .. }) && !left_out.is_empty() {

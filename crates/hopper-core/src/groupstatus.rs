@@ -112,8 +112,13 @@ pub enum Status {
     /// Other members' changes wait for the player to pull them: the group
     /// takes changes only from its maker (`only`, their name).
     Parked { from: Vec<crate::syncmode::Parked>, only: String },
-    /// Changes made here wait for the player to press Push.
-    ToPush { changes: usize },
+    /// Changes made here wait for the player to press Push (`after`: other
+    /// members' changes of the same mods go in once they are out).
+    ToPush { changes: usize, after: Option<After> },
+    /// Other members changed mods this PC changed too and hasn't shared
+    /// yet. Their changes go in once this PC's own are out
+    /// ([`PackCopy::held`]); `offline`: and that can't happen right now.
+    AfterYours { after: After, offline: bool },
     /// Everything is taken in, but the mods folder doesn't have what the
     /// group has: `mods` of them (`missing`: all plainly not here). The check
     /// of the copy found it ([`crate::groupverify`]); "Make my copy match"
@@ -150,6 +155,7 @@ impl Status {
             Status::NeedsMod { needs } => crate::groupdeps::label(needs.len()),
             Status::Parked { .. } => "Changes to pull",
             Status::ToPush { .. } => "Not sent yet",
+            Status::AfterYours { .. } => "Your change goes first",
             Status::Behind { missing: true, .. } => "Missing mods",
             Status::Behind { .. } => "Differs from group",
             Status::CantCheck => "Couldn't check",
@@ -160,10 +166,10 @@ impl Status {
     pub fn tone(&self) -> Tone {
         match self {
             Status::InStep { .. } => Tone::Good,
-            Status::Updating { .. } | Status::Sending | Status::ToPush { .. } | Status::Checking => Tone::Busy,
+            Status::Updating { .. } | Status::Sending | Status::ToPush { .. } | Status::Checking | Status::AfterYours { offline: false, .. } => Tone::Busy,
             Status::WaitsForGame { .. } | Status::WaitsForYou { .. } | Status::Parked { .. } | Status::Behind { .. } | Status::CantCheck => Tone::Warn,
             Status::Cant { .. } | Status::NeedsMod { .. } => Tone::Bad,
-            Status::Offline { .. } => Tone::Quiet,
+            Status::Offline { .. } | Status::AfterYours { offline: true, .. } => Tone::Quiet,
         }
     }
 
@@ -177,8 +183,8 @@ impl Status {
             Status::WaitsForGame { .. } => 3,
             Status::Parked { .. } | Status::CantCheck => 4,
             Status::ToPush { .. } => 5,
-            Status::Offline { .. } => 6,
-            Status::Updating { .. } | Status::Sending | Status::Checking => 7,
+            Status::Offline { .. } | Status::AfterYours { offline: true, .. } => 6,
+            Status::Updating { .. } | Status::Sending | Status::Checking | Status::AfterYours { .. } => 7,
             Status::InStep { .. } => 8,
         }
     }
@@ -219,10 +225,18 @@ impl Status {
             },
             Status::NeedsMod { needs } => crate::groupdeps::detail(needs),
             Status::Parked { from, only } => parked_says(from, only),
-            Status::ToPush { changes: 0 } => "You changed this pack. The group gets your changes when you press Push.".to_string(),
-            Status::ToPush { changes } => {
-                format!("You made {}. The group gets them when you press Push.", crate::syncmode::changes_words(*changes))
+            Status::ToPush { changes, after } => {
+                let yours = match changes {
+                    0 => "You changed this pack. The group gets your changes when you press Push.".to_string(),
+                    n => format!("You made {}. The group gets them when you press Push.", crate::syncmode::changes_words(*n)),
+                };
+                match after {
+                    Some(a) => format!("{yours} {}", a.then_says()),
+                    None => yours,
+                }
             }
+            Status::AfterYours { after, offline: false } => after.waiting_says(),
+            Status::AfterYours { after, offline: true } => format!("{} Can't reach the group right now.", after.waiting_says()),
         }
     }
 
@@ -236,6 +250,85 @@ impl Status {
             }
             other => other.label().to_string(),
         }
+    }
+}
+
+/// Other members' changes that wait for this PC's own change of the same
+/// mod to be shared ([`PackCopy::held`]), as the status tells them. A wait
+/// that ran out used to drop such a change without a word.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct After {
+    /// The mods' names, each once ("" for one whose name isn't known).
+    pub mods: Vec<String>,
+    /// The members who changed them, each once.
+    pub by: Vec<String>,
+    /// Every one of the changes brings another file (an update, an added
+    /// mod): "Mia's version". A switch or a removal among them: "change".
+    pub versions: bool,
+}
+
+impl After {
+    /// What the copy keeps aside, or None when nothing waits.
+    pub fn of(copy: &PackCopy) -> Option<After> {
+        if copy.held.is_empty() {
+            return None;
+        }
+        let mut mods: Vec<String> = Vec::new();
+        let mut by: Vec<String> = Vec::new();
+        for h in &copy.held {
+            mods.push(h.mod_name.clone());
+            if !h.name.is_empty() && !by.contains(&h.name) {
+                by.push(h.name.clone());
+            }
+        }
+        Some(After { mods, by, versions: copy.held.iter().all(|h| h.is_version()) })
+    }
+
+    /// "Sodium", "Sodium and Lithium", "3 mods"; "a mod" for one with no
+    /// name.
+    fn mods_say(&self) -> String {
+        let named = self.mods.iter().all(|n| !n.is_empty());
+        match self.mods.as_slice() {
+            [one] if named => one.clone(),
+            [_] => "a mod".to_string(),
+            [a, b] if named => format!("{a} and {b}"),
+            many => format!("{} mods", many.len()),
+        }
+    }
+
+    /// "Mia's", "Mia and Noah's", "the group's".
+    fn whose(&self) -> String {
+        match self.by.as_slice() {
+            [a] => format!("{a}'s"),
+            [a, b] => format!("{a} and {b}'s"),
+            _ => "the group's".to_string(),
+        }
+    }
+
+    /// "version goes in", "changes go in".
+    fn goes_in(&self) -> String {
+        let noun = if self.versions { "version" } else { "change" };
+        if self.mods.len() == 1 { format!("{noun} goes in") } else { format!("{noun}s go in") }
+    }
+
+    /// "Waiting for your change to Sodium to be shared, then Mia's version
+    /// goes in."
+    pub fn waiting_says(&self) -> String {
+        let yours = if self.mods.len() == 1 { "change" } else { "changes" };
+        format!("Waiting for your {yours} to {} to be shared, then {} {}.", self.mods_say(), self.whose(), self.goes_in())
+    }
+
+    /// After "The group gets them when you press Push.": "Then Mia's
+    /// version of Sodium goes in."
+    pub fn then_says(&self) -> String {
+        let of = if self.versions { "of" } else { "to" };
+        let (noun, verb) = match (self.versions, self.mods.len() == 1) {
+            (true, true) => ("version", "goes in"),
+            (true, false) => ("versions", "go in"),
+            (false, true) => ("change", "goes in"),
+            (false, false) => ("changes", "go in"),
+        };
+        format!("Then {} {noun} {of} {} {verb}.", self.whose(), self.mods_say())
     }
 }
 
@@ -310,18 +403,28 @@ pub fn status(i: &Input) -> Status {
         Check::Couldnt => return Status::CantCheck,
         Check::Matches | Check::Checking => {}
     }
+    // A member's change kept aside until this PC's own change of the same
+    // mod is out: said wherever that change stands (offline, held back for
+    // Push, on its way), so it never waits unseen.
+    let after = After::of(i.copy);
     if !i.connected {
-        return Status::Offline { checked: i.checked };
+        return match after {
+            Some(after) => Status::AfterYours { after, offline: true },
+            None => Status::Offline { checked: i.checked },
+        };
     }
     let parked = crate::syncmode::parked(i.copy, only);
     if !parked.is_empty() {
         return Status::Parked { from: parked, only: i.only_from.map(|(_, n)| n.to_string()).unwrap_or_default() };
     }
     // Held back for Push: what waits for this PC's own change to go out
-    // waits for the Push too (or is taken in after a while, the change
-    // here kept).
+    // waits for the Push too (after a while its code is taken in, and the
+    // change to that mod kept aside until the Push).
     if let Some(changes) = i.to_push {
-        return Status::ToPush { changes };
+        return Status::ToPush { changes, after };
+    }
+    if let Some(after) = after {
+        return Status::AfterYours { after, offline: false };
     }
     if i.unsent || i.held {
         return Status::Sending;
@@ -412,8 +515,10 @@ pub fn pull_says(reached: bool, made: usize, from: &[String], after: &Status, no
         Status::InStep { .. } | Status::Sending | Status::Updating { .. } | Status::Checking => (format!("{took} Now the same as the group."), false),
         // Only this PC's own changes wait, to go out: the copy has the
         // group's.
-        Status::ToPush { .. } if took.is_empty() => ("You have the group's latest changes. Yours go out when you press Push.".to_string(), false),
-        Status::ToPush { .. } => (format!("{took} Yours go out when you press Push."), false),
+        // (With a member's change kept aside for one of them, the copy
+        // doesn't have it yet: the status's own line says so, below.)
+        Status::ToPush { after: None, .. } if took.is_empty() => ("You have the group's latest changes. Yours go out when you press Push.".to_string(), false),
+        Status::ToPush { after: None, .. } => (format!("{took} Yours go out when you press Push."), false),
         other => {
             let lead = if took.is_empty() { String::new() } else { format!("{took} ") };
             (format!("{lead}{}", other.detail(now)), matches!(other, Status::Cant { .. } | Status::CantCheck))
@@ -716,7 +821,7 @@ mod tests {
         let c = PackCopy::default();
         let mut i = input(&c);
         i.to_push = Some(2);
-        assert_eq!(status(&i), Status::ToPush { changes: 2 });
+        assert_eq!(status(&i), Status::ToPush { changes: 2, after: None });
         // A copy that is behind says so before it says it waits for a push.
         i.check = Check::Behind { mods: 1, missing: true };
         assert!(matches!(status(&i), Status::Behind { .. }));
@@ -1123,16 +1228,109 @@ mod tests {
         let mut i = input(&c);
         i.to_push = Some(3);
         let s = status(&i);
-        assert_eq!(s, Status::ToPush { changes: 3 });
+        assert_eq!(s, Status::ToPush { changes: 3, after: None });
         assert_eq!(s.label(), "Not sent yet");
         assert_eq!(s.detail(0), "You made 3 changes. The group gets them when you press Push.");
         // A member's change waiting on one of those (held) reads the same:
         // it isn't on its way while the player keeps theirs.
         i.held = true;
-        assert_eq!(status(&i), Status::ToPush { changes: 3 });
+        assert_eq!(status(&i), Status::ToPush { changes: 3, after: None });
         // Pull now says the copy has the group's.
         let (says, bad) = pull_says(true, 0, &[], &s, 0);
         assert!(!bad && says.contains("press Push"), "{says}");
+    }
+
+    /// One change kept aside for this PC's own, as the copy saves it.
+    fn kept_aside(key: &str, mod_name: &str, by: &str, now: crate::groupsync::State) -> crate::groupsync::HeldChange {
+        crate::groupsync::HeldChange { key: key.into(), now, by: by.to_lowercase(), name: by.into(), seq: 10, mod_name: mod_name.into(), ..Default::default() }
+    }
+
+    fn file(n: u64) -> crate::groupsync::State {
+        crate::groupsync::State::File { file: format!("cf:{n}"), on: true }
+    }
+
+    /// A member's change that waits for this PC's own is never silent: it is
+    /// said whether that change is on its way, held back for Push, or can't
+    /// go out at all.
+    #[test]
+    fn a_change_kept_aside_for_yours_is_said_wherever_yours_stands() {
+        let mut c = PackCopy::default();
+        c.held.push(kept_aside("p:1", "Sodium", "Mia", file(13)));
+        let mut i = input(&c);
+        let s = status(&i);
+        assert_eq!(s, Status::AfterYours { after: After::of(&c).unwrap(), offline: false });
+        assert_eq!(s.label(), "Your change goes first");
+        assert_eq!(s.title(), "Your change goes first");
+        assert_eq!(s.detail(0), "Waiting for your change to Sodium to be shared, then Mia's version goes in.");
+        assert_eq!(s.tone(), Tone::Busy);
+        // Sending is the same wait, said with what it holds up.
+        i.unsent = true;
+        i.held = true;
+        assert!(matches!(status(&i), Status::AfterYours { offline: false, .. }));
+        // Offline: it can't go out, and that is said too.
+        i.connected = false;
+        let s = status(&i);
+        assert!(matches!(s, Status::AfterYours { offline: true, .. }), "{s:?}");
+        assert_eq!(s.detail(0), "Waiting for your change to Sodium to be shared, then Mia's version goes in. Can't reach the group right now.");
+        assert_eq!(s.tone(), Tone::Quiet);
+        // Held back for Push: the Push line, and what comes after it.
+        i.connected = true;
+        i.to_push = Some(1);
+        let s = status(&i);
+        assert_eq!(s, Status::ToPush { changes: 1, after: After::of(&c) });
+        assert_eq!(s.label(), "Not sent yet");
+        assert_eq!(s.detail(0), "You made 1 change. The group gets them when you press Push. Then Mia's version of Sodium goes in.");
+        // Pull now doesn't claim the copy has the group's latest then.
+        let (says, _) = pull_says(true, 0, &[], &s, 0);
+        assert_eq!(says, s.detail(0));
+        // What needs the player still comes first.
+        waiting_from(&mut c, "noah", "Noah", 12, &[("p:2", 0, "noah")]);
+        assert!(matches!(status(&input(&c)), Status::Updating { .. }));
+    }
+
+    #[test]
+    fn changes_kept_aside_are_told_by_how_many_and_what_they_do() {
+        let says = |held: Vec<crate::groupsync::HeldChange>| {
+            let c = PackCopy { held, ..Default::default() };
+            let a = After::of(&c).unwrap();
+            (a.waiting_says(), a.then_says())
+        };
+        // Two mods, one member.
+        assert_eq!(
+            says(vec![kept_aside("p:1", "Sodium", "Mia", file(13)), kept_aside("p:2", "Lithium", "Mia", file(23))]),
+            (
+                "Waiting for your changes to Sodium and Lithium to be shared, then Mia's versions go in.".to_string(),
+                "Then Mia's versions of Sodium and Lithium go in.".to_string()
+            )
+        );
+        // Two members.
+        assert_eq!(
+            says(vec![kept_aside("p:1", "Sodium", "Mia", file(13)), kept_aside("p:2", "Lithium", "Noah", file(23))]).0,
+            "Waiting for your changes to Sodium and Lithium to be shared, then Mia and Noah's versions go in."
+        );
+        // Many mods and people: counted, not listed.
+        let many = vec![
+            kept_aside("p:1", "Sodium", "Mia", file(13)),
+            kept_aside("p:2", "Lithium", "Noah", file(23)),
+            kept_aside("p:3", "Iris", "Ava", file(33)),
+        ];
+        assert_eq!(says(many).0, "Waiting for your changes to 3 mods to be shared, then the group's versions go in.");
+        // A removal or a switch is a change, not a version.
+        let off = kept_aside("p:1", "Sodium", "Mia", crate::groupsync::State::File { file: "cf:11".into(), on: false });
+        assert_eq!(says(vec![off]).0, "Waiting for your change to Sodium to be shared, then Mia's change goes in.");
+        let removed = kept_aside("p:1", "Sodium", "Mia", crate::groupsync::State::Unlisted);
+        assert_eq!(
+            says(vec![removed]),
+            (
+                "Waiting for your change to Sodium to be shared, then Mia's change goes in.".to_string(),
+                "Then Mia's change to Sodium goes in.".to_string()
+            )
+        );
+        // A mod whose name isn't known here, from a member with no name.
+        let mut nameless = kept_aside("p:1", "", "", file(13));
+        nameless.by = "x".into();
+        assert_eq!(says(vec![nameless]).0, "Waiting for your change to a mod to be shared, then the group's version goes in.");
+        assert_eq!(After::of(&PackCopy::default()), None);
     }
 
     /// Holding back never stops this PC taking the others' changes in.

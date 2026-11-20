@@ -46,6 +46,7 @@ recipe, publish, sync server).
 | Same as the group | **Same as group** | "Same as the group. Checked 2 min ago." | nothing below applies and the PC is connected |
 | Updating | **Updating** | "Taking in 3 changes from Mia." / "Getting the group's changes." | a merge runs, or codes wait and nothing blocks them |
 | Sending | **Sending your changes** | "Your changes reach the group in a moment." | a change made here is not sent yet (and nothing else applies) |
+| Your change first | **Your change goes first** | "Waiting for your change to Sodium to be shared, then Mia's version goes in." (offline: + "Can't reach the group right now."; held back for Push: the Push line + "Then Mia's version of Sodium goes in.") | a member's change is kept aside for this PC's own change of the same mod (`PackCopy::held`, below) |
 | Behind, game | **Behind: close the game** | "The pack's new version / the loader / N mods change when you close the game." | `Wait::Game`, loader moved while the game runs, or jars queued in `.hopper-locked.json` |
 | Behind, you | **Behind: needs you** | "Some of your settings changed in this update too. Pick what to keep." | `Wait::Pick` |
 | Can't apply | **Can't update** | the plain reason + whether Hopper tries again | a failed try (`group_retry`, `Wait::Failed`), GitHub's rate limit, or a mod from a link the player hasn't trusted yet (see below) |
@@ -83,6 +84,39 @@ other sources?" dialog (`incoming_sources::gate`); a yes sets
 `Owed::approved` (`approve_owed`), which lets that one mod past the source
 check on the retry, then pulls. A mod the group changed again, or that is on
 this PC by now, leaves the list.
+
+### A member's change to a mod this PC changed too and hasn't sent
+
+A member's change to a mod this PC changed and hasn't sent yet waits for
+this PC's publish (`Verdict::Held`), and after 10 s (`HELD_FOR`) the member's
+code is taken in anyway. That used to drop their change of that mod without
+a word. Then a change taken back here before it was sent left this PC on the
+old file for good, and one sent much later (offline, a send that kept
+failing, "When I press Push") went out as the newest and undid the member's
+update for the whole group.
+
+The change is kept now: `PackCopy::held` (settings), one `HeldChange` per
+mod, with what is needed to make it later. `groupsync::plan` makes it once
+this PC's own change of the mod is no longer unsent, through the same
+`apply` as any member's change, and never while it is unsent, so the two
+can't swap back and forth:
+
+- **Sent**: the member's change goes in after it, dated right after that
+  publish, so it wins on every PC. This PC's code then goes out again as an
+  echo of the member's change (no Push needed for it).
+- **Taken back**: it goes in as it came, with its own number.
+
+Only the newest change of a mod is kept. A later one that goes in, or that
+already is what this PC has, ends the one kept; a later one that loses only
+to this PC's own publish takes its place. So a mod the group removed later
+is never brought back by an older update. Mods only: a loader, pack version
+or lock that waited too long is dropped as before (and logged).
+
+The app looks at what is kept when the pack or its last publish changes
+(`Store::held_due`), which is when such a change can go in: no timer, no
+extra traffic. The status says it for as long as it waits (the "Your change
+goes first" row above), and the check of the mods folder doesn't list the
+mod as different meanwhile.
 
 ### The "taken in" baseline never claims more than is on disk
 
@@ -208,7 +242,9 @@ game, a pick still waits for the player; the line says so.
 `hopper --dialog group-sync --state NAME` fills a made-up group (you, Mia,
 Noah, Ava) over the first two instances: the first is a copy of Mia's pack,
 the second a pack of yours. NAME is one of in-step, updating, game, pick,
-left-out, failed, offline, sending, and for the check of the mods folder
+left-out, failed, offline, sending, after-yours, after-yours-push (a member's
+change kept aside for yours; with -push, shared when you press Push), and
+for the check of the mods folder
 verify-matches, verify-behind (two mods), verify-cant, verify-kept, verify-all
 (every reason once). Nothing goes to the real service
 (`Store::group_preview`; the feed's friends and groups are ignored while it
