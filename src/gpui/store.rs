@@ -3698,6 +3698,8 @@ impl Store {
         if updates.is_empty() {
             return;
         }
+        // Name what is actually changing: a pack update is not a mod update.
+        let what = hopper::update_list::kinds_label(&inst.addons, &updates).unwrap_or_else(|| "content".to_string());
         if server_mods::remote(root).is_some() {
             self.run_remote_updates(root, updates);
             return;
@@ -3720,7 +3722,7 @@ impl Store {
         let queue = self.update_queue.clone();
         let recent = self.recent_updates.clone();
         let wake = self.wake.clone();
-        self.spawn_instance_job(&inst.root.clone(), format!("Updating mods in {}", inst.name), move |job| {
+        self.spawn_instance_job(&inst.root.clone(), format!("Updating {what} in {}", inst.name), move |job| {
             fresh(&mut inst);
             let jars_before = server_offer::jars_at(&inst.root);
             // No snapshot first: backups are the player's to make. The

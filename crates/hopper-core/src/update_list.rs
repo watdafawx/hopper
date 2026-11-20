@@ -43,10 +43,71 @@ pub fn pending_in<'a>(addons: &'a [Addon], list: &'a [Update], class: u32) -> im
     })
 }
 
-/// How many offers each kind has, in [`KINDS`] order. The header and the
-/// content tabs count from the same filter, so their numbers agree.
+/// The offers a content tab shows, one per row the player sees: mods one per
+/// project (an old copy folded into its row is not a second update), packs,
+/// shaders and data packs one per file (each copy sits in its own row and
+/// has its own version). Only offers for something still installed as that
+/// kind are listed.
+pub fn pending_rows<'a>(addons: &'a [Addon], list: &'a [Update], class: u32) -> impl Iterator<Item = &'a Update> + 'a {
+    let by_file = class != crate::cf::CLASS_MODS;
+    let mut seen = HashSet::new();
+    list.iter().filter(move |u| {
+        let key = crate::pack_where::row_key(&u.from);
+        let installed = addons.iter().any(|a| {
+            a.project_id == u.project_id && in_class(a, class) && (!by_file || crate::pack_where::row_key(&a.file_name) == key)
+        });
+        installed
+            && if by_file {
+                seen.insert(key)
+            } else {
+                seen.insert(u.project_id.to_string())
+            }
+    })
+}
+
+/// How many offers each kind has, in [`KINDS`] order, counted as the rows
+/// the player sees (see [`pending_rows`]). The header, the tab counts and
+/// Update all all count from this, so their numbers agree.
 pub fn counts(addons: &[Addon], list: &[Update]) -> [usize; 4] {
-    KINDS.map(|c| pending_in(addons, list, c).count())
+    KINDS.map(|c| pending_rows(addons, list, c).count())
+}
+
+/// What a set of updates changes, in tab order, for a task title: "mods",
+/// "resource packs", or "2 resource packs, 1 mod" when it is a mix. `None`
+/// when no update names something installed (a loose file, say).
+pub fn kinds_label(addons: &[Addon], updates: &[Update]) -> Option<String> {
+    let mut counts = [0usize; 4];
+    for (i, class) in KINDS.iter().enumerate() {
+        // One per row, as the list counts it: a mod once however many of its
+        // files are offered, a pack once per file name.
+        let by_file = *class != crate::cf::CLASS_MODS;
+        let mut seen = HashSet::new();
+        counts[i] = updates
+            .iter()
+            .filter(|u| {
+                let installed = addons.iter().any(|a| a.project_id == u.project_id && in_class(a, *class));
+                installed
+                    && if by_file {
+                        seen.insert(crate::pack_where::row_key(&u.from))
+                    } else {
+                        seen.insert(u.project_id.to_string())
+                    }
+            })
+            .count();
+    }
+    const MANY: [&str; 4] = ["mods", "resource packs", "shaders", "data packs"];
+    const ONE: [&str; 4] = ["mod", "resource pack", "shader", "data pack"];
+    let kinds: Vec<(usize, usize)> = counts.iter().copied().enumerate().filter(|(_, n)| *n > 0).collect();
+    match kinds.as_slice() {
+        [] => None,
+        [(i, _)] => Some(MANY[*i].to_string()),
+        many => Some(
+            many.iter()
+                .map(|(i, n)| format!("{n} {}", if *n == 1 { ONE[*i] } else { MANY[*i] }))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -266,6 +327,72 @@ mod tests {
         assert_eq!(counts(&addons, &list), [2, 1, 1, 0]);
         let ids: Vec<u64> = pending_in(&addons, &list, crate::cf::CLASS_MODS).map(|u| u.project_id).collect();
         assert_eq!(ids, vec![1, 4]);
+    }
+
+    #[test]
+    fn counts_follow_the_rows_not_the_projects() {
+        // One resource pack in resourcepacks\ and again in Paxi, under
+        // different names: the list has two offers, the tab shows two rows,
+        // so both the header and Update all must say 2.
+        let mut rp = addon(2, "geo.zip");
+        rp.class_id = crate::cf::CLASS_RESOURCE_PACKS;
+        let mut paxi = addon(2, "geo-copy.zip");
+        paxi.class_id = crate::cf::CLASS_RESOURCE_PACKS;
+        let addons = vec![rp, paxi];
+        let list = vec![offer(2, "geo.zip", 20), offer(2, "geo-copy.zip", 21)];
+        assert_eq!(counts(&addons, &list), [0, 2, 0, 0]);
+        assert_eq!(pending_rows(&addons, &list, crate::cf::CLASS_RESOURCE_PACKS).count(), 2);
+        // A second offer for the same file (a saved list, then a check) is
+        // still one row.
+        let twice = vec![offer(2, "geo.zip", 20), offer(2, "geo.zip", 22), offer(2, "geo-copy.zip", 21)];
+        assert_eq!(counts(&addons, &twice), [0, 2, 0, 0]);
+        // A copy that is gone is not counted.
+        assert_eq!(counts(&addons[..1], &twice), [0, 1, 0, 0]);
+        // A mod's old copy folded into its row is one mod, not two.
+        let mut old = addon(1, "a-1.0.jar");
+        old.class_id = crate::cf::CLASS_MODS;
+        let mut shown = addon(1, "a-1.1.jar");
+        shown.class_id = crate::cf::CLASS_MODS;
+        let mods = vec![old, shown];
+        let list = vec![offer(1, "a-1.0.jar", 10), offer(1, "a-1.1.jar", 11)];
+        assert_eq!(counts(&mods, &list), [1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn counts_keep_each_kind_to_its_own_copies() {
+        // The same zip added as a resource pack and as a data pack: each tab
+        // counts its own file, and the header counts both (two rows).
+        let mut rp = addon(2, "geo.zip");
+        rp.class_id = crate::cf::CLASS_RESOURCE_PACKS;
+        let mut dp = addon(2, "geo.zip");
+        dp.class_id = crate::cf::CLASS_DATAPACKS;
+        let addons = vec![rp, dp];
+        let list = vec![offer(2, "geo.zip", 20)];
+        assert_eq!(counts(&addons, &list), [0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn kinds_label_names_what_is_updating() {
+        let mut m = addon(1, "a.jar");
+        m.class_id = crate::cf::CLASS_MODS;
+        let mut rp = addon(2, "geo.zip");
+        rp.class_id = crate::cf::CLASS_RESOURCE_PACKS;
+        let mut rp2 = addon(3, "geo2.zip");
+        rp2.class_id = crate::cf::CLASS_RESOURCE_PACKS;
+        let mut sh = addon(4, "solas.zip");
+        sh.class_id = crate::cf::CLASS_SHADERS;
+        let addons = vec![m, rp, rp2, sh];
+        let mods = vec![offer(1, "a.jar", 10)];
+        assert_eq!(kinds_label(&addons, &mods).as_deref(), Some("mods"));
+        let packs = vec![offer(2, "geo.zip", 20), offer(3, "geo2.zip", 21)];
+        assert_eq!(kinds_label(&addons, &packs).as_deref(), Some("resource packs"));
+        // A mix names every kind and how many, in tab order, plural only
+        // where there is more than one.
+        let both = vec![offer(1, "a.jar", 10), offer(2, "geo.zip", 20), offer(3, "geo2.zip", 21)];
+        assert_eq!(kinds_label(&addons, &both).as_deref(), Some("1 mod, 2 resource packs"));
+        assert_eq!(kinds_label(&addons, &[offer(4, "solas.zip", 30)]).as_deref(), Some("shaders"));
+        // An update that names nothing installed adds no kind.
+        assert_eq!(kinds_label(&addons, &[offer(9, "gone.jar", 90)]), None);
     }
 
     fn offer(pid: u64, from: &str, to_id: u64) -> Update {

@@ -428,13 +428,6 @@ impl Offers {
         self.get(a).is_some()
     }
 
-    pub(crate) fn values(&self) -> Box<dyn Iterator<Item = &Update> + '_> {
-        match &self.by_file {
-            Some(m) => Box::new(m.values()),
-            None => Box::new(self.by_pid.values()),
-        }
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
         self.by_file.as_ref().map_or(self.by_pid.is_empty(), HashMap::is_empty)
     }
@@ -1560,7 +1553,7 @@ impl AddonsView {
             .values()
             .filter(|u| inst.addons.iter().any(|a| a.project_id == u.project_id && in_class(a, self.class)));
         if self.class == cf::CLASS_MODS {
-            let mut out = pending;
+            let mut out = pending.into_iter().map(|u| (u.project_id, u)).collect::<HashMap<_, _>>();
             for u in recent {
                 out.insert(u.project_id, u.clone());
             }
@@ -1568,7 +1561,7 @@ impl AddonsView {
         }
         // One just done sits under its new file, where its row is now; a
         // second copy of it elsewhere keeps its own offer.
-        let mut out = hopper::pack_where::offers_by_file(pending.values());
+        let mut out = hopper::pack_where::offers_by_file(pending.iter());
         for u in recent {
             out.insert(hopper::pack_where::row_key(&u.file.file_name), u.clone());
         }
@@ -1585,13 +1578,12 @@ impl AddonsView {
         hopper::pack_where::just_updated(self.recent.get(&a.project_id), a.project_id, &a.file_name, own)
     }
 
-    fn pending_updates(&self, inst: &Instance, cx: &App) -> HashMap<u64, Update> {
+    fn pending_updates(&self, inst: &Instance, cx: &App) -> Vec<Update> {
         match self.store.read(cx).updates(&inst.root).and_then(|u| u.ready()) {
-            // Same filter as the instance header's count.
-            Some(u) => hopper::update_list::pending_in(&inst.addons, u, self.class)
-                .map(|u| (u.project_id, u.clone()))
-                .collect(),
-            None => HashMap::new(),
+            // Same rows as the instance header's count: mods one per
+            // project, packs and shaders one per file (see Offers).
+            Some(u) => hopper::update_list::pending_rows(&inst.addons, u, self.class).cloned().collect(),
+            None => Vec::new(),
         }
     }
 
@@ -3053,9 +3045,14 @@ impl AddonsView {
         pending.retain(|u| !self.recent.get(&u.project_id).is_some_and(|r| r.from.eq_ignore_ascii_case(&u.from)));
         let updates = &pending;
         let of_class = || inst.addons.iter().filter(|a| in_class(a, self.class) && !hidden_copy(&self.table.extra, &a.file_name));
-        let n_up = of_class()
-            .filter(|a| updates.contains(a))
-            .count();
+        // One row per file for packs: two copies of the same name (the
+        // instance's and Paxi's) are one row, so they are one update here,
+        // the same as in the header and the list.
+        let mut row_files = HashSet::new();
+        let shown_rows: Vec<&hopper::instances::Addon> = of_class()
+            .filter(|a| self.class == cf::CLASS_MODS || row_files.insert(hopper::pack_where::row_key(&a.file_name)))
+            .collect();
+        let n_up = shown_rows.iter().filter(|a| updates.contains(a)).count();
         let n_off = of_class().filter(|a| !self.row_on(a)).count();
         let n_added = of_class().filter(|a| !a.from_pack).count();
         // Packs filter by where they count; the rest by Updates / Disabled.
@@ -3153,11 +3150,13 @@ impl AddonsView {
             true if updates.is_empty() => None,
             true => {
                 let store = self.store.read(cx);
-                // What isn't already updating or queued.
-                let all: Vec<Update> = updates
-                    .values()
+                // What isn't already updating or queued, one per row shown
+                // (the same rows the header counts).
+                let all: Vec<Update> = shown_rows
+                    .iter()
+                    .filter(|a| updates.contains(a))
+                    .filter_map(|a| updates.get(a).cloned())
                     .filter(|u| store.update_state(&inst.root, u.project_id).is_none())
-                    .cloned()
                     .collect();
                 // The toolbar's one filled button: opens the review first.
                 let n = all.len();
