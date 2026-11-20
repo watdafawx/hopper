@@ -1240,6 +1240,9 @@ impl Store {
         // Required mods the packs lack: read once a copy appears (later
         // reads follow the mods folder changing).
         self.seed_group_needs();
+        // The copies checked against their mods folders (again when either
+        // changed since).
+        self.seed_group_verify();
         // Group packs with other members' changes waiting.
         let mut ready: Vec<(PackCopy, PathBuf, bool)> = Vec::new();
         for c in self.settings.group_copies.iter().filter(|_| self.group_preview.is_none()) {
@@ -1270,7 +1273,7 @@ impl Store {
     fn group_ready(&self, c: &PackCopy, root: &Path, now: Instant, forced: bool) -> Option<bool> {
         // Nothing waiting, but the player just confirmed the source of a mod
         // the group's changes left out (or Pull now was asked): make it now.
-        if self.group_merging.contains(&c.local) || (c.waiting.is_empty() && !forced && !c.owed_ready(self.settings.allow_sources)) {
+        if self.group_merging.contains(&c.local) || self.group_verify.repairing.contains(&c.local) || (c.waiting.is_empty() && !forced && !c.owed_ready(self.settings.allow_sources)) {
             return None;
         }
         // The group moved the pack and this PC couldn't follow yet: the
@@ -1337,7 +1340,8 @@ impl Store {
             connected: matches!(self.sync_status(), SyncStatus::Ok),
             checked: self.mailbox_checked,
             now: unix_now(),
-            merging: self.group_merging.contains(&c.local) || self.group_pulling.contains_key(&c.local),
+            merging: self.group_merging.contains(&c.local) || self.group_pulling.contains_key(&c.local) || self.group_verify.repairing.contains(&c.local),
+            check: self.group_check(root),
             pack_due: self.group_pack_due(root),
             failure,
             allow_sources: self.settings.allow_sources,
@@ -1545,6 +1549,10 @@ impl Store {
         if state != "needs-mod" {
             self.preview_group_needs(&root, &local, Vec::new());
         }
+        // Every state the check can be in, on the first copy: verify-matches,
+        // verify-behind (two mods), verify-cant, verify-kept, verify-all.
+        // Every other state has a copy that matches.
+        self.preview_group_verify(&root, &local, if state.starts_with("verify") { state } else { "verify-matches" });
         if state == "failed" {
             let e = anyhow::anyhow!("The mod sites wouldn't give Hopper that file.");
             let r = hopper::recipe::Retry::failed(None, &newest(&copy), &e, 0, Instant::now());
@@ -1664,9 +1672,15 @@ impl Store {
 
     /// Tells what Pull now did: `made` changes went in (from `from`), and
     /// the copy stands as `group_status` says now.
-    fn finish_pull(&mut self, local: &str, root: &Path, made: usize, from: Vec<String>, cx: &mut Context<Self>) {
+    pub(super) fn finish_pull(&mut self, local: &str, root: &Path, made: usize, from: Vec<String>, cx: &mut Context<Self>) {
         // "Pull from Mia" is done: her later codes wait again.
         self.group_pull_from.remove(local);
+        // After the group's changes are in, Pull now makes the copy match
+        // what the group has (a mod a copy silently lacks), then tells all.
+        if self.pull_repairs(local, root, made, &from, cx) {
+            return;
+        }
+        self.pull_told(local);
         let Some(reached) = self.group_pulling.remove(local) else { return };
         let Some(after) = self.group_status(root) else { return };
         let (text, bad) = hopper::groupstatus::pull_says(reached, made, &from, &after, unix_now());

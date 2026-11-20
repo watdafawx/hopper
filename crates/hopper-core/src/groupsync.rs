@@ -837,7 +837,7 @@ impl Kept {
 
 /// The file a mod here is, the way a code names it ("cf:<file>",
 /// "mr:<version>", "src:<file name>").
-fn file_here(a: &Addon) -> Option<String> {
+pub(crate) fn file_here(a: &Addon) -> Option<String> {
     if a.source.is_some() {
         return Some(format!("src:{}", a.file_name.trim_end_matches(".disabled").to_lowercase()));
     }
@@ -1180,6 +1180,13 @@ fn baseline(mut g: Got, now: &Mods, prev: Option<&Mods>, from: &str, unresolved:
 /// Whose a code's file is: from the instance's own mods when it has that
 /// file, else asked from CurseForge or Modrinth (failures give None).
 pub fn projects_of(inst: &Instance, shares: &[&Share]) -> HashMap<String, u64> {
+    projects_of_noted(inst, shares).0
+}
+
+/// [`projects_of`], and whether a site failed to answer for some file (as
+/// against a site that doesn't know it): the check can't speak for those.
+pub fn projects_of_noted(inst: &Instance, shares: &[&Share]) -> (HashMap<String, u64>, bool) {
+    let mut failed = false;
     let mut out: HashMap<String, u64> = HashMap::new();
     let mut ask_cf: Vec<u64> = Vec::new();
     for s in shares {
@@ -1207,7 +1214,10 @@ pub fn projects_of(inst: &Instance, shares: &[&Share]) -> HashMap<String, u64> {
                             }
                             // Not silent: the mod is left out of this read
                             // and kept out of the baseline (see `baseline`).
-                            Err(e) => log::warn!("group sync: looking up Modrinth version {version}: {e:#}"),
+                            Err(e) => {
+                                failed = true;
+                                log::warn!("group sync: looking up Modrinth version {version}: {e:#}");
+                            }
                         }
                     }
                 }
@@ -1224,10 +1234,13 @@ pub fn projects_of(inst: &Instance, shares: &[&Share]) -> HashMap<String, u64> {
                     out.insert(format!("cf:{}", f.id), f.mod_id);
                 }
             }
-            Err(e) => log::warn!("group sync: looking up {} CurseForge file(s): {e:#}", chunk.len()),
+            Err(e) => {
+                failed = true;
+                log::warn!("group sync: looking up {} CurseForge file(s): {e:#}", chunk.len());
+            }
         }
     }
-    out
+    (out, failed)
 }
 
 /// The lookup [`mods`] wants, from [`projects_of`]'s answers.

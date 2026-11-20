@@ -21,6 +21,7 @@ mod config_sync;
 mod disk_sync;
 mod friends;
 mod group_needs;
+mod group_verify;
 mod only_here;
 mod node_heads;
 mod panel_events;
@@ -77,6 +78,9 @@ pub enum Msg {
     Added(Box<Msg>, Option<HashSet<String>>),
     /// A group copy's jars were read for required mods the pack lacks.
     GroupNeeds(Box<group_needs::Scanned>),
+    /// A group copy was checked against its mods folder, or made to match.
+    GroupChecked(Box<group_verify::Checked>),
+    GroupRepaired(Box<group_verify::Repair>),
     /// A server's mods were synced while it ran (when it had started):
     /// its pages offer a restart. Then as [`Msg::ServersChanged`].
     SyncedLive(PathBuf, String),
@@ -752,6 +756,8 @@ pub struct Store {
     group_loader_waiting: HashSet<PathBuf>,
     /// Required mods the group copies' packs lack (`group_needs`).
     group_needs: group_needs::State,
+    /// Group copies checked against their mods folders (`group_verify`).
+    group_verify: group_verify::State,
     /// Group copies (local ids) whose group moved the pack to a version
     /// this PC couldn't follow yet, with when that was found and the pack
     /// file the instance was on then (see `friends::pack_due_ready`).
@@ -1117,6 +1123,7 @@ impl Store {
             group_preview: None,
             group_loader_waiting: Default::default(),
             group_needs: Default::default(),
+            group_verify: Default::default(),
             group_pack_due: Default::default(),
             group_strays: Default::default(),
             cfg: Default::default(),
@@ -1580,6 +1587,8 @@ impl Store {
                 }
             }
             Msg::GroupNeeds(s) => self.on_group_needs(*s, cx),
+            Msg::GroupChecked(c) => self.on_group_checked(*c, cx),
+            Msg::GroupRepaired(r) => self.on_group_repaired(*r, cx),
             Msg::Fetch(root, pages, by) => self.fetch_pages(&root, pages, by),
             Msg::Reidentified(root) => {
                 self.handle(Msg::InstanceChanged(root.clone()), cx);
@@ -1611,6 +1620,7 @@ impl Store {
                 self.note_content(&root);
                 self.read_waiting(&root);
                 self.want_group_needs(&root);
+                self.want_group_verify(&root);
             }
             Msg::Disk(changes) => self.disk_changed(changes, cx),
             Msg::DiskLoaded(root, new, area) => self.disk_loaded(root, new, area, cx),

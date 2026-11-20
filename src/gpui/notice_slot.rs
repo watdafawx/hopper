@@ -105,6 +105,9 @@ pub struct Notice {
     pub actions: Vec<Act>,
     /// What "Details" opens under the strip (rows, more text).
     pub details: Option<AnyElement>,
+    /// Its details open the first time it shows (the player can close them
+    /// and they stay closed): for a list the player needs to see.
+    pub open_new: bool,
     /// A thin bar along the strip's bottom edge while something runs.
     pub progress: Option<f32>,
     /// The ✕. Ignored for [`Tier::Stop`]: those stay until fixed.
@@ -126,6 +129,7 @@ impl Notice {
             primary: None,
             actions: Vec::new(),
             details: None,
+            open_new: false,
             progress: None,
             dismiss: None,
             since: 0,
@@ -173,6 +177,12 @@ impl Notice {
 
     pub fn details(mut self, el: impl IntoElement) -> Self {
         self.details = Some(el.into_any_element());
+        self
+    }
+
+    /// Opens the details the first time the notice shows ([`Notice::open_new`]).
+    pub fn open_new(mut self) -> Self {
+        self.open_new = true;
         self
     }
 
@@ -242,6 +252,9 @@ pub fn fold(tiers: &[Tier]) -> (Vec<usize>, Vec<(Tier, Vec<usize>)>) {
 #[derive(Default)]
 struct SlotState {
     open: HashSet<SharedString>,
+    /// Notices whose details were opened by themselves ([`Notice::open_new`]),
+    /// so closing them sticks.
+    seen: HashSet<SharedString>,
     width: Pixels,
 }
 
@@ -263,6 +276,16 @@ pub fn slot(id: &str, notices: Vec<Notice>, window: &mut Window, cx: &mut App) -
     let width = state.read(cx).width;
     let narrow = width > px(0.) && width < window.rem_size() * NARROW_REM;
     let subjects = !(width > px(0.) && width < window.rem_size() * SUBJECT_REM);
+    // Details that open by themselves, once each.
+    for n in notices.iter().filter(|n| n.open_new && n.details.is_some()) {
+        if !state.read(cx).seen.contains(&n.id) {
+            let id = n.id.clone();
+            state.update(cx, |s, _| {
+                s.seen.insert(id.clone());
+                s.open.insert(id);
+            });
+        }
+    }
     let keys: Vec<(Tier, i64)> = notices.iter().map(|n| (n.tier, n.since)).collect();
     let mut slots: Vec<Option<Notice>> = notices.into_iter().map(Some).collect();
     let sorted: Vec<Notice> = order(&keys).into_iter().filter_map(|i| slots[i].take()).collect();

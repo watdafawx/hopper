@@ -64,6 +64,27 @@ pub struct Input<'a> {
     /// This PC shares its changes when the player presses Push, and this
     /// pack has some held back: about how many (0: can't tell).
     pub to_push: Option<usize>,
+    /// What the check of the copy against its mods folder found
+    /// ([`crate::groupverify`]).
+    pub check: Check,
+}
+
+/// How the copy compares with the group, mod by mod, as the last check of
+/// its mods folder found it ([`crate::groupverify::check`]). The rest of the
+/// status is bookkeeping (nothing waits, nothing failed); this is the part
+/// that looks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Check {
+    /// Not looked at yet, or being looked at: nothing is claimed.
+    #[default]
+    Checking,
+    /// The copy has what the group has.
+    Matches,
+    /// `mods` of the group's mods are missing, another file, or switched
+    /// differently here (`missing`: all of them are plainly not here).
+    Behind { mods: usize, missing: bool },
+    /// A site didn't answer, so the check can't say.
+    Couldnt,
 }
 
 /// How one copy stands.
@@ -93,6 +114,16 @@ pub enum Status {
     Parked { from: Vec<crate::syncmode::Parked>, only: String },
     /// Changes made here wait for the player to press Push.
     ToPush { changes: usize },
+    /// Everything is taken in, but the mods folder doesn't have what the
+    /// group has: `mods` of them (`missing`: all plainly not here). The check
+    /// of the copy found it ([`crate::groupverify`]); "Make my copy match"
+    /// fixes it.
+    Behind { mods: usize, missing: bool },
+    /// The check of the copy couldn't finish (a site didn't answer), so it
+    /// can't say the copy matches.
+    CantCheck,
+    /// The copy is being compared with the group.
+    Checking,
 }
 
 /// How loud a status is: what colour a chip gets.
@@ -119,14 +150,18 @@ impl Status {
             Status::NeedsMod { needs } => crate::groupdeps::label(needs.len()),
             Status::Parked { .. } => "Changes to pull",
             Status::ToPush { .. } => "Not sent yet",
+            Status::Behind { missing: true, .. } => "Missing mods",
+            Status::Behind { .. } => "Differs from group",
+            Status::CantCheck => "Couldn't check",
+            Status::Checking => "Checking",
         }
     }
 
     pub fn tone(&self) -> Tone {
         match self {
             Status::InStep { .. } => Tone::Good,
-            Status::Updating { .. } | Status::Sending | Status::ToPush { .. } => Tone::Busy,
-            Status::WaitsForGame { .. } | Status::WaitsForYou { .. } | Status::Parked { .. } => Tone::Warn,
+            Status::Updating { .. } | Status::Sending | Status::ToPush { .. } | Status::Checking => Tone::Busy,
+            Status::WaitsForGame { .. } | Status::WaitsForYou { .. } | Status::Parked { .. } | Status::Behind { .. } | Status::CantCheck => Tone::Warn,
             Status::Cant { .. } | Status::NeedsMod { .. } => Tone::Bad,
             Status::Offline { .. } => Tone::Quiet,
         }
@@ -137,13 +172,13 @@ impl Status {
     pub fn rank(&self) -> u8 {
         match self {
             Status::Cant { .. } => 0,
-            Status::NeedsMod { .. } => 1,
+            Status::NeedsMod { .. } | Status::Behind { .. } => 1,
             Status::WaitsForYou { .. } => 2,
             Status::WaitsForGame { .. } => 3,
-            Status::Parked { .. } => 4,
+            Status::Parked { .. } | Status::CantCheck => 4,
             Status::ToPush { .. } => 5,
             Status::Offline { .. } => 6,
-            Status::Updating { .. } | Status::Sending => 7,
+            Status::Updating { .. } | Status::Sending | Status::Checking => 7,
             Status::InStep { .. } => 8,
         }
     }
@@ -155,6 +190,9 @@ impl Status {
                 Some(at) => format!("Same as the group. Checked {}.", ago(now, *at)),
                 None => "Same as the group.".to_string(),
             },
+            Status::Behind { mods, missing } => behind_says(*mods, *missing),
+            Status::CantCheck => CANT_CHECK.to_string(),
+            Status::Checking => "Comparing your copy with the group.".to_string(),
             Status::Updating { changes, from } => {
                 let who = people(from);
                 match (*changes, who.is_empty()) {
@@ -263,6 +301,15 @@ pub fn status(i: &Input) -> Status {
     if !i.needs.is_empty() {
         return Status::NeedsMod { needs: i.needs.to_vec() };
     }
+    // Taken in is not the same as there: the mods folder is what counts
+    // ([`crate::groupverify`]). What the player keeps only here, or locked,
+    // is no difference; a mod waiting to be pulled from the maker is Parked
+    // (below), not missing, since only codes already taken in are compared.
+    match i.check {
+        Check::Behind { mods, missing } => return Status::Behind { mods, missing },
+        Check::Couldnt => return Status::CantCheck,
+        Check::Matches | Check::Checking => {}
+    }
     if !i.connected {
         return Status::Offline { checked: i.checked };
     }
@@ -279,7 +326,25 @@ pub fn status(i: &Input) -> Status {
     if i.unsent || i.held {
         return Status::Sending;
     }
+    // Same as the group is a measured claim: until the check has looked at
+    // the mods folder, nothing is said.
+    if i.check == Check::Checking {
+        return Status::Checking;
+    }
     Status::InStep { checked: i.checked }
+}
+
+/// What the strip says when the check couldn't finish.
+pub const CANT_CHECK: &str = "Hopper couldn't check CurseForge just now, so your copy might be missing something. Try again.";
+
+/// "Your copy is missing 2 mods the group has." (`missing`: all of them are
+/// plainly not here); "Your copy differs in 2 mods." when some are another
+/// version or switched the other way. The second is short on purpose: the strip
+/// cuts a long title with an ellipsis at the narrowest window, and the cut must
+/// not take the word "mods" with it.
+pub fn behind_says(mods: usize, missing: bool) -> String {
+    let n = if mods == 1 { "1 mod".to_string() } else { format!("{mods} mods") };
+    if missing { format!("Your copy is missing {n} the group has.") } else { format!("Your copy differs in {n}.") }
 }
 
 /// About how many changes the codes waiting to be taken in carry: the mods
@@ -343,15 +408,15 @@ pub fn pull_says(reached: bool, made: usize, from: &[String], after: &Status, no
         return (format!("{lead}Couldn't reach the group to check for newer changes. Try again in a moment."), true);
     }
     match after {
-        Status::InStep { .. } | Status::Sending | Status::Updating { .. } if took.is_empty() => ("Already the same as the group.".to_string(), false),
-        Status::InStep { .. } | Status::Sending | Status::Updating { .. } => (format!("{took} Now the same as the group."), false),
+        Status::InStep { .. } | Status::Sending | Status::Updating { .. } | Status::Checking if took.is_empty() => ("Already the same as the group.".to_string(), false),
+        Status::InStep { .. } | Status::Sending | Status::Updating { .. } | Status::Checking => (format!("{took} Now the same as the group."), false),
         // Only this PC's own changes wait, to go out: the copy has the
         // group's.
         Status::ToPush { .. } if took.is_empty() => ("You have the group's latest changes. Yours go out when you press Push.".to_string(), false),
         Status::ToPush { .. } => (format!("{took} Yours go out when you press Push."), false),
         other => {
             let lead = if took.is_empty() { String::new() } else { format!("{took} ") };
-            (format!("{lead}{}", other.detail(now)), matches!(other, Status::Cant { .. }))
+            (format!("{lead}{}", other.detail(now)), matches!(other, Status::Cant { .. } | Status::CantCheck))
         }
     }
 }
@@ -363,7 +428,8 @@ pub fn pull_says(reached: bool, made: usize, from: &[String], after: &Status, no
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Member {
     /// Nothing from them about these packs: they don't keep a copy, or
-    /// this PC hasn't heard from it yet. No chip.
+    /// this PC hasn't heard from it yet. It gets a quiet chip of its own so
+    /// the row never looks like "in step" by saying nothing.
     Unknown,
     InStep,
     /// `changes` changes the group made (mods, the pack version, the loader)
@@ -374,7 +440,7 @@ pub enum Member {
 impl Member {
     pub fn label(&self) -> String {
         match self {
-            Member::Unknown => String::new(),
+            Member::Unknown => "Not heard from yet".to_string(),
             Member::InStep => "Same as group".to_string(),
             Member::Behind { changes: 1 } => "Behind by 1".to_string(),
             Member::Behind { changes } => format!("Behind by {changes}"),
@@ -393,7 +459,7 @@ impl Member {
     /// the member's own PC knows (see the design note).
     pub fn detail(&self, name: &str) -> String {
         match self {
-            Member::Unknown => String::new(),
+            Member::Unknown => format!("Hopper hasn't heard from {name}'s copy of this pack yet, so it can't tell whether it is in step."),
             Member::InStep => format!("{name}'s copy has the group's latest changes."),
             Member::Behind { changes } => {
                 let n = if *changes == 1 { "1 change".to_string() } else { format!("{changes} changes") };
@@ -547,6 +613,7 @@ mod tests {
             needs: &[],
             only_from: None,
             to_push: None,
+            check: Check::Matches,
         }
     }
 
@@ -597,6 +664,75 @@ mod tests {
         assert_eq!(s.label(), "Same as group");
         assert_eq!(s.detail(1120), "Same as the group. Checked 2 min ago.");
         assert_eq!(s.tone(), Tone::Good);
+    }
+
+    #[test]
+    fn a_copy_missing_mods_is_not_in_step_even_with_nothing_waiting() {
+        // The bug: nothing waits and nothing failed, but the mods folder lacks
+        // what the group has.
+        let c = PackCopy::default();
+        let mut i = input(&c);
+        i.check = Check::Behind { mods: 2, missing: true };
+        let s = status(&i);
+        assert_eq!(s, Status::Behind { mods: 2, missing: true });
+        assert_eq!(s.label(), "Missing mods");
+        assert_eq!(s.detail(1120), "Your copy is missing 2 mods the group has.");
+        assert_eq!(s.tone(), Tone::Warn);
+        assert!(s.rank() <= 1, "a copy that differs needs the player");
+        i.check = Check::Behind { mods: 1, missing: false };
+        let s = status(&i);
+        assert_eq!(s.label(), "Differs from group");
+        assert_eq!(s.detail(1120), "Your copy differs in 1 mod.");
+        assert_eq!(behind_says(1, true), "Your copy is missing 1 mod the group has.");
+    }
+
+    #[test]
+    fn a_check_that_could_not_finish_is_said_and_never_in_step() {
+        let c = PackCopy::default();
+        let mut i = input(&c);
+        i.check = Check::Couldnt;
+        let s = status(&i);
+        assert_eq!(s, Status::CantCheck);
+        assert_eq!(s.detail(0), "Hopper couldn't check CurseForge just now, so your copy might be missing something. Try again.");
+        // Pulling again while it still can't says it is a problem.
+        assert!(pull_says(true, 0, &[], &s, 0).1);
+        // And no claim at all while the check hasn't looked yet.
+        i.check = Check::Checking;
+        assert_eq!(status(&i), Status::Checking);
+        assert_ne!(status(&i).label(), "Same as group");
+    }
+
+    #[test]
+    fn changes_waiting_for_a_pull_or_a_push_are_not_missing_mods() {
+        // Parked: the maker's changes wait for Pull. The check compares only
+        // what is taken in, so it says the copy matches, and the status says
+        // what really waits.
+        let mut c = PackCopy::default();
+        waiting_from(&mut c, "mia", "Mia", 5, &[("p:1", 5, "mia")]);
+        let mut i = input(&c);
+        i.only_from = Some(("noah", "Noah"));
+        assert!(matches!(status(&i), Status::Parked { .. }), "{:?}", status(&i));
+        // Push by hand: this PC's own changes wait for the player.
+        let c = PackCopy::default();
+        let mut i = input(&c);
+        i.to_push = Some(2);
+        assert_eq!(status(&i), Status::ToPush { changes: 2 });
+        // A copy that is behind says so before it says it waits for a push.
+        i.check = Check::Behind { mods: 1, missing: true };
+        assert!(matches!(status(&i), Status::Behind { .. }));
+    }
+
+    #[test]
+    fn what_needs_the_player_comes_before_a_difference_in_mods() {
+        let c = PackCopy::default();
+        let mut i = input(&c);
+        i.check = Check::Behind { mods: 3, missing: true };
+        i.failure = Some(Failure { why: "x", again: true });
+        assert!(matches!(status(&i), Status::Cant { .. }));
+        let needs = needs_owo();
+        i.failure = None;
+        i.needs = &needs;
+        assert!(matches!(status(&i), Status::NeedsMod { .. }));
     }
 
     fn needs_owo() -> Vec<crate::groupdeps::Need> {
@@ -936,7 +1072,12 @@ mod tests {
         let c = member_copy(&[("p:1", "mia", 12)], None);
         assert_eq!(member_status(&[&c], "noah"), Member::Unknown);
         assert_eq!(member_status(&[], "noah"), Member::Unknown);
-        assert_eq!(Member::Unknown.label(), "");
+        // Not heard from is said, never left blank (a blank chip reads as
+        // "nothing wrong").
+        assert_eq!(Member::Unknown.label(), "Not heard from yet");
+        assert_eq!(Member::Unknown.tone(), Tone::Quiet);
+        assert!(Member::Unknown.detail("Noah").starts_with("Hopper hasn't heard from Noah's copy"), "{}", Member::Unknown.detail("Noah"));
+        assert_ne!(Member::Unknown.label(), Member::InStep.label());
     }
 
     #[test]

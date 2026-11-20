@@ -18,7 +18,7 @@ use crate::notice_slot::{self, Notice, Tier};
 use crate::store::Store;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::{Disableable as _, Sizable as _, StyledExt as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use hopper::groupstatus::Status;
 use std::path::Path;
@@ -36,7 +36,96 @@ pub fn look(status: &Status) -> (IconName, Tier) {
         Status::NeedsMod { .. } => (IconName::PackageX, Tier::Stop),
         Status::Parked { .. } => (IconName::Users, Tier::Choice),
         Status::ToPush { .. } => (IconName::Upload, Tier::Info),
+        Status::Behind { .. } | Status::CantCheck => (IconName::CircleAlert, Tier::Choice),
+        Status::Checking => (IconName::RefreshCw, Tier::Info),
     }
+}
+
+/// What a row of the check says under the mod's name, in plain words.
+pub fn why_says(r: &hopper::groupverify::Row) -> String {
+    use hopper::groupverify::Why;
+    let base = match r.why {
+        Why::Missing => "The group has it. You don't.".to_string(),
+        Why::Different if r.older => "Yours is older than the group's.".to_string(),
+        Why::Different => "Yours is another version than the group's.".to_string(),
+        Why::OffHere => "Turned off here, on in the group.".to_string(),
+        Why::OnHere => "Turned on here, off in the group.".to_string(),
+        Why::LeftOut => "From a link you haven't allowed yet.".to_string(),
+        Why::OnlyHere => "Kept only on this PC. Hopper leaves it as it is.".to_string(),
+        Why::Locked => "You locked its version. Hopper leaves it as it is.".to_string(),
+    };
+    if r.why.repairable() && !r.by_name.is_empty() { format!("{base} Last changed by {}.", r.by_name) } else { base }
+}
+
+/// The list under the strip when the copy differs from the group: one row
+/// per mod with why, and its own button. Mods the player keeps come last
+/// and have none.
+fn verify_list<V: 'static>(store: &Entity<Store>, root: &Path, v: &hopper::groupverify::Verified, busy: bool, cx: &mut Context<V>) -> AnyElement {
+    use hopper::groupverify::Why;
+    let icons: Vec<String> = v.rows.iter().filter_map(|r| store.read(cx).verify_name(&r.key).map(|n| n.2.clone())).filter(|i| !i.is_empty()).collect();
+    store.update(cx, |s, _| icons.iter().for_each(|i| s.want_image(i)));
+    let s = store.read(cx);
+    let mut list = v_flex().w_full().gap_0p5();
+    for (ix, r) in v.rows.iter().enumerate() {
+        let (name, project, icon) = s.verify_name(&r.key).cloned().unwrap_or((r.name.clone(), r.project, String::new()));
+        let name = if r.name.is_empty() { name } else { r.name.clone() };
+        let name = if name.is_empty() { "A mod".to_string() } else { name };
+        let project = if r.project != 0 { r.project } else { project };
+        let (st, rt) = (store.clone(), root.to_path_buf());
+        let link = crate::widgets::mod_link(
+            SharedString::from(format!("verify-mod:{ix}")),
+            name,
+            s.image(&icon),
+            project,
+            move |project, _, cx| {
+                let root = rt.clone();
+                st.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Peek { root, project }));
+            },
+            cx,
+        )
+        .font_semibold()
+        .into_any_element();
+        let button = r.fixable().then(|| {
+            let (st, rt, key, pin) = (store.clone(), root.to_path_buf(), r.key.clone(), r.pin.clone());
+            let action = r.why.action();
+            let left_out = r.why == Why::LeftOut;
+            let b = Button::new(("verify-fix", ix)).small().outline().label(action).disabled(busy).tooltip(match r.why {
+                Why::LeftOut => "Say yes to this source, then get the mod",
+                Why::Missing => "Gets this mod, as the group has it",
+                _ => "Makes this mod as the group has it",
+            });
+            b.on_click(move |_, window, cx| {
+                let (st, rt, key) = (st.clone(), rt.clone(), key.clone());
+                match pin.clone() {
+                    Some(pin) if left_out => {
+                        let (st2, rt2, key2) = (st.clone(), rt.clone(), key.clone());
+                        incoming_sources::gate(st, vec![pin.clone()], window, cx, move |leave_out, _, cx| {
+                            let yes: Vec<_> = if leave_out.contains(&pin) { Vec::new() } else { vec![pin.clone()] };
+                            if !yes.is_empty() {
+                                st2.update(cx, |s, cx| s.repair_group(&rt2, Some(vec![key2.clone()]), yes, cx));
+                            }
+                        });
+                    }
+                    _ => st.update(cx, |s, cx| s.repair_group(&rt, Some(vec![key]), Vec::new(), cx)),
+                }
+            })
+        });
+        list = list.child(
+            h_flex()
+                .id(("verify-row", ix))
+                .w_full()
+                .gap_2()
+                .px_1()
+                .py_1()
+                .items_center()
+                .rounded(cx.theme().radius)
+                .hover(|d| crate::widgets::row_hover(d, cx))
+                .child(h_flex().flex_none().max_w(rems(16.)).overflow_hidden().text_sm().child(link))
+                .child(div().flex_1().min_w_0().truncate().text_sm().text_color(cx.theme().muted_foreground).child(why_says(r)))
+                .children(button),
+        );
+    }
+    list.into_any_element()
 }
 
 /// "Pull from Mia": takes in that member's waiting changes. Just the name
@@ -106,6 +195,7 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     let left_out = s.left_out_pins(root);
     // Read before `cx` is borrowed mutably for the mod links below.
     let pushing = s.pushing_at(root);
+    let repairing = s.group_repairing(root);
     let in_step = matches!(status, Status::InStep { .. });
     // In step is good news the player may not want to see every time.
     let key = hopper::settings::notice_key(&root.to_string_lossy(), "group-in-step", "in step");
@@ -119,8 +209,16 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     // in the line under it. Mods match the group; updates are a separate thing.
     // What Pull now just did ("Took in 2 changes ...") is kept as it is: it
     // says what the player asked for.
+    let behind = matches!(status, Status::Behind { .. });
     let (title, detail) = if in_step {
-        ("Same as the group".to_string(), in_step_line(&detail, from_pull))
+        ("Your copy matches the group.".to_string(), in_step_line(&detail, from_pull))
+    } else if behind && !from_pull {
+        // The headline says it all; the list under it says which mods.
+        (detail, String::new())
+    } else if matches!(status, Status::CantCheck) && !from_pull {
+        // The sentence goes under the strip, open: on a narrow page a subject
+        // on the strip would be cut to nothing.
+        ("Couldn't check".to_string(), String::new())
     } else {
         (status.title(), detail)
     };
@@ -130,6 +228,19 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
         Status::NeedsMod { needs } if !from_pull => n.subject_rich(detail, needs_line(store, root, needs, cx)),
         _ => n.subject(detail),
     };
+    // What the copy lacks, one row per mod with its own button.
+    // When the copy matches, the mods Hopper leaves alone (kept only on this
+    // PC, locked) are still listed, closed behind Details.
+    let verified = s_verified(store, root, cx).filter(|v| behind || (in_step && !v.rows.is_empty()));
+    if let Some(v) = &verified {
+        let list = n.details(verify_list(store, root, v, busy || repairing, cx));
+        n = if behind { list.open_new() } else { list };
+    }
+    if matches!(status, Status::CantCheck) && !from_pull {
+        let said = status.detail(now);
+        let muted = cx.theme().muted_foreground;
+        n = n.details(div().w_full().text_sm().text_color(muted).child(said)).open_new();
+    }
     if in_step {
         n = n.dismiss_key(store, key);
     }
@@ -165,6 +276,49 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
                     });
                 })
         });
+    } else if let Some(v) = verified.as_ref().filter(|v| !v.to_fix().is_empty()) {
+        // Exactly the rows of the list: the ones that need no yes first;
+        // when only mods from links are left, the yes.
+        let plain: Vec<String> = v.to_fix().iter().filter(|r| r.why != hopper::groupverify::Why::LeftOut).map(|r| r.key.clone()).collect();
+        let pins: Vec<hopper::sources::carry::Pin> = v.to_fix().iter().filter(|r| r.why == hopper::groupverify::Why::LeftOut).filter_map(|r| r.pin.clone()).collect();
+        let left_keys: Vec<String> = v.to_fix().iter().filter(|r| r.why == hopper::groupverify::Why::LeftOut).map(|r| r.key.clone()).collect();
+        let (store, root) = (store.clone(), root.to_path_buf());
+        n = n.primary(move |fit| {
+            if !plain.is_empty() {
+                notice_slot::main_button(Button::new("group-make-match").small(), fit)
+                    .icon(IconName::Download)
+                    .label(if repairing { "Making it match..." } else if fit.narrow { "Make match" } else { "Make my copy match" })
+                    .disabled(busy || repairing)
+                    .tooltip("Gets, updates or switches exactly the mods in this list. Nothing else changes")
+                    .on_click(move |_, _, cx| {
+                        let (store, root, plain) = (store.clone(), root.clone(), plain.clone());
+                        store.update(cx, |s, cx| s.repair_group(&root, Some(plain), Vec::new(), cx));
+                    })
+            } else {
+                notice_slot::main_button(Button::new("group-allow-get").small(), fit)
+                    .label("Allow and get it")
+                    .disabled(busy || repairing)
+                    .tooltip("Say yes to these mods' sources, then get them")
+                    .on_click(move |_, window, cx| {
+                        let (store2, root2, all, keys) = (store.clone(), root.clone(), pins.clone(), left_keys.clone());
+                        incoming_sources::gate(store.clone(), pins.clone(), window, cx, move |leave_out, _, cx| {
+                            let yes: Vec<_> = all.iter().filter(|p| !leave_out.contains(p)).cloned().collect();
+                            if !yes.is_empty() {
+                                store2.update(cx, |s, cx| s.repair_group(&root2, Some(keys.clone()), yes, cx));
+                            }
+                        });
+                    })
+            }
+        });
+    } else if matches!(status, Status::CantCheck) {
+        let (store, root) = (store.clone(), root.to_path_buf());
+        n = n.primary(move |fit| {
+            notice_slot::main_button(Button::new("group-check-again").small(), fit)
+                .icon(IconName::RefreshCw)
+                .label("Try again")
+                .tooltip("Compares your copy with the group again")
+                .on_click(move |_, _, cx| store.update(cx, |s, cx| s.recheck_group(&root, cx)))
+        });
     } else if let Status::Parked { from, .. } = &status {
         // One button per member whose changes wait; the first leads.
         for (ix, who) in from.iter().take(3).enumerate() {
@@ -197,6 +351,11 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     let (store, root) = (store.clone(), root.to_path_buf());
     n = n.action_fit(move |fit| pull_button(&store, &root, pulling, nothing_to_pull, fit.narrow, "group-pull"));
     Some(n)
+}
+
+/// The check's last answer for the copy at `root`, when it is up to date.
+fn s_verified<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Context<V>) -> Option<hopper::groupverify::Verified> {
+    store.read(cx).group_verified(root).cloned()
 }
 
 /// The "Missing a required mod" strip's line as elements: the mods it names

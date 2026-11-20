@@ -22,6 +22,12 @@ mod, loader and pack version included:
   that never count as behind: a mod **kept only on this PC** (`onlyhere`)
   and a mod the player **locked** (`KeptWhy::Locked`).
 
+The last point used to be read from bookkeeping only (nothing queued, nothing
+failed), never from the mods folder, so a copy that silently lacked a mod said
+"same as the group". It is now measured: see "Checking the copy against the
+mods folder" below. "In step" is only said once that check says the copy
+matches.
+
 "The group's latest state" is not stored anywhere central. The relay keeps
 only the newest code of each member's copy (`<who>/<inst>`), and each PC takes
 those codes in mod by mod. So "the group's latest state" is what this PC knows
@@ -44,10 +50,15 @@ recipe, publish, sync server).
 | Behind, you | **Behind: needs you** | "Some of your settings changed in this update too. Pick what to keep." | `Wait::Pick` |
 | Can't apply | **Can't update** | the plain reason + whether Hopper tries again | a failed try (`group_retry`, `Wait::Failed`), GitHub's rate limit, or a mod from a link the player hasn't trusted yet (see below) |
 | Offline | **Offline** | "Can't reach the group right now. Your copy may be out of date. Last checked 8 min ago." | the PC is not connected |
+| Missing mods | **Missing mods** / **Differs from group** | "Your copy is missing 2 mods the group has." (or "Your copy differs in 2 mods." when some are another version or switched the other way) with a list, one row per mod | the check of the mods folder found rows (below) |
+| Couldn't check | **Couldn't check** | "Hopper couldn't check CurseForge just now, so your copy might be missing something. Try again." | a site didn't answer, so the check can't say |
+| Checking | **Checking** | "Comparing your copy with the group." | the check hasn't answered yet (only ever shown in place of Same as the group) |
 
 When several apply, the first one the player must act on wins: Can't update,
-Behind: needs you, Behind: close the game, Updating, Offline, Sending,
-Same as the group.
+Missing mods / Couldn't check, Behind: needs you, Behind: close the game,
+Updating, Offline, Sending, Same as the group. Changes the group sent that
+wait by design (Only maker, push by hand) are Parked / Waiting to push, never
+"missing".
 
 "Waiting for the game" is shown exactly where sync waits for it today and
 nowhere else: the pack version (`Wait::Game`), a moved loader
@@ -95,9 +106,36 @@ without it, silently. Two places used to break this and now share one rule
   task notes them.
 
 Repair happens when the member's code arrives again: their next publish, a
-restart, or Check now. There is no timer. Not covered: a member's first code
-with a failed lookup, and baselines that were already wrong before this
-change (those need a check against the disk).
+restart, or Check now. There is no timer. A member's first code with a failed
+lookup, and baselines that were already wrong, are covered by the check
+against the mods folder below.
+
+### Checking the copy against the mods folder
+
+`hopper_core::groupverify::verify` compares what the group has (each member's
+newest taken code, `copy.got`, with the marks winning over a code) with the
+instance's addons. It is a local comparison: no disk walk per publish tick, no
+per-file network call (a lookup only for files that are not on the PC, in
+batches, and only when the copy lacks something). It runs off the UI thread on
+demand and after a merge, a repair or a change to the mods folder, never on the
+publish tick. One row per mod, with a reason:
+
+| Row | Button | Repaired by |
+|---|---|---|
+| **Missing**: the group has the mod, this copy doesn't | Get it | yes |
+| **Different file**: another version (says if yours is older) | Update | yes |
+| **Off here, on in the group** / **On here, off in the group** | Turn it on / Turn it off | yes |
+| **Left out for its source**: from a link nobody confirmed | Allow and get it | only after the yes (`incoming_sources::gate`) |
+| **Kept only on this PC** | none | never (listed) |
+| **Locked by you** | none | never (listed) |
+
+A deliberate removal (a mark newer than the add) is never "missing"; a change
+made here and not sent yet is this PC's own, not a difference; a pack mod on
+another pack version is not "different". If a site didn't answer, the result
+is "Couldn't check", never "matches". The instance page's strip shows the
+headline and the list; **Make my copy match** applies exactly the rows in the
+list through `groupsync::apply`, the same install path as sync's own changes.
+Nothing downloads before a button is pressed.
 
 ## Other members
 
@@ -143,11 +181,17 @@ group's Packs list row. It:
    same path as an arriving event, so it is safe to repeat);
 2. forgets the retry backoff of a failed try, the "waits for the game" timer
    and a given-up state, so the merge runs now;
-3. runs the same merge as the automatic one (`groupsync::merge`), only when
+3. runs the same merge as the automatic one (`groupsync::merge`) when
    something waits (a code in `waiting`, an owed mod that is ready, or a
-   queued jar): with nothing waiting it just says "Already the same as the
-   group";
-4. says what happened in one line next to the button and as a notice: "Took in
+   queued jar);
+4. then verifies and repairs: it runs the check of the mods folder
+   (`groupverify::repair`, which applies exactly the rows the check finds) and
+   makes what the group has and this copy lacks, whether or not anything
+   waited. This is what "pull" means: the copy ends as the group has it, not
+   only "nothing queued". When the group couldn't be reached, the repair is
+   not run (the last known state is what the Make my copy match button
+   already offers);
+5. says what happened in one line next to the button and as a notice: "Took in
    3 changes from Mia", "Already the same as the group", "Couldn't reach the
    group", or the reason it can't apply.
 
@@ -159,7 +203,9 @@ game, a pick still waits for the player; the line says so.
 `hopper --dialog group-sync --state NAME` fills a made-up group (you, Mia,
 Noah, Ava) over the first two instances: the first is a copy of Mia's pack,
 the second a pack of yours. NAME is one of in-step, updating, game, pick,
-left-out, failed, offline, sending. Nothing goes to the real service
+left-out, failed, offline, sending, and for the check of the mods folder
+verify-matches, verify-behind (two mods), verify-cant, verify-kept, verify-all
+(every reason once). Nothing goes to the real service
 (`Store::group_preview`; the feed's friends and groups are ignored while it
 shows) and Pull now settles what waits. Test builds only, like
 `given_up_preview`.
@@ -169,6 +215,10 @@ shows) and Pull now settles what waits. Test builds only, like
 - `crates/hopper-core/src/groupstatus.rs`: `Status`, `Input`, `status()`,
   `waiting_changes()`, `member_status()`, `merge_due()` / `pack_due_ready()`
   (what Pull now skips), `pull_says()`, wording. Tests.
+- `crates/hopper-core/src/groupverify.rs`: `verify()`, `check()`, `select()`,
+  `repair()`. Tests, one per reason.
+- `src/gpui/store/group_verify.rs`: runs the check off the UI thread, keeps its
+  answer, `repair_group`, Pull now's repair.
 - `groupsync.rs`: `Owed::approved`, `owed_to_allow()`, `approve_owed()`, `owed_ready()` counting approved mods.
 - `src/gpui/store/friends.rs`: gathers `Input`, `pull_group_now`.
 - `src/gpui/group_pack.rs` (instance page notice) and `friends.rs` (group

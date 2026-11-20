@@ -1795,6 +1795,9 @@ impl FriendsPanel {
                         Some(st) => (st.label().to_string(), st.tone(), st.detail(now())),
                         None => (String::new(), Tone::Quiet, String::new()),
                     }
+                } else if !m.joined {
+                    // Invited, not in yet: "Invited" says it.
+                    (String::new(), Tone::Quiet, String::new())
                 } else {
                     let ms = &member_state[mi];
                     (ms.label(), ms.tone(), ms.detail(&name))
