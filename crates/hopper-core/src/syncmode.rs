@@ -142,7 +142,7 @@ mod tests {
 
     fn got(seq: u64, name: &str, stamps: &[(&str, u64, &str)]) -> Got {
         let stamps = stamps.iter().map(|(k, s, by)| (k.to_string(), Stamp { seq: *s, by: by.to_string() })).collect();
-        Got { code: format!("code-{name}-{seq}"), seq, at: 0, name: name.into(), stamps }
+        Got { code: format!("code-{name}-{seq}"), seq, at: 0, name: name.into(), stamps, ..Default::default() }
     }
 
     /// A copy of Noah's group pack with codes waiting from Noah (the

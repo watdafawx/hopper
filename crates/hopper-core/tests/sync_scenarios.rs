@@ -333,7 +333,7 @@ impl Pc {
                 // The sharer's own copy takes members' copies; a member's
                 // copy takes the sharer's code and every member's copy.
                 if e.key == groupsync::COPY_KEY || !self.sharer {
-                    self.copy.arrive(&e.from, Got { code: e.code.clone(), seq: e.seq, at: e.at, name: e.from_name.clone(), stamps: e.marks.clone() });
+                    self.copy.arrive(&e.from, Got { code: e.code.clone(), seq: e.seq, at: e.at, name: e.from_name.clone(), stamps: e.marks.clone(), ..Default::default() });
                 }
             }
             self.seen.push(e);

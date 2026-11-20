@@ -578,6 +578,13 @@ pub struct Got {
     /// from an older Hopper or mailbox.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub stamps: BTreeMap<String, Stamp>,
+    /// A member's first code that couldn't be read whole: a file of it
+    /// couldn't be looked up, so it is kept without that file
+    /// ([`baseline`]). Their next code is then still read as their first
+    /// ([`first_changes`]) instead of being compared with this one: a file
+    /// nobody could place is no proof the member changed that mod.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
 }
 
 /// One copy of a group's pack on this PC.
@@ -1006,9 +1013,8 @@ fn revive_owed(copy: &PackCopy, here: &Mods, sent: Option<&Mods>, todo: &mut Vec
 ///
 /// A change is dated by its stamp when the code has one (the member only
 /// passed it on), else by the code's own number (the member made it).
-/// A member's first code has nothing to compare with; only its stamped
-/// mods are taken from it, since an unstamped difference may just be that
-/// member being behind.
+/// A member's first code has nothing of theirs to compare with: it is read
+/// against this copy instead, for additions only ([`first_changes`]).
 pub fn plan(
     copy: &PackCopy,
     here: &Mods,
@@ -1037,7 +1043,9 @@ pub fn plan(
             out.taken.push((from, g));
             continue;
         };
-        let prev = copy.got.get(&from).and_then(|p| decode(&p.code).map(|m| (m, p.seq)));
+        // A first code kept without a file nobody could look up is no code
+        // to compare with: theirs is still a first code (`Got::partial`).
+        let prev = copy.got.get(&from).filter(|p| !p.partial).and_then(|p| decode(&p.code).map(|m| (m, p.seq)));
         let found: Vec<Change> = match &prev {
             Some((prev, prev_seq)) => {
                 let prev_seq = *prev_seq;
@@ -1064,15 +1072,7 @@ pub fn plan(
                 }
                 found
             }
-            None => g
-                .stamps
-                .keys()
-                .filter_map(|k| {
-                    let was = will.get(k).cloned().unwrap_or_else(|| state_of(here, k));
-                    let to = state_of(&now, k);
-                    (was != to).then(|| Change { key: k.clone(), was, now: to, entry: now.map.get(k).map(|(_, e)| e.clone()) })
-                })
-                .collect(),
+            None => first_changes(copy, (&from, &g), &now, here, &will, &marks, &mut decode),
         };
         let mut held = false;
         for c in found {
@@ -1125,11 +1125,80 @@ pub fn plan(
         if held {
             out.held = true;
         } else {
-            let g = baseline(g, &now, prev.as_ref().map(|(m, _)| m), &from, &mut out.unresolved);
+            let g = baseline(g, &now, prev.as_ref().map(|(m, _)| m), here, &from, &mut out.unresolved);
             out.taken.push((from, g));
         }
     }
     (todo, out)
+}
+
+/// The changes a member's first code makes: nothing was taken from `from`
+/// before, so there is no code of theirs to compare `g` (read as `now`)
+/// with. `will`: this copy's mods as the changes decided so far leave them;
+/// `marks`: who changed each mod last, with those changes.
+///
+/// Its stamped mods, as always (a stamp dates the change, whatever it is).
+/// And what the code lists that this copy lacks, or has as another file or
+/// switched the other way: what the member changed before their first
+/// publish went out. Those changes carry no stamp, since a copy that sent
+/// nothing yet has nothing to tell its own changes by ([`stamps_out`],
+/// [`mark_own`]), so without this they reached nobody. [`plan`] dates them
+/// by the code, as the member's own.
+///
+/// Additions only. A mod the code doesn't list is left alone, and so is a
+/// pack mod it takes out: in a first code that may only be a mod the member
+/// never had, so a removal still needs its stamp.
+///
+/// An unstamped difference can also be that member being behind, or this
+/// copy being ahead. It counts as the member's change only when nothing
+/// says otherwise:
+/// - nobody dated a change of that mod (no mark here, no stamp in any
+///   member's code): a mod the group changed or removed is decided by that
+///   change, not by a code that may not know of it;
+/// - no other member's code taken in has the mod that way: then it is how
+///   the group had it all along, and what differs is this copy;
+/// - the code is of this copy's pack version: between two versions a mod
+///   can differ only because of the version.
+fn first_changes(
+    copy: &PackCopy,
+    (from, g): (&str, &Got),
+    now: &Mods,
+    here: &Mods,
+    will: &HashMap<String, State>,
+    marks: &BTreeMap<String, Mark>,
+    decode: &mut impl FnMut(&str) -> Option<Mods>,
+) -> Vec<Change> {
+    let was_of = |k: &str| will.get(k).cloned().unwrap_or_else(|| here.state(k));
+    let mut found: Vec<Change> = g
+        .stamps
+        .keys()
+        .filter_map(|k| {
+            let (was, to) = (was_of(k), now.state(k));
+            (was != to).then(|| Change { key: k.clone(), was, now: to, entry: now.map.get(k).map(|(_, e)| e.clone()) })
+        })
+        .collect();
+    if now.pack != here.pack {
+        return found;
+    }
+    let dated = |k: &str| marks.contains_key(k) || copy.got.values().chain(copy.waiting.values()).any(|x| x.stamps.contains_key(k));
+    // The other members' codes taken in, read only when a mod differs.
+    let mut others: Option<Vec<Mods>> = None;
+    for (k, (to, e)) in &now.map {
+        // A lock is no mod, and a pack mod taken out is a removal.
+        if lock_target(k).is_some() || !matches!(to, State::File { .. } | State::Off) || dated(k) {
+            continue;
+        }
+        let was = was_of(k);
+        if was == *to {
+            continue;
+        }
+        let others = others.get_or_insert_with(|| copy.got.iter().filter(|(id, _)| id.as_str() != from).filter_map(|(_, p)| decode(&p.code)).collect());
+        if others.iter().any(|m| m.map.get(k).is_some_and(|(s, _)| s == to)) {
+            continue;
+        }
+        found.push(Change { key: k.clone(), was, now: to.clone(), entry: Some(e.clone()) });
+    }
+    found
 }
 
 /// The task's note for files that couldn't be looked up ([`baseline`]).
@@ -1154,17 +1223,23 @@ fn unresolved_says(entries: &[Entry]) -> String {
 /// never holds the others back.
 ///
 /// Only what is new in this code: an entry the last one listed too is kept
-/// (it was taken then, and an unchanged mod isn't an add), and a member's
-/// first code is kept whole (nothing to compare with: it is a starting
-/// point, and only its stamped mods are taken from it, as always).
-/// `unresolved` gets the entries left out, for the task's note.
-fn baseline(mut g: Got, now: &Mods, prev: Option<&Mods>, from: &str, unresolved: &mut Vec<Entry>) -> Got {
-    let Some(prev) = prev else { return g };
-    let fresh: Vec<&Entry> = now.unknown.iter().filter(|e| !prev.lists(e)).collect();
+/// (it was taken then, and an unchanged mod isn't an add). A member's first
+/// code (`prev` None) is read against this copy (`here`, see
+/// [`first_changes`]), so there it is an entry this copy doesn't list; and
+/// the code kept is marked [`Got::partial`], so that reading it again is
+/// reading a first code again, by the same rule: compared with the cut code
+/// instead, the file would count as a change the member made after it,
+/// which nobody knows. `unresolved` gets the entries left out, for the
+/// task's note.
+fn baseline(mut g: Got, now: &Mods, prev: Option<&Mods>, here: &Mods, from: &str, unresolved: &mut Vec<Entry>) -> Got {
+    g.partial = false;
+    let known = prev.unwrap_or(here);
+    let fresh: Vec<&Entry> = now.unknown.iter().filter(|e| !known.lists(e)).collect();
     if fresh.is_empty() {
         return g;
     }
     if let Some((code, left_out)) = crate::sharecode::pruned_code(&g.code, |e| fresh.contains(&e)) {
+        g.partial = prev.is_none();
         log::warn!(
             "group sync: {} file(s) in {}'s code couldn't be looked up, so they weren't taken: {}. Tried again when their code is read next.",
             left_out.len(),
@@ -2244,11 +2319,22 @@ mod tests {
 
     #[test]
     fn a_first_code_from_a_member_is_only_the_starting_point() {
+        // Changed with the first-code fix (`first_changes`). This used to be
+        // Mia's code alone, with mod 1 off where it is on here, and nothing
+        // was taken: every unstamped difference was dropped, so what a
+        // member changed before their first publish reached nobody. Now such
+        // a difference is theirs unless something says otherwise, so the
+        // starting point is spelled out: Sam's code, taken in already, has
+        // mod 1 off too. That is how the group had it all along; the mod is
+        // on here because it was turned on here. And mod 2, which Mia's
+        // code doesn't list, is not removed.
         let mut copy = PackCopy::default();
+        copy.got.insert("sam".into(), got(code(vec![cf(11, false)]), 2, "Sam"));
         copy.arrive("mia", got(code(vec![cf(11, false)]), 5, "Mia"));
-        let here = m(vec![cf(11, true)]);
+        let here = m(vec![cf(11, true), cf(21, true)]);
         let (todo, merged) = plan(&copy, &here, Some(&here), false, dec);
-        assert!(todo.is_empty());
+        assert!(todo.is_empty(), "{todo:?}");
+        assert!(merged.marks.is_empty());
         assert_eq!(merged.taken.len(), 1);
         // An old code replayed after a newer one was taken is ignored.
         let mut copy = PackCopy::default();
@@ -2445,6 +2531,21 @@ mod tests {
         fn set(&mut self, project: u64, file: u64, on: bool) {
             self.mods.insert(project, (file, on));
         }
+        fn remove(&mut self, project: u64) {
+            self.mods.remove(&project);
+        }
+        /// A member who joins a group that is already running, the way the
+        /// desktop does it: installs the sharer's pack as it is now (the
+        /// copy starts from that follow, with nothing sent and no marks)
+        /// and says yes to the group, so the relay hands them every
+        /// member's last code. They have published nothing yet: what they
+        /// change from here on is in their first code, unstamped.
+        fn join(id: &str, sharer: &Pc, relay: &mut Relay) -> Pc {
+            let mut pc = Pc::new(id, false, &[]);
+            pc.follow_first(&sharer.code());
+            relay.join(id);
+            pc
+        }
         fn set_loader(&mut self, loader: &str) {
             self.loader = loader.into();
         }
@@ -2460,7 +2561,7 @@ mod tests {
                 relay.seq += 1;
                 let q = relay.queues.entry(to.to_string()).or_default();
                 q.retain(|(_, from, _)| *from != self.id);
-                let g = Got { code: now.clone(), seq: relay.seq, at: relay.seq, name: self.id.clone(), stamps: stamps.clone() };
+                let g = Got { code: now.clone(), seq: relay.seq, at: relay.seq, name: self.id.clone(), stamps: stamps.clone(), ..Default::default() };
                 q.push((relay.seq, self.id.clone(), g.clone()));
                 relay.packs.insert(self.id.clone(), g);
             }
@@ -2959,16 +3060,342 @@ mod tests {
     fn a_first_code_takes_only_dated_changes() {
         // Mia's first code: 1 off, stamped with Sam's change (seq 30, newer
         // than anything here), and 2 off unstamped (may only be Mia behind).
+        //
+        // Changed with the first-code fix (`first_changes`): "may only be
+        // Mia behind" now has to show. Before, any unstamped difference was
+        // dropped; now it is Mia's own change unless the group dated a
+        // change of that mod. So this copy knows one: Sam turned mod 2 on
+        // (seq 10). Mia's code has it off without a stamp, so she doesn't
+        // know of his change, and it stays on.
         let mut copy = PackCopy::default();
         let mut g = got(code(vec![cf(11, false), cf(21, false)]), 40, "Mia");
         g.stamps.insert("p:1".into(), Stamp { seq: 30, by: "sam".into() });
         copy.got.insert("sam".into(), got(code(vec![cf(11, true)]), 5, "Sam"));
+        copy.marks.insert("p:2".into(), Mark { state: st(21, true), kind: Kind::On, seq: 10, by: "sam".into(), ..Default::default() });
         copy.arrive("mia", g);
         let here = m(vec![cf(11, true), cf(21, true)]);
         let (todo, merged) = plan(&copy, &here, Some(&here), false, dec);
         assert_eq!(todo.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), ["p:1"]);
         assert_eq!((merged.marks[0].1.by.as_str(), merged.marks[0].1.name.as_str(), merged.marks[0].1.seq), ("sam", "Sam", 30));
         assert_eq!(merged.taken.len(), 1);
+    }
+
+    // ---- A member's first code ---------------------------------------
+    //
+    // What a member changes between joining and their first publish going
+    // out carries no stamp (nothing sent yet to tell their own changes by).
+
+    /// The mods a plan changes, in order of their keys.
+    fn planned(todo: &[Change]) -> Vec<(&str, State, Kind)> {
+        let mut v: Vec<(&str, State, Kind)> = todo.iter().map(|c| (c.key.as_str(), c.now.clone(), c.kind())).collect();
+        v.sort();
+        v
+    }
+    /// Who a plan says changed `key`: (id, name, the change's number).
+    fn marked<'a>(merged: &'a Merged, key: &str) -> (&'a str, &'a str, u64) {
+        let (_, mk) = merged.marks.iter().find(|(k, _)| k == key).unwrap_or_else(|| panic!("no mark for {key}"));
+        (mk.by.as_str(), mk.name.as_str(), mk.seq)
+    }
+
+    #[test]
+    fn a_first_code_brings_a_mod_added_before_the_first_publish() {
+        // Mia joined with mod 1, then added mod 5.
+        let mut copy = PackCopy::default();
+        copy.got.insert("sam".into(), got(code(vec![cf(11, true)]), 2, "Sam"));
+        copy.arrive("mia", got(code(vec![cf(11, true), cf(51, true)]), 10, "Mia"));
+        let here = m(vec![cf(11, true)]);
+        let (todo, merged) = plan(&copy, &here, Some(&here), false, dec);
+        assert_eq!(planned(&todo), [("p:5", st(51, true), Kind::Added)]);
+        assert_eq!(todo[0].entry, Some(cf(51, true)), "with the file to get");
+        assert_eq!(marked(&merged, "p:5"), ("mia", "Mia", 10), "hers, dated by her code");
+        assert_eq!(merged.made, [("p:5".to_string(), Kind::Added, "Mia".to_string())]);
+        assert_eq!(merged.taken.len(), 1);
+    }
+
+    #[test]
+    fn a_first_code_brings_an_update_made_before_the_first_publish() {
+        // Mod 2 came with the pack as file 21; Mia moved it to 22.
+        let mut copy = PackCopy::default();
+        copy.got.insert("sam".into(), got(code(vec![cf(11, true), cf(21, true)]), 2, "Sam"));
+        copy.arrive("mia", got(code(vec![cf(11, true), cf(22, true)]), 10, "Mia"));
+        let here = m(vec![cf(11, true), cf(21, true)]);
+        let (todo, merged) = plan(&copy, &here, Some(&here), false, dec);
+        assert_eq!(planned(&todo), [("p:2", st(22, true), Kind::Updated)]);
+        assert_eq!(marked(&merged, "p:2"), ("mia", "Mia", 10));
+    }
+
+    #[test]
+    fn a_first_code_brings_a_switch_made_before_the_first_publish() {
+        // Off, on, and a mod of the pack turned off.
+        for (theirs, mine, key, to, kind) in [
+            (cf(11, false), vec![cf(11, true)], "p:1", st(11, false), Kind::Off),
+            (cf(11, true), vec![cf(11, false)], "p:1", st(11, true), Kind::On),
+            (Entry::Off(Target::Curse(7)), vec![], "p:7", State::Off, Kind::Off),
+        ] {
+            let mut copy = PackCopy::default();
+            copy.arrive("mia", got(code(vec![theirs]), 12, "Mia"));
+            let here = m(mine);
+            let (todo, merged) = plan(&copy, &here, Some(&here), false, dec);
+            assert_eq!(planned(&todo), [(key, to, kind)]);
+            assert_eq!(marked(&merged, key), ("mia", "Mia", 12));
+        }
+    }
+
+    #[test]
+    fn a_first_code_removes_nothing_and_puts_nothing_back() {
+        // Mia's code doesn't list mod 2, and takes pack mod 7 out, both
+        // without a stamp: she may never have had them. Nothing goes.
+        let mut copy = PackCopy::default();
+        copy.arrive("mia", got(code(vec![cf(11, true), Entry::Remove(Target::Curse(7))]), 10, "Mia"));
+        let here = m(vec![cf(11, true), cf(21, true)]);
+        let (todo, merged) = plan(&copy, &here, Some(&here), false, dec);
+        assert!(todo.is_empty(), "{todo:?}");
+        assert!(merged.marks.is_empty());
+        assert_eq!(merged.taken.len(), 1);
+        // A removal she passes on with its stamp is still made.
+        let mut copy = PackCopy::default();
+        let mut g = got(code(vec![cf(11, true)]), 10, "Mia");
+        g.stamps.insert("p:2".into(), Stamp { seq: 8, by: "sam".into() });
+        copy.arrive("mia", g);
+        let (todo, _) = plan(&copy, &here, Some(&here), false, dec);
+        assert_eq!(planned(&todo), [("p:2", State::Unlisted, Kind::Removed)]);
+        // Sam removed mod 3 (seq 5) and this PC took that. Mia's code still
+        // lists it: she is behind, and it doesn't come back.
+        let mut copy = PackCopy::default();
+        copy.marks.insert("p:3".into(), Mark { state: State::Unlisted, kind: Kind::Removed, by: "sam".into(), name: "Sam".into(), seq: 5, at: 5 });
+        copy.arrive("mia", got(code(vec![cf(11, true), cf(31, true)]), 20, "Mia"));
+        let here = m(vec![cf(11, true)]);
+        let (todo, _) = plan(&copy, &here, Some(&here), false, dec);
+        assert!(todo.is_empty(), "{todo:?}");
+        // The same when this PC only knows the removal from Sam's code (it
+        // joined after: no mark of its own, his code carries the stamp).
+        let mut copy = PackCopy::default();
+        let mut sam = got(code(vec![cf(11, true)]), 6, "Sam");
+        sam.stamps.insert("p:3".into(), Stamp { seq: 5, by: "sam".into() });
+        copy.got.insert("sam".into(), sam);
+        copy.arrive("mia", got(code(vec![cf(11, true), cf(31, true)]), 20, "Mia"));
+        let (todo, _) = plan(&copy, &here, Some(&here), false, dec);
+        assert!(todo.is_empty(), "{todo:?}");
+    }
+
+    #[test]
+    fn a_first_code_never_undoes_what_the_group_or_this_pc_changed() {
+        // The group moved mod 1 to file 12 (Sam, seq 30). Mia's first code,
+        // sent later (seq 40), still has 11 without a stamp: she hasn't
+        // taken his update yet. Dated by her code it would win and bring the
+        // old file back, here and then everywhere.
+        let mut copy = PackCopy::default();
+        copy.marks.insert("p:1".into(), Mark { state: st(12, true), kind: Kind::Updated, by: "sam".into(), name: "Sam".into(), seq: 30, at: 30 });
+        copy.arrive("mia", got(code(vec![cf(11, true)]), 40, "Mia"));
+        let here = m(vec![cf(12, true)]);
+        let (todo, merged) = plan(&copy, &here, Some(&here), false, dec);
+        assert!(todo.is_empty(), "{todo:?}");
+        assert_eq!(merged.taken.len(), 1);
+        // This PC moved mod 1 to 12 before its own first publish, so it has
+        // no mark for that either. Mia's code has 11 as the pack came, like
+        // the sharer's code taken in here: it is this copy that differs, and
+        // its own update stays.
+        let mut copy = PackCopy::default();
+        copy.got.insert("sharer".into(), got(code(vec![cf(11, true)]), 1, "Sharer"));
+        copy.arrive("mia", got(code(vec![cf(11, true)]), 40, "Mia"));
+        let (todo, _) = plan(&copy, &here, Some(&here), false, dec);
+        assert!(todo.is_empty(), "{todo:?}");
+        // A mod changed here and not sent yet holds her change of it back,
+        // as with any code.
+        let mut copy = PackCopy::default();
+        copy.arrive("mia", got(code(vec![cf(13, true)]), 40, "Mia"));
+        let sent = m(vec![cf(11, true)]);
+        let (todo, merged) = plan(&copy, &here, Some(&sent), false, dec);
+        assert!(todo.is_empty() && merged.held && merged.taken.is_empty());
+        // Two first codes at once that add the same mod: it is added once,
+        // as the one who sent first has it.
+        let mut copy = PackCopy::default();
+        copy.arrive("mia", got(code(vec![cf(12, true), cf(51, true)]), 40, "Mia"));
+        copy.arrive("noah", got(code(vec![cf(12, true), cf(52, true)]), 41, "Noah"));
+        let (todo, merged) = plan(&copy, &here, Some(&here), false, dec);
+        assert_eq!(planned(&todo), [("p:5", st(51, true), Kind::Added)]);
+        assert_eq!(marked(&merged, "p:5"), ("mia", "Mia", 40));
+        assert_eq!(merged.taken.len(), 2);
+    }
+
+    #[test]
+    fn a_first_code_of_another_pack_version_brings_only_its_stamped_mods() {
+        // Between two versions of a pack a mod can differ only because of
+        // the version, so an unstamped difference says nothing.
+        let mut copy = PackCopy::default();
+        let mut g = got(pcode(86, vec![cf(51, true), cf(61, true)]), 10, "Mia");
+        g.stamps.insert("p:6".into(), Stamp { seq: 7, by: "sam".into() });
+        copy.arrive("mia", g);
+        let here = pmods(85, vec![]);
+        let (todo, _) = plan(&copy, &here, Some(&here), false, pdec);
+        assert_eq!(todo.iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), ["p:6"]);
+        // On the same version, both.
+        let here = pmods(86, vec![]);
+        let (todo, _) = plan(&copy, &here, Some(&here), false, pdec);
+        let mut keys: Vec<&str> = todo.iter().map(|c| c.key.as_str()).collect();
+        keys.sort();
+        assert_eq!(keys, ["p:5", "p:6"]);
+    }
+
+    /// The scenario that would have caught this: a group that is running,
+    /// a member who joins, changes things and only then publishes.
+    #[test]
+    fn a_member_who_changes_mods_before_their_first_publish_reaches_the_group() {
+        let mut relay = Relay::default();
+        let all = ["A", "C", "D"];
+        let mut a = Pc::new("A", true, &base());
+        a.publish(&mut relay, &["A", "C"], true);
+        let mut c = Pc::join("C", &a, &mut relay);
+        c.publish(&mut relay, &["A", "C"], true);
+        for pc in [&mut a, &mut c] {
+            pc.read(&relay);
+            pc.merge();
+            assert!(pc.merges.is_empty());
+        }
+        // D joins and installs the pack as A has it.
+        let mut d = Pc::join("D", &a, &mut relay);
+        // A takes mod 3 out; C gets that. D doesn't yet.
+        a.remove(3);
+        a.publish(&mut relay, &all, true);
+        online_in(&mut c, &mut relay, &all);
+        assert!(!c.mods.contains_key(&3));
+        // D, before anything of theirs went out: adds mod 5, moves mod 2 to
+        // a newer file, turns mod 1 off, and takes mod 4 out.
+        d.set(5, 51, true);
+        d.set(2, 22, true);
+        d.set(1, 11, false);
+        d.remove(4);
+        d.publish(&mut relay, &all, true);
+        assert!(d.copy.marks.is_empty(), "a first publish dates nothing of its own");
+        assert!(relay.packs["D"].stamps.is_empty(), "and its code carries no stamp");
+        for pc in [&mut a, &mut c] {
+            online_in(pc, &mut relay, &all);
+            assert_eq!(pc.mods.get(&5), Some(&(51, true)), "{} has the mod D added", pc.id);
+            assert_eq!(pc.mods.get(&2), Some(&(22, true)), "{} has D's file of mod 2", pc.id);
+            assert_eq!(pc.mods.get(&1), Some(&(11, false)), "{} has mod 1 off", pc.id);
+            for k in ["p:1", "p:2", "p:5"] {
+                assert_eq!(pc.copy.marks[k].by, "D", "{k} is D's change on {}", pc.id);
+            }
+            assert_eq!(pc.copy.marks["p:5"].kind.says(&pc.copy.marks["p:5"].name), "Added by D");
+            // What D's code doesn't list is no removal, and the mod A took
+            // out (which D's code still lists) doesn't come back.
+            assert_eq!(pc.mods.get(&4), Some(&(41, true)), "{} keeps mod 4", pc.id);
+            assert!(!pc.mods.contains_key(&3), "mod 3 stays out on {}", pc.id);
+            assert_eq!(pc.copy.marks["p:3"].by, "A");
+        }
+        // D catches up, and nothing flips anywhere after.
+        for _ in 0..3 {
+            for pc in [&mut a, &mut c, &mut d] {
+                online_in(pc, &mut relay, &all);
+            }
+        }
+        let want: BTreeMap<u64, (u64, bool)> = [(1, (11, false)), (2, (22, true)), (4, (41, true)), (5, (51, true))].into_iter().collect();
+        assert_eq!(a.mods, want);
+        assert_eq!(c.mods, want);
+        // D has the same, less the mod D took out: that removal was never
+        // dated, so it stays D's own.
+        let mut d_want = want.clone();
+        d_want.remove(&4);
+        assert_eq!(d.mods, d_want);
+        let before = (a.merges.len(), c.merges.len(), d.merges.len());
+        for pc in [&mut a, &mut c, &mut d] {
+            pc.restart();
+            online_in(pc, &mut relay, &all);
+        }
+        assert_eq!((a.merges.len(), c.merges.len(), d.merges.len()), before, "settled");
+        // A fourth member who joins now gets D's changes with the pack, and
+        // their own first code changes nothing anywhere.
+        let all4 = ["A", "C", "D", "E"];
+        let mut e = Pc::join("E", &a, &mut relay);
+        online_in(&mut e, &mut relay, &all4);
+        assert_eq!(e.mods, want);
+        for pc in [&mut a, &mut c, &mut d] {
+            online_in(pc, &mut relay, &all4);
+        }
+        assert_eq!((a.merges.len(), c.merges.len(), d.merges.len()), before, "a first code that changed nothing changes nothing");
+        assert_eq!(d.mods, d_want);
+    }
+
+    #[test]
+    fn a_first_code_whose_lookup_failed_lands_later_and_is_not_claimed() {
+        let mut relay = Relay::default();
+        let all = ["A", "B"];
+        let mut a = Pc::new("A", true, &base());
+        a.publish(&mut relay, &["A"], true);
+        let mut b = Pc::join("B", &a, &mut relay);
+        // B, before the first publish: moves mod 2 on and adds mod 5.
+        b.set(2, 22, true);
+        b.set(5, 51, true);
+        b.publish(&mut relay, &all, true);
+        // Merge 1: CurseForge doesn't answer for file 51 on A's PC.
+        a.lookup_fails.insert(51);
+        a.read(&relay);
+        a.merge();
+        assert_eq!(a.mods.get(&2), Some(&(22, true)), "the rest of the code goes in");
+        assert!(!a.mods.contains_key(&5), "its project is unknown here, so it isn't made");
+        assert!(a.copy.waiting.is_empty(), "the code is taken, not held back");
+        assert_eq!(files_of(&a.copy.got["B"].code), [11, 22, 31, 41], "the copy doesn't claim a mod that didn't come in");
+        assert!(a.copy.got["B"].partial);
+        // Reading the same again while it still fails does nothing more.
+        let merges = a.merges.len();
+        a.restart();
+        a.read(&relay);
+        a.merge();
+        assert!(a.copy.waiting.is_empty());
+        assert_eq!(a.merges.len(), merges);
+        // Merge 2: it answers. The code is read again and the mod comes in.
+        a.lookup_fails.clear();
+        a.restart();
+        a.read(&relay);
+        a.merge();
+        assert_eq!(a.mods.get(&5), Some(&(51, true)), "the mod arrives once its lookup works");
+        assert_eq!(a.copy.marks["p:5"].by, "B");
+        assert_eq!(files_of(&a.copy.got["B"].code), [11, 22, 31, 41, 51]);
+        assert!(!a.copy.got["B"].partial);
+        assert_eq!(a.merges.last().unwrap().iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), ["p:5"], "and only that");
+        // B's next code is compared with that one, as any member's.
+        b.remove(5);
+        b.publish(&mut relay, &all, true);
+        online_in(&mut a, &mut relay, &all);
+        assert!(!a.mods.contains_key(&5), "a removal B makes later is taken");
+    }
+
+    #[test]
+    fn a_first_code_read_again_after_a_failed_lookup_is_still_a_first_code() {
+        let mut relay = Relay::default();
+        let mut a = Pc::new("A", true, &base());
+        a.publish(&mut relay, &["A", "C"], true);
+        let mut c = Pc::join("C", &a, &mut relay);
+        c.publish(&mut relay, &["A", "C"], true);
+        for pc in [&mut a, &mut c] {
+            pc.read(&relay);
+            pc.merge();
+        }
+        let all = ["A", "C", "D"];
+        let mut d = Pc::join("D", &a, &mut relay);
+        // A moves mod 1 to a newer file; C takes it. D publishes before
+        // getting it, so D's first code still has the old file 11.
+        a.set(1, 12, true);
+        a.publish(&mut relay, &all, true);
+        online_in(&mut c, &mut relay, &all);
+        d.set(5, 51, true);
+        d.publish(&mut relay, &all, true);
+        // On C the old file can't be looked up (C no longer has it).
+        c.lookup_fails.insert(11);
+        c.read(&relay);
+        c.merge();
+        assert_eq!(c.mods.get(&5), Some(&(51, true)));
+        assert!(c.copy.got["D"].partial);
+        // Read again once it answers: file 11 is D being behind, as it was
+        // the first time. Compared with the code kept without it, it would
+        // look like an update D made, and A's newer file would be undone.
+        c.lookup_fails.clear();
+        c.restart();
+        c.read(&relay);
+        c.merge();
+        assert_eq!(c.mods.get(&1), Some(&(12, true)), "the group's newer file stays");
+        assert!(!c.copy.got["D"].partial);
+        assert_eq!(c.copy.marks["p:1"].by, "A");
     }
 
     #[test]

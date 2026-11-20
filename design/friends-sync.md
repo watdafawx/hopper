@@ -104,9 +104,19 @@ person: only the newest code waits.
 it that way. The relay passes it on as it is (cut to 2000 entries) and an
 older relay drops it. A member who passes on a change it took late then
 can't undo a newer one: its copy's change is dated by the stamp, not by the
-number of its own, later event. A member's first code is taken in only for
-its stamped mods, since an unstamped difference may just be that member
-being behind. Without stamps it all works as before.
+number of its own, later event. Without stamps it all works as before.
+
+A member's first code has no earlier code of theirs to compare with, and
+what they changed before their first publish carries no stamp (a copy that
+sent nothing yet can't tell its own changes). So a first code is read against
+this PC's copy instead (`groupsync::first_changes`): its stamped mods as
+always, and what it lists that this copy lacks, or has as another file or
+switched the other way. Those are additions only: a mod the code doesn't
+list, or a pack mod it takes out, is no removal without a stamp. An
+unstamped difference is left alone when it may only be that member being
+behind or this copy being ahead: a mod the group dated a change of (a mark
+here, or a stamp in any member's code), a mod another member's taken code
+has that same way, and a code of another pack version.
 
 What a copy keeps as "taken in" from a member (`got`) is pruned to what landed:
 an entry whose CurseForge / Modrinth lookup failed, and a file a follow's

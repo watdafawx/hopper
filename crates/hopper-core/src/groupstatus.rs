@@ -631,7 +631,7 @@ mod tests {
 
     fn waiting_from(copy: &mut PackCopy, who: &str, name: &str, seq: u64, stamps: &[(&str, u64, &str)]) {
         let stamps = stamps.iter().map(|(k, s, by)| (k.to_string(), Stamp { seq: *s, by: by.to_string() })).collect();
-        copy.waiting.insert(who.into(), Got { code: "x".into(), seq, at: 0, name: name.into(), stamps });
+        copy.waiting.insert(who.into(), Got { code: "x".into(), seq, at: 0, name: name.into(), stamps, ..Default::default() });
     }
 
     /// A mod from the GitHub repo `octo/<name>` that this PC left out until

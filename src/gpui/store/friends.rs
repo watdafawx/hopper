@@ -1463,7 +1463,7 @@ impl Store {
             ..Default::default()
         };
         self.mailbox_recipes = vec![pack];
-        let got = |name: &str, seq: u64| Got { code: String::new(), seq, at: now - 600, name: name.into(), stamps: Default::default() };
+        let got = |name: &str, seq: u64| Got { seq, at: now - 600, name: name.into(), ..Default::default() };
         let mark = |by: &str, name: &str, seq: u64, kind: Change| Mark { by: by.into(), name: name.into(), seq, at: now - 900, kind, ..Default::default() };
         let mut copy = PackCopy { inst: "preview-pack".into(), group: "g-preview".into(), local: local.clone(), ..Default::default() };
         copy.got.insert("mia".into(), got("Mia", 22));
@@ -1757,7 +1757,7 @@ impl Store {
             for e in strays {
                 self.group_strays.remove(&(e.from.clone(), e.inst.clone()));
                 late.push(e.clone());
-                c.arrive(&e.from, Got { code: e.code, seq: e.seq, at: e.at, name: e.from_name, stamps: e.marks });
+                c.arrive(&e.from, Got { code: e.code, seq: e.seq, at: e.at, name: e.from_name, stamps: e.marks, ..Default::default() });
             }
         }
         // A copy set up only now (the follow went in after the sharer's
@@ -1801,7 +1801,7 @@ impl Store {
             return;
         }
         let name = if e.from_name.is_empty() { self.friend_name(&e.from) } else { e.from_name.clone() };
-        let g = Got { code: e.code.clone(), seq: e.seq, at: e.at, name, stamps: e.marks.clone() };
+        let g = Got { code: e.code.clone(), seq: e.seq, at: e.at, name, stamps: e.marks.clone(), ..Default::default() };
         if self.settings.group_copies.iter().any(|c| c.inst == e.inst) {
             self.update_settings_quietly(|st| {
                 for c in st.group_copies.iter_mut().filter(|c| c.inst == e.inst) {
@@ -2114,7 +2114,7 @@ impl Store {
         self.sync_copies();
         if self.settings.group_copies.iter().any(|c| c.inst == e.inst && c.local != c.inst) {
             let name = if e.from_name.is_empty() { self.friend_name(&e.from) } else { e.from_name.clone() };
-            let g = Got { code: e.code.clone(), seq: e.seq, at: e.at, name, stamps: e.marks.clone() };
+            let g = Got { code: e.code.clone(), seq: e.seq, at: e.at, name, stamps: e.marks.clone(), ..Default::default() };
             // The follow's applied code moves on once the merge took it in
             // (`on_group_merged`), not now: a copy set up again from the
             // follow would start from a code whose changes never went in.

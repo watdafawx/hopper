@@ -106,9 +106,14 @@ without it, silently. Two places used to break this and now share one rule
   task notes them.
 
 Repair happens when the member's code arrives again: their next publish, a
-restart, or Check now. There is no timer. A member's first code with a failed
-lookup, and baselines that were already wrong, are covered by the check
-against the mods folder below.
+restart, or Check now. There is no timer. A member's first code follows the
+same rule: a file of it that couldn't be looked up (and that this copy
+doesn't list) is cut out of the code stored in `got`. That code is also kept
+as `partial`, so the next read of the member's code is a first code again
+(`groupsync::first_changes`) and not compared with the cut one: compared, the
+file would count as a change the member made, which nobody knows. Baselines
+that were already wrong are covered by the check against the mods folder
+below.
 
 ### Checking the copy against the mods folder
 
