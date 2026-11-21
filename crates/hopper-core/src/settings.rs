@@ -65,6 +65,10 @@ pub struct FollowedRecipe {
     pub seen: String,
     /// Files the recipe couldn't describe; the player has to get those.
     pub left_out: Vec<String>,
+    /// Files of the pack that failed to download here, which Hopper fetches
+    /// again by itself: worded apart from `left_out` (see [`crate::leftout`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<crate::leftout::Failed>,
     /// When the sender last changed the pack (unix seconds, the relay's).
     pub at: u64,
     /// Why no more updates come, once they stopped: "unshared" (they turned

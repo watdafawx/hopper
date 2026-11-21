@@ -244,6 +244,9 @@ pub struct AppliedCode {
     /// (file 51)"), for the follow's `left_out`. Mods the player chose not
     /// to install are out of the code but not listed here (the apply said so).
     pub missing: Vec<String>,
+    /// Those files as the code lists them, for the follow's failed
+    /// downloads ([`crate::leftout::applied`]).
+    pub failed: Vec<sharecode::Entry>,
 }
 
 /// The code a group pack's follow keeps as applied, after [`apply_to`] (or
@@ -257,7 +260,7 @@ pub struct AppliedCode {
 /// the log; a follow that isn't kept in step with a group keeps the code
 /// whole (it is applied again by itself until it matches: don't call this).
 pub fn applied_code(inst: &Instance, code: &str, skip: &[crate::sources::carry::Pin], job: &Job) -> AppliedCode {
-    let whole = AppliedCode { code: code.to_string(), missing: Vec::new() };
+    let whole = AppliedCode { code: code.to_string(), missing: Vec::new(), failed: Vec::new() };
     let Ok(share) = sharecode::decode(code) else { return whole };
     let l = sharecode::landed(inst, &share);
     if l.missing.is_empty() {
@@ -275,7 +278,7 @@ pub fn applied_code(inst: &Instance, code: &str, skip: &[crate::sources::carry::
             if failed.len() == 1 { "it" } else { "them" },
         ));
     }
-    AppliedCode { code: l.code, missing: failed.iter().map(sharecode::entry_says).filter(|n| !n.is_empty()).collect() }
+    AppliedCode { code: l.code, missing: failed.iter().map(sharecode::entry_says).filter(|n| !n.is_empty()).collect(), failed }
 }
 
 /// [`apply_to`] refused: the code doesn't fit this instance any more (see
@@ -809,6 +812,7 @@ mod tests {
             .collect();
         assert_eq!(kept, [11, 31], "the code the copy starts from has only what arrived");
         assert_eq!(a.missing, ["a CurseForge mod (file 21)"], "and the missing file is named");
+        assert_eq!(a.failed, [Entry::CurseFile { file: 21, enabled: true }], "and kept as the file it is, to list and look up");
         let notes = &jobs.snapshot()[0].notes;
         assert_eq!(notes.len(), 1, "said in the task, not silent: {notes:?}");
         assert!(notes[0].contains("file 21"), "{notes:?}");
@@ -817,7 +821,7 @@ mod tests {
         let job = jobs.start_quiet("test");
         let all = Instance { addons: vec![addon(1, 11, "a"), addon(2, 21, "b"), addon(3, 31, "c")], ..Default::default() };
         let a = applied_code(&all, &code, &[], &job);
-        assert_eq!(a, AppliedCode { code: code.clone(), missing: Vec::new() });
+        assert_eq!(a, AppliedCode { code: code.clone(), missing: Vec::new(), failed: Vec::new() });
         assert_eq!(job.note_count(), 0);
     }
 }

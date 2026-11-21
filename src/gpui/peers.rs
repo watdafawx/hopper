@@ -86,6 +86,8 @@ impl PeersView {
         self.diff = None;
         self.picked.clear();
         self.remote_inst.clear();
+        // What a followed pack is missing is shown here: name it.
+        self.store.update(cx, |s, _| s.name_left_out(&root));
         self.root = Some(root);
         // The other PC's list is the same, but the pack to match it with
         // changed.
@@ -431,8 +433,8 @@ impl PeersView {
                     Ok(recipe) => {
                         let Some(mut f) = this.followed(cx) else { return };
                         let changed = recipe.code != f.code;
+                        hopper::leftout::sharer_said(&mut f, &recipe.code, &recipe.left_out);
                         f.seen = recipe.code;
-                        f.left_out = recipe.left_out;
                         let name = f.peer_name.clone();
                         this.save_follow(f, cx);
                         this.message = Some(Ok(if changed {
@@ -516,6 +518,11 @@ impl PeersView {
 
     fn follow_line(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let f = self.followed(cx)?;
+        let missing = hopper::leftout::lines_for(
+            &f,
+            self.store.read(cx).instance(std::path::Path::new(&f.root)),
+            if f.peer_name.is_empty() { "them" } else { &f.peer_name },
+        );
         let theme = cx.theme();
         let changed = f.seen != f.code;
         Some(
@@ -572,15 +579,9 @@ impl PeersView {
                                 .on_click(cx.listener(|this, _, _, cx| this.stop_follow(cx))),
                         ),
                 )
-                .when(!f.left_out.is_empty(), |c| {
-                    c.child(
-                        widgets::fine_print(
-                            crate::friends::hand_added_line(&f.left_out, if f.peer_name.is_empty() { "them" } else { &f.peer_name }),
-                            cx,
-                        )
-                        .text_xs(),
-                    )
-                })
+                // What's missing, by why: a download that failed is Hopper's
+                // to get again, a jar on no mod site is the friend's to send.
+                .children(missing.into_iter().map(|line| widgets::fine_print(line, cx).text_xs()))
                 .into_any_element(),
         )
     }

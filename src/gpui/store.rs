@@ -112,6 +112,9 @@ pub enum Msg {
     /// A new instance was made by following a friend's pack: remember the
     /// recipe for its root (known only once it was made).
     Followed(Box<hopper::settings::FollowedRecipe>),
+    /// The names of mods whose files failed to come in for the pack
+    /// followed at this root (`hopper::leftout::lookup`).
+    LeftOutNamed(PathBuf, HashMap<String, String>),
     /// That new instance exists and its mods are going in: the follow is
     /// recorded now, so an install that never finishes still has one.
     FollowMade(Box<hopper::settings::FollowedRecipe>),
@@ -731,6 +734,9 @@ pub struct Store {
     follow_applying: HashSet<PathBuf>,
     /// Follows whose last automatic apply failed, by instance root.
     follow_retry: HashMap<PathBuf, hopper::recipe::Retry>,
+    /// When each file that failed to come in was last asked a name for
+    /// (`hopper::leftout::key`), so a list on screen never asks in a loop.
+    left_out_asked: HashMap<String, std::time::Instant>,
     /// Group copies (local instance ids) taking in other members' changes
     /// now, ones whose last try failed, and ones waiting for their own
     /// change to be sent (by the `sent_seq` they waited at).
@@ -1115,6 +1121,7 @@ impl Store {
             pending_follow: Default::default(),
             follow_applying: Default::default(),
             follow_retry: Default::default(),
+            left_out_asked: Default::default(),
             group_merging: Default::default(),
             group_retry: Default::default(),
             github_limit_told: None,
@@ -1607,6 +1614,7 @@ impl Store {
                 }
             }
             Msg::Followed(f) => self.on_followed(*f, cx),
+            Msg::LeftOutNamed(root, names) => self.on_left_out_named(root, names, cx),
             Msg::FollowMade(f) => self.on_follow_made(*f, cx),
             Msg::RecipeApplied(r) => self.on_recipe_applied(*r, cx),
             Msg::RecipeFailed(root, code, e, job) => self.on_recipe_failed(root, code, e, job, cx),
@@ -1628,6 +1636,7 @@ impl Store {
                 self.read_waiting(&root);
                 self.want_group_needs(&root);
                 self.want_group_verify(&root);
+                self.tidy_left_out(&root);
             }
             Msg::Disk(changes) => self.disk_changed(changes, cx),
             Msg::DiskLoaded(root, new, area) => self.disk_loaded(root, new, area, cx),

@@ -804,7 +804,7 @@ pub fn pruned_code(code: &str, gone: impl Fn(&Entry) -> bool) -> Option<(String,
 /// Modrinth file by its id, a mod from a link by its pin (the same file and
 /// bytes). Anything else a code lists (a removal, a switch off, a lock) has
 /// no file to land.
-fn on_disk(inst: &Instance, e: &Entry) -> bool {
+pub fn on_disk(inst: &Instance, e: &Entry) -> bool {
     match e {
         Entry::CurseFile { file, .. } => inst.addons.iter().any(|a| a.file_id == *file && !is_mr(a.project_id)),
         Entry::ModrinthFile { version, .. } => {

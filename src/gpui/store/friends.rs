@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// How long a file that failed to come in waits before its mod's name is
+/// asked for again, when the mod site didn't give one (`Store::name_left_out`).
+const NAME_AGAIN: Duration = Duration::from_secs(5 * 60);
 /// How often the groups are read again when nothing says they changed.
 const GROUPS_EVERY: Duration = Duration::from_secs(60);
 /// How long a failed publish waits before it's tried again.
@@ -248,8 +251,12 @@ pub struct RecipeApplied {
     /// applied code (`hopper::recipe::applied_code`): the code applied
     /// before that, when files of it didn't come in.
     pub pruned_from: Option<String>,
-    /// The files that didn't come in, named for the follow's `left_out`.
-    pub missing: Vec<String>,
+    /// The files that didn't come in, for the follow's failed downloads
+    /// (`hopper::leftout`).
+    pub missing: Vec<hopper::sharecode::Entry>,
+    /// Whether the folder was checked for what came in (a follow kept in
+    /// step with a group): only then does an empty `missing` say all did.
+    pub checked: bool,
 }
 
 /// Other members' changes taken into a group copy (`hopper::groupsync`).
@@ -1025,12 +1032,72 @@ impl Store {
             cx,
         );
         self.sync_copies();
+        self.name_left_out(&root);
         self.handle(Msg::installed(root, &[], None), cx);
+    }
+
+    /// Keeps the missing list of the pack followed at `root` true: a file
+    /// that is here now (fetched by a later read of the group, or put in by
+    /// hand) is taken off it. Then names what is still on it.
+    pub(super) fn tidy_left_out(&mut self, root: &Path) {
+        let Some(f) = self.follow_at(root).filter(|f| !f.left_out.is_empty() || !f.failed.is_empty()) else { return };
+        let mut now = f.clone();
+        if self.instance(root).is_some_and(|inst| hopper::leftout::drop_here(&mut now, inst)) {
+            self.update_settings_quietly(|st| {
+                for f in st.followed_recipes.iter_mut().filter(|f| Path::new(&f.root) == root) {
+                    f.left_out = now.left_out.clone();
+                    f.failed = now.failed.clone();
+                }
+            });
+        }
+        self.name_left_out(root);
+    }
+
+    /// Looks up the names of the mods whose files failed to come in for the
+    /// pack followed at `root`: one question per mod site for all of them,
+    /// off the UI thread, and the answer is saved with the row so it is
+    /// asked once. A file the site didn't name is asked about again after
+    /// [`NAME_AGAIN`], when something next touches the list.
+    pub fn name_left_out(&mut self, root: &Path) {
+        let Some(f) = self.follow_at(root) else { return };
+        let now = std::time::Instant::now();
+        let mut ask = Vec::new();
+        for e in hopper::leftout::unnamed(f) {
+            let Some(k) = hopper::leftout::key(&e) else { continue };
+            if self.left_out_asked.get(&k).is_some_and(|at| now.duration_since(*at) < NAME_AGAIN) {
+                continue;
+            }
+            ask.push((k, e));
+        }
+        if ask.is_empty() {
+            return;
+        }
+        let entries: Vec<hopper::sharecode::Entry> = ask.iter().map(|(_, e)| e.clone()).collect();
+        for (k, _) in ask {
+            self.left_out_asked.insert(k, now);
+        }
+        let (tx, root) = (self.tx.clone(), root.to_path_buf());
+        std::thread::spawn(move || {
+            let names = hopper::leftout::lookup(&entries);
+            if !names.is_empty() {
+                let _ = tx.send(Msg::LeftOutNamed(root, names));
+            }
+        });
+    }
+
+    /// The names [`Store::name_left_out`] asked for came back.
+    pub(super) fn on_left_out_named(&mut self, root: PathBuf, names: HashMap<String, String>, cx: &mut Context<Self>) {
+        self.update_settings_quietly(|st| {
+            for f in st.followed_recipes.iter_mut().filter(|f| Path::new(&f.root) == root) {
+                hopper::leftout::set_names(f, &names);
+            }
+        });
+        cx.notify();
     }
 
     /// A followed pack's code was applied at its root.
     pub(super) fn on_recipe_applied(&mut self, r: RecipeApplied, cx: &mut Context<Self>) {
-        let RecipeApplied { root, code, held, declined, pruned_from, missing } = r;
+        let RecipeApplied { root, code, held, declined, pruned_from, missing, checked } = r;
         self.follow_applying.remove(&root);
         // It worked: the failed tries before it are done with.
         if let Some(old) = self.follow_retry.remove(&root) {
@@ -1056,15 +1123,15 @@ impl Store {
                     // a code arrived meanwhile; else it's this one, so
                     // nothing counts as waiting and this isn't applied
                     // again and again.
-                    if let Some(full) = &pruned_from {
-                        if f.seen == *full {
-                            f.seen = code.clone();
-                        }
-                        for m in &missing {
-                            if !f.left_out.contains(m) {
-                                f.left_out.push(m.clone());
-                            }
-                        }
+                    if let Some(full) = &pruned_from
+                        && f.seen == *full
+                    {
+                        f.seen = code.clone();
+                    }
+                    // The files that failed are listed as that, and one
+                    // listed before that came in this time is taken off.
+                    if checked {
+                        hopper::leftout::applied(f, pruned_from.as_ref().unwrap_or(&code), &missing);
                     }
                 }
             },
@@ -2150,13 +2217,21 @@ impl Store {
                 if !e.from_name.is_empty() {
                     f.peer_name = e.from_name.clone();
                 }
-                f.left_out = e.left_out.clone();
+                // Only what the sharer said is replaced: a download that
+                // failed here stays listed while the pack has that file.
+                hopper::leftout::sharer_said(f, &e.code, &e.left_out);
                 f.at = e.at;
                 // Shared again after it stopped.
                 f.ended.clear();
                 f.seen = e.code.clone();
             }
         });
+        // A file the list still names may be here by now.
+        let roots: Vec<PathBuf> =
+            self.settings.followers(&e.from, &e.inst, &e.key).into_iter().map(|ix| PathBuf::from(&self.settings.followed_recipes[ix].root)).collect();
+        for root in roots {
+            self.tidy_left_out(&root);
+        }
         // A group pack kept both ways takes its sharer's code mod by mod,
         // like every other member's.
         self.sync_copies();
@@ -2441,14 +2516,10 @@ impl Store {
                         // left out for their source) aren't in it, so they
                         // show as changes later and go in then.
                         let a = hopper::recipe::applied_code(&inst, &full, &left_to_ask, job);
+                        hopper::leftout::applied(&mut f, &full, &a.failed);
                         if a.code != full {
                             f.seen = a.code.clone();
                             f.code = a.code;
-                            for m in a.missing {
-                                if !f.left_out.contains(&m) {
-                                    f.left_out.push(m);
-                                }
-                            }
                         }
                     }
                     Ok(Msg::Followed(Box::new(FollowedRecipe {
@@ -2541,11 +2612,11 @@ impl Store {
                 let (kept, pruned_from, missing) = if bound {
                     let a = hopper::recipe::applied_code(&inst, &code, &skip, job);
                     let pruned = (a.code != code).then(|| code.clone());
-                    (a.code, pruned, a.missing)
+                    (a.code, pruned, a.failed)
                 } else {
                     (code.clone(), None, Vec::new())
                 };
-                Ok(RecipeApplied { root: r2.clone(), code: kept, held, declined: answer, pruned_from, missing })
+                Ok(RecipeApplied { root: r2.clone(), code: kept, held, declined: answer, pruned_from, missing, checked: bound })
             };
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("Hopper hit a bug and stopped this task.")));
@@ -2815,7 +2886,8 @@ impl Store {
     /// can't be downloaded, so this PC doesn't have them): a member's copy
     /// passes the names on, so every member still sees what's missing.
     fn sharers_hand_added(&self, c: &PackCopy) -> Vec<String> {
-        let followed = self.settings.followed_recipes.iter().find(|f| f.local == c.local && f.inst == c.inst).map(|f| f.left_out.clone());
+        // Not this PC's failed downloads: those are nobody else's news.
+        let followed = self.settings.followed_recipes.iter().find(|f| f.local == c.local && f.inst == c.inst).map(hopper::leftout::hand_added);
         followed.unwrap_or_else(|| {
             self.mailbox_recipes
                 .iter()

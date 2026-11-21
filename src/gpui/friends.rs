@@ -4351,22 +4351,7 @@ fn group_submenu(
 /// The files a friend added by hand (on no mod site), by name, and who to
 /// ask for them. Long lists name the first few.
 pub fn hand_added_line(names: &[String], who: &str) -> String {
-    const SHOWN: usize = 3;
-    let n = names.len();
-    let mut list = names.iter().take(SHOWN).cloned().collect::<Vec<_>>();
-    if n > SHOWN {
-        list.push(format!("{} more", n - SHOWN));
-    }
-    let listed = match list.as_slice() {
-        [] => String::new(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    };
-    if n == 1 {
-        format!("{listed} isn't on any mod site, so Hopper can't download it. Ask {who} to send it.")
-    } else {
-        format!("{listed} aren't on any mod site, so Hopper can't download them. Ask {who} to send them.")
-    }
+    hopper::leftout::no_source_line(names, who)
 }
 
 pub(crate) fn name_or(name: &str, or: &str) -> String {

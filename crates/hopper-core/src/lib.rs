@@ -48,6 +48,7 @@ pub mod extlog;
 pub mod file_age;
 pub mod folderrules;
 pub mod fuzzy;
+pub mod leftout;
 pub mod listorder;
 pub mod namematch;
 pub mod game;
