@@ -4484,7 +4484,7 @@ dependencies = [
 
 [[package]]
 name = "hopper"
-version = "0.89.2"
+version = "0.89.3"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4514,7 +4514,7 @@ dependencies = [
 
 [[package]]
 name = "hopper-core"
-version = "0.89.2"
+version = "0.89.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
