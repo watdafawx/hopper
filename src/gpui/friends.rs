@@ -770,7 +770,8 @@ impl FriendsPanel {
                 "Needs your answer",
                 more(top.state.note(&top.who).map(|n| format!("{}: {n}", top.name)).unwrap_or_default()),
             ),
-            CopyState::Updating => (IconName::RefreshCw, theme.primary, "Syncing", format!("Getting {}'s changes for {}.", top.who, top.name)),
+            CopyState::Differs(text) => (IconName::Info, theme.warning, "Needs a look", more(text.clone())),
+            CopyState::Updating => (IconName::RefreshCw, theme.primary, "Syncing",format!("Getting {}'s changes for {}.", top.who, top.name)),
             CopyState::UpToDate => (
                 IconName::CircleCheck,
                 theme.success,
@@ -1274,7 +1275,7 @@ impl FriendsPanel {
             Some((_, local, _)) if group.is_some() => format!("Your copy: {local}"),
             Some((_, local, CopyState::Updating)) => format!("Getting {who}'s changes · your copy: {local}"),
             // The note under it says what's wrong: not "up to date".
-            Some((_, local, CopyState::Failed(..) | CopyState::Held(_))) => format!("Your copy: {local}"),
+            Some((_, local, CopyState::Failed(..) | CopyState::Held(_) | CopyState::Differs(_))) => format!("Your copy: {local}"),
             Some((_, local, _)) => format!("Your copy: {local} · up to date"),
             None if e.at > 0 => format!("Updated {}", ago(e.at)),
             None => String::new(),
@@ -1508,7 +1509,7 @@ impl FriendsPanel {
                 let sub = match state {
                     CopyState::Updating => format!("Getting {who}'s changes · {}", ago(e.at)),
                     CopyState::Failed(..) => format!("From {sender} · changed {}", ago(e.at)),
-                    CopyState::Held(_) => format!("From {sender}"),
+                    CopyState::Held(_) | CopyState::Differs(_) => format!("From {sender}"),
                     CopyState::UpToDate => format!("From {sender} · up to date"),
                 };
                 let kept = s.instance(root).map_or(0, |i| i.only_here.len());
@@ -3748,6 +3749,10 @@ enum CopyState {
     Failed(String, bool),
     /// Mods from GitHub and other links left out until the player says.
     Held(Vec<String>),
+    /// The mods folder doesn't match what the group has, the check couldn't
+    /// finish, or a mod waits for a browser download: the line says what.
+    /// Same words as the instance page's strip, so the two never disagree.
+    Differs(String),
 }
 
 impl CopyState {
@@ -3755,7 +3760,7 @@ impl CopyState {
     fn rank(&self) -> u8 {
         match self {
             CopyState::Failed(..) => 0,
-            CopyState::Held(_) => 1,
+            CopyState::Held(_) | CopyState::Differs(_) => 1,
             CopyState::Updating => 2,
             CopyState::UpToDate => 3,
         }
@@ -3770,9 +3775,24 @@ impl CopyState {
                 [one] => format!("{one} is from GitHub or another link, so it wasn't added. Update asks about it."),
                 many => format!("{} mods from GitHub and other links weren't added. Update asks about them.", many.len()),
             }),
+            CopyState::Differs(text) => Some(text.clone()),
             _ => None,
         }
     }
+}
+
+/// What the group check found that the copy still lacks, in one line, for
+/// the statuses where the copy is not the group's yet.
+fn differs_says(st: &Status) -> Option<String> {
+    use hopper::groupstatus as gs;
+    Some(match st {
+        Status::Behind { mods, missing } => gs::behind_says(*mods, *missing),
+        Status::CantCheck => gs::CANT_CHECK.to_string(),
+        Status::ByHand { mods } => gs::by_hand_says(mods),
+        Status::NeedsMod { .. } => "A mod in the pack needs another mod the pack doesn't have.".to_string(),
+        Status::WaitsForYou { .. } => "A pack update waits for your answer.".to_string(),
+        _ => return None,
+    })
 }
 
 fn copy_state(s: &Store, f: &hopper::settings::FollowedRecipe, root: &Path) -> CopyState {
@@ -3787,6 +3807,11 @@ fn copy_state(s: &Store, f: &hopper::settings::FollowedRecipe, root: &Path) -> C
     }
     if !f.held.is_empty() {
         return CopyState::Held(f.held.clone());
+    }
+    // "Same as the group" is the mods folder's word, not the codes': say
+    // what the instance page's check found, or the two pages disagree.
+    if let Some(text) = s.group_status(root).and_then(|st| differs_says(&st)) {
+        return CopyState::Differs(text);
     }
     CopyState::UpToDate
 }
@@ -4413,6 +4438,19 @@ mod tests {
         assert_eq!(ago(t - 86400), "1 day ago");
         assert_eq!(ago(t - 3 * 86400), "3 days ago");
         assert_eq!(ago(t - 4 * 2_592_000), "4 months ago");
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_copy_the_check_found_behind_is_never_called_up_to_date() {
+        // The Friends page once said "In sync" while the pack's page said
+        // "missing 1 mod": both now read the same group status.
+        let behind = differs_says(&Status::Behind { mods: 1, missing: true }).expect("behind says something");
+        assert_eq!(behind, "Your copy is missing 1 mod the group has.");
+        assert!(differs_says(&Status::ByHand { mods: vec!["Taverns".into()] }).is_some_and(|t| t.contains("Taverns")));
+        assert!(differs_says(&Status::CantCheck).is_some());
+        assert!(differs_says(&Status::InStep { checked: None }).is_none());
+        assert!(differs_says(&Status::Checking).is_none());
+        assert_eq!(CopyState::Differs("x".into()).rank(), 1);
     }
 
     #[::core::prelude::v1::test]
