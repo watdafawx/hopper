@@ -1413,6 +1413,31 @@ impl FriendsPanel {
                 .tooltip(format!("Takes in {name}'s changes now. Other people's keep waiting"))
                 .on_click(cx.listener(move |this, _, _, cx| this.store.update(cx, |s, cx| s.pull_group_from(&root, &who, cx))));
         }
+        if let Status::ByHand { .. } = st {
+            let s = self.store.read(cx);
+            let urls: Vec<String> = s.group_pending(&root).into_iter().map(|p| p.url).filter(|u| !u.is_empty()).collect();
+            let fetch = s.fetch_files(&root).0;
+            let store = self.store.clone();
+            return match fetch {
+                Some(v) => {
+                    let b = Button::new(id).xsmall().outline();
+                    let b = if v.running() {
+                        b.icon(IconName::ExternalLink).label("Show window").disabled(!v.step.is_open())
+                    } else {
+                        b.icon(IconName::RefreshCw).label("Retry")
+                    };
+                    b.on_click(move |_, _, cx| crate::fetch_progress::click(&store, &v, cx))
+                }
+                None => Button::new(id)
+                    .xsmall()
+                    .outline()
+                    .icon(IconName::Download)
+                    .label(if urls.len() <= 1 { "Download".to_string() } else { format!("Download {}", urls.len()) })
+                    .disabled(urls.is_empty())
+                    .tooltip("Opens each page in a small Hopper window that saves the file and closes")
+                    .on_click(move |_, _, cx| store.read(cx).fetch_pages(&root, urls.clone(), None)),
+            };
+        }
         if let Status::ToPush { changes, .. } = st {
             let pushing = self.store.read(cx).pushing_at(&root);
             return Button::new(id)

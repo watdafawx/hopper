@@ -844,6 +844,10 @@ pub struct Merged {
     /// Files of the taken codes that couldn't be looked up, so their mods
     /// weren't made and the codes were kept without them ([`baseline`]).
     pub unresolved: Vec<Entry>,
+    /// CurseForge files whose author allows downloads only from the website
+    /// (and that aren't on Modrinth under the same hash): queued in
+    /// `.hopper-pending.json` for the player to download by hand.
+    pub by_hand: Vec<crate::modpack::Pending>,
 }
 
 /// A member's change sync didn't make here, for the player to see.
@@ -1498,7 +1502,19 @@ pub fn lookup(found: &HashMap<String, u64>) -> impl FnMut(&Entry) -> Option<u64>
 /// the code); it is noted. A change that fails doesn't stop the others,
 /// but fails the whole: tried again, the ones made are already there.
 pub fn apply(inst: &mut Instance, todo: &[Change], skip_sources: &[crate::sources::carry::Pin], job: &Job) -> anyhow::Result<()> {
+    apply_with_pending(inst, todo, skip_sources, job).map(|_| ())
+}
+
+/// Like [`apply`], returning `(mod key, pending)` for each change whose file
+/// couldn't be downloaded automatically and was queued for a browser download.
+pub fn apply_with_pending(
+    inst: &mut Instance,
+    todo: &[Change],
+    skip_sources: &[crate::sources::carry::Pin],
+    job: &Job,
+) -> anyhow::Result<Vec<(String, crate::modpack::Pending)>> {
     let mut failed: Vec<(String, anyhow::Error)> = Vec::new();
+    let mut by_hand: Vec<(String, crate::modpack::Pending)> = Vec::new();
     let shipped = if todo.iter().any(|c| matches!(c.now, State::Removed | State::Unlisted)) { pack_ships(inst) } else { Default::default() };
     for (n, c) in todo.iter().enumerate() {
         job.check_cancelled()?;
@@ -1520,46 +1536,48 @@ pub fn apply(inst: &mut Instance, todo: &[Change], skip_sources: &[crate::source
             job.note(format!("{name}: kept, you locked its version"));
             continue;
         }
-        let r: anyhow::Result<()> = match (&c.now, &c.entry) {
+        let r: anyhow::Result<Option<crate::modpack::Pending>> = match (&c.now, &c.entry) {
             (State::Off, _) => match at {
-                Some(i) => switch(inst, i, false, &name, job),
-                None => Ok(()),
+                Some(i) => switch(inst, i, false, &name, job).map(|()| None),
+                None => Ok(None),
             },
             (State::Removed, _) => match at {
-                Some(i) => crate::install::remove(inst, i),
-                None => Ok(()),
+                Some(i) => crate::install::remove(inst, i).map(|()| None),
+                None => Ok(None),
             },
             (State::Unlisted, _) => match (&c.was, at) {
-                (State::Off, Some(i)) => switch(inst, i, true, &name, job),
+                (State::Off, Some(i)) => switch(inst, i, true, &name, job).map(|()| None),
                 // A Modrinth pack names its mods by file, so a pack mod
                 // updated here (no longer counted as the pack's) is found
                 // by asking the pack first, below.
-                (State::File { .. }, Some(i)) if !inst.addons[i].from_pack && !is_mr_pack(inst) => crate::install::remove(inst, i),
+                (State::File { .. }, Some(i)) if !inst.addons[i].from_pack && !is_mr_pack(inst) => crate::install::remove(inst, i).map(|()| None),
                 // Back to the pack's own file: how an undone update or
                 // removal of a pack mod reads in a member's code.
                 (State::File { .. } | State::Removed, _) => match pack_file(inst, &c.key, job) {
                     Some(PackFile::Curse(project, file)) => put_back_pack_file(inst, project, file, job),
-                    Some(PackFile::Modrinth(f)) => put_back_mr_file(inst, &f, job),
+                    Some(PackFile::Modrinth(f)) => put_back_mr_file(inst, &f, job).map(|()| None),
                     None => match at {
-                        Some(i) if matches!(c.was, State::File { .. }) && !inst.addons[i].from_pack => crate::install::remove(inst, i),
+                        Some(i) if matches!(c.was, State::File { .. }) && !inst.addons[i].from_pack => crate::install::remove(inst, i).map(|()| None),
                         _ => {
                             job.note(format!("{name}: putting back the modpack's own file isn't done by sync"));
-                            Ok(())
+                            Ok(None)
                         }
                     },
                 },
-                _ => Ok(()),
+                _ => Ok(None),
             },
             (State::File { on, .. }, Some(e)) => file_change(inst, at, e, *on, skip_sources, job),
-            (State::File { .. }, None) => Ok(()),
+            (State::File { .. }, None) => Ok(None),
         };
-        if let Err(e) = r {
-            failed.push((name, e));
+        match r {
+            Ok(Some(p)) => by_hand.push((c.key.clone(), p)),
+            Ok(None) => {}
+            Err(e) => failed.push((name, e)),
         }
     }
     inst.save()?;
     match failed.into_iter().next() {
-        None => Ok(()),
+        None => Ok(by_hand),
         Some((name, e)) => Err(e.context(format!("Couldn't change {name}"))),
     }
 }
@@ -1631,10 +1649,12 @@ fn put_back_mr_file(inst: &mut Instance, f: &crate::modpack::MrIndexFile, job: &
 
 /// Puts the pack's own `file` of `project` back, on and counted as the
 /// pack's again (whatever file of it is here now goes to History).
-fn put_back_pack_file(inst: &mut Instance, project: u64, file: u64, job: &Job) -> anyhow::Result<()> {
+fn put_back_pack_file(inst: &mut Instance, project: u64, file: u64, job: &Job) -> anyhow::Result<Option<crate::modpack::Pending>> {
     let same = inst.addons.iter().any(|a| a.project_id == project && a.file_id == file);
     if !same {
-        crate::install::install_file(inst, project, file, job)?;
+        if let crate::install::FileInstall::Pending(p) = crate::install::install_file_outcome(inst, project, file, Some(true), job)? {
+            return Ok(Some(p));
+        }
     }
     if let Some(i) = inst.addons.iter().position(|a| a.project_id == project) {
         inst.addons[i].from_pack = true;
@@ -1642,7 +1662,7 @@ fn put_back_pack_file(inst: &mut Instance, project: u64, file: u64, job: &Job) -
             crate::install::set_enabled_later(inst, i, true)?;
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Whether making `c` here would take a mod's file away: a removal, or a
@@ -1963,7 +1983,24 @@ pub fn merge(root: &Path, copy: &PackCopy, allow: bool, ignore_unsent: bool, pac
         // are theirs, whatever else changes here meanwhile.
         let _scope = crate::actor::begin(root, None);
         claim_changes(&inst, &todo, &merged, &copy.group);
-        apply(&mut inst, &todo, &skip, job)?;
+        let by_hand = apply_with_pending(&mut inst, &todo, &skip, job)?;
+        for (key, p) in by_hand {
+            // Queued for a browser download, not installed yet: don't count it
+            // as taken in, while keeping its mark so the copy knows it waits.
+            merged.made.retain(|(k, _, _)| *k != key);
+            merged.by_hand.push(p);
+        }
+    }
+    // A mod the group removed while its browser download was still waiting
+    // leaves the pending list too.
+    let dropped: Vec<u64> = merged
+        .marks
+        .iter()
+        .filter(|(_, m)| matches!(m.state, State::Removed | State::Unlisted))
+        .filter_map(|(k, _)| k.strip_prefix("p:").and_then(|n| n.parse().ok()))
+        .collect();
+    if !dropped.is_empty() {
+        let _ = crate::modpack::remove_pending_projects(root, &dropped);
     }
     Ok(merged)
 }
@@ -2200,6 +2237,30 @@ pub fn reconcile(copies: &mut Vec<PackCopy>, st: &Settings, groups_of: impl Fn(&
     gone
 }
 
+/// Pending browser downloads in `pending` that belong to this group copy:
+/// mods the group's latest state wants (or pack mods from a group pack
+/// update), excluding anything the player keeps only on this PC or the group
+/// removed.
+pub fn group_pending<'a>(inst: &Instance, copy: &PackCopy, pending: &'a [crate::modpack::Pending]) -> Vec<&'a crate::modpack::Pending> {
+    pending
+        .iter()
+        .filter(|p| {
+            if p.project_id == 0 {
+                return false;
+            }
+            let key = format!("p:{}", p.project_id);
+            if inst.only_here.contains_key(&key) {
+                return false;
+            }
+            match copy.marks.get(&key).map(|m| &m.state) {
+                Some(State::File { file, .. }) => p.file_id != 0 && file == &format!("cf:{}", p.file_id),
+                Some(State::Removed) => false,
+                _ => p.addon.as_ref().is_some_and(|a| a.from_pack),
+            }
+        })
+        .collect()
+}
+
 fn file_change(
     inst: &mut Instance,
     at: Option<usize>,
@@ -2207,7 +2268,7 @@ fn file_change(
     on: bool,
     skip_sources: &[crate::sources::carry::Pin],
     job: &Job,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<crate::modpack::Pending>> {
     let (project, file) = match e {
         Entry::CurseFile { file, .. } => {
             let p = match at {
@@ -2229,27 +2290,29 @@ fn file_change(
                     let name = inst.addons[i].name.clone();
                     switch(inst, i, *enabled, &name, job)?;
                 }
-                return Ok(());
+                return Ok(None);
             }
             if skip_sources.iter().any(|s| s.source.url == pin.source.url && s.source.pattern == pin.source.pattern) {
                 job.note(format!("{}: not installed, you haven't confirmed its source on this PC", crate::sources::carry::display_name(pin)));
-                return Ok(());
+                return Ok(None);
             }
             crate::sources::install_pinned(inst, pin, *enabled, job)?;
-            return Ok(());
+            return Ok(None);
         }
-        _ => return Ok(()),
+        _ => return Ok(None),
     };
     let same = at.is_some_and(|i| inst.addons[i].file_id == file && inst.addons[i].project_id == project);
     if !same {
-        crate::install::install_file(inst, project, file, job)?;
+        if let crate::install::FileInstall::Pending(p) = crate::install::install_file_outcome(inst, project, file, Some(on), job)? {
+            return Ok(Some(p));
+        }
     }
     if let Some(i) = inst.addons.iter().position(|a| a.project_id == project)
         && inst.addons[i].enabled != on
     {
         crate::install::set_enabled_later(inst, i, on)?;
     }
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -3814,6 +3877,7 @@ mod tests {
             only_from: None,
             to_push: None,
             check: Check::Matches,
+            by_hand: &[],
         };
         let s = status(&input);
         assert_eq!(s, Status::AfterYours { after: After::of(&b.copy).unwrap(), offline: false });
@@ -3825,7 +3889,7 @@ mod tests {
         let inst = b.instance();
         let codes: BTreeMap<String, Mods> = b.copy.got.iter().map(|(k, g)| (k.clone(), dec(&g.code).unwrap())).collect();
         let sent = dec(&b.copy.sent);
-        let facts = crate::groupverify::Facts { inst: &inst, copy: &b.copy, codes: &codes, sent: sent.as_ref(), pack: Some(&State::Unlisted), skip: &[] };
+        let facts = crate::groupverify::Facts { inst: &inst, copy: &b.copy, codes: &codes, sent: sent.as_ref(), pack: Some(&State::Unlisted), skip: &[], pending: &[] };
         assert!(crate::groupverify::verify(&facts, 0).rows.is_empty());
     }
 
@@ -5935,5 +5999,33 @@ mod lock_sync_tests {
         inst.addons[0].locked = false;
         assert!(!locked_out(&inst, &update));
         let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    #[test]
+    fn group_pending_picks_only_mods_the_group_still_wants() {
+        let mut inst = Instance::default();
+        inst.only_here.insert("p:30".into(), crate::onlyhere::Kept::default());
+        let mut copy = PackCopy::default();
+        copy.marks.insert("p:10".into(), Mark { state: State::File { file: "cf:101".into(), on: true }, ..Default::default() });
+        copy.marks.insert("p:20".into(), Mark { state: State::Removed, ..Default::default() });
+        copy.marks.insert("p:30".into(), Mark { state: State::File { file: "cf:301".into(), on: true }, ..Default::default() });
+        let mk = |project_id: u64, file_id: u64, name: &str, from_pack: bool| crate::modpack::Pending {
+            name: name.into(),
+            file_name: format!("{name}.jar"),
+            project_id,
+            file_id,
+            addon: Some(Addon { project_id, file_id, from_pack, ..Default::default() }),
+            ..Default::default()
+        };
+        let list = vec![
+            mk(10, 101, "Entity Culling", false), // wanted by group mark
+            mk(10, 100, "Old Entity Culling", false), // older file id than mark
+            mk(20, 201, "Removed Mod", false), // removed by group
+            mk(30, 301, "Only Here Mod", false), // kept only on this PC
+            mk(40, 401, "Pack Mod", true), // from group pack update
+            mk(50, 501, "Personal Browse Mod", false), // not in group marks
+        ];
+        let picked: Vec<&str> = group_pending(&inst, &copy, &list).into_iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(picked, ["Entity Culling", "Pack Mod"]);
     }
 }

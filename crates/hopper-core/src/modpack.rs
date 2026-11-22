@@ -193,15 +193,36 @@ fn clear_pending_at(root: &Path) -> anyhow::Result<()> {
 }
 
 /// Adds files to download by hand to an instance's list (a file already
-/// listed is replaced).
+/// listed — or an older pending file of the same project — is replaced).
 pub fn add_pending(root: &Path, more: &[Pending]) -> anyhow::Result<()> {
     let mut list: Vec<Pending> = fs::read(root.join(PENDING_FILE))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
-    list.retain(|p| !more.iter().any(|m| m.file_name == p.file_name));
+    list.retain(|p| {
+        !more.iter().any(|m| m.file_name == p.file_name || (m.project_id != 0 && m.project_id == p.project_id))
+    });
     list.extend(more.iter().cloned());
     write_pending(root, &list)
+}
+
+/// Drops pending browser-download entries for `projects` (e.g. a mod the
+/// group removed before it was downloaded). Returns true when any entry went.
+pub fn remove_pending_projects(root: &Path, projects: &[u64]) -> anyhow::Result<bool> {
+    if projects.is_empty() || !root.join(PENDING_FILE).is_file() {
+        return Ok(false);
+    }
+    let mut list: Vec<Pending> = fs::read(root.join(PENDING_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let before = list.len();
+    list.retain(|p| p.project_id == 0 || !projects.contains(&p.project_id));
+    if list.len() == before {
+        return Ok(false);
+    }
+    write_pending(root, &list)?;
+    Ok(true)
 }
 
 /// The copy of `p` in `dir` (the user's Downloads): the same name, or the
@@ -2537,6 +2558,26 @@ mod tests {
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].file_name, "c.jar");
         fs::remove_dir_all(&t).unwrap();
+    }
+
+    #[test]
+    fn add_pending_replaces_older_file_of_same_project_and_remove_drops_it() {
+        let root = std::env::temp_dir().join(format!("hopper-pending-proj-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let inst = Instance { root: root.clone(), name: "t".into(), ..Default::default() };
+        let old = Pending { name: "Entity Culling".into(), file_name: "ec-1.0.jar".into(), project_id: 448_233, file_id: 1, ..Default::default() };
+        let newer = Pending { name: "Entity Culling".into(), file_name: "ec-1.1.jar".into(), project_id: 448_233, file_id: 2, ..Default::default() };
+        let other = Pending { name: "Other".into(), file_name: "other.jar".into(), project_id: 99, file_id: 3, ..Default::default() };
+        add_pending(&root, &[old, other]).unwrap();
+        add_pending(&root, &[newer]).unwrap();
+        let got: Vec<(u64, u64)> = pending_downloads(&inst).into_iter().map(|p| (p.project_id, p.file_id)).collect();
+        assert_eq!(got, [(99, 3), (448_233, 2)]);
+        assert!(remove_pending_projects(&root, &[448_233]).unwrap());
+        let got: Vec<(u64, u64)> = pending_downloads(&inst).into_iter().map(|p| (p.project_id, p.file_id)).collect();
+        assert_eq!(got, [(99, 3)]);
+        assert!(!remove_pending_projects(&root, &[448_233]).unwrap());
+        let _ = fs::remove_dir_all(&root);
     }
 
     use super::*;

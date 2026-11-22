@@ -2073,16 +2073,22 @@ impl LibraryView {
     }
 
     fn pending_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
-        let pending = self.store.read(cx).pending(&inst.root).to_vec();
+        let s = self.store.read(cx);
+        let mut pending = s.pending(&inst.root).to_vec();
+        // When the group sync strip is showing ByHand, it already offers the
+        // same Download / Show files controls for the group's pending mods:
+        // don't show a second notice for the same files.
+        if matches!(s.group_status(&inst.root), Some(hopper::groupstatus::Status::ByHand { .. })) {
+            let group = s.group_pending(&inst.root);
+            pending.retain(|p| !group.iter().any(|g| g.file_name == p.file_name && g.file_id == p.file_id));
+        }
         if pending.is_empty() {
             return None;
         }
         // While the download window works on them: one progress for all,
         // and each file's step under Show files.
-        let (fetch, files) = self.store.read(cx).fetch_files(&inst.root);
+        let (fetch, _) = s.fetch_files(&inst.root);
         let (root, n) = (inst.root.clone(), pending.len());
-        let list = pending.clone();
-        drop(files);
         let running = fetch.as_ref().filter(|v| v.running());
         let title = match &fetch {
             Some(v) if v.running() => format!("Downloading from CurseForge…{}", if v.total > 1 { format!(" {} of {}", (v.done + 1).min(v.total), v.total) } else { String::new() }),
@@ -2097,49 +2103,7 @@ impl LibraryView {
         let urls: Vec<String> = pending.iter().map(|p| p.url.clone()).filter(|u| !u.is_empty()).collect();
         let (store, root2) = (self.store.clone(), root.clone());
         let main = fetch.clone();
-        let show_files = {
-            let (store, root) = (self.store.clone(), root.clone());
-            Button::new("pending-show")
-                .small()
-                .outline()
-                .label("Show files")
-                .on_click(move |_, window, cx| {
-                    let (list, store, root) = (list.clone(), store.clone(), root.clone());
-                    window.open_dialog(cx, move |d, _, cx| {
-                        // Each file's step, as the window goes.
-                        let files = store.read(cx).fetch_files(&root).1;
-                        d.title("Download these by hand").child(
-                            v_flex().gap_2().children(list.iter().enumerate().map(|(i, p)| {
-                                let url = p.url.clone();
-                                h_flex()
-                                    .gap_3()
-                                    .child(
-                                        v_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(div().text_sm().truncate().child(p.name.clone()))
-                                            .child(widgets::caption(
-                                                match files.iter().find(|f| f.url == p.url) {
-                                                    Some(f) => format!("{} · {}", p.file_name, f.shown_step().label(f.size)),
-                                                    None => p.file_name.clone(),
-                                                },
-                                                cx,
-                                            )
-                                            .text_xs()),
-                                    )
-                                    .child(
-                                        Button::new(("pending-open", i))
-                                            .xsmall()
-                                            .outline()
-                                            .icon(IconName::ExternalLink)
-                                            .label("Open page")
-                                            .on_click(move |_, _, cx| cx.open_url(&url)),
-                                    )
-                            })),
-                        )
-                    });
-                })
-        };
+        let show_files = crate::fetch_progress::show_files_button("pending-show", self.store.clone(), root.clone(), pending);
         let (st, r) = (self.store.clone(), root.clone());
         let check = cx.listener(move |this, _: &ClickEvent, _, cx| this.store.read(cx).finish_pack(&root));
         Some(
@@ -2147,32 +2111,7 @@ impl LibraryView {
                 .icon(if running.is_some() { IconName::Hourglass } else { IconName::Download })
                 .subject(subject)
                 .progress(progress)
-                .primary(move |fit| match &main {
-                    // Running: brings the window up. Stuck: tries those again.
-                    Some(v) => {
-                        let (store, v1) = (store.clone(), v.clone());
-                        let b = Button::new("pending-open-all").small();
-                        let b = if v.running() {
-                            b.outline()
-                                .icon(IconName::ExternalLink)
-                                .label("Show window")
-                                .tooltip("Brings the download window to the front")
-                                .disabled(!v.step.is_open())
-                        } else {
-                            notice_slot::main_button(b, fit)
-                                .icon(IconName::RefreshCw)
-                                .label("Retry")
-                                .tooltip("Opens the download window again for the files that didn't come")
-                        };
-                        b.on_click(move |_, _, cx| crate::fetch_progress::click(&store, &v1, cx))
-                    }
-                    None => notice_slot::main_button(Button::new("pending-open-all").small(), fit)
-                        .icon(IconName::Download)
-                        .label(if urls.len() == 1 { "Download".to_string() } else { format!("Download {}", urls.len()) })
-                        .tooltip("Opens each page in a small Hopper window that saves the file and closes. Files you download yourself are picked up from Downloads too.")
-                        .disabled(urls.is_empty())
-                        .on_click(move |_, _, cx| store.read(cx).fetch_pages(&root2, urls.clone(), None)),
-                })
+                .primary(move |fit| crate::fetch_progress::download_button("pending-open-all", store.clone(), root2.clone(), urls.clone(), main.clone(), fit))
                 .action(show_files)
                 .action(
                     Button::new("pending-check")

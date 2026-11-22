@@ -66,11 +66,14 @@ pub struct Repair {
 
 /// What a copy and its mods are, as one number: the check runs again when it
 /// changes. Cheap (no disk): the record the store holds.
-fn stamp(inst: &hopper::instances::Instance, c: &hopper::groupsync::PackCopy, allow: bool) -> u64 {
+fn stamp(inst: &hopper::instances::Instance, c: &hopper::groupsync::PackCopy, pending: &[hopper::modpack::Pending], allow: bool) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     allow.hash(&mut h);
     for a in &inst.addons {
         (&a.project_id, &a.file_id, &a.mr_version, &a.file_name, a.enabled, a.locked, a.from_pack).hash(&mut h);
+    }
+    for p in pending {
+        (p.project_id, p.file_id, &p.file_name).hash(&mut h);
     }
     inst.only_here.keys().for_each(|k| k.hash(&mut h));
     for (k, g) in &c.got {
@@ -97,7 +100,7 @@ impl Store {
         let Some(copy) = self.group_copy(root).cloned() else { return };
         let Some(inst) = self.instance(root).cloned() else { return };
         let allow = self.settings.allow_sources;
-        let stamp = stamp(&inst, &copy, allow);
+        let stamp = stamp(&inst, &copy, self.pending(root), allow);
         let local = copy.local.clone();
         match self.group_verify.list.get_mut(&local) {
             Some(r) if r.stamp == stamp => {
@@ -251,6 +254,10 @@ impl Store {
                     }
                 });
                 let n = done.done.len();
+                let by_hand = std::mem::take(&mut done.by_hand);
+                for p in &by_hand {
+                    self.kept_said.insert(format!("{local}|by_hand|{}", p.file_id));
+                }
                 let mut made_rows = std::mem::take(&mut done.done);
                 self.name_list(&root, &mut made_rows);
                 if let Some(mut after) = done.after.take() {
@@ -263,7 +270,10 @@ impl Store {
                         .iter()
                         .find(|c| c.local == local)
                         .zip(self.instance(&root))
-                        .map(|(c, i)| stamp(i, c, self.settings.allow_sources))
+                        .map(|(c, i)| {
+                            let pending = hopper::modpack::pending_downloads(i);
+                            stamp(i, c, &pending, self.settings.allow_sources)
+                        })
                         .unwrap_or(0);
                     // The instance changed: this answer is replaced by the
                     // next one (the stamp differs), but it says the result
@@ -271,7 +281,7 @@ impl Store {
                     self.group_verify.list.insert(local.clone(), Read { stamp, stale: n > 0, at: Instant::now(), v: after });
                 }
                 self.want_group_needs(&root);
-                if n > 0 {
+                if n > 0 || !by_hand.is_empty() {
                     self.handle(Msg::InstanceChanged(root.clone()), cx);
                 }
                 match pull {
@@ -281,7 +291,18 @@ impl Store {
                         from.dedup();
                         self.finish_pull(&local, &root, made + n, from, cx);
                     }
-                    None if n > 0 => cx.emit(StoreEvent::Notice(groupverify::done_says(&made_rows), false)),
+                    None if n > 0 || !by_hand.is_empty() => {
+                        let names: Vec<String> = by_hand.iter().map(|p| p.name.clone()).collect();
+                        let text = match (n > 0, !names.is_empty()) {
+                            (true, false) => groupverify::done_says(&made_rows),
+                            (false, true) => hopper::groupstatus::by_hand_says(&names),
+                            (true, true) => format!("{} {}", groupverify::done_says(&made_rows), hopper::groupstatus::by_hand_says(&names)),
+                            (false, false) => String::new(),
+                        };
+                        if !text.is_empty() {
+                            cx.emit(StoreEvent::Notice(text, false));
+                        }
+                    }
                     None => {}
                 }
             }

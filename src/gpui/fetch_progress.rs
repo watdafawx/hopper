@@ -6,10 +6,12 @@
 //! "Install"; a click brings the window to the front. When it fails, the
 //! button turns into Retry.
 
+use crate::notice_slot;
 use crate::store::Store;
+use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::webfetch::{Event, Step};
@@ -326,6 +328,92 @@ pub fn button(b: Button, v: &FetchView, cx: &App) -> Button {
             .label("Retry")
             .tooltip(format!("{}. Retry opens the download window again", v.detail()))
     }
+}
+
+/// The primary button on a notice for website-only files: "Download" /
+/// "Download N" before it starts, "Show window" while Hopper's download
+/// window runs, and "Retry" for files that didn't come. Shared between the
+/// instance's pending banner and the group sync strip.
+pub fn download_button(
+    id: &'static str,
+    store: Entity<Store>,
+    root: PathBuf,
+    urls: Vec<String>,
+    fetch: Option<FetchView>,
+    fit: notice_slot::Fit,
+) -> Button {
+    match fetch {
+        // Running: brings the window up. Stuck: tries those again.
+        Some(v) => {
+            let b = Button::new(id).small();
+            let b = if v.running() {
+                b.outline()
+                    .icon(IconName::ExternalLink)
+                    .label("Show window")
+                    .tooltip("Brings the download window to the front")
+                    .disabled(!v.step.is_open())
+            } else {
+                notice_slot::main_button(b, fit)
+                    .icon(IconName::RefreshCw)
+                    .label("Retry")
+                    .tooltip("Opens the download window again for the files that didn't come")
+            };
+            b.on_click(move |_, _, cx| click(&store, &v, cx))
+        }
+        None => notice_slot::main_button(Button::new(id).small(), fit)
+            .icon(IconName::Download)
+            .label(if urls.len() == 1 { "Download".to_string() } else { format!("Download {}", urls.len()) })
+            .tooltip("Opens each page in a small Hopper window that saves the file and closes. Files you download yourself are picked up from Downloads too.")
+            .disabled(urls.is_empty())
+            .on_click(move |_, _, cx| store.read(cx).fetch_pages(&root, urls.clone(), None)),
+    }
+}
+
+/// "Show files": opens the shared "Download these by hand" dialog listing
+/// each pending file, its current step, and an "Open page" link.
+pub fn show_files_button(id: &'static str, store: Entity<Store>, root: PathBuf, list: Vec<hopper::modpack::Pending>) -> Button {
+    Button::new(id)
+        .small()
+        .outline()
+        .label("Show files")
+        .on_click(move |_, window, cx| {
+            let (list, store, root) = (list.clone(), store.clone(), root.clone());
+            window.open_dialog(cx, move |d, _, cx| {
+                // Each file's step, as the window goes.
+                let files = store.read(cx).fetch_files(&root).1;
+                d.title("Download these by hand").child(
+                    v_flex().gap_2().children(list.iter().enumerate().map(|(i, p)| {
+                        let url = p.url.clone();
+                        h_flex()
+                            .gap_3()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().text_sm().truncate().child(p.name.clone()))
+                                    .child(
+                                        widgets::caption(
+                                            match files.iter().find(|f| f.url == p.url) {
+                                                Some(f) => format!("{} · {}", p.file_name, f.shown_step().label(f.size)),
+                                                None => p.file_name.clone(),
+                                            },
+                                            cx,
+                                        )
+                                        .text_xs(),
+                                    ),
+                            )
+                            .child(
+                                Button::new(("pending-open", i))
+                                    .xsmall()
+                                    .outline()
+                                    .icon(IconName::ExternalLink)
+                                    .label("Open page")
+                                    .on_click(move |_, _, cx| cx.open_url(&url)),
+                            )
+                    })),
+                )
+            });
+        })
 }
 
 /// A caption line for a card with room for it: the step, and Show window

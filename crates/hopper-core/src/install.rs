@@ -211,6 +211,14 @@ pub fn pick_update<'a>(files: &'a [cf::File], mc: &str, max_release: u32, above:
         .max_by_key(|f| f.id)
 }
 
+/// Whether installing one file put it on disk or queued it for a browser
+/// download because its author blocks third-party downloads.
+#[derive(Clone, Debug)]
+pub enum FileInstall {
+    Installed(String),
+    Pending(crate::modpack::Pending),
+}
+
 /// Downloads one file into the instance, replacing the project's old file.
 fn put_file(
     inst: &mut Instance,
@@ -219,9 +227,32 @@ fn put_file(
     from_pack: bool,
     job: &Job,
 ) -> anyhow::Result<()> {
+    put_file_outcome(inst, m, f, from_pack, None, job).map(|_| ())
+}
+
+/// Like [`put_file`], reporting whether the file landed or was queued for a
+/// browser download. `enabled`: when set on a pending file, stored on its
+/// addon record so it lands on or off as asked.
+fn put_file_outcome(
+    inst: &mut Instance,
+    m: &cf::Mod,
+    f: &cf::File,
+    from_pack: bool,
+    enabled: Option<bool>,
+    job: &Job,
+) -> anyhow::Result<FileInstall> {
     match fetch_file(&inst.root, m, f, from_pack, job, true, &|_| {})? {
-        Fetched::File(dest) => place_file(inst, m, f, from_pack, &dest),
-        Fetched::Pending(p) => add_pending_note(&inst.root, p, job),
+        Fetched::File(dest) => {
+            place_file(inst, m, f, from_pack, &dest)?;
+            Ok(FileInstall::Installed(f.file_name.clone()))
+        }
+        Fetched::Pending(mut p) => {
+            if let (Some(on), Some(a)) = (enabled, p.addon.as_mut()) {
+                a.enabled = on;
+            }
+            add_pending_note(&inst.root, p.clone(), job)?;
+            Ok(FileInstall::Pending(p))
+        }
     }
 }
 
@@ -253,7 +284,15 @@ fn fetch_file(
     tick: &(dyn Fn(u64) + Sync),
 ) -> anyhow::Result<Fetched> {
     let folder = folder_for_class(m.class_id.unwrap_or(cf::CLASS_MODS));
-    let Ok(url) = cf::download_url(f) else {
+    let url = match cf::download_url(f) {
+        Ok(u) => Some(u),
+        // CurseForge blocks third-party downloads for this file: if the author
+        // also uploaded the exact same jar (matching sha1) to Modrinth, fetch
+        // it from there; `download_checked` still verifies size and sha1.
+        Err(_) if f.modrinth.is_none() && f.source.is_none() => f.sha1().and_then(|h| crate::modfetch::modrinth_mirror(&h)),
+        Err(_) => None,
+    };
+    let Some(url) = url else {
         // The author allows website downloads only: the user downloads it in
         // the browser and Hopper picks it up from Downloads.
         let e = f.expect();
@@ -1299,6 +1338,21 @@ pub fn install_file(
     file_id: u64,
     job: &Job,
 ) -> anyhow::Result<String> {
+    match install_file_outcome(inst, project_id, file_id, None, job)? {
+        FileInstall::Installed(name) => Ok(name),
+        FileInstall::Pending(p) => Ok(p.file_name),
+    }
+}
+
+/// Like [`install_file`], reporting whether the file landed on disk or was
+/// queued for a browser download ([`FileInstall::Pending`]).
+pub fn install_file_outcome(
+    inst: &mut Instance,
+    project_id: u64,
+    file_id: u64,
+    enabled: Option<bool>,
+    job: &Job,
+) -> anyhow::Result<FileInstall> {
     let f = crate::source::file(project_id, file_id)?;
     let known = inst.addons.iter().find(|a| a.project_id == project_id);
     let (m, from_pack) = match known {
@@ -1306,9 +1360,9 @@ pub fn install_file(
         None => (crate::source::get_mod(project_id)?, false),
     };
     // Keeps a disabled mod disabled (see `keep_history`).
-    put_file(inst, &m, &f, from_pack, job)?;
+    let out = put_file_outcome(inst, &m, &f, from_pack, enabled, job)?;
     inst.save()?;
-    Ok(f.file_name)
+    Ok(out)
 }
 
 /// The project as `put_file` needs it, from what the instance already knows.

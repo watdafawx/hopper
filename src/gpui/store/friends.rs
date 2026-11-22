@@ -1040,6 +1040,14 @@ impl Store {
     /// that is here now (fetched by a later read of the group, or put in by
     /// hand) is taken off it. Then names what is still on it.
     pub(super) fn tidy_left_out(&mut self, root: &Path) {
+        // Once the last pending browser download for a group copy lands, don't
+        // keep showing Pull now's stale "CurseForge website" line for 2 min.
+        if let Some(local) = self.group_copy(root).map(|c| c.local.clone())
+            && self.group_pending(root).is_empty()
+            && self.group_pulled.get(&local).is_some_and(|(t, _, _)| t.contains("CurseForge website"))
+        {
+            self.group_pulled.remove(&local);
+        }
         let Some(f) = self.follow_at(root).filter(|f| !f.left_out.is_empty() || !f.failed.is_empty()) else { return };
         let mut now = f.clone();
         if self.instance(root).is_some_and(|inst| hopper::leftout::drop_here(&mut now, inst)) {
@@ -1408,6 +1416,13 @@ impl Store {
         hopper::groupstatus::pack_due_ready(&d.due.wait, self.running(root).is_some(), now.duration_since(d.at), forced)
     }
 
+    /// Pending browser-download files at `root` that belong to this group copy.
+    pub fn group_pending(&self, root: &Path) -> Vec<hopper::modpack::Pending> {
+        let Some(inst) = self.instance(root) else { return Vec::new() };
+        let Some(copy) = self.group_copy(root) else { return Vec::new() };
+        groupsync::group_pending(inst, copy, self.pending(root)).into_iter().cloned().collect()
+    }
+
     /// How this PC's copy of the group pack at `root` stands with the group
     /// (`hopper::groupstatus`), or `None` when it isn't a group copy.
     pub fn group_status(&self, root: &Path) -> Option<hopper::groupstatus::Status> {
@@ -1420,6 +1435,7 @@ impl Store {
         let jars_waiting = if playing { hopper::locked::list(root).len() } else { 0 };
         let only = self.only_from(c);
         let to_push = self.to_push_at(root);
+        let by_hand: Vec<String> = self.group_pending(root).into_iter().map(|p| p.name).collect();
         Some(hopper::groupstatus::status(&Input {
             copy: c,
             connected: matches!(self.sync_status(), SyncStatus::Ok),
@@ -1427,6 +1443,7 @@ impl Store {
             now: unix_now(),
             merging: self.group_merging.contains(&c.local) || self.group_pulling.contains_key(&c.local) || self.group_verify.repairing.contains(&c.local),
             check: self.group_check(root),
+            by_hand: &by_hand,
             pack_due: self.group_pack_due(root),
             failure,
             allow_sources: self.settings.allow_sources,
@@ -2065,8 +2082,21 @@ impl Store {
                 self.install_loader(inst);
             }
         }
-        if !merged.made.is_empty() {
+        let has_by_hand = !merged.by_hand.is_empty();
+        // Website-only mods queued during automatic sync: raise one notice per
+        // file (never repeatedly). Pull now reports them in its own summary.
+        let fresh_by_hand: Vec<String> = merged
+            .by_hand
+            .iter()
+            .filter(|p| self.kept_said.insert(format!("{local}|by_hand|{}", p.file_id)))
+            .map(|p| p.name.clone())
+            .collect();
+        if !merged.made.is_empty() || has_by_hand {
             self.handle(Msg::InstanceChanged(root.clone()), cx);
+        }
+        if !self.group_pulling.contains_key(&local) && !fresh_by_hand.is_empty() {
+            let pack = self.instance(&root).map(|i| i.name.as_str()).unwrap_or("");
+            cx.emit(StoreEvent::Notice(hopper::groupstatus::by_hand_notice(pack, &fresh_by_hand), false));
         }
         self.finish_pull(&local, &root, made, from, cx);
         cx.notify();

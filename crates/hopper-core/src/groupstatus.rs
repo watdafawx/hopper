@@ -67,6 +67,9 @@ pub struct Input<'a> {
     /// What the check of the copy against its mods folder found
     /// ([`crate::groupverify`]).
     pub check: Check,
+    /// Group mods waiting in `.hopper-pending.json` to be downloaded from the
+    /// CurseForge website (their authors disallow automatic downloads).
+    pub by_hand: &'a [String],
 }
 
 /// How the copy compares with the group, mod by mod, as the last check of
@@ -129,6 +132,9 @@ pub enum Status {
     CantCheck,
     /// The copy is being compared with the group.
     Checking,
+    /// Group mods whose authors only allow downloads from the CurseForge
+    /// website wait for the player to download them by hand.
+    ByHand { mods: Vec<String> },
 }
 
 /// How loud a status is: what colour a chip gets.
@@ -160,6 +166,7 @@ impl Status {
             Status::Behind { .. } => "Differs from group",
             Status::CantCheck => "Couldn't check",
             Status::Checking => "Checking",
+            Status::ByHand { .. } => "Download by hand",
         }
     }
 
@@ -167,7 +174,7 @@ impl Status {
         match self {
             Status::InStep { .. } => Tone::Good,
             Status::Updating { .. } | Status::Sending | Status::ToPush { .. } | Status::Checking | Status::AfterYours { offline: false, .. } => Tone::Busy,
-            Status::WaitsForGame { .. } | Status::WaitsForYou { .. } | Status::Parked { .. } | Status::Behind { .. } | Status::CantCheck => Tone::Warn,
+            Status::WaitsForGame { .. } | Status::WaitsForYou { .. } | Status::Parked { .. } | Status::Behind { .. } | Status::CantCheck | Status::ByHand { .. } => Tone::Warn,
             Status::Cant { .. } | Status::NeedsMod { .. } => Tone::Bad,
             Status::Offline { .. } | Status::AfterYours { offline: true, .. } => Tone::Quiet,
         }
@@ -179,7 +186,7 @@ impl Status {
         match self {
             Status::Cant { .. } => 0,
             Status::NeedsMod { .. } | Status::Behind { .. } => 1,
-            Status::WaitsForYou { .. } => 2,
+            Status::WaitsForYou { .. } | Status::ByHand { .. } => 2,
             Status::WaitsForGame { .. } => 3,
             Status::Parked { .. } | Status::CantCheck => 4,
             Status::ToPush { .. } => 5,
@@ -241,6 +248,7 @@ impl Status {
             }
             Status::AfterYours { after, offline: false } => after.waiting_says(),
             Status::AfterYours { after, offline: true } => format!("{} Can't reach the group right now.", after.waiting_says()),
+            Status::ByHand { mods } => by_hand_says(mods),
         }
     }
 
@@ -252,6 +260,11 @@ impl Status {
                 let names: Vec<String> = from.iter().map(|p| p.name.clone()).collect();
                 format!("Changes from {}", people(&names))
             }
+            Status::ByHand { mods } => match mods.as_slice() {
+                [one] if !one.trim().is_empty() => format!("{} to download in your browser", one.trim()),
+                many if !many.is_empty() => format!("{} mods to download in your browser", many.len()),
+                _ => "Download by hand".to_string(),
+            },
             other => other.label().to_string(),
         }
     }
@@ -414,6 +427,12 @@ pub fn status(i: &Input) -> Status {
         Check::Couldnt => return Status::CantCheck,
         Check::Matches | Check::Checking => {}
     }
+    // Group mods waiting for a browser download: said ahead of Offline,
+    // Sending, Checking and InStep so Pull now and the strip never claim
+    // the copy matches while a mod still hasn't landed.
+    if !i.by_hand.is_empty() {
+        return Status::ByHand { mods: i.by_hand.to_vec() };
+    }
     // A member's change kept aside until this PC's own change of the same
     // mod is out: said wherever that change stands (offline, held back for
     // Push, on its way), so it never waits unseen.
@@ -459,6 +478,34 @@ pub const CANT_CHECK: &str = "Hopper couldn't check CurseForge just now, so your
 pub fn behind_says(mods: usize, missing: bool) -> String {
     let n = if mods == 1 { "1 mod".to_string() } else { format!("{mods} mods") };
     if missing { format!("Your copy is missing {n} the group has.") } else { format!("Your copy differs in {n}.") }
+}
+
+/// "Entity Culling can only be downloaded from the CurseForge website."
+/// Long lists name the first three ("A, B, C and 2 more ...").
+pub fn by_hand_says(mods: &[String]) -> String {
+    let names: Vec<String> = mods.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if names.is_empty() {
+        return "Some mods can only be downloaded from the CurseForge website.".to_string();
+    }
+    const SHOWN: usize = 3;
+    let mut list: Vec<String> = names.iter().take(SHOWN).cloned().collect();
+    if names.len() > SHOWN {
+        list.push(format!("{} more", names.len() - SHOWN));
+    }
+    format!("{} can only be downloaded from the CurseForge website.", join(&list))
+}
+
+/// Notice raised once when automatic group sync queues website-only mods for
+/// `pack` (empty when the pack's name isn't known).
+pub fn by_hand_notice(pack: &str, mods: &[String]) -> String {
+    let them = if mods.len() == 1 { "it" } else { "them" };
+    let base = by_hand_says(mods);
+    let pack = pack.trim();
+    if pack.is_empty() {
+        format!("{base} Open the pack to download {them}.")
+    } else {
+        format!("{pack}: {base} Open the pack to download {them}.")
+    }
 }
 
 /// About how many changes the codes waiting to be taken in carry: the mods
@@ -730,6 +777,7 @@ mod tests {
             only_from: None,
             to_push: None,
             check: Check::Matches,
+            by_hand: &[],
         }
     }
 
@@ -1359,5 +1407,52 @@ mod tests {
         let a = member_copy(&[("p:1", "mia", 50)], Some((20, &[])));
         let b = member_copy(&[("p:7", "mia", 60), ("p:8", "mia", 61)], Some((20, &[])));
         assert_eq!(member_status(&[&a, &b], "noah"), Member::Behind { changes: 3 });
+    }
+
+    #[test]
+    fn website_only_mods_report_by_hand_in_status_and_pull_says() {
+        let c = PackCopy::default();
+        let one = vec!["Entity Culling".to_string()];
+        let mut i = input(&c);
+        i.by_hand = &one;
+        // Even while the folder check hasn't finished yet, ByHand beats Checking
+        // so Pull now never claims "Now the same as the group."
+        i.check = Check::Checking;
+        let s = status(&i);
+        assert_eq!(s, Status::ByHand { mods: one.clone() });
+        assert_eq!(s.label(), "Download by hand");
+        assert_eq!(s.title(), "Entity Culling to download in your browser");
+        assert_eq!(s.tone(), Tone::Warn);
+        assert_eq!(s.detail(0), "Entity Culling can only be downloaded from the CurseForge website.");
+
+        let (text, bad) = pull_says(true, 0, &[], &s, 0);
+        assert!(!bad);
+        assert_eq!(text, "Entity Culling can only be downloaded from the CurseForge website.");
+
+        let mia = vec!["Mia".to_string()];
+        let (text, bad) = pull_says(true, 2, &mia, &s, 0);
+        assert!(!bad);
+        assert_eq!(text, "Took in 2 changes from Mia. Entity Culling can only be downloaded from the CurseForge website.");
+
+        // Multiple mods and automatic-sync notice wording.
+        let many: Vec<String> = ["Entity Culling", "Mod B", "Mod C", "Mod D"].into_iter().map(String::from).collect();
+        let s_many = Status::ByHand { mods: many.clone() };
+        assert_eq!(s_many.title(), "4 mods to download in your browser");
+        assert_eq!(s_many.detail(0), "Entity Culling, Mod B, Mod C and 1 more can only be downloaded from the CurseForge website.");
+        assert_eq!(
+            by_hand_notice("Skyblock", &one),
+            "Skyblock: Entity Culling can only be downloaded from the CurseForge website. Open the pack to download it."
+        );
+        assert_eq!(
+            by_hand_notice("", &many[..2]),
+            "Entity Culling and Mod B can only be downloaded from the CurseForge website. Open the pack to download them."
+        );
+
+        // Higher-priority statuses (Updating, Cant, Behind) still take precedence.
+        i.merging = true;
+        assert!(matches!(status(&i), Status::Updating { .. }));
+        i.merging = false;
+        i.check = Check::Behind { mods: 1, missing: true };
+        assert!(matches!(status(&i), Status::Behind { .. }));
     }
 }

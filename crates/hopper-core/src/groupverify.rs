@@ -173,6 +173,10 @@ pub struct Facts<'a> {
     /// The mods from links this PC wouldn't download unasked
     /// ([`crate::sources::carry::auto_skip`] of the codes' pins).
     pub skip: &'a [Pin],
+    /// Files already waiting for a browser download (`.hopper-pending.json`):
+    /// they aren't listed as missing/repairable, because "Make my copy match"
+    /// can't fetch them automatically.
+    pub pending: &'a [crate::modpack::Pending],
 }
 
 /// What the group says one mod is.
@@ -258,6 +262,13 @@ fn state_here(inst: &Instance, a: Option<&Addon>, sent: Option<&State>) -> State
 /// "cf:123" -> 123.
 fn cf_number(file: &str) -> Option<u64> {
     file.strip_prefix("cf:")?.parse().ok()
+}
+
+/// Whether `pending` already has a browser download waiting for the exact
+/// CurseForge file `want` asks for.
+fn pending_for(pending: &[crate::modpack::Pending], want: &State) -> bool {
+    let State::File { file, .. } = want else { return false };
+    cf_number(file).is_some_and(|fid| pending.iter().any(|p| p.file_id == fid))
 }
 
 /// The project a key names ("p:123"), 0 when it names none.
@@ -351,6 +362,11 @@ fn row_of(f: &Facts, key: &str, w: &Want, a: Option<&Addon>, here: &State) -> Op
     };
     let mark = w.mark.clone().map(|m| Mark { kind: Change { key: key.to_string(), was: here.clone(), now: w.state.clone(), entry: None }.kind(), ..m });
     let pin = pin_of(w.entry.as_ref()).cloned();
+    // Already waiting in the browser-download list for this exact file: not a
+    // mod "Make my copy match" can fetch automatically (`groupstatus::Status::ByHand`).
+    if !kept && matches!(why, Why::Missing | Why::Different) && pending_for(f.pending, &w.state) {
+        return None;
+    }
     let (why, change) = if kept {
         (Why::OnlyHere, None)
     } else if a.is_some_and(|a| a.locked) && why == Why::Different {
@@ -425,7 +441,8 @@ pub fn check(inst: &Instance, copy: &PackCopy, allow: bool, now: u64) -> Verifie
     // A mod the player said yes to goes in whatever the sources say.
     let approved: Vec<Pin> = copy.owed.iter().filter(|o| o.approved).filter_map(|o| pin_of(o.entry.as_ref()).cloned()).collect();
     skip.retain(|p| !approved.contains(p));
-    let mut v = verify(&Facts { inst, copy, codes: &codes, sent: sent.as_ref(), pack: pack.as_ref(), skip: &skip }, now);
+    let pending = crate::modpack::pending_downloads(inst);
+    let mut v = verify(&Facts { inst, copy, codes: &codes, sent: sent.as_ref(), pack: pack.as_ref(), skip: &skip, pending: &pending }, now);
     // A file whose project can't be told is a mod the check can't speak for.
     // Only when a site failed to answer: a file the site no longer has is not
     // a reason to say "try again" for ever.
@@ -467,6 +484,9 @@ pub struct Repaired {
     pub left: Vec<Row>,
     /// Marks to save, and the owed list after (see [`Merged`]).
     pub merged: Merged,
+    /// CurseForge files that couldn't be downloaded automatically and were
+    /// queued in `.hopper-pending.json` for a browser download.
+    pub by_hand: Vec<crate::modpack::Pending>,
     /// The check again, once it was made.
     pub after: Option<Verified>,
 }
@@ -518,18 +538,24 @@ pub fn repair(root: &Path, copy: &PackCopy, keys: Option<&[String]>, approved: &
     let wanted: Vec<Pin> = doing.iter().filter_map(|r| r.pin.clone()).collect();
     let mut skip = crate::sources::carry::auto_skip(&wanted, allow);
     skip.retain(|p| !approved.contains(p) && !copy.owed.iter().filter(|o| o.approved).filter_map(|o| pin_of(o.entry.as_ref())).any(|q| q == p));
-    groupsync::apply(&mut inst, &todo, &skip, job)?;
-    for r in &doing {
+    let by_hand = groupsync::apply_with_pending(&mut inst, &todo, &skip, job)?;
+    let by_hand_keys: BTreeSet<String> = by_hand.iter().map(|(k, _)| k.clone()).collect();
+    let mut landed: Vec<Row> = Vec::new();
+    for r in doing {
         if let Some(m) = &r.mark {
             out.merged.marks.push((r.key.clone(), m.clone()));
         }
-        out.merged.made.push((r.key.clone(), r.change.as_ref().map(Change::kind).unwrap_or_default(), r.by_name.clone()));
+        if !by_hand_keys.contains(&r.key) {
+            out.merged.made.push((r.key.clone(), r.change.as_ref().map(Change::kind).unwrap_or_default(), r.by_name.clone()));
+            landed.push(r);
+        }
     }
+    out.by_hand = by_hand.into_iter().map(|(_, p)| p).collect();
     // What was owed and is made now isn't owed any more.
-    if copy.owed.iter().any(|o| doing.iter().any(|r| r.key == o.key)) {
-        out.merged.owed = Some(copy.owed.iter().filter(|o| !doing.iter().any(|r| r.key == o.key)).cloned().collect());
+    if copy.owed.iter().any(|o| landed.iter().any(|r| r.key == o.key)) {
+        out.merged.owed = Some(copy.owed.iter().filter(|o| !landed.iter().any(|r| r.key == o.key)).cloned().collect());
     }
-    out.done = doing;
+    out.done = landed;
     // What the folder says now, so the strip shows the result without
     // another round trip.
     out.after = Some(check(&inst, copy, allow, 0));
@@ -601,7 +627,7 @@ mod tests {
         (copy, codes)
     }
     fn run(inst: &Instance, copy: &PackCopy, codes: &BTreeMap<String, Mods>, sent: Option<&Mods>, skip: &[Pin]) -> Verified {
-        verify(&Facts { inst, copy, codes, sent, pack: Some(&State::Unlisted), skip }, 100)
+        verify(&Facts { inst, copy, codes, sent, pack: Some(&State::Unlisted), skip, pending: &[] }, 100)
     }
     fn pin(file: &str) -> Pin {
         let source = ModSource { url: "o/r".into(), pattern: "cool-#.jar".into(), publisher: "o/r".into(), ..Default::default() };
@@ -841,11 +867,11 @@ mod tests {
         codes.get_mut("a").unwrap().pack = State::File { file: "pack:cf:100:2".into(), on: true };
         let here = State::File { file: "pack:cf:100:1".into(), on: true };
         let i = inst(vec![a]);
-        let v = verify(&Facts { inst: &i, copy: &copy, codes: &codes, sent: None, pack: Some(&here), skip: &[] }, 0);
+        let v = verify(&Facts { inst: &i, copy: &copy, codes: &codes, sent: None, pack: Some(&here), skip: &[], pending: &[] }, 0);
         assert!(v.rows.is_empty(), "{:?}", v.rows);
         // The same file change on the same pack version is a real difference.
         codes.get_mut("a").unwrap().pack = here.clone();
-        let v = verify(&Facts { inst: &i, copy: &copy, codes: &codes, sent: None, pack: Some(&here), skip: &[] }, 0);
+        let v = verify(&Facts { inst: &i, copy: &copy, codes: &codes, sent: None, pack: Some(&here), skip: &[], pending: &[] }, 0);
         assert_eq!(only(&v).why, Why::Different);
     }
 
@@ -897,5 +923,29 @@ mod tests {
         assert_eq!(done_says(&[row("A"), row("B"), row("C"), row("D")]), "Made your copy match the group for A, B and 2 more.");
         assert_eq!(Why::Missing.action(), "Get it");
         assert_eq!(Why::LeftOut.action(), "Allow and get it");
+    }
+
+    #[test]
+    fn a_mod_already_waiting_for_browser_download_is_not_called_missing() {
+        let (copy, codes) = group(vec![("a", 5, vec![cf(11, true)])]);
+        let p = crate::modpack::Pending {
+            name: "Entity Culling".into(),
+            file_name: "entityculling.jar".into(),
+            project_id: 1,
+            file_id: 11,
+            url: "https://www.curseforge.com/minecraft/mc-mods/entityculling/download/11".into(),
+            ..Default::default()
+        };
+        let i = inst(vec![]);
+        // Exact wanted file is in pending: not listed as missing for repair.
+        let v = verify(&Facts { inst: &i, copy: &copy, codes: &codes, sent: None, pack: Some(&State::Unlisted), skip: &[], pending: std::slice::from_ref(&p) }, 0);
+        assert!(v.rows.is_empty(), "{:?}", v.rows);
+        assert!(v.matches());
+        // Group moved to a newer file (12) than what's pending (11): still flagged.
+        let (copy2, codes2) = group(vec![("a", 6, vec![cf(12, true)])]);
+        let v2 = verify(&Facts { inst: &i, copy: &copy2, codes: &codes2, sent: None, pack: Some(&State::Unlisted), skip: &[], pending: std::slice::from_ref(&p) }, 0);
+        assert_eq!(only(&v2).why, Why::Missing);
+        // Without pending: listed as missing as usual.
+        assert_eq!(only(&run(&i, &copy, &codes, None, &[])).why, Why::Missing);
     }
 }

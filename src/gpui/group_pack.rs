@@ -39,6 +39,7 @@ pub fn look(status: &Status) -> (IconName, Tier) {
         Status::AfterYours { .. } => (IconName::Clock, Tier::Info),
         Status::Behind { .. } | Status::CantCheck => (IconName::CircleAlert, Tier::Choice),
         Status::Checking => (IconName::RefreshCw, Tier::Info),
+        Status::ByHand { .. } => (IconName::Download, Tier::Choice),
     }
 }
 
@@ -197,6 +198,9 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     // Read before `cx` is borrowed mutably for the mod links below.
     let pushing = s.pushing_at(root);
     let repairing = s.group_repairing(root);
+    let by_hand_pending = if matches!(status, Status::ByHand { .. }) { s.group_pending(root) } else { Vec::new() };
+    let by_hand_fetch = if matches!(status, Status::ByHand { .. }) { s.fetch_files(root).0 } else { None };
+    let by_hand_running = by_hand_fetch.as_ref().filter(|v| v.running());
     let in_step = matches!(status, Status::InStep { .. });
     // Don't show a full-width banner just to say everything matches; only
     // show the banner when out of step, failing, or right after a pull.
@@ -204,9 +208,15 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
         return None;
     }
     let key = hopper::settings::notice_key(&root.to_string_lossy(), "group-in-step", "in step");
-    let (icon, tier) = look(&status);
+    let (mut icon, tier) = look(&status);
+    if by_hand_running.is_some() {
+        icon = IconName::Hourglass;
+    }
     let from_pull = pulled.is_some();
-    let detail = pulled.unwrap_or_else(|| status.detail(now));
+    let detail = match &by_hand_fetch {
+        Some(v) if v.running() || !from_pull => v.detail(),
+        _ => pulled.unwrap_or_else(|| status.detail(now)),
+    };
     // "In step" is a word only we use: say what it means, and don't repeat it
     // in the line under it. Mods match the group; updates are a separate thing.
     // What Pull now just did ("Took in 2 changes ...") is kept as it is: it
@@ -221,10 +231,17 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
         // The sentence goes under the strip, open: on a narrow page a subject
         // on the strip would be cut to nothing.
         ("Couldn't check".to_string(), String::new())
+    } else if let Some(v) = by_hand_running {
+        (
+            format!("Downloading from CurseForge…{}", if v.total > 1 { format!(" {} of {}", (v.done + 1).min(v.total), v.total) } else { String::new() }),
+            detail,
+        )
     } else {
         (status.title(), detail)
     };
-    let mut n = Notice::new("group-status", tier, title).icon(icon);
+    let mut n = Notice::new("group-status", tier, title)
+        .icon(icon)
+        .progress(by_hand_running.map(|v| v.progress.unwrap_or(0.0)));
     n = match &status {
         // The mods it names are links with their icons.
         Status::NeedsMod { needs } if !from_pull => n.subject_rich(detail, needs_line(store, root, needs, cx)),
@@ -334,6 +351,20 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     } else if let Status::ToPush { changes, .. } = status {
         let (store, root) = (store.clone(), root.to_path_buf());
         n = n.primary(move |fit| push_button(&store, vec![root.clone()], changes, pushing, fit, "group-push"));
+    } else if matches!(status, Status::ByHand { .. }) && !by_hand_pending.is_empty() {
+        let urls: Vec<String> = by_hand_pending.iter().map(|p| p.url.clone()).filter(|u| !u.is_empty()).collect();
+        let (store1, root1) = (store.clone(), root.to_path_buf());
+        let fetch = by_hand_fetch.clone();
+        n = n
+            .primary(move |fit| {
+                crate::fetch_progress::download_button("group-pending-download", store1.clone(), root1.clone(), urls.clone(), fetch.clone(), fit)
+            })
+            .action(crate::fetch_progress::show_files_button(
+                "group-pending-show",
+                store.clone(),
+                root.to_path_buf(),
+                by_hand_pending,
+            ));
     } else if matches!(status, Status::Cant { .. }) && !left_out.is_empty() {
         let (store, root) = (store.clone(), root.to_path_buf());
         n = n.primary(move |fit| {

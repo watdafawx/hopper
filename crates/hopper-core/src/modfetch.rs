@@ -167,6 +167,35 @@ pub fn links(inst: &Instance, jars: &[PathBuf]) -> HashMap<PathBuf, Link> {
     out
 }
 
+/// The Modrinth CDN URL for the exact file with `sha1` among `found`, when
+/// its host is allowed. Used to fetch CurseForge files whose author allows
+/// downloads only from the website when the author also uploaded the same jar
+/// to Modrinth.
+pub fn pick_modrinth_mirror(found: &HashMap<String, crate::modrinth::Version>, sha1: &str) -> Option<String> {
+    let want = sha1.to_ascii_lowercase();
+    let v = found.get(&want).or_else(|| found.iter().find(|(k, _)| k.eq_ignore_ascii_case(&want)).map(|(_, v)| v))?;
+    v.files
+        .iter()
+        .find(|f| f.hashes.get("sha1").is_some_and(|h| h.eq_ignore_ascii_case(&want)) && allowed(&f.url))
+        .map(|f| f.url.clone())
+}
+
+/// Asks Modrinth for a direct download URL for the exact file matching `sha1`.
+/// Returns `None` when Modrinth doesn't have that exact jar or can't be reached.
+pub fn modrinth_mirror(sha1: &str) -> Option<String> {
+    if sha1.is_empty() {
+        return None;
+    }
+    let want = sha1.to_ascii_lowercase();
+    match crate::modrinth::versions_by_sha1(std::slice::from_ref(&want)) {
+        Ok(found) => pick_modrinth_mirror(&found, &want),
+        Err(e) => {
+            log::debug!("Modrinth hash mirror lookup for {want}: {e:#}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +236,53 @@ mod tests {
         let e = fetch("https://evil.net/x.jar", &dest, &Expect::default()).unwrap_err();
         assert!(format!("{e:#}").contains("only downloads mods from"));
         assert!(!dest.exists());
+    }
+
+    #[test]
+    fn modrinth_mirror_picks_only_exact_hash_on_allowed_host() {
+        use crate::modrinth::{Version, VersionFile};
+        let mut found = HashMap::new();
+        let sha = "abcdef1234567890";
+        found.insert(
+            sha.to_string(),
+            Version {
+                id: "v1".into(),
+                project_id: "p1".into(),
+                files: vec![
+                    VersionFile {
+                        url: "https://evil.net/entityculling.jar".into(),
+                        filename: "entityculling.jar".into(),
+                        hashes: HashMap::from([("sha1".into(), "deadbeef".into())]),
+                        ..Default::default()
+                    },
+                    VersionFile {
+                        url: "https://cdn.modrinth.com/data/NNAgCjsB/versions/v1/entityculling.jar".into(),
+                        filename: "entityculling.jar".into(),
+                        hashes: HashMap::from([("sha1".into(), sha.to_uppercase())]),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            pick_modrinth_mirror(&found, "ABCDEF1234567890").as_deref(),
+            Some("https://cdn.modrinth.com/data/NNAgCjsB/versions/v1/entityculling.jar")
+        );
+        assert_eq!(pick_modrinth_mirror(&found, "00000000"), None);
+        // A matching hash on an untrusted host is refused.
+        let mut bad = HashMap::new();
+        bad.insert(
+            sha.to_string(),
+            Version {
+                files: vec![VersionFile {
+                    url: "https://evil.net/entityculling.jar".into(),
+                    hashes: HashMap::from([("sha1".into(), sha.into())]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        assert_eq!(pick_modrinth_mirror(&bad, sha), None);
     }
 }
