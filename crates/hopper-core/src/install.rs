@@ -272,6 +272,25 @@ enum Fetched {
     Pending(crate::modpack::Pending),
 }
 
+/// The by-hand download for a file only the CurseForge website gives.
+fn website_only_pending(m: &cf::Mod, f: &cf::File, folder: &str, from_pack: bool) -> crate::modpack::Pending {
+    let e = f.expect();
+    let m = &cf::full_project(m);
+    crate::modpack::Pending {
+        name: m.name.clone(),
+        file_name: f.file_name.clone(),
+        folder: folder.to_string(),
+        project_id: m.id,
+        file_id: f.id,
+        url: f.manual_url(m),
+        reason: "The author only allows downloads from the CurseForge website".into(),
+        size: e.len,
+        sha1: e.sha1,
+        addon: Some(addon_from(m, f, from_pack)),
+        replaces: String::new(),
+    }
+}
+
 /// Downloads `f` into its folder without touching the instance's records,
 /// so several can run at once. `bytes`: report byte progress on `job`.
 fn fetch_file(
@@ -295,21 +314,7 @@ fn fetch_file(
     let Some(url) = url else {
         // The author allows website downloads only: the user downloads it in
         // the browser and Hopper picks it up from Downloads.
-        let e = f.expect();
-        let m = &cf::full_project(m);
-        return Ok(Fetched::Pending(crate::modpack::Pending {
-            name: m.name.clone(),
-            file_name: f.file_name.clone(),
-            folder: folder.to_string(),
-            project_id: m.id,
-            file_id: f.id,
-            url: f.manual_url(m),
-            reason: "The author only allows downloads from the CurseForge website".into(),
-            size: e.len,
-            sha1: e.sha1,
-            addon: Some(addon_from(m, f, from_pack)),
-            replaces: String::new(),
-        }));
+        return Ok(Fetched::Pending(website_only_pending(m, f, folder, from_pack)));
     };
     let dest = root.join(folder).join(&f.file_name);
     let total = f.file_length;
@@ -322,12 +327,21 @@ fn fetch_file(
         Some(_) => root.join(folder).join(format!("{}.hopper-download", f.file_name)),
         None => dest,
     };
-    cf::download_checked(&url, &dest, &f.expect(), Some(job), |n| {
+    if let Err(e) = cf::download_checked(&url, &dest, &f.expect(), Some(job), |n| {
         if bytes && total > 0 {
             job.progress(n as usize, total as usize);
         }
         tick(n);
-    })?;
+    }) {
+        // CurseForge still hands out a CDN link for some files whose author
+        // blocks third-party downloads, and the CDN then answers 403. That is
+        // the same "website only" case, not an error to retry forever.
+        if f.source.is_none() && cf::cdn_refused(&url, &e) {
+            let _ = fs::remove_file(&dest);
+            return Ok(Fetched::Pending(website_only_pending(m, f, folder, from_pack)));
+        }
+        return Err(e);
+    }
     if let Some(s) = &f.source
         && let Err(e) = crate::sources::verify_download(&dest, s)
     {
