@@ -1536,6 +1536,12 @@ pub fn http_status(e: &anyhow::Error) -> Option<u16> {
     })
 }
 
+/// A 403 from CurseForge's own CDN for a file link it gave out: the author
+/// blocks downloads outside the website.
+pub fn cdn_refused(url: &str, e: &anyhow::Error) -> bool {
+    http_status(e) == Some(403) && url.contains("forgecdn.net/")
+}
+
 /// A server error (5xx) or a timeout: worth one more try.
 pub fn is_transient(e: &anyhow::Error) -> bool {
     if http_status(e).is_some_and(|s| s >= 500) {
@@ -1877,6 +1883,15 @@ fn real_loose_fingerprints() {
                 .collect::<Vec<_>>()
         );
     }
+}
+
+#[test]
+fn a_cdn_403_means_website_only_but_other_refusals_do_not() {
+    let e = anyhow::Error::new(ureq::Error::StatusCode(403)).context("download");
+    assert!(cdn_refused("https://edge.forgecdn.net/files/1/2/a.jar", &e));
+    assert!(!cdn_refused("https://example.com/a.jar", &e));
+    let gone = anyhow::Error::new(ureq::Error::StatusCode(404));
+    assert!(!cdn_refused("https://edge.forgecdn.net/files/1/2/a.jar", &gone));
 }
 
 #[cfg(test)]
