@@ -111,9 +111,10 @@ async fn restore(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
     let root = e.root.clone();
     let world_dir = root.join(&world);
     let shown = file.name.clone();
+    let who = crate::mods_api::changer(&app, &headers, &method);
     let job = crate::pack_api::spawn(&app, format!("Restoring {}", e.name), move |_job| {
         let _guard = guard;
-        let kept = backupmods::restore(&root, &world_dir, &file).inspect_err(|err| {
+        let kept = backupmods::restore_by(&root, &world_dir, &file, &who).inspect_err(|err| {
             log::warn!("{}", format!("restore of {shown} failed: {err:#}"));
         })?;
         Ok(json!({ "ok": true, "world": world, "kept": kept.to_string_lossy() }))
@@ -126,9 +127,10 @@ async fn remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
     require_owner(&app, &headers, &method)?;
     let root = e.root.clone();
     let name = p.name.clone();
+    let who = crate::mods_api::changer(&app, &headers, &method);
     let gone = blocking(move || {
         let f = p.lookup(root.clone())()?;
-        backupmods::remove(&root, &f)
+        backupmods::remove_by(&root, &f, &who)
     })
     .await?;
     log::info!("{}: removed backup {name}, kept at {}", e.name, gone.display());

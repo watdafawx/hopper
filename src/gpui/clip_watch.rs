@@ -18,6 +18,15 @@ static HWND_SLOT: Mutex<Option<isize>> = Mutex::new(None);
 static LAST: Mutex<String> = Mutex::new(String::new());
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// Remembers a link Hopper itself just copied, so the clipboard watcher
+/// won't offer to open it back in Hopper (GPUI writes to the clipboard
+/// without a window owner on Windows, so GetClipboardOwner can't tell).
+pub fn ignore(text: &str) {
+    if let Some((url, _)) = hopper::modlinks::from_text(text) {
+        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = url;
+    }
+}
+
 /// Starts or stops listening (the setting, at start and when it changes).
 pub fn set_enabled(on: bool) {
     #[cfg(windows)]

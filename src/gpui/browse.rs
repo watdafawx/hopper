@@ -3312,7 +3312,10 @@ impl BrowseView {
                 None => widgets::card_selected_in(r, theme.primary).bg(theme.list_active),
             })
             .when(!picked, |r| r.hover(|s| widgets::row_hover(s, cx)))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_detail(open.clone(), cx)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.list_focus.focus(window, cx);
+                this.open_detail(open.clone(), cx);
+            }))
             .child(crate::logos::thumb(&self.logos, m.icon(), icon.as_deref(), rems(3.5), cx))
             .child(
                 v_flex()
@@ -3383,6 +3386,7 @@ impl BrowseView {
                     )
                     .item(
                         PopupMenuItem::new("Copy link").icon(IconName::Copy).on_click(move |_, _, cx| {
+                            crate::clip_watch::ignore(&url2);
                             cx.write_to_clipboard(ClipboardItem::new_string(url2.clone()))
                         }),
                     )
@@ -3726,7 +3730,14 @@ impl BrowseView {
         if self.selected.as_ref().is_none_or(|s| s.id != m.id) {
             self.open_detail(m, cx);
         }
-        self.list.scroll_to_reveal_item(ix);
+        // `scroll_to_reveal_item` sums measured heights and stops short when
+        // `ix` hasn't been laid out yet (below the list's overdraw); jump
+        // directly to `ix` in that case.
+        if self.list.bounds_for_item(ix).is_none() {
+            self.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
+        } else {
+            self.list.scroll_to_reveal_item(ix);
+        }
         cx.notify();
     }
 
@@ -4062,6 +4073,7 @@ impl BrowseView {
                                     site_fg,
                                     "Copy link",
                                     move |_, window, cx| {
+                                        crate::clip_watch::ignore(&link);
                                         cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
                                         window.push_notification(Notification::success("Copied the link."), cx);
                                     },
@@ -5065,7 +5077,10 @@ impl BrowseView {
                         .clickable(cx)
                         .when(current, |r| widgets::row_selected(r, cx))
                         .when(!current, |r| r.hover(|s| widgets::row_hover(s, cx)))
-                        .on_click(cx.listener(move |this, _, _, cx| this.open_detail(open.clone(), cx)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                this.list_focus.focus(window, cx);
+                this.open_detail(open.clone(), cx);
+            }))
                         .child(crate::logos::thumb(&self.logos, m.icon(), icon.as_deref(), rems(2.75), cx))
                         .child(
                             v_flex()
@@ -5370,7 +5385,10 @@ impl BrowseView {
                         .rounded(theme.radius)
                         .clickable(cx)
                         .hover(|s| s.bg(theme.list_hover))
-                        .on_click(cx.listener(move |this, _, _, cx| this.open_detail(open.clone(), cx)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                this.list_focus.focus(window, cx);
+                this.open_detail(open.clone(), cx);
+            }))
                         .child(crate::logos::thumb(&self.logos, d.icon(), icon.as_deref(), ico, cx))
                         .child(
                             v_flex()

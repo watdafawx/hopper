@@ -276,6 +276,9 @@ fn undo_record(inst: &mut Instance, f: &Saved, did: crate::actor::Did, key: &str
     if matches!(did, Did::Moved | Did::Copied) {
         anyhow::bail!("A move or copy of the whole server can't be undone from History.");
     }
+    if matches!(did, Did::Restored | Did::BackupRemoved) {
+        anyhow::bail!("Backup restores and removals can't be undone from History; the copy is kept under .hopper-backups.");
+    }
     let _quiet = crate::actor::quiet(&inst.root);
     let at = inst
         .addons
@@ -286,7 +289,7 @@ fn undo_record(inst: &mut Instance, f: &Saved, did: crate::actor::Did, key: &str
         (Did::Added, Some(i)) => crate::install::remove(inst, i)?,
         (Did::On, Some(i)) => crate::install::set_enabled(inst, i, false)?,
         (Did::Off, Some(i)) => crate::install::set_enabled(inst, i, true)?,
-        (Did::Moved | Did::Copied, _) | (_, None) => {}
+        (Did::Moved | Did::Copied | Did::Restored | Did::BackupRemoved, _) | (_, None) => {}
     }
     if let Some(dir) = f.path.parent() {
         crate::actor::forget_record(dir, key, did);

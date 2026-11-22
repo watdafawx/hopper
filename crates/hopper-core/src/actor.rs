@@ -84,6 +84,11 @@ pub enum Did {
     /// History shows it; it can't be undone from there.
     Moved,
     Copied,
+    /// A backup-mod backup was restored over a world, or deleted. The old
+    /// world / removed zip is kept under `.hopper-backups/`; History records
+    /// what happened and who did it (not undoable from History).
+    Restored,
+    BackupRemoved,
 }
 
 /// A change that set nothing aside, kept in a History folder's
@@ -113,6 +118,17 @@ pub fn note_move(root: &Path, did: Did, name: &str, note: &str, who: &Who) -> st
     let mut all = read_records(&dir);
     let addon = Addon { name: name.to_string(), ..Default::default() };
     all.push(Record { did, key: format!("move:{}", crate::time::now()), addon, who: who.clone(), batch: String::new(), note: note.to_string() });
+    fs::write(dir.join(RECORDS_FILE), serde_json::to_vec_pretty(&all).unwrap_or_default())
+}
+
+/// Notes in History that a backup-mod backup was restored or removed
+/// (`did` is [`Did::Restored`] or [`Did::BackupRemoved`]).
+pub fn note_backup(root: &Path, did: Did, name: &str, note: &str, who: &Who) -> std::io::Result<()> {
+    let dir = root.join(crate::sync::BACKUP_DIR).join(crate::time::now().to_string());
+    fs::create_dir_all(&dir)?;
+    let mut all = read_records(&dir);
+    let addon = Addon { name: name.to_string(), ..Default::default() };
+    all.push(Record { did, key: format!("backup:{}:{name}", crate::time::now()), addon, who: who.clone(), batch: String::new(), note: note.to_string() });
     fs::write(dir.join(RECORDS_FILE), serde_json::to_vec_pretty(&all).unwrap_or_default())
 }
 

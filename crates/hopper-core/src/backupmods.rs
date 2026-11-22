@@ -281,8 +281,13 @@ pub fn find(root: &Path, mod_name: &str, name: &str) -> Option<BackupFile> {
 
 /// Removes a backup by moving it under `<root>/.hopper-backups/removed/`, so
 /// it can still be found by hand (backups are big and often the only copy of
-/// a world). Returns where it went.
+/// a world), and records the removal in History. Returns where it went.
 pub fn remove(root: &Path, file: &BackupFile) -> anyhow::Result<PathBuf> {
+    remove_by(root, file, &crate::actor::Who::you())
+}
+
+/// Like [`remove`], attributing the History entry to `who`.
+pub fn remove_by(root: &Path, file: &BackupFile, who: &crate::actor::Who) -> anyhow::Result<PathBuf> {
     let dir = root.join(crate::sync::BACKUP_DIR).join("removed");
     fs::create_dir_all(&dir)?;
     let stamp = crate::time::now_iso().replace([':', '.'], "-");
@@ -290,17 +295,22 @@ pub fn remove(root: &Path, file: &BackupFile) -> anyhow::Result<PathBuf> {
         .name
         .replace('\\', "/")
         .replace('/', "-");
-    let dest = dir.join(format!("{stamp}-{base}"));
-    match fs::rename(&file.path, &dest) {
-        Ok(()) => Ok(dest),
+    let dest_name = format!("{stamp}-{base}");
+    let dest = dir.join(&dest_name);
+    if fs::rename(&file.path, &dest).is_err() {
         // Another drive (a mod configured to back up elsewhere): copy, then
         // drop the original.
-        Err(_) => {
-            fs::copy(&file.path, &dest)?;
-            fs::remove_file(&file.path)?;
-            Ok(dest)
-        }
+        fs::copy(&file.path, &dest)?;
+        fs::remove_file(&file.path)?;
     }
+    let _ = crate::actor::note_backup(
+        root,
+        crate::actor::Did::BackupRemoved,
+        &file.name,
+        &format!("Kept in .hopper-backups/removed/{dest_name}."),
+        who,
+    );
+    Ok(dest)
 }
 
 /// The folder in `zip` holding `level.dat` ("world/", or "" when the
@@ -317,9 +327,14 @@ fn world_prefix(z: &mut zip::ZipArchive<fs::File>) -> Option<String> {
 }
 
 /// Replaces `world` with the world in a full backup zip. The current world
-/// is moved to `<root>/.hopper-backups/before-restore/` first. The server
-/// must be stopped.
+/// is moved to `<root>/.hopper-backups/before-restore/` first, and the
+/// restore is recorded in History. The server must be stopped.
 pub fn restore(root: &Path, world: &Path, backup: &BackupFile) -> anyhow::Result<PathBuf> {
+    restore_by(root, world, backup, &crate::actor::Who::you())
+}
+
+/// Like [`restore`], attributing the History entry to `who`.
+pub fn restore_by(root: &Path, world: &Path, backup: &BackupFile, who: &crate::actor::Who) -> anyhow::Result<PathBuf> {
     if backup.partial() {
         anyhow::bail!(
             "{} only has the files changed since an earlier backup. Restore it with the mod.",
@@ -383,6 +398,14 @@ pub fn restore(root: &Path, world: &Path, backup: &BackupFile) -> anyhow::Result
         }
         return Err(e.into());
     }
+    let note = match &kept {
+        Some(k) => {
+            let kname = k.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            format!("Restored from {}. Previous world kept in .hopper-backups/before-restore/{kname}.", backup.name)
+        }
+        None => format!("Restored from {}.", backup.name),
+    };
+    let _ = crate::actor::note_backup(root, crate::actor::Did::Restored, &name, &note, who);
     Ok(kept.unwrap_or_default())
 }
 
@@ -482,10 +505,16 @@ mod tests {
         assert_eq!(f.path, a);
         assert!(find(&root, "SimpleBackups", "../world/level.dat").is_none());
 
-        // Deleting keeps it, under .hopper-backups/removed.
+        // Deleting keeps it, under .hopper-backups/removed, and writes a History entry.
         let gone = remove(&root, &f).unwrap();
         assert!(gone.is_file() && !a.exists());
         assert!(gone.to_string_lossy().contains("before") == false);
+        let hist = crate::backups::history(&root);
+        assert!(hist.iter().flat_map(|s| &s.files).any(|e| {
+            e.change == crate::backups::Change::BackupRemoved
+                && e.name == "world/world_2026-10-09_16-30-12.zip"
+                && e.restore_to.contains(".hopper-backups/removed/")
+        }));
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -499,6 +528,12 @@ mod tests {
         let f = BackupFile { path: top, name: "2026-01-01.zip".into(), size: 1, modified: 0 };
         restore(&root, &root.join("world"), &f).unwrap();
         assert!(root.join("world/DIM-1/x").exists());
+        let hist = crate::backups::history(&root);
+        assert!(hist.iter().flat_map(|s| &s.files).any(|e| {
+            e.change == crate::backups::Change::Restored
+                && e.name == "world"
+                && e.restore_to.contains("2026-01-01.zip")
+        }));
 
         let none = root.join("none.zip");
         zip_with(&none, &["readme.txt"]);

@@ -608,7 +608,7 @@ pub fn site_of_ref(r: &Ref) -> &'static str {
 
 /// The order a pack update's mods are listed in: what most players look for
 /// first.
-const PACK_KINDS: [Change; 11] = [
+const PACK_KINDS: [Change; 13] = [
     Change::Updated,
     Change::RolledBack,
     Change::Removed,
@@ -620,6 +620,8 @@ const PACK_KINDS: [Change; 11] = [
     Change::Edited,
     Change::Moved,
     Change::Copied,
+    Change::Restored,
+    Change::BackupRemoved,
 ];
 
 impl Saved {
@@ -667,7 +669,7 @@ impl Saved {
         let base = self.name.trim_end_matches(".disabled");
         let line = match (self.change, &self.now, &self.src) {
             // A move or copy keeps its sentence where a file's place would be.
-            (Change::Moved | Change::Copied, _, _) => self.restore_to.clone(),
+            (Change::Moved | Change::Copied | Change::Restored | Change::BackupRemoved, _, _) => self.restore_to.clone(),
             // A record of a mod from a link: no site to name, no copy kept.
             (_, _, None) if self.record.is_some() => crate::undo::version_of(base),
             // Only turned on or off: the same file, so no "X → X".
@@ -722,6 +724,10 @@ pub enum Change {
     Moved,
     /// The whole server copied between machines (a record; no Undo).
     Copied,
+    /// A backup-mod backup was restored over a world (a record; no Undo).
+    Restored,
+    /// A backup-mod backup was deleted (a record; no Undo).
+    BackupRemoved,
 }
 
 impl Change {
@@ -738,12 +744,15 @@ impl Change {
             Change::Added => "Added",
             Change::Moved => "Moved",
             Change::Copied => "Copied",
+            Change::Restored => "Restored",
+            Change::BackupRemoved => "Removed",
         }
     }
 
-    /// Whether Undo can put it back: not a whole server's move or copy.
+    /// Whether Undo can put it back: not a whole server's move or copy,
+    /// nor a backup-mod restore or removal.
     pub fn undoable(self) -> bool {
-        !matches!(self, Change::Moved | Change::Copied)
+        !matches!(self, Change::Moved | Change::Copied | Change::Restored | Change::BackupRemoved)
     }
 
     /// The label as a verb after a name: "Mia turned off Sodium".
@@ -760,6 +769,8 @@ impl Change {
             Change::Added => "added",
             Change::Moved => "moved",
             Change::Copied => "copied",
+            Change::Restored => "restored",
+            Change::BackupRemoved => "removed",
         }
     }
 
@@ -776,6 +787,7 @@ impl Change {
             "Added" => Change::Added,
             "Moved" => Change::Moved,
             "Copied" => Change::Copied,
+            "Restored" => Change::Restored,
             _ => Change::Removed,
         }
     }
@@ -1046,7 +1058,7 @@ impl Set {
     /// of the whole server between panels rather than files changing.
     fn whole_server(&self) -> Option<(&str, Change)> {
         let f = self.files.first()?;
-        (self.files.iter().all(|f| matches!(f.change, Change::Moved | Change::Copied)) && !f.name.is_empty()).then_some((f.name.as_str(), f.change))
+        (self.files.iter().all(|f| matches!(f.change, Change::Moved | Change::Copied | Change::Restored | Change::BackupRemoved)) && !f.name.is_empty()).then_some((f.name.as_str(), f.change))
     }
 
     /// The set as Hopper Server sends it (`GET /servers/{id}/mod-backups`),
@@ -1269,7 +1281,13 @@ fn group_packs(sets: Vec<Set>) -> Vec<Set> {
 /// A record as a History entry.
 fn record_entry(dir: &Path, r: &crate::actor::Record) -> Saved {
     let a = &r.addon;
-    if matches!(r.did, crate::actor::Did::Moved | crate::actor::Did::Copied) {
+    if matches!(r.did, crate::actor::Did::Moved | crate::actor::Did::Copied | crate::actor::Did::Restored | crate::actor::Did::BackupRemoved) {
+        let change = match r.did {
+            crate::actor::Did::Moved => Change::Moved,
+            crate::actor::Did::Copied => Change::Copied,
+            crate::actor::Did::Restored => Change::Restored,
+            _ => Change::BackupRemoved,
+        };
         return Saved {
             path: dir.join(crate::actor::RECORDS_FILE),
             name: a.name.clone(),
@@ -1278,7 +1296,7 @@ fn record_entry(dir: &Path, r: &crate::actor::Record) -> Saved {
             restore_to: r.note.clone(),
             download: false,
             src: None,
-            change: if r.did == crate::actor::Did::Moved { Change::Moved } else { Change::Copied },
+            change,
             now: None,
             now_site: "",
             reason: String::new(),
@@ -1306,6 +1324,8 @@ fn record_entry(dir: &Path, r: &crate::actor::Record) -> Saved {
         crate::actor::Did::Off => Change::TurnedOff,
         crate::actor::Did::Moved => Change::Moved,
         crate::actor::Did::Copied => Change::Copied,
+        crate::actor::Did::Restored => Change::Restored,
+        crate::actor::Did::BackupRemoved => Change::BackupRemoved,
     };
     Saved {
         path: dir.join(crate::actor::RECORDS_FILE),

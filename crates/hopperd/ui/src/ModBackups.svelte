@@ -308,7 +308,7 @@
     return days <= 0 ? 'Today' : days === 1 ? 'Yesterday' : dateOf(iso(t));
   }
   const hm = (t) => new Date(t * 1000).toTimeString().slice(0, 5);
-  const tone = (c) => ({ Removed: 'red', Updated: 'blue', 'Rolled back': 'warn', 'Turned on': 'green', Added: 'green', 'Turned off': 'muted', Moved: 'blue', Copied: 'blue' })[c] ?? 'pri';
+  const tone = (c) => ({ Removed: 'red', Updated: 'blue', 'Rolled back': 'warn', 'Turned on': 'green', Added: 'green', 'Turned off': 'muted', Moved: 'blue', Copied: 'blue', Restored: 'warn' })[c] ?? 'pri';
   // Sets grouped under their day.
   const days = $derived.by(() => {
     const out = [];
