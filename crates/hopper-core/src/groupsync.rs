@@ -541,15 +541,22 @@ pub fn stamps_of(marks: &BTreeMap<String, Mark>, now: &Mods) -> BTreeMap<String,
 /// keeps just the newest code per sender, so a change that puts a mod back
 /// the way that member last saw it would otherwise read as no change at
 /// all: an Undo right after taking someone's update (before they read the
-/// echo) never reached them, and they kept the update. Left out when the
-/// pack version moved, where a mod can differ only because of the version.
+/// echo) never reached them, and they kept the update. When the pack
+/// version moved, mod diffs are left out (a mod can differ only because of
+/// the version), but [`PACK_KEY`] itself is stamped so a member with no
+/// prior code from this PC (or a partial one, or one who missed an
+/// intermediate move) still follows the version change.
 pub fn stamps_out(marks: &BTreeMap<String, Mark>, sent: Option<&Mods>, now: &Mods, me: &str) -> BTreeMap<String, Stamp> {
     let mut out = stamps_of(marks, now);
-    if let Some(sent) = sent.filter(|s| s.pack == now.pack) {
-        for c in changes(sent, now) {
-            if !out.contains_key(&c.key) && marks.get(&c.key).is_none_or(|m| m.state != c.now) {
-                out.insert(c.key, Stamp { seq: 0, by: me.to_string() });
+    if let Some(sent) = sent {
+        if sent.pack == now.pack {
+            for c in changes(sent, now) {
+                if !out.contains_key(&c.key) && marks.get(&c.key).is_none_or(|m| m.state != c.now) {
+                    out.insert(c.key, Stamp { seq: 0, by: me.to_string() });
+                }
             }
+        } else if !out.contains_key(PACK_KEY) && marks.get(PACK_KEY).is_none_or(|m| m.state != now.pack) {
+            out.insert(PACK_KEY.to_string(), Stamp { seq: 0, by: me.to_string() });
         }
     }
     out
@@ -4785,6 +4792,60 @@ mod tests {
         copy.arrive("A", g);
         let (todo, _) = plan(&copy, &pmods(85, vec![]), None, false, pdec);
         assert_eq!(pack_change(&todo).map(|c| c.now.clone()), Some(pver(86)));
+    }
+
+    #[test]
+    fn a_pack_version_publish_stamps_the_pack_move_for_first_codes_and_rollbacks() {
+        // On the publish that actually moves the pack (85 -> 86), `marks`
+        // doesn't hold 86 yet (that's recorded after publish succeeds).
+        // `stamps_out` must still date `~pack` as made in this code so a
+        // receiver with no prior `got` (or a partial one) follows it, while
+        // still leaving regular mod diffs unstamped across pack versions.
+        let sent85 = pmods(85, vec![]);
+        let now86 = pmods(86, vec![cf(51, true)]);
+        let stamps = stamps_out(&BTreeMap::new(), Some(&sent85), &now86, "A");
+        assert_eq!(stamps.get(PACK_KEY), Some(&Stamp { seq: 0, by: "A".into() }));
+        assert!(!stamps.contains_key("p:5"), "mod diffs across pack versions stay unstamped");
+
+        // Receiver with no prior code from A: first_changes must take ~pack.
+        let mut copy = pcopy();
+        let mut g = got(pcode(86, vec![cf(51, true)]), 12, "McFawx");
+        g.stamps = stamps.clone();
+        copy.arrive("A", g);
+        let (todo, merged) = plan(&copy, &pmods(85, vec![]), Some(&pmods(85, vec![])), false, pdec);
+        assert_eq!(pack_change(&todo).map(|c| c.now.clone()), Some(pver(86)));
+        assert_eq!(marked(&merged, PACK_KEY), ("A", "McFawx", 12));
+
+        // Receiver whose prior `got[A]` is partial (re-read as a first code).
+        let mut copy = pcopy();
+        copy.got.insert("A".into(), Got { partial: true, ..got(pcode(85, vec![]), 3, "McFawx") });
+        let mut g = got(pcode(86, vec![]), 12, "McFawx");
+        g.stamps = stamps;
+        copy.arrive("A", g);
+        let (todo, _) = plan(&copy, &pmods(85, vec![]), Some(&pmods(85, vec![])), false, pdec);
+        assert_eq!(pack_change(&todo).map(|c| c.now.clone()), Some(pver(86)));
+
+        // Rollback (85 -> 86 -> 85): receiver still has got[A]=85 and here=86
+        // (from someone else at seq 15), then A moves back to 85 at seq 20.
+        let mut a_marks = BTreeMap::new();
+        a_marks.insert(PACK_KEY.to_string(), Mark { state: pver(86), kind: Kind::Updated, by: "A".into(), name: String::new(), seq: 12, at: 12 });
+        let back_stamps = stamps_out(&a_marks, Some(&pmods(86, vec![])), &pmods(85, vec![]), "A");
+        assert_eq!(back_stamps.get(PACK_KEY), Some(&Stamp { seq: 0, by: "A".into() }));
+        let mut copy = pcopy();
+        copy.got.insert("A".into(), got(pcode(85, vec![]), 3, "McFawx"));
+        copy.marks.insert(PACK_KEY.to_string(), Mark { state: pver(86), kind: Kind::Updated, by: "B".into(), name: "B".into(), seq: 15, at: 15 });
+        let mut g = got(pcode(85, vec![]), 20, "McFawx");
+        g.stamps = back_stamps;
+        copy.arrive("A", g);
+        let (todo, _) = plan(&copy, &pmods(86, vec![]), Some(&pmods(86, vec![])), false, pdec);
+        assert_eq!(pack_change(&todo).map(|c| c.now.clone()), Some(pver(85)));
+
+        // Echo: B took 86 from A (seq 12) and publishes its echo while its
+        // own `sent` was still 85; the stamp stays A's seq 12, not B's seq 0.
+        let mut b_marks = BTreeMap::new();
+        b_marks.insert(PACK_KEY.to_string(), Mark { state: pver(86), kind: Kind::Updated, by: "A".into(), name: "McFawx".into(), seq: 12, at: 12 });
+        let echo_stamps = stamps_out(&b_marks, Some(&pmods(85, vec![])), &pmods(86, vec![]), "B");
+        assert_eq!(echo_stamps.get(PACK_KEY), Some(&Stamp { seq: 12, by: "A".into() }));
     }
 
     #[test]

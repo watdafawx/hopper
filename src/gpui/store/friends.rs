@@ -1349,7 +1349,13 @@ impl Store {
         // the group's changes left out (or Pull now was asked): make it now.
         // Or a member's change kept aside for this PC's own may go in now.
         let idle = c.waiting.is_empty() && !forced && !c.owed_ready(self.settings.allow_sources) && !self.held_due(c);
-        if self.group_merging.contains(&c.local) || self.group_verify.repairing.contains(&c.local) || idle {
+        // While Pull now is fetching the feed, leave the merge to `pulled_feed`
+        // so a background tick can't hijack it before all codes arrive.
+        if self.group_merging.contains(&c.local)
+            || (!forced && self.group_pulling.contains_key(&c.local))
+            || self.group_verify.repairing.contains(&c.local)
+            || idle
+        {
             return None;
         }
         // The group moved the pack and this PC couldn't follow yet: the
@@ -1752,8 +1758,11 @@ impl Store {
             Ok(feed) => {
                 self.mailbox_checked = Some(unix_now());
                 let ours: Vec<Event> = feed.events.into_iter().filter(|e| e.kind() == Kind::Recipe && e.inst == inst).collect();
+                // Record every fetched code before starting one forced merge;
+                // ticking mid-loop would start a non-forced merge on the first
+                // code and make `group_ready` below return None.
                 for e in newest_codes_only(ours) {
-                    self.mailbox_event(e, false, cx);
+                    self.got_recipe_inner(e, false, cx);
                 }
             }
             Err(e) => {
@@ -1766,6 +1775,8 @@ impl Store {
         match (copy, go) {
             // The result is told when the merge ends (`on_group_merged`).
             (Some(c), Some(ignore_unsent)) => self.merge_group(c, root, ignore_unsent),
+            // A merge is already in flight: wait for `on_group_merged` to finish the pull.
+            _ if self.group_merging.contains(&local) => {}
             _ => self.finish_pull(&local, &root, 0, Vec::new(), cx),
         }
         cx.notify();
@@ -1862,9 +1873,12 @@ impl Store {
             }
         }
         // A copy set up only now (the follow went in after the sharer's
-        // recipe came) catches up on the sharer's shared settings as well.
-        for c in copies.iter().filter(|c| c.local != c.inst && !self.settings.group_copies.iter().any(|o| o.local == c.local && o.inst == c.inst)) {
-            late.extend(self.mailbox_recipes.iter().filter(|e| e.inst == c.inst && !e.configs.is_empty()).cloned());
+        // recipe came, or after the sharer pushed a newer version while it was
+        // installing) catches up on both the sharer's latest code and shared
+        // settings.
+        let me = self.mailbox_id();
+        for c in copies.iter_mut().filter(|c| c.local != c.inst && !self.settings.group_copies.iter().any(|o| o.local == c.local && o.inst == c.inst)) {
+            late.extend(catch_up_new_copy(c, &me, &self.mailbox_recipes, |id| self.friend_name(id)));
         }
         if copies != self.settings.group_copies {
             self.update_settings_quietly(|st| st.group_copies = copies);
@@ -1899,6 +1913,10 @@ impl Store {
 
     /// A member's copy of a group pack arrived: taken into this PC's copy.
     fn got_copy(&mut self, e: Event, cx: &mut Context<Self>) {
+        self.got_copy_inner(e, true, cx);
+    }
+
+    fn got_copy_inner(&mut self, e: Event, tick: bool, cx: &mut Context<Self>) {
         if e.from == self.mailbox_id() {
             return;
         }
@@ -1916,7 +1934,9 @@ impl Store {
                 let taken = self.take_configs(&e);
                 self.say_taken(taken, cx);
             }
-            self.follow_tick(cx);
+            if tick {
+                self.follow_tick(cx);
+            }
         } else {
             let k = (e.from.clone(), e.inst.clone());
             if self.group_strays.get(&k).is_none_or(|x| x.seq < e.seq) {
@@ -2195,8 +2215,12 @@ impl Store {
     /// A friend's pack, new or changed: listed, and applied on every
     /// instance here that follows it.
     fn got_recipe(&mut self, e: Event, cx: &mut Context<Self>) {
+        self.got_recipe_inner(e, true, cx);
+    }
+
+    fn got_recipe_inner(&mut self, e: Event, tick: bool, cx: &mut Context<Self>) {
         if e.key == groupsync::COPY_KEY {
-            self.got_copy(e, cx);
+            self.got_copy_inner(e, tick, cx);
             return;
         }
         // One entry per pack; one from before ids (its folder name) is the
@@ -2251,7 +2275,9 @@ impl Store {
         }
         // Applied by the tick, which also catches a code seen before but
         // never applied (Hopper closed first, or the apply failed).
-        self.follow_tick(cx);
+        if tick {
+            self.follow_tick(cx);
+        }
     }
 
     /// A friend stopped sharing a pack with this PC (or one of the ways it
@@ -3311,6 +3337,34 @@ fn hidden_key(e: &Event) -> String {
     format!("{}/{}/{}", e.from, e.inst, e.at)
 }
 
+/// Catches a newly created follower copy up on the sharer's latest recipe
+/// already in `recipes`: if it matches the follow's initial code (`seq == 0`),
+/// records its real sequence number and stamps; if a newer code arrived while
+/// the follow was installing or before its group was known, queues it into
+/// `waiting` so the next tick merges it automatically. Returns events carrying
+/// shared settings to take in.
+fn catch_up_new_copy(c: &mut PackCopy, me: &str, recipes: &[Event], friend_name: impl Fn(&str) -> String) -> Vec<Event> {
+    let mut configs = Vec::new();
+    for e in recipes {
+        if e.inst != c.inst || e.from == me {
+            continue;
+        }
+        if !e.configs.is_empty() {
+            configs.push(e.clone());
+        }
+        if let Some(g) = c.got.get_mut(&e.from).filter(|g| g.code == e.code) {
+            if g.seq == 0 && e.seq > 0 {
+                g.seq = e.seq;
+                g.stamps = e.marks.clone();
+            }
+        } else {
+            let name = if e.from_name.is_empty() { friend_name(&e.from) } else { e.from_name.clone() };
+            c.arrive(&e.from, Got { code: e.code.clone(), seq: e.seq, at: e.at, name, stamps: e.marks.clone(), ..Default::default() });
+        }
+    }
+    configs
+}
+
 /// Takes the ways a revoke closes off a received pack: shared directly,
 /// through some groups. Returns whether none is left (the pack is gone).
 fn drop_ways(r: &mut Event, revoke: &Event) -> bool {
@@ -3324,8 +3378,9 @@ fn drop_ways(r: &mut Event, revoke: &Event) -> bool {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's own `test` macro would come with it.
-    use super::{drop_ways, minutes, newest_codes_only, waiting_line, with_names};
+    use super::{catch_up_new_copy, drop_ways, minutes, newest_codes_only, waiting_line, with_names};
     use super::{FriendReads, FRIENDS_FALLBACK, FRIENDS_ON_FOCUS, FRIENDS_RETRY, FRIENDS_SAFETY};
+    use hopper::groupsync::{Got, PackCopy, Stamp};
     use hopper::mailbox::Event;
     use std::time::{Duration, Instant};
 
@@ -3479,5 +3534,30 @@ mod tests {
         // The last one goes: the pack is gone.
         let last = Event { direct: false, groups: vec!["g2".into()], ..ev(4, "revoke", "p1", "") };
         assert!(drop_ways(&mut r, &last));
+    }
+
+    #[test]
+    fn a_new_follower_copy_catches_up_on_a_sharer_recipe_that_arrived_first() {
+        let mut c = PackCopy { inst: "p1".into(), group: "g1".into(), local: "local".into(), ..Default::default() };
+        c.got.insert("aa".into(), Got { code: "HOP-1".into(), seq: 0, name: "Mia".into(), ..Default::default() });
+        // Sharer pushed HOP-2 (seq 20) while the follow was still installing HOP-1.
+        let mut e = ev(20, "recipe", "p1", "HOP-2");
+        e.from_name = "Mia".into();
+        e.configs = "cfg".into();
+        let configs = catch_up_new_copy(&mut c, "me", &[e], |_| "Mia".into());
+        assert_eq!(configs.len(), 1);
+        assert_eq!(c.waiting.get("aa").map(|g| (g.code.as_str(), g.seq)), Some(("HOP-2", 20)));
+
+        // When the recipe matches the installed code, fill in its real seq/stamps
+        // without queuing a redundant merge.
+        let mut c = PackCopy { inst: "p1".into(), group: "g1".into(), local: "local".into(), ..Default::default() };
+        c.got.insert("aa".into(), Got { code: "HOP-1".into(), seq: 0, name: "Mia".into(), ..Default::default() });
+        let mut e = ev(12, "recipe", "p1", "HOP-1");
+        e.marks.insert("p:1".into(), Stamp { seq: 12, by: "aa".into() });
+        let configs = catch_up_new_copy(&mut c, "me", &[e], |_| "Mia".into());
+        assert!(configs.is_empty());
+        assert!(c.waiting.is_empty());
+        assert_eq!(c.got["aa"].seq, 12);
+        assert_eq!(c.got["aa"].stamps.get("p:1"), Some(&Stamp { seq: 12, by: "aa".into() }));
     }
 }
