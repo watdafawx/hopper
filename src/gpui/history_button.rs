@@ -223,10 +223,11 @@ impl Render for HistoryButton {
             .id("history-button")
             .relative()
             .flex_none()
-            // The same outline icon button as the more menu beside it.
+            // Ghost icon button matching Settings and More beside it.
             .child(
                 Button::new("history")
-                    .outline()
+                    .ghost()
+                    .small()
                     .icon(IconName::RotateCcwClock)
                     .tooltip(tip)
                     .on_click(cx.listener(move |this, _, window, cx| {

@@ -2410,6 +2410,7 @@ impl LibraryView {
         let mut menu_fold = fold;
         menu_fold.folder = true;
         let _ = r_folder;
+        let has_actions = pack_update.is_some() || sync_to.is_some();
         let tab_tools = h_flex()
             .flex_none()
             .flex_nowrap()
@@ -2417,6 +2418,7 @@ impl LibraryView {
             .gap_1p5()
             .children(pack_update)
             .children(sync_to)
+            .when(has_actions, |r| r.child(div().w(px(1.)).h(rems(1.0)).bg(theme.border).mx_0p5()))
             .child(
                 Button::new("inst-settings")
                     .ghost()
@@ -2727,29 +2729,38 @@ impl LibraryView {
                 })
         });
         let key = widgets::fit_key(BAR.iter().map(|t| Self::bar_label(*t)).chain([Self::bar_label(slot(self.tab))]));
-        div()
+        h_flex()
             .flex_none()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .gap_3()
             .px_6()
             .border_b_1()
             .border_color(theme.border)
-            .child(self.tabs_fit.wrap(
-                "inst-tabs-fit",
-                h_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .id("inst-tabs")
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_x_scroll()
-                            .child(div().relative().child(strip).children(underline)),
-                    )
-                    .children(more)
-                    .child(tools),
-                max,
-                key,
-                cx.entity_id(),
-            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.tabs_fit.wrap(
+                        "inst-tabs-fit",
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("inst-tabs")
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_x_scroll()
+                                    .child(div().relative().child(strip).children(underline)),
+                            )
+                            .children(more),
+                        max,
+                        key,
+                        cx.entity_id(),
+                    )),
+            )
+            .child(tools)
             .into_any_element()
     }
 
