@@ -1530,7 +1530,8 @@ impl Store {
     /// you changed too and haven't shared yet; with -push, you share when
     /// you press Push); parked and parked-one (the group takes changes
     /// only from Mia, and Noah's and Ava's, or Noah's, wait); to-push
-    /// (changes are shared when you press Push, and both packs hold some).
+    /// (changes are shared when you press Push, and both packs hold some);
+    /// by-hand and by-hand-two (one, then two mods that only their websites give).
     /// Nothing goes to the real service; Pull now settles what it can.
     pub fn preview_group_sync(&mut self, state: &str, cx: &mut Context<Self>) {
         use hopper::groupsync::{Kind as Change, Mark, Owed, Stamp, State};
@@ -1646,6 +1647,38 @@ impl Store {
                     mod_name: "Sodium".into(),
                     ..Default::default()
                 });
+            }
+            // One (by-hand) or two (by-hand-two) mods whose authors keep them
+            // off other sites' downloads: the strip offers Download / Show files.
+            // The second name is long on purpose, to see it fit.
+            "by-hand" | "by-hand-two" => {
+                let mut site = |project: u64, file: u64, name: &str, jar: &str| {
+                    let p = hopper::modpack::Pending {
+                        name: name.into(),
+                        file_name: jar.into(),
+                        folder: "mods".into(),
+                        project_id: project,
+                        file_id: file,
+                        url: format!("https://www.curseforge.com/minecraft/mc-mods/preview-{project}/download/{file}"),
+                        reason: "The author keeps this mod off other sites' downloads.".into(),
+                        ..Default::default()
+                    };
+                    copy.marks.insert(
+                        format!("p:{project}"),
+                        Mark { by: "mia".into(), name: "Mia".into(), seq: 23, at: now - 900, kind: Change::Added, state: State::File { file: format!("cf:{file}"), on: true }, ..Default::default() },
+                    );
+                    p
+                };
+                let mut list = vec![site(448233, 6_100_001, "Entity Culling", "entityculling-fabric-1.7.4.jar")];
+                if state == "by-hand-two" {
+                    list.push(site(
+                        901_234,
+                        6_100_002,
+                        "Additional Placements: Extended Slabs, Stairs and Walls of the Overworld",
+                        "additionalplacements-1.2.jar",
+                    ));
+                }
+                self.pending.insert(root.clone(), list);
             }
             "parked" | "parked-one" => {
                 let stamp = |by: &str| Stamp { seq: 0, by: by.into() };
