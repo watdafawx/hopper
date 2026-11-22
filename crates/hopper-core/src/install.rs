@@ -604,9 +604,47 @@ pub fn search_text_for_mod_id(mod_id: &str) -> String {
     mod_id.replace(['_', '-', '.'], " ").split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
+/// Whether a project's slug or name is `want` (a squashed mod id) with a
+/// prefix glued on: "lets-do-foundation" is "foundation" by "Let's Do".
+fn is_prefixed_mod_id(want: &str, slug: &str, name: &str) -> bool {
+    let head = name_head(name);
+    // Short ids ("core") end too many names to trust.
+    want.len() >= 5 && [squash_id(slug), squash_id(head)].iter().any(|s| s.len() > want.len() && s.ends_with(want))
+}
+
+/// The project a jar in `inst` names as required that matches `mod_id`.
+/// Sites list many mods whose slug is a plain word ("foundation"), so a
+/// guess from the id alone can land on a different mod than the one the
+/// jar asked for; the jar's own dependency list (project ids) is exact.
+/// Only projects the instance doesn't have are looked at: that's what a
+/// missing-mod notice is about.
+fn project_from_requires(inst: &Instance, want: &str) -> Option<cf::Mod> {
+    let have: std::collections::HashSet<u64> = inst.addons.iter().map(|a| a.project_id).collect();
+    let mut ids: Vec<u64> = inst.addons.iter().flat_map(|a| a.requires.iter().copied()).filter(|id| *id != 0 && !have.contains(id)).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    // A mod's id rarely matches a dependency exactly, so look through the
+    // missing ones for the page named like it (a few at most).
+    let mut loose: Vec<cf::Mod> = Vec::new();
+    for id in ids.into_iter().take(40) {
+        let Ok(m) = crate::source::get_mod(id) else { continue };
+        if hit_is_mod_id(want, &m.slug, &m.name) {
+            return Some(m);
+        }
+        if is_prefixed_mod_id(want, &m.slug, &m.name) {
+            loose.push(m);
+        }
+    }
+    // One prefixed page and no exact one: that's the mod it asked for.
+    (loose.len() == 1).then(|| loose.remove(0))
+}
+
 pub fn project_for_mod_id(inst: &Instance, mod_id: &str) -> anyhow::Result<Option<cf::Mod>> {
     let squash = squash_id;
     let want = squash(mod_id);
+    if let Some(m) = project_from_requires(inst, &want) {
+        return Ok(Some(m));
+    }
     // Library ids whose pages are named differently.
     const ALIASES: &[(&str, &str)] = &[
         ("kotlinforforge", "kotlin-for-forge"),
@@ -2321,6 +2359,15 @@ mod mod_id_lookup {
         let t = super::slug_tries("cloth_config");
         assert_eq!(t[..2], ["cloth_config", "cloth-config"]);
         assert_eq!(t.iter().filter(|s| *s == "cloth-config").count(), 1);
+    }
+
+    #[test]
+    fn prefixed_pages_match_a_mod_id() {
+        use super::is_prefixed_mod_id as p;
+        assert!(p("foundation", "lets-do-foundation", "[Let's Do] Foundation"));
+        assert!(!p("foundation", "foundation", "Foundation"));
+        // Too short an id to trust.
+        assert!(!p("core", "some-core", "Some Core"));
     }
 
     #[test]
