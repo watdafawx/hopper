@@ -335,7 +335,7 @@ async fn list(
         let pack = PackMods::of(&inst);
         // A pack whose mod list can't be had (no CurseForge key, pack file
         // gone): nothing tells the pack's mods from yours, so none show as
-        // "Added by you" (same as the desktop table).
+        // "Your mods" (same as the desktop table).
         let no_list = inst.pack.is_some() && pack.is_none();
         let mut rows: Vec<Value> = Vec::new();
         let mut known = std::collections::HashSet::new();

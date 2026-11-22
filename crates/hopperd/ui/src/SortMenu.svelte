@@ -12,13 +12,13 @@
   import { ArrowUpDown, ArrowDown, ArrowUp, ChevronDown, Check } from '@lucide/svelte';
 
   // choices: [[col, label]]; sort: { col, desc }; onSort(col) works like a header click.
-  // hasPack: "Added by you first" only means something with a pack to tell apart.
+  // hasPack: "Your mods first" only means something with a pack to tell apart.
   let { choices, sort, updatesFirst = $bindable(), yoursFirst = $bindable(false), hasPack = false, onSort } = $props();
   let open = $state(false);
 
   const name = $derived(choices.find(([c]) => c === sort.col)?.[1] || 'Name');
   const yours = $derived(hasPack && yoursFirst);
-  const order = $derived(updatesFirst && yours ? `Updates, yours first, then ${name}` : updatesFirst ? `Updates first, then ${name}` : yours ? `Added by you first, then ${name}` : name);
+  const order = $derived(updatesFirst && yours ? `Updates, yours first, then ${name}` : updatesFirst ? `Updates first, then ${name}` : yours ? `Your mods first, then ${name}` : name);
   // Icon only while the order is the default (newest added, updates first); it names itself once changed.
   const isDefault = $derived(updatesFirst && !yours && sort.col === 'added' && sort.desc);
 
@@ -50,7 +50,7 @@
       </button>
       {#if hasPack}
         <button class="menu-item" role="menuitemcheckbox" aria-checked={yoursFirst} onclick={() => { open = false; yoursFirst = !yoursFirst; }}>
-          <span class="menu-ck">{#if yoursFirst}<Check size={13} />{/if}</span>Added by you first
+          <span class="menu-ck">{#if yoursFirst}<Check size={13} />{/if}</span>Your mods first
         </button>
       {/if}
       <div class="menu-label">Clicking a column header changes this too.</div>

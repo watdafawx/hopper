@@ -153,7 +153,7 @@ fn list_mods(store: &Store, args: &Value) -> Reply {
             if args["only_disabled"].as_bool() == Some(true) && a.enabled {
                 return None;
             }
-            // As the Mods tab's "Added by you": without a modpack, all of them.
+            // As the Mods tab's "Your mods": without a modpack, all of them.
             let added = inst.pack.is_none() || !a.from_pack;
             if args["only_added"].as_bool() == Some(true) && !added {
                 return None;

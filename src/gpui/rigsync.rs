@@ -2279,7 +2279,7 @@ impl SyncPanel {
             (EnvFilter::Server, "Server only"),
         ];
         const SOURCES: [(SourceFilter, &str); 2] =
-            [(SourceFilter::Any, "Pack + added by you"), (SourceFilter::Added, "Added by you")];
+            [(SourceFilter::Any, "Pack + your mods"), (SourceFilter::Added, "Your mods")];
         let env_ix = ENVS.iter().position(|(e, _)| *e == self.filters.env).unwrap_or(0);
         let src_ix = SOURCES
             .iter()

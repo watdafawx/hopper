@@ -123,8 +123,8 @@
   const LINK_ICON = { Source: Code, Issues: Bug, Wiki: BookOpen, Discord: MessageCircle };
   // Desktop's loader colors (theme::palette).
   const LOADER_COLOR = { neoforge: 'hsl(20 75% 60%)', forge: 'hsl(215 35% 65%)', fabric: 'hsl(38 45% 70%)', quilt: 'hsl(270 55% 70%)' };
-  async function copyId() {
-    try { await navigator.clipboard.writeText(String(p.id)); say('Copied the project ID.'); } catch { say(`Project ID: ${p.id}`); }
+  async function copyLink() {
+    try { await navigator.clipboard.writeText(p.url); say('Copied the link.'); } catch { say(p.url); }
   }
 
   function reset() {
@@ -408,7 +408,12 @@
           {#if p.license}<span class="grp muted"><Scale size={12} />{p.license}</span>{/if}
         </div>
         <div class="row wrap links">
-          <a class="btn sm {p.source}" href={p.url} target="_blank" rel="noreferrer noopener"><Brand name={p.source} />Open on {SITE[p.source]}</a>
+          <!-- The link sits beside "Open on …" as one split pill, as the
+               desktop does: the same page, ready to paste. -->
+          <span class="sitepair">
+            <a class="btn sm {p.source}" href={p.url} target="_blank" rel="noreferrer noopener"><Brand name={p.source} />Open on {SITE[p.source]}</a>
+            <button class="btn sm {p.source} icon" title="Copy link" aria-label="Copy link" onclick={copyLink}><Copy size={13} /></button>
+          </span>
           {#if packs}
             {#if p.server_files}<span class="chip running" title="The pack author's own server files"><Server size={11} />Server files</span>
             {:else}<span class="chip starting" title="This pack has no official server files: Hopper builds the server from the pack, leaving client-only mods out"><Hammer size={11} />From client pack</span>{/if}
@@ -417,7 +422,6 @@
             {@const LIcon = LINK_ICON[l.label]}
             <a class="btn sm ghost" href={l.url} title={l.url} target="_blank" rel="noreferrer noopener">{#if LIcon}<LIcon size={13} />{:else}<Brand name={l.label} />{/if}{l.label}</a>
           {/each}
-          {#if p.source === 'curseforge'}<button class="btn sm ghost icon" title="Copy project ID ({p.id})" aria-label="Copy project ID" onclick={copyId}><Copy size={13} /></button>{/if}
         </div>
       </div>
       {#if packs && session.owner}
@@ -629,8 +633,12 @@
   .grp :global(.l) { color: var(--gold); }
   .grp :global(.s) { color: var(--green); }
   .links { gap: 6px; margin-top: 12px; }
-  .links a.curseforge { color: var(--acc); }
-  .links a.modrinth { color: #1bd96a; }
+  .links a.curseforge, .links button.curseforge { color: var(--acc); }
+  .links a.modrinth, .links button.modrinth { color: #1bd96a; }
+  /* "Open on CurseForge" and its project id: one pill, as the desktop does. */
+  .sitepair { display: inline-flex; }
+  .sitepair .btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  .sitepair .btn:last-child { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 0; padding-left: 6px; padding-right: 6px; }
   .wrap { flex-wrap: wrap; }
   .mk { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: none; max-width: 280px; }
   .busy { display: inline-flex; align-items: center; gap: 6px; color: var(--gold); max-width: 260px; min-width: 0; }

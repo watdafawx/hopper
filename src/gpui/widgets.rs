@@ -142,6 +142,31 @@ pub fn split(
     h_flex().flex_none().items_center().child(lead).child(tail)
 }
 
+/// A split button whose right half is one more action of the same kind, an
+/// icon on its own (opening the project on its site, and copying its id):
+/// the lead keeps its look, the half joins it in `fg` and the theme's border.
+pub fn split_icon(
+    lead: impl IntoElement,
+    id: impl Into<ElementId>,
+    icon: IconName,
+    size: gpui_kit::component::Size,
+    fg: Hsla,
+    tip: impl Into<SharedString>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Div {
+    let tail = Button::new(id)
+        .icon(Icon::new(icon))
+        .outline()
+        .text_color(fg)
+        .with_size(size)
+        .border_l_0()
+        .rounded_tl(px(0.))
+        .rounded_bl(px(0.))
+        .tooltip(tip)
+        .on_click(on_click);
+    h_flex().flex_none().items_center().child(lead).child(tail)
+}
+
 /// A split button whose right half is a ▾ that opens `menu`: the usual
 /// action on the left, the other ways to do it behind the arrow.
 pub fn split_menu(
@@ -517,6 +542,53 @@ pub fn chip_w(label: &str) -> f32 {
 /// Categories shown before the rest fold into "+n".
 const MOD_TAG_CATEGORIES: usize = 2;
 
+/// Your own mod (on top of the pack) and, when a group member changed it, who
+/// did, as one pill: "＋ Your mod" in the colour that means yours, then the
+/// group's words in quiet grey. Alone, the pill is just your half; a group's
+/// change with nothing of yours is plain text, quieter than a chip. Both
+/// halves are tags, so the pill is exactly a chip's height.
+pub fn your_mod_pill(added: bool, changed_by: Option<&str>, cx: &App) -> Div {
+    let theme = cx.theme();
+    let yours = crate::theme::palette::YOURS;
+    let radius = crate::theme::radius_sm();
+    let tag = |bg: Hsla, fg: Hsla| {
+        gpui_kit::component::tag::Tag::custom(bg, fg, gpui_kit::transparent_black())
+            .xsmall()
+            .flex_none()
+            .whitespace_nowrap()
+            .map(chip_pad)
+    };
+    if !added {
+        return div()
+            .flex_none()
+            .text_size(rems(0.625))
+            .text_color(theme.muted_foreground)
+            .child(changed_by.unwrap_or_default().to_string());
+    }
+    let mut own = tag(yours.opacity(alpha::TINT), crate::theme::chip_ink(yours))
+        .gap_1()
+        .child(Icon::new(IconName::Plus).xsmall())
+        .child("Your mod");
+    // The outer corners only, so the two halves read as one pill.
+    own = if changed_by.is_some() {
+        own.rounded_tl(radius).rounded_bl(radius).rounded_tr(px(0.)).rounded_br(px(0.))
+    } else {
+        own.rounded(radius)
+    };
+    let mut pill = div().flex().items_stretch().flex_none().child(own);
+    if let Some(by) = changed_by {
+        pill = pill.child(div().w(px(1.)).bg(theme.border)).child(
+            tag(theme.secondary, theme.muted_foreground)
+                .rounded_tr(radius)
+                .rounded_br(radius)
+                .rounded_tl(px(0.))
+                .rounded_bl(px(0.))
+                .child(by.to_string()),
+        );
+    }
+    pill
+}
+
 /// A mod's badges on one line, the same everywhere a mod is listed: new,
 /// added, where it runs, its categories and where it came from.
 pub fn mod_tags(t: ModTags, cx: &App) -> Div {
@@ -564,11 +636,17 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
     if t.new {
         put("New", tag(ok, "New".into()).into_any_element());
     }
-    if t.added {
-        put("Added by you", tag(warn, "Added by you".into()).into_any_element());
-    }
-    if let Some(by) = t.changed_by {
-        put(by, tag(info, by.to_string().into()).into_any_element());
+    // Your own mod and a group member's change sit in one pill: yours loud
+    // on the left, the group's quiet on the right. A group change alone
+    // stays quieter than any chip.
+    if t.added || t.changed_by.is_some() {
+        let label = match (t.added, t.changed_by) {
+            (true, Some(by)) => format!("Your mod, and {by}"),
+            (true, None) => "Your mod".to_string(),
+            (false, Some(by)) => by.to_string(),
+            (false, None) => String::new(),
+        };
+        put(&label, your_mod_pill(t.added, t.changed_by, cx).into_any_element());
     }
     if t.only_here {
         put(

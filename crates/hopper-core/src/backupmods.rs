@@ -80,6 +80,15 @@ const KNOWN: &[Known] = &[
     },
 ];
 
+/// The folders backup mods write to when Hopper can't tell which mod it is
+/// (its jar is gone with a pack update, or was renamed): the folder name says
+/// what made it. "backup" is Textile Backup's.
+const KNOWN_DIRS: &[(&str, &str)] = &[
+    ("simplebackups", "SimpleBackups"),
+    ("backups", "Backups folder"),
+    ("backup", "Backup folder"),
+];
+
 /// A backup mod found in a server or instance, and its backups.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModBackups {
@@ -114,6 +123,31 @@ impl BackupFile {
     /// Hopper can restore zips; other archives are left to the mod.
     pub fn restorable(&self) -> bool {
         !self.partial() && self.name.to_lowercase().ends_with(".zip")
+    }
+}
+
+/// The world folder a backup belongs to: the folder it sits in, when that
+/// folder holds its zips (`simplebackups/world/…`). `None` when it lies
+/// straight in the mod's folder.
+pub fn world_of(file: &BackupFile) -> Option<&str> {
+    let (head, _) = file.name.split_once('/')?;
+    (!head.is_empty()).then_some(head)
+}
+
+impl ModBackups {
+    /// The backups by the world folder they hold, newest first, in the order
+    /// each world first shows (its newest backup); "" for those lying
+    /// straight in the folder.
+    pub fn by_world(&self) -> Vec<(String, Vec<&BackupFile>)> {
+        let mut out: Vec<(String, Vec<&BackupFile>)> = Vec::new();
+        for f in &self.files {
+            let world = world_of(f).unwrap_or("").to_string();
+            match out.iter_mut().find(|(w, _)| *w == world) {
+                Some((_, list)) => list.push(f),
+                None => out.push((world, vec![f])),
+            }
+        }
+        out
     }
 }
 
@@ -181,7 +215,8 @@ fn archives(dir: &Path) -> Vec<BackupFile> {
 }
 
 /// The backup mods in `root` (a server or instance folder), with their
-/// backups.
+/// backups. A mod's own folder counts even with no jar to match (its jar is
+/// gone after a pack update, or was renamed): the pack still has the zips.
 pub fn detect(root: &Path) -> Vec<ModBackups> {
     let jars: Vec<String> = fs::read_dir(root.join("mods"))
         .into_iter()
@@ -211,7 +246,61 @@ pub fn detect(root: &Path) -> Vec<ModBackups> {
             command: k.command.map(str::to_string),
         });
     }
+    // Folders whose mod Hopper can't name: add them unless one already
+    // points there.
+    for (folder, name) in KNOWN_DIRS {
+        let dir = root.join(folder);
+        if !dir.is_dir() || out.iter().any(|m| m.dir == dir) {
+            continue;
+        }
+        // An empty folder (or one no backup mod ever filled) says nothing.
+        let files = archives(&dir);
+        if files.is_empty() {
+            continue;
+        }
+        out.push(ModBackups {
+            mod_name: name.to_string(),
+            files,
+            dir,
+            command: None,
+        });
+    }
     out
+}
+
+/// The backup `name` in the folder of the mod called `mod` under `root`:
+/// what a panel or window asks for by name, so no path ever comes from one.
+pub fn find(root: &Path, mod_name: &str, name: &str) -> Option<BackupFile> {
+    detect(root)
+        .into_iter()
+        .find(|m| m.mod_name == mod_name)?
+        .files
+        .into_iter()
+        .find(|f| f.name.replace('\\', "/") == name.replace('\\', "/"))
+}
+
+/// Removes a backup by moving it under `<root>/.hopper-backups/removed/`, so
+/// it can still be found by hand (backups are big and often the only copy of
+/// a world). Returns where it went.
+pub fn remove(root: &Path, file: &BackupFile) -> anyhow::Result<PathBuf> {
+    let dir = root.join(crate::sync::BACKUP_DIR).join("removed");
+    fs::create_dir_all(&dir)?;
+    let stamp = crate::time::now_iso().replace([':', '.'], "-");
+    let base = file
+        .name
+        .replace('\\', "/")
+        .replace('/', "-");
+    let dest = dir.join(format!("{stamp}-{base}"));
+    match fs::rename(&file.path, &dest) {
+        Ok(()) => Ok(dest),
+        // Another drive (a mod configured to back up elsewhere): copy, then
+        // drop the original.
+        Err(_) => {
+            fs::copy(&file.path, &dest)?;
+            fs::remove_file(&file.path)?;
+            Ok(dest)
+        }
+    }
 }
 
 /// The folder in `zip` holding `level.dat` ("world/", or "" when the
@@ -354,6 +443,49 @@ mod tests {
         assert_eq!(fs::read_to_string(world.join("level.dat")).unwrap(), "world/level.dat");
         assert!(world.join("region/r.0.0.mca").exists());
         assert_eq!(fs::read_to_string(kept.join("level.dat")).unwrap(), "new");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn finds_a_folder_with_no_jar_and_groups_by_world() {
+        let root = std::env::temp_dir().join(format!("hopper-backupmods3-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("mods")).unwrap();
+        // The pack updated and dropped the mod's jar: the zips stay.
+        fs::create_dir_all(root.join("simplebackups/world")).unwrap();
+        fs::create_dir_all(root.join("simplebackups/world_nether")).unwrap();
+        let a = root.join("simplebackups/world/world_2026-10-09_16-30-12.zip");
+        let b = root.join("simplebackups/world_nether/world_nether_2026-10-09_16-30-12.zip");
+        zip_with(&a, &["world/level.dat"]);
+        zip_with(&b, &["world_nether/level.dat"]);
+        // A plain "backups" folder counts too, named for what it is.
+        fs::create_dir_all(root.join("backups")).unwrap();
+        let c = root.join("backups/2026-10-01.zip");
+        zip_with(&c, &["world/level.dat"]);
+        // An empty one says nothing and isn't listed.
+        fs::create_dir_all(root.join("backup")).unwrap();
+
+        let found = detect(&root);
+        assert_eq!(found.len(), 2, "{found:#?}");
+        let sb = found.iter().find(|m| m.mod_name == "SimpleBackups").unwrap();
+        assert!(sb.command.is_none());
+        assert_eq!(sb.files.len(), 2);
+        let worlds: Vec<String> = sb.by_world().into_iter().map(|(w, _)| w).collect();
+        assert_eq!(worlds.len(), 2);
+        assert!(worlds.contains(&"world".to_string()) && worlds.contains(&"world_nether".to_string()));
+        assert_eq!(world_of(&sb.files[0]).is_some(), true);
+        assert!(found.iter().any(|m| m.mod_name == "Backups folder"));
+        assert!(!found.iter().any(|m| m.mod_name == "Backup folder"));
+
+        // By name only: no path comes from the caller.
+        let f = find(&root, "SimpleBackups", "world/world_2026-10-09_16-30-12.zip").unwrap();
+        assert_eq!(f.path, a);
+        assert!(find(&root, "SimpleBackups", "../world/level.dat").is_none());
+
+        // Deleting keeps it, under .hopper-backups/removed.
+        let gone = remove(&root, &f).unwrap();
+        assert!(gone.is_file() && !a.exists());
+        assert!(gone.to_string_lossy().contains("before") == false);
         fs::remove_dir_all(&root).unwrap();
     }
 

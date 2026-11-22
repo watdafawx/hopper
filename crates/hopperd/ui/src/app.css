@@ -8,6 +8,10 @@
   --acc: #f97316; --acc-dim: #f973161f; --green: #22c55e; --green-dim: #22c55e1a;
   --gold: #facc15; --gold-dim: #facc151a; --blue: #38bdf8; --blue-dim: #38bdf81a;
   --red: #ef4444; --red-dim: #ef44441a; --violet: #a78bfa; --violet-dim: #a78bfa1a;
+  /* "Your mod" on top of a pack (desktop's theme::palette::YOURS): a teal of its own, so it never reads
+     as a warning (gold), an action (orange) or "ok" (green). */
+  --teal: #38b3a6; --teal-dim: #38b3a61a;
+  --ink-teal: light-dark(color-mix(in srgb, var(--teal) 50%, #000), color-mix(in srgb, var(--teal) 35%, var(--text)));
   --danger: #dc2626;
   /* Red as small text: the theme red with its lightness moved until it reads (>= 5:1) on every surface and on its own tint.
      lib/theme.svelte.js sets it per theme from lib/ink.js; this is the Hopper Dark value for before that runs
@@ -92,6 +96,12 @@ a.btn { color: var(--text); }
    box no taller than the text, and 2px more padding below than above: centred as laid out, the UI
    font's tall ascent leaves capitals a pixel low (desktop's widgets::chip_pad). */
 .chip { display: inline-flex; align-items: center; gap: 5px; box-sizing: border-box; height: 20px; line-height: 1; font-size: 11.5px; padding: 0 8px 2px; border-radius: var(--radius-sm); border: 1px solid transparent; background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--ink-subtle); white-space: nowrap; }
+/* Your own mod on top of the pack, and the group's change after it: one pill, yours strong on the
+   left in teal, theirs quiet on the right (desktop's widgets::your_mod_pill). */
+.yours { display: inline-flex; flex: none; box-sizing: border-box; height: 20px; border-radius: var(--radius-sm); overflow: hidden; }
+.yours > span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 11.5px; line-height: 1; padding: 0 8px 2px; }
+.yours .own { background: var(--teal-dim); color: var(--ink-teal); }
+.yours.starting .own { background: var(--gold-dim); color: var(--ink-gold); }
 .chip.running { color: var(--ink-green); border-color: transparent; background: var(--green-dim); }
 .chip.starting, .chip.stopping, .chip.warn { color: var(--ink-gold); border-color: transparent; background: var(--gold-dim); }
 .chip.crashed, .chip.wake_failed { color: var(--ink-red); border-color: transparent; background: var(--red-dim); }

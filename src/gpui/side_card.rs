@@ -70,7 +70,7 @@ fn body(c: &SideCard, _: &mut Window, cx: &mut App) -> AnyElement {
             .child(text)
     };
     let (icon, side) = side_of(c.side.as_ref()).unwrap_or((SIDE_UNKNOWN.0, SIDE_UNKNOWN.1.to_string()));
-    let origin = if c.from_pack { "From the pack" } else { "Added by you" };
+    let origin = if c.from_pack { "From the pack" } else { "Your mod" };
     let mut card = v_flex()
         .w(rems(21.))
         .gap_2()

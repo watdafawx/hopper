@@ -334,6 +334,72 @@
 
   // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
   $effect(() => onChange(sid, ['backups'], load));
+
+  // Backups a backup mod made in the server's own folder (SimpleBackups,
+  // FTB Backups, Advanced Backups…): listed apart from Hopper's own.
+  let mb = $state(null);
+  async function loadMods() {
+    try {
+      mb = await api(`${base}/backupmods`);
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
+  $effect(() => {
+    sid;
+    loadMods();
+  });
+
+  // A mod's backups by the world folder they hold, newest first.
+  function worlds(files) {
+    const out = [];
+    for (const f of files) {
+      const w = f.world || '';
+      const at = out.findIndex(([k]) => k === w);
+      if (at < 0) out.push([w, [f]]);
+      else out[at][1].push(f);
+    }
+    return out;
+  }
+
+  async function restoreMod(m, f) {
+    const ok = await confirmIt('Restore this backup?', {
+      body: `${f.name} replaces the ${f.world} world. The current world is kept in .hopper-backups/before-restore.`,
+      ok: 'Restore',
+      danger: true,
+    });
+    if (!ok) return;
+    busy = 'Restoring';
+    try {
+      const { job } = await post(`${base}/backupmods/restore`, { mod: m.mod, name: f.name });
+      await followJob(job, (st) => (busy = st.detail || 'Restoring'));
+      say(`Restored ${f.world}.`);
+      loadMods();
+    } catch (e) {
+      say(e.message, true);
+    } finally {
+      busy = '';
+    }
+  }
+
+  async function removeMod(m, f) {
+    const ok = await confirmIt('Delete this backup?', {
+      body: `${f.name} is moved to .hopper-backups/removed, so it can still be found on disk.`,
+      ok: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    busy = 'Deleting';
+    try {
+      await post(`${base}/backupmods/remove`, { mod: m.mod, name: f.name });
+      say(`Deleted ${f.name}.`);
+      loadMods();
+    } catch (e) {
+      say(e.message, true);
+    } finally {
+      busy = '';
+    }
+  }
 </script>
 
 <div class="split">
@@ -427,6 +493,36 @@
         <div class="tiny muted foot">{bytes(data.total_size)} on disk for backups{saved > 0 ? ` (${bytes(data.as_zips)} as zips)` : ''}{data.disk_free ? ` · ${bytes(data.disk_free)} free` : ''}</div>
       {/if}
     </div>
+
+    <!-- Backups a backup mod keeps in the server's own folder: the same list
+         Hopper desktop's server Backups tab shows. -->
+    {#if mb?.mods?.length}
+      <div class="card">
+        <h3><Archive size={14} />Backups from a backup mod
+          <span class="sp"></span>
+          <button class="btn sm icon ghost" title="Look again" disabled={!!busy} onclick={loadMods}><RefreshCw size={13} /></button>
+        </h3>
+        <div class="small muted">Kept in the server's own folder by a backup mod. Restoring one replaces that world; the current one is kept in .hopper-backups/before-restore.</div>
+        {#each mb.mods as m (m.mod + m.dir)}
+          <div class="mbh"><b>{m.mod}</b><span class="tiny muted">{m.dir}</span>{#if m.command}<span class="chip" title="The mod backs up on its own while the server runs">/{m.command}</span>{/if}</div>
+          {#each worlds(m.files) as [world, files] (world || 'root')}
+            <div class="mbw">{world || 'Backups'}<span class="tiny muted"> · {plural(files.length, 'backup')}</span></div>
+            {#each files.slice(0, 20) as f (f.name)}
+              <div class="b mbf">
+                <div class="nmw">
+                  <div class="ell nm">{f.name.split('/').pop()}</div>
+                  <div class="tiny muted ell"><span title={fullDate(f.modified)}>{whenLabel(f.modified)}</span> · {bytes(f.size)}{f.partial ? ' · part of a set' : ''}</div>
+                </div>
+                <button class="btn sm icon ghost" title="Download" onclick={() => download(`/api/v1${base}/backupmods/download?mod=${encodeURIComponent(m.mod)}&name=${encodeURIComponent(f.name)}`)}><Download size={13} /></button>
+                <button class="btn sm" disabled={alive || !!busy || !f.restorable || !f.world} title={!f.world ? 'Not in a world folder: restore it with the mod' : alive ? 'Stop the server first' : f.partial ? 'Only the files changed since an earlier backup: restore it with the mod' : f.restorable ? 'Put this world back to that backup' : 'Hopper restores zips'} onclick={() => restoreMod(m, f)}><Undo2 size={13} />Restore</button>
+                {#if mb.can_remove}<button class="btn sm icon ghost" title={alive ? 'Stop the server first' : 'Delete'} disabled={alive || !!busy} onclick={() => removeMod(m, f)}><Trash2 size={13} /></button>{/if}
+              </div>
+            {/each}
+            {#if files.length > 20}<p class="tiny muted pad">{files.length - 20} older backups here; find them in {m.dir} on the server.</p>{/if}
+          {/each}
+        {/each}
+      </div>
+    {/if}
 
     {#if remote}
       <div class="card">
@@ -536,6 +632,10 @@
   .files { padding: 0 12px 10px 37px; display: flex; flex-direction: column; gap: 6px; }
   .input.sm { padding: 3px 8px; }
   .foot { margin-top: 6px; }
+  /* A backup mod's world headings, under its name. */
+  .mbh { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 14px 0 2px; }
+  .mbw { font-size: 11px; letter-spacing: .02em; text-transform: uppercase; color: var(--subtle); margin: 10px 0 0; }
+  .mbf:last-child { border-bottom: 1px solid var(--line); }
   /* The shared loading row, at a backup card's height. */
   .skel { height: 56px; padding: 0 12px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: var(--radius-lg); }
   .nmw { flex: 1; min-width: 0; }

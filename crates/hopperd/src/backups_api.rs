@@ -163,7 +163,7 @@ async fn restore(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
 }
 
 /// A server being restored; dropped when its restore job ends.
-struct Restoring(String);
+pub(crate) struct Restoring(String);
 
 impl Restoring {
     fn set() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
@@ -172,7 +172,7 @@ impl Restoring {
     }
 
     /// None when that server is already being restored.
-    fn start(id: &str) -> Option<Self> {
+    pub(crate) fn start(id: &str) -> Option<Self> {
         Self::set().lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string()).then(|| Restoring(id.to_string()))
     }
 }

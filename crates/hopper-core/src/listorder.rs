@@ -1,4 +1,4 @@
-//! The lead groups of the Mods tab's sort: "Updates first" and "Added by you
+//! The lead groups of the Mods tab's sort: "Updates first" and "Your mods
 //! first". One rule here so the desktop table and the server panel (which
 //! mirrors it in `Mods.svelte`) agree.
 
@@ -16,7 +16,7 @@ pub struct Lead {
 pub struct Facts {
     /// Has an update waiting.
     pub update: bool,
-    /// Marked "Added by you" (never true for a list with no pack).
+    /// Marked "Your mod" (never true for a list with no pack).
     pub yours: bool,
 }
 

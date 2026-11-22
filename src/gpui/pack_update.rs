@@ -1273,7 +1273,7 @@ impl UpdatePreview {
         let (primary, muted, radius) = (theme.primary, theme.muted_foreground, theme.radius);
         let rows = held
             .iter()
-            .map(|m| (m.clone(), ("Added by you", muted), format!("{} → {}", m.from, m.to)))
+            .map(|m| (m.clone(), ("Your mod", muted), format!("{} → {}", m.from, m.to)))
             .collect();
         let card = v_flex()
             .gap_2()
@@ -1949,7 +1949,7 @@ impl UpdatePreview {
                             Some(d) => format!("⚠ needs {d}, which the pack drops"),
                             None => y.from.clone(),
                         };
-                        (need.is_some(), (y.clone(), ("Added by you", if need.is_some() { warning } else { muted }), detail))
+                        (need.is_some(), (y.clone(), ("Your mod", if need.is_some() { warning } else { muted }), detail))
                     })
                     .collect();
                 rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.0.name.to_lowercase().cmp(&b.1.0.name.to_lowercase())));

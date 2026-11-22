@@ -52,7 +52,7 @@ enum Show {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Rail {
     Show(Show),
-    /// "Added by you": only what is not from the modpack.
+    /// "Your mods": only what is not from the modpack.
     Added,
     /// "Config changed": only mods whose config is off its defaults.
     Cfg,
@@ -889,7 +889,7 @@ pub struct AddonsView {
     /// Only mods whose config has settings not at their default.
     cfg_changed_only: bool,
     updates_first: bool,
-    /// "Added by you first": the player's own mods lead (after updates).
+    /// "Your mods first": the player's own mods lead (after updates).
     yours_first: bool,
     sort: (SortCol, bool),
     pub(crate) selected: HashSet<String>,
@@ -2948,7 +2948,7 @@ impl AddonsView {
         let order = match (first, yours) {
             (true, true) => format!("Updates, yours first, then {name}"),
             (true, false) => format!("Updates first, then {name}"),
-            (false, true) => format!("Added by you first, then {name}"),
+            (false, true) => format!("Your mods first, then {name}"),
             (false, false) => name.to_string(),
         };
         let muted = cx.theme().muted_foreground;
@@ -2999,7 +2999,7 @@ impl AddonsView {
                 if has_pack {
                     let v = view.clone();
                     let on = yours;
-                    menu = menu.item(PopupMenuItem::new("Added by you first").checked(on).on_click(move |_, _, cx| {
+                    menu = menu.item(PopupMenuItem::new("Your mods first").checked(on).on_click(move |_, _, cx| {
                         v.update(cx, |this, cx| {
                             this.yours_first = !on;
                             cx.notify();
@@ -3101,7 +3101,7 @@ impl AddonsView {
             first_toggle = false;
         };
         if inst.pack.is_some() && self.global_dir().is_none() {
-            toggle(Rail::Added, "Added by you", IconName::UserPlus, n_added);
+            toggle(Rail::Added, "Your mods", IconName::Plus, n_added);
         }
         if let Some(n) = self.cfg_index.as_ref().filter(|_| self.class == cf::CLASS_MODS).map(|_| self.cfg_changed_keys().len()).filter(|n| *n > 0 || self.cfg_changed_only) {
             toggle(Rail::Cfg, "Config changed", IconName::Settings2, n);
@@ -4342,7 +4342,7 @@ impl AddonsView {
                 key: &file,
                 // Shaders say "Active" instead.
                 in_use: flags.in_use && self.class != cf::CLASS_SHADERS,
-                // One marker: "Added by you" says it's new to the pack already.
+                // One marker: "Your mod" says it's new to the pack already.
                 new: flags.new && !flags.added,
                 added: flags.added,
                 changed_by: changed_by.as_deref(),
@@ -6702,7 +6702,7 @@ mod tests {
 
     #[test]
     fn rail_pick_keeps_toggles_and_toggle_keeps_pick() {
-        // Updates picked, then Added by you on: both hold.
+        // Updates picked, then Your mods on: both hold.
         let (s, a, c) = Rail::Show(Show::Updates).apply(Show::All, false, false);
         let (s, a, c) = Rail::Added.apply(s, a, c);
         assert_eq!((s, a, c), (Show::Updates, true, false));

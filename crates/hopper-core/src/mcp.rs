@@ -144,7 +144,7 @@ fn data_tools() -> Value {
                 "filter": { "type": "string", "description": "Only those whose name or file contains this" },
                 "only_updates": { "type": "boolean" },
                 "only_disabled": { "type": "boolean" },
-                "only_added": { "type": "boolean", "description": "Only those the player added, not the modpack (the Mods tab's \"Added by you\")" },
+                "only_added": { "type": "boolean", "description": "Only those the player added, not the modpack (the Mods tab's \"Your mods\")" },
                 "only_sources": { "type": "boolean", "description": "Only mods that follow a GitHub, Maven, Jenkins or link source" }
             } }
         },

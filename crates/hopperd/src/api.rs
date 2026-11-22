@@ -185,6 +185,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::manage_api::routes())
         .merge(crate::mods_api::routes())
         .merge(crate::mods_upload::routes())
+        .merge(crate::backupmods_api::routes())
         .merge(crate::sources_api::routes())
         .merge(crate::webhooks::routes())
         .merge(crate::mcp::routes())

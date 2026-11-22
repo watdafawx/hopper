@@ -1538,59 +1538,92 @@ impl ServerControl {
         &self,
         mi: usize,
         m: &hopper::backupmods::ModBackups,
-        hosted: bool,
         running: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let dir = m.dir.clone();
         let command = m.command.clone();
-        let files: Vec<_> = m.files.iter().take(50).enumerate().map(|(fi, f)| {
-            let file = f.clone();
-            let id = 500_000 + mi * 1_000 + fi;
-            let why_not = if running {
-                Some("Stop the server first")
-            } else if f.partial() {
-                Some("Only the files changed since an earlier backup: restore it with the mod")
-            } else if !f.restorable() {
-                Some("Hopper restores zips; restore this one with the mod")
-            } else {
-                None
-            };
-            h_flex()
-                .id(("mod-backup", id))
-                .gap_2()
-                .px_3()
-                .py_1p5()
-                .rounded(theme.radius)
-                .hover(|s| s.bg(theme.list_hover))
-                .child(div().flex_1().min_w_0().text_sm().truncate().child(f.name.clone()))
-                .child(
-                    widgets::caption(
-                        format!(
-                            "{} · {}",
-                            hopper::hosting::local_panel::format_bytes(f.size),
-                            hopper::time::relative_secs(f.modified)
-                        ),
-                        cx,
-                    )
-                    .text_xs()
-                    .flex_none(),
-                )
-                .when(hosted, |row| {
-                    row.child(
-                        Button::new(("mod-restore", id))
-                            .xsmall()
-                            .outline()
-                            .label("Restore")
-                            .disabled(why_not.is_some())
-                            .tooltip(why_not.unwrap_or("Replace the world with this backup"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.ask_restore_mod(file.clone(), window, cx)
-                            })),
-                    )
-                })
-        }).collect();
+        // One heading per world folder the backups hold, as the mod lays them
+        // out (`simplebackups/world/…`): the world is what a restore replaces.
+        let worlds: Vec<(String, Vec<AnyElement>)> = m
+            .by_world()
+            .into_iter()
+            .enumerate()
+            .map(|(wi, (world, files))| {
+                let rows: Vec<AnyElement> = files
+                    .iter()
+                    .take(50)
+                    .enumerate()
+                    .map(|(fi, f)| {
+                        let file = (*f).clone();
+                        let id = 500_000 + mi * 10_000 + wi * 1_000 + fi;
+                        let why_not = if running {
+                            Some("Stop the server first")
+                        } else if world.is_empty() {
+                            Some("Not in a world folder: restore it with the mod")
+                        } else if f.partial() {
+                            Some("Only the files changed since an earlier backup: restore it with the mod")
+                        } else if !f.restorable() {
+                            Some("Hopper restores zips; restore this one with the mod")
+                        } else {
+                            None
+                        };
+                        // The heading names the world; the row names the file.
+                        let shown = f.name.rsplit('/').next().unwrap_or(&f.name).to_string();
+                        h_flex()
+                            .id(("mod-backup", id))
+                            .gap_2()
+                            .px_3()
+                            .py_1p5()
+                            .rounded(theme.radius)
+                            .hover(|s| s.bg(theme.list_hover))
+                            .child(div().flex_1().min_w_0().text_sm().truncate().child(shown))
+                            .child(
+                                widgets::caption(
+                                    format!(
+                                        "{} · {}",
+                                        hopper::hosting::local_panel::format_bytes(f.size),
+                                        hopper::time::relative_secs(f.modified)
+                                    ),
+                                    cx,
+                                )
+                                .text_xs()
+                                .flex_none(),
+                            )
+                            .child(
+                                Button::new(("mod-restore", id))
+                                    .xsmall()
+                                    .outline()
+                                    .label("Restore")
+                                    .disabled(why_not.is_some())
+                                    .tooltip(why_not.unwrap_or("Replace the world with this backup"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.ask_restore_mod(file.clone(), window, cx)
+                                    })),
+                            )
+                            .child({
+                                let file = (*f).clone();
+                                Button::new(("mod-remove", id))
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(IconName::Trash)
+                                    .disabled(running)
+                                    .tooltip(if running {
+                                        "Stop the server first"
+                                    } else {
+                                        "Delete this backup (kept in .hopper-backups/removed)"
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.ask_remove_mod(file.clone(), window, cx)
+                                    }))
+                            })
+                            .into_any_element()
+                    })
+                    .collect();
+                (world, rows)
+            })
+            .collect();
         let total: u64 = m.files.iter().map(|f| f.size).sum();
         let mod_name = m.mod_name.clone();
         v_flex()
@@ -1602,8 +1635,9 @@ impl ServerControl {
                     .child(
                         widgets::caption(
                             format!(
-                                "{} backups · {}",
+                                "{} {} · {}",
                                 m.files.len(),
+                                if m.files.len() == 1 { "backup" } else { "backups" },
                                 hopper::hosting::local_panel::format_bytes(total)
                             ),
                             cx,
@@ -1647,8 +1681,65 @@ impl ServerControl {
             .when(m.files.is_empty(), |c| {
                 c.child(widgets::caption("No backups yet.", cx).px_3())
             })
-            .children(files)
+            .children(worlds.into_iter().flat_map(|(world, rows)| {
+                let head = (!world.is_empty()).then(|| {
+                    div()
+                        .px_3()
+                        .pt_2()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.muted_foreground)
+                        .child(world.clone())
+                        .into_any_element()
+                });
+                head.into_iter().chain(rows)
+            }))
             .into_any_element()
+    }
+
+    /// Asks, then deletes a backup mod's backup (it is moved under
+    /// `.hopper-backups/removed`, so it can still be found by hand).
+    fn ask_remove_mod(&mut self, file: hopper::backupmods::BackupFile, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let name = self.server_name(cx);
+        let view = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (view, root, file) = (view.clone(), root.clone(), file.clone());
+            alert
+                .title(format!("Delete {name}'s backup?"))
+                .description(format!(
+                    "{} is moved to .hopper-backups/removed, so it can still be found on disk.",
+                    file.name
+                ))
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default()
+                        .ok_text("Delete")
+                        .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, window, cx| {
+                    let (root, file) = (root.clone(), file.clone());
+                    view.update(cx, |_, cx| {
+                        cx.spawn_in(window, async move |this, cx| {
+                            let shown = file.name.clone();
+                            let r = cx
+                                .background_spawn(async move { hopper::backupmods::remove(&root, &file) })
+                                .await;
+                            this.update_in(cx, |this, window, cx| {
+                                let n = match r {
+                                    Ok(_) => Notification::success(format!("Deleted {shown}.")),
+                                    Err(e) => Notification::error(format!("{e:#}")),
+                                };
+                                window.push_notification(n, cx);
+                                this.load_mod_backups(cx);
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    });
+                    true
+                })
+        });
     }
 
     fn backup_now(&mut self, set: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1747,7 +1838,7 @@ impl ServerControl {
                         found
                             .iter()
                             .enumerate()
-                            .map(|(mi, m)| self.mod_backups_section(mi, m, hosted, running, cx))
+                            .map(|(mi, m)| self.mod_backups_section(mi, m, running, cx))
                             .collect::<Vec<_>>(),
                     )
                     .into_any_element(),
@@ -1758,7 +1849,7 @@ impl ServerControl {
             let hint = if hosted {
                 "No backup mod in this server. Most packs have one (SimpleBackups, FTB Backups, Advanced Backups…); add one in Content and its backups show here."
             } else {
-                "No backup mod in this server. Panel backups show here once one is set up in Settings → Servers."
+                "No backups found in this server: neither a backup mod (SimpleBackups, FTB Backups…) nor a `backups` or `simplebackups` folder."
             };
             return v_flex()
                 .gap_3()

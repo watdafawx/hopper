@@ -48,6 +48,10 @@ pub mod palette {
 
     pub const CURSEFORGE: Hsla = hs(14.0, 0.87, 0.58);
     pub const MODRINTH: Hsla = hs(145.0, 0.78, 0.48);
+    /// The marker for a mod the player added on top of a pack: a teal of its
+    /// own, so "yours" never reads as a warning (yellow) or as an action
+    /// (orange, green).
+    pub const YOURS: Hsla = hs(174.0, 0.52, 0.46);
     pub const NEOFORGE: Hsla = hs(20.0, 0.75, 0.6);
     pub const FORGE: Hsla = hs(215.0, 0.35, 0.65);
     pub const FABRIC: Hsla = hs(38.0, 0.45, 0.7);

@@ -60,7 +60,7 @@ async fn as_instance(
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
     let v = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
         let mut inst = crate::mods_api::instance_of(&e)?;
-        // The desktop table reads `from_pack` for "Added by you"; a server
+        // The desktop table reads `from_pack` for "Your mods"; a server
         // set up from a server pack has no marks of its own (view only).
         hopper_core::modpack::mark_pack_mods(&mut inst);
         // The web table lists only entries whose jar is still in the folder.

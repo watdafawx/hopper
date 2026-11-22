@@ -8,7 +8,7 @@
   // finds the files edited on the server so they can be kept. Replaced and
   // removed files go to .hopper-backups.
   import { X, ChevronDown, ChevronRight as Caret, TriangleAlert, Package, ServerCog, Server, FileText, Archive, Check,
-    ShieldCheck, Settings2, GitCompare, Download, FolderOpen } from '@lucide/svelte';
+    ShieldCheck, Settings2, GitCompare, Download, FolderOpen, Plus } from '@lucide/svelte';
   import { onMount, onDestroy, untrack } from 'svelte';
   import { api, post } from './lib/api.js';
   import { followJob } from './lib/jobs.js';
@@ -699,7 +699,7 @@
                     {:else}
                       <div class="list">
                         {#each stayMods.slice(0, LIST_CAP) as r (r.m.name + r.m.from)}
-                          <div class="mr row-hover">{@render modCell(r.m)}<span class="tiny muted ell grow">{r.need ? `⚠ needs ${r.need}, which the pack drops` : r.m.from}</span><span class="chip xs" class:starting={r.need}>Added by you</span></div>
+                          <div class="mr row-hover">{@render modCell(r.m)}<span class="tiny muted ell grow">{r.need ? `⚠ needs ${r.need}, which the pack drops` : r.m.from}</span><span class="yours" class:starting={r.need}><span class="own"><Plus size={10} />Your mod</span></span></div>
                         {/each}
                       </div>
                     {/if}

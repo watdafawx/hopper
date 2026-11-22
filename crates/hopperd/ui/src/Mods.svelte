@@ -31,7 +31,7 @@
   import {
     Search, Plus, ScanSearch, RefreshCw, X, Settings2, Lock, LockOpen, Download, ScrollText, Ellipsis, Trash2,
     Monitor, Server as ServerIcon, ArrowLeftRight, ArrowDown, ArrowUp, ExternalLink, Shuffle, FolderOpen, CircleCheck, Clock,
-    CircleOff, CircleQuestionMark, Layers, CircleArrowUp, Archive, UserPlus, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check, Columns3, RotateCcw, Info, Link, Unlink, SlidersHorizontal,
+    CircleOff, CircleQuestionMark, Layers, CircleArrowUp, Archive, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check, Columns3, RotateCcw, Info, Link, Unlink, SlidersHorizontal,
   } from '@lucide/svelte';
   import ModConfigPanel from './ModConfigPanel.svelte';
   import { cfg, loadIndex, modForFile } from './lib/configs.svelte.js';
@@ -161,7 +161,7 @@
     }
   };
   let onlyYours = $state(pref('yours', false));
-  // "Config changed" combines with the pick, as "Added by you" does.
+  // "Config changed" combines with the pick, as "Your mods" does.
   let onlyCfg = $state(pref('cfg', false));
   $effect(() => keep('cfg', onlyCfg));
   let updatesFirst = $state(pref('updates-first', true));
@@ -190,7 +190,7 @@
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
   const mods = $derived(data?.mods || []);
-  // "Added by you" only means something on a server made from a pack.
+  // "Your mods" only means something on a server made from a pack.
   const hasPack = $derived(!!data?.pack);
   const yours = (m) => hasPack && m.source && !m.from_pack;
   const isArchived = (m) => archived.has(m.project_id) && !done.has(m.project_id);
@@ -213,7 +213,7 @@
   // The rail: the picks (what is listed) that apply, then the toggles that combine with the pick.
   const rail = $derived([
     ...CHIPS.filter(([k]) => k === 'all' || k === 'updates' || k === 'off' || counts[k] || chip === k).map(([k, label, icon]) => ({ k, label, icon, n: k === 'all' ? mods.length : counts[k], tog: false, on: chip === k })),
-    ...(hasPack ? [{ k: 'yours', label: 'Added by you', icon: UserPlus, n: counts.yours, tog: true, on: onlyYours }] : []),
+    ...(hasPack ? [{ k: 'yours', label: 'Your mods', icon: Plus, n: counts.yours, tog: true, on: onlyYours }] : []),
     ...(counts.config || onlyCfg ? [{ k: 'config', label: 'Config changed', icon: Settings2, n: counts.config, tog: true, on: onlyCfg }] : []),
   ]);
   function railPick(k) {
@@ -947,7 +947,7 @@
               </div>
               <div class="tags">
                 {#if isNew(m) && !yours(m)}<span class="chip tag okc">New</span>{/if}
-                {#if yours(m)}<span class="chip tag gold">Added by you</span>{/if}
+                {#if yours(m)}<span class="yours" title="Not from the pack: you added this"><span class="own"><Plus size={10} />Your mod</span></span>{/if}
                 {#if isUnknown(m)}<span class="chip tag">Unknown</span>{/if}
                 {#if SIDE_TAG[m.side]}<span class="chip tag {SIDE_TAG[m.side][1]}" title={fromMr(m) ? `${SIDE_TAG[m.side][0]}${fromMr(m)}` : undefined}>{SIDE_TAG[m.side][0]}</span>{/if}
                 {#if !(up && (vl || breaking))}

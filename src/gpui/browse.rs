@@ -4032,8 +4032,11 @@ impl BrowseView {
                             .mt_3()
                             .gap_1()
                             .flex_wrap()
-                            .child(
-                                Button::new("site")
+                            .child({
+                                // Open on the site, and copy the link beside
+                                // it: the same page, one click away.
+                                let link = page.clone();
+                                let site = Button::new("site")
                                     .small()
                                     .outline()
                                     .text_color(site_fg)
@@ -4050,8 +4053,21 @@ impl BrowseView {
                                         None => b.icon(crate::brand::site_icon(m.modrinth.is_some())),
                                     })
                                     .label(site_label)
-                                    .on_click(move |_, _, cx| cx.open_url(&page)),
-                            )
+                                    .on_click(move |_, _, cx| cx.open_url(&page));
+                                widgets::split_icon(
+                                    widgets::split_lead(site),
+                                    "copy-link",
+                                    IconName::Copy,
+                                    gpui_kit::component::Size::Small,
+                                    site_fg,
+                                    "Copy link",
+                                    move |_, window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+                                        window.push_notification(Notification::success("Copied the link."), cx);
+                                    },
+                                )
+                                .into_any_element()
+                            })
                             .children(self.server_badge(m, "detail-server".into(), true, cx))
                             .children(m.links.extra().into_iter().map(|(label, url)| {
                                 let url = url.to_string();
@@ -4077,30 +4093,14 @@ impl BrowseView {
             // Without an Install bar the compact bar shows once the
             // header has scrolled away.
             .when(!has_card, |h| h.child(page_mark(self.sticky.fold.clone(), true)))
-            // Copy id, bookmark and close sit over the name's line only, so
-            // the rows under the byline get the panel's whole width.
+            // Bookmark and close sit over the name's line only, so the rows
+            // under the byline get the panel's whole width.
             .child(
                 h_flex()
                     .absolute()
                     .top_0()
                     .right_0()
                     .gap_0p5()
-                    // The CurseForge project id, for the few who need it (support,
-                    // packs by id): copied, not shown. Up with the bookmark.
-                    .when(m.modrinth.is_none() && !hopper::sources::is_src(m.id), |r| {
-                        let id = m.id.to_string();
-                        r.child(
-                            Button::new("copy-id")
-                                .small()
-                                .ghost()
-                                .icon(IconName::Copy)
-                                .tooltip(format!("Copy project ID ({id})"))
-                                .on_click(move |_, window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
-                                    window.push_notification(Notification::success("Copied the project ID."), cx);
-                                }),
-                        )
-                    })
                     .child(self.bookmark_button(m, "detail-bookmark".into(), cx))
                     .child(self.close_button("close-detail", cx)),
             );
