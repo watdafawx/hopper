@@ -3443,7 +3443,7 @@ impl Store {
 
     /// A newer file of the instance's modpack, if there is one.
     pub fn pack_update(&self, inst: &Instance) -> Option<&hopper::cf::File> {
-        self.pack_updates.get(&inst.pack.as_ref()?.project_id)
+        newer_pack_file(&self.pack_updates, inst.pack.as_ref()?)
     }
 
     /// Moves an instance to another version of its modpack with the given
@@ -5798,4 +5798,28 @@ fn test_seed() -> Option<TestSeed> {
         seed.mods.insert(k.clone(), serde_json::from_value(l.clone()).ok()?);
     }
     Some(seed)
+}
+
+/// The checked-for pack file, unless the instance already has it or a newer
+/// one: the group or a follow can move the pack without going through
+/// `update_pack`, which is what clears the offer otherwise.
+fn newer_pack_file<'a>(updates: &'a HashMap<u64, hopper::cf::File>, pack: &hopper::instances::PackRef) -> Option<&'a hopper::cf::File> {
+    updates.get(&pack.project_id).filter(|f| f.id > pack.file_id)
+}
+
+#[cfg(test)]
+mod pack_offer_tests {
+    use super::newer_pack_file;
+    use hopper::{cf::File, instances::PackRef};
+    use std::collections::HashMap;
+
+    #[test]
+    fn an_offer_for_the_installed_pack_file_is_not_shown() {
+        let updates = HashMap::from([(7, File { id: 86, ..Default::default() })]);
+        let at = |file_id| PackRef { project_id: 7, file_id, ..Default::default() };
+        assert!(newer_pack_file(&updates, &at(85)).is_some());
+        assert!(newer_pack_file(&updates, &at(86)).is_none());
+        assert!(newer_pack_file(&updates, &at(90)).is_none());
+        assert!(newer_pack_file(&updates, &PackRef { project_id: 8, file_id: 1, ..Default::default() }).is_none());
+    }
 }
