@@ -2570,6 +2570,9 @@ impl LibraryView {
             .when_some(store::played(inst.play_seconds), |r, t| {
                 r.child(crate::hero::soft_fact(IconName::Clock, format!("{t} played"), cx))
             })
+            .when_some(self.sizes.get(&inst.root).and_then(|s| *s), |r, n| {
+                r.child(crate::hero::soft_fact(IconName::HardDrive, hopper::instance_ops::human_bytes(n), cx))
+            })
             .when_some(page.clone(), |r, (author, downloads, ..)| {
                 r.child(crate::hero::soft_fact(IconName::User, format!("by {author}"), cx))
                     .child(crate::hero::soft_fact(IconName::Download, downloads, cx))

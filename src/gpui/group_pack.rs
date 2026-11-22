@@ -198,11 +198,12 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     let pushing = s.pushing_at(root);
     let repairing = s.group_repairing(root);
     let in_step = matches!(status, Status::InStep { .. });
-    // In step is good news the player may not want to see every time.
-    let key = hopper::settings::notice_key(&root.to_string_lossy(), "group-in-step", "in step");
-    if in_step && notice_slot::hidden(store, &key, cx) {
+    // Don't show a full-width banner just to say everything matches; only
+    // show the banner when out of step, failing, or right after a pull.
+    if in_step && pulled.is_none() {
         return None;
     }
+    let key = hopper::settings::notice_key(&root.to_string_lossy(), "group-in-step", "in step");
     let (icon, tier) = look(&status);
     let from_pull = pulled.is_some();
     let detail = pulled.unwrap_or_else(|| status.detail(now));
