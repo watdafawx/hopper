@@ -2411,6 +2411,7 @@ impl LibraryView {
         menu_fold.folder = true;
         let _ = r_folder;
         let has_actions = pack_update.is_some() || sync_to.is_some();
+        let divider_border = cx.theme().border;
         let tab_tools = h_flex()
             .flex_none()
             .flex_nowrap()
@@ -2418,7 +2419,7 @@ impl LibraryView {
             .gap_1p5()
             .children(pack_update)
             .children(sync_to)
-            .when(has_actions, |r| r.child(div().w(px(1.)).h(rems(1.0)).bg(theme.border).mx_0p5()))
+            .when(has_actions, |r| r.child(div().w(px(1.)).h(rems(1.0)).bg(divider_border).mx_0p5()))
             .child(
                 Button::new("inst-settings")
                     .ghost()

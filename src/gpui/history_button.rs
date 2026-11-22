@@ -224,7 +224,8 @@ impl Render for HistoryButton {
             .relative()
             .flex_none()
             // Ghost icon button matching Settings and More beside it.
-            .child(
+            .child({
+                use gpui_kit::component::{Sizable as _, button::ButtonVariants as _};
                 Button::new("history")
                     .ghost()
                     .small()
@@ -236,8 +237,8 @@ impl Render for HistoryButton {
                         this.count = 0;
                         cx.notify();
                         on_open(window, cx);
-                    })),
-            )
+                    }))
+            })
             .when(count > 0, |d| {
                 let label = if count > 99 { "99+".to_string() } else { count.to_string() };
                 let rem: f32 = theme.font_size.into();
