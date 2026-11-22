@@ -1531,7 +1531,9 @@ impl Store {
     /// you press Push); parked and parked-one (the group takes changes
     /// only from Mia, and Noah's and Ava's, or Noah's, wait); to-push
     /// (changes are shared when you press Push, and both packs hold some);
-    /// by-hand and by-hand-two (one, then two mods that only their websites give).
+    /// by-hand and by-hand-two (one, then two mods that only their websites give);
+    /// checking, blink and long (the check out of date for good, for 0.3 s
+    /// every 2 s, for 3 s every 6 s).
     /// Nothing goes to the real service; Pull now settles what it can.
     pub fn preview_group_sync(&mut self, state: &str, cx: &mut Context<Self>) {
         use hopper::groupsync::{Kind as Change, Mark, Owed, Stamp, State};
@@ -1710,6 +1712,30 @@ impl Store {
         // verify-behind (two mods), verify-cant, verify-kept, verify-all.
         // Every other state has a copy that matches.
         self.preview_group_verify(&root, &local, if state.starts_with("verify") { state } else { "verify-matches" });
+        // The check is out of date: for good (checking), for 0.3 s every 2 s
+        // (blink: a change to the mods, answered at once) or for 3 s every
+        // 6 s (long: a slow check).
+        if let Some((busy, every)) = match state {
+            "checking" => Some((Duration::from_secs(3600), Duration::from_secs(3600))),
+            "blink" => Some((Duration::from_millis(300), Duration::from_secs(2))),
+            "long" => Some((Duration::from_secs(3), Duration::from_secs(6))),
+            _ => None,
+        } {
+            let root = root.clone();
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(every.saturating_sub(busy).max(Duration::from_millis(300))).await;
+                    if this.update(cx, |s, cx| s.preview_check_stale(&root, true, cx)).is_err() {
+                        break;
+                    }
+                    cx.background_executor().timer(busy).await;
+                    if this.update(cx, |s, cx| s.preview_check_stale(&root, false, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         if state == "failed" {
             let e = anyhow::anyhow!("The mod sites wouldn't give Hopper that file.");
             let r = hopper::recipe::Retry::failed(None, &newest(&copy), &e, 0, Instant::now());

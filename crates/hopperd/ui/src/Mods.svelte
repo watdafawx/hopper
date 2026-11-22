@@ -46,6 +46,7 @@
     setOn, removeMods, problems, setLocked, resetConfig, switchSource, setVersionLock, configFiles, versionLocked, wordsMatch, ago, dateOf,
   } from './lib/modops.js';
   import { pick, startPick, swept, sweeping, clickSwallowed, tickLabel, countLabel } from './lib/dragpick.svelte.js';
+  import { settled } from './lib/settle.svelte.js';
   import { Selection, addKey } from './lib/selection.svelte.js';
   import SelectionBar from './lib/SelectionBar.svelte';
   import { rightClear } from './lib/rightclear.js';
@@ -67,6 +68,12 @@
   let chip = $state(untrack(() => shared?.want) || 'all');
   let busy = $state('');
   let identifying = $state('');
+  // The notice appears only if identifying lasts, so a quick one doesn't flash it.
+  const identifyingShown = settled(() => identifying);
+  let lastIdentifying = $state('');
+  $effect(() => {
+    if (identifying) lastIdentifying = identifying;
+  });
   let updates = $state(null);
   // Projects whose installed file the author archived (from the update check).
   let archived = $state(new Set());
@@ -895,7 +902,7 @@
       <ModProfiles {base} {alive} onChanged={() => changed(false)} />
     </div>
     <!-- The notes go to the notice slot above the server's tabs. -->
-    {#if identifying}<Notice id="mods-identifying" tier="info" icon={ScanSearch} title={identifying} subject="Names, icons and updates fill in when it's done" />{/if}
+    {#if identifyingShown.shown}<Notice id="mods-identifying" tier="info" icon={ScanSearch} title={identifying || lastIdentifying} subject="Names, icons and updates fill in when it's done" />{/if}
     {#if showSourcesHint({ known: srcKnown, allowed: srcOn, chip, unknown: counts.unknown, closed: srcHintClosed })}
       <Notice id="mods-src-hint" tier="info" title="Their sources may not have come along" subject="Mods from links is off" onclose={() => (srcHintClosed = true)}>
         {#snippet primary(fit)}<a class={mainClass(fit)} href="#/settings/content">{fit.narrow ? 'Turn on' : 'Turn it on in Settings'}</a>{/snippet}

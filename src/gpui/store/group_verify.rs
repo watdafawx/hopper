@@ -168,6 +168,17 @@ impl Store {
         self.group_verify.list.get(&c.local).filter(|r| !r.stale).map(|r| &r.v)
     }
 
+    /// `--dialog group-sync --state blink|long|checking`: makes the check's
+    /// answer out of date (or fresh again), as a change to the mods does,
+    /// so the strip's Checking state can be watched.
+    pub fn preview_check_stale(&mut self, root: &Path, stale: bool, cx: &mut Context<Self>) {
+        let Some(local) = self.group_copy(root).map(|c| c.local.clone()) else { return };
+        if let Some(r) = self.group_verify.list.get_mut(&local) {
+            r.stale = stale;
+        }
+        cx.notify();
+    }
+
     /// The name, project and icon url of a mod of the check's list by key.
     pub fn verify_name(&self, key: &str) -> Option<&(String, u64, String)> {
         self.group_verify.names.get(key)

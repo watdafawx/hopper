@@ -213,6 +213,93 @@ impl Notice {
     }
 }
 
+/// A state that is busy for a moment (checking, sending, taking changes in)
+/// and needs nothing from the player. It never gets a strip: a strip pushes
+/// the page down and up again as it comes and goes. It shows in
+/// [`activity_dot`], a fixed place in the tab row, instead.
+pub struct Activity {
+    /// The state is busy right now.
+    pub busy: bool,
+    /// What the dot shows (and says on hover) while busy.
+    pub busy_text: SharedString,
+    /// What it shows the rest of the time.
+    pub rest_icon: IconName,
+    pub rest_text: SharedString,
+    /// The resting icon's colour: `None` for the quiet grey.
+    pub rest_good: bool,
+}
+
+struct DotState {
+    settle: hopper::settle::Settle,
+    t0: std::time::Instant,
+    /// A wake-up is already waiting: one is enough.
+    waiting: bool,
+}
+
+/// The side of the dot: the same in every state, so the tab row never moves.
+const DOT: f32 = 28.;
+
+/// The activity as a 28 px indicator for the tab row. A busy state shows
+/// only if it lasts ([`hopper::settle`]), and stays long enough to read, so
+/// a check that ends in a blink changes nothing. `None` for a page with
+/// nothing to say: then the row has no dot at all.
+pub fn activity_dot(id: &str, activity: Option<Activity>, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+    let a = activity?;
+    let state = window.use_keyed_state(ElementId::Name(format!("activity-dot:{id}").into()), cx, |_, _| DotState {
+        settle: hopper::settle::Settle::default(),
+        t0: std::time::Instant::now(),
+        waiting: false,
+    });
+    let step = state.update(cx, |s, _| {
+        let now = s.t0.elapsed();
+        s.settle.step(a.busy, now)
+    });
+    // Ask again when the answer changes by itself (the delay ran out, or
+    // the hold is over).
+    if let Some(wait) = step.wake_in
+        && !state.read(cx).waiting
+    {
+        state.update(cx, |s, _| s.waiting = true);
+        let st = state.clone();
+        window
+            .spawn(cx, async move |cx| {
+                cx.background_executor().timer(wait + std::time::Duration::from_millis(20)).await;
+                cx.update(|window, cx| {
+                    st.update(cx, |s, _| s.waiting = false);
+                    window.refresh();
+                })
+                .ok();
+            })
+            .detach();
+    }
+    let theme = cx.theme();
+    let (icon, text, color) = if step.show {
+        (IconName::LoaderCircle, a.busy_text.clone(), theme.info)
+    } else {
+        (a.rest_icon, a.rest_text.clone(), if a.rest_good { theme.success } else { theme.muted_foreground })
+    };
+    let key = format!("activity-dot-fade:{id}:{}", step.show);
+    Some(
+        div()
+            .id(SharedString::from(format!("activity-dot:{id}")))
+            .flex_none()
+            .size(px(DOT))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(theme.radius)
+            .text_color(color)
+            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(w, cx))
+            // A new state fades in rather than popping.
+            .child(Icon::new(icon).small().with_animation(
+                ElementId::Name(key.into()),
+                Animation::new(std::time::Duration::from_millis(220)).with_easing(ease_out_quint()),
+                |i, t| i.opacity(0.3 + 0.7 * t),
+            ))
+            .into_any_element(),
+    )
+}
+
 /// True when the notice keyed `key` was closed (and its text hasn't changed
 /// since): a page leaves it out of the slot and the list.
 pub fn hidden(store: &Entity<crate::store::Store>, key: &str, cx: &App) -> bool {

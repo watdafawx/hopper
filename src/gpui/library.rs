@@ -3115,6 +3115,10 @@ impl LibraryView {
         notices.extend(self.addons.update(cx, |a, cx| a.notices(&root, cx)));
         notices.extend(hint);
         let slot = notice_slot::slot("instance", notices, window, cx).map(|s| div().flex_none().px_6().pt_2().child(s));
+        // The group's busy states live in a fixed dot beside the tab tools,
+        // so a check coming and going moves nothing.
+        let dot = notice_slot::activity_dot("instance", crate::group_pack::group_activity(&self.store, &inst.root, cx), window, cx);
+        let tab_tools = h_flex().flex_none().gap_1().items_center().children(dot).child(tab_tools).into_any_element();
         let tabs = self.tabs(&inst, tab_tools, cx);
         let pack_tabs = self.pack_tabs(&inst, cx);
         let body = self.tab_body(&inst, cx);

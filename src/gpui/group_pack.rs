@@ -177,6 +177,38 @@ pub fn pull_button(store: &Entity<Store>, root: &Path, pulling: bool, in_step: b
     b.on_click(move |_, _, cx| store.update(cx, |s, cx| s.pull_group_now(&root, cx)))
 }
 
+/// States that pass by themselves and ask nothing of the player: they show
+/// as the activity dot, never as a strip.
+fn is_transient(status: &Status) -> bool {
+    matches!(status, Status::Checking | Status::Updating { .. } | Status::Sending | Status::InStep { .. })
+}
+
+/// What the activity dot of the tab row says about the group copy at
+/// `root`: busy while the check or a pull runs, else how it stands.
+/// `None` when the instance isn't a group copy.
+pub fn group_activity<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Context<V>) -> Option<notice_slot::Activity> {
+    let s = store.read(cx);
+    let status = s.group_status(root)?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let pulling = s.group_pulling(root);
+    let busy = pulling || s.group_repairing(root) || matches!(status, Status::Checking | Status::Updating { .. } | Status::Sending);
+    let busy_text = match &status {
+        Status::Checking | Status::Updating { .. } | Status::Sending => status.detail(now),
+        _ => "Checking the group and taking in what waits.".to_string(),
+    };
+    let (rest_icon, rest_text, rest_good) = match &status {
+        Status::InStep { .. } => {
+            let line = match s.group_pulled(root) {
+                Some((text, false)) => text.to_string(),
+                _ => status.detail(now),
+            };
+            (IconName::CircleCheck, format!("Your copy matches the group. {}", in_step_line(&line, s.group_pulled(root).is_some())), true)
+        }
+        other => (IconName::Users, other.title(), false),
+    };
+    Some(notice_slot::Activity { busy, busy_text: busy_text.into(), rest_icon, rest_text: rest_text.into(), rest_good })
+}
+
 /// The line under "Same as the group": the status line without its first
 /// sentence (the title says it), or what Pull now just did, as it is.
 fn in_step_line(detail: &str, from_pull: bool) -> String {
@@ -193,6 +225,7 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     let due = s.group_pack_due(root).cloned();
     let busy = s.is_busy(root);
     let pulling = s.group_pulling(root);
+    let pulled_bad = s.group_pulled(root).is_some_and(|(_, bad)| bad);
     let pulled = s.group_pulled(root).map(|(t, _)| t.to_string());
     let left_out = s.left_out_pins(root);
     // Read before `cx` is borrowed mutably for the mod links below.
@@ -205,6 +238,12 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     // Don't show a full-width banner just to say everything matches; only
     // show the banner when out of step, failing, or right after a pull.
     if in_step && pulled.is_none() {
+        return None;
+    }
+    // Busy for a moment, or just done: the player has nothing to do, so no
+    // strip (it would push the page down and up again). The dot in the tab
+    // row says it ([`group_activity`]); a failed Pull now stays here.
+    if is_transient(&status) && !pulled_bad && by_hand_running.is_none() {
         return None;
     }
     let key = hopper::settings::notice_key(&root.to_string_lossy(), "group-in-step", "in step");
