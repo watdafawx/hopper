@@ -2204,7 +2204,7 @@ impl LibraryView {
         b
     }
 
-    fn header(&self, inst: &Instance, cx: &mut Context<Self>) -> AnyElement {
+    fn header(&self, inst: &Instance, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
         let store = self.store.read(cx);
         let playing = store.running(&inst.root).is_some();
         let icon = inst
@@ -2401,56 +2401,47 @@ impl LibraryView {
         let history = self.history_button(&root, cx);
         let site = self.pack_facts(inst, cx).map(|(_, _, _, url, mr)| (url, mr));
         let actions = h_flex()
-                            .flex_none()
-                            .flex_nowrap()
-                            .gap_2()
-                            .children(play_small)
-                            .children(pack_update)
-                            .children(sync_to)
-                            .when(!fold.folder, |r| {
-                                r.child(
-                                    Button::new("folder")
-                                        .outline()
-                                        .icon(IconName::FolderOpen)
-                                        .label("Folder")
-                                        .on_click(move |_, _, _| store::open_path(&r_folder)),
-                                )
-                            })
-                            .when_some(site.clone().filter(|_| !fold.folder), |r, (url, mr)| {
-                                r.child(
-                                    Button::new("pack-site")
-                                        .outline()
-                                        .icon(IconName::ExternalLink)
-                                        .text_color(widgets::site_color(mr))
-                                        .tooltip(if mr { "Open on Modrinth" } else { "Open on CurseForge" })
-                                        .on_click(move |_, _, cx| cx.open_url(&url)),
-                                )
-                            })
-                            // Named, here beside Folder, so it's easy to find.
-                            .when(!fold.settings, |r| {
-                                r.child(
-                                    Button::new("inst-settings")
-                                        .outline()
-                                        .selected(self.tab == InstTab::Settings)
-                                        .icon(IconName::SlidersHorizontal)
-                                        .label("Settings")
-                                        .on_click(cx.listener(|this, _, _, cx| this.set_tab(InstTab::Settings, cx))),
-                                )
-                            })
-                            .when(!fold.history, |r| r.child(history))
-                            .child(
-                                Button::new("more")
-                                    .outline()
-                                    .icon(IconName::Ellipsis)
-                                    .tooltip("More")
-                                    // Right-aligned to the button, off the window edge.
-                                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
-                                        instance_menu(menu, &view, &r_more, Some((fold, site.clone())), window, cx)
-                                    }),
-                            );
+            .flex_none()
+            .flex_nowrap()
+            .gap_2()
+            .children(play_small);
+        // Secondary management tools live on the right end of the tab row
+        // (Option C), keeping the hero focused on identity and Play.
+        let mut menu_fold = fold;
+        menu_fold.folder = true;
+        let _ = r_folder;
+        let tab_tools = h_flex()
+            .flex_none()
+            .flex_nowrap()
+            .items_center()
+            .gap_1p5()
+            .children(pack_update)
+            .children(sync_to)
+            .child(
+                Button::new("inst-settings")
+                    .ghost()
+                    .small()
+                    .selected(self.tab == InstTab::Settings)
+                    .icon(IconName::SlidersHorizontal)
+                    .tooltip("Instance settings")
+                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(InstTab::Settings, cx))),
+            )
+            .child(history)
+            .child(
+                Button::new("more")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Ellipsis)
+                    .tooltip("More (Folder, Duplicate, Export…)")
+                    // Right-aligned to the button, off the window edge.
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
+                        instance_menu(menu, &view, &r_more, Some((menu_fold, site.clone())), window, cx)
+                    }),
+            )
+            .into_any_element();
         key_parts.push(format!("{playing}{starting}{busy}"));
         let key = widgets::fit_key(key_parts.iter().map(|s| s.as_str()));
-        self.hero(inst, icon, actions, key, cx)
+        (self.hero(inst, icon, actions, key, cx), tab_tools)
     }
 
     /// On Overview, the pack's page facts the banner shows in place of the
@@ -2507,68 +2498,8 @@ impl LibraryView {
             pill_names.push("Working".into());
             pills.push(widgets::pill("Working", theme.warning, true).into_any_element());
         }
-        // The update pills open what they're about.
-        if let Some(f) = store.pack_update(inst).cloned() {
-            let root = inst.root.clone();
-            let hover = theme.primary.opacity(0.2);
-            pill_names.push("Pack update".into());
-            pills.push(
-                widgets::pill("Pack update", theme.primary, false)
-                    .id("pill-pack-update")
-                    .clickable(cx)
-                    .hover(move |s| s.bg(hover))
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("Review the pack update").build(window, cx)
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        crate::pack_update::open(this.store.clone(), root.clone(), f.clone(), window, cx)
-                    }))
-                    .into_any_element(),
-            );
-        }
-        let counts = update_counts(store, inst);
-        if let Some(tab) = updates_tab(&counts) {
-            let hover = theme.info.opacity(0.2);
-            // The breakdown when several kinds have updates, else where
-            // clicking goes.
-            let tip = SharedString::from(if updates_mixed(&counts) {
-                updates_breakdown(&counts)
-            } else {
-                format!("Show them in {}", tab.label())
-            });
-            pill_names.push(updates_label(&counts).into());
-            pills.push(
-                widgets::pill(updates_label(&counts), theme.info, false)
-                    .id("pill-mod-updates")
-                    .clickable(cx)
-                    .hover(move |s| s.bg(hover))
-                    .tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_updates(tab, cx)))
-                    .into_any_element(),
-            );
-        }
-        // Another launcher's instance says whose it is.
-        if let Some(k) = hopper::launchers::Kind::from_key(&inst.source) {
-            pill_names.push(k.name().into());
-            pills.push(widgets::pill(k.name(), theme.accent_foreground, false).into_any_element());
-        }
-        pill_names.push(match &inst.pack {
-            Some(p) if hopper::modrinth::is_mr(p.project_id) => "Modrinth".into(),
-            Some(_) => "CurseForge".into(),
-            None => "Custom".into(),
-        });
-        pills.push(
-            match &inst.pack {
-                Some(p) => {
-                    let mr = hopper::modrinth::is_mr(p.project_id);
-                    widgets::pill(if mr { "Modrinth" } else { "CurseForge" }, widgets::site_color(mr), false)
-                }
-                None => widgets::pill("Custom", theme.muted_foreground, false),
-            }
-            .into_any_element(),
-        );
+        // Pack update / mod update / site pills stay out of the quiet hero
+        // (they live on the tab row and Mods tab instead).
 
         // Minecraft, loader, pack version.
         // Each in its own color (Minecraft green, loader yellow, version
@@ -2633,6 +2564,9 @@ impl LibraryView {
                         }),
                 )
             })
+            .when_some(store::played(inst.play_seconds), |r, t| {
+                r.child(crate::hero::soft_fact(IconName::Clock, format!("{t} played"), cx))
+            })
             .when_some(page.clone(), |r, (author, downloads, ..)| {
                 r.child(crate::hero::soft_fact(IconName::User, format!("by {author}"), cx))
                     .child(crate::hero::soft_fact(IconName::Download, downloads, cx))
@@ -2647,28 +2581,7 @@ impl LibraryView {
                     .truncate()
                     .child(s)
             });
-        let mods = crate::addons::shown_count(inst, cf::CLASS_MODS);
-        let (time, time_label) = match store::played(inst.play_seconds) {
-            Some(t) => (t, "Played"),
-            None => (
-                inst.last_played
-                    .as_deref()
-                    .map(hopper::time::relative)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "Never".into()),
-                "Last played",
-            ),
-        };
-        let size = match self.sizes.get(&inst.root) {
-            Some(Some(n)) => Some(hopper::instance_ops::human_bytes(*n)),
-            _ => None,
-        };
-        let stats: Vec<(String, String)> = [Some((time, time_label)), Some((mods.to_string(), "Mods")), size.map(|s| (s, "Size"))]
-            .into_iter()
-            .flatten()
-            .take(hero_room(self.detail_w))
-            .map(|(v, l)| (v, l.to_string()))
-            .collect();
+        let stats: Vec<(String, String)> = Vec::new();
         let blur = icon.as_ref().and_then(|p| self.blurs.get(p).cloned().flatten());
         crate::hero::render(
             crate::hero::Hero {
@@ -2701,7 +2614,7 @@ impl LibraryView {
     /// "More" menu. Tabs
     /// report where they were laid out; the underline is placed from that
     /// (one frame late the very first time).
-    fn tabs(&self, inst: &Instance, cx: &mut Context<Self>) -> AnyElement {
+    fn tabs(&self, inst: &Instance, tools: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         let news = self.logs_news(inst, cx).filter(|(key, _)| !self.store.read(cx).notice_hidden(key));
         let theme = cx.theme();
         let slot = |tab: InstTab| if tab.is_pack() { InstTab::ResourcePacks } else { tab };
@@ -2831,7 +2744,8 @@ impl LibraryView {
                             .overflow_x_scroll()
                             .child(div().relative().child(strip).children(underline)),
                     )
-                    .children(more),
+                    .children(more)
+                    .child(tools),
                 max,
                 key,
                 cx.entity_id(),
@@ -3209,7 +3123,7 @@ impl LibraryView {
             self.want_blur(&icon, cx);
         }
         self.want_size(&inst.root, cx);
-        let header = self.header(&inst, cx);
+        let (header, tab_tools) = self.header(&inst, cx);
         let hint = self.server_hint(&inst, cx);
         let cf_change = self.cf_change_bar(&inst, cx);
         let pending = self.pending_banner(&inst, cx);
@@ -3247,7 +3161,7 @@ impl LibraryView {
         notices.extend(self.addons.update(cx, |a, cx| a.notices(&root, cx)));
         notices.extend(hint);
         let slot = notice_slot::slot("instance", notices, window, cx).map(|s| div().flex_none().px_6().pt_2().child(s));
-        let tabs = self.tabs(&inst, cx);
+        let tabs = self.tabs(&inst, tab_tools, cx);
         let pack_tabs = self.pack_tabs(&inst, cx);
         let body = self.tab_body(&inst, cx);
         let anim = format!("{}:{}", inst.root.display(), self.tab.label());

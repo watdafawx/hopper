@@ -1322,6 +1322,12 @@ impl AppView {
         let theme = cx.theme();
         let (muted, hover, radius) = (theme.muted_foreground, theme.list_hover, theme.radius);
         let state = self.store.read(cx).self_update().cloned();
+        // Only show the version chip in the title bar when an update is
+        // available, downloading or ready; otherwise the version lives in
+        // the ? help menu so the bar stays quiet.
+        if !matches!(state, Some(SelfUpdate::Available(_) | SelfUpdate::Installing(_) | SelfUpdate::Ready(_))) {
+            return div().into_any_element();
+        }
         // (text, colour, icon, tooltip); no colour is the plain chip.
         let (text, color, icon, tip): (String, Option<Hsla>, Option<IconName>, String) = match &state {
             Some(SelfUpdate::Available(r)) => (
@@ -1684,6 +1690,8 @@ impl AppView {
                                         button.into_any_element()
                                     }
                                 })
+                                .child(div().w(px(1.)).h(rems(0.9)).bg(line).mx_0p5())
+                                // Grouped everyday tools: re-read, theme, settings.
                                 .child(
                                     Button::new("refresh")
                                         .ghost()
@@ -1694,27 +1702,6 @@ impl AppView {
                                             this.refresh(&Refresh, window, cx)
                                         })),
                                 )
-                                // Help lives with the tools: report a problem, or the project page.
-                                .child(
-                                    Button::new("report-issue")
-                                        .ghost()
-                                        .small()
-                                        .icon(IconName::Bug)
-                                        .when(!dialog, |b| b.tooltip("Report a problem on GitHub"))
-                                        .on_click(|_, _, cx| {
-                                            use hopper::report::{issue_url, App};
-                                            cx.open_url(&issue_url(App::Hopper, hopper::selfupdate::CURRENT, None))
-                                        }),
-                                )
-
-                                .child(
-                                    Button::new("open-github")
-                                        .ghost()
-                                        .small()
-                                        .icon(IconName::Github)
-                                        .when(!dialog, |b| b.tooltip("Hopper on GitHub"))
-                                        .on_click(|_, _, cx| cx.open_url(hopper::report::REPO_URL)),
-                                )
                                 .child(self.appearance.clone())
                                 .child(
                                     Button::new("open-settings")
@@ -1724,7 +1711,45 @@ impl AppView {
                                         .selected(self.page == Page::Settings)
                                         .when(!dialog, |b| b.tooltip("Settings (Ctrl+,)"))
                                         .on_click(cx.listener(|this, _, _, cx| this.go(Page::Settings, cx))),
-                                ),
+                                )
+                                .child(div().w(px(1.)).h(rems(0.9)).bg(line).mx_0p5())
+                                // Help and about: report a problem, GitHub, Hopper versions.
+                                .child({
+                                    use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+                                    let store = self.store.clone();
+                                    Button::new("help-menu")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::CircleQuestionMark)
+                                        .when(!dialog, |b| b.tooltip("Help, GitHub and Hopper version"))
+                                        .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                                            let store = store.clone();
+                                            menu.item(
+                                                PopupMenuItem::new("Report a problem")
+                                                    .icon(IconName::Bug)
+                                                    .on_click(|_, _, cx| {
+                                                        use hopper::report::{issue_url, App};
+                                                        cx.open_url(&issue_url(App::Hopper, hopper::selfupdate::CURRENT, None))
+                                                    }),
+                                            )
+                                            .item(
+                                                PopupMenuItem::new("Hopper on GitHub")
+                                                    .icon(IconName::Github)
+                                                    .on_click(|_, _, cx| cx.open_url(hopper::report::REPO_URL)),
+                                            )
+                                            .separator()
+                                            .item(
+                                                PopupMenuItem::new(format!(
+                                                    "Hopper v{} — versions & updates",
+                                                    hopper::selfupdate::CURRENT
+                                                ))
+                                                .icon(IconName::Tag)
+                                                .on_click(move |_, window, cx| {
+                                                    crate::hopper_versions::open(store.clone(), window, cx)
+                                                }),
+                                            )
+                                        })
+                                }),
                         )
                         .child(account),
                 ),

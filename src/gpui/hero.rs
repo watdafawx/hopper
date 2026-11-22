@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 /// The hero's height in rem, the same on every tab.
 pub const HERO: f32 = 9.5;
+/// The quieter hero's height in rem (no pills, no stats box: Option C).
+pub const HERO_SHORT: f32 = 6.5;
 /// The folded hero's height in rem (see [`render_compact`]).
 pub const HERO_COMPACT: f32 = 4.0;
 
@@ -114,6 +116,9 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
     let glass = widgets::glass(cx);
     let dark = theme.mode.is_dark();
     let taller = h.summary.is_some();
+    let has_pills = !h.pills.is_empty();
+    let short = !has_pills && h.stats.is_empty() && !taller;
+    let art_rem = if short { 4.5 } else { 6.5 };
     let fit = h.fit;
     // One level past the page's own: every action is as small as it gets
     // and still doesn't fit, so the name gives up the room it kept and
@@ -165,7 +170,7 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
     // The art: large, rounded, lifted off the backdrop.
     let art = div()
         .flex_none()
-        .size(rems(6.5))
+        .size(rems(art_rem))
         .rounded(theme.radius_lg)
         .overflow_hidden()
         .bg(theme.muted)
@@ -175,7 +180,7 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
             BoxShadow::new(px(0.), px(14.), black().opacity(if dark { 0.5 } else { 0.25 })).blur_radius(px(32.)),
         ])
         .map(|d| match h.art.clone() {
-            Some(p) => d.child(img(crate::thumbs::source_in(crate::thumbs::Cat::Banner, &p, crate::thumbs::Want::Rems(rems(6.5)), cx)).size_full().rounded(theme.radius_lg - px(1.)).object_fit(ObjectFit::Cover)),
+            Some(p) => d.child(img(crate::thumbs::source_in(crate::thumbs::Cat::Banner, &p, crate::thumbs::Want::Rems(rems(art_rem)), cx)).size_full().rounded(theme.radius_lg - px(1.)).object_fit(ObjectFit::Cover)),
             None => d.flex().items_center().justify_center().child(h.no_art),
         });
 
@@ -227,7 +232,7 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
                 .flex_1()
                 .min_w(rems(title_min))
                 .gap_1p5()
-                .child(pills)
+                .when(has_pills, |c| c.child(pills))
                 .child(
                     div()
                         .text_size(rems(1.65))
@@ -298,7 +303,7 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
         .child(content)
         // Its box, for layout checks: the actions must end inside it.
         .child(widgets::bounds_probe("hero"))
-        .h(rems(if taller { HERO + 1.5 } else { HERO }))
+        .h(rems(if taller { HERO + 1.5 } else if short { HERO_SHORT } else { HERO }))
         .into_any_element()
 }
 
