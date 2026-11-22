@@ -800,6 +800,9 @@ impl AppView {
                 // A made-up friends group, with the first two instances as its
                 // packs: `--dialog group-sync --state left-out --page friends`.
                 "group-sync" => this.store.update(cx, |s, cx| s.preview_group_sync(&state, cx)),
+                // Made-up sync chips in the hero (group, server, both):
+                // `--dialog sync-chip --state s-differ` or `--state cycle`.
+                "sync-chip" => this.store.update(cx, |s, cx| s.preview_sync_chip(&state, cx)),
                 // After the server comparison has had time to finish.
                 "side" => cx
                     .spawn_in(window, async move |this, cx| {

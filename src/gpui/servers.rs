@@ -2042,6 +2042,20 @@ impl ServersView {
     }
 
     fn detail(&self, s: &ServerInfo, art: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // The sync chip with the server's pack (every tab; the Sync tab's
+        // own `show` takes over when it opens).
+        let paired = self.store.read(cx).server_tools() && self.store.read(cx).paired(s).is_some();
+        let made_up = self.store.read(cx).sync_chip_preview.clone();
+        let chips: Vec<crate::sync_chip::Chip> = if let Some(name) = made_up {
+            crate::sync_chip::preview(&name).into_iter().filter_map(|c| crate::sync_chip::settled(c, window, cx)).collect()
+        } else if paired {
+            if self.sync.read(cx).server() != Some(s.root.as_path()) {
+                self.sync.update(cx, |p, cx| p.quiet(s.root.clone(), cx));
+            }
+            self.sync.update(cx, |p, cx| p.chip(true, cx)).and_then(|c| crate::sync_chip::settled(c, window, cx)).into_iter().collect()
+        } else {
+            Vec::new()
+        };
         // The paired pack's page, for the Overview.
         let pack_id = self
             .store
@@ -2330,6 +2344,7 @@ impl ServersView {
                 blur,
                 no_art: letter_tile(&s.name, rems(2.25)).into_any_element(),
                 pills,
+                chips,
                 title: s.name.clone().into(),
                 facts,
                 summary: motd,

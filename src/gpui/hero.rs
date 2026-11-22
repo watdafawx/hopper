@@ -25,6 +25,9 @@ pub struct Hero {
     /// What stands in for missing art (an icon or a letter tile).
     pub no_art: AnyElement,
     pub pills: Vec<AnyElement>,
+    /// The sync chips (group, server), last in the pill row. They fold
+    /// before the plain pills (`hopper::syncchip::plan`).
+    pub chips: Vec<crate::sync_chip::Chip>,
     pub title: SharedString,
     /// The facts line under the title (see [`fact`]).
     pub facts: Div,
@@ -116,7 +119,7 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
     let glass = widgets::glass(cx);
     let dark = theme.mode.is_dark();
     let taller = h.summary.is_some();
-    let has_pills = !h.pills.is_empty();
+    let has_pills = !h.pills.is_empty() || !h.chips.is_empty();
     let short = !has_pills && h.stats.is_empty() && !taller;
     let art_rem = if short { 4.5 } else { 6.5 };
     let fit = h.fit;
@@ -132,38 +135,62 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
     // Past that (a side panel at its widest): the name at its least still
     // leaves the actions short, so the art gives its room too.
     let no_art = squeezed && fit.as_ref().is_some_and(|f| f.actions.short_by() > keep - TITLE_MIN);
-    // Pills that don't fit fold into "+N", which names them on hover.
+    // Pills that don't fit fold into "+N", which names them on hover. The
+    // sync chips come last and go first: their words shorten, they become
+    // icons, then fold (a chip that needs the player never folds); see
+    // `hopper::syncchip::plan`.
+    let chips = h.chips;
     let pills: AnyElement = match &fit {
         Some(f) => {
             let n = h.pills.len();
-            let max = n.saturating_sub(1);
+            let plain = n.saturating_sub(1);
+            let fixed: Vec<bool> = chips.iter().map(|c| c.look.fixed).collect();
+            let max = hopper::syncchip::max_level(&fixed, plain);
             // The pills' room is what the actions and the art leave the
             // name, both picked above.
             f.pills.context(f.actions.level() as u64 * 2 + no_art as u64);
-            let hidden = f.pills.level().min(max);
-            let rest: Vec<SharedString> = f.pill_names.iter().skip(n - hidden).cloned().collect();
-            let key = widgets::fit_key(f.pill_names.iter().map(|s| s.as_ref()));
+            let plan = hopper::syncchip::plan(&fixed, plain, f.pills.level().min(max));
+            let hidden_plain = plan.plain_folded;
+            let hidden = hidden_plain + plan.chips_folded;
+            let mut rest: Vec<String> = Vec::new();
+            if plan.chips_folded > 0 {
+                rest.extend(chips.iter().map(|c| c.look.label.clone()));
+            }
+            rest.extend(f.pill_names.iter().skip(n - hidden_plain).map(|s| s.to_string()));
+            let key = widgets::fit_key(
+                f.pill_names
+                    .iter()
+                    .map(|s| s.as_ref())
+                    .chain(chips.iter().flat_map(|c| [c.look.label.as_str(), c.look.short.as_str()])),
+            );
+            let chip_els: Vec<AnyElement> = match (&plan.merged, chips.as_slice()) {
+                (Some(form), [a, b]) => vec![crate::sync_chip::render(&crate::sync_chip::Chip::merge(a, b), *form, cx)],
+                _ => chips
+                    .iter()
+                    .zip(plan.forms.iter())
+                    .filter_map(|(c, form)| form.map(|form| crate::sync_chip::render(c, form, cx)))
+                    .collect(),
+            };
             f.pills
                 .wrap(
                     "hero-pills",
                     h_flex()
                         .gap_1p5()
-                        .children(h.pills.into_iter().take(n - hidden))
-                        .when(hidden > 0, |r| {
-                            let tip: SharedString = rest.join(", ").into();
-                            r.child(
-                                widgets::pill(format!("+{hidden}"), theme.muted_foreground, false)
-                                    .id("hero-pills-more")
-                                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)),
-                            )
-                        }),
+                        .children(h.pills.into_iter().take(n - hidden_plain))
+                        .children(chip_els)
+                        .when(hidden > 0, |r| r.child(crate::sync_chip::more_pill(hidden, rest.join(", "), cx))),
                     max,
                     key,
                     f.view,
                 )
                 .into_any_element()
         }
-        None => h_flex().gap_1p5().flex_wrap().children(h.pills).into_any_element(),
+        None => h_flex()
+            .gap_1p5()
+            .flex_wrap()
+            .children(h.pills)
+            .children(chips.iter().map(|c| crate::sync_chip::render(c, hopper::syncchip::Form::Full, cx)))
+            .into_any_element(),
     };
     let fx = crate::hero_drift::backdrop(h.art.as_deref(), h.title.as_ref(), cx);
 

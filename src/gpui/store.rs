@@ -763,6 +763,9 @@ pub struct Store {
     /// `--dialog group-sync`: a made-up group is shown (the value: whether it
     /// reaches its server), and nothing goes to the real one.
     group_preview: Option<bool>,
+    /// `--dialog sync-chip`: the hero shows these made-up sync chips (a
+    /// state name, see `sync_chip::preview`) instead of the real ones.
+    pub sync_chip_preview: Option<String>,
     /// Instances moved to the group's loader while their game ran: the new
     /// loader is installed when it closes.
     group_loader_waiting: HashSet<PathBuf>,
@@ -1135,6 +1138,7 @@ impl Store {
             group_pull_from: Default::default(),
             mailbox_checked: None,
             group_preview: None,
+            sync_chip_preview: None,
             group_loader_waiting: Default::default(),
             group_needs: Default::default(),
             group_verify: Default::default(),

@@ -46,6 +46,8 @@
   import PackUpdate from './PackUpdate.svelte';
   import MovedBanner from './MovedBanner.svelte';
   import NoticeSlot from './lib/NoticeSlot.svelte';
+  import SyncChip from './lib/SyncChip.svelte';
+  import { previewChips } from './lib/syncchipPreview.js';
   import { provideNotices } from './lib/notices.svelte.js';
   import { provideModsShared } from './lib/modsShared.svelte.js';
   import ModsNotices from './ModsNotices.svelte';
@@ -127,6 +129,9 @@
   let peek = $state(null);
   /** The header's "…" menu, and a player's menu in the Players card. */
   let more = $state(false);
+  // The sync chips; the header's room for them is what its text column has left after the name and state.
+  let ttlW = $state(0);
+  const syncChips = $derived(previewChips(new URLSearchParams(location.search).get('syncchip')));
   // The relay setup dialog (this panel's own servers, owner only).
   let relaySetup = $state(false);
   let playerMenu = $state(null);
@@ -271,13 +276,14 @@
   <div class="head">
     <HeroDrift src={hero.src} />
     <Avatar server={s} cls="ic big" />
-    <div class="ttl">
+    <div class="ttl" bind:clientWidth={ttlW}>
       <div class="row chips">
         <h2 title={s.path}>{s.name}</h2>
         <span class="chip {stateKey(s)}" title={stateTip(s)}><span class="dot {stateKey(s)}"></span>{stateText(s)}{s.boot && !s.progress ? ` · ${s.boot.label}` : ''}{alive && !s.progress ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
         {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}{#if outside(s)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}<ServerAlerts server={s} part="chip" />{#if s.sending}<button class="chip warn" title="Its files are being sent to another panel. It can't start until that's done. Click to see how far it got." onclick={() => openMove(s)}>Sending</button>{/if}
         {#if panel}<span class="chip lan" title="This server is on {panel.name} ({panel.url})">On {panel.name}</span>{#if panel.role}<span class="chip">{roleLabel(panel.role)}</span>{/if}{/if}
         {#if packJobs.byId[s.id]}{@const pj = packJobs.byId[s.id]}<span class="chip acc packup" title="{pj.detail || 'Updating'}. Its toast says how it ended."><span class="spinner"></span>Updating{pj.to ? ` to ${shortVersions(packCheck?.pack?.current?.name || '', pj.to)[1]}` : ''}{pj.progress != null ? ` · ${Math.floor(pj.progress * 100)}%` : ''}</span>{:else if packShort}<button class="chip acc packup" title="{packCheck.pack.name}: {packNewer.length} newer version{packNewer.length === 1 ? '' : 's'}. Review the changelog and update." onclick={() => openUpdate()}><PackagePlus size={12} />Pack update {packShort[0]} → {packShort[1]}</button>{/if}
+        <SyncChip chips={syncChips} room={ttlW > 0 ? Math.max(1, ttlW - 330) : 0} />
       </div>
       <!-- Facts as in desktop's header: icon, then the value; the folder is in the "…" menu. -->
       <div class="facts small">

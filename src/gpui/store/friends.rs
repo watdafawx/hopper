@@ -1522,6 +1522,42 @@ impl Store {
         .detach();
     }
 
+    /// `--dialog sync-chip --state NAME`: made-up sync chips in the hero (a
+    /// group's, a server's, both), see `sync_chip::PREVIEWS`; `cycle` walks
+    /// through all of them.
+    pub fn preview_sync_chip(&mut self, state: &str, cx: &mut Context<Self>) {
+        let names = crate::sync_chip::PREVIEWS;
+        if state != "cycle" {
+            self.sync_chip_preview = Some(state.to_string());
+            cx.notify();
+            return;
+        }
+        // Every state in turn, each held `HOPPER_CHIP_CYCLE_MS` (2.5 s); the
+        // name in play is written to `chip-state.txt` in the data folder.
+        let ms: u64 = std::env::var("HOPPER_CHIP_CYCLE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2500);
+        cx.spawn(async move |this, cx| {
+            let mut i = 0usize;
+            loop {
+                let name = names[i % names.len()].to_string();
+                i += 1;
+                let ok = this
+                    .update(cx, |s, cx| {
+                        s.sync_chip_preview = Some(name.clone());
+                        if let Some(dir) = hopper::paths::dirs() {
+                            std::fs::write(dir.data_dir().join("chip-state.txt"), &name).ok();
+                        }
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !ok {
+                    return;
+                }
+                cx.background_executor().timer(Duration::from_millis(ms)).await;
+            }
+        })
+        .detach();
+    }
+
     /// `--dialog group-sync --state NAME`: a made-up group of four (you, Mia,
     /// Noah, Ava) with the first instance as a copy of Mia's pack and the
     /// second as a pack of yours, to see every status without a friend or a

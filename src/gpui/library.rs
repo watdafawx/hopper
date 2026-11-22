@@ -319,6 +319,8 @@ pub struct LibraryView {
     /// The header's pills and actions, and the tab bar, fitted to the room
     /// the page has (see `widgets::Fit`).
     hero_pills: widgets::Fit,
+    /// The sync chips of the hero, settled in `detail` (see `sync_chip::settled`).
+    sync_chips: Vec<crate::sync_chip::Chip>,
     hero_actions: widgets::Fit,
     /// The figures box over the header actions (`hero::HeroFit::stats`).
     hero_stats: widgets::Fit,
@@ -775,6 +777,7 @@ impl LibraryView {
             crashes: HashMap::new(),
             detail_w: 80.0,
             hero_pills: Default::default(),
+            sync_chips: Vec::new(),
             hero_actions: Default::default(),
             hero_stats: Default::default(),
             tabs_fit: Default::default(),
@@ -2534,6 +2537,7 @@ impl LibraryView {
                 blur,
                 no_art: Icon::new(IconName::Package).large().text_color(theme.muted_foreground).into_any_element(),
                 pills,
+                chips: self.sync_chips.clone(),
                 title: inst.name.clone().into(),
                 facts,
                 summary: summary.map(IntoElement::into_any_element),
@@ -3077,6 +3081,24 @@ impl LibraryView {
             self.want_blur(&icon, cx);
         }
         self.want_size(&inst.root, cx);
+        // The hero's sync chips: the group's and the paired server's. The
+        // server's comparison runs here too, so the chip is there on every
+        // tab (the Server tab's own `show` takes over when it opens).
+        let paired = self.store.read(cx).server_tools().then(|| self.store.read(cx).server_of(&inst.root).map(|s| s.root.clone())).flatten();
+        let server_chip = paired.and_then(|root| {
+            if self.server.read(cx).server() != Some(root.as_path()) {
+                self.server.update(cx, |p, cx| p.quiet(root, cx));
+            }
+            self.server.update(cx, |p, cx| p.chip(false, cx))
+        });
+        let made_up = self.store.read(cx).sync_chip_preview.clone();
+        self.sync_chips = match made_up {
+            Some(name) => crate::sync_chip::preview(&name),
+            None => [crate::group_pack::group_chip(&self.store, &inst.root, cx), server_chip].into_iter().flatten().collect(),
+        }
+        .into_iter()
+        .filter_map(|c| crate::sync_chip::settled(c, window, cx))
+        .collect();
         let (header, tab_tools) = self.header(&inst, cx);
         let hint = self.server_hint(&inst, cx);
         let cf_change = self.cf_change_bar(&inst, cx);
@@ -3115,10 +3137,6 @@ impl LibraryView {
         notices.extend(self.addons.update(cx, |a, cx| a.notices(&root, cx)));
         notices.extend(hint);
         let slot = notice_slot::slot("instance", notices, window, cx).map(|s| div().flex_none().px_6().pt_2().child(s));
-        // The group's busy states live in a fixed dot beside the tab tools,
-        // so a check coming and going moves nothing.
-        let dot = notice_slot::activity_dot("instance", crate::group_pack::group_activity(&self.store, &inst.root, cx), window, cx);
-        let tab_tools = h_flex().flex_none().gap_1().items_center().children(dot).child(tab_tools).into_any_element();
         let tabs = self.tabs(&inst, tab_tools, cx);
         let pack_tabs = self.pack_tabs(&inst, cx);
         let body = self.tab_body(&inst, cx);

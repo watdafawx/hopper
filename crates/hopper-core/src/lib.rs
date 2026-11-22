@@ -58,6 +58,7 @@ pub mod groupstatus;
 pub mod groupsync;
 pub mod groupverify;
 pub mod settle;
+pub mod syncchip;
 pub mod syncmode;
 pub mod history;
 pub mod hopperd;

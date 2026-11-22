@@ -62,6 +62,7 @@ mod mcp_data;
 mod mcp_servers;
 mod nav;
 mod notice_slot;
+mod sync_chip;
 mod pack_lookup;
 mod pack_where;
 mod pack_update;

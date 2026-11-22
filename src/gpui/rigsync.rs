@@ -960,6 +960,102 @@ impl SyncPanel {
         server_online(self.store.read(cx), Some(self.control.read(cx)), r)
     }
 
+    /// Compares `root`'s server with its pack for the hero's sync chip
+    /// without opening the tab: the console, configs and history stay as
+    /// they are. The tab's own `show` takes over when it opens.
+    pub fn quiet(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        if self.server.as_ref() == Some(&root) {
+            return;
+        }
+        self.server = Some(root);
+        self.diff = None;
+        self.result = None;
+        self.crash = None;
+        self.crash_configs.clear();
+        self.failed.clear();
+        self.echo_until = None;
+        self.slowed = None;
+        self._slow_task = None;
+        self.drift = None;
+        self.server_nf = None;
+        self.show = None;
+        self.seen_rev = self.compare_key(cx);
+        self.rescan(cx);
+    }
+
+    /// The hero's sync chip for the pair: the instance's with its server
+    /// (`on_server_page` false: named by the server) or the server's with
+    /// its pack (named by the pack). `None` when there is no pair or no
+    /// answer yet.
+    pub fn chip(&self, on_server_page: bool, cx: &mut Context<Self>) -> Option<crate::sync_chip::Chip> {
+        use crate::sync_chip::{Action, Chip, Section};
+        use hopper::syncchip::{ServerState, Work};
+        let (server, inst) = self.pair_header(cx)?;
+        let other = if on_server_page { inst.name.clone() } else { server.name.clone() };
+        let view = cx.entity();
+        let online = self.online(cx);
+        let blocked = online && !self.allow_online(cx);
+        let working = self.syncing(cx);
+        let (state, to_change) = match &self.diff {
+            _ if working => (ServerState::Working(Work::Pushing), 0),
+            None if self.comparing => (ServerState::Comparing, 0),
+            None => return None,
+            Some(Err(e)) => {
+                let e = e.to_lowercase();
+                let offline = ["unreachable", "connect", "offline", "timed out", "refused", "reach"].iter().any(|w| e.contains(w));
+                (if offline { ServerState::Offline } else { ServerState::Failed }, 0)
+            }
+            Some(Ok(_)) => {
+                let n = self.whole(cx).iter().filter(|g| Show::Needs.has(**g)).count();
+                (if n == 0 { ServerState::InSync } else { ServerState::Differ { mods: n, blocked } }, n)
+            }
+        };
+        let look = hopper::syncchip::server_look(&state, &other);
+        let (title, line): (String, String) = match &state {
+            ServerState::InSync => (format!("Same mods as {other}"), "Nothing to send or take.".into()),
+            ServerState::Differ { mods, blocked } => (
+                format!("{} differ from {other}", if *mods == 1 { "1 mod".to_string() } else { format!("{mods} mods") }),
+                if *blocked {
+                    "It is running. Stop it first, or allow syncing while it runs in Settings.".into()
+                } else {
+                    "Sync makes the server's mods match this instance.".into()
+                },
+            ),
+            ServerState::Comparing => (format!("Comparing with {other}"), "Looking at both mod lists.".into()),
+            ServerState::Working(_) => (format!("Sending to {other}"), "It takes a moment. Nothing else to do.".into()),
+            ServerState::Offline => (format!("{other} is offline"), "Can't reach it. Hopper tries again by itself.".into()),
+            ServerState::Failed => (
+                "Couldn't compare".to_string(),
+                match &self.diff {
+                    Some(Err(e)) => e.clone(),
+                    _ => String::new(),
+                },
+            ),
+        };
+        let mut actions: Vec<Action> = Vec::new();
+        if to_change > 0 {
+            let v = view.clone();
+            actions.push(Action {
+                label: "Sync to server".into(),
+                icon: Some(IconName::ServerCog),
+                primary: true,
+                disabled: blocked || self.running,
+                run: std::rc::Rc::new(move |w, cx| v.update(cx, |p, cx| p.confirm_update(w, cx))),
+            });
+        }
+        if !working {
+            let v = view.clone();
+            actions.push(Action {
+                label: "Check again".into(),
+                icon: Some(IconName::RefreshCw),
+                primary: actions.is_empty(),
+                disabled: self.comparing,
+                run: std::rc::Rc::new(move |_, cx| v.update(cx, |p, cx| p.rescan(cx))),
+            });
+        }
+        Some(Chip { id: "server".into(), look, progress: None, sections: vec![Section { title: title.into(), line: line.into(), progress: None, actions }] })
+    }
+
     /// Syncing while the server runs is allowed (the default; settings
     /// keep the player's choice).
     fn allow_online(&self, cx: &App) -> bool {

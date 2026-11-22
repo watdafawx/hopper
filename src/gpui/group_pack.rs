@@ -22,6 +22,7 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, Styl
 use gpui_kit::*;
 use hopper::groupstatus::Status;
 use std::path::Path;
+use std::rc::Rc;
 
 /// The one-line status of a group copy at `root`: icon, tier and tooltip
 /// that go with each state.
@@ -177,36 +178,65 @@ pub fn pull_button(store: &Entity<Store>, root: &Path, pulling: bool, in_step: b
     b.on_click(move |_, _, cx| store.update(cx, |s, cx| s.pull_group_now(&root, cx)))
 }
 
-/// States that pass by themselves and ask nothing of the player: they show
-/// as the activity dot, never as a strip.
-fn is_transient(status: &Status) -> bool {
-    matches!(status, Status::Checking | Status::Updating { .. } | Status::Sending | Status::InStep { .. })
-}
-
-/// What the activity dot of the tab row says about the group copy at
-/// `root`: busy while the check or a pull runs, else how it stands.
-/// `None` when the instance isn't a group copy.
-pub fn group_activity<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Context<V>) -> Option<notice_slot::Activity> {
+/// The sync chip of the hero for the group copy at `root`: how it stands,
+/// and in its popover what that means and what can be done. `None` when
+/// the instance isn't a group copy. The chip is the whole story for a
+/// state that needs nothing (busy, behind, offline, failed); a state that
+/// needs the player keeps its strip ([`group_status_bar`]) too.
+pub fn group_chip<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Context<V>) -> Option<crate::sync_chip::Chip> {
+    use crate::sync_chip::{Action, Chip, Section};
     let s = store.read(cx);
     let status = s.group_status(root)?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let pulling = s.group_pulling(root);
-    let busy = pulling || s.group_repairing(root) || matches!(status, Status::Checking | Status::Updating { .. } | Status::Sending);
-    let busy_text = match &status {
-        Status::Checking | Status::Updating { .. } | Status::Sending => status.detail(now),
-        _ => "Checking the group and taking in what waits.".to_string(),
+    let pulling = s.group_pulling(root) || s.group_repairing(root);
+    let pulled = s.group_pulled(root).map(|(t, bad)| (t.to_string(), bad));
+    let pulled_bad = pulled.as_ref().is_some_and(|(_, bad)| *bad);
+    let left_out = !s.left_out_pins(root).is_empty();
+    let pushing = s.pushing_at(root);
+    let look = hopper::syncchip::group_look(&status, pulling, pulled_bad, left_out);
+    let in_step = matches!(status, Status::InStep { .. });
+    let (title, line) = match (&status, &pulled) {
+        (Status::InStep { .. }, Some((t, false))) => ("Your copy matches the group.".to_string(), t.clone()),
+        (Status::InStep { .. }, _) => ("Your copy matches the group.".to_string(), in_step_line(&status.detail(now), false)),
+        (_, Some((t, true))) => ("Couldn't take the changes in".to_string(), t.clone()),
+        _ => (status.title(), status.detail(now)),
     };
-    let (rest_icon, rest_text, rest_good) = match &status {
-        Status::InStep { .. } => {
-            let line = match s.group_pulled(root) {
-                Some((text, false)) => text.to_string(),
-                _ => status.detail(now),
-            };
-            (IconName::CircleCheck, format!("Your copy matches the group. {}", in_step_line(&line, s.group_pulled(root).is_some())), true)
+    let progress = None;
+    let mut actions: Vec<Action> = Vec::new();
+    fn act(actions: &mut Vec<Action>, label: String, icon: IconName, primary: bool, disabled: bool, run: crate::sync_chip::Run) {
+        actions.push(Action { label: label.into(), icon: Some(icon), primary, disabled, run });
+    }
+    let (st, rt) = (store.clone(), root.to_path_buf());
+    match &status {
+        Status::Parked { from, .. } => {
+            for (ix, who) in from.iter().take(3).enumerate() {
+                let (st, rt, id) = (st.clone(), rt.clone(), who.id.clone());
+                act(&mut actions, format!("Pull from {}", who.name), IconName::Download, ix == 0, pulling, Rc::new(move |_, cx| st.update(cx, |s, cx| s.pull_group_from(&rt, &id, cx))));
+            }
         }
-        other => (IconName::Users, other.title(), false),
-    };
-    Some(notice_slot::Activity { busy, busy_text: busy_text.into(), rest_icon, rest_text: rest_text.into(), rest_good })
+        Status::ToPush { changes, .. } => {
+            let (st, rt, n) = (st.clone(), rt.clone(), *changes);
+            act(&mut actions, hopper::syncmode::push_label(n), IconName::Upload, true, pushing, Rc::new(move |_, cx| st.update(cx, |s, cx| s.push_changes(std::slice::from_ref(&rt), cx))));
+        }
+        Status::CantCheck | Status::Cant { .. } | Status::Offline { .. } => {
+            let (st, rt) = (st.clone(), rt.clone());
+            act(&mut actions, "Try again".into(), IconName::RefreshCw, true, pulling, Rc::new(move |_, cx| st.update(cx, |s, cx| s.recheck_group(&rt, cx))));
+        }
+        _ => {}
+    }
+    // Pull now is always there; in step it only checks.
+    if !matches!(status, Status::CantCheck | Status::Cant { .. } | Status::Offline { .. }) || pulled_bad {
+        let (st, rt) = (st.clone(), rt.clone());
+        let label = if pulling { "Checking..." } else if in_step || matches!(status, Status::Parked { .. } | Status::ToPush { .. }) { "Check now" } else { "Pull now" };
+        let primary = actions.is_empty();
+        act(&mut actions, label.into(), IconName::RefreshCw, primary, pulling, Rc::new(move |_, cx| st.update(cx, |s, cx| s.pull_group_now(&rt, cx))));
+    }
+    Some(Chip {
+        id: "group".into(),
+        look,
+        progress,
+        sections: vec![Section { title: title.into(), line: line.into(), progress: None, actions }],
+    })
 }
 
 /// The line under "Same as the group": the status line without its first
@@ -235,15 +265,10 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     let by_hand_fetch = if matches!(status, Status::ByHand { .. }) { s.fetch_files(root).0 } else { None };
     let by_hand_running = by_hand_fetch.as_ref().filter(|v| v.running());
     let in_step = matches!(status, Status::InStep { .. });
-    // Don't show a full-width banner just to say everything matches; only
-    // show the banner when out of step, failing, or right after a pull.
-    if in_step && pulled.is_none() {
-        return None;
-    }
-    // Busy for a moment, or just done: the player has nothing to do, so no
-    // strip (it would push the page down and up again). The dot in the tab
-    // row says it ([`group_activity`]); a failed Pull now stays here.
-    if is_transient(&status) && !pulled_bad && by_hand_running.is_none() {
+    // A strip only for what needs the player (a choice, mods to get). Busy,
+    // behind, offline and failed say it in the hero's sync chip
+    // ([`group_chip`]): a strip would push the page down and up again.
+    if !hopper::syncchip::group_look(&status, pulling, pulled_bad, !left_out.is_empty()).strip && by_hand_running.is_none() {
         return None;
     }
     let key = hopper::settings::notice_key(&root.to_string_lossy(), "group-in-step", "in step");
