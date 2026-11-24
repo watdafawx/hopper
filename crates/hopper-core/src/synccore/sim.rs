@@ -12,14 +12,18 @@
 //! newest replacing the older (every event is cumulative, so nothing is
 //! lost). P4 adds its limits (queue size, body cap, down) to that struct.
 
-use super::apply::Outcome;
+use super::apply::{self, Fetch, FetchError, Fs, Outcome, RealFs};
 use super::engine::{Answer, Engine, Review, Status};
 use super::gate::{Limits, Trust};
 use super::local::Drift;
-use super::model::{Arrival, Change, Dot, Edit, Key, PackMode, Seen, Value, Why};
-use super::plan::PackPlan;
+use super::model::{Arrival, Change, ConfigMode, Dot, Edit, Key, PackMode, Seen, Value, Why};
+use super::plan::{PackPlan, Step, Wait};
 use super::wire::MemberStatus;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Relay time when a group starts (so "never online" is 0, never "now").
 const START: u64 = 1_000_000;
@@ -115,6 +119,21 @@ struct Pc {
     /// The instance's name; renaming it changes nothing in sync.
     #[allow(dead_code)]
     instance: String,
+    /// A real scratch folder: the PC's instance, so `apply::run` swaps real
+    /// files (removed when the group is dropped).
+    root: PathBuf,
+    /// Config files changed on this PC (never shared).
+    configs: BTreeSet<String>,
+    /// The next download of a key ends like this (once).
+    fail: BTreeMap<Key, Outcome>,
+    /// Downloads tried per key.
+    tries: BTreeMap<Key, usize>,
+    /// The PC dies after this many file swaps of its next apply.
+    crash_after: Option<usize>,
+    /// Died mid-apply: nothing runs until `Group::recover_apply`.
+    crashed: bool,
+    /// The status last posted, so a status-only change is posted too.
+    status_posted: Option<MemberStatus>,
 }
 
 impl Pc {
@@ -124,8 +143,88 @@ impl Pc {
 
     /// Puts a value on disk and records that it was applied.
     fn land(&mut self, key: &Key, value: Value) {
+        self.put_files(key, &value);
         self.disk.insert(key.clone(), value.clone());
         self.engine.applied.insert(key.clone(), value);
+    }
+
+    /// The real files of `key` match `value` (a file, or none).
+    fn put_files(&self, key: &Key, value: &Value) {
+        if !matches!(value, Value::File { .. } | Value::Gone) {
+            return;
+        }
+        let dir = self.root.join(apply::folder_of(key));
+        let prefix = file_prefix(key);
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+        if let Value::File { file, on } = value {
+            let _ = std::fs::create_dir_all(&dir);
+            let name = format!("{prefix}{}.jar{}", safe(file), if *on { "" } else { ".disabled" });
+            let _ = std::fs::write(dir.join(name), "jar");
+        }
+    }
+
+    /// A pack update landed here: its stated config handling, for this PC.
+    /// (Pack mods turned off stay off: the sim never resets them.)
+    fn pack_moved(&mut self, mode: &PackMode, mine: bool) {
+        if (if mine { mode.here } else { mode.friends }) == ConfigMode::Clean {
+            self.configs.clear();
+            self.engine.edited_configs.clear();
+        }
+    }
+
+    /// Runs the engine's steps through `apply::run` on this PC's real
+    /// folder. Returns whether anything landed.
+    fn apply_steps(&mut self, steps: Vec<Step>) -> bool {
+        let fetch = SimFetch {
+            keys: steps
+                .iter()
+                .filter_map(|s| match &s.to {
+                    Value::File { file, .. } => Some((file.clone(), s.key.clone())),
+                    _ => None,
+                })
+                .collect(),
+            fail: RefCell::new(std::mem::take(&mut self.fail)),
+            tries: RefCell::new(std::mem::take(&mut self.tries)),
+        };
+        let plan = super::plan::ApplyPlan { steps, waits: Vec::new() };
+        let jobs = crate::jobs::Jobs::new(crate::waker::noop());
+        let job = jobs.start_quiet("sim apply");
+        let cut = self.crash_after.take().map(|n| CutFs { swaps: Cell::new(n), dead: Cell::new(false) });
+        let report = match &cut {
+            Some(fs) => apply::run_with(fs, &self.root, &plan, &fetch, &job),
+            None => apply::run_with(&RealFs, &self.root, &plan, &fetch, &job),
+        };
+        self.fail = fetch.fail.into_inner();
+        self.tries = fetch.tries.into_inner();
+        if cut.is_some_and(|fs| fs.dead.get()) {
+            // Power gone: nothing was told to the engine.
+            self.crashed = true;
+            return true;
+        }
+        self.took(&report)
+    }
+
+    /// Takes a report in: the engine, the disk map and a pack update's mode.
+    fn took(&mut self, report: &apply::ApplyReport) -> bool {
+        let mut moved = false;
+        for r in &report.results {
+            if r.outcome != Outcome::Done {
+                continue;
+            }
+            let Some((c, _)) = self.engine.log.changes.get(&r.by) else { continue };
+            let (now, why, mine) = (c.now.clone(), c.why.clone(), c.dot.author == self.engine.me);
+            self.disk.insert(r.key.clone(), now);
+            if let Why::PackUpdate { mode } = why {
+                self.pack_moved(&mode, mine);
+            }
+            moved = true;
+        }
+        self.engine.applied(report);
+        moved
     }
 
     /// A change the player makes here: a record, unless the mod stays on
@@ -152,6 +251,18 @@ pub struct Group {
     shared: BTreeSet<String>,
     /// Shared settings changes: (who, mod, setting, value).
     setting_log: Vec<(String, String, String, String)>,
+    /// What each pack version ships: every PC's lookups know it, and a
+    /// pack move removes none of it (the sim removes nothing on a move).
+    #[allow(dead_code)]
+    ships: BTreeMap<String, Vec<Key>>,
+}
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        for pc in self.pcs.values() {
+            let _ = std::fs::remove_dir_all(&pc.root);
+        }
+    }
 }
 
 impl Group {
@@ -169,6 +280,7 @@ impl Group {
             limits: Limits::default(),
             shared: BTreeSet::new(),
             setting_log: Vec::new(),
+            ships: BTreeMap::new(),
         };
         for n in names {
             g.add_pc(n, true);
@@ -279,23 +391,30 @@ impl Group {
         let _ = who;
         todo!("P5: sim")
     }
+    /// What pressing Update would do, as `who` is shown it.
     pub fn pack_plan(&self, who: &str, version: &str, mode: PackMode) -> PackPlan {
-        let _ = (who, version, mode);
-        todo!("P6: sim")
+        self.pc(who).engine.pack_plan(version, mode)
     }
+    /// `who` presses Update: one record carrying the stated mode.
     pub fn update_pack(&mut self, who: &str, version: &str, mode: PackMode) {
-        let _ = (who, version, mode);
-        todo!("P6: sim")
+        let at = self.contact(who);
+        let batch = self.new_batch(who);
+        let now = Value::Text(version.to_string());
+        let pc = self.pc_mut(who);
+        pc.make(&Key::Pack, &now, Why::PackUpdate { mode }, &batch, at);
+        pc.pack_moved(&mode, true);
     }
     /// What a pack version ships, for every PC's lookups.
     pub fn pack_ships(&mut self, version: &str, keys: &[Key]) {
-        let _ = (version, keys);
-        todo!("P6: sim")
+        self.ships.insert(version.to_string(), keys.to_vec());
     }
     /// A config file changed on this PC (not shared).
     pub fn edit_config(&mut self, who: &str, file: &str) {
-        let _ = (who, file);
-        todo!("P6: sim")
+        let pc = self.pc_mut(who);
+        pc.configs.insert(file.to_string());
+        if !pc.engine.edited_configs.iter().any(|f| f == file) {
+            pc.engine.edited_configs.push(file.to_string());
+        }
     }
     /// Shares a mod's settings with the group (configsync, which rides
     /// along unchanged: settings travel beside the records).
@@ -333,18 +452,25 @@ impl Group {
         todo!("P5: sim")
     }
     pub fn game(&mut self, who: &str, running: bool) {
-        let _ = (who, running);
-        todo!("P6: sim")
+        self.pc_mut(who).engine.game_running = running;
     }
-    /// The next downloads of `key`'s file on this PC end with `how`.
+    /// The next download of `key`'s file on this PC ends with `how`.
     pub fn fail_fetch(&mut self, who: &str, key: &Key, how: Outcome) {
-        let _ = (who, key, how);
-        todo!("P6: sim")
+        self.pc_mut(who).fail.insert(key.clone(), how);
     }
-    /// The PC dies after `after_steps` file swaps of its next apply.
+    /// The PC dies after `after_steps` file swaps of its next apply, and
+    /// stays dead until its restart runs [`Group::recover_apply`].
     pub fn crash_mid_apply(&mut self, who: &str, after_steps: usize) {
-        let _ = (who, after_steps);
-        todo!("P6: sim")
+        self.pc_mut(who).crash_after = Some(after_steps);
+    }
+    /// The start-up half of a restart: finishes the swap a crash cut short
+    /// and tells the engine (what `apply::recover` returns).
+    pub fn recover_apply(&mut self, who: &str) {
+        let pc = self.pc_mut(who);
+        if let Some(report) = apply::recover(&pc.root).expect("the journal can be recovered") {
+            pc.took(&report);
+        }
+        pc.crashed = false;
     }
     /// Hopper restarts: state saved and loaded again, journal recovered.
     pub fn restart(&mut self, who: &str) {
@@ -480,18 +606,25 @@ impl Group {
         let _ = (who, member);
         todo!("P5: sim")
     }
+    /// Keys waiting for the player to download by hand.
     pub fn by_hand(&self, who: &str) -> Vec<Key> {
-        let _ = who;
-        todo!("P6: sim")
+        let waits = self.pc(who).engine.plan().waits;
+        waits.into_iter().filter(|(_, w)| *w == Wait::ByHand).map(|(k, _)| k).collect()
     }
+    /// How many times this PC tried to download `key`'s file.
     pub fn fetch_tries(&self, who: &str, key: &Key) -> usize {
-        let _ = (who, key);
-        todo!("P6: sim")
+        self.pc(who).tries.get(key).copied().unwrap_or(0)
     }
     /// How many files of `key` are on this PC's disk.
     pub fn files_of(&self, who: &str, key: &Key) -> usize {
-        let _ = (who, key);
-        todo!("P6: sim")
+        let pc = self.pc(who);
+        let prefix = file_prefix(key);
+        std::fs::read_dir(pc.root.join(apply::folder_of(key)))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+            .count()
     }
     /// The folder `key`'s file sits in ("mods", "shaderpacks").
     pub fn folder(&self, who: &str, key: &Key) -> Option<String> {
@@ -511,8 +644,7 @@ impl Group {
         self.pc(who).settings.get(&(mod_id.to_string(), setting.to_string())).cloned()
     }
     pub fn edited_config(&self, who: &str, file: &str) -> bool {
-        let _ = (who, file);
-        todo!("P6: sim")
+        self.pc(who).configs.contains(file)
     }
     pub fn has_world(&self, who: &str, name: &str) -> bool {
         self.pc(who).worlds.contains(name)
@@ -559,6 +691,10 @@ impl Group {
             engine.applied.insert(k.clone(), v.clone());
         }
         let settings_read = self.setting_log.len();
+        static ROOTS: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir()
+            .join(format!("hopper-sim-{}-{}", std::process::id(), ROOTS.fetch_add(1, Ordering::Relaxed)));
+        let _ = std::fs::remove_dir_all(&root);
         self.pcs.insert(
             name.to_string(),
             Pc {
@@ -583,8 +719,19 @@ impl Group {
                 settings_read,
                 worlds: BTreeSet::new(),
                 instance: "Our pack".into(),
+                root,
+                configs: BTreeSet::new(),
+                fail: BTreeMap::new(),
+                tries: BTreeMap::new(),
+                crash_after: None,
+                crashed: false,
+                status_posted: None,
             },
         );
+        let pc = &self.pcs[name];
+        for (k, v) in &self.base {
+            pc.put_files(k, v);
+        }
     }
 
     fn new_batch(&mut self, who: &str) -> String {
@@ -616,6 +763,8 @@ impl Group {
                 continue;
             }
             let mut events = Vec::new();
+            let status = pc.engine.my_status();
+            let status_changed = pc.status_posted.as_ref() != Some(&status);
             for r in members.iter().filter(|r| *r != s) {
                 if let Some(acked) = pc.engine.members.get(r).map(|m| m.seen.clone()) {
                     if pc.checkpoint_for.contains(r)
@@ -636,14 +785,15 @@ impl Group {
                 let seen = pc.engine.seen();
                 let last = pc.last_posted.get(r).cloned().unwrap_or_default();
                 let new_records = !dots.is_empty() && dots != last.0;
-                if !new_records && seen == last.1 {
+                if !new_records && seen == last.1 && !status_changed {
                     continue;
                 }
                 pc.last_posted.insert(r.clone(), (dots, seen));
-                let event = Event { seq: 0, at, from: s.clone(), changes, status: pc.engine.my_status() };
+                let event = Event { seq: 0, at, from: s.clone(), changes, status: status.clone() };
                 events.push((r.clone(), event));
             }
             pc.push_pending = false;
+            pc.status_posted = Some(status);
             for (r, event) in events {
                 self.relay.post(&r, event);
                 moved = true;
@@ -706,16 +856,18 @@ impl Group {
         moved
     }
 
-    /// Every PC puts what the engine lets land on its disk.
+    /// Every PC puts what the engine's plan allows on its disk, through
+    /// `apply::run`.
     fn apply_all(&mut self) -> bool {
         let mut moved = false;
         for pc in self.pcs.values_mut() {
-            for step in pc.engine.lands() {
-                if pc.only_here.contains(&step.key) {
-                    continue;
-                }
-                pc.land(&step.key, step.to);
-                moved = true;
+            if pc.crashed {
+                continue;
+            }
+            let steps: Vec<Step> =
+                pc.engine.plan().steps.into_iter().filter(|s| !pc.only_here.contains(&s.key)).collect();
+            if !steps.is_empty() {
+                moved |= pc.apply_steps(steps);
             }
             for (dot, note) in pc.engine.not_followed() {
                 if pc.told_loader.insert(dot) {
@@ -757,6 +909,95 @@ impl Group {
             }
         }
     }
+}
+
+/// Downloads files of a plan into the staging folder, naming each file by
+/// its key so the sim can count a mod's files.
+struct SimFetch {
+    /// File id to the key it is for.
+    keys: BTreeMap<String, Key>,
+    fail: RefCell<BTreeMap<Key, Outcome>>,
+    tries: RefCell<BTreeMap<Key, usize>>,
+}
+
+impl Fetch for SimFetch {
+    fn fetch(&self, file: &str, into: &Path) -> anyhow::Result<()> {
+        let key = self.keys[file].clone();
+        *self.tries.borrow_mut().entry(key.clone()).or_default() += 1;
+        match self.fail.borrow_mut().remove(&key) {
+            Some(Outcome::Blocked) => Err(FetchError::Blocked.into()),
+            Some(Outcome::Retry { after_secs }) => Err(FetchError::Retry { after_secs }.into()),
+            Some(Outcome::Failed(why)) => anyhow::bail!("{why}"),
+            Some(Outcome::Done) | None => Ok(std::fs::write(into, "jar")?),
+        }
+    }
+
+    fn file_name(&self, key: &Key, file: &str) -> String {
+        format!("{}{}.jar", file_prefix(key), safe(file))
+    }
+}
+
+/// The real disk until `swaps` file swaps are made, then dead: every change
+/// fails, like a power cut. The journal's own saves don't count.
+struct CutFs {
+    swaps: Cell<usize>,
+    dead: Cell<bool>,
+}
+
+impl CutFs {
+    fn alive(&self) -> io::Result<()> {
+        if self.dead.get() {
+            Err(io::Error::other("power cut"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Fs for CutFs {
+    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+        self.alive()?;
+        RealFs.create_dir_all(p)
+    }
+    fn write(&self, p: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.alive()?;
+        RealFs.write(p, bytes)
+    }
+    fn read(&self, p: &Path) -> io::Result<Vec<u8>> {
+        RealFs.read(p)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.alive()?;
+        let journal = to.file_name().is_some_and(|n| n.to_string_lossy().starts_with("journal.json"));
+        if !journal {
+            if self.swaps.get() == 0 {
+                self.dead.set(true);
+                return Err(io::Error::other("power cut"));
+            }
+            self.swaps.set(self.swaps.get() - 1);
+        }
+        RealFs.rename(from, to)
+    }
+    fn remove_file(&self, p: &Path) -> io::Result<()> {
+        self.alive()?;
+        RealFs.remove_file(p)
+    }
+    fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        self.alive()?;
+        RealFs.remove_dir_all(p)
+    }
+    fn exists(&self, p: &Path) -> bool {
+        RealFs.exists(p)
+    }
+}
+
+fn safe(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
+}
+
+/// Every file of a key starts with this.
+fn file_prefix(key: &Key) -> String {
+    format!("{}__", safe(&format!("{key:?}")))
 }
 
 /// A History row's sentence.
@@ -869,5 +1110,22 @@ mod tests {
             says,
             ["Turned off by A", "Turned on by A", "Updated by A", "Removed by A", "Added by A"]
         );
+    }
+
+    #[test]
+    fn a_pc_that_dies_mid_swap_finishes_it_on_the_next_start() {
+        let mut g = Group::with(&["A", "B"], &[(k(1), on(11)), (k(2), on(21)), (k(3), on(31))]);
+        g.crash_mid_apply("B", 1);
+        g.edits("A", &[(k(1), on(12)), (k(2), on(22)), (k(3), on(32))]);
+        g.settle();
+        // Dead: B's disk map didn't move and nothing was told to its engine.
+        assert_eq!(g.value("B", &k(1)), on(11));
+        g.recover_apply("B");
+        g.settle();
+        for n in 1..=3 {
+            assert_eq!(g.value("B", &k(n)), on(n * 10 + 2));
+            assert_eq!(g.files_of("B", &k(n)), 1);
+        }
+        assert!(g.history("B").iter().all(|h| h.by == "A"));
     }
 }

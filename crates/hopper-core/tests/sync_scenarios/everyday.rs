@@ -80,7 +80,6 @@ fn w09_a_shared_setting_still_travels() {
 /// Covers W10. A edits a config file of a mod whose settings aren't
 /// shared. Nothing reaches B, and A sees it marked "Stays on this PC".
 #[test]
-#[ignore = "sync-rewrite"]
 fn w10_other_config_files_stay_on_this_pc() {
     let mut g = three();
     g.edit_config("A", "config/create-common.toml");
@@ -230,7 +229,6 @@ fn w35_trust_and_push_by_hand() {
 /// which mod it is: nothing on B reads as removed, and mod 3 updates once
 /// the download works.
 #[test]
-#[ignore = "sync-rewrite"]
 fn c1_a_lookup_failure_is_never_a_removal() {
     use hopper_core::synccore::apply::Outcome;
     let mut g = three();

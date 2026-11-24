@@ -6,13 +6,14 @@
 //! and status (P5), plan/apply (P6) and the wire outbox (P4) are other
 //! phases; their methods stay `todo!()` here.
 
-use super::apply::ApplyReport;
+use super::apply::{ApplyReport, Outcome};
 use super::gate::{self, GateCtx, Limits, Risk, Trust};
 use super::local::{Drift, Snapshot};
 use super::model::{Arrival, Change, Dot, Edit, Key, MemberId, PackMode, Seen, Value, Why};
-use super::plan::{ApplyPlan, PackPlan, Step};
+use super::plan::{self, ApplyPlan, PackPlan, Step, Wait};
 use super::register::{fold, merge, Log, Merge, Register};
 use super::wire::{Body, MemberStatus, Packet, WIRE_VERSION};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A review card: records that wait for the player.
@@ -85,6 +86,25 @@ pub struct Engine {
     /// Relay time of this PC's last contact (set by `touch` and every
     /// receive); the "online at" of what it records.
     pub contact: u64,
+    /// This PC's game is running (jar changes wait; the app sets it).
+    pub game_running: bool,
+    /// Config files changed on this PC, for the pack plan (never shared).
+    pub edited_configs: Vec<String>,
+    /// Keys whose last apply failed or was rate limited: not tried again
+    /// until their time (relay seconds). Per key, so one never holds others.
+    pub retry: BTreeMap<Key, Retry>,
+    /// Keys the author blocked downloads of, with the record that was
+    /// blocked: by hand, never retried until a newer record.
+    pub blocked: BTreeMap<Key, Dot>,
+}
+
+/// When a failed step is tried again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retry {
+    /// The record that failed (a newer one starts fresh).
+    pub by: Dot,
+    pub until: u64,
+    pub tries: u32,
 }
 
 /// The registers of the log, and which winners wait for the player.
@@ -326,6 +346,7 @@ impl Engine {
                 to: w.now.clone(),
                 by: w.dot.clone(),
                 name: w.name.clone(),
+                why: w.why.clone(),
             });
         }
         steps
@@ -354,16 +375,88 @@ impl Engine {
         out
     }
 
+    /// What to do on disk now: `lands()` minus what waits (the game, a
+    /// review, a source, a back-off, a download only the player can make).
     pub fn plan(&self) -> ApplyPlan {
-        todo!("P6: plan")
+        let reviews = self.reviews();
+        let j = self.judged();
+        let mut waits: Vec<(Key, Wait)> = Vec::new();
+        // Held winners that would change this PC: each says what it waits for.
+        for (key, reg) in &j.regs {
+            let w = &reg.winner;
+            let Some(risks) = j.held.get(&w.dot) else { continue };
+            if self.applied.get(key).cloned().unwrap_or_default() == w.now {
+                continue;
+            }
+            let wait = if risks.contains(&Risk::NewSource) {
+                Wait::Source
+            } else {
+                let id = reviews.iter().find(|r| r.changes.contains(&w.dot)).map_or(0, |r| r.id);
+                Wait::Review(id)
+            };
+            waits.push((key.clone(), wait));
+        }
+        let mut steps = Vec::new();
+        for step in self.lands() {
+            if self.blocked.get(&step.key) == Some(&step.by) {
+                waits.push((step.key, Wait::ByHand));
+            } else if let Some(r) = self.retry.get(&step.key).filter(|r| r.by == step.by && self.contact < r.until) {
+                waits.push((step.key, Wait::Retry { after_secs: r.until - self.contact }));
+            } else if self.game_running && !matches!(step.key, Key::Lock(_)) {
+                waits.push((step.key, Wait::GameRunning));
+            } else {
+                steps.push(step);
+            }
+        }
+        waits.sort_by(|a, b| a.0.cmp(&b.0));
+        ApplyPlan { steps, waits }
     }
+
+    /// Takes in what `apply::run` did: `applied` moves only for steps that
+    /// are done, to the value of the record they were for. Nothing here
+    /// makes a record, so a halfway failure never re-publishes what landed
+    /// under this player's name.
     pub fn applied(&mut self, report: &ApplyReport) {
-        let _ = report;
-        todo!("P6: applied")
+        for r in &report.results {
+            match &r.outcome {
+                Outcome::Done => {
+                    if let Some((c, _)) = self.log.changes.get(&r.by) {
+                        self.applied.insert(r.key.clone(), c.now.clone());
+                    }
+                    self.retry.remove(&r.key);
+                    self.blocked.remove(&r.key);
+                }
+                Outcome::Blocked => {
+                    self.retry.remove(&r.key);
+                    self.blocked.insert(r.key.clone(), r.by.clone());
+                }
+                Outcome::Retry { after_secs } => self.back_off(r, *after_secs),
+                Outcome::Failed(_) => {
+                    let tries = self.retry.get(&r.key).filter(|x| x.by == r.by).map_or(0, |x| x.tries);
+                    // 1 min, 2, 4 ... never more than an hour.
+                    let after = (60u64 << tries.min(6)).min(3600);
+                    self.back_off(r, after)
+                }
+            }
+        }
     }
+
+    fn back_off(&mut self, r: &super::apply::StepResult, after_secs: u64) {
+        let tries = self.retry.get(&r.key).filter(|x| x.by == r.by).map_or(0, |x| x.tries) + 1;
+        let retry = Retry { by: r.by.clone(), until: self.contact + after_secs, tries };
+        self.retry.insert(r.key.clone(), retry);
+    }
+
+    /// What a pack update to `version` in `mode` does for this PC and each
+    /// friend, from their last status, before the player presses Update.
     pub fn pack_plan(&self, version: &str, mode: PackMode) -> PackPlan {
-        let _ = (version, mode);
-        todo!("P6: pack plan")
+        let from = match self.applied.get(&Key::Pack) {
+            Some(Value::Text(t)) => t.clone(),
+            _ => String::new(),
+        };
+        let members: Vec<MemberStatus> =
+            self.members.values().filter(|m| m.member != self.me).cloned().collect();
+        plan::pack_plan(&from, version, &mode, &members)
     }
 
     /// The edits that put back what `member` changed since relay time
@@ -446,6 +539,18 @@ impl Engine {
             member: self.me.clone(),
             name: self.name.clone(),
             seen: self.seen(),
+            pack: match self.applied.get(&Key::Pack) {
+                Some(Value::Text(t)) => t.clone(),
+                _ => String::new(),
+            },
+            edited_configs: self.edited_configs.clone(),
+            off_pack_mods: self
+                .applied
+                .iter()
+                .filter(|(_, v)| **v == Value::PackOff)
+                .map(|(k, _)| k.clone())
+                .collect(),
+            game_running: self.game_running,
             ..MemberStatus::default()
         }
     }
@@ -714,6 +819,7 @@ fn loader_label(v: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::model::ConfigMode;
     use super::*;
 
     const H: u64 = 3600;
@@ -1093,5 +1199,123 @@ mod tests {
         let first = a.reviews()[0].id;
         a.record(edit(mk(3), file(32)), T0 + 72 * H);
         assert_eq!(a.reviews()[0].id, first);
+    }
+
+    /// A and B in step; A updates mod 1; B has it as a plan step.
+    fn pair() -> (Engine, Engine, Dot) {
+        let (mut a, mut b) = (pc("A"), pc("B"));
+        let d = act(&mut a, edit(mk(1), file(12)), T0);
+        send(&a, &mut b, T0);
+        (a, b, d)
+    }
+
+    fn done(key: Key, by: &Dot) -> super::super::apply::StepResult {
+        super::super::apply::StepResult { key, by: by.clone(), outcome: Outcome::Done }
+    }
+
+    #[test]
+    fn a_plan_is_the_register_minus_what_waits() {
+        let (_a, mut b, d) = pair();
+        let p = b.plan();
+        assert_eq!(p.steps.len(), 1);
+        assert_eq!((p.steps[0].key.clone(), p.steps[0].by.clone()), (mk(1), d));
+        assert!(p.waits.is_empty());
+        b.game_running = true;
+        let p = b.plan();
+        assert!(p.steps.is_empty());
+        assert_eq!(p.waits, vec![(mk(1), Wait::GameRunning)]);
+    }
+
+    #[test]
+    fn applied_moves_only_for_done_steps_and_makes_no_record() {
+        let (_a, mut b, d) = pair();
+        let before = b.log.changes.len();
+        let other = Dot { author: "A".into(), n: 99 };
+        let report = ApplyReport {
+            results: vec![
+                done(mk(1), &d),
+                super::super::apply::StepResult { key: mk(2), by: other, outcome: Outcome::Failed("x".into()) },
+            ],
+        };
+        b.applied(&report);
+        assert_eq!(b.applied[&mk(1)], file(12));
+        assert_eq!(b.applied[&mk(2)], file(21));
+        assert_eq!(b.log.changes.len(), before, "nothing re-published as this PC's");
+        assert!(b.plan().steps.is_empty());
+    }
+
+    #[test]
+    fn a_failed_step_backs_off_per_key_and_comes_back() {
+        let (_a, mut b, d) = pair();
+        b.touch(T0);
+        let fail = |o| ApplyReport {
+            results: vec![super::super::apply::StepResult { key: mk(1), by: d.clone(), outcome: o }],
+        };
+        b.applied(&fail(Outcome::Failed("reset".into())));
+        let p = b.plan();
+        assert!(p.steps.is_empty());
+        assert_eq!(p.waits, vec![(mk(1), Wait::Retry { after_secs: 60 })]);
+        b.touch(T0 + 60);
+        assert_eq!(b.plan().steps.len(), 1, "tried again after its time");
+        b.applied(&fail(Outcome::Failed("reset".into())));
+        assert_eq!(b.plan().waits, vec![(mk(1), Wait::Retry { after_secs: 120 })], "longer each time");
+        b.applied(&fail(Outcome::Retry { after_secs: 300 }));
+        assert_eq!(b.plan().waits[0].1, Wait::Retry { after_secs: 300 });
+    }
+
+    #[test]
+    fn a_blocked_download_waits_by_hand_until_a_newer_record() {
+        let (mut a, mut b, d) = pair();
+        b.applied(&ApplyReport {
+            results: vec![super::super::apply::StepResult { key: mk(1), by: d, outcome: Outcome::Blocked }],
+        });
+        assert_eq!(b.plan().waits, vec![(mk(1), Wait::ByHand)]);
+        b.touch(T0 + 9 * H);
+        assert_eq!(b.plan().waits, vec![(mk(1), Wait::ByHand)], "never retried by a timer");
+        act(&mut a, edit(mk(1), file(13)), T0 + 10);
+        send(&a, &mut b, T0 + 20);
+        let p = b.plan();
+        assert_eq!(p.steps.len(), 1, "a new record starts fresh");
+        assert!(p.waits.is_empty());
+    }
+
+    #[test]
+    fn a_held_record_is_a_wait_with_its_card() {
+        let (mut a, mut b) = (pc("A"), pc("B"));
+        b.set_trust("A", Trust::AskFirst);
+        act(&mut a, edit(mk(1), file(12)), T0);
+        send(&a, &mut b, T0);
+        let p = b.plan();
+        assert!(p.steps.is_empty());
+        let card = b.reviews()[0].id;
+        assert_eq!(p.waits, vec![(mk(1), Wait::Review(card))]);
+    }
+
+    #[test]
+    fn the_pack_plan_reads_the_members_last_status() {
+        let (a, mut b, _d) = pair();
+        let mut status = a.my_status();
+        status.edited_configs = vec!["a.toml".into(), "b.toml".into()];
+        status.game_running = true;
+        b.members.insert("A".into(), status);
+        let mode = PackMode { here: ConfigMode::Keep, friends: ConfigMode::Keep, keep_off: true };
+        let p = b.pack_plan("cf:100/8700", mode);
+        assert_eq!(p.friends.len(), 1);
+        assert_eq!(p.friends[0].kept_files, 2);
+        assert!(p.friends[0].waits_for_game);
+    }
+
+    #[test]
+    fn my_status_carries_what_the_plan_shows() {
+        let mut e = pc("A");
+        e.applied.insert(Key::Pack, Value::Text("cf:100/8600".into()));
+        e.applied.insert(mk(4), Value::PackOff);
+        e.edited_configs = vec!["c.toml".into()];
+        e.game_running = true;
+        let s = e.my_status();
+        assert_eq!(s.pack, "cf:100/8600");
+        assert_eq!(s.off_pack_mods, vec![mk(4)]);
+        assert_eq!(s.edited_configs, vec!["c.toml".to_string()]);
+        assert!(s.game_running);
     }
 }

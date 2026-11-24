@@ -9,7 +9,6 @@ use hopper_core::synccore::{Status, Value};
 /// fails. The first and third land on B named A, the second retries, and
 /// nothing goes out as B's change.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w25_one_failed_file_keeps_everyones_names() {
     let mut g = three();
     g.fail_fetch("B", &m(2), Outcome::Failed("connection reset".into()));
@@ -26,7 +25,6 @@ fn w25_one_failed_file_keeps_everyones_names() {
 /// Covers W26, C5. A mod site is down for B: the step retries after its
 /// back-off and lands, and A's other changes weren't held up meanwhile.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w26_a_site_down_retries_without_blocking_others() {
     let mut g = three();
     g.fail_fetch("B", &m(1), Outcome::Retry { after_secs: 300 });
@@ -43,7 +41,6 @@ fn w26_a_site_down_retries_without_blocking_others() {
 /// B's by-hand queue once, is not retried forever, and B's other changes
 /// land.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w27_blocked_download_goes_to_by_hand_once() {
     let mut g = three();
     g.fail_fetch("B", &m(7), Outcome::Blocked);
@@ -110,7 +107,6 @@ fn c4_a_restart_before_applying_applies_once() {
 /// Covers C5. GitHub's hourly limit: B's link-sourced mod waits with the
 /// limit's back-off, and the group's CurseForge changes keep landing.
 #[test]
-#[ignore = "sync-rewrite"]
 fn c5_a_rate_limit_backs_off_per_key() {
     use hopper_core::synccore::Key;
     let mut g = three();
