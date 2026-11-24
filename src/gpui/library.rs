@@ -2166,13 +2166,19 @@ impl LibraryView {
         let fold = HeaderFold { folder: lv >= 3, settings: lv >= 4, history: lv >= 7 };
         let mut key_parts: Vec<String> = Vec::new();
         let pack_update = store.pack_update(inst).cloned().map(|f| {
-            let full = format!("Update pack to {}", f.display_name);
-            key_parts.push(full.clone());
+            // The version as the tag under the pack's name says it; the
+            // file's full name when none can be read from it.
+            let pack_name = inst.pack.as_ref().map(|p| p.name.as_str()).unwrap_or_default();
+            let (short, full) = match hopper::grouppack::update_label(pack_name, &f) {
+                Some(v) => (format!("Update pack to {v}"), format!("Update pack to {}", f.display_name)),
+                None => (format!("Update pack to {}", f.display_name), format!("Update pack to {}", f.display_name)),
+            };
+            key_parts.push(short.clone());
             let lead = Button::new("update-pack")
                 .outline()
                 .icon(Icon::new(IconName::Download).text_color(primary));
             let lead = match lv {
-                0 => lead.label(full),
+                0 => lead.label(short).tooltip(full),
                 1 => lead.label("Update pack").tooltip(full),
                 _ => lead.tooltip(full),
             };

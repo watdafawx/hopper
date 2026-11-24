@@ -109,7 +109,8 @@ pub fn group_look(status: &Status, pulling: bool, pull_failed: bool, left_out: b
         return g(Tone::Bad, Alert, "Sync failed", "Failed").fixed();
     }
     let look = match status {
-        Status::InStep { .. } => g(Tone::Good, Check, "In sync", "In sync"),
+        // Beside the server's "In sync with <server>": say who this one is with.
+        Status::InStep { .. } => g(Tone::Good, Check, "In sync with friends", "In sync"),
         Status::Checking => g(Tone::Busy, Spin, "Checking…", "Checking…").busy(),
         Status::Updating { from, .. } => {
             Look::new(Source::Group, Tone::Busy, Spin, format!("Updating with {} changes", whose(from)), "Updating…").busy()
@@ -361,13 +362,14 @@ mod tests {
     #[test]
     fn rest_and_busy_states() {
         let ok = group_look(&Status::InStep { checked: None }, false, false, false);
-        assert_eq!((ok.tone, ok.label.as_str(), ok.busy, ok.fixed), (Tone::Good, "In sync", false, false));
+        assert_eq!((ok.tone, ok.label.as_str(), ok.busy, ok.fixed), (Tone::Good, "In sync with friends", false, false));
+        assert_eq!(ok.short, "In sync");
         let chk = group_look(&Status::Checking, false, false, false);
         assert_eq!((chk.tone, chk.busy), (Tone::Busy, true));
         // Pull now running makes any state busy, and keeps its words.
         let pull = group_look(&Status::InStep { checked: None }, true, false, false);
         assert!(pull.busy);
-        assert_eq!(pull.label, "In sync");
+        assert_eq!(pull.label, "In sync with friends");
     }
 
     #[test]

@@ -221,6 +221,24 @@ pub fn version_name(pack: &str, file: &crate::cf::File) -> String {
     short_version(pack, &file.display_name)
 }
 
+/// A pack version as the instance page's version tag shows it: "8.6" is
+/// "v8.6", a name that doesn't start with a digit stays as it is.
+pub fn version_tag(version: &str) -> String {
+    if version.starts_with(|c: char| c.is_ascii_digit()) { format!("v{version}") } else { version.to_string() }
+}
+
+/// The button's version for a pack file ("v8.6"), the same words as the tag
+/// under the pack's name. `None` when no version can be read from the file,
+/// so the caller shows the file's full name.
+pub fn update_label(pack: &str, file: &crate::cf::File) -> Option<String> {
+    let v = version_name(pack, file);
+    // "8-1.78.1" is the file name's pack number glued to the version: not clean.
+    if v.is_empty() || !v.chars().any(|c| c.is_ascii_digit()) || v.contains(|c: char| c.is_whitespace() || c == '-' || c == '_') {
+        return None;
+    }
+    Some(version_tag(&v))
+}
+
 /// The toast and the task's note once the group's pack version is in:
 /// "McFawx updated All the Mods 10 to 8.6. Your edits were kept."
 pub fn says_done(who: &str, pack: &str, version: &str, back: bool) -> String {
@@ -287,9 +305,10 @@ impl Due {
         }
     }
 
-    /// The button: "Update pack to 8.6".
+    /// The button: "Update pack to v8.6" (the version as the page's tag says it).
     pub fn action(&self) -> String {
-        if self.back { format!("Move pack back to {}", self.version) } else { format!("Update pack to {}", self.version) }
+        let v = version_tag(&self.version);
+        if self.back { format!("Move pack back to {v}") } else { format!("Update pack to {v}") }
     }
 }
 
@@ -337,8 +356,25 @@ mod tests {
             wait: Wait::Game,
         };
         assert_eq!(d.title(), "McFawx updated All the Mods 10 to 8.6");
-        assert_eq!(d.action(), "Update pack to 8.6");
+        assert_eq!(d.action(), "Update pack to v8.6");
+        assert_eq!(Due { back: true, ..d.clone() }.action(), "Move pack back to v8.6");
         assert_eq!(short_version("All the Mods 10", "All the Mods 10-8.6"), "8.6");
+    }
+
+    #[test]
+    fn the_update_button_names_the_version_like_the_tag() {
+        let file = |name: &str, display: &str| crate::cf::File { file_name: name.into(), display_name: display.into(), ..Default::default() };
+        let label = |pack: &str, name: &str, display: &str| update_label(pack, &file(name, display));
+        assert_eq!(label("All the Mods 10", "All the Mods 10-8.6.zip", "All the Mods 10-8.6"), Some("v8.6".into()));
+        assert_eq!(label("All the Mods 10", "ATM10-8.6.zip", "All the Mods 10-8.6"), Some("v8.6".into()));
+        assert_eq!(label("Fabulously Optimized", "Fabulously.Optimized-13.6.0.zip", "13.6.0 for 26.1.2"), Some("v13.6.0".into()));
+        // A pack number glued to the version isn't clean: full name instead.
+        assert_eq!(label("TNP Limitless 8", "TNP-Limitless-8-1.78.1.zip", "Limitless 8 - v1.78.1"), None);
+        assert_eq!(label("TNP Limitless 8", "pack.zip", "Limitless 8 - v1.78.1"), Some("v1.78.1".into()));
+        // No version anywhere: the caller keeps the full name.
+        assert_eq!(label("Pack", "pack.zip", "Pack"), None);
+        assert_eq!(version_tag("8.6"), "v8.6");
+        assert_eq!(version_tag("v1.78.1"), "v1.78.1");
     }
 
     #[test]
