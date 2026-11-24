@@ -3969,6 +3969,7 @@ impl BrowseView {
             None => format!("Open on {}", if m.modrinth.is_some() { "Modrinth" } else { "CurseForge" }),
         };
         let site_fg = if origin.is_some() { theme.foreground } else { site_color(m.modrinth.is_some()) };
+        let site_fg_plain = theme.foreground;
         // The viewer shows the full image; the strip's small copy stands in
         // while it loads.
         let gallery: Vec<crate::image_viewer::Shot> = m
@@ -4046,39 +4047,17 @@ impl BrowseView {
                             .child({
                                 // Open on the site, and copy the link beside
                                 // it: the same page, one click away.
-                                let link = page.clone();
-                                let site = Button::new("site")
-                                    .small()
-                                    .outline()
-                                    .text_color(site_fg)
-                                    .map(|b| match &origin {
-                                        // GitHub's logo for a mod from GitHub; a
-                                        // plain link icon for other links.
-                                        Some(o) => match o.kind {
-                                            hopper::sources::Kind::GitHub => match crate::brand::git_host_icon("GitHub") {
-                                                Some(i) => b.icon(i),
-                                                None => b.icon(IconName::ExternalLink),
-                                            },
-                                            _ => b.icon(IconName::ExternalLink),
-                                        },
-                                        None => b.icon(crate::brand::site_icon(m.modrinth.is_some())),
-                                    })
-                                    .label(site_label)
-                                    .on_click(move |_, _, cx| cx.open_url(&page));
-                                widgets::split_icon(
-                                    widgets::split_lead(site),
-                                    "copy-link",
-                                    IconName::Copy,
-                                    gpui_kit::component::Size::Small,
-                                    site_fg,
-                                    "Copy link",
-                                    move |_, window, cx| {
-                                        crate::clip_watch::ignore(&link);
-                                        cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
-                                        window.push_notification(Notification::success("Copied the link."), cx);
+                                // GitHub's logo for a mod from GitHub; a
+                                // plain link icon for other links.
+                                let icon = match &origin {
+                                    Some(o) => match o.kind {
+                                        hopper::sources::Kind::GitHub => crate::brand::git_host_icon("GitHub")
+                                            .unwrap_or_else(|| IconName::ExternalLink.into()),
+                                        _ => IconName::ExternalLink.into(),
                                     },
-                                )
-                                .into_any_element()
+                                    None => crate::brand::site_icon(m.modrinth.is_some()),
+                                };
+                                widgets::link_pill("site", icon, site_label, page, site_fg).into_any_element()
                             })
                             .children(self.server_badge(m, "detail-server".into(), true, cx))
                             .children(m.links.extra().into_iter().map(|(label, url)| {
@@ -4092,13 +4071,7 @@ impl BrowseView {
                                     "Discord" => IconName::MessageCircle.into(),
                                     host => crate::brand::git_host_icon(host).unwrap_or_else(|| IconName::Code.into()),
                                 };
-                                Button::new(ElementId::Name(format!("link:{label}").into()))
-                                    .small()
-                                    .ghost()
-                                    .icon(icon)
-                                    .label(label)
-                                    .tooltip(url.clone())
-                                    .on_click(move |_, _, cx| cx.open_url(&url))
+                                widgets::link_pill(label, icon, label, url, site_fg_plain)
                             }))
                     ),
             )
