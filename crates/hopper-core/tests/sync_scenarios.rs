@@ -24,6 +24,14 @@
 //!
 //! Tests named `gap_*` describe behaviour the desktop doesn't have yet and
 //! fail until it does (see `.claude/changes/sync-scenarios/card.md`).
+//!
+//! `rewrite::` holds the scenarios for the rewritten core
+//! (design/sync-rewrite.md), in `tests/sync_scenarios/`. They are in-memory
+//! and ignored as `sync-rewrite` until their phase lands; add
+//! `--skip rewrite::` to the run above meanwhile.
+
+#[path = "sync_scenarios/mod.rs"]
+mod rewrite;
 
 use hopper_core as hopper;
 
