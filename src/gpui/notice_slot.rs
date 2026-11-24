@@ -108,8 +108,6 @@ pub struct Notice {
     /// Its details open the first time it shows (the player can close them
     /// and they stay closed): for a list the player needs to see.
     pub open_new: bool,
-    /// A thin bar along the strip's bottom edge while something runs.
-    pub progress: Option<f32>,
     /// The ✕. Ignored for [`Tier::Stop`]: those stay until fixed.
     pub dismiss: Option<Dismiss>,
     /// When it happened (unix seconds), for the order within a tier; 0 when
@@ -130,7 +128,6 @@ impl Notice {
             actions: Vec::new(),
             details: None,
             open_new: false,
-            progress: None,
             dismiss: None,
             since: 0,
         }
@@ -183,11 +180,6 @@ impl Notice {
     /// Opens the details the first time the notice shows ([`Notice::open_new`]).
     pub fn open_new(mut self) -> Self {
         self.open_new = true;
-        self
-    }
-
-    pub fn progress(mut self, p: Option<f32>) -> Self {
-        self.progress = p.map(|p| p.clamp(0., 1.));
         self
     }
 
@@ -459,10 +451,7 @@ fn strip(mut n: Notice, fit: Fit, subjects: bool, more: Option<AnyElement>, stat
                 .children(toggle_btn)
                 .children(close)
                 .children(more),
-        )
-        .when_some(n.progress, |r, p| {
-            r.child(div().absolute().left_0().bottom_0().h(px(2.)).w(relative(p)).bg(color))
-        });
+        );
     v_flex()
         .w_full()
         .gap_1()

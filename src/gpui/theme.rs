@@ -393,6 +393,9 @@ pub fn apply(name: &str, mode: u8, zoom: u16, cx: &mut App) {
         (None, None) => (true, hopper_dark(), Backdrop::Opaque),
     };
     Theme::change(if dark { ThemeMode::Dark } else { ThemeMode::Light }, None, cx);
+    // Toasts open bottom right, off the hero's Play / Stop button (the
+    // kit's default is top right, right over it).
+    Theme::update(cx, |t| t.notification.placement = Anchor::BottomRight);
     if let Some(c) = config {
         Theme::update(cx, |t| t.apply_config(&Rc::new(c)));
     }

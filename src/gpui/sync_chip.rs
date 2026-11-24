@@ -46,8 +46,13 @@ pub struct Section {
     pub line: SharedString,
     /// A bar under the line (0..=1) while something is taken in.
     pub progress: Option<f32>,
+    /// More to show under the line (a list with mod links, say), drawn when
+    /// the popover opens.
+    pub body: Option<Body>,
     pub actions: Vec<Action>,
 }
+
+pub type Body = Rc<dyn Fn(&mut App) -> AnyElement>;
 
 /// One chip: how it looks and what its popover says.
 #[derive(Clone)]
@@ -93,6 +98,7 @@ pub fn glyph_icon(g: Glyph) -> IconName {
         Glyph::Down => IconName::Download,
         Glyph::Up => IconName::Upload,
         Glyph::Differ => IconName::ArrowLeftRight,
+        Glyph::Restart => IconName::RefreshCw,
     }
 }
 
@@ -271,9 +277,11 @@ pub fn render(chip: &Chip, form: Form, _cx: &App) -> AnyElement {
 /// optional bar and its buttons (one filled at most).
 fn body(sections: &[Section], cx: &mut App) -> AnyElement {
     let theme = cx.theme().clone();
+    // A section with a list of its own needs more room for it.
+    let width = if sections.iter().any(|s| s.body.is_some()) { 24.0 } else { 19.5 };
     v_flex()
-        .w(rems(19.5))
-        .max_w(rems(19.5))
+        .w(rems(width))
+        .max_w(rems(width))
         .gap_3()
         .children(sections.iter().enumerate().map(|(i, s)| {
             v_flex()
@@ -288,6 +296,7 @@ fn body(sections: &[Section], cx: &mut App) -> AnyElement {
                         ),
                     )
                 })
+                .when_some(s.body.clone(), |c, b| c.child(b(cx)))
                 .when(!s.actions.is_empty(), |c| {
                     c.child(h_flex().flex_wrap().gap_2().pt_1().children(s.actions.iter().enumerate().map(|(j, a)| {
                         let run = a.run.clone();
@@ -312,13 +321,13 @@ pub fn more_pill(hidden: usize, names: String, cx: &App) -> AnyElement {
 /// g-*: the group's chip, s-*: the server's, both-*: the two together.
 pub const PREVIEWS: &[&str] = &[
     "g-in-sync", "g-checking", "g-updating", "g-sending", "g-behind", "g-offline", "g-failed", "g-needs", "s-in-sync", "s-differ", "s-comparing",
-    "s-pushing", "s-offline", "s-blocked", "s-failed", "both-ok", "both-busy", "both-needs", "both-long",
+    "s-pushing", "s-offline", "s-blocked", "s-failed", "s-wont", "dl-waiting", "dl-working", "dl-stuck", "rs-changed", "rs-waiting", "both-ok", "both-busy", "both-needs", "both-long",
 ];
 
 /// Made-up chips for a preview state, no network, no real group or server.
 pub fn preview(name: &str) -> Vec<Chip> {
     use hopper::groupstatus::Status;
-    use hopper::syncchip::{ServerState, Work, group_look, server_look};
+    use hopper::syncchip::{DownloadState, ServerState, Work, download_look, group_look, server_look};
     let noop: Run = Rc::new(|_, _| {});
     let make = |id: &str, look: Look, title: &str, line: &str, progress: Option<f32>, primary: &str| Chip {
         id: id.to_string().into(),
@@ -327,6 +336,7 @@ pub fn preview(name: &str) -> Vec<Chip> {
             title: title.to_string().into(),
             line: line.to_string().into(),
             progress,
+            body: None,
             actions: vec![Action { label: primary.to_string().into(), icon: Some(IconName::RefreshCw), primary: true, disabled: false, run: noop.clone() }],
         }],
         look,
@@ -361,6 +371,7 @@ pub fn preview(name: &str) -> Vec<Chip> {
             ServerState::Comparing => (format!("Comparing with {other}"), "Looking at both mod lists."),
             ServerState::Working(_) => (format!("Sending to {other}"), "It takes a moment. Nothing else to do."),
             ServerState::Offline => (format!("{other} is offline"), "Can't reach it. Hopper tries again by itself."),
+            ServerState::WontJoin => (format!("{other} turns this pack away"), "NeoForge: 21.1.172 in this pack, 21.1.200 on the server"),
             ServerState::Failed => ("Couldn't compare".to_string(), "The server didn't answer the way Hopper expected."),
         };
         let progress = matches!(state, ServerState::Working(_)).then_some(0.4);
@@ -368,7 +379,50 @@ pub fn preview(name: &str) -> Vec<Chip> {
     };
     const NAME: &str = "Skyblock Server";
     const LONG: &str = "All the Mods 10 - To the Sky Survival";
+    // The Downloads chip: files waiting, the window working, files that didn't come.
+    let downloads = |state: DownloadState| {
+        let look = download_look(&state);
+        let (title, line, progress) = match &state {
+            DownloadState::Waiting { files } => (format!("{files} files to download in your browser"), "Their authors only allow downloads from the CurseForge website.", None),
+            DownloadState::Working { done, total } => (
+                format!("Downloading from CurseForge… {} of {total}", done + 1),
+                "Downloading Create · 62%",
+                Some(0.4),
+            ),
+            DownloadState::Stuck => ("Some files didn't come".to_string(), "Create didn't download. Retry opens the window again.", None),
+        };
+        let label = match state {
+            DownloadState::Working { .. } => "Show window",
+            DownloadState::Stuck => "Retry",
+            DownloadState::Waiting { .. } => "Download 3",
+        };
+        let mut chip = make("downloads", look, &title, line, progress, label);
+        for a in &mut chip.sections[0].actions {
+            a.icon = None;
+        }
+        chip
+    };
+    // The Restart chip: what changed while the game runs.
+    let restart = |changed: bool| {
+        let look = hopper::syncchip::restart_look(changed, "game");
+        let (title, line) = if changed {
+            ("Changed while the game runs", "Restart it to load the changes.")
+        } else {
+            ("Waiting for the game to close", "2 old files the game still has open will be removed when it closes.")
+        };
+        let mut chip = make("restart", look, title, line, None, "Hide");
+        for a in &mut chip.sections[0].actions {
+            a.icon = None;
+            a.primary = false;
+        }
+        chip
+    };
     match name.split_once('-') {
+        Some(("rs", "changed")) => vec![restart(true)],
+        Some(("rs", _)) => vec![restart(false)],
+        Some(("dl", "working")) => vec![downloads(DownloadState::Working { done: 1, total: 3 })],
+        Some(("dl", "stuck")) => vec![downloads(DownloadState::Stuck)],
+        Some(("dl", _)) => vec![downloads(DownloadState::Waiting { files: 3 })],
         Some(("g", n)) => vec![g(n)],
         Some(("s", n)) => vec![server(
             match n {
@@ -378,6 +432,7 @@ pub fn preview(name: &str) -> Vec<Chip> {
                 "offline" => ServerState::Offline,
                 "blocked" => ServerState::Differ { mods: 3, blocked: true },
                 "failed" => ServerState::Failed,
+                "wont" => ServerState::WontJoin,
                 _ => ServerState::InSync,
             },
             NAME,

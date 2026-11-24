@@ -604,7 +604,6 @@ impl AddonsView {
         let dups: Vec<&hopper::install::Duplicate> = self.missing.dups.iter().filter(|d| d.is_problem()).collect();
         let notes: Vec<&hopper::install::Duplicate> = self.missing.dups.iter().filter(|d| d.is_note()).collect();
         let queued = self.missing.queued;
-        let (off, on) = (self.missing.switch_off, self.missing.switch_on);
         let place = inst.root.to_string_lossy();
         if !dups.is_empty() {
             let rows = self.dup_rows(inst, &dups, false, cx);
@@ -643,31 +642,6 @@ impl AddonsView {
         }
         if !notes.is_empty() {
             out.extend(self.dup_note(inst, &notes, &place, cx));
-        }
-        // Old files and switches waiting for the game to close (the problem
-        // notice above says it for its own files).
-        if dups.is_empty() && queued + off + on > 0 {
-            let s = |n: usize| if n == 1 { "" } else { "s" };
-            let mut said = Vec::new();
-            if queued > 0 {
-                said.push(format!("{queued} old file{} the game still has open will be removed when it closes.", s(queued)));
-            }
-            if off > 0 {
-                said.push(format!("{off} mod{} the game has open will be turned off when it closes.", s(off)));
-            }
-            if on > 0 {
-                said.push(format!("{on} mod{} the game has open will be turned on when it closes.", s(on)));
-            }
-            let text = said.join(" ");
-            let key = hopper::settings::notice_key(&place, "queued", &text);
-            if !notice_slot::hidden(&self.store, &key, cx) {
-                out.push(
-                    Notice::new("queued", Tier::Info, "Waiting for the game to close")
-                        .icon(IconName::Hourglass)
-                        .subject(text)
-                        .dismiss_key(&self.store, key),
-                );
-            }
         }
         out
     }
@@ -1892,25 +1866,80 @@ impl AddonsView {
         )
     }
 
-    /// "Restart the game to use them": only once mods or packs changed
-    /// while it runs, until closed or the game restarts.
-    pub(crate) fn restart_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
-        if !self.store.read(cx).changed_while_running(&inst.root) {
+    /// Old files and switches waiting for the game to close, in words (the
+    /// problem notice says it for its own files). `None` when nothing
+    /// waits, a problem says it, or the player hid it.
+    fn waiting_line(&self, inst: &Instance, cx: &App) -> Option<(String, String)> {
+        if self.missing.root.as_ref() != Some(&inst.root) || self.missing.dups.iter().any(|d| d.is_problem()) {
             return None;
         }
-        let root = inst.root.clone();
-        let store = self.store.clone();
-        Some(
-            Notice::new("restart", Tier::Info, "Changed while the game runs")
-                .icon(IconName::RefreshCw)
-                .subject("Restart it to load the changes")
-                .dismiss(move |_, cx| {
-                    store.update(cx, |s, cx| {
-                        s.dismiss_changed_while_running(&root);
-                        cx.notify();
-                    });
-                }),
-        )
+        let (queued, off, on) = (self.missing.queued, self.missing.switch_off, self.missing.switch_on);
+        if queued + off + on == 0 {
+            return None;
+        }
+        let s = |n: usize| if n == 1 { "" } else { "s" };
+        let mut said = Vec::new();
+        if queued > 0 {
+            said.push(format!("{queued} old file{} the game still has open will be removed when it closes.", s(queued)));
+        }
+        if off > 0 {
+            said.push(format!("{off} mod{} the game has open will be turned off when it closes.", s(off)));
+        }
+        if on > 0 {
+            said.push(format!("{on} mod{} the game has open will be turned on when it closes.", s(on)));
+        }
+        let text = said.join(" ");
+        let key = hopper::settings::notice_key(&inst.root.to_string_lossy(), "queued", &text);
+        (!notice_slot::hidden(&self.store, &key, cx)).then_some((text, key))
+    }
+
+    /// The Restart chip while the game runs: mods or packs changed under it
+    /// ("restart to load"), and old files and switches that wait for it to
+    /// close. Each part has its Hide, as the strips had their ✕.
+    pub(crate) fn restart_chip(&self, inst: &Instance, cx: &App) -> Option<crate::sync_chip::Chip> {
+        use crate::sync_chip::{Action, Chip, Section};
+        let changed = self.store.read(cx).changed_while_running(&inst.root);
+        let waiting = self.waiting_line(inst, cx);
+        if !changed && waiting.is_none() {
+            return None;
+        }
+        let hide = |label: &str, run: crate::sync_chip::Run| Action { label: label.to_string().into(), icon: None, primary: false, disabled: false, run };
+        let mut sections = Vec::new();
+        if changed {
+            let (store, root) = (self.store.clone(), inst.root.clone());
+            sections.push(Section {
+                title: "Changed while the game runs".into(),
+                line: "Restart it to load the changes.".into(),
+                progress: None,
+                body: None,
+                actions: vec![hide(
+                    "Hide",
+                    std::rc::Rc::new(move |_, cx| {
+                        store.update(cx, |s, cx| {
+                            s.dismiss_changed_while_running(&root);
+                            cx.notify();
+                        })
+                    }),
+                )],
+            });
+        }
+        if let Some((text, key)) = waiting {
+            let store = self.store.clone();
+            sections.push(Section {
+                title: "Waiting for the game to close".into(),
+                line: text.into(),
+                progress: None,
+                body: None,
+                actions: vec![hide(
+                    "Hide",
+                    std::rc::Rc::new(move |w, cx| {
+                        store.update(cx, |s, cx| s.hide_notice(&key, cx));
+                        w.refresh();
+                    }),
+                )],
+            });
+        }
+        Some(Chip { id: "restart".into(), look: hopper::syncchip::restart_look(changed, "game"), progress: None, sections })
     }
 
     /// Named sets of disabled mods to switch between.

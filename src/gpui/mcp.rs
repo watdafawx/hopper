@@ -3,6 +3,7 @@
 //! can click, hover and type in this window without desktop control.
 
 use crate::app::{AppView, Page};
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 use hopper::mcp::{self, Command, Reply, Request, text};
 use serde_json::{Value, json};
@@ -352,7 +353,7 @@ fn key_name(name: &str) -> Option<&'static str> {
     })
 }
 
-/// `{tab, instance, view, search, server}`, like the dev arguments.
+/// `{tab, instance, view, search, server, chips, toast}`, like the dev arguments.
 fn navigate(app: &mut AppView, v: &Value, window: &mut Window, cx: &mut Context<AppView>) {
     let s = |k: &str| v[k].as_str().map(str::to_string);
     // Server sync is a server's Sync tab now: "sync" still goes there.
@@ -387,6 +388,17 @@ fn navigate(app: &mut AppView, v: &Value, window: &mut Window, cx: &mut Context<
         let (inst, view) = (s("instance"), s("view"));
         app.library
             .update(cx, |l, cx| l.navigate(inst.as_deref(), view.as_deref(), cx));
+    }
+    // {"chips": "s-differ+run"}: made-up hero chips (see `sync_chip::PREVIEWS`),
+    // "off" puts the real ones back; {"toast": "text"} shows a toast.
+    if let Some(name) = s("chips") {
+        app.store.update(cx, |st, cx| {
+            st.sync_chip_preview = (name != "off").then_some(name);
+            cx.notify();
+        });
+    }
+    if let Some(text) = s("toast") {
+        window.push_notification(gpui_kit::component::notification::Notification::info(text), cx);
     }
     if s("dialog").as_deref() == Some("accounts") {
         crate::accounts::open(app.store.clone(), window, cx);

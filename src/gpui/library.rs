@@ -2075,65 +2075,6 @@ impl LibraryView {
         });
     }
 
-    fn pending_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
-        let s = self.store.read(cx);
-        let mut pending = s.pending(&inst.root).to_vec();
-        // When the group sync strip is showing ByHand, it already offers the
-        // same Download / Show files controls for the group's pending mods:
-        // don't show a second notice for the same files.
-        if matches!(s.group_status(&inst.root), Some(hopper::groupstatus::Status::ByHand { .. })) {
-            let group = s.group_pending(&inst.root);
-            pending.retain(|p| !group.iter().any(|g| g.file_name == p.file_name && g.file_id == p.file_id));
-        }
-        if pending.is_empty() {
-            return None;
-        }
-        // While the download window works on them: one progress for all,
-        // and each file's step under Show files.
-        let (fetch, _) = s.fetch_files(&inst.root);
-        let (root, n) = (inst.root.clone(), pending.len());
-        let running = fetch.as_ref().filter(|v| v.running());
-        let title = match &fetch {
-            Some(v) if v.running() => format!("Downloading from CurseForge…{}", if v.total > 1 { format!(" {} of {}", (v.done + 1).min(v.total), v.total) } else { String::new() }),
-            _ if n == 1 => format!("{} to download in your browser", pending[0].name),
-            _ => format!("{n} files to download in your browser"),
-        };
-        let subject = match &fetch {
-            Some(v) => v.detail(),
-            None => "Their authors only allow downloads from the CurseForge website".to_string(),
-        };
-        let progress = running.map(|v| v.progress.unwrap_or(0.0));
-        let urls: Vec<String> = pending.iter().map(|p| p.url.clone()).filter(|u| !u.is_empty()).collect();
-        let (store, root2) = (self.store.clone(), root.clone());
-        let main = fetch.clone();
-        let show_files = crate::fetch_progress::show_files_button("pending-show", self.store.clone(), root.clone(), pending);
-        let (st, r) = (self.store.clone(), root.clone());
-        let check = cx.listener(move |this, _: &ClickEvent, _, cx| this.store.read(cx).finish_pack(&root));
-        Some(
-            Notice::new("pending", Tier::Choice, title)
-                .icon(if running.is_some() { IconName::Hourglass } else { IconName::Download })
-                .subject(subject)
-                .progress(progress)
-                .primary(move |fit| crate::fetch_progress::download_button("pending-open-all", store.clone(), root2.clone(), urls.clone(), main.clone(), fit))
-                .action(show_files)
-                .action(
-                    Button::new("pending-check")
-                        .small()
-                        .ghost()
-                        .label("Check now")
-                        .tooltip("Hopper checks Downloads every few seconds; this re-runs the pack's install too")
-                        .on_click(check),
-                )
-                // Forgets them: Hopper stops waiting for these files.
-                .dismiss(move |_, cx| {
-                    st.update(cx, |s, cx| {
-                        s.forget_pending(&r);
-                        cx.notify();
-                    })
-                }),
-        )
-    }
-
     /// The History button for `root`, made once per open instance.
     fn history_button(&self, root: &Path, cx: &mut Context<Self>) -> Entity<crate::history_button::HistoryButton> {
         let mut slot = self.history_btn.borrow_mut();
@@ -2444,6 +2385,12 @@ impl LibraryView {
             };
             pill_names.push(format!("Running · {up}").into());
             pills.push(widgets::pill(format!("Running · {up}"), theme.success, true).into_any_element());
+        }
+        // `--dialog sync-chip --state NAME+run`: a made-up Running pill, to
+        // see the hero with and without it.
+        else if store.sync_chip_preview.as_deref().is_some_and(|n| n.ends_with("+run")) {
+            pill_names.push("Running · 4m".into());
+            pills.push(widgets::pill("Running · 4m", theme.success, true).into_any_element());
         }
         if store.is_busy(&inst.root) {
             pill_names.push("Working".into());
@@ -3097,10 +3044,23 @@ impl LibraryView {
             }
             self.server.update(cx, |p, cx| p.chip(false, cx))
         });
+        // The pre-join check (the server would turn the pack away, or has
+        // other mods) is part of that chip: red, and its list in the popover.
+        let server_chip = crate::join_help::into_chip(&self.store, &inst.root, server_chip, cx);
         let made_up = self.store.read(cx).sync_chip_preview.clone();
         self.sync_chips = match made_up {
-            Some(name) => crate::sync_chip::preview(&name),
-            None => [crate::group_pack::group_chip(&self.store, &inst.root, cx), server_chip].into_iter().flatten().collect(),
+            Some(name) => crate::sync_chip::preview(name.strip_suffix("+run").unwrap_or(&name)),
+            None => [
+                crate::group_pack::group_chip(&self.store, &inst.root, cx),
+                server_chip,
+                // Files from the CurseForge website, and the window getting them.
+                crate::downloads_chip::chip(&self.store, &inst.root, cx),
+                // What changed while the game runs, and what waits for it to close.
+                self.addons.read(cx).restart_chip_for(&inst.root, cx),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
         }
         .into_iter()
         .filter_map(|c| crate::sync_chip::settled(c, window, cx))
@@ -3108,8 +3068,6 @@ impl LibraryView {
         let (header, tab_tools) = self.header(&inst, cx);
         let hint = self.server_hint(&inst, cx);
         let cf_change = self.cf_change_bar(&inst, cx);
-        let pending = self.pending_banner(&inst, cx);
-        let pre_join = crate::join_help::pre_join_bar(&self.store, &inst.root, cx);
         let group_pack = crate::group_pack::group_status_bar(&self.store, &inst.root, cx);
         let stuck = {
             let view = cx.entity().downgrade();
@@ -3136,9 +3094,7 @@ impl LibraryView {
         let mut notices: Vec<Notice> = Vec::new();
         notices.extend(stuck);
         notices.extend(cf_change);
-        notices.extend(pending);
         notices.extend(group_pack);
-        notices.extend(pre_join);
         let root = inst.root.clone();
         notices.extend(self.addons.update(cx, |a, cx| a.notices(&root, cx)));
         notices.extend(hint);

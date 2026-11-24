@@ -28,6 +28,17 @@ export function serverLook(state, other = '') {
   }
 }
 
+// "Restart to load" while the server runs: what changed since it started loads only after a
+// restart. It stands alone beside the sync chips (never merged with them) and needs nothing now.
+export function restartLook(changed, what = 'server') {
+  return changed
+    ? look('restart', 'busy', 'restart', 'Restart to load', 'Restart')
+    : look('restart', 'quiet', 'behind', `Waiting for the ${what} to close`, 'Waiting');
+}
+export const standsAlone = (l) => l.source === 'restart';
+const aloneForm = (level) => (level === 0 ? 'full' : level === 1 ? 'short' : 'icon');
+export { aloneForm };
+
 // Both chips as one "Sync" chip: the worse tone wins, and it can't fold if either can't.
 export function merged(a, b) {
   const w = TONE_RANK[b.tone] > TONE_RANK[a.tone] ? b : a;
@@ -79,12 +90,16 @@ export function plan(fixed, plain, level) {
 const CHIP_PAD = 16 + 14 + 5;
 const GAP = 6;
 const width = (c, form) => (form === 'icon' ? 16 + 14 : CHIP_PAD + Math.ceil((form === 'short' ? c.short : c.label).length * 6.4));
-export function levelFor(chips, room) {
+export function levelFor(all, room) {
+  const chips = all.filter((c) => !standsAlone(c));
+  const alone = all.filter(standsAlone);
   const fixed = chips.map((c) => c.fixed);
-  const top = maxLevel(fixed, 0);
+  const top = Math.max(maxLevel(fixed, 0), alone.length ? 2 : 0);
   for (let lv = 0; lv <= top; lv++) {
     const p = plan(fixed, 0, lv);
     const parts = p.merged ? [width(merged(chips[0], chips[1]), p.merged)] : p.forms.filter(Boolean).map((f, i) => width(chips[i], f));
+    // The stand-alone chips follow the sync chips, and fold with them.
+    if (!p.chipsFolded) parts.push(...alone.map((c) => width(c, aloneForm(lv))));
     const total = parts.reduce((a, b) => a + b, 0) + GAP * Math.max(0, parts.length - 1);
     if (!parts.length || total <= room) return lv;
   }

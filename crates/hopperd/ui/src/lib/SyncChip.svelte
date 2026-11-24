@@ -3,25 +3,31 @@
   // in the header's chip row. Click opens a small popover with the details and its actions.
   // Narrow, the label shortens, then it is an icon; two chips become one "Sync" chip listing both;
   // chips that can't fold ("Sync failed") stay. Words and fold order: lib/syncchip.js.
-  import { CircleCheck, LoaderCircle, Clock, CircleOff, CircleAlert, Download, Upload, ArrowLeftRight } from '@lucide/svelte';
-  import { merged, plan, levelFor } from './syncchip.js';
+  import { CircleCheck, LoaderCircle, Clock, CircleOff, CircleAlert, Download, Upload, ArrowLeftRight, RotateCcw } from '@lucide/svelte';
+  import { merged, plan, levelFor, standsAlone, aloneForm } from './syncchip.js';
 
-  // chips: [{ look, title, line, actions: [{ label, primary, run }], progress }]
+  // chips: [{ look, title, line, actions: [{ label, primary, disabled, run }], progress }]. The
+  // Restart chip stands alone beside the sync chips ([syncchip.js] `standsAlone`).
   let { chips = [], room = 0 } = $props();
 
-  const ICON = { check: CircleCheck, spin: LoaderCircle, behind: Clock, offline: CircleOff, alert: CircleAlert, down: Download, up: Upload, differ: ArrowLeftRight };
+  const ICON = { check: CircleCheck, spin: LoaderCircle, behind: Clock, offline: CircleOff, alert: CircleAlert, down: Download, up: Upload, differ: ArrowLeftRight, restart: RotateCcw };
   let open = $state(null);
 
   const looks = $derived(chips.map((c) => c.look));
-  const p = $derived(plan(looks.map((l) => l.fixed), 0, levelFor(looks, room > 0 ? room : 1e4)));
-  const both = $derived(looks.length >= 2 ? merged(looks[0], looks[1]) : null);
-  // What is drawn: the merged chip (listing every section), or each chip that hasn't folded.
-  const shown = $derived(
-    p.merged
-      ? [{ look: both, form: p.merged, sections: chips, key: 'both' }]
-      : chips.map((c, i) => ({ look: c.look, form: p.forms[i], sections: [c], key: `c${i}` })).filter((x) => x.form),
-  );
-  const hidden = $derived(p.chipsFolded);
+  const level = $derived(levelFor(looks, room > 0 ? room : 1e4));
+  const syncs = $derived(chips.filter((c) => !standsAlone(c.look)));
+  const alone = $derived(chips.filter((c) => standsAlone(c.look)));
+  const p = $derived(plan(syncs.map((c) => c.look.fixed), 0, level));
+  const both = $derived(syncs.length >= 2 ? merged(syncs[0].look, syncs[1].look) : null);
+  // What is drawn: the merged chip (listing every section), or each chip that hasn't folded; then
+  // the stand-alone ones, which fold with the sync chips.
+  const shown = $derived([
+    ...(p.merged
+      ? [{ look: both, form: p.merged, sections: syncs, key: 'both' }]
+      : syncs.map((c, i) => ({ look: c.look, form: p.forms[i], sections: [c], key: `c${i}` })).filter((x) => x.form)),
+    ...(p.chipsFolded ? [] : alone.map((c, i) => ({ look: c.look, form: aloneForm(level), sections: [c], key: `a${i}` }))),
+  ]);
+  const hidden = $derived(p.chipsFolded ? p.chipsFolded + alone.length : 0);
   const text = (x) => (x.form === 'full' ? x.look.label : x.form === 'short' ? x.look.short : '');
   const tip = (x) => x.sections.map((c) => c.look.label).join(' · ');
 </script>
@@ -39,7 +45,7 @@
         </button>
         {#if open === x.key}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <div class="popover spop" role="dialog" aria-label="Sync details" onclick={(e) => e.stopPropagation()}>
+          <div class="popover spop" role="dialog" aria-label="Details" onclick={(e) => e.stopPropagation()}>
             {#each x.sections as c, i (i)}
               {#if i}<div class="spsep"></div>{/if}
               <div class="spsec">
@@ -47,7 +53,7 @@
                 {#if c.line}<span class="muted small">{c.line}</span>{/if}
                 {#if c.progress != null}<span class="spprog"><i style:width="{Math.round(c.progress * 100)}%"></i></span>{/if}
                 {#if c.actions?.length}
-                  <span class="spacts">{#each c.actions as a (a.label)}<button class="btn sm" class:go={a.primary} onclick={() => (a.run(), (open = null))}>{a.label}</button>{/each}</span>
+                  <span class="spacts">{#each c.actions as a (a.label)}<button class="btn sm" class:go={a.primary} disabled={a.disabled} onclick={() => (a.run(), (open = null))}>{a.label}</button>{/each}</span>
                 {/if}
               </div>
             {/each}

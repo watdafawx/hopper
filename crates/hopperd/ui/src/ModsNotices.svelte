@@ -1,14 +1,12 @@
 <script>
-  // The Mods tab's notices on every tab of a server page, as desktop's: changed
-  // while it runs, a mod in twice, client-only mods on. The list comes from the
+  // The Mods tab's notices on every tab of a server page, as desktop's: a mod in
+  // twice, client-only mods on. ("Changed while it runs" is a chip in the header.) The list comes from the
   // Mods tab while it's open; on other tabs it's read here.
-  import { RotateCcw } from '@lucide/svelte';
   import { untrack } from 'svelte';
   import Notice from './lib/Notice.svelte';
   import { mainClass } from './lib/noticeorder.js';
   import { api } from './lib/api.js';
   import { onChange } from './lib/changes.svelte.js';
-  import { askPower } from './lib/consoleKit.js';
   import { removeMods } from './lib/modops.js';
   import { modsShared } from './lib/modsShared.svelte.js';
   import { twiceOf, olderOf, clientOnOf, briefNames } from './lib/modsnotes.js';
@@ -45,14 +43,6 @@
   const clientOn = $derived(clientOnOf(mods));
   const chip = $derived(tabOpen ? shared.chip?.() : null);
 
-  // "Restart to load": only once mods changed while it runs (the panel
-  // compares with what it started with). Closed until the next change.
-  let restartClosed = $state(false);
-  const changedSince = $derived(server.changed_since_start);
-  $effect(() => {
-    if (!changedSince) restartClosed = false;
-  });
-
   async function keepNewest() {
     const reload = () => (shared?.reload ? shared.reload() : load());
     if (await removeMods(base, older, alive, { onUndo: reload })) reload();
@@ -60,11 +50,6 @@
   const showClient = () => (shared?.show ? shared.show('client') : openMods('client'));
 </script>
 
-{#if changedSince && !restartClosed}
-  <Notice id="mods-restart" tier="info" icon={RotateCcw} title="Changed while the server runs" subject="Restart it to load the changes" onclose={() => (restartClosed = true)}>
-    {#snippet primary(fit)}<button class={mainClass(fit)} disabled={server.state === 'stopping'} onclick={() => askPower(server, 'restart')}><RotateCcw size={13} />Restart</button>{/snippet}
-  </Notice>
-{/if}
 {#if twice.length}
   <!-- A mod in twice stops Fabric and Quilt from loading; NeoForge and Forge load one. -->
   <Notice id="mods-twice" tier={/^(fabric|quilt)/i.test(data?.loader || '') ? 'stop' : 'info'} title="{twice.length} mod{twice.length === 1 ? ' is' : 's are'} in twice" subject={briefNames(twice.map((l) => l[0].name))}>
