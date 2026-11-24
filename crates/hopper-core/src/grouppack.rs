@@ -368,8 +368,12 @@ mod tests {
         assert_eq!(label("All the Mods 10", "All the Mods 10-8.6.zip", "All the Mods 10-8.6"), Some("v8.6".into()));
         assert_eq!(label("All the Mods 10", "ATM10-8.6.zip", "All the Mods 10-8.6"), Some("v8.6".into()));
         assert_eq!(label("Fabulously Optimized", "Fabulously.Optimized-13.6.0.zip", "13.6.0 for 26.1.2"), Some("v13.6.0".into()));
-        // A pack number glued to the version isn't clean: full name instead.
-        assert_eq!(label("TNP Limitless 8", "TNP-Limitless-8-1.78.1.zip", "Limitless 8 - v1.78.1"), None);
+        // The pack's own number before the version ("8-1.78.1") isn't part of it.
+        assert_eq!(label("TNP Limitless 8", "TNP-Limitless-8-1.78.1.zip", "Limitless 8 - v1.78.1"), Some("v1.78.1".into()));
+        assert_eq!(label("TNP Limitless 8", "TNP-Limitless-8-1.80.0.zip", "Limitless 8 - v1.80.0"), Some("v1.80.0".into()));
+        assert_eq!(label("RLCraft", "RLCraft-v2.9.3.zip", "RLCraft v2.9.3"), Some("v2.9.3".into()));
+        assert_eq!(label("Create Live", "Create-Live-1.5.zip", "Create Live 1.5"), Some("v1.5".into()));
+        assert_eq!(label("Vanilla+", "Vanilla+ 4.1.zip", "Vanilla+ 4.1"), Some("v4.1".into()));
         assert_eq!(label("TNP Limitless 8", "pack.zip", "Limitless 8 - v1.78.1"), Some("v1.78.1".into()));
         // No version anywhere: the caller keeps the full name.
         assert_eq!(label("Pack", "pack.zip", "Pack"), None);
@@ -386,5 +390,6 @@ mod tests {
         assert_eq!(version_name("All the Mods 10", &file("All the Mods 10-8.6.zip", "All the Mods 10-8.6")), "8.6");
         // A file name without a version: the display name's.
         assert_eq!(version_name("All the Mods 10", &file("pack.zip", "All the Mods 10-8.6")), "8.6");
+        assert_eq!(version_name("TNP Limitless 8", &file("TNP-Limitless-8-1.78.1.zip", "Limitless 8 - v1.78.1")), "1.78.1");
     }
 }

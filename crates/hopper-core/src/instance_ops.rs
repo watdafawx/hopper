@@ -1542,7 +1542,40 @@ pub fn pack_version_label(file_name: &str) -> String {
         .strip_suffix(".zip")
         .or_else(|| file_name.strip_suffix(".jar"))
         .unwrap_or(file_name);
-    crate::scan::short_version(&format!("{stem}.jar"))
+    let v = crate::scan::short_version(&format!("{stem}.jar"));
+    // "TNP-Limitless-8-1.78.1" reads as "8-1.78.1": the pack's own number
+    // glued to the version. A bare whole number before a dash and a dotted
+    // version is that number, not part of the version.
+    if let Some((head, rest)) = v.split_once('-')
+        && !head.is_empty()
+        && head.chars().all(|c| c.is_ascii_digit())
+        && rest.starts_with(|c: char| c.is_ascii_digit())
+        && rest.contains('.')
+    {
+        return rest.to_string();
+    }
+    v
+}
+
+#[cfg(test)]
+mod pack_version_label_tests {
+    use super::pack_version_label;
+
+    #[test]
+    fn real_pack_file_names() {
+        for (file, want) in [
+            ("TNP-Limitless-8-1.78.1.zip", "1.78.1"),
+            ("TNP-Limitless-8-1.80.0.zip", "1.80.0"),
+            ("All the Mods 10-8.6.zip", "8.6"),
+            ("ATM10-8.6.zip", "8.6"),
+            ("Fabulously.Optimized-13.6.0.zip", "13.6.0"),
+            ("Create-Live-1.5.zip", "1.5"),
+            ("RLCraft-v2.9.3.zip", "v2.9.3"),
+            ("Abibliophobia-3.1.0.zip", "3.1.0"),
+        ] {
+            assert_eq!(pack_version_label(file), want, "{file}");
+        }
+    }
 }
 
 #[cfg(test)]
