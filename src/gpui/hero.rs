@@ -147,12 +147,16 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
         Some(f) => {
             let n = h.pills.len();
             let plain = n.saturating_sub(1);
-            let fixed: Vec<bool> = chips.iter().map(|c| c.look.fixed).collect();
-            let max = hopper::syncchip::max_level(&fixed, plain);
+            // The sync chips can become one "Sync" chip; the others (Downloads,
+            // ...) stand alone and follow them.
+            let (sync, alone): (Vec<&crate::sync_chip::Chip>, Vec<&crate::sync_chip::Chip>) = chips.iter().partition(|c| c.look.source.is_sync());
+            let fixed: Vec<bool> = sync.iter().map(|c| c.look.fixed).collect();
+            let extra: Vec<bool> = alone.iter().map(|c| c.look.fixed).collect();
+            let max = hopper::syncchip::max_level_with(&fixed, &extra, plain);
             // The pills' room is what the actions and the art leave the
             // name, both picked above.
             f.pills.context(f.actions.level() as u64 * 2 + no_art as u64);
-            let plan = hopper::syncchip::plan(&fixed, plain, f.pills.level().min(max));
+            let plan = hopper::syncchip::plan_with(&fixed, &extra, plain, f.pills.level().min(max));
             let hidden_plain = plan.plain_folded;
             let hidden = hidden_plain + plan.chips_folded;
             let mut rest: Vec<String> = Vec::new();
@@ -166,14 +170,15 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
                     .map(|s| s.as_ref())
                     .chain(chips.iter().flat_map(|c| [c.look.label.as_str(), c.look.short.as_str()])),
             );
-            let chip_els: Vec<AnyElement> = match (&plan.merged, chips.as_slice()) {
+            let mut chip_els: Vec<AnyElement> = match (&plan.merged, sync.as_slice()) {
                 (Some(form), [a, b]) => vec![crate::sync_chip::render(&crate::sync_chip::Chip::merge(a, b), *form, cx)],
-                _ => chips
+                _ => sync
                     .iter()
                     .zip(plan.forms.iter())
                     .filter_map(|(c, form)| form.map(|form| crate::sync_chip::render(c, form, cx)))
                     .collect(),
             };
+            chip_els.extend(alone.iter().zip(plan.extra_forms.iter()).filter_map(|(c, form)| form.map(|form| crate::sync_chip::render(c, form, cx))));
             f.pills
                 .wrap(
                     "hero-pills",

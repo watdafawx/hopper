@@ -187,6 +187,10 @@ pub fn group_chip<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Conte
     use crate::sync_chip::{Action, Chip, Section};
     let s = store.read(cx);
     let status = s.group_status(root)?;
+    // Files only the website gives are the Downloads chip's.
+    if matches!(status, Status::ByHand { .. }) {
+        return None;
+    }
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let pulling = s.group_pulling(root) || s.group_repairing(root);
     let pulled = s.group_pulled(root).map(|(t, bad)| (t.to_string(), bad));
@@ -261,26 +265,19 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     // Read before `cx` is borrowed mutably for the mod links below.
     let pushing = s.pushing_at(root);
     let repairing = s.group_repairing(root);
-    let by_hand_pending = if matches!(status, Status::ByHand { .. }) { s.group_pending(root) } else { Vec::new() };
-    let by_hand_fetch = if matches!(status, Status::ByHand { .. }) { s.fetch_files(root).0 } else { None };
-    let by_hand_running = by_hand_fetch.as_ref().filter(|v| v.running());
     let in_step = matches!(status, Status::InStep { .. });
     // A strip only for what needs the player (a choice, mods to get). Busy,
     // behind, offline and failed say it in the hero's sync chip
     // ([`group_chip`]): a strip would push the page down and up again.
-    if !hopper::syncchip::group_look(&status, pulling, pulled_bad, !left_out.is_empty()).strip && by_hand_running.is_none() {
+    // Files only the website gives are the Downloads chip's
+    // ([`crate::downloads_chip`]).
+    if matches!(status, Status::ByHand { .. }) || !hopper::syncchip::group_look(&status, pulling, pulled_bad, !left_out.is_empty()).strip {
         return None;
     }
     let key = hopper::settings::notice_key(&root.to_string_lossy(), "group-in-step", "in step");
-    let (mut icon, tier) = look(&status);
-    if by_hand_running.is_some() {
-        icon = IconName::Hourglass;
-    }
+    let (icon, tier) = look(&status);
     let from_pull = pulled.is_some();
-    let detail = match &by_hand_fetch {
-        Some(v) if v.running() || !from_pull => v.detail(),
-        _ => pulled.unwrap_or_else(|| status.detail(now)),
-    };
+    let detail = pulled.unwrap_or_else(|| status.detail(now));
     // "In step" is a word only we use: say what it means, and don't repeat it
     // in the line under it. Mods match the group; updates are a separate thing.
     // What Pull now just did ("Took in 2 changes ...") is kept as it is: it
@@ -295,17 +292,10 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
         // The sentence goes under the strip, open: on a narrow page a subject
         // on the strip would be cut to nothing.
         ("Couldn't check".to_string(), String::new())
-    } else if let Some(v) = by_hand_running {
-        (
-            format!("Downloading from CurseForge…{}", if v.total > 1 { format!(" {} of {}", (v.done + 1).min(v.total), v.total) } else { String::new() }),
-            detail,
-        )
     } else {
         (status.title(), detail)
     };
-    let mut n = Notice::new("group-status", tier, title)
-        .icon(icon)
-        .progress(by_hand_running.map(|v| v.progress.unwrap_or(0.0)));
+    let mut n = Notice::new("group-status", tier, title).icon(icon);
     n = match &status {
         // The mods it names are links with their icons.
         Status::NeedsMod { needs } if !from_pull => n.subject_rich(detail, needs_line(store, root, needs, cx)),
@@ -415,20 +405,6 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     } else if let Status::ToPush { changes, .. } = status {
         let (store, root) = (store.clone(), root.to_path_buf());
         n = n.primary(move |fit| push_button(&store, vec![root.clone()], changes, pushing, fit, "group-push"));
-    } else if matches!(status, Status::ByHand { .. }) && !by_hand_pending.is_empty() {
-        let urls: Vec<String> = by_hand_pending.iter().map(|p| p.url.clone()).filter(|u| !u.is_empty()).collect();
-        let (store1, root1) = (store.clone(), root.to_path_buf());
-        let fetch = by_hand_fetch.clone();
-        n = n
-            .primary(move |fit| {
-                crate::fetch_progress::download_button("group-pending-download", store1.clone(), root1.clone(), urls.clone(), fetch.clone(), fit)
-            })
-            .action(crate::fetch_progress::show_files_button(
-                "group-pending-show",
-                store.clone(),
-                root.to_path_buf(),
-                by_hand_pending,
-            ));
     } else if matches!(status, Status::Cant { .. }) && !left_out.is_empty() {
         let (store, root) = (store.clone(), root.to_path_buf());
         n = n.primary(move |fit| {

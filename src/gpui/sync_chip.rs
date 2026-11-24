@@ -320,13 +320,13 @@ pub fn more_pill(hidden: usize, names: String, cx: &App) -> AnyElement {
 /// g-*: the group's chip, s-*: the server's, both-*: the two together.
 pub const PREVIEWS: &[&str] = &[
     "g-in-sync", "g-checking", "g-updating", "g-sending", "g-behind", "g-offline", "g-failed", "g-needs", "s-in-sync", "s-differ", "s-comparing",
-    "s-pushing", "s-offline", "s-blocked", "s-failed", "s-wont", "both-ok", "both-busy", "both-needs", "both-long",
+    "s-pushing", "s-offline", "s-blocked", "s-failed", "s-wont", "dl-waiting", "dl-working", "dl-stuck", "both-ok", "both-busy", "both-needs", "both-long",
 ];
 
 /// Made-up chips for a preview state, no network, no real group or server.
 pub fn preview(name: &str) -> Vec<Chip> {
     use hopper::groupstatus::Status;
-    use hopper::syncchip::{ServerState, Work, group_look, server_look};
+    use hopper::syncchip::{DownloadState, ServerState, Work, download_look, group_look, server_look};
     let noop: Run = Rc::new(|_, _| {});
     let make = |id: &str, look: Look, title: &str, line: &str, progress: Option<f32>, primary: &str| Chip {
         id: id.to_string().into(),
@@ -378,7 +378,33 @@ pub fn preview(name: &str) -> Vec<Chip> {
     };
     const NAME: &str = "Skyblock Server";
     const LONG: &str = "All the Mods 10 - To the Sky Survival";
+    // The Downloads chip: files waiting, the window working, files that didn't come.
+    let downloads = |state: DownloadState| {
+        let look = download_look(&state);
+        let (title, line, progress) = match &state {
+            DownloadState::Waiting { files } => (format!("{files} files to download in your browser"), "Their authors only allow downloads from the CurseForge website.", None),
+            DownloadState::Working { done, total } => (
+                format!("Downloading from CurseForge… {} of {total}", done + 1),
+                "Downloading Create · 62%",
+                Some(0.4),
+            ),
+            DownloadState::Stuck => ("Some files didn't come".to_string(), "Create didn't download. Retry opens the window again.", None),
+        };
+        let label = match state {
+            DownloadState::Working { .. } => "Show window",
+            DownloadState::Stuck => "Retry",
+            DownloadState::Waiting { .. } => "Download 3",
+        };
+        let mut chip = make("downloads", look, &title, line, progress, label);
+        for a in &mut chip.sections[0].actions {
+            a.icon = None;
+        }
+        chip
+    };
     match name.split_once('-') {
+        Some(("dl", "working")) => vec![downloads(DownloadState::Working { done: 1, total: 3 })],
+        Some(("dl", "stuck")) => vec![downloads(DownloadState::Stuck)],
+        Some(("dl", _)) => vec![downloads(DownloadState::Waiting { files: 3 })],
         Some(("g", n)) => vec![g(n)],
         Some(("s", n)) => vec![server(
             match n {

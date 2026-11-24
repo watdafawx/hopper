@@ -40,6 +40,16 @@ pub enum Source {
     Group,
     /// The pack and its server.
     Server,
+    /// Files the pack waits for from the CurseForge website.
+    Downloads,
+}
+
+impl Source {
+    /// A sync chip (the group's or the server's): two of them can become
+    /// one "Sync" chip. The others stand on their own.
+    pub fn is_sync(self) -> bool {
+        matches!(self, Source::Group | Source::Server)
+    }
 }
 
 /// What one chip shows.
@@ -217,6 +227,36 @@ pub fn server_look(state: &ServerState, other: &str) -> Look {
     }
 }
 
+/// Where the files a pack waits for stand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DownloadState {
+    /// `files` wait for the player: their authors only allow the website.
+    Waiting { files: usize },
+    /// Hopper's download window works on them: `done` of `total` are in.
+    Working { done: usize, total: usize },
+    /// Some didn't come; the window is closed.
+    Stuck,
+}
+
+/// The Downloads chip: files from the CurseForge website. Busy while the
+/// window works (the app adds a line along the chip's foot); amber and
+/// fixed while the player has to act.
+pub fn download_look(state: &DownloadState) -> Look {
+    use Glyph::*;
+    let d = |tone, glyph, label: String, short: &str| Look::new(Source::Downloads, tone, glyph, label, short);
+    match state {
+        DownloadState::Waiting { files } => {
+            let label = if *files == 1 { "1 file to download".to_string() } else { format!("{files} files to download") };
+            d(Tone::Warn, Down, label, "To download").fixed()
+        }
+        DownloadState::Working { done, total } => {
+            let label = if *total > 1 { format!("Downloading {} of {total}", (done + 1).min(*total)) } else { "Downloading…".to_string() };
+            d(Tone::Busy, Spin, label, "Downloading…").busy()
+        }
+        DownloadState::Stuck => d(Tone::Warn, Alert, "Download didn't finish".to_string(), "Failed").fixed(),
+    }
+}
+
 /// How bad a tone is, for the one chip two fold into.
 fn rank(t: Tone) -> u8 {
     match t {
@@ -258,6 +298,8 @@ pub struct Plan {
     /// One entry per chip, in order; `None`: it is folded into "+N" (or
     /// into the merged chip when `merged`).
     pub forms: Vec<Option<Form>>,
+    /// The same for the stand-alone chips (Downloads, ...), in order.
+    pub extra_forms: Vec<Option<Form>>,
     /// The two chips are one "Sync" chip in this form (its position is the
     /// first chip's); `forms` are then all `None`.
     pub merged: Option<Form>,
@@ -279,25 +321,37 @@ pub struct Plan {
 /// 4. chips that need nothing fold into "+N", the last first, then the other
 ///    pills; a chip that [`Look::fixed`] stays (as its icon).
 pub fn max_level(fixed: &[bool], plain: usize) -> usize {
-    if fixed.is_empty() {
+    max_level_with(fixed, &[], plain)
+}
+
+/// [`max_level`] with chips that stand alone beside the sync chips
+/// (`extra[i]`: chip i never folds): they shorten and become icons with the
+/// others, and fold into "+N" with them, but are never merged.
+pub fn max_level_with(fixed: &[bool], extra: &[bool], plain: usize) -> usize {
+    if fixed.is_empty() && extra.is_empty() {
         return plain;
     }
-    let two = fixed.len() >= 2;
-    let icon_at = if two { 3 } else { 2 };
-    // Two chips fold as the one merged chip.
-    let foldable = if two { usize::from(!fixed.iter().any(|f| *f)) } else { usize::from(!fixed[0]) };
+    let icon_at = if fixed.len() >= 2 { 3 } else { 2 };
+    // The chips fold together, and only when none needs the player.
+    let foldable = usize::from(!fixed.iter().chain(extra).any(|f| *f));
     icon_at + foldable + plain
 }
 
 pub fn plan(fixed: &[bool], plain: usize, level: usize) -> Plan {
+    plan_with(fixed, &[], plain, level)
+}
+
+/// [`plan`] with chips that stand alone (see [`max_level_with`]).
+pub fn plan_with(fixed: &[bool], extra: &[bool], plain: usize, level: usize) -> Plan {
     let n = fixed.len();
-    let max = max_level(fixed, plain);
+    let m = extra.len();
+    let max = max_level_with(fixed, extra, plain);
     let level = level.min(max);
     let two = n >= 2;
     let icon_at = if two { 3 } else { 2 };
-    let merged_fixed = fixed.iter().any(|f| *f);
-    let mut p = Plan { forms: vec![Some(Form::Full); n], merged: None, plain_folded: 0, chips_folded: 0 };
-    if n == 0 {
+    let any_fixed = fixed.iter().chain(extra).any(|f| *f);
+    let mut p = Plan { forms: vec![Some(Form::Full); n], extra_forms: vec![Some(Form::Full); m], merged: None, plain_folded: 0, chips_folded: 0 };
+    if n == 0 && m == 0 {
         p.plain_folded = level.min(plain);
         return p;
     }
@@ -306,7 +360,10 @@ pub fn plan(fixed: &[bool], plain: usize, level: usize) -> Plan {
         1 => Form::Short,
         _ => Form::Icon,
     };
-    if two {
+    p.extra_forms = vec![Some(form); m];
+    if n == 0 {
+        // Only stand-alone chips.
+    } else if two {
         match level {
             0 | 1 => p.forms = vec![Some(form); n],
             2 => {
@@ -325,14 +382,12 @@ pub fn plan(fixed: &[bool], plain: usize, level: usize) -> Plan {
         let mut steps = level - icon_at;
         // Chips that need nothing go first, the last first. A merged chip
         // that needs the player stays, and so no chip folds at all.
-        if steps > 0 && !(if two { merged_fixed } else { fixed[0] }) {
+        if steps > 0 && !any_fixed {
             steps -= 1;
-            if two {
-                p.merged = None;
-            } else {
-                p.forms[0] = None;
-            }
-            p.chips_folded = n;
+            p.merged = None;
+            p.forms.iter_mut().for_each(|f| *f = None);
+            p.extra_forms.iter_mut().for_each(|f| *f = None);
+            p.chips_folded = n + m;
         }
         p.plain_folded = steps.min(plain);
     }
@@ -432,6 +487,39 @@ mod tests {
         assert!(m.fixed);
         assert_eq!(m.tone, Tone::Bad);
         assert_eq!(plan(&[false, true], 0, 99).merged, Some(Form::Icon));
+    }
+
+    #[test]
+    fn downloads_words_and_folds() {
+        let w = download_look(&DownloadState::Waiting { files: 3 });
+        assert_eq!((w.label.as_str(), w.short.as_str(), w.tone), ("3 files to download", "To download", Tone::Warn));
+        assert!(w.fixed && !w.busy && w.source == Source::Downloads);
+        assert_eq!(download_look(&DownloadState::Waiting { files: 1 }).label, "1 file to download");
+        let r = download_look(&DownloadState::Working { done: 1, total: 3 });
+        assert_eq!(r.label, "Downloading 2 of 3");
+        assert!(r.busy && !r.fixed);
+        // The count never runs past the total while the last one finishes.
+        assert_eq!(download_look(&DownloadState::Working { done: 3, total: 3 }).label, "Downloading 3 of 3");
+        assert_eq!(download_look(&DownloadState::Working { done: 0, total: 1 }).label, "Downloading…");
+        assert!(download_look(&DownloadState::Stuck).fixed);
+        // Alone, a busy chip shortens, becomes an icon, then folds.
+        let p = plan_with(&[], &[false], 0, 0);
+        assert_eq!(p.extra_forms, vec![Some(Form::Full)]);
+        assert_eq!(plan_with(&[], &[false], 0, 1).extra_forms, vec![Some(Form::Short)]);
+        assert_eq!(plan_with(&[], &[false], 0, 2).extra_forms, vec![Some(Form::Icon)]);
+        let gone = plan_with(&[], &[false], 0, 3);
+        assert_eq!((gone.extra_forms, gone.chips_folded), (vec![None], 1));
+        // One that needs the player never folds, and nothing else does for it.
+        assert_eq!(max_level_with(&[], &[true], 0), 2);
+        assert_eq!(plan_with(&[], &[true], 0, 9).extra_forms, vec![Some(Form::Icon)]);
+        // Beside a sync chip: they fold together, last of all.
+        assert_eq!(max_level_with(&[false], &[false], 0), 3);
+        let both = plan_with(&[false], &[false], 0, 3);
+        assert_eq!((both.forms, both.extra_forms, both.chips_folded), (vec![None], vec![None], 2));
+        // A fixed one keeps them all.
+        assert_eq!(plan_with(&[false], &[true], 0, 9).forms, vec![Some(Form::Icon)]);
+        // Without stand-alone chips nothing changes.
+        assert_eq!(plan(&[false, true], 0, 0), plan_with(&[false, true], &[], 0, 0));
     }
 
     #[test]
