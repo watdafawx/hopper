@@ -300,6 +300,19 @@ pub fn run_chip(id: &str, problem: hopper::syncchip::RunProblem, notices: Vec<No
     })
 }
 
+/// The popover body of a chip that owns one page notice (the group chip): its
+/// rows as the list shows them, without the tier headings.
+pub fn body(id: &str, producer: Producer) -> crate::sync_chip::Body {
+    let key: SharedString = format!("body:{id}").into();
+    Rc::new(move |window, cx| list(&key, &producer, false, window, cx))
+}
+
+/// The ids of the notices that stop play: a chip that has one opens its
+/// popover once by itself.
+pub fn stop_ids(notices: &[Notice]) -> Vec<SharedString> {
+    notices.iter().filter(|n| n.tier == Tier::Stop).map(|n| n.id.clone()).collect()
+}
+
 /// The popover's content: the page's notices as the grouped list (`grouped`),
 /// or just their rows (the run state chip's one problem).
 fn list(id: &SharedString, producer: &Producer, grouped: bool, window: &mut Window, cx: &mut App) -> AnyElement {
@@ -420,7 +433,7 @@ fn list_row(n: Notice, state: &Entity<SlotState>, open: &HashSet<SharedString>, 
                         .child(div().text_sm().font_semibold().truncate().child(n.title.clone()))
                         .when_some(n.subject.clone(), |c, s| match n.rich {
                             Some(rich) => c.child(
-                                h_flex().min_w_0().overflow_hidden().items_center().gap_1().text_xs().text_color(theme.muted_foreground).child(rich),
+                                div().w_full().min_w_0().text_xs().text_color(theme.muted_foreground).child(rich),
                             ),
                             None => c.child(widgets::caption(s, cx).text_xs()),
                         }),

@@ -4,8 +4,9 @@
 //! (one function for both apps); this draws it.
 //!
 //! Click opens a popover with the details and the actions (Pull now, Push,
-//! ...). A state that needs the player (choices, downloads) keeps its strip
-//! as well (`group_pack::group_status_bar`); the chip only says it too.
+//! ...). A state that needs the player (a choice, mods to get, changes to
+//! pull or push) shows its notice (`group_pack::group_status_bar`) there, with
+//! its buttons.
 //!
 //! The chip is the same width in a state and its next one only by
 //! accident: it sits last in the pill row, so a new width moves nothing

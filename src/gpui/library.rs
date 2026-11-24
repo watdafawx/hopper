@@ -2013,10 +2013,8 @@ impl LibraryView {
         let Some(inst) = self.store.read(cx).instance(root).cloned() else { return Vec::new() };
         let hint = self.server_hint(&inst, cx);
         let cf_change = self.cf_change_bar(&inst, cx);
-        let group_pack = crate::group_pack::group_status_bar(&self.store, &inst.root, cx);
         let mut notices: Vec<Notice> = Vec::new();
         notices.extend(cf_change);
-        notices.extend(group_pack);
         notices.extend(self.addons.update(cx, |a, cx| a.notices(root, cx)));
         notices.extend(hint);
         notices
