@@ -114,5 +114,7 @@ pub fn chip(store: &Entity<Store>, root: &Path, cx: &App) -> Option<Chip> {
         look,
         progress,
         sections: vec![Section { title: title.into(), line: line.into(), progress, body: None, actions }],
+        auto_open: Vec::new(),
+        width: None,
     })
 }

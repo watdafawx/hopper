@@ -45,11 +45,11 @@
   import ShareLog from './ShareLog.svelte';
   import PackUpdate from './PackUpdate.svelte';
   import MovedBanner from './MovedBanner.svelte';
-  import NoticeSlot from './lib/NoticeSlot.svelte';
+  import NoticeList from './lib/NoticeList.svelte';
   import SyncChip from './lib/SyncChip.svelte';
   import { previewChips } from './lib/syncchipPreview.js';
   import { restartLook } from './lib/syncchip.js';
-  import { provideNotices } from './lib/notices.svelte.js';
+  import { provideNotices, needsChip, runChip } from './lib/notices.svelte.js';
   import { provideModsShared } from './lib/modsShared.svelte.js';
   import ModsNotices from './ModsNotices.svelte';
   import { openMove } from './lib/moveDialog.svelte.js';
@@ -62,8 +62,8 @@
   // for this panel. Everything on the page then talks to that panel. Shell
   // keys the page on panel and server, so it never changes under the page.
   let { id, tab = 'console', path = '', panel: panelProp = null } = $props();
-  // One slot above the tabs for every notice the page has (desktop's
-  // notice_slot.rs): the crash, a stuck start, alerts, a move, the Mods tab's.
+  // Every notice the page has (the crash, a stuck start, alerts, a move, the Mods tab's) is one
+  // "Needs you" chip in the header, its list in the popover (desktop's notice_slot.rs).
   const notices = provideNotices();
   const modsShared = provideModsShared();
   const panel = untrack(() => panelProp);
@@ -152,7 +152,10 @@
         }
       : null,
   );
-  const headChips = $derived([...syncChips, ...(restartChip ? [restartChip] : [])]);
+  const needs = $derived(needsChip(notices, id, needsList));
+  // A start that looks stuck, or a crash: the chip right after the state pill.
+  const run = $derived(runChip(notices, id, runList));
+  const headChips = $derived([...(run ? [run] : []), ...syncChips, ...(needs ? [needs] : []), ...(restartChip ? [restartChip] : [])]);
   // The relay setup dialog (this panel's own servers, owner only).
   let relaySetup = $state(false);
   let playerMenu = $state(null);
@@ -290,6 +293,9 @@
   });
 </script>
 
+{#snippet needsList()}<NoticeList {notices} />{/snippet}
+{#snippet runList()}<NoticeList {notices} run />{/snippet}
+
 {#if !s}
   <div class="pad muted">{feed.servers.length ? 'No server with that id.' : panel && panel.state !== 'ok' ? `Can't reach ${panel.name} right now.` : 'Loading…'}</div>
 {:else}
@@ -359,7 +365,6 @@
   <CrashStrip server={s} hidden={tab === 'logs'} seeWhy={(rel) => nav('logs', rel)} />
   <StuckStrip server={s} hidden={tab === 'logs'} seeWhy={(rel) => nav('logs', rel)} />
   <ModsNotices server={s} openMods={(chip) => ((modsShared.want = chip), nav('mods'))} />
-  <NoticeSlot {notices} />
 
   <nav class="tabs">
     {#each TABS as [t, label, Icon] (t)}
@@ -465,7 +470,8 @@
   .head > :global(*:not(.drift)) { position: relative; z-index: 1; }
   .ttl { flex: 1; min-width: 0; }
   .acts { flex: none; }
-  .chips { flex-wrap: nowrap; min-width: 0; overflow: hidden; }
+  /* No clip here: a chip's popover hangs below the row. The title and the plain chips cut themselves. */
+  .chips { flex-wrap: nowrap; min-width: 0; }
   .chips h2 { flex: none; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chips > :global(.chip) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   @container shead (max-width: 620px) {

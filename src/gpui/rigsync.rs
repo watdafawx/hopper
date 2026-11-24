@@ -983,6 +983,19 @@ impl SyncPanel {
         self.rescan(cx);
     }
 
+    /// The paired server's crash as a red chip in the instance's hero, next
+    /// to the run state pill, with the crash notice (what stopped it, roll
+    /// back, See why) in its popover. `None` when it didn't crash.
+    pub fn crash_chip(&mut self, root: &std::path::Path, cx: &mut Context<Self>) -> Option<crate::sync_chip::Chip> {
+        self.strip.update(cx, |st, cx| st.show(root.to_path_buf(), cx));
+        let notices: Vec<crate::notice_slot::Notice> = self.strip.update(cx, |st, cx| st.notice(cx)).into_iter().collect();
+        let view = cx.entity().downgrade();
+        let producer: crate::notice_slot::Producer = std::rc::Rc::new(move |_, cx| {
+            view.update(cx, |p, cx| p.strip.update(cx, |st, cx| st.notice(cx)).into_iter().collect()).unwrap_or_default()
+        });
+        crate::notice_slot::run_chip(&format!("server:{}", root.display()), hopper::syncchip::RunProblem::ServerCrashed, notices, producer)
+    }
+
     /// The hero's sync chip for the pair: the instance's with its server
     /// (`on_server_page` false: named by the server) or the server's with
     /// its pack (named by the pack). `None` when there is no pair or no
@@ -1055,7 +1068,7 @@ impl SyncPanel {
                 run: std::rc::Rc::new(move |_, cx| v.update(cx, |p, cx| p.rescan(cx))),
             });
         }
-        Some(Chip { id: "server".into(), look, progress: None, sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions }] })
+        Some(Chip { id: "server".into(), look, progress: None, sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions }], auto_open: Vec::new(), width: None })
     }
 
     /// The server page's Restart chip: mods were synced while it runs, so
@@ -1094,6 +1107,8 @@ impl SyncPanel {
             look: hopper::syncchip::restart_look(true, "server"),
             progress: None,
             sections: vec![Section { title: "Synced while the server runs".into(), line: line.into(), progress: None, body: None, actions }],
+            auto_open: Vec::new(),
+            width: None,
         })
     }
 
@@ -3588,16 +3603,6 @@ impl Render for SyncPanel {
         let side = self.in_instance;
         let header = (!side).then(|| self.header(&server, &inst, cx));
         let sidebar = side.then(|| self.sidebar(&server, &inst, window, cx));
-        // On the Servers page the crash is one line above every tab (see
-        // server_crash.rs) and the card is in Logs & crashes.
-        let crash = if self.in_server_page {
-            None
-        } else {
-            let root = server.root.clone();
-            self.strip.update(cx, |st, cx| st.show(root, cx));
-            let crash = self.strip.update(cx, |st, cx| st.notice(cx));
-            crate::notice_slot::slot("sync-crash", crash.into_iter().collect(), window, cx)
-        };
         let drift = self.drift_banner(cx);
         let drift_chip = self.drift_chip(cx);
         // The console is a section where the panel is set up (in an
@@ -3780,7 +3785,6 @@ impl Render for SyncPanel {
                         .pb_4()
                         .gap_3()
                         .child(sections)
-                        .children(crash)
                         .children(drift)
                         .child(v_flex().flex_1().min_h_0().child(body)),
                 )
@@ -3792,7 +3796,6 @@ impl Render for SyncPanel {
             .when(pad, |c| c.px_6().py_5())
             .gap_3()
             .children(header)
-            .children(crash)
             .child(sections)
             .children(drift)
             .child(v_flex().flex_1().min_h_0().child(body))

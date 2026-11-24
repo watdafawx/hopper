@@ -2041,6 +2041,49 @@ impl ServersView {
             .collect()
     }
 
+    /// The server's own problems, for the chip beside the run state pill
+    /// (and again for the chip's popover, each time it draws): the crash (not
+    /// on Logs & crashes, which shows it in full) and a stuck start.
+    fn run_notices(&self, root: &std::path::Path, cx: &mut Context<Self>) -> Vec<crate::notice_slot::Notice> {
+        let mut notices: Vec<crate::notice_slot::Notice> = Vec::new();
+        if self.tab != TAB_LOGS {
+            self.strip.update(cx, |st, cx| st.show(root.to_path_buf(), cx));
+            notices.extend(self.strip.update(cx, |st, cx| st.notice(cx)));
+        }
+        // The control polls this server every second or two; the store's
+        // copy is slower.
+        let fresh = self.control.read(cx).stats_of(root).cloned();
+        let pstats = fresh.or_else(|| self.store.read(cx).panel_stats(root).cloned());
+        let view = cx.entity().downgrade();
+        notices.extend(crate::stuck::server_stuck_bar(&self.store, root, pstats.as_ref(), &self.control, move |rel, _, cx| {
+            view.update(cx, |this, cx| this.see_crash(rel, cx)).ok();
+        }, cx));
+        notices
+    }
+
+    /// The chip beside the run state pill: red "Crashed" or "Looks stuck ·
+    /// N min", the notice's buttons in its popover.
+    fn run_chip(&self, root: &std::path::Path, cx: &mut Context<Self>) -> Option<crate::sync_chip::Chip> {
+        let notices = self.run_notices(root, cx);
+        let crashed = notices.iter().any(|n| n.id == "srv-crash");
+        let minutes = {
+            let fresh = self.control.read(cx).stats_of(root).cloned();
+            let stats = fresh.or_else(|| self.store.read(cx).panel_stats(root).cloned());
+            stats.and_then(|s| s.stuck).and_then(|r| hopper::syncchip::stuck_minutes(&r.headline))
+        };
+        let problem = if crashed { hopper::syncchip::RunProblem::Crashed } else { hopper::syncchip::RunProblem::Stuck { minutes } };
+        let (view, id) = (cx.entity().downgrade(), root.to_path_buf());
+        let producer: crate::notice_slot::Producer =
+            std::rc::Rc::new(move |_, cx| view.update(cx, |this, cx| this.run_notices(&id, cx)).unwrap_or_default());
+        crate::notice_slot::run_chip(&format!("server:{}", root.display()), problem, notices, producer)
+    }
+
+    /// Every other notice the server has, for its "Needs you" chip (and again
+    /// for the chip's popover, each time it draws): the Mods table's.
+    fn page_notices(&self, root: &std::path::Path, cx: &mut Context<Self>) -> Vec<crate::notice_slot::Notice> {
+        self.mods_table.update(cx, |a, cx| a.notices(root, cx))
+    }
+
     fn detail(&self, s: &ServerInfo, art: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // The sync chip with the server's pack (every tab; the Sync tab's
         // own `show` takes over when it opens).
@@ -2059,6 +2102,19 @@ impl ServersView {
         } else {
             Vec::new()
         };
+        // Every notice the server has that no other chip says, after the
+        // sync chip: "Needs you" (see `page_notices`).
+        let mut chips = chips;
+        if self.store.read(cx).sync_chip_preview.is_none() {
+            let notices = self.page_notices(&s.root, cx);
+            let (view, root) = (cx.entity().downgrade(), s.root.clone());
+            let producer: crate::notice_slot::Producer =
+                std::rc::Rc::new(move |_, cx| view.update(cx, |this, cx| this.page_notices(&root, cx)).unwrap_or_default());
+            let at = chips.iter().take_while(|c| c.look.source.is_sync()).count();
+            chips.splice(at..at, crate::notice_slot::chip(&format!("server:{}", s.root.display()), notices, producer));
+            // The run state's problem comes first: the chip after its pill.
+            chips.splice(0..0, self.run_chip(&s.root, cx));
+        }
         // The paired pack's page, for the Overview.
         let pack_id = self
             .store
@@ -2366,23 +2422,6 @@ impl ServersView {
             },
             cx,
         );
-        let slot = {
-            // One slot above the tabs for every notice the server has,
-            // as on an instance: the crash (not on Logs & crashes, which
-            // shows it in full), a stuck start, the Mods table's.
-            let mut notices: Vec<crate::notice_slot::Notice> = Vec::new();
-            if self.tab != TAB_LOGS {
-                self.strip.update(cx, |st, cx| st.show(s.root.clone(), cx));
-                notices.extend(self.strip.update(cx, |st, cx| st.notice(cx)));
-            }
-            let view = cx.entity().downgrade();
-            notices.extend(crate::stuck::server_stuck_bar(&self.store, &s.root, pstats.as_ref(), &self.control, move |rel, _, cx| {
-                view.update(cx, |this, cx| this.see_crash(rel, cx)).ok();
-            }, cx));
-            let root = s.root.clone();
-            notices.extend(self.mods_table.update(cx, |a, cx| a.notices(&root, cx)));
-            crate::notice_slot::slot("server", notices, window, cx)
-        };
         let body = v_flex()
             .flex_1()
             .min_h_0()
@@ -2390,7 +2429,6 @@ impl ServersView {
             .pt_2()
             .pb_5()
             .map(|c| if self.tab == TAB_OVERVIEW { c.gap_5() } else { c.gap_3() })
-            .children(slot)
             .child({
                 let codes = tabs_for(remote, self.store.read(cx).site_of(&s.root).is_some(), self.store.read(cx).is_hosted(&s.root));
                 let danger = cx.theme().danger;

@@ -397,6 +397,10 @@ fn navigate(app: &mut AppView, v: &Value, window: &mut Window, cx: &mut Context<
             cx.notify();
         });
     }
+    // {"stuck": "<instance name>"}: a made-up stuck report ("off" clears it).
+    if let Some(name) = s("stuck") {
+        app.store.update(cx, |st, cx| st.preview_stuck(if name == "off" { "" } else { &name }, cx));
+    }
     if let Some(text) = s("toast") {
         window.push_notification(gpui_kit::component::notification::Notification::info(text), cx);
     }

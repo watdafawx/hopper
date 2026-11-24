@@ -33,6 +33,10 @@ pub enum Glyph {
     Differ,
     /// An arrow round a circle: restart to load what changed.
     Restart,
+    /// A lower-case "i": notes for the player's information.
+    Note,
+    /// A clock: a start that makes no progress.
+    Stuck,
 }
 
 /// Which side the chip is about.
@@ -46,6 +50,11 @@ pub enum Source {
     Downloads,
     /// The game or server runs with what it had when it started.
     Restart,
+    /// Every notice no other chip says ("Needs you").
+    Attention,
+    /// The game or server itself has a problem: its start looks stuck, or it
+    /// crashed. It sits right after the run state's own pill.
+    Run,
 }
 
 impl Source {
@@ -274,6 +283,125 @@ pub fn restart_look(changed: bool, what: &str) -> Look {
         r(Tone::Busy, Restart, "Restart to load".to_string(), "Restart")
     } else {
         r(Tone::Quiet, Behind, format!("Waiting for the {what} to close"), "Waiting")
+    }
+}
+
+/// How much a notice matters (the page's notice tiers, most first).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Need {
+    /// The game or server won't start or load until it's fixed.
+    Stop,
+    /// The player has to decide something.
+    Choice,
+    /// For the player's information; nothing breaks.
+    Info,
+}
+
+/// The longest title the chip shows in full; a longer one is cut with "…"
+/// (its full text is in the popover and the tooltip).
+const ATTENTION_TITLE: usize = 28;
+
+/// The "Needs you" chip: every notice the page has that no other chip says.
+/// `needs` are their tiers, `title` the first one's (the most important). One
+/// notice shows its own title ("2 mods in twice"), more say "N need you"; the
+/// colour is the worst tier's (red for a problem that stops play, amber for a
+/// choice). Only notes left make a quiet grey "N notes" that may fold. `None`
+/// when there is nothing to say.
+pub fn attention_look(needs: &[Need], title: &str) -> Option<Look> {
+    use Glyph::*;
+    let worst = needs.iter().copied().min()?;
+    let n = needs.len();
+    if worst == Need::Info {
+        let label = if n == 1 { "1 note".to_string() } else { format!("{n} notes") };
+        return Some(Look::new(Source::Attention, Tone::Quiet, Note, label.clone(), label));
+    }
+    let (tone, short) = if worst == Need::Stop { (Tone::Bad, "Stops play") } else { (Tone::Warn, "Needs you") };
+    let label = if n == 1 {
+        let t = title.trim();
+        if t.chars().count() > ATTENTION_TITLE {
+            let cut: String = t.chars().take(ATTENTION_TITLE - 1).collect();
+            format!("{}…", cut.trim_end())
+        } else {
+            t.to_string()
+        }
+    } else {
+        format!("{n} need you")
+    };
+    Some(Look::new(Source::Attention, tone, Alert, label, if n == 1 { short } else { "Needs you" }).fixed())
+}
+
+/// What is wrong with the game or server that runs (or ran).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunProblem {
+    /// The start makes no progress; `minutes` is how long, when known.
+    Stuck { minutes: Option<u32> },
+    /// It stopped with a crash.
+    Crashed,
+    /// The paired server stopped with a crash (said on its pack's page).
+    ServerCrashed,
+}
+
+/// The whole minutes in a stuck report's headline ("... (no progress for 4
+/// min, CPU idle)"); `None` when it only counts seconds or doesn't say.
+pub fn stuck_minutes(headline: &str) -> Option<u32> {
+    let rest = headline.split("no progress for ").nth(1)?;
+    let mut words = rest.split_whitespace();
+    let n: u32 = words.next()?.parse().ok()?;
+    words.next()?.trim_end_matches([',', ')']).eq("min").then_some(n)
+}
+
+/// The chip next to the run state pill while the game or server has a
+/// problem: red, never folds, its notice (with Restart, See why) in the
+/// popover.
+pub fn run_look(problem: &RunProblem) -> Look {
+    use Glyph::*;
+    match problem {
+        RunProblem::Stuck { minutes } => {
+            let label = match minutes {
+                Some(m) if *m >= 1 => format!("Looks stuck · {m} min"),
+                _ => "Looks stuck".to_string(),
+            };
+            Look::new(Source::Run, Tone::Bad, Stuck, label, "Stuck").fixed()
+        }
+        RunProblem::Crashed => Look::new(Source::Run, Tone::Bad, Alert, "Crashed", "Crashed").fixed(),
+        RunProblem::ServerCrashed => Look::new(Source::Run, Tone::Bad, Alert, "Server crashed", "Crashed").fixed(),
+    }
+}
+
+/// A problem marked on the mod's own row in the mods list: the mod that needs
+/// something that isn't installed, the one the loader refuses, a pack mod the
+/// paired server lacks. A click on the marker opens the popover of the chip
+/// that lists the problem.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowProblem {
+    /// Needs these mods (names), which aren't installed.
+    Needs(Vec<String>),
+    /// The loader refuses it, or the last crash stopped at it.
+    StopsLoading,
+    /// In the pack, not on this server.
+    NotOnServer(String),
+}
+
+impl RowProblem {
+    /// The marker's words: "Needs Sophisticated Core", "Needs Create +1".
+    pub fn label(&self) -> String {
+        match self {
+            RowProblem::Needs(names) => match names.as_slice() {
+                [] => "Needs a mod".to_string(),
+                [one] => format!("Needs {one}"),
+                [first, rest @ ..] => format!("Needs {first} +{}", rest.len()),
+            },
+            RowProblem::StopsLoading => "Stops loading".to_string(),
+            RowProblem::NotOnServer(server) => format!("Not on {server}"),
+        }
+    }
+
+    /// Red for what stops play, amber for a difference the player may want.
+    pub fn tone(&self) -> Tone {
+        match self {
+            RowProblem::Needs(_) | RowProblem::StopsLoading => Tone::Bad,
+            RowProblem::NotOnServer(_) => Tone::Warn,
+        }
     }
 }
 
@@ -527,6 +655,32 @@ mod tests {
     }
 
     #[test]
+    fn needs_you_words_tone_and_folding() {
+        assert_eq!(attention_look(&[], ""), None);
+        // One notice says its own title; a problem that stops play is red and never folds.
+        let one = attention_look(&[Need::Stop], "2 mods in twice").unwrap();
+        assert_eq!((one.label.as_str(), one.short.as_str(), one.tone, one.source), ("2 mods in twice", "Stops play", Tone::Bad, Source::Attention));
+        assert!(one.fixed && !one.busy && !one.strip && !one.source.is_sync());
+        // A choice is amber and never folds either.
+        let choice = attention_look(&[Need::Info, Need::Choice], "x").unwrap();
+        assert_eq!((choice.label.as_str(), choice.short.as_str(), choice.tone), ("2 need you", "Needs you", Tone::Warn));
+        assert!(choice.fixed);
+        // Many: the worst tier sets the colour.
+        let many = attention_look(&[Need::Info, Need::Stop, Need::Choice], "x").unwrap();
+        assert_eq!((many.label.as_str(), many.tone), ("3 need you", Tone::Bad));
+        // Only notes: quiet grey, and it may fold.
+        let notes = attention_look(&[Need::Info, Need::Info], "x").unwrap();
+        assert_eq!((notes.label.as_str(), notes.tone, notes.fixed, notes.glyph), ("2 notes", Tone::Quiet, false, Glyph::Note));
+        assert_eq!(attention_look(&[Need::Info], "x").unwrap().label, "1 note");
+        // A long title is cut, not left to push the row.
+        let long = attention_look(&[Need::Choice], "Create 6.0.6 needs Flywheel 1.0.0 or newer to load").unwrap();
+        assert!(long.label.chars().count() <= ATTENTION_TITLE && long.label.ends_with('…'), "{}", long.label);
+        // Beside a sync chip: a fixed one keeps every chip; a quiet one folds with them.
+        assert_eq!(plan_with(&[false], &[one.fixed], 0, 9).extra_forms, vec![Some(Form::Icon)]);
+        assert_eq!(plan_with(&[false], &[notes.fixed], 0, 3).extra_forms, vec![None]);
+    }
+
+    #[test]
     fn downloads_words_and_folds() {
         let w = download_look(&DownloadState::Waiting { files: 3 });
         assert_eq!((w.label.as_str(), w.short.as_str(), w.tone), ("3 files to download", "To download", Tone::Warn));
@@ -615,6 +769,40 @@ mod tests {
         let bad = server_look(&ServerState::Failed, "");
         assert!(merged(&a, &bad).fixed);
         assert_eq!(merged(&bad, &a).tone, Tone::Bad);
+    }
+
+    #[test]
+    fn run_problem_words_tone_and_folding() {
+        let stuck = run_look(&RunProblem::Stuck { minutes: Some(4) });
+        assert_eq!((stuck.label.as_str(), stuck.short.as_str(), stuck.tone, stuck.glyph, stuck.source), ("Looks stuck · 4 min", "Stuck", Tone::Bad, Glyph::Stuck, Source::Run));
+        assert!(stuck.fixed && !stuck.busy && !stuck.strip && !stuck.source.is_sync());
+        // Under a minute, or not known: no number.
+        assert_eq!(run_look(&RunProblem::Stuck { minutes: Some(0) }).label, "Looks stuck");
+        assert_eq!(run_look(&RunProblem::Stuck { minutes: None }).label, "Looks stuck");
+        let crashed = run_look(&RunProblem::Crashed);
+        assert_eq!((crashed.label.as_str(), crashed.tone, crashed.fixed), ("Crashed", Tone::Bad, true));
+        assert_eq!(run_look(&RunProblem::ServerCrashed).label, "Server crashed");
+        // It never folds, even with no room.
+        assert_eq!(plan_with(&[false], &[stuck.fixed], 0, 3).extra_forms, vec![Some(Form::Icon)]);
+    }
+
+    #[test]
+    fn row_problem_words_and_tone() {
+        assert_eq!(RowProblem::Needs(vec!["Sophisticated Core".into()]).label(), "Needs Sophisticated Core");
+        assert_eq!(RowProblem::Needs(vec!["Create".into(), "Flywheel".into(), "Jade".into()]).label(), "Needs Create +2");
+        assert_eq!(RowProblem::Needs(Vec::new()).label(), "Needs a mod");
+        assert_eq!(RowProblem::StopsLoading.label(), "Stops loading");
+        assert_eq!(RowProblem::NotOnServer("TNP-LL8".into()).label(), "Not on TNP-LL8");
+        assert_eq!(RowProblem::StopsLoading.tone(), Tone::Bad);
+        assert_eq!(RowProblem::Needs(vec!["A".into()]).tone(), Tone::Bad);
+        assert_eq!(RowProblem::NotOnServer("S".into()).tone(), Tone::Warn);
+    }
+
+    #[test]
+    fn stuck_minutes_from_the_headline() {
+        assert_eq!(stuck_minutes("TNP looks stuck while loading mods (no progress for 4 min, CPU idle)"), Some(4));
+        assert_eq!(stuck_minutes("looks stuck while loading mods (no progress for 45 s, CPU idle)"), None);
+        assert_eq!(stuck_minutes("looks stuck while loading mods"), None);
     }
 
     #[test]

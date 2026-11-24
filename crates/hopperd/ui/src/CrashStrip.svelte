@@ -83,7 +83,7 @@
 </script>
 
 {#if crash && settled && !hidden}
-  <Notice id="srv-crash" tier="stop" title="The server crashed" subject={what} since={crash.when} details={st ? crashDetails : null}>
+  <Notice id="srv-crash" tier="stop" run="crashed" title="The server crashed" subject={what} since={crash.when} details={st ? crashDetails : null}>
     {#snippet primary(fit)}
       {#if changed && !back}
         <button class={mainClass(fit)} disabled={busy || alive} title={alive ? 'Stop the server first' : `${fit.narrow ? rollLabel + '. ' : ''}Swaps in the older copy. The newer one goes to Mods › History.`} onclick={putBack}><Undo2 size={13} />{fit.narrow ? `Roll back ${modName || 'the mod'}` : rollLabel}</button>

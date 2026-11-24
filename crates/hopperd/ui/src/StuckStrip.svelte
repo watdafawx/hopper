@@ -11,6 +11,7 @@
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { power } from './lib/power.js';
+  import { stuckMinutes } from './lib/syncchip.js';
 
   let { server, seeWhy, hidden = false } = $props();
 
@@ -54,7 +55,7 @@
 </script>
 
 {#if r && !hidden}
-  <Notice id="srv-stuck" tier="stop" icon={Clock} title="{server.name} looks stuck {doing}" subject={top ? `${topName} (${top.certainty})` : ''} since={r.when || 0} details={top ? stuckDetails : null}>
+  <Notice id="srv-stuck" tier="stop" run="stuck" minutes={stuckMinutes(r.headline)} icon={Clock} title="{server.name} looks stuck {doing}" subject={top ? `${topName} (${top.certainty})` : ''} since={r.when || 0} details={top ? stuckDetails : null}>
     {#snippet primary(fit)}
       <button class={mainClass(fit)} title="It won't finish on its own; starting again usually gets past it" onclick={() => power(server, 'restart')}><RotateCcw size={13} />{fit.narrow ? 'Restart…' : 'Restart server…'}</button>
     {/snippet}

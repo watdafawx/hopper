@@ -1262,6 +1262,33 @@ impl AddonsView {
         self.missing.list.len() + self.missing.dups.iter().filter(|d| d.is_problem()).count() + self.missing.blockers.len()
     }
 
+    /// What stops play about this mod, for the marker on its row: it needs a
+    /// mod that isn't installed, or the loader refuses it (or the last crash
+    /// stopped at it). Only for problems the "Needs you" chip lists as
+    /// stopping play: a requirement the game loaded fine without is only a note.
+    pub(crate) fn row_stop(&self, file_name: &str) -> Option<hopper::syncchip::RowProblem> {
+        use hopper::syncchip::RowProblem;
+        let root = self.root.as_ref()?;
+        let bare = file_name.trim_end_matches(".disabled");
+        let same = self.missing.root.as_ref() == Some(root);
+        if same && self.missing.loaded_fine.is_none() {
+            let known = self.dep_projects.borrow();
+            let names: Vec<String> = self
+                .missing
+                .list
+                .iter()
+                .filter(|m| m.file_name.eq_ignore_ascii_case(bare))
+                .map(|m| known.get(&m.needs).cloned().flatten().map_or_else(|| m.needs.clone(), |(_, n, _)| n))
+                .collect();
+            if !names.is_empty() {
+                return Some(RowProblem::Needs(names));
+            }
+        }
+        let crash = self.crash_stop.as_ref().is_some_and(|(st, _)| st.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(bare));
+        let blocked = same && self.missing.loaded_fine.is_none() && self.missing.blockers.iter().any(|b| b.file_name.eq_ignore_ascii_case(bare));
+        (crash || blocked).then_some(RowProblem::StopsLoading)
+    }
+
     /// "N problems will stop the game at loading": what the loader refuses
     /// besides missing mods, with Turn off where that fixes it.
     pub(crate) fn blocker_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<Notice> {
@@ -1939,7 +1966,7 @@ impl AddonsView {
                 )],
             });
         }
-        Some(Chip { id: "restart".into(), look: hopper::syncchip::restart_look(changed, "game"), progress: None, sections })
+        Some(Chip { id: "restart".into(), look: hopper::syncchip::restart_look(changed, "game"), progress: None, sections, auto_open: Vec::new(), width: None })
     }
 
     /// Named sets of disabled mods to switch between.

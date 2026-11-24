@@ -1,9 +1,9 @@
-//! The instance page's strip for a pack kept in step with a friends group:
+//! The group chip of the instance hero for a pack kept in step with a friends group:
 //! whether this PC's copy has what the group has, what it waits for if not,
 //! and "Pull now" (`hopper::groupstatus`, `design/group-sync-status.md`).
 //!
 //! The updates themselves run by themselves when they can
-//! (`groupsync::merge`). The strip's main button is for what only the
+//! (`groupsync::merge`). The notice's main button is for what only the
 //! player can do: open the update dialog for a pack version (the game
 //! closed, settings both sides changed, or a failed try), or say yes to
 //! mods from links this PC doesn't trust yet. "Pull now" is always there:
@@ -63,7 +63,7 @@ pub fn why_says(r: &hopper::groupverify::Row) -> String {
 /// The list under the strip when the copy differs from the group: one row
 /// per mod with why, and its own button. Mods the player keeps come last
 /// and have none.
-fn verify_list<V: 'static>(store: &Entity<Store>, root: &Path, v: &hopper::groupverify::Verified, busy: bool, cx: &mut Context<V>) -> AnyElement {
+fn verify_list(store: &Entity<Store>, root: &Path, v: &hopper::groupverify::Verified, busy: bool, cx: &mut App) -> AnyElement {
     use hopper::groupverify::Why;
     let icons: Vec<String> = v.rows.iter().filter_map(|r| store.read(cx).verify_name(&r.key).map(|n| n.2.clone())).filter(|i| !i.is_empty()).collect();
     store.update(cx, |s, _| icons.iter().for_each(|i| s.want_image(i)));
@@ -182,8 +182,9 @@ pub fn pull_button(store: &Entity<Store>, root: &Path, pulling: bool, in_step: b
 /// and in its popover what that means and what can be done. `None` when
 /// the instance isn't a group copy. The chip is the whole story for a
 /// state that needs nothing (busy, behind, offline, failed); a state that
-/// needs the player keeps its strip ([`group_status_bar`]) too.
-pub fn group_chip<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Context<V>) -> Option<crate::sync_chip::Chip> {
+/// needs the player (a choice, mods to get, changes to pull or push) puts
+/// that notice ([`group_status_bar`]) in the popover, with its buttons.
+pub fn group_chip(store: &Entity<Store>, root: &Path, cx: &mut App) -> Option<crate::sync_chip::Chip> {
     use crate::sync_chip::{Action, Chip, Section};
     let s = store.read(cx);
     let status = s.group_status(root)?;
@@ -198,6 +199,26 @@ pub fn group_chip<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Conte
     let left_out = !s.left_out_pins(root).is_empty();
     let pushing = s.pushing_at(root);
     let look = hopper::syncchip::group_look(&status, pulling, pulled_bad, left_out);
+    if look.strip
+        && let Some(notice) = group_status_bar(store, root, cx)
+    {
+        // The notice is asked for again whenever the popover draws, so its
+        // buttons and lists are current. A problem that stops play opens it
+        // once by itself.
+        let auto_open = notice_slot::stop_ids(std::slice::from_ref(&notice));
+        let (st, rt) = (store.clone(), root.to_path_buf());
+        let producer: notice_slot::Producer = Rc::new(move |_, cx| group_status_bar(&st, &rt, cx).into_iter().collect());
+        let body = notice_slot::body(&format!("group:{}", root.display()), producer);
+        return Some(Chip {
+            id: "group".into(),
+            look,
+            progress: None,
+            sections: vec![Section { title: "".into(), line: "".into(), progress: None, body: Some(body), actions: Vec::new() }],
+            auto_open,
+            // As wide as the "Needs you" list: the rows hold mod names and a button.
+            width: Some(32.),
+        });
+    }
     let in_step = matches!(status, Status::InStep { .. });
     let (title, line) = match (&status, &pulled) {
         (Status::InStep { .. }, Some((t, false))) => ("Your copy matches the group.".to_string(), t.clone()),
@@ -240,6 +261,8 @@ pub fn group_chip<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Conte
         look,
         progress,
         sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions }],
+        auto_open: Vec::new(),
+        width: None,
     })
 }
 
@@ -252,7 +275,7 @@ fn in_step_line(detail: &str, from_pull: bool) -> String {
     detail.strip_prefix("Same as the group. ").unwrap_or("Nothing new to take in.").to_string()
 }
 
-pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Context<V>) -> Option<Notice> {
+pub fn group_status_bar(store: &Entity<Store>, root: &Path, cx: &mut App) -> Option<Notice> {
     let s = store.read(cx);
     let status = s.group_status(root)?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -266,9 +289,9 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
     let pushing = s.pushing_at(root);
     let repairing = s.group_repairing(root);
     let in_step = matches!(status, Status::InStep { .. });
-    // A strip only for what needs the player (a choice, mods to get). Busy,
-    // behind, offline and failed say it in the hero's sync chip
-    // ([`group_chip`]): a strip would push the page down and up again.
+    // A notice only for what needs the player (a choice, mods to get). Busy,
+    // behind, offline and failed are the chip's own words ([`group_chip`]);
+    // the notice is the body of the chip's popover.
     // Files only the website gives are the Downloads chip's
     // ([`crate::downloads_chip`]).
     if matches!(status, Status::ByHand { .. }) || !hopper::syncchip::group_look(&status, pulling, pulled_bad, !left_out.is_empty()).strip {
@@ -289,8 +312,7 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
         // The headline says it all; the list under it says which mods.
         (detail, String::new())
     } else if matches!(status, Status::CantCheck) && !from_pull {
-        // The sentence goes under the strip, open: on a narrow page a subject
-        // on the strip would be cut to nothing.
+        // The sentence goes under the notice, open.
         ("Couldn't check".to_string(), String::new())
     } else {
         (status.title(), detail)
@@ -427,15 +449,15 @@ pub fn group_status_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut
 }
 
 /// The check's last answer for the copy at `root`, when it is up to date.
-fn s_verified<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Context<V>) -> Option<hopper::groupverify::Verified> {
+fn s_verified(store: &Entity<Store>, root: &Path, cx: &mut App) -> Option<hopper::groupverify::Verified> {
     store.read(cx).group_verified(root).cloned()
 }
 
-/// The "Missing a required mod" strip's line as elements: the mods it names
+/// The "Missing a required mod" notice's line as elements: the mods it names
 /// (the missing ones and the ones that need them) with their icons, each
 /// opening its page beside the instance. A missing mod no site has a page
 /// for shows its id and doesn't open.
-fn needs_line<V: 'static>(store: &Entity<Store>, root: &Path, needs: &[hopper::groupdeps::Need], cx: &mut Context<V>) -> AnyElement {
+fn needs_line(store: &Entity<Store>, root: &Path, needs: &[hopper::groupdeps::Need], cx: &mut App) -> AnyElement {
     use hopper::groupdeps::Piece;
     let wanted: Vec<String> = needs.iter().filter_map(|n| store.read(cx).group_need_project(&n.id)).map(|(_, icon)| icon).filter(|i| !i.is_empty()).collect();
     store.update(cx, |s, _| wanted.iter().for_each(|i| s.want_image(i)));
@@ -459,10 +481,12 @@ fn needs_line<V: 'static>(store: &Entity<Store>, root: &Path, needs: &[hopper::g
     };
     // No gap: the words carry their own spaces, so a comma sits against the
     // mod before it.
-    let mut line = h_flex().min_w_0().items_center();
+    // The line wraps: in the chip's popover a long sentence must not squeeze
+    // the mod names to nothing and leave their icons on top of the words.
+    let mut line = h_flex().w_full().min_w_0().flex_wrap().items_center();
     for (i, piece) in hopper::groupdeps::detail_pieces(needs).into_iter().enumerate() {
         line = match piece {
-            Piece::Text(t) => line.child(div().flex_none().whitespace_nowrap().child(t)),
+            Piece::Text(t) => line.child(div().min_w_0().child(t)),
             Piece::Need(k) => {
                 let n = &needs[k];
                 let (project, icon) = s.group_need_project(&n.id).unwrap_or_default();

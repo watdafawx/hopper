@@ -3888,6 +3888,7 @@ impl AddonsView {
                     let file = name.clone();
                     let menu = self.loose_menu(name, cx);
                     let menu2 = menu.clone();
+                    let problem = self.problem_marker(name, cx);
                     h_flex()
                         .id(ElementId::Name(format!("loose:{name}").into()))
                         .h(rems(ROW_H))
@@ -3914,6 +3915,7 @@ impl AddonsView {
                                 .truncate()
                                 .child(name.clone()),
                         )
+                        .children(problem)
                         .when(self.class == cf::CLASS_MODS && self.store.read(cx).settings().allow_sources, |r| {
                             let f = name.trim_end_matches(".disabled").to_string();
                             r.child(
@@ -4228,6 +4230,7 @@ impl AddonsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let old_copy = self.old_copy_chip(a, cx);
+        let problem = self.problem_marker(&a.file_name, cx);
         // Packs in one list: the grip in the row's padding (their place is a
         // chip by the name). Resource packs in game order: grip, place, ↑↓.
         let grip = self.where_mode().then(|| self.where_grip(&a.file_name, &a.name, cx));
@@ -4893,6 +4896,7 @@ Change version", a.file_name).into()
                                 }))
                         })
                     }).children(self.lock_tags(a, update, &breaks, needs.as_deref(), vlocked, cx))
+                    .children(problem)
                     .children(old_copy)),
             )
             .when(self.show_action(), |r| r.child(action))
@@ -5271,6 +5275,59 @@ Change version", a.file_name).into()
                         })
                 })
                 .dismiss_key(&self.store, key),
+        )
+    }
+
+    /// What stops play about this mod, or differs from the paired server, as a
+    /// marker beside its name: "Needs X", "Stops loading", "Not on <server>".
+    /// A click opens the popover of the chip that lists it.
+    fn problem_marker(&self, file_name: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use hopper::groupstatus::Tone;
+        use hopper::syncchip::RowProblem;
+        let root = self.root.as_ref()?;
+        let bare = file_name.trim_end_matches(".disabled");
+        let (problem, chip_id) = match self.row_stop(file_name) {
+            // The page's own "Needs you" chip, as the instance page or the server page names it.
+            Some(p) => {
+                let page = if self.store.read(cx).instance(root).is_some() { "instance" } else { "server" };
+                (p, format!("needs-{page}:{}", root.display()))
+            }
+            None => {
+                let s = self.store.read(cx);
+                let shown = s.server_of(root).map(|sv| sv.root.clone());
+                let lacks = s
+                    .pre_joins(root)
+                    .into_iter()
+                    .find(|p| Some(&p.server_root) == shown.as_ref())
+                    .filter(|p| p.add.iter().any(|d| d.client.as_ref().is_some_and(|c| c.file_name.eq_ignore_ascii_case(bare))))
+                    .map(|p| p.server.clone());
+                (RowProblem::NotOnServer(lacks?), "server".to_string())
+            }
+        };
+        let theme = cx.theme();
+        let color = match problem.tone() {
+            Tone::Bad => theme.danger,
+            _ => theme.warning,
+        };
+        let label = problem.label();
+        let tip = match &problem {
+            RowProblem::NotOnServer(server) => format!("This mod is in the pack but not on {server}. Click to see what to do."),
+            _ => format!("{label}. Click to see what to do."),
+        };
+        Some(
+            div()
+                .id(SharedString::from(format!("row-problem:{file_name}")))
+                .flex_none()
+                .clickable(cx)
+                .rounded(px(crate::theme::RADIUS))
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                .on_click(cx.listener(move |_, _, window, cx| {
+                    cx.stop_propagation();
+                    crate::sync_chip::request_open(&chip_id);
+                    window.refresh();
+                }))
+                .child(widgets::chip(color).child(label))
+                .into_any_element(),
         )
     }
 
