@@ -97,7 +97,6 @@ fn c2_a_taken_in_change_never_echoes_as_mine() {
 /// Covers C6. B's download of mod 7 is blocked by its author. B's status
 /// is not "in sync" (it says what waits), and A sees that B lacks mod 7.
 #[test]
-#[ignore = "sync-rewrite"]
 fn c6_status_comes_from_the_disk_not_bookkeeping() {
     use hopper_core::synccore::apply::Outcome;
     let mut g = three();

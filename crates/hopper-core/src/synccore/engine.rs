@@ -11,8 +11,8 @@ use super::gate::{self, GateCtx, Limits, Risk, Trust};
 use super::local::{self, Drift, Snapshot};
 use super::model::{Arrival, Change, Dot, Edit, Key, MemberId, PackMode, Seen, Value, Why};
 use super::plan::{self, ApplyPlan, PackPlan, Step, Wait};
-use super::register::{fold, merge, Log, Merge, Register};
-use super::wire::{Body, MemberStatus, Packet, WIRE_VERSION};
+use super::register::{self, fold, merge, Log, Merge, Register};
+use super::wire::{self, Body, MemberStatus, Packet, WIRE_VERSION};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -99,6 +99,49 @@ pub struct Engine {
     /// Keys the author blocked downloads of, with the record that was
     /// blocked: by hand, never retried until a newer record.
     pub blocked: BTreeMap<Key, Dot>,
+    /// What was posted to whom (the wire outbox, `outbox` / `sent`).
+    pub posting: Posting,
+}
+
+/// What an event to one member said, to post again only on a difference.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Posted {
+    pub dots: Vec<Dot>,
+    pub seen: Seen,
+    pub missing: Vec<Key>,
+    pub needs_full: bool,
+    /// Copies besides the engine's own.
+    pub extra_copies: usize,
+}
+
+/// The outbox's memory, per member.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Posting {
+    /// What was last posted to each member.
+    last: BTreeMap<MemberId, Posted>,
+    /// The register hash each sender's last packet carried.
+    their_hash: BTreeMap<MemberId, String>,
+    /// Members already sent the full checkpoint they asked for.
+    checkpointed: BTreeSet<MemberId>,
+    /// Members that still need a checkpoint from this PC.
+    new_members: BTreeSet<MemberId>,
+    /// Events built (every 50th carries a checkpoint).
+    pub publishes: u64,
+    /// The status last posted, so a status-only change is posted too.
+    status: Option<MemberStatus>,
+}
+
+/// One event to post: the body and status for `to`, to be wrapped in a
+/// packet (with one empty entry per more copy) and handed to the relay.
+#[derive(Clone, Debug)]
+pub struct Outgoing {
+    pub to: MemberId,
+    pub body: Body,
+    pub status: MemberStatus,
+    /// The register hash the packet carries.
+    pub hash: String,
+    posted: Posted,
+    ask_now: bool,
 }
 
 /// When a failed step is tried again.
@@ -194,12 +237,108 @@ impl Engine {
     pub fn note_out_of_date(&mut self, member: &str) {
         self.outdated.insert(member.to_string());
     }
-    pub fn outbox(&self) -> Option<Packet> {
-        todo!("P4: outbox")
+    /// The register hash of everything this PC holds.
+    pub fn hash(&self) -> String {
+        register::hash(&fold(&self.log))
     }
-    pub fn sent(&mut self, packet_hash: &str, arrival: Arrival) {
-        let _ = (packet_hash, arrival);
-        todo!("P4: sent")
+
+    /// Whether this PC, level with `from` by `seen`, holds a different
+    /// register than that sender's last packet carried (damaged state).
+    fn needs_full_from(&self, from: &str) -> bool {
+        let (Some(theirs), Some(m)) = (self.posting.their_hash.get(from), self.members.get(from)) else {
+            return false;
+        };
+        m.seen == self.seen() && self.reviews().is_empty() && wire::hash_mismatch(&self.hash(), theirs)
+    }
+
+    /// This PC's status for a packet to `to`: what it has taken in, what its
+    /// disk lacks and whether it needs `to` to send everything.
+    pub fn status_for(&self, to: &str, disk: &Snapshot) -> MemberStatus {
+        let mut status = self.my_status();
+        status.missing = self.missing(disk);
+        status.needs_full = self.needs_full_from(to);
+        status
+    }
+
+    /// A person joined the group: every packet to them carries a checkpoint
+    /// until they have taken it in.
+    pub fn new_member(&mut self, member: &str) {
+        self.posting.new_members.insert(member.to_string());
+    }
+
+    /// What to post to each of `to` now (the real app and the sim both
+    /// build their packets from this): what they haven't acked, a
+    /// checkpoint to a new member, to one that asked, or every 50th time,
+    /// and a repost when only the status changed. One event per member,
+    /// however many copies of the group this PC holds (`extra_copies`).
+    /// Nothing is due when it all matches what was last posted.
+    pub fn outbox(&mut self, to: &[String], disk: &Snapshot, extra_copies: usize) -> Vec<Outgoing> {
+        let own_status = self.my_status();
+        let status_changed = self.posting.status.as_ref() != Some(&own_status);
+        let hash = self.hash();
+        let mut out = Vec::new();
+        for r in to.iter().filter(|r| **r != self.me) {
+            if let Some(acked) = self.members.get(r).map(|m| m.seen.clone()) {
+                if self.posting.new_members.contains(r) && self.checkpoint().iter().all(|c| acked.covers(&c.dot)) {
+                    self.posting.new_members.remove(r);
+                }
+            }
+            // A member whose hash differed asked for everything, once.
+            let asked = self.members.get(r).is_some_and(|m| m.needs_full);
+            if !asked {
+                self.posting.checkpointed.remove(r);
+            }
+            let ask_now = asked && !self.posting.checkpointed.contains(r);
+            let new_member = self.posting.new_members.contains(r);
+            let mut changes = self.unacked_by(r);
+            if new_member || ask_now {
+                for c in self.checkpoint() {
+                    if !changes.iter().any(|x| x.dot == c.dot) {
+                        changes.push(c);
+                    }
+                }
+            }
+            let status = self.status_for(r, disk);
+            let posted = Posted {
+                dots: changes.iter().map(|c| c.dot.clone()).collect(),
+                seen: status.seen.clone(),
+                missing: status.missing.clone(),
+                needs_full: status.needs_full,
+                extra_copies,
+            };
+            let last = self.posting.last.get(r).cloned().unwrap_or_default();
+            let new_records = !posted.dots.is_empty() && posted.dots != last.dots;
+            let same_news = posted.seen == last.seen
+                && posted.missing == last.missing
+                && posted.needs_full == last.needs_full
+                && posted.extra_copies == last.extra_copies;
+            if !new_records && !ask_now && same_news && !status_changed {
+                continue;
+            }
+            self.posting.publishes += 1;
+            let periodic = wire::send_checkpoint(false, false, self.posting.publishes);
+            if periodic {
+                for c in self.checkpoint() {
+                    if !changes.iter().any(|x| x.dot == c.dot) {
+                        changes.push(c);
+                    }
+                }
+            }
+            let full = new_member || ask_now || periodic;
+            let body = if full { Body::Checkpoint(changes) } else { Body::Tail(changes) };
+            out.push(Outgoing { to: r.clone(), body, status, hash: hash.clone(), posted, ask_now });
+        }
+        self.posting.status = Some(own_status);
+        out
+    }
+
+    /// The relay took `event`: it is what the member was last sent, so the
+    /// same thing is not posted again.
+    pub fn sent(&mut self, event: &Outgoing) {
+        self.posting.last.insert(event.to.clone(), event.posted.clone());
+        if event.ask_now {
+            self.posting.checkpointed.insert(event.to.clone());
+        }
     }
 
     // ── friends ──────────────────────────────────────────────────────
@@ -211,9 +350,10 @@ impl Engine {
             self.outdated.insert(packet.from);
             return Received { refused: true, ..Received::default() };
         }
-        let Some((body, status, _hash)) = packet.copies.remove(&self.copy) else {
+        let Some((body, status, hash)) = packet.copies.remove(&self.copy) else {
             return Received::default();
         };
+        self.posting.their_hash.insert(packet.from.clone(), hash);
         let changes = match body {
             Body::Tail(c) | Body::Checkpoint(c) => c,
         };
@@ -1461,5 +1601,100 @@ mod tests {
         assert_eq!(s.off_pack_mods, vec![mk(4)]);
         assert_eq!(s.edited_configs, vec!["c.toml".to_string()]);
         assert!(s.game_running);
+    }
+
+    fn disk(e: &Engine) -> Snapshot {
+        Snapshot { values: e.applied.clone(), unreadable: false }
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Builds the outbox and marks every event as taken by the relay.
+    fn post(e: &mut Engine, to: &[&str]) -> Vec<Outgoing> {
+        let snap = disk(e);
+        let out = e.outbox(&names(to), &snap, 0);
+        for o in &out {
+            e.sent(o);
+        }
+        out
+    }
+
+    #[test]
+    fn the_outbox_has_one_event_per_recipient_and_not_for_me() {
+        let mut a = pc("A");
+        act(&mut a, edit(mk(1), file(12)), T0);
+        let out = post(&mut a, &["A", "B", "C"]);
+        assert_eq!(out.iter().map(|o| o.to.as_str()).collect::<Vec<_>>(), vec!["B", "C"]);
+        for o in &out {
+            assert!(matches!(&o.body, Body::Tail(c) if c.len() == 1));
+            assert_eq!(o.hash, a.hash());
+        }
+    }
+
+    #[test]
+    fn nothing_is_posted_again_until_something_changes() {
+        let mut a = pc("A");
+        act(&mut a, edit(mk(1), file(12)), T0);
+        assert_eq!(post(&mut a, &["B"]).len(), 1);
+        assert!(post(&mut a, &["B"]).is_empty());
+        act(&mut a, edit(mk(2), file(22)), T0);
+        let out = post(&mut a, &["B"]);
+        assert!(matches!(&out[0].body, Body::Tail(c) if c.len() == 2));
+    }
+
+    #[test]
+    fn an_event_the_relay_refused_is_built_again() {
+        let mut a = pc("A");
+        act(&mut a, edit(mk(1), file(12)), T0);
+        let snap = disk(&a);
+        assert_eq!(a.outbox(&names(&["B"]), &snap, 0).len(), 1);
+        // Not marked sent: the next round builds it again.
+        assert_eq!(a.outbox(&names(&["B"]), &snap, 0).len(), 1);
+    }
+
+    #[test]
+    fn a_new_member_gets_a_checkpoint_until_they_have_it() {
+        let mut a = pc("A");
+        act(&mut a, edit(mk(1), file(12)), T0);
+        a.new_member("B");
+        let out = post(&mut a, &["B"]);
+        assert!(matches!(&out[0].body, Body::Checkpoint(c) if !c.is_empty()));
+        // B acks everything: the next event is an ordinary tail.
+        let mut acked = a.my_status();
+        acked.member = "B".into();
+        a.members.insert("B".into(), acked);
+        a.game_running = true;
+        let out = post(&mut a, &["B"]);
+        assert!(matches!(&out[0].body, Body::Tail(_)));
+    }
+
+    #[test]
+    fn a_status_only_change_is_posted_again() {
+        let mut a = pc("A");
+        post(&mut a, &["B"]);
+        assert!(post(&mut a, &["B"]).is_empty());
+        a.game_running = true;
+        let out = post(&mut a, &["B"]);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].status.game_running);
+        assert!(matches!(&out[0].body, Body::Tail(c) if c.is_empty()));
+    }
+
+    #[test]
+    fn every_fiftieth_event_carries_a_checkpoint() {
+        let mut a = pc("A");
+        let mut full = 0;
+        for i in 0..100 {
+            a.game_running = i % 2 == 0;
+            for o in post(&mut a, &["B"]) {
+                if matches!(o.body, Body::Checkpoint(_)) {
+                    full += 1;
+                }
+            }
+        }
+        assert_eq!(a.posting.publishes, 100);
+        assert_eq!(full, 2);
     }
 }

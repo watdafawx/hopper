@@ -21,9 +21,8 @@ use super::apply::{self, Fetch, FetchError, Fs, Outcome, RealFs};
 use super::engine::{Answer, Engine, Review, Status};
 use super::gate::{Limits, Trust};
 use super::local::{self, Drift, Snapshot};
-use super::model::{Arrival, Change, ConfigMode, Dot, Edit, Key, PackMode, Seen, Value, Why};
+use super::model::{Arrival, Change, ConfigMode, Dot, Edit, Key, PackMode, Value, Why};
 use super::plan::{PackPlan, Step, Wait};
-use super::register;
 use super::store;
 use super::wire::{self, Body, MemberStatus, Packet, RelayLimits, RelayQueue, WireError, WIRE_VERSION};
 use std::cell::{Cell, RefCell};
@@ -132,12 +131,6 @@ struct Pc {
     copies: BTreeSet<String>,
     /// The wire version it sends.
     wire_version: u8,
-    /// The register hash each sender's last packet carried.
-    their_hash: BTreeMap<String, String>,
-    /// Members already sent the full checkpoint they asked for.
-    checkpointed: BTreeSet<String>,
-    /// Events this PC posted (every 50th carries a checkpoint).
-    publishes: u64,
     only_here: BTreeSet<Key>,
     notes: Vec<String>,
     told_loader: BTreeSet<Dot>,
@@ -145,10 +138,6 @@ struct Pc {
     returning: bool,
     away: BTreeMap<String, usize>,
     order: Option<Vec<String>>,
-    /// What was last posted to each member.
-    last_posted: BTreeMap<String, Posted>,
-    /// Members that still need a checkpoint from this PC.
-    checkpoint_for: BTreeSet<String>,
     settings: BTreeMap<(String, String), String>,
     settings_read: usize,
     worlds: BTreeSet<String>,
@@ -168,19 +157,6 @@ struct Pc {
     crash_after: Option<usize>,
     /// Died mid-apply: nothing runs until `Group::recover_apply`.
     crashed: bool,
-    /// The status last posted, so a status-only change is posted too.
-    status_posted: Option<MemberStatus>,
-}
-
-/// What an event to one member said, to post again only on a difference.
-#[derive(Clone, Debug, Default, PartialEq)]
-struct Posted {
-    dots: Vec<Dot>,
-    seen: Seen,
-    missing: Vec<Key>,
-    needs_full: bool,
-    /// Copies besides the engine's own.
-    extra_copies: usize,
 }
 
 impl Pc {
@@ -190,16 +166,7 @@ impl Pc {
 
     /// The register hash of everything this PC holds.
     fn hash(&self) -> String {
-        register::hash(&register::fold(&self.engine.log))
-    }
-
-    /// Whether this PC, level with `from` by `seen`, holds a different
-    /// register than that sender's last packet carried (damaged state).
-    fn needs_full_from(&self, from: &str) -> bool {
-        let (Some(theirs), Some(m)) = (self.their_hash.get(from), self.engine.members.get(from)) else {
-            return false;
-        };
-        m.seen == self.engine.seen() && self.engine.reviews().is_empty() && wire::hash_mismatch(&self.hash(), theirs)
+        self.engine.hash()
     }
 
     /// The packet to a member: `body`, the status, and one empty entry for
@@ -216,10 +183,7 @@ impl Pc {
 
     /// This PC's status for a packet to `r`.
     fn status_for(&self, r: &str) -> MemberStatus {
-        let mut status = self.engine.my_status();
-        status.missing = self.engine.missing(&self.snapshot());
-        status.needs_full = self.needs_full_from(r);
-        status
+        self.engine.status_for(r, &self.snapshot())
     }
 
     fn disk_value(&self, key: &Key) -> Value {
@@ -571,7 +535,11 @@ impl Group {
     pub fn restart(&mut self, who: &str) {
         let pc = self.pc_mut(who);
         let copy = pc.engine.copy.clone();
+        let posting = std::mem::take(&mut pc.engine.posting);
         pc.engine = store::decode(&store::encode(&pc.engine), &copy).expect("saved state loads again");
+        // What was posted isn't saved yet; the sim keeps it across a restart.
+        pc.engine.posting = posting;
+        self.recover_apply(who);
     }
     /// The PC's own clock is off by `secs`. Nothing reads it: only relay
     /// time orders or gates anything.
@@ -628,7 +596,7 @@ impl Group {
     pub fn join(&mut self, name: &str) {
         self.add_pc(name, false);
         for m in self.members.clone() {
-            self.pc_mut(&m).checkpoint_for.insert(name.to_string());
+            self.pc_mut(&m).engine.new_member(name);
         }
         self.members.insert(name.to_string());
     }
@@ -803,17 +771,12 @@ impl Group {
                 unreadable: false,
                 copies: BTreeSet::from(["pack".to_string()]),
                 wire_version: WIRE_VERSION,
-                their_hash: BTreeMap::new(),
-                checkpointed: BTreeSet::new(),
-                publishes: 0,
                 only_here: BTreeSet::new(),
                 notes: Vec::new(),
                 told_loader: BTreeSet::new(),
                 returning: false,
                 away: BTreeMap::new(),
                 order: None,
-                last_posted: BTreeMap::new(),
-                checkpoint_for: BTreeSet::new(),
                 settings: BTreeMap::new(),
                 settings_read,
                 worlds: BTreeSet::new(),
@@ -824,7 +787,6 @@ impl Group {
                 tries: BTreeMap::new(),
                 crash_after: None,
                 crashed: false,
-                status_posted: None,
             },
         );
         let pc = &self.pcs[name];
@@ -865,73 +827,21 @@ impl Group {
             if !pc.online || !pc.following || (pc.push_by_hand && !pc.push_pending) {
                 continue;
             }
-            let mut events = Vec::new();
-            let own_status = pc.engine.my_status();
-            let status_changed = pc.status_posted.as_ref() != Some(&own_status);
-            for r in members.iter().filter(|r| *r != s) {
-                if let Some(acked) = pc.engine.members.get(r).map(|m| m.seen.clone()) {
-                    if pc.checkpoint_for.contains(r)
-                        && pc.engine.checkpoint().iter().all(|c| acked.covers(&c.dot))
-                    {
-                        pc.checkpoint_for.remove(r);
-                    }
-                }
-                // A member whose hash differed asked for everything, once.
-                let asked = pc.engine.members.get(r).is_some_and(|m| m.needs_full);
-                if !asked {
-                    pc.checkpointed.remove(r);
-                }
-                let ask_now = asked && !pc.checkpointed.contains(r);
-                let new_member = pc.checkpoint_for.contains(r);
-                let mut changes = pc.engine.unacked_by(r);
-                if new_member || ask_now {
-                    for c in pc.engine.checkpoint() {
-                        if !changes.iter().any(|x| x.dot == c.dot) {
-                            changes.push(c);
-                        }
-                    }
-                }
-                let status = pc.status_for(r);
-                let posted = Posted {
-                    dots: changes.iter().map(|c| c.dot.clone()).collect(),
-                    seen: status.seen.clone(),
-                    missing: status.missing.clone(),
-                    needs_full: status.needs_full,
-                    extra_copies: pc.copies.len() - 1,
-                };
-                let last = pc.last_posted.get(r).cloned().unwrap_or_default();
-                let new_records = !posted.dots.is_empty() && posted.dots != last.dots;
-                let same_news = posted.seen == last.seen
-                    && posted.missing == last.missing
-                    && posted.needs_full == last.needs_full
-                    && posted.extra_copies == last.extra_copies;
-                if !new_records && !ask_now && same_news && !status_changed {
-                    continue;
-                }
-                pc.publishes += 1;
-                let mut sent = changes;
-                let periodic = wire::send_checkpoint(false, false, pc.publishes);
-                if periodic {
-                    for c in pc.engine.checkpoint() {
-                        if !sent.iter().any(|x| x.dot == c.dot) {
-                            sent.push(c);
-                        }
-                    }
-                }
-                let full = new_member || ask_now || periodic;
-                let body = if full { Body::Checkpoint(sent) } else { Body::Tail(sent) };
-                let bodies = wire::encode(&pc.packet(body, status));
-                events.push((r.clone(), bodies, posted, ask_now));
-            }
+            let extra = pc.copies.len() - 1;
+            let snapshot = pc.snapshot();
+            let events: Vec<_> = pc
+                .engine
+                .outbox(&members, &snapshot, extra)
+                .into_iter()
+                .map(|o| {
+                    let bodies = wire::encode(&pc.packet(o.body.clone(), o.status.clone()));
+                    (o, bodies)
+                })
+                .collect();
             pc.push_pending = false;
-            pc.status_posted = Some(own_status);
-            for (r, bodies, posted, ask_now) in events {
-                if self.relay.post(&r, s, at, &bodies) {
-                    let pc = self.pc_mut(s);
-                    pc.last_posted.insert(r.clone(), posted);
-                    if ask_now {
-                        pc.checkpointed.insert(r);
-                    }
+            for (o, bodies) in events {
+                if self.relay.post(&o.to, s, at, &bodies) {
+                    self.pc_mut(s).engine.sent(&o);
                     moved = true;
                 }
             }
@@ -958,12 +868,8 @@ impl Group {
                 let at = Arrival { seq: e.seq, at: e.at };
                 match wire::decode(&e.queue.bodies()) {
                     Ok(packet) => {
-                        let hash = packet.copies.get(&pc.engine.copy).map(|c| c.2.clone());
                         pc.copies.extend(packet.copies.keys().cloned());
                         let got = pc.engine.receive(packet, at);
-                        if let Some(hash) = hash {
-                            pc.their_hash.insert(e.from.clone(), hash);
-                        }
                         pc.notes.extend(got.notes);
                         if pc.returning {
                             for (name, n) in got.by_author {
@@ -1346,9 +1252,9 @@ mod tests {
         g.settle();
         g.settle();
         assert_eq!(g.group_hash("A"), g.group_hash("B"));
-        let posted = g.pc("A").publishes;
+        let posted = g.pc("A").engine.posting.publishes;
         g.settle();
-        assert_eq!(g.pc("A").publishes, posted, "nothing more is sent once they agree");
+        assert_eq!(g.pc("A").engine.posting.publishes, posted, "nothing more is sent once they agree");
     }
 
     #[test]

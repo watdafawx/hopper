@@ -56,7 +56,6 @@ fn w27_blocked_download_goes_to_by_hand_once() {
 /// Covers W32, C4. B's game is running: jar changes wait, then land when
 /// it closes, named A. No pack update runs under a running game.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w32_game_running_waits_then_lands() {
     let mut g = three();
     g.game("B", true);
@@ -73,7 +72,6 @@ fn w32_game_running_waits_then_lands() {
 /// restart the journal is finished: each mod has exactly one file, none is
 /// doubled, and the authors are A's.
 #[test]
-#[ignore = "sync-rewrite"]
 fn c4_a_crash_mid_swap_leaves_no_duplicate_copies() {
     let mut g = three();
     g.crash_mid_apply("B", 1);
@@ -91,7 +89,6 @@ fn c4_a_crash_mid_swap_leaves_no_duplicate_copies() {
 /// but before applying it: it is applied once after the restart, not twice
 /// and not lost.
 #[test]
-#[ignore = "sync-rewrite"]
 fn c4_a_restart_before_applying_applies_once() {
     let mut g = three();
     g.game("B", true);

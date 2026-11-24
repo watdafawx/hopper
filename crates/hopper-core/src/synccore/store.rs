@@ -87,6 +87,7 @@ pub fn decode(bytes: &[u8], copy: &str) -> Option<Engine> {
         edited_configs: Vec::new(),
         retry: BTreeMap::new(),
         blocked: BTreeMap::new(),
+        posting: Default::default(),
     })
 }
 
