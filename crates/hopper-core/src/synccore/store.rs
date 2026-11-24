@@ -82,6 +82,11 @@ pub fn decode(bytes: &[u8], copy: &str) -> Option<Engine> {
         told: s.told.into_iter().collect(),
         contact: s.contact,
         outdated: s.outdated.into_iter().collect(),
+        // Set by the app on each start, so not saved.
+        game_running: false,
+        edited_configs: Vec::new(),
+        retry: BTreeMap::new(),
+        blocked: BTreeMap::new(),
     })
 }
 

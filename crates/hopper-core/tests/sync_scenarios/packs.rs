@@ -17,7 +17,6 @@ const CLEAN_HERE: PackMode = PackMode { here: ConfigMode::Clean, friends: Config
 /// plan says B keeps those 3 files; after it, B is on the new version with
 /// the 3 files still B's, and never stuck at "Behind: needs you".
 #[test]
-#[ignore = "sync-rewrite"]
 fn w06_keep_my_changes_is_stated_and_done_per_friend() {
     let mut g = packed();
     for f in ["config/a.toml", "config/b.toml", "config/c.toml"] {
@@ -39,7 +38,6 @@ fn w06_keep_my_changes_is_stated_and_done_per_friend() {
 /// configs are cleaned, B's are not, and mod 4 stays off for B. The plan
 /// said both before Update.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w07_clean_update_cleans_only_this_pc_and_keeps_friends_off_mods() {
     let mut g = packed();
     g.edit("B", m(4), Value::PackOff);
@@ -57,7 +55,6 @@ fn w07_clean_update_cleans_only_this_pc_and_keeps_friends_off_mods() {
 /// Covers W8. A moves the pack back to an older version. B and C get a
 /// "Move back too / Stay" card (a big move asks), and stay until they answer.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w08_moving_the_pack_back_asks() {
     let mut g = packed();
     g.update_pack("A", "cf:100/8400", KEEP);
@@ -69,7 +66,6 @@ fn w08_moving_the_pack_back_asks() {
 /// Covers W19. A switches the instance to another modpack. B is offered
 /// "Get it as a new instance" and B's copy is left as it is.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w19_switching_to_another_pack_offers_a_new_instance() {
     let mut g = packed();
     g.update_pack("A", "cf:200/100", KEEP);
@@ -81,7 +77,6 @@ fn w19_switching_to_another_pack_offers_a_new_instance() {
 /// Covers R4. C's game is running: A's plan says "C: waits until the game
 /// closes" before A presses Update.
 #[test]
-#[ignore = "sync-rewrite"]
 fn r4_the_plan_says_who_waits_for_their_game() {
     let mut g = packed();
     g.game("C", true);
@@ -94,7 +89,6 @@ fn r4_the_plan_says_who_waits_for_their_game() {
 /// ships mod 4 as a pack jar that A had added by hand. Moving to it is no
 /// removal of mod 4 anywhere.
 #[test]
-#[ignore = "sync-rewrite"]
 fn c1_a_jar_the_pack_now_ships_is_not_removed() {
     let mut g = packed();
     g.edit("A", m(9), f(91));
