@@ -58,8 +58,16 @@ impl Value {
     /// Whether going from `was` to this takes a mod away or turns it off
     /// (the destructive side of a clash).
     pub fn takes_away(&self, was: &Value) -> bool {
-        let _ = was;
-        todo!("P1: removal / turn-off test")
+        self.is_away() && !was.is_away()
+    }
+
+    /// Whether the mod isn't there for the player: removed, turned off, or
+    /// a pack mod removed or turned off.
+    pub fn is_away(&self) -> bool {
+        matches!(
+            self,
+            Value::Gone | Value::PackOff | Value::PackRemoved | Value::File { on: false, .. }
+        )
     }
 }
 
@@ -129,4 +137,43 @@ pub struct Edit {
     pub now: Value,
     pub why: Why,
     pub batch: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(on: bool) -> Value {
+        Value::File { file: "a.jar".into(), on }
+    }
+
+    #[test]
+    fn covers_needs_the_authors_counter_to_reach_n() {
+        let mut s = Seen::default();
+        let d = Dot { author: "mia".into(), n: 3 };
+        assert!(!s.covers(&d));
+        s.0.insert("mia".into(), 2);
+        assert!(!s.covers(&d));
+        s.0.insert("mia".into(), 3);
+        assert!(s.covers(&d));
+        s.0.insert("mia".into(), 9);
+        assert!(s.covers(&d));
+        assert!(!s.covers(&Dot { author: "noah".into(), n: 1 }));
+    }
+
+    #[test]
+    fn takes_away_is_removal_or_turn_off_only() {
+        assert!(Value::Gone.takes_away(&file(true)));
+        assert!(file(false).takes_away(&file(true)));
+        assert!(Value::PackOff.takes_away(&Value::PackDefault));
+        assert!(Value::PackRemoved.takes_away(&Value::PackDefault));
+        // Already away: nothing more is taken.
+        assert!(!Value::Gone.takes_away(&Value::Gone));
+        assert!(!Value::Gone.takes_away(&file(false)));
+        // Adds, updates and turn-ons keep the mod.
+        assert!(!file(true).takes_away(&Value::Gone));
+        assert!(!file(true).takes_away(&file(false)));
+        assert!(!Value::PackDefault.takes_away(&Value::PackOff));
+        assert!(!Value::Text("1.21".into()).takes_away(&Value::Text("1.20".into())));
+    }
 }
