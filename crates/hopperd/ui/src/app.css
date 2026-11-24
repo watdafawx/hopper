@@ -186,7 +186,7 @@ mark.hit { background: color-mix(in srgb, var(--acc) 30%, transparent); color: v
 .sic { width: 20px; height: 20px; border-radius: var(--radius-sm); flex: none; display: grid; place-items: center; font-size: 10px; font-weight: 700; color: #1a1a1f; }
 .ic.big { width: 40px; height: 40px; font-size: 16px; }
 /* Notifications: desktop's look (popover, icon); bottom centre so they never cover a page's top-right actions. */
-.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); display: flex; align-items: flex-start; gap: 9px; background: var(--popover); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 10px 14px; box-shadow: 0 16px 40px #000a; z-index: 100; cursor: default; width: max-content; max-width: min(380px, calc(100vw - 32px)); font-size: 12.5px; animation: toast-in .18s ease-out; }
+.toast { position: fixed; bottom: 18px; right: 18px; display: flex; align-items: flex-start; gap: 9px; background: var(--popover); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 10px 14px; box-shadow: 0 16px 40px #000a; z-index: 100; cursor: default; width: max-content; max-width: min(380px, calc(100vw - 32px)); font-size: 12.5px; animation: toast-in .18s ease-out; }
 .toast.bad { border-color: #ef444466; }
 @keyframes toast-in { from { opacity: 0; } }
 /* An empty list (widgets::empty_state): a round icon, a title, a line on what to do next. */

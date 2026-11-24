@@ -2439,6 +2439,12 @@ impl LibraryView {
             pill_names.push(format!("Running · {up}").into());
             pills.push(widgets::pill(format!("Running · {up}"), theme.success, true).into_any_element());
         }
+        // `--dialog sync-chip --state NAME+run`: a made-up Running pill, to
+        // see the hero with and without it.
+        else if store.sync_chip_preview.as_deref().is_some_and(|n| n.ends_with("+run")) {
+            pill_names.push("Running · 4m".into());
+            pills.push(widgets::pill("Running · 4m", theme.success, true).into_any_element());
+        }
         if store.is_busy(&inst.root) {
             pill_names.push("Working".into());
             pills.push(widgets::pill("Working", theme.warning, true).into_any_element());
@@ -3093,7 +3099,7 @@ impl LibraryView {
         });
         let made_up = self.store.read(cx).sync_chip_preview.clone();
         self.sync_chips = match made_up {
-            Some(name) => crate::sync_chip::preview(&name),
+            Some(name) => crate::sync_chip::preview(name.strip_suffix("+run").unwrap_or(&name)),
             None => [crate::group_pack::group_chip(&self.store, &inst.root, cx), server_chip].into_iter().flatten().collect(),
         }
         .into_iter()

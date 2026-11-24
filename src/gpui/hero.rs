@@ -11,8 +11,9 @@ use std::path::PathBuf;
 
 /// The hero's height in rem, the same on every tab.
 pub const HERO: f32 = 9.5;
-/// The quieter hero's height in rem (no pills, no stats box: Option C).
-pub const HERO_SHORT: f32 = 6.5;
+/// The pill row's height in rem (`widgets::pill`), kept free when the hero
+/// has no pill so it is the same height with and without one.
+const PILL_ROW: f32 = 1.375;
 /// The folded hero's height in rem (see [`render_compact`]).
 pub const HERO_COMPACT: f32 = 4.0;
 
@@ -120,8 +121,10 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
     let dark = theme.mode.is_dark();
     let taller = h.summary.is_some();
     let has_pills = !h.pills.is_empty() || !h.chips.is_empty();
-    let short = !has_pills && h.stats.is_empty() && !taller;
-    let art_rem = if short { 4.5 } else { 6.5 };
+    // The height never depends on what the hero holds right now: a pill or
+    // a chip that comes and goes (Running, a sync chip) must not move the
+    // tabs and the list under it.
+    let art_rem = 6.5;
     let fit = h.fit;
     // One level past the page's own: every action is as small as it gets
     // and still doesn't fit, so the name gives up the room it kept and
@@ -259,7 +262,9 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
                 .flex_1()
                 .min_w(rems(title_min))
                 .gap_1p5()
-                .when(has_pills, |c| c.child(pills))
+                // The pill row keeps its room when it is empty, so the name
+                // doesn't slide when the first pill appears.
+                .child(if has_pills { pills } else { div().h(rems(PILL_ROW)).into_any_element() })
                 .child(
                     div()
                         .text_size(rems(1.65))
@@ -330,7 +335,7 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
         .child(content)
         // Its box, for layout checks: the actions must end inside it.
         .child(widgets::bounds_probe("hero"))
-        .h(rems(if taller { HERO + 1.5 } else if short { HERO_SHORT } else { HERO }))
+        .h(rems(if taller { HERO + 1.5 } else { HERO }))
         .into_any_element()
 }
 
