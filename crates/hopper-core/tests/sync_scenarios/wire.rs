@@ -6,7 +6,6 @@ use hopper_core::synccore::Status;
 /// Covers design §10 (speed). In step, A turns one mod off in a 400-mod
 /// pack: A's packet carries one record, not the list, and is small.
 #[test]
-#[ignore = "sync-rewrite"]
 fn a_small_change_sends_a_small_packet() {
     let all: Vec<_> = (1..=400).map(|n| (m(n), f(n * 10 + 1))).collect();
     let mut g = Group::with(&["A", "B"], &all);
@@ -20,7 +19,6 @@ fn a_small_change_sends_a_small_packet() {
 /// Covers design §10 (hash). B's saved state is damaged (a record lost).
 /// The hashes differ, B asks for a checkpoint, and B ends in step.
 #[test]
-#[ignore = "sync-rewrite"]
 fn a_hash_mismatch_heals_with_a_checkpoint() {
     let mut g = three();
     g.edit("A", m(1), f(12));
@@ -37,7 +35,6 @@ fn a_hash_mismatch_heals_with_a_checkpoint() {
 /// A shares 151 packs in one group with B, who is offline. Every pack
 /// reaches B: one cumulative event per sender and group, not one per pack.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w29_r7_151_packs_to_an_offline_friend_all_arrive() {
     let mut g = Group::with(&["A", "B"], &base());
     g.offline("B");
@@ -72,7 +69,6 @@ fn c3_the_newest_packet_carries_everything_unacked() {
 /// Covers relay scenario s16. A checkpoint of a 3000-mod pack is over the
 /// relay's body cap: it goes in parts and B folds it only once whole.
 #[test]
-#[ignore = "sync-rewrite"]
 fn a_big_checkpoint_goes_in_parts() {
     let all: Vec<_> = (1..=3000).map(|n| (m(n), f(n * 10 + 1))).collect();
     let mut g = Group::with(&["A"], &all);
@@ -85,7 +81,6 @@ fn a_big_checkpoint_goes_in_parts() {
 /// Covers W28 (relay scenarios s13, s14). The relay restarts and is down
 /// a while: A's change waits in A's outbox and reaches B when it's back.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w28_relay_down_then_back() {
     let mut g = three();
     g.relay_down();
@@ -100,7 +95,6 @@ fn w28_relay_down_then_back() {
 /// Covers W36. C runs an older Hopper that sends another format. A and B
 /// refuse C's packets, change nothing, and say "C's Hopper is out of date".
 #[test]
-#[ignore = "sync-rewrite"]
 fn w36_an_old_hopper_is_refused_and_named() {
     let mut g = three();
     g.old_hopper("C");

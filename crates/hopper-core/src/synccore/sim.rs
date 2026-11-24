@@ -7,18 +7,25 @@
 //! People are named by a short string ("A", "B"), which is also their
 //! member id and shown name. Built in P3 (engine) and P4 (relay limits).
 //!
-//! Events carry records in memory (`Event`), not wire packets: the wire is
-//! P4's. The relay is [`SimRelay`]: one event per (recipient, sender), the
+//! Events carry real wire bodies (`wire::encode`, in parts over the cap),
+//! so size limits, part sets, hashes and version refusals are the real
+//! ones. The relay is [`SimRelay`]: one event per (recipient, sender), the
 //! newest replacing the older (every event is cumulative, so nothing is
-//! lost). P4 adds its limits (queue size, body cap, down) to that struct.
+//! lost), with a body cap and an up/down switch. A new event replaces the
+//! sender's whole slot (the app deletes its old part keys when it posts).
+//! The engine models one copy; more copies of a group are only names that
+//! travel in the packet (`share_copy`), enough to show that they all arrive
+//! in one event.
 
 use super::apply::Outcome;
 use super::engine::{Answer, Engine, Review, Status};
 use super::gate::{Limits, Trust};
-use super::local::Drift;
+use super::local::{self, Drift, Snapshot};
 use super::model::{Arrival, Change, Dot, Edit, Key, PackMode, Seen, Value, Why};
 use super::plan::PackPlan;
-use super::wire::MemberStatus;
+use super::register;
+use super::store;
+use super::wire::{self, Body, MemberStatus, Packet, RelayLimits, RelayQueue, WireError, WIRE_VERSION};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Relay time when a group starts (so "never online" is 0, never "now").
@@ -34,17 +41,19 @@ pub struct HistoryRow {
     pub by: String,
 }
 
-/// What one sender has for one recipient on the relay: every record the
-/// recipient hasn't acked (or a checkpoint), and the sender's status.
+/// What one sender has for one recipient on the relay: the bodies of its
+/// newest packet (one, or the parts of a big one).
 #[derive(Clone, Debug)]
 pub struct Event {
     pub seq: u64,
     /// Relay time it was posted.
     pub at: u64,
     pub from: String,
-    pub changes: Vec<Change>,
-    pub status: MemberStatus,
+    pub queue: RelayQueue,
 }
+
+/// The group's relay key for a sender's event.
+const GROUP: &str = "group";
 
 /// Something the relay tells a PC besides records.
 #[derive(Clone, Debug)]
@@ -61,14 +70,29 @@ pub struct SimRelay {
     /// The newest event per (recipient, sender).
     pub events: BTreeMap<(String, String), Event>,
     notices: BTreeMap<String, Vec<Notice>>,
+    pub limits: RelayLimits,
+    /// Nobody can post or read.
+    pub down: bool,
 }
 
 impl SimRelay {
-    /// Stores an event, replacing the sender's older one for this recipient.
-    pub fn post(&mut self, to: &str, mut event: Event) {
+    /// Stores `bodies` as the sender's event for this recipient, replacing
+    /// its older one. Refused (`false`) while the relay is down or when a
+    /// body is over the cap; the sender keeps its older event then.
+    pub fn post(&mut self, to: &str, from: &str, at: u64, bodies: &[String]) -> bool {
+        if self.down {
+            return false;
+        }
+        let mut queue = RelayQueue::default();
+        for (i, body) in bodies.iter().enumerate() {
+            if !queue.put(&wire::part_key(GROUP, i, bodies.len()), body.clone(), &self.limits) {
+                return false;
+            }
+        }
         self.seq += 1;
-        event.seq = self.seq;
-        self.events.insert((to.to_string(), event.from.clone()), event);
+        let event = Event { seq: self.seq, at, from: from.to_string(), queue };
+        self.events.insert((to.to_string(), from.to_string()), event);
+        true
     }
 
     /// Takes everything waiting for `to`, in `order` (senders named first
@@ -98,6 +122,18 @@ struct Pc {
     skew: i64,
     push_by_hand: bool,
     push_pending: bool,
+    /// The instance can't be read (folder locked).
+    unreadable: bool,
+    /// The group's copies this PC has (the engine models "pack").
+    copies: BTreeSet<String>,
+    /// The wire version it sends.
+    wire_version: u8,
+    /// The register hash each sender's last packet carried.
+    their_hash: BTreeMap<String, String>,
+    /// Members already sent the full checkpoint they asked for.
+    checkpointed: BTreeSet<String>,
+    /// Events this PC posted (every 50th carries a checkpoint).
+    publishes: u64,
     only_here: BTreeSet<Key>,
     notes: Vec<String>,
     told_loader: BTreeSet<Dot>,
@@ -105,8 +141,8 @@ struct Pc {
     returning: bool,
     away: BTreeMap<String, usize>,
     order: Option<Vec<String>>,
-    /// What was last posted to each member: its records and this PC's seen.
-    last_posted: BTreeMap<String, (Vec<Dot>, Seen)>,
+    /// What was last posted to each member.
+    last_posted: BTreeMap<String, Posted>,
     /// Members that still need a checkpoint from this PC.
     checkpoint_for: BTreeSet<String>,
     settings: BTreeMap<(String, String), String>,
@@ -117,7 +153,56 @@ struct Pc {
     instance: String,
 }
 
+/// What an event to one member said, to post again only on a difference.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Posted {
+    dots: Vec<Dot>,
+    seen: Seen,
+    missing: Vec<Key>,
+    needs_full: bool,
+    /// Copies besides the engine's own.
+    extra_copies: usize,
+}
+
 impl Pc {
+    fn snapshot(&self) -> Snapshot {
+        Snapshot { values: self.disk.clone(), unreadable: self.unreadable }
+    }
+
+    /// The register hash of everything this PC holds.
+    fn hash(&self) -> String {
+        register::hash(&register::fold(&self.engine.log))
+    }
+
+    /// Whether this PC, level with `from` by `seen`, holds a different
+    /// register than that sender's last packet carried (damaged state).
+    fn needs_full_from(&self, from: &str) -> bool {
+        let (Some(theirs), Some(m)) = (self.their_hash.get(from), self.engine.members.get(from)) else {
+            return false;
+        };
+        m.seen == self.engine.seen() && self.engine.reviews().is_empty() && wire::hash_mismatch(&self.hash(), theirs)
+    }
+
+    /// The packet to a member: `body`, the status, and one empty entry for
+    /// each more copy (they all ride in the one event).
+    fn packet(&self, body: Body, status: MemberStatus) -> Packet {
+        let hash = self.hash();
+        let mut copies = BTreeMap::new();
+        for c in self.copies.iter().filter(|c| **c != self.engine.copy) {
+            copies.insert(c.clone(), (Body::Tail(Vec::new()), status.clone(), hash.clone()));
+        }
+        copies.insert(self.engine.copy.clone(), (body, status, hash));
+        Packet { version: self.wire_version, from: self.engine.me.clone(), group: GROUP.into(), copies }
+    }
+
+    /// This PC's status for a packet to `r`.
+    fn status_for(&self, r: &str) -> MemberStatus {
+        let mut status = self.engine.my_status();
+        status.missing = self.engine.missing(&self.snapshot());
+        status.needs_full = self.needs_full_from(r);
+        status
+    }
+
     fn disk_value(&self, key: &Key) -> Value {
         self.disk.get(key).cloned().unwrap_or_default()
     }
@@ -186,8 +271,9 @@ impl Group {
     /// Delivers and applies until nothing moves.
     pub fn settle(&mut self) {
         let now = self.now;
+        let up = !self.relay.down;
         for pc in self.pcs.values_mut() {
-            if pc.online {
+            if pc.online && up {
                 pc.ever_contacted = true;
                 pc.engine.touch(now);
             }
@@ -271,13 +357,25 @@ impl Group {
     pub fn allow_source(&mut self, who: &str, key: &Key) {
         self.pc_mut(who).engine.allow_source(key);
     }
+    /// "Put them back": the disk goes back to what was applied; nothing is
+    /// sent (the real one is an apply plan).
     pub fn put_back(&mut self, who: &str) {
-        let _ = who;
-        todo!("P5: sim")
+        let pc = self.pc_mut(who);
+        let drifts = pc.engine.drift(&pc.snapshot());
+        for (key, value) in local::put_back(&drifts) {
+            pc.disk.insert(key, value);
+        }
     }
+    /// "Remove for everyone": the mods missing from this PC's folder become
+    /// this player's removals.
     pub fn share_drift(&mut self, who: &str) {
-        let _ = who;
-        todo!("P5: sim")
+        let at = self.contact(who);
+        let batch = self.new_batch(who);
+        let pc = self.pc_mut(who);
+        let drifts = pc.engine.drift(&pc.snapshot());
+        for e in local::share_edits(&drifts, &batch) {
+            pc.make(&e.key, &e.now, e.why, &e.batch, at);
+        }
     }
     pub fn pack_plan(&self, who: &str, version: &str, mode: PackMode) -> PackPlan {
         let _ = (who, version, mode);
@@ -317,20 +415,17 @@ impl Group {
     }
     /// Shares one more pack copy in the group.
     pub fn share_copy(&mut self, who: &str, copy: &str) {
-        let _ = (who, copy);
-        todo!("P4: sim")
+        self.pc_mut(who).copies.insert(copy.to_string());
     }
 
     // ── the PC ───────────────────────────────────────────────────────
 
     /// A change on disk Hopper didn't make (Explorer, another launcher).
     pub fn outside(&mut self, who: &str, key: Key, now: Value) {
-        let _ = (who, key, now);
-        todo!("P5: sim")
+        self.pc_mut(who).disk.insert(key, now);
     }
     pub fn unreadable(&mut self, who: &str, on: bool) {
-        let _ = (who, on);
-        todo!("P5: sim")
+        self.pc_mut(who).unreadable = on;
     }
     pub fn game(&mut self, who: &str, running: bool) {
         let _ = (who, running);
@@ -348,8 +443,9 @@ impl Group {
     }
     /// Hopper restarts: state saved and loaded again, journal recovered.
     pub fn restart(&mut self, who: &str) {
-        let _ = who;
-        todo!("P5: sim")
+        let pc = self.pc_mut(who);
+        let copy = pc.engine.copy.clone();
+        pc.engine = store::decode(&store::encode(&pc.engine), &copy).expect("saved state loads again");
     }
     /// The PC's own clock is off by `secs`. Nothing reads it: only relay
     /// time orders or gates anything.
@@ -358,13 +454,12 @@ impl Group {
     }
     /// Damages saved state: drops `author`'s record `n`.
     pub fn forget_record(&mut self, who: &str, author: &str, n: u64) {
-        let _ = (who, author, n);
-        todo!("P4: sim")
+        let dot = Dot { author: author.to_string(), n };
+        self.pc_mut(who).engine.log.changes.remove(&dot);
     }
     /// This PC sends packets of another wire version from now on.
     pub fn old_hopper(&mut self, who: &str) {
-        let _ = who;
-        todo!("P4: sim")
+        self.pc_mut(who).wire_version = WIRE_VERSION + 1;
     }
 
     // ── the network and the group ────────────────────────────────────
@@ -393,14 +488,14 @@ impl Group {
         self.pc_mut(who).order = Some(senders.iter().map(|s| s.to_string()).collect());
     }
     pub fn relay_down(&mut self) {
-        todo!("P4: sim")
+        self.relay.down = true;
     }
     pub fn relay_up(&mut self) {
-        todo!("P4: sim")
+        self.relay.down = false;
     }
+    /// The largest body the relay takes.
     pub fn relay_body_cap(&mut self, bytes: usize) {
-        let _ = bytes;
-        todo!("P4: sim")
+        self.relay.limits.max_body = bytes;
     }
     /// A new person: starts on the group's first state, as a share code
     /// gives it, and is sent a checkpoint by everyone.
@@ -446,8 +541,7 @@ impl Group {
         self.pc(who).engine.value(key)
     }
     pub fn group_hash(&self, who: &str) -> String {
-        let _ = who;
-        todo!("P4: sim")
+        self.pc(who).hash()
     }
     /// The shown name of who changed `key` last, as this PC knows it.
     pub fn last_by(&self, who: &str, key: &Key) -> Option<String> {
@@ -468,17 +562,16 @@ impl Group {
         self.pc(who).notes.clone()
     }
     pub fn status(&self, who: &str) -> Status {
-        let _ = who;
-        todo!("P5: sim")
+        let pc = self.pc(who);
+        pc.engine.status(&pc.snapshot())
     }
     pub fn drift(&self, who: &str) -> Vec<Drift> {
-        let _ = who;
-        todo!("P5: sim")
+        let pc = self.pc(who);
+        pc.engine.drift(&pc.snapshot())
     }
     /// The keys `member` reported missing on their disk, as `who` sees it.
     pub fn member_missing(&self, who: &str, member: &str) -> Vec<Key> {
-        let _ = (who, member);
-        todo!("P5: sim")
+        self.pc(who).engine.members.get(member).map(|m| m.missing.clone()).unwrap_or_default()
     }
     pub fn by_hand(&self, who: &str) -> Vec<Key> {
         let _ = who;
@@ -522,18 +615,18 @@ impl Group {
     }
     /// Copies this PC follows.
     pub fn copies(&self, who: &str) -> usize {
-        let _ = who;
-        todo!("P4: sim")
+        self.pc(who).copies.len()
     }
-    /// Events waiting for `who` on the relay.
+    /// Bodies waiting for `who` on the relay (an event is one, or its parts).
     pub fn relay_events(&self, who: &str) -> usize {
-        let _ = who;
-        todo!("P4: sim")
+        self.relay.events.iter().filter(|((to, _), _)| to == who).map(|(_, e)| e.queue.len()).sum()
     }
-    /// Size of the packet this PC would send now.
+    /// Size on the wire of the packet this PC would send a friend now.
     pub fn outbox_bytes(&self, who: &str) -> usize {
-        let _ = who;
-        todo!("P4: sim")
+        let pc = self.pc(who);
+        let Some(r) = self.members.iter().find(|m| *m != who) else { return 0 };
+        let packet = pc.packet(Body::Tail(pc.engine.unacked_by(r)), pc.status_for(r));
+        wire::encode(&packet).iter().map(String::len).sum()
     }
     /// Records made by `author` that `who` holds.
     pub fn records_by(&self, who: &str, author: &str) -> usize {
@@ -571,6 +664,12 @@ impl Group {
                 skew: 0,
                 push_by_hand: false,
                 push_pending: false,
+                unreadable: false,
+                copies: BTreeSet::from(["pack".to_string()]),
+                wire_version: WIRE_VERSION,
+                their_hash: BTreeMap::new(),
+                checkpointed: BTreeSet::new(),
+                publishes: 0,
                 only_here: BTreeSet::new(),
                 notes: Vec::new(),
                 told_loader: BTreeSet::new(),
@@ -604,9 +703,13 @@ impl Group {
         }
     }
 
-    /// Every online PC posts what each member hasn't acked, or a
-    /// checkpoint to a new one, when that differs from what it last posted.
+    /// Every online PC posts what each member hasn't acked, a checkpoint to
+    /// a new member or one that asked for it, or its status when that
+    /// changed. One event per member, however many copies it holds.
     fn post_all(&mut self) -> bool {
+        if self.relay.down {
+            return false;
+        }
         let members: Vec<String> = self.members.iter().cloned().collect();
         let mut moved = false;
         for s in &members {
@@ -624,29 +727,63 @@ impl Group {
                         pc.checkpoint_for.remove(r);
                     }
                 }
+                // A member whose hash differed asked for everything, once.
+                let asked = pc.engine.members.get(r).is_some_and(|m| m.needs_full);
+                if !asked {
+                    pc.checkpointed.remove(r);
+                }
+                let ask_now = asked && !pc.checkpointed.contains(r);
+                let new_member = pc.checkpoint_for.contains(r);
                 let mut changes = pc.engine.unacked_by(r);
-                if pc.checkpoint_for.contains(r) {
+                if new_member || ask_now {
                     for c in pc.engine.checkpoint() {
                         if !changes.iter().any(|x| x.dot == c.dot) {
                             changes.push(c);
                         }
                     }
                 }
-                let dots: Vec<Dot> = changes.iter().map(|c| c.dot.clone()).collect();
-                let seen = pc.engine.seen();
+                let status = pc.status_for(r);
+                let posted = Posted {
+                    dots: changes.iter().map(|c| c.dot.clone()).collect(),
+                    seen: status.seen.clone(),
+                    missing: status.missing.clone(),
+                    needs_full: status.needs_full,
+                    extra_copies: pc.copies.len() - 1,
+                };
                 let last = pc.last_posted.get(r).cloned().unwrap_or_default();
-                let new_records = !dots.is_empty() && dots != last.0;
-                if !new_records && seen == last.1 {
+                let new_records = !posted.dots.is_empty() && posted.dots != last.dots;
+                let same_news = posted.seen == last.seen
+                    && posted.missing == last.missing
+                    && posted.needs_full == last.needs_full
+                    && posted.extra_copies == last.extra_copies;
+                if !new_records && !ask_now && same_news {
                     continue;
                 }
-                pc.last_posted.insert(r.clone(), (dots, seen));
-                let event = Event { seq: 0, at, from: s.clone(), changes, status: pc.engine.my_status() };
-                events.push((r.clone(), event));
+                pc.publishes += 1;
+                let mut sent = changes;
+                let periodic = wire::send_checkpoint(false, false, pc.publishes);
+                if periodic {
+                    for c in pc.engine.checkpoint() {
+                        if !sent.iter().any(|x| x.dot == c.dot) {
+                            sent.push(c);
+                        }
+                    }
+                }
+                let full = new_member || ask_now || periodic;
+                let body = if full { Body::Checkpoint(sent) } else { Body::Tail(sent) };
+                let bodies = wire::encode(&pc.packet(body, status));
+                events.push((r.clone(), bodies, posted, ask_now));
             }
             pc.push_pending = false;
-            for (r, event) in events {
-                self.relay.post(&r, event);
-                moved = true;
+            for (r, bodies, posted, ask_now) in events {
+                if self.relay.post(&r, s, at, &bodies) {
+                    let pc = self.pc_mut(s);
+                    pc.last_posted.insert(r.clone(), posted);
+                    if ask_now {
+                        pc.checkpointed.insert(r);
+                    }
+                    moved = true;
+                }
             }
         }
         moved
@@ -654,6 +791,9 @@ impl Group {
 
     /// Every online PC takes in what waits for it.
     fn deliver_all(&mut self) -> bool {
+        if self.relay.down {
+            return false;
+        }
         let names: Vec<String> = self.pcs.keys().cloned().collect();
         let mut moved = false;
         for p in &names {
@@ -666,11 +806,25 @@ impl Group {
             let pc = self.pc_mut(p);
             for e in events {
                 let at = Arrival { seq: e.seq, at: e.at };
-                let got = pc.engine.ingest(&e.from, e.changes, e.status, at);
-                pc.notes.extend(got.notes);
-                if pc.returning {
-                    for (name, n) in got.by_author {
-                        *pc.away.entry(name).or_default() += n;
+                match wire::decode(&e.queue.bodies()) {
+                    Ok(packet) => {
+                        let hash = packet.copies.get(&pc.engine.copy).map(|c| c.2.clone());
+                        pc.copies.extend(packet.copies.keys().cloned());
+                        let got = pc.engine.receive(packet, at);
+                        if let Some(hash) = hash {
+                            pc.their_hash.insert(e.from.clone(), hash);
+                        }
+                        pc.notes.extend(got.notes);
+                        if pc.returning {
+                            for (name, n) in got.by_author {
+                                *pc.away.entry(name).or_default() += n;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        if let Some(WireError::OutOfDate { .. }) = err.downcast_ref::<WireError>() {
+                            pc.engine.note_out_of_date(&e.from);
+                        }
                     }
                 }
                 moved = true;
@@ -680,6 +834,9 @@ impl Group {
     }
 
     fn deliver_notices(&mut self) -> bool {
+        if self.relay.down {
+            return false;
+        }
         let names: Vec<String> = self.pcs.keys().cloned().collect();
         let mut moved = false;
         for p in &names {
@@ -794,13 +951,16 @@ mod tests {
         Group::with(&["A", "B"], &[(k(1), on(11))])
     }
 
+    fn body() -> Vec<String> {
+        vec!["1.0000000000000000.0.1.x".to_string()]
+    }
+
     #[test]
     fn the_relay_keeps_only_the_newest_event_per_sender() {
         let mut r = SimRelay::default();
-        let ev = |at| Event { seq: 0, at, from: "A".into(), changes: vec![], status: MemberStatus::default() };
-        r.post("B", ev(1));
-        r.post("B", ev(2));
-        r.post("C", ev(3));
+        assert!(r.post("B", "A", 1, &body()));
+        assert!(r.post("B", "A", 2, &body()));
+        assert!(r.post("C", "A", 3, &body()));
         let got = r.take("B", None);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].at, 2);
@@ -812,8 +972,7 @@ mod tests {
     fn take_follows_the_order_asked_for() {
         let mut r = SimRelay::default();
         for from in ["A", "B", "C"] {
-            let e = Event { seq: 0, at: 1, from: from.into(), changes: vec![], status: MemberStatus::default() };
-            r.post("D", e);
+            r.post("D", from, 1, &body());
         }
         let order = vec!["C".to_string(), "A".to_string()];
         let froms: Vec<String> = r.take("D", Some(&order)).into_iter().map(|e| e.from).collect();
@@ -844,6 +1003,111 @@ mod tests {
         g.online("B");
         g.settle();
         assert_eq!(g.records_by("B", "A"), 2);
+    }
+
+    #[test]
+    fn a_checkpoint_over_the_cap_goes_in_parts_and_folds_only_whole() {
+        let mut g = Group::with(&["A"], &[]);
+        // Names that don't compress, so 3000 of them don't fit one part.
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut word = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            format!("{x:016x}")
+        };
+        let edits: Vec<(Key, Value)> = (0..3000)
+            .map(|_| (Key::Mod(format!("src:{}{}", word(), word())), Value::File { file: format!("{}{}", word(), word()), on: true }))
+            .collect();
+        g.edits("A", &edits);
+        g.join("B");
+        g.offline("B");
+        g.settle();
+        assert!(g.relay_events("B") > 1, "{} bodies", g.relay_events("B"));
+        assert_eq!(g.records_by("B", "A"), 0);
+        g.online("B");
+        g.settle();
+        assert_eq!(g.records_by("B", "A"), 3000);
+        assert_eq!(g.group_hash("A"), g.group_hash("B"));
+    }
+
+    #[test]
+    fn a_body_over_the_cap_is_refused_and_tried_again_later() {
+        let mut g = group();
+        g.relay_body_cap(100);
+        g.edit("A", k(1), on(12));
+        g.settle();
+        assert_eq!(g.relay_events("B"), 0);
+        assert_eq!(g.value("B", &k(1)), on(11));
+        g.relay_body_cap(64 * 1024);
+        g.settle();
+        assert_eq!(g.value("B", &k(1)), on(12));
+    }
+
+    #[test]
+    fn a_relay_that_is_down_holds_everything_back_both_ways() {
+        let mut g = group();
+        g.relay_down();
+        g.edit("A", k(1), on(12));
+        g.settle();
+        assert_eq!(g.relay_events("B"), 0);
+        g.relay_up();
+        g.settle();
+        assert_eq!(g.value("B", &k(1)), on(12));
+    }
+
+    #[test]
+    fn many_copies_ride_in_one_event() {
+        let mut g = group();
+        g.offline("B");
+        for i in 0..151 {
+            g.share_copy("A", &format!("pack-{i}"));
+        }
+        g.settle();
+        assert_eq!(g.relay_events("B"), 1);
+        g.online("B");
+        g.settle();
+        assert_eq!(g.copies("B"), 152);
+    }
+
+    #[test]
+    fn a_restart_keeps_the_engine_as_it_was() {
+        let mut g = group();
+        g.edit("A", k(1), on(12));
+        g.settle();
+        let before = g.pc("B").engine.clone();
+        g.restart("B");
+        assert_eq!(g.pc("B").engine, before);
+        g.edit("A", k(1), on(13));
+        g.settle();
+        assert_eq!(g.value("B", &k(1)), on(13));
+    }
+
+    #[test]
+    fn a_missing_mod_is_reported_to_friends_not_sent_as_a_removal() {
+        let mut g = Group::with(&["A", "B"], &[(k(1), on(11)), (k(2), on(21))]);
+        g.outside("B", k(2), Value::Gone);
+        g.settle();
+        assert_eq!(g.member_missing("A", "B"), [k(2)]);
+        assert_eq!(g.value("A", &k(2)), on(21));
+        g.put_back("B");
+        g.settle();
+        assert!(g.member_missing("A", "B").is_empty());
+    }
+
+    #[test]
+    fn a_stale_status_never_hangs_the_group_in_checkpoints() {
+        let mut g = group();
+        g.edit("A", k(1), on(12));
+        g.settle();
+        g.forget_record("B", "A", 1);
+        g.edit("A", k(2), on(22));
+        g.settle();
+        g.settle();
+        assert_eq!(g.group_hash("A"), g.group_hash("B"));
+        let posted = g.pc("A").publishes;
+        g.settle();
+        assert_eq!(g.pc("A").publishes, posted, "nothing more is sent once they agree");
     }
 
     #[test]

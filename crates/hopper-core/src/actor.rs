@@ -363,6 +363,11 @@ pub(crate) fn note_save(old: Option<&Instance>, new: &Instance) {
     }
     let Some(old) = old else { return };
     note_swaps(&old.addons, &new.addons, &new.root);
+    // A group copy also keeps what the player did as sync records; a friend's
+    // sync and Undo (no tag) stay out of it.
+    crate::synccore::local::note_save(&new.root, &old.addons, &new.addons, |a| {
+        tag_for_addon(&new.root, a).filter(|t| t.who.is_you()).map(|t| t.batch)
+    });
     let changes = diff(&old.addons, &new.addons);
     if changes.is_empty() {
         return;

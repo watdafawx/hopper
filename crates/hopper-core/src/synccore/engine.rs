@@ -8,7 +8,7 @@
 
 use super::apply::ApplyReport;
 use super::gate::{self, GateCtx, Limits, Risk, Trust};
-use super::local::{Drift, Snapshot};
+use super::local::{self, Drift, Snapshot};
 use super::model::{Arrival, Change, Dot, Edit, Key, MemberId, PackMode, Seen, Value, Why};
 use super::plan::{ApplyPlan, PackPlan, Step};
 use super::register::{fold, merge, Log, Merge, Register};
@@ -85,6 +85,9 @@ pub struct Engine {
     /// Relay time of this PC's last contact (set by `touch` and every
     /// receive); the "online at" of what it records.
     pub contact: u64,
+    /// Members whose packets were refused (another wire version), until a
+    /// packet of theirs is taken in again.
+    pub outdated: BTreeSet<MemberId>,
 }
 
 /// The registers of the log, and which winners wait for the player.
@@ -139,9 +142,37 @@ impl Engine {
         dot
     }
 
+    /// Where the scanned disk differs from what this PC applied. Never sent.
     pub fn drift(&self, disk: &Snapshot) -> Vec<Drift> {
-        let _ = disk;
-        todo!("P5: drift")
+        local::drift(&self.applied, disk)
+    }
+
+    /// Keys the group has that this disk lacks (the `missing` of this PC's
+    /// status): drift where the file is gone, and what the register says
+    /// should be there. An unreadable instance reports none, not everything.
+    pub fn missing(&self, disk: &Snapshot) -> Vec<Key> {
+        if disk.unreadable {
+            return Vec::new();
+        }
+        let mut keys: BTreeSet<Key> = self
+            .drift(disk)
+            .into_iter()
+            .filter(|d| d.found == Value::Gone && d.expected != Value::Gone)
+            .map(|d| d.key)
+            .collect();
+        for step in self.lands() {
+            let there = disk.values.get(&step.key).is_some_and(|v| *v != Value::Gone);
+            if matches!(step.key, Key::Mod(_)) && !step.to.is_away() && !there {
+                keys.insert(step.key);
+            }
+        }
+        keys.into_iter().collect()
+    }
+
+    /// A member's packet was refused (another wire version): the status
+    /// says so until one of theirs is taken in.
+    pub fn note_out_of_date(&mut self, member: &str) {
+        self.outdated.insert(member.to_string());
     }
     pub fn outbox(&self) -> Option<Packet> {
         todo!("P4: outbox")
@@ -157,6 +188,7 @@ impl Engine {
     pub fn receive(&mut self, packet: Packet, arrival: Arrival) -> Received {
         let mut packet = packet;
         if packet.version != WIRE_VERSION {
+            self.outdated.insert(packet.from);
             return Received { refused: true, ..Received::default() };
         }
         let Some((body, status, _hash)) = packet.copies.remove(&self.copy) else {
@@ -188,6 +220,7 @@ impl Engine {
             }
         }
         self.members.insert(from.to_string(), status);
+        self.outdated.remove(from);
         self.touch(arrival.at);
         got.notes = self.tell_losers();
         got.reviews = self
@@ -419,9 +452,39 @@ impl Engine {
         self.log.changes.get(&winner).map(|(c, _)| c)
     }
 
+    /// The chip, from the disk and the register, never from bookkeeping of
+    /// what was meant: a friend's Hopper that is out of date first, then
+    /// what waits for the player, then a mods folder that differs, then the
+    /// group's changes not on disk yet, then this PC's own not acked yet.
     pub fn status(&self, disk: &Snapshot) -> Status {
-        let _ = disk;
-        todo!("P5: status")
+        if let Some(id) = self.outdated.iter().next() {
+            let name = self.members.get(id).map_or_else(|| id.clone(), |m| m.name.clone());
+            return Status::OutOfDate(name);
+        }
+        let waiting = self.reviews().len();
+        if waiting > 0 {
+            return Status::NeedsYou(waiting);
+        }
+        let differs = self.drift(disk).len();
+        if differs > 0 {
+            return Status::Differs(differs);
+        }
+        let behind = self.lands().len();
+        if behind > 0 {
+            return Status::Behind(behind);
+        }
+        // A copy's friends are known from their statuses; until one arrives
+        // nothing of ours has been acked.
+        let sending = self
+            .log
+            .changes
+            .keys()
+            .filter(|d| d.author == self.me && (self.members.is_empty() || self.members.values().any(|m| !m.seen.covers(d))))
+            .count();
+        if sending > 0 {
+            return Status::Sending(sending);
+        }
+        Status::InSync
     }
 
     pub fn members(&self) -> Vec<MemberStatus> {
@@ -1083,6 +1146,87 @@ mod tests {
         let mut a = pc("a");
         let p = Packet { version: WIRE_VERSION + 1, from: "b".into(), group: "g".into(), copies: BTreeMap::new() };
         assert!(a.receive(p, Arrival::default()).refused);
+    }
+
+    fn snap(items: &[(u64, Value)]) -> Snapshot {
+        Snapshot { values: items.iter().map(|(n, v)| (mk(*n), v.clone())).collect(), unreadable: false }
+    }
+
+    /// The disk of a PC after `settle`: its applied values.
+    fn disk_of(e: &Engine) -> Snapshot {
+        Snapshot { values: e.applied.clone(), unreadable: false }
+    }
+
+    #[test]
+    fn drift_is_the_disk_against_what_was_applied() {
+        let a = pc("a");
+        assert!(a.drift(&disk_of(&a)).is_empty());
+        let d = a.drift(&snap(&[(1, file(11)), (3, file(32))]));
+        let keys: Vec<Key> = d.iter().map(|d| d.key.clone()).collect();
+        assert_eq!(keys, [mk(2), mk(3)]);
+    }
+
+    #[test]
+    fn status_says_in_sync_only_when_the_disk_agrees() {
+        let mut a = pc("a");
+        assert_eq!(a.status(&disk_of(&a)), Status::InSync);
+        // The disk differs: the chip says so, whatever was meant.
+        assert_eq!(a.status(&snap(&[(1, file(11)), (3, file(31))])), Status::Differs(1));
+        // An unreadable instance is not "differs" (and not drift).
+        let unreadable = Snapshot { values: BTreeMap::new(), unreadable: true };
+        assert_eq!(a.status(&unreadable), Status::InSync);
+        // Its own change not acked yet.
+        act(&mut a, edit(mk(1), file(12)), T0);
+        assert_eq!(a.status(&disk_of(&a)), Status::Sending(1));
+        // A friend's status acks it.
+        let mut b = pc("b");
+        send(&a, &mut b, T0);
+        a.ingest("b", vec![], b.my_status(), Arrival { seq: 2, at: T0 });
+        assert_eq!(a.status(&disk_of(&a)), Status::InSync);
+    }
+
+    #[test]
+    fn status_puts_what_waits_for_you_first_then_behind() {
+        let (mut a, mut b) = (pc("a"), pc("b"));
+        b.record(edit(mk(1), file(12)), T0);
+        send(&b, &mut a, T0);
+        // A plain change from a friend that isn't on disk yet.
+        assert_eq!(a.status(&disk_of(&a)), Status::Behind(1));
+        settle(&mut a);
+        assert_eq!(a.status(&disk_of(&a)), Status::InSync);
+        // A removal while away waits for the player.
+        b.record(edit(mk(2), Value::Gone), T0);
+        send(&b, &mut a, T0 + 72 * H);
+        assert_eq!(a.status(&disk_of(&a)), Status::NeedsYou(1));
+    }
+
+    #[test]
+    fn a_refused_packet_shows_who_is_out_of_date_until_they_send_again() {
+        let mut a = pc("a");
+        let mut b = pc("b");
+        b.record(edit(mk(1), file(12)), T0);
+        a.ingest("b", vec![], b.my_status(), Arrival { seq: 1, at: T0 });
+        let old = Packet { version: WIRE_VERSION + 1, from: "b".into(), group: "g".into(), copies: BTreeMap::new() };
+        assert!(a.receive(old, Arrival::default()).refused);
+        assert_eq!(a.status(&disk_of(&a)), Status::OutOfDate("b".into()));
+        a.ingest("b", vec![], b.my_status(), Arrival { seq: 2, at: T0 });
+        assert_eq!(a.status(&disk_of(&a)), Status::InSync);
+    }
+
+    #[test]
+    fn missing_lists_what_the_group_has_and_this_disk_lacks() {
+        let (mut a, mut b) = (pc("a"), pc("b"));
+        // Gone from this folder outside Hopper.
+        assert_eq!(a.missing(&snap(&[(1, file(11)), (3, file(31))])), [mk(2)]);
+        // A friend's new mod that isn't on this disk yet.
+        b.record(edit(mk(7), file(71)), T0);
+        send(&b, &mut a, T0);
+        let disk = disk_of(&a);
+        assert_eq!(a.missing(&disk), [mk(7)]);
+        settle(&mut a);
+        assert!(a.missing(&disk_of(&a)).is_empty());
+        let unreadable = Snapshot { values: BTreeMap::new(), unreadable: true };
+        assert!(a.missing(&unreadable).is_empty());
     }
 
     #[test]

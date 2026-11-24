@@ -7,7 +7,6 @@ use hopper_core::synccore::{Status, Value};
 /// Covers W31, R2. A jar is deleted from A's mods folder in Explorer.
 /// Nothing reaches B or C; A sees "This PC differs" for mod 2.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w31_a_jar_deleted_outside_hopper_is_never_sent() {
     let mut g = three();
     g.outside("A", m(2), Value::Gone);
@@ -20,7 +19,6 @@ fn w31_a_jar_deleted_outside_hopper_is_never_sent() {
 /// Covers W31, R2. "Put them back" restores the group's file on A and
 /// sends nothing.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w31_put_back_restores_without_sending() {
     let mut g = three();
     g.outside("A", m(2), Value::Gone);
@@ -33,7 +31,6 @@ fn w31_put_back_restores_without_sending() {
 
 /// Covers W31. "Remove for everyone" turns the drift into A's change.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w31_remove_for_everyone_shares_the_drift() {
     let mut g = three();
     g.outside("A", m(2), Value::Gone);
@@ -46,7 +43,6 @@ fn w31_remove_for_everyone_shares_the_drift() {
 /// Covers R2, S27 of the audit. A crash leaves A's mods folder half empty
 /// (6 of 12 gone). Nothing goes out; A sees one "6 mods are missing" card.
 #[test]
-#[ignore = "sync-rewrite"]
 fn r2_a_half_empty_mods_folder_sends_nothing() {
     let all: Vec<_> = (1..=12).map(|n| (m(n), f(n * 10 + 1))).collect();
     let mut g = Group::with(&["A", "B"], &all);
@@ -61,7 +57,6 @@ fn r2_a_half_empty_mods_folder_sends_nothing() {
 /// Covers W31. The CurseForge app swaps mod 3's file on A. Drift, not A's
 /// update.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w31_another_launcher_swapping_a_file_is_drift() {
     let mut g = three();
     g.outside("A", m(3), f(32));
@@ -74,7 +69,6 @@ fn w31_another_launcher_swapping_a_file_is_drift() {
 /// over its instance (the stale-list bug). Mod 5 does not come back for
 /// anyone: nothing publishes lists, and the stale write is drift on A.
 #[test]
-#[ignore = "sync-rewrite"]
 fn c2_a_stale_list_written_to_disk_brings_nothing_back() {
     let mut g = three();
     g.edit("B", m(5), Value::Gone);
@@ -117,7 +111,6 @@ fn c6_status_comes_from_the_disk_not_bookkeeping() {
 /// Covers C7. B's instance can't be read (folder locked). B sends nothing,
 /// not a blank list; A and C keep everything.
 #[test]
-#[ignore = "sync-rewrite"]
 fn c7_an_unreadable_instance_sends_nothing() {
     let mut g = three();
     g.unreadable("B", true);
