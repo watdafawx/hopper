@@ -19,7 +19,7 @@ All of it is built and merged into `main` (fast-forward from `t3/6386a470`):
 | "Update pack to v8.6" (`grouppack::version_tag/update_label`), TNP names ("8-1.78.1" -> "1.78.1") fixed in `instance_ops::pack_version_label` | done |
 | Mod peek: GitHub/Issues/Wiki/Discord/Source are `widgets::link_pill` split pills (web: `.sitepair`) | done |
 | Notices phases 0-7 of `design/notices.md` (option A: hero chips, no strips above the tabs): hero fixed height, toasts bottom right, server chip takes pre-join, Downloads chip, Restart-to-load chip (desktop + web), Needs-you chip, stuck/crash in the run chip (desktop + web), group strip into the group chip popover, mod row markers | done |
-| Release 0.92.0 / Hopper Server 0.81.0 | see the release section below for what was finished |
+| Release 0.92.0 / Hopper Server 0.81.0 | released: tags `v0.92.0`, `hopperd-v0.81.0` pushed after green CI (run 45405012055); site changelog e8d04b64. Local exe built at `X:/Dev/hopper/target/perf/local/hopper.exe`; a background job copies it over `G:\Games\Minecraft\hopper.exe` once the running one closes (check it landed). Check the Release workflow runs with `gh run list --workflow Release` and `gh release view v0.92.0` |
 
 Mock (private): https://claude.ai/artifact/Ttvp249CVG9Kmo9XycCKAT
 
