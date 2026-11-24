@@ -1057,6 +1057,11 @@ impl AppView {
             cx.notify();
             return;
         }
+        // A notice popover that opened by itself isn't focused, so it never
+        // sees the key: Esc closes it first.
+        if crate::sync_chip::dismiss_auto(window, cx) {
+            return;
+        }
         // Esc leaves Settings the way the title bar's back arrow does.
         if self.page == Page::Settings {
             if self.history.can_step(true) {

@@ -318,21 +318,51 @@ thread_local! {
     static OPENED: std::cell::RefCell<Option<(String, std::time::Instant)>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Another chip's popover opened by itself is still up.
-fn another_is_open(me: &str) -> bool {
-    OPENED.with(|o| o.borrow().as_ref().is_some_and(|(id, at)| id != me && at.elapsed() < std::time::Duration::from_secs(2)))
+thread_local! {
+    /// The open state of the chip in [`OPENED`], so Escape (and a chip that
+    /// outranks it) can close that popover from outside the chip.
+    static OPENED_STATE: std::cell::RefCell<Option<Entity<Auto>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A run problem (stuck start, crash) outranks everything else that opens by
+/// itself: the game or server not working is what the player must see first.
+fn rank(chip_id: &str) -> u8 {
+    u8::from(chip_id == "run" || chip_id.starts_with("run-"))
+}
+
+/// Whether chip `me` may open by itself while `other` (the chip that has an
+/// automatic popover open, if any) is up: nothing open, or `me` outranks it.
+fn may_open(me: &str, other: Option<&str>) -> bool {
+    other.is_none_or(|o| o == me || rank(me) > rank(o))
 }
 
 /// `me` holds the one automatic popover while it is open; frees it when closed.
-fn hold(me: &str, open: bool) {
+fn hold(me: &str, open: bool, state: &Entity<Auto>) {
     OPENED.with(|o| {
         let mut o = o.borrow_mut();
         if open {
             *o = Some((me.to_string(), std::time::Instant::now()));
+            OPENED_STATE.with(|s| *s.borrow_mut() = Some(state.clone()));
         } else if o.as_ref().is_some_and(|(id, _)| id == me) {
             *o = None;
+            OPENED_STATE.with(|s| *s.borrow_mut() = None);
         }
     });
+}
+
+/// Closes the popover that opened by itself, if one is up. Escape does this
+/// (the popover isn't focused: opening gives the keyboard back to the field
+/// the player was typing in). Says whether it closed one.
+pub fn dismiss_auto(window: &mut Window, cx: &mut App) -> bool {
+    let Some(state) = OPENED_STATE.with(|s| s.borrow_mut().take()) else { return false };
+    OPENED.with(|o| *o.borrow_mut() = None);
+    if !state.read(cx).open {
+        return false;
+    }
+    state.update(cx, |a, _| a.open = false);
+    // The chip's view may be cached and not redraw by itself.
+    window.refresh();
+    true
 }
 
 /// Marks the keys as shown and says whether any of them was new.
@@ -383,7 +413,13 @@ impl RenderOnce for ChipEl {
         if chip.auto_open.is_empty() && !auto.read(cx).controlled {
             return pop.into_any_element();
         }
-        if !chip.auto_open.is_empty() && first_sight(&chip.id, &chip.auto_open) && !another_is_open(&chip.id) {
+        let other = OPENED.with(|o| o.borrow().as_ref().filter(|(id, at)| *id != *chip.id && at.elapsed() < std::time::Duration::from_secs(2)).map(|(id, _)| id.clone()));
+        if !chip.auto_open.is_empty() && first_sight(&chip.id, &chip.auto_open) && may_open(&chip.id, other.as_deref()) {
+            // One automatic popover at a time: close the other one, however
+            // long ago it drew (a higher-ranked chip takes over).
+            if OPENED.with(|o| o.borrow().as_ref().is_some_and(|(id, _)| *id != *chip.id)) {
+                dismiss_auto(window, cx);
+            }
             auto.update(cx, |a, _| a.open = true);
             // Opening focuses the popover; give the keyboard back to what
             // had it (a search box the player is typing in) once drawn.
@@ -392,11 +428,11 @@ impl RenderOnce for ChipEl {
             }
         }
         let open = auto.read(cx).open;
-        hold(&chip.id, open);
+        hold(&chip.id, open, &auto);
         let (a2, me) = (auto.clone(), chip.id.clone());
         pop.open(open)
             .on_open_change(move |o, _, cx| {
-                hold(&me, *o);
+                hold(&me, *o, &a2);
                 a2.update(cx, |a, _| a.open = *o)
             })
             .into_any_element()
@@ -451,7 +487,7 @@ pub fn more_pill(hidden: usize, names: String, cx: &App) -> AnyElement {
 /// g-*: the group's chip, s-*: the server's, both-*: the two together.
 pub const PREVIEWS: &[&str] = &[
     "g-in-sync", "g-checking", "g-updating", "g-sending", "g-behind", "g-offline", "g-failed", "g-needs", "s-in-sync", "s-differ", "s-comparing",
-    "s-pushing", "s-offline", "s-blocked", "s-failed", "s-wont", "dl-waiting", "dl-working", "dl-stuck", "rs-changed", "rs-waiting", "both-ok", "both-busy", "both-needs", "both-long",
+    "s-pushing", "s-offline", "s-blocked", "s-failed", "s-wont", "dl-waiting", "dl-working", "dl-stuck", "rs-changed", "rs-waiting", "both-ok", "both-busy", "both-needs", "both-long", "needs-open", "needs-run",
 ];
 
 /// Made-up chips for a preview state, no network, no real group or server.
@@ -560,9 +596,19 @@ pub fn preview(name: &str) -> Vec<Chip> {
         }
         chip
     };
+    let open_needs = || {
+        let mut chip = g("needs");
+        chip.id = "needs-preview".into();
+        chip.auto_open = vec!["preview".into()];
+        chip
+    };
     let stuck = || run(hopper::syncchip::RunProblem::Stuck { minutes: Some(4) }, "Skyblock Server looks stuck while loading mods", "Nothing has happened for 4 minutes.");
     match name.split_once('-') {
         Some(("run", "stuck")) => vec![stuck()],
+        // A notice popover that opened by itself (`needs-open`), then a run
+        // problem showing up beside it (`needs-run`): the run one takes over.
+        Some(("needs", "open")) => vec![open_needs()],
+        Some(("needs", _)) => vec![open_needs(), stuck()],
         Some(("run", "crashed")) => vec![run(hopper::syncchip::RunProblem::Crashed, "The server crashed", "Create stopped it while it loaded.")],
         Some(("run", "all")) => vec![stuck(), g("in-sync"), server(ServerState::Differ { mods: 3, blocked: false }, NAME), restart(true)],
         Some(("rs", "changed")) => vec![restart(true)],
@@ -598,5 +644,31 @@ pub fn preview(name: &str) -> Vec<Chip> {
             vec![group, server(ServerState::Differ { mods: 3, blocked: false }, LONG)]
         }
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: that brings gpui's `test` macro in over #[test].
+    use super::may_open;
+
+    #[test]
+    fn nothing_open_lets_any_chip_open() {
+        assert!(may_open("needs-instance", None));
+        assert!(may_open("run-instance", None));
+    }
+
+    #[test]
+    fn equal_rank_waits_for_the_open_one() {
+        assert!(!may_open("needs-instance", Some("group")));
+        assert!(!may_open("run-a", Some("run-b")));
+        assert!(may_open("needs-instance", Some("needs-instance")));
+    }
+
+    #[test]
+    fn a_run_problem_takes_over() {
+        assert!(may_open("run-instance", Some("needs-instance")));
+        assert!(may_open("run-server", Some("group")));
+        assert!(!may_open("needs-instance", Some("run-instance")));
     }
 }

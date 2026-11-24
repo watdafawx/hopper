@@ -1542,19 +1542,8 @@ pub fn pack_version_label(file_name: &str) -> String {
         .strip_suffix(".zip")
         .or_else(|| file_name.strip_suffix(".jar"))
         .unwrap_or(file_name);
-    let v = crate::scan::short_version(&format!("{stem}.jar"));
-    // "TNP-Limitless-8-1.78.1" reads as "8-1.78.1": the pack's own number
-    // glued to the version. A bare whole number before a dash and a dotted
-    // version is that number, not part of the version.
-    if let Some((head, rest)) = v.split_once('-')
-        && !head.is_empty()
-        && head.chars().all(|c| c.is_ascii_digit())
-        && rest.starts_with(|c: char| c.is_ascii_digit())
-        && rest.contains('.')
-    {
-        return rest.to_string();
-    }
-    v
+    // The TNP "8-1.78.1" fix lives in `short_version`, shared with mod jars.
+    crate::scan::short_version(&format!("{stem}.jar"))
 }
 
 #[cfg(test)]

@@ -363,13 +363,26 @@ pub fn short_version(file_name: &str) -> String {
         Some(i) if v.ends_with(')') => &v[..i],
         _ => &v,
     };
-    v.split('+')
+    let v = v
+        .split('+')
         .filter(|p| {
             let p = p.strip_prefix("mc").unwrap_or(p);
             !p.is_empty() && !is_loader_token(p) && !looks_like_minecraft_version(p)
         })
         .collect::<Vec<_>>()
-        .join("+")
+        .join("+");
+    // "TNP-Limitless-8-1.78.1" reads as "8-1.78.1": the pack's own number
+    // glued to the version. A bare whole number before a dash and a dotted
+    // version is that number, not part of the version.
+    if let Some((head, rest)) = v.split_once('-')
+        && !head.is_empty()
+        && head.chars().all(|c| c.is_ascii_digit())
+        && rest.starts_with(|c: char| c.is_ascii_digit())
+        && rest.contains('.')
+    {
+        return rest.to_string();
+    }
+    v
 }
 
 /// "journeymap-neoforge-1.21.1-6.0.0-beta.77.jar" -> "journeymap-neoforge".
@@ -526,6 +539,15 @@ displayTest=\"MATCH_VERSION\"
         assert_eq!(short_version("mekanism-enchanting-infuser-compat-1.0.0 (2).jar"), "1.0.0");
         assert_eq!(short_version("netprodis-2.0.0+1.21.jar"), "2.0.0");
         assert_eq!(short_version("mob_grinding_utils-1.1.10+mc1.21.1.jar"), "1.1.10");
+        // A pack's own number glued in front of the version is dropped.
+        assert_eq!(short_version("TNP-Limitless-8-1.78.1.jar"), "1.78.1");
+        assert_eq!(short_version("All the Mods 10-8.6.jar"), "8.6");
+        // Not a leading whole number + dotted version: left alone.
+        assert_eq!(
+            short_version("integrateddynamics-1.21.1-neoforge-1.38.0-2266.jar"),
+            "1.38.0-2266"
+        );
+        assert_eq!(short_version("foo-7-beta.jar"), "7-beta");
         assert_eq!(
             version_from_file_name("integrateddynamics-1.21.1-neoforge-1.38.0-2266.jar"),
             "1.38.0-2266"
