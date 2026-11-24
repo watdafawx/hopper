@@ -89,7 +89,6 @@ fn c2_a_stale_list_written_to_disk_brings_nothing_back() {
 /// stays the friend's: B's next packet doesn't send it as B's, and History
 /// everywhere names A only.
 #[test]
-#[ignore = "sync-rewrite"]
 fn c2_a_taken_in_change_never_echoes_as_mine() {
     let mut g = three();
     g.edit("A", m(1), f(12));

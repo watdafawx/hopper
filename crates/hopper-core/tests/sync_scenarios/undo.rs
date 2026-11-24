@@ -6,7 +6,6 @@ use hopper_core::synccore::Value;
 /// Covers W15. A removes mod 2; B undoes it from History. Mod 2 is back on
 /// every PC, named B, and a later change by C still reaches A.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w15_undo_a_friends_change_reaches_everyone() {
     let mut g = three();
     g.edit("A", m(2), Value::Gone);
@@ -23,7 +22,6 @@ fn w15_undo_a_friends_change_reaches_everyone() {
 /// Covers R5. C makes 3 changes today. A presses "Put back C's changes":
 /// all three go back everywhere as one batch named A.
 #[test]
-#[ignore = "sync-rewrite"]
 fn r5_put_back_one_friends_changes_in_one_click() {
     let mut g = three();
     g.advance(DAY);
@@ -42,7 +40,6 @@ fn r5_put_back_one_friends_changes_in_one_click() {
 /// Covers R5. Putting back C's changes leaves alone a key B changed after
 /// C, and says so.
 #[test]
-#[ignore = "sync-rewrite"]
 fn r5_put_back_skips_what_someone_changed_since() {
     let mut g = three();
     let since = g.now();
@@ -61,7 +58,6 @@ fn r5_put_back_skips_what_someone_changed_since() {
 /// returns (the relay only holds A's newest event). B ends on mod 1 on,
 /// and its History shows both changes.
 #[test]
-#[ignore = "sync-rewrite"]
 fn c3_made_and_undone_while_away_both_arrive() {
     let mut g = three();
     g.offline("B");
@@ -79,7 +75,6 @@ fn c3_made_and_undone_while_away_both_arrive() {
 /// undoes A's update of mod 1 and then A changes mod 2: the undo still
 /// reaches A (an undo used to match the last code, so nobody saw it).
 #[test]
-#[ignore = "sync-rewrite"]
 fn c3_an_undo_followed_by_another_change_still_arrives() {
     let mut g = three();
     g.edit("A", m(1), f(12));

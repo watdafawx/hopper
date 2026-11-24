@@ -55,7 +55,6 @@ fn w29_r7_151_packs_to_an_offline_friend_all_arrive() {
 /// the newest. It still holds all four records (packets are cumulative
 /// until B acks).
 #[test]
-#[ignore = "sync-rewrite"]
 fn c3_the_newest_packet_carries_everything_unacked() {
     let mut g = three();
     g.offline("B");

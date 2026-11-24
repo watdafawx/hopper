@@ -7,7 +7,6 @@ use hopper_core::synccore::Value;
 /// changes: D's first packet in is a checkpoint and D ends in step, with
 /// each mod named after who changed it last.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w16_a_late_joiner_gets_the_latest_state() {
     let mut g = three();
     g.edit("A", m(1), f(12));
@@ -22,7 +21,6 @@ fn w16_a_late_joiner_gets_the_latest_state() {
 
 /// Covers W16. D's own changes made before D's first packet reach the group.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w16_a_joiners_own_changes_reach_the_group() {
     let mut g = three();
     g.join("D");
@@ -35,7 +33,6 @@ fn w16_a_joiners_own_changes_reach_the_group() {
 /// keeps its last version and stops following; the others are told, and
 /// B's later changes reach nobody.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w17_a_member_who_leaves_keeps_their_copy() {
     let mut g = three();
     g.offline("B");
@@ -53,7 +50,6 @@ fn w17_a_member_who_leaves_keeps_their_copy() {
 /// Covers W18 (relay scenarios s10, s11). The group is deleted while C is
 /// offline. On return C stops following and keeps its last version.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w18_group_deleted_while_away_keeps_the_last_version() {
     let mut g = three();
     g.edit("A", m(1), f(12));
@@ -70,7 +66,6 @@ fn w18_group_deleted_while_away_keeps_the_last_version() {
 /// that only follows and never makes a change ends equal to the group and
 /// sends no records of its own: the shape a server follower will use.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w37_a_read_only_follower_ends_equal_and_sends_nothing() {
     let mut g = three();
     g.edit("A", m(1), f(12));
