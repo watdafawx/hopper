@@ -8,7 +8,6 @@ use hopper_core::synccore::{Answer, Risk, Value};
 /// (higher Lamport clock, then author), with no card, and the author whose
 /// change lost is told.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w13_same_mod_both_online_ends_the_same_everywhere() {
     let mut g = three();
     g.edit("A", m(1), f(12));
@@ -26,7 +25,6 @@ fn w13_same_mod_both_online_ends_the_same_everywhere() {
 /// later. Whoever reconnects first, every PC ends on the same file: the
 /// order they come back in decides nothing.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w14_same_mod_both_offline_reconnect_order_decides_nothing() {
     for a_first in [true, false] {
         let mut g = three();
@@ -51,7 +49,6 @@ fn w14_same_mod_both_offline_reconnect_order_decides_nothing() {
 /// comes back. Nobody loses mod 1: every PC keeps A's update and shows a
 /// card "B removed ... You updated it" until someone answers.
 #[test]
-#[ignore = "sync-rewrite"]
 fn r1_update_vs_removal_asks_and_keeps_the_mod() {
     let mut g = three();
     g.offline("B");
@@ -70,7 +67,6 @@ fn r1_update_vs_removal_asks_and_keeps_the_mod() {
 /// record that had seen both, so the card closes on every PC and mod 1 is
 /// gone everywhere, named after C.
 #[test]
-#[ignore = "sync-rewrite"]
 fn r1_the_first_answer_settles_the_clash_for_everyone() {
     let mut g = three();
     g.offline("B");
@@ -94,7 +90,6 @@ fn r1_the_first_answer_settles_the_clash_for_everyone() {
 /// change; now neither change is ever lost: B ends on the same file as A
 /// and History on both lists both changes.
 #[test]
-#[ignore = "sync-rewrite"]
 fn c4_a_slow_publish_never_drops_a_friends_change() {
     let mut g = three();
     g.edit("A", m(1), f(12));
@@ -115,7 +110,6 @@ fn c4_a_slow_publish_never_drops_a_friends_change() {
 /// Covers R1. Folding the same records in any order gives the same group
 /// state: C receives A's and B's packets in both orders across two runs.
 #[test]
-#[ignore = "sync-rewrite"]
 fn r1_arrival_order_never_changes_the_result() {
     let mut ends = Vec::new();
     for a_first in [true, false] {

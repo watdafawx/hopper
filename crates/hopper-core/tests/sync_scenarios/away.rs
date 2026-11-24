@@ -8,7 +8,6 @@ use hopper_core::synccore::{Answer, Risk, Value};
 /// A and C get one card "B was away for 3 days. B made 2 changes." and
 /// nothing lands until they answer; "Take them" lands both.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w11_changes_from_a_long_away_friend_wait_for_ok() {
     let mut g = three();
     g.offline("B");
@@ -29,7 +28,6 @@ fn w11_changes_from_a_long_away_friend_wait_for_ok() {
 /// Covers W11, R5. Same as above; A answers "Keep ours". A follow-up record
 /// puts mods 2 and 3 back for the whole group, B included, named A.
 #[test]
-#[ignore = "sync-rewrite"]
 fn w11_keep_ours_puts_it_back_for_everyone() {
     let mut g = three();
     g.offline("B");
@@ -50,7 +48,6 @@ fn w11_keep_ours_puts_it_back_for_everyone() {
 /// A and C get one "B removed 12 mods at once" card; nothing is removed
 /// on their PCs until they answer.
 #[test]
-#[ignore = "sync-rewrite"]
 fn r5_many_removals_at_once_ask_first() {
     let mut g = Group::with(&["A", "B", "C"], &(1..=12).map(|n| (m(n), f(n * 10 + 1))).collect::<Vec<_>>());
     let gone: Vec<_> = (1..=12).map(|n| (m(n), Value::Gone)).collect();
@@ -64,7 +61,6 @@ fn r5_many_removals_at_once_ask_first() {
 
 /// Covers R5, D6. Five removals in one go is not "many": they land.
 #[test]
-#[ignore = "sync-rewrite"]
 fn r5_five_removals_land_by_themselves() {
     let mut g = three();
     let gone: Vec<_> = (1..=5).map(|n| (m(n), Value::Gone)).collect();
@@ -77,7 +73,6 @@ fn r5_five_removals_land_by_themselves() {
 /// Covers design §8. B is away two days while A makes 5 changes and C 2.
 /// On return B gets a summary note naming both, and the changes land.
 #[test]
-#[ignore = "sync-rewrite"]
 fn back_from_away_shows_a_summary() {
     let mut g = three();
     g.offline("B");
@@ -95,7 +90,6 @@ fn back_from_away_shows_a_summary() {
 /// Covers R5. C sets B to "Ask me first": every record from B waits on C,
 /// even a harmless add, while A gets it by itself.
 #[test]
-#[ignore = "sync-rewrite"]
 fn r5_ask_me_first_per_friend() {
     use hopper_core::synccore::Trust;
     let mut g = three();
@@ -111,7 +105,6 @@ fn r5_ask_me_first_per_friend() {
 /// a day later, with A's name and the `seen` A had then (so receivers can
 /// tell they were made before A saw B's newer change).
 #[test]
-#[ignore = "sync-rewrite"]
 fn r1_offline_changes_keep_what_their_author_had_seen() {
     let mut g = three();
     g.offline("A");
