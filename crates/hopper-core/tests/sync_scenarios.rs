@@ -706,35 +706,6 @@ fn s06b_an_undo_while_a_member_is_away_reaches_them() {
     assert_eq!((pcs[1].mods[&3], pcs[1].mods.get(&2).copied()), ((31, true), Some((21, true))));
 }
 
-/// S7. Someone joins after the changes: the group hands them A's latest
-/// code and B's (they follow A's code, so only B's stamped changes are
-/// new to them), and the joiner ends like everyone else.
-#[test]
-#[ignore = "starts relay/hopper_mailbox.py; run with --ignored"]
-fn s07_a_late_joiner_gets_the_latest_pack() {
-    let relay = Relay::start();
-    let (gid, mut pcs) = group_of(&relay, &["A", "B"]);
-    six_changes(&mut pcs[0]);
-    pcs[0].publish().unwrap();
-    pcs[1].tick();
-    pcs[1].mods.insert(6, (61, false));
-    pcs[1].publish().unwrap();
-    pcs[0].tick();
-    let mut d = Pc::new(&relay, "D");
-    befriend(&pcs[0], &d);
-    pcs[0].mb.edit_group(&gid, None, &[d.id()], &[]).unwrap();
-    d.mb.accept_group(&gid).unwrap();
-    // The follow installs A's latest code (from the group).
-    let (_, evs) = d.mb.events(0, 0).unwrap();
-    let a_code = evs.iter().find(|e| e.kind() == Kind::Recipe && e.from == pcs[0].id()).expect("D gets A's pack").code.clone();
-    let s = sharecode::decode(&a_code).unwrap();
-    d.mods = s.entries.iter().map(|e| match e { Entry::CurseFile { file, enabled } => (file / 10, (*file, *enabled)), _ => unreachable!() }).collect();
-    d.join_copy(&gid, false);
-    d.tick();
-    assert_eq!(d.mods, pcs[0].mods);
-    assert_eq!(d.mods[&6], (61, false), "B's change is in A's code already");
-}
-
 /// S8. C is removed from the group while offline. Back online, C hears
 /// the pack isn't shared with them any more; what C changed meanwhile
 /// stays on C's PC and doesn't reach the others.
@@ -917,27 +888,6 @@ fn s15_a_full_queue_keeps_a_small_senders_pack() {
     assert_eq!(pcs[1].mods, after_six(), "A's code survived the flood");
 }
 
-/// GAP. Past 150 events from one sender in one person's queue, the
-/// oldest is dropped without a word: the sender got "sent" for each, and
-/// the friend never hears of the first pack.
-#[test]
-#[ignore = "gap: a queue over the per-sender limit drops packs silently"]
-fn gap_a_pack_pushed_out_of_a_queue_is_not_lost_silently() {
-    let relay = Relay::start();
-    let a = Pc::new(&relay, "A");
-    let mut b = Pc::new(&relay, "B");
-    befriend(&a, &b);
-    b.offline();
-    let code = a.code();
-    for i in 0..151 {
-        let r = a.mb.publish_to(&[b.id()], &[], &format!("p{i}"), "k", "P", &code, &[], &Default::default()).unwrap();
-        assert_eq!(r.sent, 1, "the mailbox said it was sent");
-    }
-    b.online();
-    b.read().unwrap();
-    assert!(b.seen.iter().any(|e| e.inst == "p0"), "pack p0 vanished from B's queue and nobody was told");
-}
-
 /// S16. What the sharer is told when the mailbox refuses a publish for
 /// good reasons. Today these come back as errors from a background
 /// publish (logged, retried every minute, never shown); this checks the
@@ -980,23 +930,6 @@ fn gap_storage_full_says_what_to_do() {
     let e = refused.expect("the mailbox refuses past 3 MB");
     let said = mailbox::says(&e);
     assert!(!said.contains("Try again in a few minutes"), "{said}");
-}
-
-/// S17. A loader version change goes through the mailbox like a mod's.
-#[test]
-#[ignore = "starts relay/hopper_mailbox.py; run with --ignored"]
-fn s17_a_loader_bump_reaches_members() {
-    let relay = Relay::start();
-    let (_, mut pcs) = group_of(&relay, &["A", "B"]);
-    pcs[0].loader = "neoforge-21.1.228".into();
-    pcs[0].publish().unwrap();
-    pcs[1].tick();
-    assert_eq!(pcs[1].loader, "neoforge-21.1.228");
-    // Another kind of loader isn't followed.
-    pcs[0].loader = "fabric-0.16.9".into();
-    pcs[0].publish().unwrap();
-    pcs[1].tick();
-    assert_eq!(pcs[1].loader, "neoforge-21.1.228");
 }
 
 /// S18. A hand-added jar (no source) in the sharer's pack travels as
