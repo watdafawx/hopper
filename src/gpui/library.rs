@@ -3097,6 +3097,9 @@ impl LibraryView {
             }
             self.server.update(cx, |p, cx| p.chip(false, cx))
         });
+        // The pre-join check (the server would turn the pack away, or has
+        // other mods) is part of that chip: red, and its list in the popover.
+        let server_chip = crate::join_help::into_chip(&self.store, &inst.root, server_chip, cx);
         let made_up = self.store.read(cx).sync_chip_preview.clone();
         self.sync_chips = match made_up {
             Some(name) => crate::sync_chip::preview(name.strip_suffix("+run").unwrap_or(&name)),
@@ -3109,7 +3112,6 @@ impl LibraryView {
         let hint = self.server_hint(&inst, cx);
         let cf_change = self.cf_change_bar(&inst, cx);
         let pending = self.pending_banner(&inst, cx);
-        let pre_join = crate::join_help::pre_join_bar(&self.store, &inst.root, cx);
         let group_pack = crate::group_pack::group_status_bar(&self.store, &inst.root, cx);
         let stuck = {
             let view = cx.entity().downgrade();
@@ -3138,7 +3140,6 @@ impl LibraryView {
         notices.extend(cf_change);
         notices.extend(pending);
         notices.extend(group_pack);
-        notices.extend(pre_join);
         let root = inst.root.clone();
         notices.extend(self.addons.update(cx, |a, cx| a.notices(&root, cx)));
         notices.extend(hint);

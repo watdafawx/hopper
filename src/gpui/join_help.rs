@@ -1,7 +1,7 @@
 //! Failures to join a server or open a world (`hopper::joinfail`): the
-//! card on Crash help after the game ends, and the warning under an
-//! instance's header when its paired server would turn it away
-//! (`hopper::rigsync::join_check`). They read like the crash card
+//! card on Crash help after the game ends, and the paired server's chip
+//! when the server would turn the pack away or has other mods
+//! (`hopper::rigsync::join_check`). The card reads like the crash card
 //! (`crash_view`), in amber: nothing crashed.
 
 use crate::crash_help::callout;
@@ -278,7 +278,7 @@ fn is_server(target: &str, server: &hopper::server::ServerInfo, server_host: &st
 
 /// A mod by id: its icon and name opening the mod peek when the pack has
 /// it, else just its id.
-fn mod_chip<V: 'static>(store: &Entity<Store>, root: &Path, id: &str, jar: &str, key: usize, cx: &Context<V>) -> AnyElement {
+fn mod_chip(store: &Entity<Store>, root: &Path, id: &str, jar: &str, key: usize, cx: &App) -> AnyElement {
     let s = store.read(cx);
     let addon = (!jar.is_empty())
         .then(|| s.instance(root).and_then(|i| i.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(jar.trim_end_matches(".disabled")))))
@@ -472,205 +472,235 @@ pub fn card<V: 'static>(store: &Entity<Store>, root: &Path, p: &JoinProblem, cx:
         .into_any_element()
 }
 
-/// The warning under an instance's header: its paired server would turn
-/// it away (or ask for mods it lacks). Closed per set of differences.
-pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Context<V>) -> Option<crate::notice_slot::Notice> {
+/// What the paired server's chip says when the server would turn the pack
+/// away or has other mods than it: the chip turns red for the first, and
+/// its popover lists what differs, with the buttons that fix it. `chip` is
+/// the server chip the hero already has (its comparison), if any; the
+/// result is that chip with the pre-join check folded in, or `chip` as it
+/// was when nothing differs.
+pub fn into_chip<V: 'static>(
+    store: &Entity<Store>,
+    root: &Path,
+    chip: Option<crate::sync_chip::Chip>,
+    cx: &mut Context<V>,
+) -> Option<crate::sync_chip::Chip> {
+    use crate::sync_chip::{Action, Chip, Section};
+    use hopper::syncchip::{ServerState, server_look};
     store.update(cx, |s, _| s.want_pre_join(root));
     let s = store.read(cx);
+    // The chip is the shown server's: only that one's check goes in it.
+    let shown = s.server_of(root).map(|sv| sv.root.clone());
     let all = s.pre_joins(root);
-    let p = (*all.first()?).clone();
+    let Some(p) = all.iter().find(|p| Some(&p.server_root) == shown.as_ref()).map(|p| (*p).clone()) else { return chip };
     // Its other servers that differ too, named on a line of their own.
-    let others: Vec<String> = all.iter().skip(1).map(|o| o.server.clone()).collect();
-    let several = s.servers_of(root).len() > 1;
+    let others: Vec<String> = all.iter().filter(|o| o.server_root != p.server_root).map(|o| o.server.clone()).collect();
     // The pack or server changed since: its old numbers would mislead.
     let checking = s.pre_join_checking(root, &p.server_root);
     let job = s.server_update_job(&p.server_root);
     let add_job = s.server_add_job(&p.server_root);
     let online = crate::rigsync::server_online(s, None, &p.server_root);
     let pack_nf = s.instance(root).and_then(|i| i.loader.strip_prefix("neoforge-").map(str::to_string));
-    let key = hopper::settings::notice_key(&root.to_string_lossy(), "pre-join", &p.check.signature());
-    if crate::notice_slot::hidden(store, &key, cx) {
-        return None;
-    }
-    let title = if p.check.loader.is_some() {
-        format!("{} will turn this pack away", p.server)
-    } else {
-        format!("{} has other mods than this pack", p.server)
+    let live = s.live_sync(&p.server_root).is_some();
+    let c = &p.check;
+    let wont = c.loader.is_some();
+    let list = |v: &[String]| {
+        let shown: Vec<&str> = v.iter().take(4).map(String::as_str).collect();
+        let more = v.len().saturating_sub(4);
+        if more > 0 { format!("{} and {more} more", shown.join(", ")) } else { shown.join(", ") }
     };
-    let detail = {
-        let c = &p.check;
-        let list = |v: &[String]| {
-            let shown: Vec<&str> = v.iter().take(4).map(String::as_str).collect();
-            let more = v.len().saturating_sub(4);
-            if more > 0 { format!("{} and {more} more", shown.join(", ")) } else { shown.join(", ") }
-        };
-        let mut lines = Vec::new();
-        if let Some((mine, theirs)) = &c.loader {
-            lines.push(format!("NeoForge: {mine} in this pack, {theirs} on the server"));
+    let mut lines = Vec::new();
+    if let Some((mine, theirs)) = &c.loader {
+        lines.push(format!("NeoForge: {mine} in this pack, {theirs} on the server"));
+    }
+    // Drawn as its own row (mod links and "Add to <server>"); the text
+    // stays for while it's checked again.
+    let mut only_at = None;
+    if !c.only_pack.is_empty() {
+        only_at = Some(lines.len());
+        lines.push(format!("Only in the pack: {}", list(&c.only_pack)));
+    }
+    if !c.only_server.is_empty() {
+        lines.push(format!("Only on the server: {}", list(&c.only_server)));
+    }
+    if !c.off_here.is_empty() {
+        lines.push(format!("Turned off here, still on on the server: {}", list(&c.off_here)));
+    }
+    if !c.off_there.is_empty() {
+        lines.push(format!("On here, turned off on the server: {}", list(&c.off_there)));
+    }
+    if !c.versions.is_empty() {
+        let names: Vec<String> = c.versions.iter().map(|(n, a, b)| format!("{n} ({a} here, {b} there)")).collect();
+        lines.push(format!("Other versions: {}", list(&names)));
+    }
+    if checking {
+        lines = vec![format!("Checking {} again…", p.server)];
+        only_at = None;
+    }
+    match &add_job {
+        Some(j) if j.error.is_some() => {
+            lines.push(format!("Adding to {} didn't finish: {}", p.server, j.error.clone().unwrap_or_default()));
         }
-        // Drawn as its own row (mod links and "Add to <server>"); the text
-        // stays for while it's checked again.
-        let mut only_at = None;
-        if !c.only_pack.is_empty() {
-            only_at = Some(lines.len());
-            lines.push(format!("Only in the pack: {}", list(&c.only_pack)));
+        // The server runs the mods it had when it started.
+        Some(j) if j.done && online && live => {
+            lines.push(format!("Added while {} runs: restart it to load them.", p.server));
         }
-        if !c.only_server.is_empty() {
-            lines.push(format!("Only on the server: {}", list(&c.only_server)));
-        }
-        if !c.off_here.is_empty() {
-            lines.push(format!("Turned off here, still on on the server: {}", list(&c.off_here)));
-        }
-        if !c.off_there.is_empty() {
-            lines.push(format!("On here, turned off on the server: {}", list(&c.off_there)));
-        }
-        if !c.versions.is_empty() {
-            let names: Vec<String> = c.versions.iter().map(|(n, a, b)| format!("{n} ({a} here, {b} there)")).collect();
-            lines.push(format!("Other versions: {}", list(&names)));
-        }
-        if checking {
-            lines = vec![format!("Checking {} again…", p.server)];
+        _ => {}
+    }
+    match &job {
+        Some(j) if !j.done => {
+            lines = vec![format!("Updating {}…", p.server)];
             only_at = None;
         }
-        match &add_job {
-            Some(j) if j.error.is_some() => {
-                lines.push(format!("Adding to {} didn't finish: {}", p.server, j.error.clone().unwrap_or_default()));
-            }
-            // The server runs the mods it had when it started.
-            Some(j) if j.done && online && s.live_sync(&p.server_root).is_some() => {
-                lines.push(format!("Added while {} runs: restart it to load them.", p.server));
-            }
-            _ => {}
+        Some(j) if j.error.is_some() => {
+            lines.push(format!("The update didn't finish: {}", j.error.clone().unwrap_or_default()));
         }
-        match &job {
-            Some(j) if !j.done => {
-                lines = vec![format!("Updating {}…", p.server)];
-                only_at = None;
-            }
-            Some(j) if j.error.is_some() => {
-                lines.push(format!("The update didn't finish: {}", j.error.clone().unwrap_or_default()));
-            }
-            // Done, and the server still differs: say what it did.
-            Some(j) if !checking && !j.detail.is_empty() => lines.push(format!("Last update: {}.", j.detail)),
-            _ => {}
-        }
-        if !others.is_empty() {
-            lines.push(format!("{} differ{} from this pack too.", others.join(" and "), if others.len() == 1 { "s" } else { "" }));
-        }
-        (lines, only_at)
-    };
-    let (detail, only_at) = detail;
+        // Done, and the server still differs: say what it did.
+        Some(j) if !checking && !j.detail.is_empty() => lines.push(format!("Last update: {}.", j.detail)),
+        _ => {}
+    }
+    if !others.is_empty() {
+        lines.push(format!("{} differ{} from this pack too.", others.join(" and "), if others.len() == 1 { "s" } else { "" }));
+    }
     let updating = job.as_ref().is_some_and(|j| !j.done);
     let adding = add_job.as_ref().is_some_and(|j| !j.done);
-    // "Only in the pack" with each mod's icon (a click opens its page
-    // beside), then the button that copies them to the server. Outlined:
-    // "Update server" is this notice's filled button.
-    let only_row = only_at.map(|_| {
-        let s = store.read(cx);
-        let c = &p.check;
-        let mut parts = vec![widgets::caption("Only in the pack:", cx).text_xs().into_any_element()];
-        let more = c.only_pack.len().saturating_sub(4);
-        let shown = c.only_pack.len().min(4);
-        for (i, n) in c.only_pack.iter().take(4).enumerate() {
-            let jar = s
-                .instance(root)
-                .and_then(|inst| inst.addons.iter().find(|a| a.name.eq_ignore_ascii_case(n)))
-                .map(|a| a.file_name.clone())
-                .unwrap_or_default();
-            let chip = mod_chip(store, root, n, &jar, 100 + i, cx);
-            // The comma hugs the name before it.
-            let last = i + 1 == shown && more == 0;
-            parts.push(if last { chip } else { h_flex().items_center().child(chip).child(words(",")).into_any_element() });
-        }
-        if more > 0 {
-            parts.push(widgets::caption(format!("and {more} more"), cx).text_xs().into_any_element());
-        }
-        if !p.add.is_empty() {
-            let n = p.add.len();
-            let what = if n == 1 { "this mod".to_string() } else { format!("these {n} mods") };
-            let mut tip = format!("Copies {what} to {}. Nothing there is removed.", p.server);
-            if online {
-                tip.push_str(&format!(" {} is running: restart it after adding to load them.", p.server));
-            }
-            let (st, r, sr) = (store.clone(), root.to_path_buf(), p.server_root.clone());
-            parts.push(
-                div()
-                    .pl_1()
-                    .child(
-                        Button::new("prejoin-add")
-                            .xsmall()
-                            .outline()
-                            .icon(IconName::Plus)
-                            .label(if adding { "Adding…".to_string() } else { format!("Add to {}", widgets::short_label(&p.server, 24)) })
-                            .loading(adding)
-                            .disabled(adding || updating)
-                            .tooltip(tip)
-                            .on_click(move |_, _, cx| {
-                                st.update(cx, |s, cx| {
-                                    s.add_missing_to_server(&r, &sr);
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .into_any_element(),
-            );
-        }
-        sentence(parts).into_any_element()
+
+    // The chip: the hero's own comparison when it has one, else one made
+    // from this check's count.
+    let differing = c.only_pack.len() + c.only_server.len() + c.off_here.len() + c.off_there.len() + c.versions.len();
+    let mut chip = chip.unwrap_or_else(|| Chip {
+        id: "server".into(),
+        look: server_look(&ServerState::Differ { mods: differing.max(1), blocked: false }, &p.server),
+        progress: None,
+        sections: Vec::new(),
     });
-    let (st, r, sr) = (store.clone(), root.to_path_buf(), p.server_root.clone());
-    let server = p.server.clone();
-    let update = move |fit: crate::notice_slot::Fit| {
-        crate::notice_slot::main_button(Button::new("prejoin-update").small(), fit)
-            .icon(IconName::ServerCog)
-            .label(match (updating, several && !fit.narrow) {
-                (true, _) => "Updating…".to_string(),
-                // With several servers, which one it updates.
-                (false, true) => format!("Update {server}"),
-                (false, false) => "Update server".to_string(),
-            })
-            .loading(updating)
-            .tooltip("Gives the server this pack's NeoForge and mods (it asks first)")
-            .on_click(move |_, window, cx| update_server(&st, &r, &sr, window, cx))
+    if wont && !chip.look.busy {
+        chip.look = server_look(&ServerState::WontJoin, &p.server);
+    }
+    if chip.sections.is_empty() {
+        chip.sections.push(Section {
+            title: format!("{} has other mods than this pack", p.server).into(),
+            line: "".into(),
+            progress: None,
+            body: None,
+            actions: Vec::new(),
+        });
+    }
+    // With a NeoForge mismatch its line is the subject under the title; the
+    // rest is the list.
+    let rest_at = usize::from(wont && !checking && !updating);
+    let subject = if rest_at == 1 { lines.first().cloned().unwrap_or_default() } else { String::new() };
+    let rest: Vec<String> = lines.iter().skip(rest_at).cloned().collect();
+    let only_at = only_at.filter(|at| *at >= rest_at).map(|at| at - rest_at);
+    let (head, tail) = match only_at {
+        Some(at) => (rest[..at].to_vec(), rest[at + 1..].to_vec()),
+        None => (rest, Vec::new()),
     };
-    let matcher = p.check.loader.as_ref().filter(|_| pack_nf.is_some()).map(|(_, snf)| {
+    let has_body = !head.is_empty() || !tail.is_empty() || only_at.is_some();
+    let body: crate::sync_chip::Body = {
+        let (store, root, p) = (store.clone(), root.to_path_buf(), p.clone());
+        std::rc::Rc::new(move |cx: &mut App| {
+            let cx: &App = cx;
+            let lines = |v: &[String]| v.iter().map(|l| widgets::caption(l.clone(), cx).text_xs().whitespace_normal()).collect::<Vec<_>>();
+            // "Only in the pack" with each mod's icon (a click opens its
+            // page beside), then the button that copies them to the server.
+            let only_row = only_at.map(|_| {
+                let s = store.read(cx);
+                let c = &p.check;
+                let mut parts = vec![widgets::caption("Only in the pack:", cx).text_xs().into_any_element()];
+                let more = c.only_pack.len().saturating_sub(4);
+                let shown = c.only_pack.len().min(4);
+                for (i, n) in c.only_pack.iter().take(4).enumerate() {
+                    let jar = s
+                        .instance(&root)
+                        .and_then(|inst| inst.addons.iter().find(|a| a.name.eq_ignore_ascii_case(n)))
+                        .map(|a| a.file_name.clone())
+                        .unwrap_or_default();
+                    let chip = mod_chip(&store, &root, n, &jar, 100 + i, cx);
+                    // The comma hugs the name before it.
+                    let last = i + 1 == shown && more == 0;
+                    parts.push(if last { chip } else { h_flex().items_center().child(chip).child(words(",")).into_any_element() });
+                }
+                if more > 0 {
+                    parts.push(widgets::caption(format!("and {more} more"), cx).text_xs().into_any_element());
+                }
+                if !p.add.is_empty() {
+                    let n = p.add.len();
+                    let what = if n == 1 { "this mod".to_string() } else { format!("these {n} mods") };
+                    let mut tip = format!("Copies {what} to {}. Nothing there is removed.", p.server);
+                    if online {
+                        tip.push_str(&format!(" {} is running: restart it after adding to load them.", p.server));
+                    }
+                    let (st, r, sr) = (store.clone(), root.clone(), p.server_root.clone());
+                    parts.push(
+                        div()
+                            .pl_1()
+                            .child(
+                                Button::new("prejoin-add")
+                                    .xsmall()
+                                    .outline()
+                                    .icon(IconName::Plus)
+                                    .label(if adding { "Adding…".to_string() } else { format!("Add to {}", widgets::short_label(&p.server, 24)) })
+                                    .loading(adding)
+                                    .disabled(adding || updating)
+                                    .tooltip(tip)
+                                    .on_click(move |_, _, cx| {
+                                        st.update(cx, |s, cx| {
+                                            s.add_missing_to_server(&r, &sr);
+                                            cx.notify();
+                                        });
+                                    }),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                sentence(parts).into_any_element()
+            });
+            v_flex().gap_0p5().children(lines(&head)).when_some(only_row, |d, row| d.child(row)).children(lines(&tail)).into_any_element()
+        })
+    };
+    // One "Sync to server" button: the chip's own when it has one (the same
+    // action: it asks first, then brings the server's mods and NeoForge in
+    // step), else this check's.
+    let (st, r, sr) = (store.clone(), root.to_path_buf(), p.server_root.clone());
+    let sync = move |w: &mut Window, cx: &mut App| update_server(&st, &r, &sr, w, cx);
+    let sec = &mut chip.sections[0];
+    if wont {
+        sec.title = format!("{} turns this pack away", p.server).into();
+        sec.line = subject.into();
+    }
+    if has_body {
+        sec.body = Some(body);
+    }
+    let has_sync = sec.actions.iter().any(|a| a.label.as_ref() == "Sync to server");
+    if !has_sync {
+        for a in &mut sec.actions {
+            a.primary = false;
+        }
+        sec.actions.insert(
+            0,
+            Action { label: "Sync to server".into(), icon: Some(IconName::ServerCog), primary: true, disabled: updating, run: std::rc::Rc::new(sync) },
+        );
+    }
+    if let Some((_, snf)) = c.loader.as_ref().filter(|_| pack_nf.is_some()) {
         let (st, r, nf) = (store.clone(), root.to_path_buf(), snf.clone());
-        Button::new("prejoin-match")
-            .small()
-            .outline()
-            .label("Match server")
-            .tooltip(format!("Installs NeoForge {snf} in this pack, the server's build"))
-            .on_click(move |_, window, cx| match_server(&st, &r, &nf, window, cx))
-    });
+        sec.actions.push(Action {
+            label: "Match server".into(),
+            icon: None,
+            primary: false,
+            disabled: updating,
+            run: std::rc::Rc::new(move |w, cx| match_server(&st, &r, &nf, w, cx)),
+        });
+    }
     let (st, sr) = (store.clone(), p.server_root.clone());
-    let details = Button::new("prejoin-details")
-        .small()
-        .outline()
-        .label("Compare")
-        .tooltip("Opens the server's mod comparison")
-        .on_click(move |_, _, cx| {
+    sec.actions.push(Action {
+        label: "Compare".into(),
+        icon: None,
+        primary: false,
+        disabled: false,
+        run: std::rc::Rc::new(move |_, cx| {
             let root = sr.clone();
             st.update(cx, |_, cx| cx.emit(StoreEvent::ShowServer { root, compare: true }));
-        });
-    // The first line is the strip's subject; the rest, with the "Only in
-    // the pack" row, is under Details.
-    let subject = detail.first().cloned().unwrap_or_default();
-    let (head, tail) = match only_at {
-        Some(at) => (detail[..at].to_vec(), detail[at + 1..].to_vec()),
-        None => (detail, Vec::new()),
-    };
-    let lines = |v: Vec<String>| v.into_iter().map(|l| widgets::caption(l, cx).text_xs().whitespace_normal()).collect::<Vec<_>>();
-    let body = v_flex()
-        .gap_0p5()
-        .children(lines(head))
-        .when_some(only_row, |d, row| d.child(row))
-        .children(lines(tail));
-    let mut n = crate::notice_slot::Notice::new("pre-join", crate::notice_slot::Tier::Choice, title)
-        .icon(IconName::ServerCog)
-        .subject(subject)
-        .primary(update)
-        .details(body);
-    if let Some(m) = matcher {
-        n = n.action(m);
-    }
-    Some(n.action(details).dismiss_key(store, key))
+        }),
+    });
+    Some(chip)
 }

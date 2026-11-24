@@ -235,7 +235,7 @@ pub fn group_chip<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Conte
         id: "group".into(),
         look,
         progress,
-        sections: vec![Section { title: title.into(), line: line.into(), progress: None, actions }],
+        sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions }],
     })
 }
 

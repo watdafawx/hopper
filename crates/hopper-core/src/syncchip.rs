@@ -166,6 +166,9 @@ pub enum ServerState {
     Offline,
     /// The comparison or the sync failed.
     Failed,
+    /// The server runs another NeoForge than the pack: it would turn the
+    /// game away at the door. Needs the player, so it never folds.
+    WontJoin,
 }
 
 /// What a running sync does.
@@ -210,6 +213,7 @@ pub fn server_look(state: &ServerState, other: &str) -> Look {
             s(Tone::Quiet, Offline, label, "Offline")
         }
         ServerState::Failed => s(Tone::Bad, Alert, "Sync failed".to_string(), "Failed").fixed(),
+        ServerState::WontJoin => s(Tone::Bad, Alert, "Won't let you join".to_string(), "Won't join").fixed(),
     }
 }
 
@@ -413,6 +417,21 @@ mod tests {
         assert_eq!(server_look(&ServerState::Offline, "").label, "Server offline");
         let f = server_look(&ServerState::Failed, "");
         assert!(f.fixed && f.tone == Tone::Bad);
+    }
+
+    #[test]
+    fn a_server_that_refuses_the_pack_is_red_and_never_folds() {
+        let l = server_look(&ServerState::WontJoin, "ATM10 Server");
+        assert_eq!((l.label.as_str(), l.short.as_str(), l.tone), ("Won't let you join", "Won't join", Tone::Bad));
+        assert!(l.fixed && !l.busy && !l.strip);
+        // Whatever the server's name, the words are the same.
+        assert_eq!(server_look(&ServerState::WontJoin, "").label, "Won't let you join");
+        // Beside a quiet group chip the merged chip keeps it: it is fixed.
+        let g = group_look(&Status::InStep { checked: None }, false, false, false);
+        let m = merged(&g, &l);
+        assert!(m.fixed);
+        assert_eq!(m.tone, Tone::Bad);
+        assert_eq!(plan(&[false, true], 0, 99).merged, Some(Form::Icon));
     }
 
     #[test]

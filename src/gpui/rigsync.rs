@@ -1024,6 +1024,8 @@ impl SyncPanel {
             ServerState::Comparing => (format!("Comparing with {other}"), "Looking at both mod lists.".into()),
             ServerState::Working(_) => (format!("Sending to {other}"), "It takes a moment. Nothing else to do.".into()),
             ServerState::Offline => (format!("{other} is offline"), "Can't reach it. Hopper tries again by itself.".into()),
+            // Only the pre-join check says this (`join_help::into_chip`).
+            ServerState::WontJoin => (format!("{other} turns this pack away"), String::new()),
             ServerState::Failed => (
                 "Couldn't compare".to_string(),
                 match &self.diff {
@@ -1053,7 +1055,7 @@ impl SyncPanel {
                 run: std::rc::Rc::new(move |_, cx| v.update(cx, |p, cx| p.rescan(cx))),
             });
         }
-        Some(Chip { id: "server".into(), look, progress: None, sections: vec![Section { title: title.into(), line: line.into(), progress: None, actions }] })
+        Some(Chip { id: "server".into(), look, progress: None, sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions }] })
     }
 
     /// Syncing while the server runs is allowed (the default; settings
