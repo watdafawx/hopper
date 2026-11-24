@@ -11,6 +11,7 @@
 //! against this API and un-ignored phase by phase.
 
 pub mod apply;
+pub mod bridge;
 pub mod engine;
 pub mod gate;
 pub mod local;

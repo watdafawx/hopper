@@ -102,6 +102,12 @@ fn set_id(text: &str) -> String {
 /// Each body starts `version.set.index.total.`, so an old version is
 /// refused before anything else is read.
 pub fn encode(p: &Packet) -> Vec<String> {
+    encode_with(p, MAX_PART)
+}
+
+/// [`encode`] with another part size: the real relay keeps an event's body
+/// in a field of 20 000 bytes, so the desktop cuts to that.
+pub fn encode_with(p: &Packet, max_part: usize) -> Vec<String> {
     let json = serde_json::to_vec(p).expect("a packet is plain data");
     let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
     z.write_all(&json).expect("writing to memory");
@@ -111,7 +117,7 @@ pub fn encode(p: &Packet) -> Vec<String> {
     // base64 is ASCII, so any byte cut is a character cut.
     let chunks: Vec<&str> = text
         .as_bytes()
-        .chunks(MAX_PART - HEADER_ROOM)
+        .chunks(max_part.saturating_sub(HEADER_ROOM).max(1))
         .map(|c| std::str::from_utf8(c).expect("ascii"))
         .collect();
     let n = chunks.len();

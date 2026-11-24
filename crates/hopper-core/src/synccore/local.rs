@@ -223,6 +223,47 @@ fn file_of(a: &Addon) -> String {
     }
 }
 
+/// The scan of an instance as the app has it loaded: every addon by key,
+/// the loader, the Minecraft version of a plain instance and the pack
+/// version. An instance that couldn't be read is `unreadable`. Pure: the
+/// app reads the instance, this only turns it into values.
+pub fn snapshot(inst: &crate::instances::Instance) -> Snapshot {
+    if inst.unreadable.is_some() {
+        return Snapshot { values: BTreeMap::new(), unreadable: true };
+    }
+    let mut values = BTreeMap::new();
+    for a in &inst.addons {
+        values.entry(key_of(a)).or_insert_with(|| value_of(a));
+    }
+    if !inst.loader.is_empty() {
+        values.insert(Key::Loader, Value::Text(inst.loader.clone()));
+    }
+    match &inst.pack {
+        Some(p) => {
+            if let Some(v) = pack_text(p) {
+                values.insert(Key::Pack, Value::Text(v));
+            }
+        }
+        None if !inst.game_version.is_empty() => {
+            values.insert(Key::Game, Value::Text(inst.game_version.clone()));
+        }
+        None => {}
+    }
+    Snapshot { values, unreadable: false }
+}
+
+/// A pack version as the group names it: "cf:<project>/<file>" or
+/// "mr:<project>/<version>". A pack Hopper holds no ids for has none.
+pub fn pack_text(p: &crate::instances::PackRef) -> Option<String> {
+    if !p.mr_project.is_empty() && !p.mr_version.is_empty() {
+        Some(format!("mr:{}/{}", p.mr_project, p.mr_version))
+    } else if p.project_id != 0 && p.file_id != 0 {
+        Some(format!("cf:{}/{}", p.project_id, p.file_id))
+    } else {
+        None
+    }
+}
+
 fn value_of(a: &Addon) -> Value {
     if a.from_pack {
         return if a.enabled { Value::PackDefault } else { Value::PackOff };

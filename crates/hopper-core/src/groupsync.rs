@@ -1589,6 +1589,17 @@ pub fn apply_with_pending(
     }
 }
 
+/// For friends sync (`synccore::bridge`): puts the pack's own file of the
+/// CurseForge or Modrinth project `project` back, on and counted as the
+/// pack's again. False when the pack's version doesn't have the mod.
+pub fn put_back_pack_default(inst: &mut Instance, project: u64, job: &Job) -> anyhow::Result<bool> {
+    match pack_file(inst, &format!("p:{project}"), job) {
+        Some(PackFile::Curse(p, f)) => put_back_pack_file(inst, p, f, job).map(|pending| pending.is_none()),
+        Some(PackFile::Modrinth(f)) => put_back_mr_file(inst, &f, job).map(|()| true),
+        None => Ok(false),
+    }
+}
+
 /// A pack version's own file of one mod: what "as the pack has it" means.
 enum PackFile {
     /// A CurseForge pack's: (project, file).
