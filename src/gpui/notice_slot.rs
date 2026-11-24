@@ -347,6 +347,122 @@ pub fn slot(id: &str, notices: Vec<Notice>, window: &mut Window, cx: &mut App) -
     )
 }
 
+/// Builds the page's notices again, for the popover (each frame it is open,
+/// so its buttons and lists are current). A page makes it from the entities
+/// that own its notices.
+pub type Producer = Rc<dyn Fn(&mut Window, &mut App) -> Vec<Notice>>;
+
+fn need(t: Tier) -> hopper::syncchip::Need {
+    match t {
+        Tier::Stop => hopper::syncchip::Need::Stop,
+        Tier::Choice => hopper::syncchip::Need::Choice,
+        Tier::Info => hopper::syncchip::Need::Info,
+    }
+}
+
+/// The notices' groups for the list, one per tier in the order of
+/// [`Tier::ALL`], empty ones left out: each tier with its notices' positions
+/// in `tiers` (already ordered, see [`order`]).
+pub fn group(tiers: &[Tier]) -> Vec<(Tier, Vec<usize>)> {
+    Tier::ALL
+        .iter()
+        .filter_map(|&t| {
+            let v: Vec<usize> = (0..tiers.len()).filter(|&i| tiers[i] == t).collect();
+            (!v.is_empty()).then_some((t, v))
+        })
+        .collect()
+}
+
+/// The "Needs you" chip for the hero: every notice the page has that no
+/// other chip says, in one popover (grouped Stops play / Needs a choice /
+/// For your information, Details open in place, ✕ where there is one). `None`
+/// when there are none. `id` names the page ("instance", "server") so each
+/// keeps its own open details. A problem that stops play makes the chip red,
+/// it never folds, and its popover opens once by itself.
+///
+/// `notices` only say what the chip looks like; the popover asks `producer`
+/// for fresh ones whenever it draws.
+pub fn chip(id: &str, notices: Vec<Notice>, producer: Producer) -> Option<crate::sync_chip::Chip> {
+    use crate::sync_chip::{Chip, Section};
+    let keys: Vec<(Tier, i64)> = notices.iter().map(|n| (n.tier, n.since)).collect();
+    let ix = order(&keys);
+    let needs: Vec<_> = ix.iter().map(|&i| need(notices[i].tier)).collect();
+    let look = hopper::syncchip::attention_look(&needs, ix.first().map_or("", |&i| notices[i].title.as_ref()))?;
+    // Every problem that stops play opens the popover once, each on its own.
+    let stops: Vec<SharedString> = ix.iter().filter(|&&i| notices[i].tier == Tier::Stop).map(|&i| notices[i].id.clone()).collect();
+    let key: SharedString = id.to_string().into();
+    let body: crate::sync_chip::Body = Rc::new(move |window, cx| list(&key, &producer, window, cx));
+    Some(Chip {
+        id: format!("needs-{id}").into(),
+        look,
+        progress: None,
+        sections: vec![Section { title: "".into(), line: "".into(), progress: None, body: Some(body), actions: Vec::new() }],
+        auto_open: stops,
+        width: Some(32.),
+    })
+}
+
+/// The popover's content: the page's notices as the grouped list.
+fn list(id: &SharedString, producer: &Producer, window: &mut Window, cx: &mut App) -> AnyElement {
+    let notices = producer(window, cx);
+    let state = window.use_keyed_state(ElementId::Name(format!("notice-list:{id}").into()), cx, |_, _| SlotState::default());
+    // Details that open by themselves, once each.
+    for n in notices.iter().filter(|n| n.open_new && n.details.is_some()) {
+        if !state.read(cx).seen.contains(&n.id) {
+            let id = n.id.clone();
+            state.update(cx, |s, _| {
+                s.seen.insert(id.clone());
+                s.open.insert(id);
+            });
+        }
+    }
+    let keys: Vec<(Tier, i64)> = notices.iter().map(|n| (n.tier, n.since)).collect();
+    let mut slots: Vec<Option<Notice>> = notices.into_iter().map(Some).collect();
+    let sorted: Vec<Notice> = order(&keys).into_iter().filter_map(|i| slots[i].take()).collect();
+    let tiers: Vec<Tier> = sorted.iter().map(|n| n.tier).collect();
+    let groups = group(&tiers);
+    let n = sorted.len();
+    let only_notes = tiers.iter().all(|t| *t == Tier::Info);
+    let mut sorted: Vec<Option<Notice>> = sorted.into_iter().map(Some).collect();
+    let open = state.read(cx).open.clone();
+    let theme = cx.theme().clone();
+    let rows: Vec<AnyElement> = groups
+        .iter()
+        .map(|(tier, ix)| {
+            let items: Vec<AnyElement> = ix.iter().filter_map(|&i| sorted[i].take()).map(|n| list_row(n, &state, &open, cx)).collect();
+            v_flex()
+                .gap_0p5()
+                .child(
+                    div()
+                        .px_2()
+                        .pt_1()
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("{} · {}", tier.heading(), items.len())),
+                )
+                .children(items)
+                .into_any_element()
+        })
+        .collect();
+    v_flex()
+        .id(SharedString::from(format!("notice-list:{id}")))
+        .w_full()
+        .max_h(rems(28.))
+        .gap_1()
+        .child(
+            div()
+                .px_2()
+                .text_sm()
+                .font_semibold()
+                .text_color(theme.foreground)
+                .child(if only_notes { format!("{n} {}", if n == 1 { "note" } else { "notes" }) } else { "Needs you".to_string() }),
+        )
+        .children(rows)
+        .overflow_y_scrollbar()
+        .into_any_element()
+}
+
 fn toggle(state: &Entity<SlotState>, id: SharedString, cx: &mut App) {
     state.update(cx, |s, cx| {
         if !s.open.remove(&id) {

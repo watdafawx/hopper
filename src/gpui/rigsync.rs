@@ -1055,7 +1055,7 @@ impl SyncPanel {
                 run: std::rc::Rc::new(move |_, cx| v.update(cx, |p, cx| p.rescan(cx))),
             });
         }
-        Some(Chip { id: "server".into(), look, progress: None, sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions }] })
+        Some(Chip { id: "server".into(), look, progress: None, sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions }], auto_open: Vec::new(), width: None })
     }
 
     /// The server page's Restart chip: mods were synced while it runs, so
@@ -1094,6 +1094,8 @@ impl SyncPanel {
             look: hopper::syncchip::restart_look(true, "server"),
             progress: None,
             sections: vec![Section { title: "Synced while the server runs".into(), line: line.into(), progress: None, body: None, actions }],
+            auto_open: Vec::new(),
+            width: None,
         })
     }
 

@@ -14,8 +14,9 @@
   import Addr from './Addr.svelte';
   import ServerAlerts from './ServerAlerts.svelte';
   import Progress from './Progress.svelte';
-  import NoticeSlot from './lib/NoticeSlot.svelte';
-  import { provideNotices } from './lib/notices.svelte.js';
+  import NoticeList from './lib/NoticeList.svelte';
+  import SyncChip from './lib/SyncChip.svelte';
+  import { provideNotices, needsChip } from './lib/notices.svelte.js';
 
   let { onNew = () => {}, homeName = '' } = $props();
 
@@ -24,6 +25,7 @@
   const PANEL = { id: '', state: '' };
   // Their notices, in the page's own slot (as a server page's).
   const notices = provideNotices();
+  const needs = $derived(needsChip(notices, 'overview', needsList));
 
   const h = $derived(live.host);
   const players = $derived(live.servers.reduce((n, s) => n + s.players.length, 0));
@@ -64,12 +66,13 @@
   {#if !p && outside(s)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}
 {/snippet}
 
+{#snippet needsList()}<NoticeList {notices} />{/snippet}
+
 <div class="pad">
-  <div class="row hd"><h2>Overview</h2><span class="sp"></span>
+  <div class="row hd"><h2>Overview</h2>{#if needs}<SyncChip chips={[needs]} />{/if}<span class="sp"></span>
     <a class="btn ghost icon" title="Browse modpacks to make a server from" href="#/browse"><Compass size={15} /></a>
     <button class="btn pri" onclick={onNew}><Plus size={14} />New server</button></div>
   <ServerAlerts server={PANEL} part="banner" />
-  <div class="alerts"><NoticeSlot {notices} /></div>
   <div class="grid4">
     <div class="card stat">
       <div class="lbl">CPU{h?.cpu_name ? ` · ${h.cpu_name.replace(/\(R\)|\(TM\)|CPU|Processor|\d+-Core/g, '').trim()}` : ''}</div>
@@ -191,7 +194,6 @@
 </div>
 
 <style>
-  .alerts :global(.nslot) { margin: 0 0 10px; }
   .icl { display: flex; flex: none; }
   .pad { padding: 18px; }
   h2 { font-size: 17px; font-weight: 600; }

@@ -1,7 +1,10 @@
-// The notice slot's list for one page: each <Notice> on the page (in any
-// component under it, on any tab) puts itself here, and <NoticeSlot> shows
-// them. A page makes its own with `provideNotices()`.
+// The "Needs you" chip's list for one page: each <Notice> on the page (in any
+// component under it, on any tab) puts itself here, and the chip
+// (`needsChip`, listed by <NoticeList>) shows them. A page makes its own
+// with `provideNotices()`.
 import { getContext, setContext, untrack } from 'svelte';
+import { order } from './noticeorder.js';
+import { attentionLook } from './syncchip.js';
 
 const KEY = Symbol('notices');
 
@@ -31,8 +34,24 @@ export function provideNotices() {
   return n;
 }
 
-/** The page's list, or null outside a page that has a slot. */
+/** The page's list, or null outside a page that has a chip. */
 export const pageNotices = () => getContext(KEY) || null;
+
+/** The notices in the order the list shows them (what stops play first). */
+export function ordered(notices) {
+  const all = Object.values(notices.items).sort((a, b) => a.at - b.at);
+  return order(all).map((i) => all[i]);
+}
+
+/** The "Needs you" entry for <SyncChip>'s `chips`, or null when the page has no notice. `key` names
+ * the page (the server), so a problem that stops play opens the popover once per server. `body` is
+ * the popover's snippet (<NoticeList>). */
+export function needsChip(notices, key, body) {
+  const list = ordered(notices);
+  const look = attentionLook(list.map((n) => n.tier), list[0]?.title || '');
+  if (!look) return null;
+  return { id: `needs:${key}`, look, title: '', line: '', actions: [], body, wide: true, autoOpen: list.filter((n) => n.tier === 'stop').map((n) => n.id) };
+}
 
 // Notices closed in this browser, by key: they come back when the key does
 // (a key names what the notice is about, so a new cause is a new key).

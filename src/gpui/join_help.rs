@@ -572,6 +572,8 @@ pub fn into_chip<V: 'static>(
         look: server_look(&ServerState::Differ { mods: differing.max(1), blocked: false }, &p.server),
         progress: None,
         sections: Vec::new(),
+        auto_open: Vec::new(),
+        width: None,
     });
     if wont && !chip.look.busy {
         chip.look = server_look(&ServerState::WontJoin, &p.server);
@@ -598,7 +600,7 @@ pub fn into_chip<V: 'static>(
     let has_body = !head.is_empty() || !tail.is_empty() || only_at.is_some();
     let body: crate::sync_chip::Body = {
         let (store, root, p) = (store.clone(), root.to_path_buf(), p.clone());
-        std::rc::Rc::new(move |cx: &mut App| {
+        std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
             let cx: &App = cx;
             let lines = |v: &[String]| v.iter().map(|l| widgets::caption(l.clone(), cx).text_xs().whitespace_normal()).collect::<Vec<_>>();
             // "Only in the pack" with each mod's icon (a click opens its

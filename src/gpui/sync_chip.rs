@@ -20,6 +20,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::groupstatus::Tone;
 use hopper::syncchip::{Form, Glyph, Look};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 /// The chip's height in rem: the same as `widgets::pill`, so the row is one
@@ -52,7 +53,7 @@ pub struct Section {
     pub actions: Vec<Action>,
 }
 
-pub type Body = Rc<dyn Fn(&mut App) -> AnyElement>;
+pub type Body = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 
 /// One chip: how it looks and what its popover says.
 #[derive(Clone)]
@@ -62,6 +63,13 @@ pub struct Chip {
     /// 0..=1: a thin line along the chip's foot while it is busy.
     pub progress: Option<f32>,
     pub sections: Vec<Section>,
+    /// Keys that open the popover by themselves the first time each shows
+    /// (a problem that stops play). It floats over the page and pushes
+    /// nothing, and it doesn't take the keyboard from a field the player is
+    /// typing in. Closing it sticks until a key it hasn't seen comes.
+    pub auto_open: Vec<SharedString>,
+    /// The popover's width in rem, when the default doesn't fit its content.
+    pub width: Option<f32>,
 }
 
 impl Chip {
@@ -73,6 +81,8 @@ impl Chip {
             look: hopper::syncchip::merged(&a.look, &b.look),
             progress: a.progress.or(b.progress),
             sections: a.sections.iter().chain(b.sections.iter()).cloned().collect(),
+            auto_open: Vec::new(),
+            width: None,
         }
     }
 }
@@ -99,6 +109,7 @@ pub fn glyph_icon(g: Glyph) -> IconName {
         Glyph::Up => IconName::Upload,
         Glyph::Differ => IconName::ArrowLeftRight,
         Glyph::Restart => IconName::RefreshCw,
+        Glyph::Note => IconName::Info,
     }
 }
 
@@ -256,29 +267,85 @@ use widgets::Clickable as _;
 
 /// The chip in `form`, opening its popover on click.
 pub fn render(chip: &Chip, form: Form, _cx: &App) -> AnyElement {
-    let sections = chip.sections.clone();
-    let id = SharedString::from(format!("sync-chip:{}", chip.id));
-    Popover::new(SharedString::from(format!("sync-chip-pop:{}", chip.id)))
-        .anchor(Anchor::TopLeft)
-        .appearance(true)
-        .trigger(Trigger {
-            id: ElementId::Name(id),
-            look: chip.look.clone(),
-            form,
-            progress: chip.progress,
-            selected: false,
-            open: false,
-        })
-        .content(move |_, _, cx| body(&sections, cx))
-        .into_any_element()
+    ChipEl { chip: chip.clone(), form }.into_any_element()
+}
+
+/// Whether a chip's popover is open (only tracked for a chip that has
+/// `auto_open` keys).
+#[derive(Default)]
+struct Auto {
+    open: bool,
+}
+
+thread_local! {
+    /// Every `chip id|key` that already opened its popover. It outlives the
+    /// chip's own state, which is dropped when the player visits a page
+    /// without the chip, so coming back doesn't open it a second time.
+    static SEEN: std::cell::RefCell<HashSet<String>> = std::cell::RefCell::new(HashSet::new());
+}
+
+/// Marks the keys as shown and says whether any of them was new.
+fn first_sight(chip: &str, keys: &[SharedString]) -> bool {
+    SEEN.with(|s| {
+        let mut s = s.borrow_mut();
+        let mut fresh = false;
+        for k in keys {
+            fresh |= s.insert(format!("{chip}|{k}"));
+        }
+        fresh
+    })
+}
+
+/// The chip and its popover. A chip with `auto_open` keys keeps the popover's
+/// open state itself, so it can open once by itself.
+#[derive(IntoElement)]
+struct ChipEl {
+    chip: Chip,
+    form: Form,
+}
+
+impl RenderOnce for ChipEl {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Self { chip, form } = self;
+        let sections = chip.sections.clone();
+        let id = SharedString::from(format!("sync-chip:{}", chip.id));
+        let width = chip.width;
+        let pop = Popover::new(SharedString::from(format!("sync-chip-pop:{}", chip.id)))
+            .anchor(Anchor::TopLeft)
+            .appearance(true)
+            .trigger(Trigger {
+                id: ElementId::Name(id),
+                look: chip.look.clone(),
+                form,
+                progress: chip.progress,
+                selected: false,
+                open: false,
+            })
+            .content(move |_, window, cx| body(&sections, width, window, cx));
+        if chip.auto_open.is_empty() {
+            return pop.into_any_element();
+        }
+        let auto = window.use_keyed_state(ElementId::Name(format!("sync-chip-auto:{}", chip.id).into()), cx, |_, _| Auto::default());
+        if first_sight(&chip.id, &chip.auto_open) {
+            auto.update(cx, |a, _| a.open = true);
+            // Opening focuses the popover; give the keyboard back to what
+            // had it (a search box the player is typing in) once drawn.
+            if let Some(prev) = window.focused(cx) {
+                window.defer(cx, move |window, cx| prev.focus(window, cx));
+            }
+        }
+        let open = auto.read(cx).open;
+        let a2 = auto.clone();
+        pop.open(open).on_open_change(move |o, _, cx| a2.update(cx, |a, _| a.open = *o)).into_any_element()
+    }
 }
 
 /// The popover's content: one block per side, each with its line, its
 /// optional bar and its buttons (one filled at most).
-fn body(sections: &[Section], cx: &mut App) -> AnyElement {
+fn body(sections: &[Section], width: Option<f32>, window: &mut Window, cx: &mut App) -> AnyElement {
     let theme = cx.theme().clone();
     // A section with a list of its own needs more room for it.
-    let width = if sections.iter().any(|s| s.body.is_some()) { 24.0 } else { 19.5 };
+    let width = width.unwrap_or(if sections.iter().any(|s| s.body.is_some()) { 24.0 } else { 19.5 });
     v_flex()
         .w(rems(width))
         .max_w(rems(width))
@@ -287,7 +354,7 @@ fn body(sections: &[Section], cx: &mut App) -> AnyElement {
             v_flex()
                 .gap_1p5()
                 .when(i > 0, |c| c.pt_3().border_t_1().border_color(theme.border))
-                .child(div().text_sm().font_semibold().text_color(theme.foreground).child(s.title.clone()))
+                .when(!s.title.is_empty(), |c| c.child(div().text_sm().font_semibold().text_color(theme.foreground).child(s.title.clone())))
                 .when(!s.line.is_empty(), |c| c.child(div().text_sm().text_color(theme.muted_foreground).child(s.line.clone())))
                 .when_some(s.progress, |c, p| {
                     c.child(
@@ -296,7 +363,7 @@ fn body(sections: &[Section], cx: &mut App) -> AnyElement {
                         ),
                     )
                 })
-                .when_some(s.body.clone(), |c, b| c.child(b(cx)))
+                .when_some(s.body.clone(), |c, b| c.child(b(window, cx)))
                 .when(!s.actions.is_empty(), |c| {
                     c.child(h_flex().flex_wrap().gap_2().pt_1().children(s.actions.iter().enumerate().map(|(j, a)| {
                         let run = a.run.clone();
@@ -332,6 +399,8 @@ pub fn preview(name: &str) -> Vec<Chip> {
     let make = |id: &str, look: Look, title: &str, line: &str, progress: Option<f32>, primary: &str| Chip {
         id: id.to_string().into(),
         progress,
+        auto_open: Vec::new(),
+        width: None,
         sections: vec![Section {
             title: title.to_string().into(),
             line: line.to_string().into(),

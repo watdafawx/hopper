@@ -240,6 +240,8 @@ pub fn group_chip<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Conte
         look,
         progress,
         sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions }],
+        auto_open: Vec::new(),
+        width: None,
     })
 }
 

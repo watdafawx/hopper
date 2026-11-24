@@ -1,13 +1,10 @@
 // Which notices the slot above a server's tabs shows, in what order, as
 // Hopper desktop's (src/gpui/notice_slot.rs): what stops play first, then
 // what needs a choice, then news; newest first within each; the page's own
-// order breaks ties. The top two show as strips, the rest under "N more",
-// grouped by tier.
+// order breaks ties. They are the "Needs you" chip's list, grouped by tier.
 
 export const TIERS = ['stop', 'choice', 'info'];
 export const HEADING = { stop: 'Stops play', choice: 'Needs a choice', info: 'For your information' };
-/** Strips shown before "N more". */
-export const SHOWN = 2;
 
 const rank = (t) => {
   const i = TIERS.indexOf(t);
@@ -21,19 +18,17 @@ export function order(items) {
     .sort((a, b) => rank(items[a].tier) - rank(items[b].tier) || (items[b].since || 0) - (items[a].since || 0) || a - b);
 }
 
-/** For tiers already in order: the indexes shown as strips, and the rest
- * grouped by tier for the "N more" list ([tier, indexes]). */
-export function fold(tiers) {
-  const shown = tiers.slice(0, SHOWN).map((_, i) => i);
+/** For tiers already in order: their indexes grouped by tier ([tier, indexes]), the popover's list. */
+export function group(tiers) {
   const groups = [];
-  for (let i = SHOWN; i < tiers.length; i++) {
+  for (let i = 0; i < tiers.length; i++) {
     const last = groups[groups.length - 1];
     if (last && last[0] === tiers[i]) last[1].push(i);
     else groups.push([tiers[i], [i]]);
   }
-  return { shown, groups };
+  return groups;
 }
 
-/** A notice's main button: filled on the slot's first strip only (one
- * filled button per region), outlined elsewhere. */
+/** A notice's main button: filled when `fit.lead`, outlined elsewhere (the
+ * chip's list has no lead: the chip is the one filled thing it isn't). */
 export const mainClass = (fit) => (fit?.lead ? 'btn sm pri' : 'btn sm');

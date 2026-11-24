@@ -35,7 +35,23 @@ export function restartLook(changed, what = 'server') {
     ? look('restart', 'busy', 'restart', 'Restart to load', 'Restart')
     : look('restart', 'quiet', 'behind', `Waiting for the ${what} to close`, 'Waiting');
 }
-export const standsAlone = (l) => l.source === 'restart';
+// The "Needs you" chip: every notice the page has that no other chip says. One notice shows its own
+// title (cut to 28 letters), more say "N need you"; red when one stops play, amber for a choice. Only
+// notes make a quiet grey "N notes" that may fold. `needs` are the tiers ('stop' | 'choice' | 'info').
+const ATTENTION_TITLE = 28;
+export function attentionLook(needs, title = '') {
+  if (!needs.length) return null;
+  const n = needs.length;
+  const worst = needs.includes('stop') ? 'stop' : needs.includes('choice') ? 'choice' : 'info';
+  if (worst === 'info') {
+    const label = n === 1 ? '1 note' : `${n} notes`;
+    return look('attention', 'quiet', 'note', label, label);
+  }
+  const t = title.trim();
+  const label = n === 1 ? ([...t].length > ATTENTION_TITLE ? `${[...t].slice(0, ATTENTION_TITLE - 1).join('').trimEnd()}…` : t) : `${n} need you`;
+  return look('attention', worst === 'stop' ? 'bad' : 'warn', 'alert', label, n === 1 ? (worst === 'stop' ? 'Stops play' : 'Needs you') : 'Needs you', { fixed: true });
+}
+export const standsAlone = (l) => l.source === 'restart' || l.source === 'attention';
 const aloneForm = (level) => (level === 0 ? 'full' : level === 1 ? 'short' : 'icon');
 export { aloneForm };
 
@@ -47,18 +63,19 @@ export function merged(a, b) {
 
 // Highest fold level: forms (full, short, icon; one more for the merged pair), then the chips
 // fold into "+N" unless one can't, then the plain pills.
-export function maxLevel(fixed, plain) {
+// `pinned`: a stand-alone chip that can't fold ("Needs you") keeps every chip.
+export function maxLevel(fixed, plain, pinned = false) {
   if (!fixed.length) return plain;
   const two = fixed.length >= 2;
   const iconAt = two ? 3 : 2;
-  const foldable = two ? (fixed.some(Boolean) ? 0 : 1) : fixed[0] ? 0 : 1;
+  const foldable = pinned || (two ? fixed.some(Boolean) : fixed[0]) ? 0 : 1;
   return iconAt + foldable + plain;
 }
 
 // What each chip shows at a fold level. forms: 'full' | 'short' | 'icon' | null (folded).
-export function plan(fixed, plain, level) {
+export function plan(fixed, plain, level, pinned = false) {
   const n = fixed.length;
-  level = Math.min(level, maxLevel(fixed, plain));
+  level = Math.min(level, maxLevel(fixed, plain, pinned));
   const two = n >= 2;
   const iconAt = two ? 3 : 2;
   const p = { forms: Array(n).fill('full'), merged: null, plainFolded: 0, chipsFolded: 0 };
@@ -73,7 +90,7 @@ export function plan(fixed, plain, level) {
   } else p.forms = [form];
   if (level > iconAt) {
     let steps = level - iconAt;
-    const stuck = two ? fixed.some(Boolean) : fixed[0];
+    const stuck = pinned || (two ? fixed.some(Boolean) : fixed[0]);
     if (steps > 0 && !stuck) {
       steps -= 1;
       if (two) p.merged = null;
@@ -94,9 +111,10 @@ export function levelFor(all, room) {
   const chips = all.filter((c) => !standsAlone(c));
   const alone = all.filter(standsAlone);
   const fixed = chips.map((c) => c.fixed);
-  const top = Math.max(maxLevel(fixed, 0), alone.length ? 2 : 0);
+  const pinned = alone.some((c) => c.fixed);
+  const top = Math.max(maxLevel(fixed, 0, pinned), alone.length ? 2 : 0);
   for (let lv = 0; lv <= top; lv++) {
-    const p = plan(fixed, 0, lv);
+    const p = plan(fixed, 0, lv, pinned);
     const parts = p.merged ? [width(merged(chips[0], chips[1]), p.merged)] : p.forms.filter(Boolean).map((f, i) => width(chips[i], f));
     // The stand-alone chips follow the sync chips, and fold with them.
     if (!p.chipsFolded) parts.push(...alone.map((c) => width(c, aloneForm(lv))));

@@ -33,6 +33,8 @@ pub enum Glyph {
     Differ,
     /// An arrow round a circle: restart to load what changed.
     Restart,
+    /// A lower-case "i": notes for the player's information.
+    Note,
 }
 
 /// Which side the chip is about.
@@ -46,6 +48,8 @@ pub enum Source {
     Downloads,
     /// The game or server runs with what it had when it started.
     Restart,
+    /// Every notice no other chip says ("Needs you").
+    Attention,
 }
 
 impl Source {
@@ -275,6 +279,50 @@ pub fn restart_look(changed: bool, what: &str) -> Look {
     } else {
         r(Tone::Quiet, Behind, format!("Waiting for the {what} to close"), "Waiting")
     }
+}
+
+/// How much a notice matters (the page's notice tiers, most first).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Need {
+    /// The game or server won't start or load until it's fixed.
+    Stop,
+    /// The player has to decide something.
+    Choice,
+    /// For the player's information; nothing breaks.
+    Info,
+}
+
+/// The longest title the chip shows in full; a longer one is cut with "…"
+/// (its full text is in the popover and the tooltip).
+const ATTENTION_TITLE: usize = 28;
+
+/// The "Needs you" chip: every notice the page has that no other chip says.
+/// `needs` are their tiers, `title` the first one's (the most important). One
+/// notice shows its own title ("2 mods in twice"), more say "N need you"; the
+/// colour is the worst tier's (red for a problem that stops play, amber for a
+/// choice). Only notes left make a quiet grey "N notes" that may fold. `None`
+/// when there is nothing to say.
+pub fn attention_look(needs: &[Need], title: &str) -> Option<Look> {
+    use Glyph::*;
+    let worst = needs.iter().copied().min()?;
+    let n = needs.len();
+    if worst == Need::Info {
+        let label = if n == 1 { "1 note".to_string() } else { format!("{n} notes") };
+        return Some(Look::new(Source::Attention, Tone::Quiet, Note, label.clone(), label));
+    }
+    let (tone, short) = if worst == Need::Stop { (Tone::Bad, "Stops play") } else { (Tone::Warn, "Needs you") };
+    let label = if n == 1 {
+        let t = title.trim();
+        if t.chars().count() > ATTENTION_TITLE {
+            let cut: String = t.chars().take(ATTENTION_TITLE - 1).collect();
+            format!("{}…", cut.trim_end())
+        } else {
+            t.to_string()
+        }
+    } else {
+        format!("{n} need you")
+    };
+    Some(Look::new(Source::Attention, tone, Alert, label, if n == 1 { short } else { "Needs you" }).fixed())
 }
 
 /// How bad a tone is, for the one chip two fold into.
@@ -524,6 +572,32 @@ mod tests {
         // And it folds with the others when there is no room.
         let p = plan_with(&[false], &[false], 0, 3);
         assert_eq!((p.forms, p.extra_forms), (vec![None], vec![None]));
+    }
+
+    #[test]
+    fn needs_you_words_tone_and_folding() {
+        assert_eq!(attention_look(&[], ""), None);
+        // One notice says its own title; a problem that stops play is red and never folds.
+        let one = attention_look(&[Need::Stop], "2 mods in twice").unwrap();
+        assert_eq!((one.label.as_str(), one.short.as_str(), one.tone, one.source), ("2 mods in twice", "Stops play", Tone::Bad, Source::Attention));
+        assert!(one.fixed && !one.busy && !one.strip && !one.source.is_sync());
+        // A choice is amber and never folds either.
+        let choice = attention_look(&[Need::Info, Need::Choice], "x").unwrap();
+        assert_eq!((choice.label.as_str(), choice.short.as_str(), choice.tone), ("2 need you", "Needs you", Tone::Warn));
+        assert!(choice.fixed);
+        // Many: the worst tier sets the colour.
+        let many = attention_look(&[Need::Info, Need::Stop, Need::Choice], "x").unwrap();
+        assert_eq!((many.label.as_str(), many.tone), ("3 need you", Tone::Bad));
+        // Only notes: quiet grey, and it may fold.
+        let notes = attention_look(&[Need::Info, Need::Info], "x").unwrap();
+        assert_eq!((notes.label.as_str(), notes.tone, notes.fixed, notes.glyph), ("2 notes", Tone::Quiet, false, Glyph::Note));
+        assert_eq!(attention_look(&[Need::Info], "x").unwrap().label, "1 note");
+        // A long title is cut, not left to push the row.
+        let long = attention_look(&[Need::Choice], "Create 6.0.6 needs Flywheel 1.0.0 or newer to load").unwrap();
+        assert!(long.label.chars().count() <= ATTENTION_TITLE && long.label.ends_with('…'), "{}", long.label);
+        // Beside a sync chip: a fixed one keeps every chip; a quiet one folds with them.
+        assert_eq!(plan_with(&[false], &[one.fixed], 0, 9).extra_forms, vec![Some(Form::Icon)]);
+        assert_eq!(plan_with(&[false], &[notes.fixed], 0, 3).extra_forms, vec![None]);
     }
 
     #[test]
