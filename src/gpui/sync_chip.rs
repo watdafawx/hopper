@@ -272,11 +272,35 @@ pub fn render(chip: &Chip, form: Form, _cx: &App) -> AnyElement {
     ChipEl { chip: chip.clone(), form }.into_any_element()
 }
 
-/// Whether a chip's popover is open (only tracked for a chip that has
-/// `auto_open` keys).
+/// Whether a chip's popover is open. Only tracked for a chip that has
+/// `auto_open` keys, or that something asked to open ([`request_open`]).
 #[derive(Default)]
 struct Auto {
     open: bool,
+    /// The chip keeps its popover's state itself from now on.
+    controlled: bool,
+}
+
+thread_local! {
+    /// The chip a row marker asked to open, until that chip draws.
+    static REQUEST: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Asks the chip with this id to open its popover when it next draws: what a
+/// marker on a mod's row does. The caller redraws the window.
+pub fn request_open(chip_id: &str) {
+    REQUEST.with(|r| *r.borrow_mut() = Some(chip_id.to_string()));
+}
+
+fn take_request(chip_id: &str) -> bool {
+    REQUEST.with(|r| {
+        let mut r = r.borrow_mut();
+        let mine = r.as_deref() == Some(chip_id);
+        if mine {
+            *r = None;
+        }
+        mine
+    })
 }
 
 thread_local! {
@@ -349,11 +373,17 @@ impl RenderOnce for ChipEl {
                 open: false,
             })
             .content(move |_, window, cx| body(&sections, width, window, cx));
-        if chip.auto_open.is_empty() {
+        let auto = window.use_keyed_state(ElementId::Name(format!("sync-chip-auto:{}", chip.id).into()), cx, |_, _| Auto::default());
+        if take_request(&chip.id) {
+            auto.update(cx, |a, _| {
+                a.open = true;
+                a.controlled = true;
+            });
+        }
+        if chip.auto_open.is_empty() && !auto.read(cx).controlled {
             return pop.into_any_element();
         }
-        let auto = window.use_keyed_state(ElementId::Name(format!("sync-chip-auto:{}", chip.id).into()), cx, |_, _| Auto::default());
-        if first_sight(&chip.id, &chip.auto_open) && !another_is_open(&chip.id) {
+        if !chip.auto_open.is_empty() && first_sight(&chip.id, &chip.auto_open) && !another_is_open(&chip.id) {
             auto.update(cx, |a, _| a.open = true);
             // Opening focuses the popover; give the keyboard back to what
             // had it (a search box the player is typing in) once drawn.

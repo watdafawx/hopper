@@ -368,6 +368,43 @@ pub fn run_look(problem: &RunProblem) -> Look {
     }
 }
 
+/// A problem marked on the mod's own row in the mods list: the mod that needs
+/// something that isn't installed, the one the loader refuses, a pack mod the
+/// paired server lacks. A click on the marker opens the popover of the chip
+/// that lists the problem.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowProblem {
+    /// Needs these mods (names), which aren't installed.
+    Needs(Vec<String>),
+    /// The loader refuses it, or the last crash stopped at it.
+    StopsLoading,
+    /// In the pack, not on this server.
+    NotOnServer(String),
+}
+
+impl RowProblem {
+    /// The marker's words: "Needs Sophisticated Core", "Needs Create +1".
+    pub fn label(&self) -> String {
+        match self {
+            RowProblem::Needs(names) => match names.as_slice() {
+                [] => "Needs a mod".to_string(),
+                [one] => format!("Needs {one}"),
+                [first, rest @ ..] => format!("Needs {first} +{}", rest.len()),
+            },
+            RowProblem::StopsLoading => "Stops loading".to_string(),
+            RowProblem::NotOnServer(server) => format!("Not on {server}"),
+        }
+    }
+
+    /// Red for what stops play, amber for a difference the player may want.
+    pub fn tone(&self) -> Tone {
+        match self {
+            RowProblem::Needs(_) | RowProblem::StopsLoading => Tone::Bad,
+            RowProblem::NotOnServer(_) => Tone::Warn,
+        }
+    }
+}
+
 /// How bad a tone is, for the one chip two fold into.
 fn rank(t: Tone) -> u8 {
     match t {
@@ -747,6 +784,18 @@ mod tests {
         assert_eq!(run_look(&RunProblem::ServerCrashed).label, "Server crashed");
         // It never folds, even with no room.
         assert_eq!(plan_with(&[false], &[stuck.fixed], 0, 3).extra_forms, vec![Some(Form::Icon)]);
+    }
+
+    #[test]
+    fn row_problem_words_and_tone() {
+        assert_eq!(RowProblem::Needs(vec!["Sophisticated Core".into()]).label(), "Needs Sophisticated Core");
+        assert_eq!(RowProblem::Needs(vec!["Create".into(), "Flywheel".into(), "Jade".into()]).label(), "Needs Create +2");
+        assert_eq!(RowProblem::Needs(Vec::new()).label(), "Needs a mod");
+        assert_eq!(RowProblem::StopsLoading.label(), "Stops loading");
+        assert_eq!(RowProblem::NotOnServer("TNP-LL8".into()).label(), "Not on TNP-LL8");
+        assert_eq!(RowProblem::StopsLoading.tone(), Tone::Bad);
+        assert_eq!(RowProblem::Needs(vec!["A".into()]).tone(), Tone::Bad);
+        assert_eq!(RowProblem::NotOnServer("S".into()).tone(), Tone::Warn);
     }
 
     #[test]
