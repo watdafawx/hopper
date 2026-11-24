@@ -146,6 +146,7 @@ impl Store {
             .settings
             .group_copies
             .iter()
+            .filter(|c| !self.sync_has_copy(&c.local))
             .filter_map(|c| self.instances.iter().find(|i| i.id == c.local).map(|i| i.root.clone()))
             .collect();
         for root in roots {
@@ -165,6 +166,9 @@ impl Store {
     /// The last check of the copy at `root`, when it is up to date.
     pub fn group_verified(&self, root: &Path) -> Option<&Verified> {
         let c = self.group_copy(root)?;
+        if self.sync_has_copy(&c.local) {
+            return None;
+        }
         self.group_verify.list.get(&c.local).filter(|r| !r.stale).map(|r| &r.v)
     }
 
@@ -192,6 +196,10 @@ impl Store {
     /// Forgets what was checked, so the next wake-up looks again (Try again).
     pub fn recheck_group(&mut self, root: &Path, cx: &mut Context<Self>) {
         let Some(local) = self.group_copy(root).map(|c| c.local.clone()) else { return };
+        if self.sync_has_copy(&local) {
+            self.sync_tick(cx);
+            return;
+        }
         if let Some(r) = self.group_verify.list.get_mut(&local) {
             r.stale = true;
             r.stamp = 0;
@@ -206,6 +214,10 @@ impl Store {
     /// player said yes to ("Allow and get it"). Nothing was downloaded before
     /// this.
     pub fn repair_group(&mut self, root: &Path, keys: Option<Vec<String>>, approved: Vec<Pin>, cx: &mut Context<Self>) {
+        if self.is_sync_copy(root) {
+            self.sync_put_back(root, keys, cx);
+            return;
+        }
         self.repair_group_inner(root, keys, approved, None, cx);
     }
 

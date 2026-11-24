@@ -288,6 +288,9 @@ pub fn group_status_bar(store: &Entity<Store>, root: &Path, cx: &mut App) -> Opt
     // Read before `cx` is borrowed mutably for the mod links below.
     let pushing = s.pushing_at(root);
     let repairing = s.group_repairing(root);
+    // Changes friends made that wait for the player's yes (the sync core).
+    let reviews = s.sync_reviews(root);
+    let sync_copy = s.is_sync_copy(root);
     let in_step = matches!(status, Status::InStep { .. });
     // A notice only for what needs the player (a choice, mods to get). Busy,
     // behind, offline and failed are the chip's own words ([`group_chip`]);
@@ -405,6 +408,34 @@ pub fn group_status_bar(store: &Entity<Store>, root: &Path, cx: &mut App) -> Opt
                     })
             }
         });
+    } else if behind && sync_copy {
+        // This PC's mods folder differs from what the group has: put it back.
+        let (store, root) = (store.clone(), root.to_path_buf());
+        n = n.primary(move |fit| {
+            notice_slot::main_button(Button::new("group-make-match").small(), fit)
+                .icon(IconName::Download)
+                .label(if fit.narrow { "Make match" } else { "Make my copy match" })
+                .disabled(busy)
+                .tooltip("Puts the mods back as the group has them. Nothing is sent")
+                .on_click(move |_, _, cx| {
+                    let (store, root) = (store.clone(), root.clone());
+                    store.update(cx, |s, cx| s.repair_group(&root, None, Vec::new(), cx));
+                })
+        });
+    } else if matches!(status, Status::WaitsForYou { .. }) && !reviews.is_empty() {
+        n = n.details(review_list(store, root, &reviews, cx)).open_new();
+        let (store, root) = (store.clone(), root.to_path_buf());
+        let ids: Vec<u64> = reviews.iter().map(|r| r.id).collect();
+        n = n.primary(move |fit| {
+            notice_slot::main_button(Button::new("group-take-all").small(), fit)
+                .icon(IconName::Download)
+                .label(if ids.len() == 1 { "Take it" } else { "Take them all" })
+                .tooltip("Lets these changes in, as your friends made them")
+                .on_click(move |_, _, cx| {
+                    let (store, root, ids) = (store.clone(), root.clone(), ids.clone());
+                    store.update(cx, |s, cx| ids.iter().for_each(|id| s.answer_sync_review(&root, *id, hopper::synccore::Answer::Take, cx)));
+                })
+        });
     } else if matches!(status, Status::CantCheck) {
         let (store, root) = (store.clone(), root.to_path_buf());
         n = n.primary(move |fit| {
@@ -446,6 +477,38 @@ pub fn group_status_bar(store: &Entity<Store>, root: &Path, cx: &mut App) -> Opt
     let (store, root) = (store.clone(), root.to_path_buf());
     n = n.action_fit(move |fit| pull_button(&store, &root, pulling, nothing_to_pull, fit.narrow, "group-pull"));
     Some(n)
+}
+
+/// The changes that wait for the player: one row each, with its two answers.
+fn review_list(store: &Entity<Store>, root: &Path, reviews: &[hopper::synccore::Review], cx: &mut App) -> AnyElement {
+    use hopper::synccore::Answer;
+    let mut list = v_flex().w_full().gap_0p5();
+    for (ix, r) in reviews.iter().enumerate() {
+        let id = r.id;
+        let (take, keep) = (store.clone(), store.clone());
+        let (rt1, rt2) = (root.to_path_buf(), root.to_path_buf());
+        list = list.child(
+            h_flex()
+                .id(("review-row", ix))
+                .w_full()
+                .gap_2()
+                .px_1()
+                .py_1()
+                .items_center()
+                .rounded(cx.theme().radius)
+                .hover(|d| crate::widgets::row_hover(d, cx))
+                .child(div().flex_1().min_w_0().text_sm().child(r.says.clone()))
+                .child(Button::new(("review-take", ix)).small().outline().label("Take it").on_click(move |_, _, cx| {
+                    let (st, rt) = (take.clone(), rt1.clone());
+                    st.update(cx, |s, cx| s.answer_sync_review(&rt, id, Answer::Take, cx));
+                }))
+                .child(Button::new(("review-keep", ix)).small().outline().label("Keep mine").on_click(move |_, _, cx| {
+                    let (st, rt) = (keep.clone(), rt2.clone());
+                    st.update(cx, |s, cx| s.answer_sync_review(&rt, id, Answer::Keep, cx));
+                })),
+        );
+    }
+    list.into_any_element()
 }
 
 /// The check's last answer for the copy at `root`, when it is up to date.

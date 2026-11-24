@@ -107,6 +107,10 @@ impl Store {
     /// as Pull now does. The others' stay waiting.
     pub fn pull_group_from(&mut self, root: &Path, who: &str, cx: &mut Context<Self>) {
         let Some(c) = self.group_copy(root).cloned() else { return };
+        if self.group_preview.is_none() && self.is_sync_copy(root) {
+            self.sync_take_from(root, who, cx);
+            return;
+        }
         if self.group_pulling.contains_key(&c.local) || self.group_merging.contains(&c.local) {
             return;
         }
@@ -149,6 +153,11 @@ impl Store {
     /// PC's own to send (only what it took in from others: that echo lets
     /// the others see this copy in step).
     pub(super) fn held_back(&self, id: &str, to: Option<&PublishTo>) -> bool {
+        // A group copy's changes travel through the sync core (it holds them
+        // itself); only its share code goes by this path.
+        if self.sync_has_copy(id) {
+            return false;
+        }
         if !self.settings.push_by_hand || self.push_now.contains(id) {
             return false;
         }
@@ -179,7 +188,7 @@ impl Store {
         if !self.settings.push_by_hand || self.group_preview.is_some() {
             return;
         }
-        let ids = self.sent_ids();
+        let ids: Vec<String> = self.sent_ids().into_iter().filter(|id| !self.sync_has_copy(id)).collect();
         let before = self.to_push.len();
         self.to_push.retain(|id, _| ids.contains(id));
         let mut changed = before != self.to_push.len();
@@ -249,15 +258,18 @@ impl Store {
         if !self.settings.push_by_hand || self.push_now.contains(id) {
             return None;
         }
+        if self.sync_has_copy(id) {
+            return self.sync_held(id);
+        }
         self.to_push.get(id).filter(|p| p.pending.any).map(|p| p.pending.changes)
     }
 
     /// Every pack holding changes back for Push: (instance root, name, how
     /// many changes; 0: can't tell).
     pub fn packs_to_push(&self) -> Vec<(std::path::PathBuf, String, usize)> {
-        let mut out: Vec<_> = self
-            .to_push
-            .keys()
+        let held: Vec<&String> = self.to_push.keys().chain(self.sync_copy_ids()).collect();
+        let mut out: Vec<_> = held
+            .into_iter()
             .filter_map(|id| {
                 let n = self.to_push_of(id)?;
                 let i = self.instances.iter().find(|i| &i.id == id)?;

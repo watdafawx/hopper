@@ -28,6 +28,7 @@ mod panel_events;
 mod panel_slow;
 mod server_mods;
 mod server_offer;
+mod sync_engine;
 mod sync_modes;
 // Invite and SyncStatus are for the Friends screen being rebuilt on top.
 #[allow(unused_imports)]
@@ -105,6 +106,8 @@ pub enum Msg {
     /// pack (or that failed: the copy's local id, why, the task's id).
     GroupMerged(Box<friends::GroupMerged>),
     GroupMergeFailed(String, anyhow::Error, u64),
+    /// Changes from the group were applied (or put back) on a group copy.
+    SyncApplied(Box<sync_engine::SyncApplied>),
     /// Shared mod settings were read and written in a group copy, or wait
     /// for its game to close (`config_sync`).
     ConfigTicked(Box<config_sync::CfgTicked>),
@@ -741,6 +744,8 @@ pub struct Store {
     /// now, ones whose last try failed, and ones waiting for their own
     /// change to be sent (by the `sent_seq` they waited at).
     group_merging: HashSet<String>,
+    /// The friends sync core's engines, one per group copy.
+    sync: sync_engine::SyncCore,
     group_retry: HashMap<String, hopper::recipe::Retry>,
     /// Until when the GitHub rate-limit notice already told the player, so
     /// each pack and retry it holds up doesn't say it again.
@@ -1126,6 +1131,7 @@ impl Store {
             follow_retry: Default::default(),
             left_out_asked: Default::default(),
             group_merging: Default::default(),
+            sync: Default::default(),
             group_retry: Default::default(),
             github_limit_told: None,
             group_held: Default::default(),
@@ -1624,6 +1630,7 @@ impl Store {
             Msg::RecipeFailed(root, code, e, job) => self.on_recipe_failed(root, code, e, job, cx),
             Msg::GroupMerged(m) => self.on_group_merged(*m, cx),
             Msg::GroupMergeFailed(local, e, job) => self.on_group_merge_failed(local, e, job, cx),
+            Msg::SyncApplied(a) => self.on_sync_applied(*a, cx),
             Msg::ConfigTicked(t) => self.on_config_ticked(*t, cx),
             Msg::ConfigHeld(h) => self.on_config_held(*h, cx),
             Msg::InstanceChanged(root) if server_mods::remote(&root).is_some() => self.refetch_server_mods(&root),

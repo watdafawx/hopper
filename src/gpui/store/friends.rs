@@ -1325,18 +1325,20 @@ impl Store {
         // The copies checked against their mods folders (again when either
         // changed since).
         self.seed_group_verify();
-        // Group packs with other members' changes waiting.
-        let mut ready: Vec<(PackCopy, PathBuf, bool)> = Vec::new();
-        for c in self.settings.group_copies.iter().filter(|_| self.group_preview.is_none()) {
-            let Some(root) = self.instances.iter().find(|i| i.id == c.local).map(|i| i.root.clone()) else { continue };
-            // Codes from members this PC doesn't take from by itself wait.
-            let c = self.merge_view(c);
-            if let Some(ignore_unsent) = self.group_ready(&c, &root, now, false) {
-                ready.push((c, root, ignore_unsent));
+        // Group packs take in the others' changes in `sync_tick`; only the
+        // `--dialog group-sync` previews still merge the old way.
+        if self.group_preview.is_some() {
+            let mut ready: Vec<(PackCopy, PathBuf, bool)> = Vec::new();
+            for c in self.settings.group_copies.iter() {
+                let Some(root) = self.instances.iter().find(|i| i.id == c.local).map(|i| i.root.clone()) else { continue };
+                let c = self.merge_view(c);
+                if let Some(ignore_unsent) = self.group_ready(&c, &root, now, false) {
+                    ready.push((c, root, ignore_unsent));
+                }
             }
-        }
-        for (c, root, ignore_unsent) in ready {
-            self.merge_group(c, root, ignore_unsent);
+            for (c, root, ignore_unsent) in ready {
+                self.merge_group(c, root, ignore_unsent);
+            }
         }
     }
 
@@ -1433,6 +1435,11 @@ impl Store {
     /// (`hopper::groupstatus`), or `None` when it isn't a group copy.
     pub fn group_status(&self, root: &Path) -> Option<hopper::groupstatus::Status> {
         use hopper::groupstatus::{Failure, Input};
+        if self.group_preview.is_none()
+            && let Some(s) = self.sync_chip(root, matches!(self.sync_status(), SyncStatus::Ok))
+        {
+            return Some(s);
+        }
         let c = self.group_copy(root)?;
         let failure = self.follow_error(root).map(|(why, again)| Failure { why, again });
         let playing = self.running(root).is_some();
@@ -1499,6 +1506,12 @@ impl Store {
     /// version's recheck have. Says what it did, or why it couldn't.
     pub fn pull_group_now(&mut self, root: &Path, cx: &mut Context<Self>) {
         let Some(c) = self.group_copy(root).cloned() else { return };
+        if self.group_preview.is_none() && self.is_sync_copy(root) {
+            if !self.group_pulling.contains_key(&c.local) {
+                self.sync_pull(root, cx);
+            }
+            return;
+        }
         if self.group_pulling.contains_key(&c.local) || self.group_merging.contains(&c.local) {
             return;
         }
@@ -1925,6 +1938,13 @@ impl Store {
     /// "Turned off by Mia".
     pub fn group_mark(&self, root: &Path, a: &hopper::instances::Addon) -> Option<String> {
         use groupsync::Kind;
+        if self.is_sync_copy(root) {
+            // Kept only on this PC: what others did to it didn't happen here.
+            if self.instance(root).is_some_and(|i| hopper::onlyhere::is_kept(i, a)) {
+                return None;
+            }
+            return self.sync_mark(root, a);
+        }
         // Kept only on this PC: what others did to it didn't happen here.
         if self.instance(root).is_some_and(|i| hopper::onlyhere::is_kept(i, a)) {
             return None;
@@ -1954,6 +1974,9 @@ impl Store {
     /// this PC: "Locked by Mia". Not when the mod isn't locked here since.
     pub fn group_lock_mark(&self, root: &Path, a: &hopper::instances::Addon) -> Option<String> {
         use groupsync::Kind;
+        if self.is_sync_copy(root) {
+            return self.sync_lock_mark(root, a);
+        }
         let m = self.group_copy(root)?.marks.get(&format!("{}{}", groupsync::LOCK_PREFIX, groupsync::addon_key(a)))?;
         if m.name.is_empty() || m.by == self.mailbox_id() || !matches!(m.kind, Kind::Locked) {
             return None;
@@ -2255,7 +2278,7 @@ impl Store {
 
     // ---- Inside ----------------------------------------------------------
 
-    fn mailbox_or_say(&self, cx: &mut Context<Self>) -> Option<Arc<Mailbox>> {
+    pub(super) fn mailbox_or_say(&self, cx: &mut Context<Self>) -> Option<Arc<Mailbox>> {
         if self.mailbox.is_none() {
             let text = match self.sync_status() {
                 SyncStatus::Off => "Turn on friends first.".to_string(),
@@ -2318,6 +2341,8 @@ impl Store {
     /// `Settings::mailbox_handled`).
     fn mailbox_event(&mut self, e: Event, fresh: bool, cx: &mut Context<Self>) {
         match e.kind() {
+            // A friend's sync packet for a group copy (`sync_engine`).
+            Kind::Recipe if e.inst.starts_with(super::sync_engine::PREFIX) => self.sync_receive(e, cx),
             Kind::Recipe => self.got_recipe(e, cx),
             Kind::Revoke => self.got_revoke(e, fresh, cx),
             // Read the groups again; keeping in step happens there.
@@ -2864,6 +2889,8 @@ impl Store {
             let got = this.update(cx, |s, cx| {
                 // Follows waiting on a game, a task or a retry's delay.
                 s.follow_tick(cx);
+                // Group copies: what the player did, what friends sent, what lands.
+                s.sync_tick(cx);
                 // Shared mod settings changed here, or waiting to go in.
                 s.config_tick(cx);
                 // Changes waiting to go out, for the Friends icon's count,

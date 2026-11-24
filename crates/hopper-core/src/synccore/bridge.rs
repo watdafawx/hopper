@@ -118,7 +118,8 @@ impl<'a> InstFetch<'a> {
     pub fn finish(&self, plan: &ApplyPlan, report: &ApplyReport) -> anyhow::Result<()> {
         let Some(mut inst) = instances::load(&self.root) else { return Ok(()) };
         let mut changed = false;
-        for (step, r) in plan.steps.iter().zip(&report.results) {
+        for step in &plan.steps {
+            let Some(r) = report.results.iter().find(|r| r.key == step.key && r.by == step.by) else { continue };
             if r.outcome != Outcome::Done || !matches!(step.key, Key::Mod(_)) || !is_jar_step(step) {
                 continue;
             }

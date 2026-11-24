@@ -1456,7 +1456,10 @@ pub(crate) fn undone(store: &Entity<crate::store::Store>, root: &std::path::Path
         .filter(|p| p.parent() == Some(mods.as_path()))
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .collect();
+    let files: Vec<String> = done.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
     store.update(cx, |s, cx| {
+        // A group copy records what the Undo changed as the player's Undo.
+        s.sync_note_undo(root, &files);
         s.reload_instance(root, cx);
         s.identify_jars(root, jars);
     });
