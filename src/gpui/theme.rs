@@ -447,24 +447,6 @@ pub fn ink(c: Hsla) -> Hsla {
     out
 }
 
-/// `c` as text on its own `tint` (0-1) over `page`, lightened on a dark page
-/// or darkened on a light one until it reads ([`INK_RATIO`]). A notice's red
-/// title is about 3.7:1 on its faint red strip in the dark theme.
-pub fn ink_over(c: Hsla, page: Hsla, tint: f32) -> Hsla {
-    let (o, p) = (gpui_kit::Rgba::from(c), gpui_kit::Rgba::from(page));
-    let bg = Rgba(p.r + (o.r - p.r) * tint, p.g + (o.g - p.g) * tint, p.b + (o.b - p.b) * tint, 1.0);
-    let step = if lum(bg) < 0.18 { 0.01 } else { -0.01 };
-    let mut out = c;
-    for _ in 0..80 {
-        let t = gpui_kit::Rgba::from(out);
-        if ratio(Rgba(t.r, t.g, t.b, 1.0), bg) >= INK_RATIO {
-            break;
-        }
-        out.l = (out.l + step).clamp(0., 1.);
-    }
-    out
-}
-
 /// A chip's or status pill's text colour. On a light theme the colour is
 /// mixed half way to black (in sRGB), so a label on its own faint tint reads
 /// well past 4.5:1 whatever the hue: the plain colour is 1.5-4:1 there.

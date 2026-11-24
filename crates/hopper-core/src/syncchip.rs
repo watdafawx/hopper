@@ -35,6 +35,8 @@ pub enum Glyph {
     Restart,
     /// A lower-case "i": notes for the player's information.
     Note,
+    /// A clock: a start that makes no progress.
+    Stuck,
 }
 
 /// Which side the chip is about.
@@ -50,6 +52,9 @@ pub enum Source {
     Restart,
     /// Every notice no other chip says ("Needs you").
     Attention,
+    /// The game or server itself has a problem: its start looks stuck, or it
+    /// crashed. It sits right after the run state's own pill.
+    Run,
 }
 
 impl Source {
@@ -323,6 +328,44 @@ pub fn attention_look(needs: &[Need], title: &str) -> Option<Look> {
         format!("{n} need you")
     };
     Some(Look::new(Source::Attention, tone, Alert, label, if n == 1 { short } else { "Needs you" }).fixed())
+}
+
+/// What is wrong with the game or server that runs (or ran).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunProblem {
+    /// The start makes no progress; `minutes` is how long, when known.
+    Stuck { minutes: Option<u32> },
+    /// It stopped with a crash.
+    Crashed,
+    /// The paired server stopped with a crash (said on its pack's page).
+    ServerCrashed,
+}
+
+/// The whole minutes in a stuck report's headline ("... (no progress for 4
+/// min, CPU idle)"); `None` when it only counts seconds or doesn't say.
+pub fn stuck_minutes(headline: &str) -> Option<u32> {
+    let rest = headline.split("no progress for ").nth(1)?;
+    let mut words = rest.split_whitespace();
+    let n: u32 = words.next()?.parse().ok()?;
+    words.next()?.trim_end_matches([',', ')']).eq("min").then_some(n)
+}
+
+/// The chip next to the run state pill while the game or server has a
+/// problem: red, never folds, its notice (with Restart, See why) in the
+/// popover.
+pub fn run_look(problem: &RunProblem) -> Look {
+    use Glyph::*;
+    match problem {
+        RunProblem::Stuck { minutes } => {
+            let label = match minutes {
+                Some(m) if *m >= 1 => format!("Looks stuck · {m} min"),
+                _ => "Looks stuck".to_string(),
+            };
+            Look::new(Source::Run, Tone::Bad, Stuck, label, "Stuck").fixed()
+        }
+        RunProblem::Crashed => Look::new(Source::Run, Tone::Bad, Alert, "Crashed", "Crashed").fixed(),
+        RunProblem::ServerCrashed => Look::new(Source::Run, Tone::Bad, Alert, "Server crashed", "Crashed").fixed(),
+    }
 }
 
 /// How bad a tone is, for the one chip two fold into.
@@ -689,6 +732,28 @@ mod tests {
         let bad = server_look(&ServerState::Failed, "");
         assert!(merged(&a, &bad).fixed);
         assert_eq!(merged(&bad, &a).tone, Tone::Bad);
+    }
+
+    #[test]
+    fn run_problem_words_tone_and_folding() {
+        let stuck = run_look(&RunProblem::Stuck { minutes: Some(4) });
+        assert_eq!((stuck.label.as_str(), stuck.short.as_str(), stuck.tone, stuck.glyph, stuck.source), ("Looks stuck · 4 min", "Stuck", Tone::Bad, Glyph::Stuck, Source::Run));
+        assert!(stuck.fixed && !stuck.busy && !stuck.strip && !stuck.source.is_sync());
+        // Under a minute, or not known: no number.
+        assert_eq!(run_look(&RunProblem::Stuck { minutes: Some(0) }).label, "Looks stuck");
+        assert_eq!(run_look(&RunProblem::Stuck { minutes: None }).label, "Looks stuck");
+        let crashed = run_look(&RunProblem::Crashed);
+        assert_eq!((crashed.label.as_str(), crashed.tone, crashed.fixed), ("Crashed", Tone::Bad, true));
+        assert_eq!(run_look(&RunProblem::ServerCrashed).label, "Server crashed");
+        // It never folds, even with no room.
+        assert_eq!(plan_with(&[false], &[stuck.fixed], 0, 3).extra_forms, vec![Some(Form::Icon)]);
+    }
+
+    #[test]
+    fn stuck_minutes_from_the_headline() {
+        assert_eq!(stuck_minutes("TNP looks stuck while loading mods (no progress for 4 min, CPU idle)"), Some(4));
+        assert_eq!(stuck_minutes("looks stuck while loading mods (no progress for 45 s, CPU idle)"), None);
+        assert_eq!(stuck_minutes("looks stuck while loading mods"), None);
     }
 
     #[test]

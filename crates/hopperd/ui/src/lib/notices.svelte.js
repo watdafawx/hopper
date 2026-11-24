@@ -4,7 +4,7 @@
 // with `provideNotices()`.
 import { getContext, setContext, untrack } from 'svelte';
 import { order } from './noticeorder.js';
-import { attentionLook } from './syncchip.js';
+import { attentionLook, runLook } from './syncchip.js';
 
 const KEY = Symbol('notices');
 
@@ -37,9 +37,12 @@ export function provideNotices() {
 /** The page's list, or null outside a page that has a chip. */
 export const pageNotices = () => getContext(KEY) || null;
 
-/** The notices in the order the list shows them (what stops play first). */
-export function ordered(notices) {
-  const all = Object.values(notices.items).sort((a, b) => a.at - b.at);
+/** The notices in the order the list shows them (what stops play first). `run`: the run state's own
+ * problems (a stuck start, a crash) instead of the others; they have their own chip. */
+export function ordered(notices, run = false) {
+  const all = Object.values(notices.items)
+    .filter((n) => !!n.run === run)
+    .sort((a, b) => a.at - b.at);
   return order(all).map((i) => all[i]);
 }
 
@@ -51,6 +54,17 @@ export function needsChip(notices, key, body) {
   const look = attentionLook(list.map((n) => n.tier), list[0]?.title || '');
   if (!look) return null;
   return { id: `needs:${key}`, look, title: '', line: '', actions: [], body, wide: true, autoOpen: list.filter((n) => n.tier === 'stop').map((n) => n.id) };
+}
+
+/** The run state's chip for <SyncChip>'s `chips`: red "Crashed" or "Looks stuck · N min", the notice
+ * in its popover (`body`). Null when the server has no such problem. A new report (its `since`) opens
+ * the popover once more. */
+export function runChip(notices, key, body) {
+  const list = ordered(notices, true);
+  if (!list.length) return null;
+  const crashed = list.find((n) => n.run === 'crashed');
+  const problem = crashed ? { kind: 'crashed' } : { kind: 'stuck', minutes: list[0].minutes ?? null };
+  return { id: `run:${key}`, look: runLook(problem), title: '', line: '', actions: [], body, wide: true, autoOpen: list.map((n) => `${n.id}@${n.since}`) };
 }
 
 // Notices closed in this browser, by key: they come back when the key does

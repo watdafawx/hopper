@@ -170,7 +170,7 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
                     .map(|s| s.as_ref())
                     .chain(chips.iter().flat_map(|c| [c.look.label.as_str(), c.look.short.as_str()])),
             );
-            let mut chip_els: Vec<AnyElement> = match (&plan.merged, sync.as_slice()) {
+            let sync_els: Vec<AnyElement> = match (&plan.merged, sync.as_slice()) {
                 (Some(form), [a, b]) => vec![crate::sync_chip::render(&crate::sync_chip::Chip::merge(a, b), *form, cx)],
                 _ => sync
                     .iter()
@@ -178,7 +178,15 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
                     .filter_map(|(c, form)| form.map(|form| crate::sync_chip::render(c, form, cx)))
                     .collect(),
             };
-            chip_els.extend(alone.iter().zip(plan.extra_forms.iter()).filter_map(|(c, form)| form.map(|form| crate::sync_chip::render(c, form, cx))));
+            // The run state's problem (stuck, crashed) sits right after its
+            // own pill, before the sync chips; the others follow them.
+            let (run_els, other_els): (Vec<_>, Vec<_>) = alone
+                .iter()
+                .zip(plan.extra_forms.iter())
+                .filter_map(|(c, form)| form.map(|form| (c.look.source == hopper::syncchip::Source::Run, crate::sync_chip::render(c, form, cx))))
+                .partition(|(run, _)| *run);
+            let chip_els: Vec<AnyElement> =
+                run_els.into_iter().chain(sync_els.into_iter().map(|e| (false, e))).chain(other_els).map(|(_, e)| e).collect();
             f.pills
                 .wrap(
                     "hero-pills",

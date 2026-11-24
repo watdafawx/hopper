@@ -1,6 +1,6 @@
 // `?syncchip=NAME` on the panel URL shows a sync chip in the server header without a paired
 // instance, to check how it looks and folds. Names match desktop's `--dialog sync-chip --state`.
-import { serverLook, restartLook } from './syncchip.js';
+import { serverLook, restartLook, runLook } from './syncchip.js';
 
 const act = (label, primary = false) => ({ label, primary, run() {} });
 const S = (state, other, title, line, actions, progress) => ({ look: serverLook(state, other), title, line, actions, progress });
@@ -16,8 +16,16 @@ const ONE = {
 
 const RESTART = () => ({ look: restartLook(true, 'server'), title: 'Changed while the server runs', line: 'Restart it to load the changes.', actions: [act('Restart', true), act('Hide')] });
 
+// The run state's problem, with its popover open the first time (like the real one's).
+const RUN = (problem, title, line, actions) => ({ id: `run:preview:${problem.kind}`, look: runLook(problem), title, line, actions, autoOpen: ['preview'] });
+const STUCK = () => RUN({ kind: 'stuck', minutes: 4 }, 'Skyblock Server looks stuck while loading mods', 'Nothing has happened for 4 minutes.', [act('Restart server…', true), act('See why →'), act('Wait')]);
+const CRASHED = () => RUN({ kind: 'crashed' }, 'The server crashed', 'Create stopped it while it loaded.', [act('See why →', true)]);
+
 export function previewChips(name) {
   if (!name) return [];
+  if (name === 'run-stuck') return [STUCK()];
+  if (name === 'run-crashed') return [CRASHED()];
+  if (name === 'run-all') return [STUCK(), ...ONE['s-differ'](), RESTART()];
   if (ONE[name]) return ONE[name]();
   if (name === 'rs-changed') return [RESTART()];
   if (name === 'rs-with-sync') return [...ONE['s-differ'](), RESTART()];

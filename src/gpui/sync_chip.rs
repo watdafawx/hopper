@@ -110,6 +110,7 @@ pub fn glyph_icon(g: Glyph) -> IconName {
         Glyph::Differ => IconName::ArrowLeftRight,
         Glyph::Restart => IconName::RefreshCw,
         Glyph::Note => IconName::Info,
+        Glyph::Stuck => IconName::Clock,
     }
 }
 
@@ -284,6 +285,31 @@ thread_local! {
     static SEEN: std::cell::RefCell<HashSet<String>> = std::cell::RefCell::new(HashSet::new());
 }
 
+thread_local! {
+    /// The chip whose popover opened by itself and is still open, with when it
+    /// last drew. Two chips that both have something new at once (a stuck
+    /// start and a missing mod) must not open two popovers over each other:
+    /// the first drawn (the run state's) opens, the other stays a red chip.
+    static OPENED: std::cell::RefCell<Option<(String, std::time::Instant)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Another chip's popover opened by itself is still up.
+fn another_is_open(me: &str) -> bool {
+    OPENED.with(|o| o.borrow().as_ref().is_some_and(|(id, at)| id != me && at.elapsed() < std::time::Duration::from_secs(2)))
+}
+
+/// `me` holds the one automatic popover while it is open; frees it when closed.
+fn hold(me: &str, open: bool) {
+    OPENED.with(|o| {
+        let mut o = o.borrow_mut();
+        if open {
+            *o = Some((me.to_string(), std::time::Instant::now()));
+        } else if o.as_ref().is_some_and(|(id, _)| id == me) {
+            *o = None;
+        }
+    });
+}
+
 /// Marks the keys as shown and says whether any of them was new.
 fn first_sight(chip: &str, keys: &[SharedString]) -> bool {
     SEEN.with(|s| {
@@ -326,7 +352,7 @@ impl RenderOnce for ChipEl {
             return pop.into_any_element();
         }
         let auto = window.use_keyed_state(ElementId::Name(format!("sync-chip-auto:{}", chip.id).into()), cx, |_, _| Auto::default());
-        if first_sight(&chip.id, &chip.auto_open) {
+        if first_sight(&chip.id, &chip.auto_open) && !another_is_open(&chip.id) {
             auto.update(cx, |a, _| a.open = true);
             // Opening focuses the popover; give the keyboard back to what
             // had it (a search box the player is typing in) once drawn.
@@ -335,8 +361,14 @@ impl RenderOnce for ChipEl {
             }
         }
         let open = auto.read(cx).open;
-        let a2 = auto.clone();
-        pop.open(open).on_open_change(move |o, _, cx| a2.update(cx, |a, _| a.open = *o)).into_any_element()
+        hold(&chip.id, open);
+        let (a2, me) = (auto.clone(), chip.id.clone());
+        pop.open(open)
+            .on_open_change(move |o, _, cx| {
+                hold(&me, *o);
+                a2.update(cx, |a, _| a.open = *o)
+            })
+            .into_any_element()
     }
 }
 
@@ -486,7 +518,22 @@ pub fn preview(name: &str) -> Vec<Chip> {
         }
         chip
     };
+    // The run state's problem: a start that looks stuck, a crash. Opens by
+    // itself the first time, like the real one.
+    let run = |problem: hopper::syncchip::RunProblem, title: &str, line: &str| {
+        let mut chip = make("run", hopper::syncchip::run_look(&problem), title, line, None, "Stop and start again…");
+        chip.auto_open = vec!["preview".into()];
+        chip.sections[0].actions.push(Action { label: "See why →".into(), icon: None, primary: false, disabled: false, run: noop.clone() });
+        for a in &mut chip.sections[0].actions {
+            a.icon = None;
+        }
+        chip
+    };
+    let stuck = || run(hopper::syncchip::RunProblem::Stuck { minutes: Some(4) }, "Skyblock Server looks stuck while loading mods", "Nothing has happened for 4 minutes.");
     match name.split_once('-') {
+        Some(("run", "stuck")) => vec![stuck()],
+        Some(("run", "crashed")) => vec![run(hopper::syncchip::RunProblem::Crashed, "The server crashed", "Create stopped it while it loaded.")],
+        Some(("run", "all")) => vec![stuck(), g("in-sync"), server(ServerState::Differ { mods: 3, blocked: false }, NAME), restart(true)],
         Some(("rs", "changed")) => vec![restart(true)],
         Some(("rs", _)) => vec![restart(false)],
         Some(("dl", "working")) => vec![downloads(DownloadState::Working { done: 1, total: 3 })],

@@ -49,7 +49,7 @@
   import SyncChip from './lib/SyncChip.svelte';
   import { previewChips } from './lib/syncchipPreview.js';
   import { restartLook } from './lib/syncchip.js';
-  import { provideNotices, needsChip } from './lib/notices.svelte.js';
+  import { provideNotices, needsChip, runChip } from './lib/notices.svelte.js';
   import { provideModsShared } from './lib/modsShared.svelte.js';
   import ModsNotices from './ModsNotices.svelte';
   import { openMove } from './lib/moveDialog.svelte.js';
@@ -153,7 +153,9 @@
       : null,
   );
   const needs = $derived(needsChip(notices, id, needsList));
-  const headChips = $derived([...syncChips, ...(needs ? [needs] : []), ...(restartChip ? [restartChip] : [])]);
+  // A start that looks stuck, or a crash: the chip right after the state pill.
+  const run = $derived(runChip(notices, id, runList));
+  const headChips = $derived([...(run ? [run] : []), ...syncChips, ...(needs ? [needs] : []), ...(restartChip ? [restartChip] : [])]);
   // The relay setup dialog (this panel's own servers, owner only).
   let relaySetup = $state(false);
   let playerMenu = $state(null);
@@ -292,6 +294,7 @@
 </script>
 
 {#snippet needsList()}<NoticeList {notices} />{/snippet}
+{#snippet runList()}<NoticeList {notices} run />{/snippet}
 
 {#if !s}
   <div class="pad muted">{feed.servers.length ? 'No server with that id.' : panel && panel.state !== 'ok' ? `Can't reach ${panel.name} right now.` : 'Loading…'}</div>

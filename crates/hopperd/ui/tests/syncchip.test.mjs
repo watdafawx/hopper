@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { serverLook, merged, plan, maxLevel, levelFor, attentionLook, restartLook } from '../src/lib/syncchip.js';
+import { serverLook, merged, plan, maxLevel, levelFor, attentionLook, restartLook, runLook, stuckMinutes } from '../src/lib/syncchip.js';
 
 test('server words match desktop', () => {
   assert.equal(serverLook({ kind: 'differ', mods: 3 }).label, '3 mods differ');
@@ -68,4 +68,17 @@ test('needs-you chip: words, tone, folding (as desktop)', () => {
   assert.ok(levelFor([sync, one], 1) <= 2);
   assert.ok(levelFor([sync, notes], 1) >= 3);
   assert.ok(levelFor([restartLook(true), one], 1e4) === 0);
+});
+
+test('run problems: words, red, never fold', () => {
+  const stuck = runLook({ kind: 'stuck', minutes: 4 });
+  assert.deepEqual([stuck.label, stuck.short, stuck.tone, stuck.glyph, stuck.source, stuck.fixed], ['Looks stuck \u00b7 4 min', 'Stuck', 'bad', 'stuck', 'run', true]);
+  assert.equal(runLook({ kind: 'stuck', minutes: 0 }).label, 'Looks stuck');
+  assert.equal(runLook({ kind: 'stuck', minutes: null }).label, 'Looks stuck');
+  const crashed = runLook({ kind: 'crashed' });
+  assert.deepEqual([crashed.label, crashed.tone, crashed.fixed], ['Crashed', 'bad', true]);
+  assert.equal(stuckMinutes('TNP looks stuck while loading mods (no progress for 4 min, CPU idle)'), 4);
+  assert.equal(stuckMinutes('looks stuck while loading mods (no progress for 45 s, CPU idle)'), null);
+  // It stands alone beside the sync chips and keeps every chip.
+  assert.ok(levelFor([serverLook({ kind: 'in-sync' }), stuck], 1) <= 2);
 });

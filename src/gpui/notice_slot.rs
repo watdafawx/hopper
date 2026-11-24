@@ -1,21 +1,20 @@
-//! The one notice slot above an instance's or a server's tabs. Every notice
-//! the page has (a load problem, a choice the player has to make, a tip)
-//! goes through here, so they look the same, sit in one place and never
-//! push the page off the screen: the two that matter most show as one-line
-//! strips, and the rest fold into "N more", which opens a list grouped by
-//! how much they matter.
+//! The notices of an instance's or a server's page (a load problem, a choice
+//! the player has to make, a tip). They look the same everywhere and never
+//! push the page off the screen: they live in the hero's chips. [`chip`] is
+//! the "Needs you" chip, its popover the list grouped by how much they
+//! matter; [`run_chip`] is the run state's problem (a start that looks
+//! stuck, a crash) next to its pill.
 //!
-//! A page builds its notices as [`Notice`]s and hands them to [`slot`]. The
-//! slot orders them (see [`order`]): problems that stop the game first, then
-//! the ones that need a choice, then the rest; the newest first within each.
-//! A notice that stops play has no ✕: it leaves when its cause does.
+//! A page builds its notices as [`Notice`]s. They are ordered by [`order`]:
+//! problems that stop the game first, then the ones that need a choice, then
+//! the rest; the newest first within each. A notice that stops play has no
+//! ✕: it leaves when its cause does.
 
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::popover::Popover;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashSet;
@@ -50,14 +49,6 @@ impl Tier {
             Tier::Stop => "Stops play",
             Tier::Choice => "Needs a choice",
             Tier::Info => "For your information",
-        }
-    }
-
-    fn icon(self) -> IconName {
-        match self {
-            Tier::Stop => IconName::TriangleAlert,
-            Tier::Choice => IconName::CircleAlert,
-            Tier::Info => IconName::Info,
         }
     }
 }
@@ -211,9 +202,6 @@ pub fn hidden(store: &Entity<crate::store::Store>, key: &str, cx: &App) -> bool 
     store.read(cx).notice_hidden(key)
 }
 
-/// How many notices show as strips; the rest fold into "N more".
-pub const SHOWN: usize = 2;
-
 /// The order notices show in: by tier (stops play first), then the newest
 /// first, then as given. Returns indices into `items` (tier, since).
 pub fn order(items: &[(Tier, i64)]) -> Vec<usize> {
@@ -223,128 +211,13 @@ pub fn order(items: &[(Tier, i64)]) -> Vec<usize> {
     ix
 }
 
-/// Splits ordered notices (their tiers, in order) into the strips shown and
-/// the "N more" list's groups: each group's tier with its notices' positions
-/// in `tiers`, in the order of [`Tier::ALL`], empty groups left out.
-pub fn fold(tiers: &[Tier]) -> (Vec<usize>, Vec<(Tier, Vec<usize>)>) {
-    let shown: Vec<usize> = (0..tiers.len().min(SHOWN)).collect();
-    let rest = SHOWN.min(tiers.len())..tiers.len();
-    let groups = Tier::ALL
-        .iter()
-        .filter_map(|&t| {
-            let v: Vec<usize> = rest.clone().filter(|&i| tiers[i] == t).collect();
-            (!v.is_empty()).then_some((t, v))
-        })
-        .collect();
-    (shown, groups)
-}
-
-/// The slot's own state: which notices have their details open, and its
-/// width (for the narrow layout).
+/// The list's own state: which notices have their details open.
 #[derive(Default)]
 struct SlotState {
     open: HashSet<SharedString>,
     /// Notices whose details were opened by themselves ([`Notice::open_new`]),
     /// so closing them sticks.
     seen: HashSet<SharedString>,
-    width: Pixels,
-}
-
-/// Under this width the strips drop their subject line, shorten labels and
-/// "N more" becomes "+N".
-const NARROW_REM: f32 = 34.;
-
-/// Under this width the strips drop only their subject line (it's in the
-/// title's tooltip): a long title and a long button leave it a few letters.
-const SUBJECT_REM: f32 = 46.;
-
-/// The slot itself: `None` when there's nothing to say. `id` names the
-/// page ("instance", "server") so each page keeps its own open details.
-pub fn slot(id: &str, notices: Vec<Notice>, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
-    if notices.is_empty() {
-        return None;
-    }
-    let state = window.use_keyed_state(ElementId::Name(format!("notice-slot:{id}").into()), cx, |_, _| SlotState::default());
-    let width = state.read(cx).width;
-    let narrow = width > px(0.) && width < window.rem_size() * NARROW_REM;
-    let subjects = !(width > px(0.) && width < window.rem_size() * SUBJECT_REM);
-    // Details that open by themselves, once each.
-    for n in notices.iter().filter(|n| n.open_new && n.details.is_some()) {
-        if !state.read(cx).seen.contains(&n.id) {
-            let id = n.id.clone();
-            state.update(cx, |s, _| {
-                s.seen.insert(id.clone());
-                s.open.insert(id);
-            });
-        }
-    }
-    let keys: Vec<(Tier, i64)> = notices.iter().map(|n| (n.tier, n.since)).collect();
-    let mut slots: Vec<Option<Notice>> = notices.into_iter().map(Some).collect();
-    let sorted: Vec<Notice> = order(&keys).into_iter().filter_map(|i| slots[i].take()).collect();
-    let tiers: Vec<Tier> = sorted.iter().map(|n| n.tier).collect();
-    let (shown, groups) = fold(&tiers);
-    let more = tiers.len() - shown.len();
-    let mut sorted: Vec<Option<Notice>> = sorted.into_iter().map(Some).collect();
-    let open = state.read(cx).open.clone();
-    let mut strips: Vec<AnyElement> = Vec::new();
-    let last = shown.len().saturating_sub(1);
-    // The list first: its trigger sits on the last strip.
-    let list = (more > 0).then(|| {
-        let rows: Vec<AnyElement> = groups
-            .iter()
-            .map(|(tier, ix)| {
-                let items: Vec<AnyElement> =
-                    ix.iter().filter_map(|&i| sorted[i].take()).map(|n| list_row(n, &state, &open, cx)).collect();
-                v_flex()
-                    .gap_0p5()
-                    .child(
-                        div()
-                            .px_2()
-                            .pt_1()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("{} · {}", tier.heading(), items.len())),
-                    )
-                    .children(items)
-                    .into_any_element()
-            })
-            .collect();
-        let dots: Vec<Tier> = groups.iter().flat_map(|(t, v)| std::iter::repeat_n(*t, v.len())).collect();
-        more_button(id, more, &dots, rows, narrow, window, cx)
-    });
-    let mut list = list;
-    for (k, &i) in shown.iter().enumerate() {
-        let Some(n) = sorted[i].take() else { continue };
-        let trigger = if k == last { list.take() } else { None };
-        strips.push(strip(n, Fit { narrow, lead: k == 0 }, subjects, trigger, &state, &open, cx));
-    }
-    let st = state.clone();
-    Some(
-        v_flex()
-            .id(SharedString::from(format!("notice-slot-{id}")))
-            .w_full()
-            .gap_1p5()
-            .children(strips)
-            // Its width, for the narrow layout (from the last frame).
-            .child(
-                canvas(
-                    move |bounds, window, cx| {
-                        let w = bounds.size.width;
-                        if (st.read(cx).width - w).abs() > px(0.5) {
-                            st.update(cx, |s, _| s.width = w);
-                            window.refresh();
-                        }
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0()
-                .size_full(),
-            )
-            .relative()
-            .into_any_element(),
-    )
 }
 
 /// Builds the page's notices again, for the popover (each frame it is open,
@@ -391,7 +264,7 @@ pub fn chip(id: &str, notices: Vec<Notice>, producer: Producer) -> Option<crate:
     // Every problem that stops play opens the popover once, each on its own.
     let stops: Vec<SharedString> = ix.iter().filter(|&&i| notices[i].tier == Tier::Stop).map(|&i| notices[i].id.clone()).collect();
     let key: SharedString = id.to_string().into();
-    let body: crate::sync_chip::Body = Rc::new(move |window, cx| list(&key, &producer, window, cx));
+    let body: crate::sync_chip::Body = Rc::new(move |window, cx| list(&key, &producer, true, window, cx));
     Some(Chip {
         id: format!("needs-{id}").into(),
         look,
@@ -402,8 +275,34 @@ pub fn chip(id: &str, notices: Vec<Notice>, producer: Producer) -> Option<crate:
     })
 }
 
-/// The popover's content: the page's notices as the grouped list.
-fn list(id: &SharedString, producer: &Producer, window: &mut Window, cx: &mut App) -> AnyElement {
+/// The chip beside the run state pill while the game or server has a problem
+/// (its start looks stuck, or it crashed): red, never folds, and its popover
+/// opens once by itself each time a new problem shows. `notices` are the
+/// problem's own (Restart, See why, Wait); the popover asks `producer` for
+/// fresh ones whenever it draws. `None` when there is no problem.
+pub fn run_chip(id: &str, problem: hopper::syncchip::RunProblem, notices: Vec<Notice>, producer: Producer) -> Option<crate::sync_chip::Chip> {
+    use crate::sync_chip::{Chip, Section};
+    if notices.is_empty() {
+        return None;
+    }
+    // A stuck start that comes back after "Wait" is a new problem: it opens
+    // again, once.
+    let auto_open: Vec<SharedString> = notices.iter().map(|n| format!("{}@{}", n.id, n.since).into()).collect();
+    let key: SharedString = format!("run:{id}").into();
+    let body: crate::sync_chip::Body = Rc::new(move |window, cx| list(&key, &producer, false, window, cx));
+    Some(Chip {
+        id: format!("run-{id}").into(),
+        look: hopper::syncchip::run_look(&problem),
+        progress: None,
+        sections: vec![Section { title: "".into(), line: "".into(), progress: None, body: Some(body), actions: Vec::new() }],
+        auto_open,
+        width: Some(38.),
+    })
+}
+
+/// The popover's content: the page's notices as the grouped list (`grouped`),
+/// or just their rows (the run state chip's one problem).
+fn list(id: &SharedString, producer: &Producer, grouped: bool, window: &mut Window, cx: &mut App) -> AnyElement {
     let notices = producer(window, cx);
     let state = window.use_keyed_state(ElementId::Name(format!("notice-list:{id}").into()), cx, |_, _| SlotState::default());
     // Details that open by themselves, once each.
@@ -432,15 +331,17 @@ fn list(id: &SharedString, producer: &Producer, window: &mut Window, cx: &mut Ap
             let items: Vec<AnyElement> = ix.iter().filter_map(|&i| sorted[i].take()).map(|n| list_row(n, &state, &open, cx)).collect();
             v_flex()
                 .gap_0p5()
-                .child(
-                    div()
-                        .px_2()
-                        .pt_1()
-                        .text_xs()
-                        .font_semibold()
-                        .text_color(theme.muted_foreground)
-                        .child(format!("{} · {}", tier.heading(), items.len())),
-                )
+                .when(grouped, |g| {
+                    g.child(
+                        div()
+                            .px_2()
+                            .pt_1()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("{} · {}", tier.heading(), items.len())),
+                    )
+                })
                 .children(items)
                 .into_any_element()
         })
@@ -450,14 +351,16 @@ fn list(id: &SharedString, producer: &Producer, window: &mut Window, cx: &mut Ap
         .w_full()
         .max_h(rems(28.))
         .gap_1()
-        .child(
-            div()
-                .px_2()
-                .text_sm()
-                .font_semibold()
-                .text_color(theme.foreground)
-                .child(if only_notes { format!("{n} {}", if n == 1 { "note" } else { "notes" }) } else { "Needs you".to_string() }),
-        )
+        .when(grouped, |l| {
+            l.child(
+                div()
+                    .px_2()
+                    .text_sm()
+                    .font_semibold()
+                    .text_color(theme.foreground)
+                    .child(if only_notes { format!("{n} {}", if n == 1 { "note" } else { "notes" }) } else { "Needs you".to_string() }),
+            )
+        })
         .children(rows)
         .overflow_y_scrollbar()
         .into_any_element()
@@ -470,128 +373,6 @@ fn toggle(state: &Entity<SlotState>, id: SharedString, cx: &mut App) {
         }
         cx.notify();
     });
-}
-
-/// One notice as a one-line strip: icon, title, subject, its buttons, and
-/// on the last strip the "N more" button. Its details open under it.
-fn strip(mut n: Notice, fit: Fit, subjects: bool, more: Option<AnyElement>, state: &Entity<SlotState>, open: &HashSet<SharedString>, cx: &mut App) -> AnyElement {
-    let theme = cx.theme().clone();
-    // No room for the subject on the strip: its mod names (links with icons)
-    // go in the details instead of only the tooltip.
-    let rich_below = if subjects { None } else { n.rich.take() };
-    let color = n.tier.color(cx);
-    // The title on the strip's own tint (`bg` below), readable in any theme.
-    let ink = crate::theme::ink_over(color, theme.background, 0.08);
-    let id = n.id.clone();
-    let narrow = fit.narrow;
-    // Narrow: the other buttons go in the details, so the strip stays one line.
-    let actions: Vec<AnyElement> = n.actions.into_iter().map(|a| a(Fit { narrow, lead: false })).collect();
-    let tucked = narrow && !actions.is_empty();
-    let (actions, tucked_actions) = if narrow { (Vec::new(), actions) } else { (actions, Vec::new()) };
-    let has_details = n.details.is_some() || tucked || rich_below.is_some();
-    let is_open = has_details && open.contains(&id);
-    let tip: SharedString = match &n.subject {
-        Some(s) => format!("{}\n{s}", n.title).into(),
-        None => n.title.clone(),
-    };
-    let toggle_btn = has_details.then(|| {
-        let (state, id2) = (state.clone(), id.clone());
-        let b = Button::new(SharedString::from(format!("notice-details:{id}")))
-            .small()
-            .ghost()
-            .icon(if is_open { IconName::ChevronUp } else { IconName::ChevronDown });
-        (if narrow { b.tooltip(if is_open { "Hide details" } else { "Details" }) } else { b.label("Details") })
-            .on_click(move |_, _, cx| toggle(&state, id2.clone(), cx))
-    });
-    let close = n.dismiss.filter(|_| n.tier != Tier::Stop).map(|f| {
-        Button::new(SharedString::from(format!("notice-hide:{id}")))
-            .small()
-            .ghost()
-            .icon(IconName::X)
-            .tooltip("Hide this notice")
-            .on_click(move |_, window, cx| f(window, cx))
-    });
-    let line = h_flex()
-        .id(SharedString::from(format!("notice-strip:{id}")))
-        .relative()
-        .w_full()
-        // One line at its own height: open details under it mustn't
-        // squeeze it.
-        .flex_none()
-        .h(rems(2.25))
-        .gap_2()
-        .pl_3()
-        .pr_1p5()
-        .items_center()
-        .overflow_hidden()
-        .rounded(theme.radius)
-        .border_1()
-        .border_color(color.opacity(0.45))
-        .bg(color.opacity(0.08))
-        .child(Icon::new(n.icon.unwrap_or(n.tier.icon())).small().flex_none().text_color(color))
-        .child(
-            div()
-                .id(SharedString::from(format!("notice-title:{id}")))
-                .min_w_0()
-                .when(!subjects || n.subject.is_none(), |d| d.flex_1())
-                .truncate()
-                .text_sm()
-                .font_semibold()
-                .text_color(ink)
-                .child(n.title.clone())
-                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)),
-        )
-        .when_some(n.subject.filter(|_| subjects), |r, s| match n.rich {
-            // Mod names with their icons: one line, clipped at the edge.
-            Some(rich) => r.child(
-                h_flex()
-                    .flex_1()
-                    .min_w(rems(4.))
-                    .overflow_hidden()
-                    .gap_1()
-                    .items_center()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(div().flex_none().child("·"))
-                    .child(rich),
-            ),
-            None => r.child(div().flex_1().min_w(rems(4.)).truncate().text_sm().text_color(theme.muted_foreground).child(format!("· {s}"))),
-        })
-        .child(
-            h_flex()
-                .flex_none()
-                .gap_1()
-                .items_center()
-                .children(n.primary.map(|p| p(fit)))
-                .children(actions)
-                .children(toggle_btn)
-                .children(close)
-                .children(more),
-        );
-    v_flex()
-        .w_full()
-        .gap_1()
-        .child(line)
-        .when(is_open, |c| {
-            c.child(
-                v_flex()
-                    .id(SharedString::from(format!("notice-more:{id}")))
-                    .w_full()
-                    .max_h(rems(16.))
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .rounded(theme.radius)
-                    .border_1()
-                    .border_color(color.opacity(0.25))
-                    .bg(color.opacity(0.04))
-                    .children(rich_below.map(|r| h_flex().w_full().overflow_hidden().text_sm().text_color(theme.muted_foreground).child(r)))
-                    .when(!tucked_actions.is_empty(), |c| c.child(h_flex().flex_wrap().gap_1().children(tucked_actions)))
-                    .children(n.details)
-                    .overflow_y_scrollbar(),
-            )
-        })
-        .into_any_element()
 }
 
 /// One row of the "N more" list: its tier's dot, title and subject, and its
@@ -676,49 +457,10 @@ fn blank(key: &str, id: &SharedString) -> AnyElement {
         .into_any_element()
 }
 
-/// "●●● 5 more ⌃" on the last strip (narrow: "+5"), opening the list.
-fn more_button(id: &str, n: usize, dots: &[Tier], rows: Vec<AnyElement>, narrow: bool, _: &mut Window, cx: &mut App) -> AnyElement {
-    let theme = cx.theme().clone();
-    // One dot per notice, up to five (the label says the count).
-    let marks: Vec<AnyElement> = dots
-        .iter()
-        .take(5)
-        .map(|t| div().flex_none().size(px(6.)).rounded_full().bg(t.color(cx)).into_any_element())
-        .collect();
-    let label = if narrow { format!("+{n}") } else { format!("{n} more") };
-    let trigger = Button::new(SharedString::from(format!("notice-more-btn:{id}")))
-        .small()
-        .outline()
-        .tooltip(format!("{} more {}", n, if n == 1 { "notice" } else { "notices" }))
-        .child(h_flex().gap_1().items_center().child(h_flex().gap(px(2.)).children(if narrow { marks.into_iter().take(1).collect() } else { marks })).child(label));
-    Popover::new(SharedString::from(format!("notice-more:{id}")))
-        .anchor(Anchor::TopRight)
-        .trigger(trigger)
-        .child(
-            v_flex()
-                .id(SharedString::from(format!("notice-list:{id}")))
-                .w(rems(32.))
-                .max_w(rems(32.))
-                .max_h(rems(28.))
-                .gap_1()
-                .child(
-                    div()
-                        .px_2()
-                        .text_sm()
-                        .font_semibold()
-                        .text_color(theme.foreground)
-                        .child(format!("{n} more {}", if n == 1 { "notice" } else { "notices" })),
-                )
-                .children(rows)
-                .overflow_y_scrollbar(),
-        )
-        .into_any_element()
-}
-
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's `test` attribute would shadow the built-in one.
-    use super::{Tier, fold, order};
+    use super::{Tier, order};
 
     #[test]
     fn order_puts_stops_first_then_newest() {
@@ -730,28 +472,5 @@ mod tests {
     fn order_keeps_page_order_for_ties() {
         let items = [(Tier::Choice, 0), (Tier::Choice, 0), (Tier::Stop, 0), (Tier::Choice, 0)];
         assert_eq!(order(&items), vec![2, 0, 1, 3]);
-    }
-
-    #[test]
-    fn fold_shows_two_and_groups_the_rest() {
-        let tiers = [Tier::Stop, Tier::Stop, Tier::Choice, Tier::Choice, Tier::Choice, Tier::Info, Tier::Info];
-        let (shown, groups) = fold(&tiers);
-        assert_eq!(shown, vec![0, 1]);
-        assert_eq!(groups, vec![(Tier::Choice, vec![2, 3, 4]), (Tier::Info, vec![5, 6])]);
-    }
-
-    #[test]
-    fn fold_one_or_two_has_no_list() {
-        assert_eq!(fold(&[Tier::Info]), (vec![0], vec![]));
-        assert_eq!(fold(&[Tier::Stop, Tier::Info]), (vec![0, 1], vec![]));
-        assert_eq!(fold(&[]), (vec![], vec![]));
-    }
-
-    #[test]
-    fn fold_keeps_a_third_stop_in_the_list() {
-        // A third problem that stops play is never dropped: it heads the list.
-        let (shown, groups) = fold(&[Tier::Stop, Tier::Stop, Tier::Stop, Tier::Info]);
-        assert_eq!(shown, vec![0, 1]);
-        assert_eq!(groups, vec![(Tier::Stop, vec![2]), (Tier::Info, vec![3])]);
     }
 }

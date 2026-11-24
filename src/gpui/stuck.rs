@@ -95,6 +95,24 @@ impl Store {
         cx.notify();
     }
 
+    /// `--mcp` only (`navigate {"stuck": "<instance name>"}`, "off" clears
+    /// it): a made-up stuck report for an instance that isn't running, to
+    /// see the chip and its popover without a game that really hangs.
+    pub fn preview_stuck(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.stuck.reports.clear();
+        if let Some(root) = self.instances().iter().find(|i| i.name == name).map(|i| i.root.clone()) {
+            let report = StuckReport {
+                root: root.clone(),
+                when: hopper::time::now(),
+                headline: format!("{name} looks stuck while loading mods (no progress for 4 min, CPU idle)"),
+                summary: "Made up for a screenshot.".into(),
+                ..StuckReport::default()
+            };
+            self.stuck.reports.insert(root, report);
+        }
+        cx.notify();
+    }
+
     /// The game in `root` looks stuck: what its thread dump showed.
     pub fn stuck(&self, root: &Path) -> Option<&StuckReport> {
         self.stuck.reports.get(root)

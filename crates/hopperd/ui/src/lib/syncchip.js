@@ -51,7 +51,19 @@ export function attentionLook(needs, title = '') {
   const label = n === 1 ? ([...t].length > ATTENTION_TITLE ? `${[...t].slice(0, ATTENTION_TITLE - 1).join('').trimEnd()}…` : t) : `${n} need you`;
   return look('attention', worst === 'stop' ? 'bad' : 'warn', 'alert', label, n === 1 ? (worst === 'stop' ? 'Stops play' : 'Needs you') : 'Needs you', { fixed: true });
 }
-export const standsAlone = (l) => l.source === 'restart' || l.source === 'attention';
+// The chip beside the run state while the server has a problem: red, never folds, its notice in the
+// popover. `problem` is { kind: 'stuck', minutes } or { kind: 'crashed' }.
+export function runLook(problem) {
+  if (problem.kind === 'crashed') return look('run', 'bad', 'alert', 'Crashed', 'Crashed', { fixed: true });
+  const m = problem.minutes;
+  return look('run', 'bad', 'stuck', m >= 1 ? `Looks stuck · ${m} min` : 'Looks stuck', 'Stuck', { fixed: true });
+}
+// The whole minutes in a stuck report's headline ("... (no progress for 4 min, CPU idle)"), or null.
+export function stuckMinutes(headline) {
+  const m = /no progress for (\d+) min\b/.exec(headline || '');
+  return m ? Number(m[1]) : null;
+}
+export const standsAlone = (l) => l.source === 'restart' || l.source === 'attention' || l.source === 'run';
 const aloneForm = (level) => (level === 0 ? 'full' : level === 1 ? 'short' : 'icon');
 export { aloneForm };
 

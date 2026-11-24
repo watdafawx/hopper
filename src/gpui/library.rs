@@ -1982,6 +1982,31 @@ impl LibraryView {
 
     // ---- detail --------------------------------------------------------
 
+    /// The game looks stuck: its notice, for the chip beside the run state
+    /// pill (and again for the chip's popover, each time it draws).
+    fn run_notices(&mut self, root: &Path, cx: &mut Context<Self>) -> Vec<Notice> {
+        let view = cx.entity().downgrade();
+        let inst_root = root.to_path_buf();
+        crate::stuck::stuck_bar(
+            &self.store,
+            root,
+            move |dump, _, cx| {
+                view.update(cx, |this, cx| {
+                    this.set_tab(InstTab::Logs, cx);
+                    // The dump as the crash list names it: under the instance, with "/".
+                    let rel = dump.and_then(|p| p.strip_prefix(&inst_root).ok().map(|r| r.to_string_lossy().replace('\\', "/")));
+                    if let Some(rel) = rel {
+                        this.logs.update(cx, |l, cx| l.open_report(rel, cx));
+                    }
+                })
+                .ok();
+            },
+            cx,
+        )
+        .into_iter()
+        .collect()
+    }
+
     /// Every notice the instance has, for its "Needs you" chip (and again
     /// for the chip's popover, each time it draws).
     fn page_notices(&mut self, root: &Path, cx: &mut Context<Self>) -> Vec<Notice> {
@@ -1989,28 +2014,7 @@ impl LibraryView {
         let hint = self.server_hint(&inst, cx);
         let cf_change = self.cf_change_bar(&inst, cx);
         let group_pack = crate::group_pack::group_status_bar(&self.store, &inst.root, cx);
-        let stuck = {
-            let view = cx.entity().downgrade();
-            let root = inst.root.clone();
-            crate::stuck::stuck_bar(
-                &self.store,
-                &inst.root,
-                move |dump, _, cx| {
-                    view.update(cx, |this, cx| {
-                        this.set_tab(InstTab::Logs, cx);
-                        // The dump as the crash list names it: under the instance, with "/".
-                        let rel = dump.and_then(|p| p.strip_prefix(&root).ok().map(|r| r.to_string_lossy().replace('\\', "/")));
-                        if let Some(rel) = rel {
-                            this.logs.update(cx, |l, cx| l.open_report(rel, cx));
-                        }
-                    })
-                    .ok();
-                },
-                cx,
-            )
-        };
         let mut notices: Vec<Notice> = Vec::new();
-        notices.extend(stuck);
         notices.extend(cf_change);
         notices.extend(group_pack);
         notices.extend(self.addons.update(cx, |a, cx| a.notices(root, cx)));
@@ -3073,6 +3077,7 @@ impl LibraryView {
         // server's comparison runs here too, so the chip is there on every
         // tab (the Server tab's own `show` takes over when it opens).
         let paired = self.store.read(cx).server_tools().then(|| self.store.read(cx).server_of(&inst.root).map(|s| s.root.clone())).flatten();
+        let paired_root = paired.clone();
         let server_chip = paired.and_then(|root| {
             if self.server.read(cx).server() != Some(root.as_path()) {
                 self.server.update(cx, |p, cx| p.quiet(root, cx));
@@ -3092,10 +3097,23 @@ impl LibraryView {
                 std::rc::Rc::new(move |_, cx| view.update(cx, |this, cx| this.page_notices(&root, cx)).unwrap_or_default());
             notice_slot::chip(&format!("instance:{}", inst.root.display()), notices, producer)
         };
+        // A start that looks stuck: the chip after the run state pill.
+        let run = {
+            let notices = self.run_notices(&inst.root, cx);
+            let minutes = self.store.read(cx).stuck(&inst.root).and_then(|r| hopper::syncchip::stuck_minutes(&r.headline));
+            let (view, root) = (cx.entity().downgrade(), inst.root.clone());
+            let producer: notice_slot::Producer =
+                std::rc::Rc::new(move |_, cx| view.update(cx, |this, cx| this.run_notices(&root, cx)).unwrap_or_default());
+            notice_slot::run_chip(&format!("instance:{}", inst.root.display()), hopper::syncchip::RunProblem::Stuck { minutes }, notices, producer)
+        };
+        // The paired server's crash: the same chip, for the server.
+        let server_crash = paired_root.and_then(|root| self.server.update(cx, |p, cx| p.crash_chip(&root, cx)));
         let made_up = self.store.read(cx).sync_chip_preview.clone();
         self.sync_chips = match made_up {
             Some(name) => crate::sync_chip::preview(name.strip_suffix("+run").unwrap_or(&name)),
             None => [
+                run,
+                server_crash,
                 crate::group_pack::group_chip(&self.store, &inst.root, cx),
                 server_chip,
                 needs,

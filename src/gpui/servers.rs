@@ -2041,10 +2041,10 @@ impl ServersView {
             .collect()
     }
 
-    /// Every notice the server has, for its "Needs you" chip (and again for
-    /// the chip's popover, each time it draws): the crash (not on Logs &
-    /// crashes, which shows it in full), a stuck start, the Mods table's.
-    fn page_notices(&self, root: &std::path::Path, cx: &mut Context<Self>) -> Vec<crate::notice_slot::Notice> {
+    /// The server's own problems, for the chip beside the run state pill
+    /// (and again for the chip's popover, each time it draws): the crash (not
+    /// on Logs & crashes, which shows it in full) and a stuck start.
+    fn run_notices(&self, root: &std::path::Path, cx: &mut Context<Self>) -> Vec<crate::notice_slot::Notice> {
         let mut notices: Vec<crate::notice_slot::Notice> = Vec::new();
         if self.tab != TAB_LOGS {
             self.strip.update(cx, |st, cx| st.show(root.to_path_buf(), cx));
@@ -2058,8 +2058,30 @@ impl ServersView {
         notices.extend(crate::stuck::server_stuck_bar(&self.store, root, pstats.as_ref(), &self.control, move |rel, _, cx| {
             view.update(cx, |this, cx| this.see_crash(rel, cx)).ok();
         }, cx));
-        notices.extend(self.mods_table.update(cx, |a, cx| a.notices(root, cx)));
         notices
+    }
+
+    /// The chip beside the run state pill: red "Crashed" or "Looks stuck ·
+    /// N min", the notice's buttons in its popover.
+    fn run_chip(&self, root: &std::path::Path, cx: &mut Context<Self>) -> Option<crate::sync_chip::Chip> {
+        let notices = self.run_notices(root, cx);
+        let crashed = notices.iter().any(|n| n.id == "srv-crash");
+        let minutes = {
+            let fresh = self.control.read(cx).stats_of(root).cloned();
+            let stats = fresh.or_else(|| self.store.read(cx).panel_stats(root).cloned());
+            stats.and_then(|s| s.stuck).and_then(|r| hopper::syncchip::stuck_minutes(&r.headline))
+        };
+        let problem = if crashed { hopper::syncchip::RunProblem::Crashed } else { hopper::syncchip::RunProblem::Stuck { minutes } };
+        let (view, id) = (cx.entity().downgrade(), root.to_path_buf());
+        let producer: crate::notice_slot::Producer =
+            std::rc::Rc::new(move |_, cx| view.update(cx, |this, cx| this.run_notices(&id, cx)).unwrap_or_default());
+        crate::notice_slot::run_chip(&format!("server:{}", root.display()), problem, notices, producer)
+    }
+
+    /// Every other notice the server has, for its "Needs you" chip (and again
+    /// for the chip's popover, each time it draws): the Mods table's.
+    fn page_notices(&self, root: &std::path::Path, cx: &mut Context<Self>) -> Vec<crate::notice_slot::Notice> {
+        self.mods_table.update(cx, |a, cx| a.notices(root, cx))
     }
 
     fn detail(&self, s: &ServerInfo, art: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2090,6 +2112,8 @@ impl ServersView {
                 std::rc::Rc::new(move |_, cx| view.update(cx, |this, cx| this.page_notices(&root, cx)).unwrap_or_default());
             let at = chips.iter().take_while(|c| c.look.source.is_sync()).count();
             chips.splice(at..at, crate::notice_slot::chip(&format!("server:{}", s.root.display()), notices, producer));
+            // The run state's problem comes first: the chip after its pill.
+            chips.splice(0..0, self.run_chip(&s.root, cx));
         }
         // The paired pack's page, for the Overview.
         let pack_id = self

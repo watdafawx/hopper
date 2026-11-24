@@ -6,10 +6,11 @@
   import { HEADING, group } from './noticeorder.js';
   import { ordered } from './notices.svelte.js';
 
-  let { notices } = $props();
+  // `run`: the run state chip's list (a stuck start, a crash): just the rows, no headings.
+  let { notices, run = false } = $props();
 
   let open = $state({});
-  const list = $derived(ordered(notices));
+  const list = $derived(ordered(notices, run));
   const groups = $derived(group(list.map((n) => n.tier)).map(([tier, ix]) => [tier, ix.map((i) => list[i])]));
   const infoOnly = $derived(list.length > 0 && list.every((n) => n.tier === 'info'));
   const toggle = (id) => (open = { ...open, [id]: !open[id] });
@@ -18,9 +19,9 @@
 </script>
 
 <div class="nlist" role="list">
-  <div class="nhead">{infoOnly ? `${list.length} note${list.length === 1 ? '' : 's'}` : 'Needs you'}</div>
+  {#if !run}<div class="nhead">{infoOnly ? `${list.length} note${list.length === 1 ? '' : 's'}` : 'Needs you'}</div>{/if}
   {#each groups as [tier, items] (tier)}
-    <div class="ngroup">{HEADING[tier]} · {items.length}</div>
+    {#if !run}<div class="ngroup">{HEADING[tier]} · {items.length}</div>{/if}
     {#each items as m (m.id)}
       {@const rowMore = !!m.details || !!m.actions}
       <div class="nrow" role="listitem">

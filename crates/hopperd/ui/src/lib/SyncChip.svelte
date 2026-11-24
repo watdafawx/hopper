@@ -13,33 +13,42 @@
   // keys: its popover opens by itself the first time one of them is seen in this browser tab.
   let { chips = [], room = 0 } = $props();
 
-  const ICON = { check: CircleCheck, spin: LoaderCircle, behind: Clock, offline: CircleOff, alert: CircleAlert, down: Download, up: Upload, differ: ArrowLeftRight, restart: RotateCcw, note: Info };
+  const ICON = { check: CircleCheck, spin: LoaderCircle, behind: Clock, offline: CircleOff, alert: CircleAlert, down: Download, up: Upload, differ: ArrowLeftRight, restart: RotateCcw, note: Info, stuck: Clock };
   let open = $state(null);
   // `chip id|key` pairs that already opened a popover by themselves; they outlive the chip, so
   // leaving the page and coming back doesn't open it again.
   const seen = new Set();
+  // Two chips with something new at once (a stuck start and a missing mod) don't open two popovers
+  // over each other: the first chip's opens (the run state's comes first), the other stays a red chip.
   $effect(() => {
+    let first = null;
     for (const c of chips) {
       if (!c.autoOpen?.length) continue;
       const fresh = c.autoOpen.filter((k) => !seen.has(`${c.id}|${k}`));
       for (const k of fresh) seen.add(`${c.id}|${k}`);
-      if (fresh.length) untrack(() => (open = c.id));
+      if (fresh.length && first === null) first = c.id;
     }
+    if (first !== null) untrack(() => (open ??= first));
   });
 
   const looks = $derived(chips.map((c) => c.look));
   const level = $derived(levelFor(looks, room > 0 ? room : 1e4));
   const syncs = $derived(chips.filter((c) => !standsAlone(c.look)));
+  // The run state's problem sits first, right after its own pill, before the sync chips.
   const alone = $derived(chips.filter((c) => standsAlone(c.look)));
+  const runs = $derived(alone.filter((c) => c.look.source === 'run'));
+  const rest = $derived(alone.filter((c) => c.look.source !== 'run'));
   const p = $derived(plan(syncs.map((c) => c.look.fixed), 0, level));
   const both = $derived(syncs.length >= 2 ? merged(syncs[0].look, syncs[1].look) : null);
   // What is drawn: the merged chip (listing every section), or each chip that hasn't folded; then
   // the stand-alone ones, which fold with the sync chips.
+  const aloneShown = (list) => (p.chipsFolded ? [] : list.map((c, i) => ({ look: c.look, form: aloneForm(level), sections: [c], key: c.id || `a${i}` })));
   const shown = $derived([
+    ...aloneShown(runs),
     ...(p.merged
       ? [{ look: both, form: p.merged, sections: syncs, key: 'both' }]
       : syncs.map((c, i) => ({ look: c.look, form: p.forms[i], sections: [c], key: `c${i}` })).filter((x) => x.form)),
-    ...(p.chipsFolded ? [] : alone.map((c, i) => ({ look: c.look, form: aloneForm(level), sections: [c], key: c.id || `a${i}` }))),
+    ...aloneShown(rest),
   ]);
   const hidden = $derived(p.chipsFolded ? p.chipsFolded + alone.length : 0);
   // The popover hangs under its chip; on a narrow window the chip may sit too far right for it, so
