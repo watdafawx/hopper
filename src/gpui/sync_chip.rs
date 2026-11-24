@@ -98,6 +98,7 @@ pub fn glyph_icon(g: Glyph) -> IconName {
         Glyph::Down => IconName::Download,
         Glyph::Up => IconName::Upload,
         Glyph::Differ => IconName::ArrowLeftRight,
+        Glyph::Restart => IconName::RefreshCw,
     }
 }
 
@@ -320,7 +321,7 @@ pub fn more_pill(hidden: usize, names: String, cx: &App) -> AnyElement {
 /// g-*: the group's chip, s-*: the server's, both-*: the two together.
 pub const PREVIEWS: &[&str] = &[
     "g-in-sync", "g-checking", "g-updating", "g-sending", "g-behind", "g-offline", "g-failed", "g-needs", "s-in-sync", "s-differ", "s-comparing",
-    "s-pushing", "s-offline", "s-blocked", "s-failed", "s-wont", "dl-waiting", "dl-working", "dl-stuck", "both-ok", "both-busy", "both-needs", "both-long",
+    "s-pushing", "s-offline", "s-blocked", "s-failed", "s-wont", "dl-waiting", "dl-working", "dl-stuck", "rs-changed", "rs-waiting", "both-ok", "both-busy", "both-needs", "both-long",
 ];
 
 /// Made-up chips for a preview state, no network, no real group or server.
@@ -401,7 +402,24 @@ pub fn preview(name: &str) -> Vec<Chip> {
         }
         chip
     };
+    // The Restart chip: what changed while the game runs.
+    let restart = |changed: bool| {
+        let look = hopper::syncchip::restart_look(changed, "game");
+        let (title, line) = if changed {
+            ("Changed while the game runs", "Restart it to load the changes.")
+        } else {
+            ("Waiting for the game to close", "2 old files the game still has open will be removed when it closes.")
+        };
+        let mut chip = make("restart", look, title, line, None, "Hide");
+        for a in &mut chip.sections[0].actions {
+            a.icon = None;
+            a.primary = false;
+        }
+        chip
+    };
     match name.split_once('-') {
+        Some(("rs", "changed")) => vec![restart(true)],
+        Some(("rs", _)) => vec![restart(false)],
         Some(("dl", "working")) => vec![downloads(DownloadState::Working { done: 1, total: 3 })],
         Some(("dl", "stuck")) => vec![downloads(DownloadState::Stuck)],
         Some(("dl", _)) => vec![downloads(DownloadState::Waiting { files: 3 })],

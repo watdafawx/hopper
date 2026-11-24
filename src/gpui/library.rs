@@ -3049,6 +3049,8 @@ impl LibraryView {
                 server_chip,
                 // Files from the CurseForge website, and the window getting them.
                 crate::downloads_chip::chip(&self.store, &inst.root, cx),
+                // What changed while the game runs, and what waits for it to close.
+                self.addons.read(cx).restart_chip_for(&inst.root, cx),
             ]
             .into_iter()
             .flatten()

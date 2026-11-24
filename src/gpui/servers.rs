@@ -2052,7 +2052,10 @@ impl ServersView {
             if self.sync.read(cx).server() != Some(s.root.as_path()) {
                 self.sync.update(cx, |p, cx| p.quiet(s.root.clone(), cx));
             }
-            self.sync.update(cx, |p, cx| p.chip(true, cx)).and_then(|c| crate::sync_chip::settled(c, window, cx)).into_iter().collect()
+            // The server's sync chip, then Restart to load while it runs.
+            let sync = self.sync.update(cx, |p, cx| p.chip(true, cx)).and_then(|c| crate::sync_chip::settled(c, window, cx));
+            let restart = self.sync.update(cx, |p, cx| p.restart_chip(cx));
+            sync.into_iter().chain(restart).collect()
         } else {
             Vec::new()
         };

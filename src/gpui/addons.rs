@@ -1176,8 +1176,17 @@ impl AddonsView {
         out.extend(self.client_on_note(&inst, cx));
         out.extend(self.shader_notes(&inst, cx));
         out.extend(self.only_here_note(&inst, cx));
-        out.extend(self.restart_note(&inst, cx));
         out
+    }
+
+    /// The Restart chip for the instance's hero (what [`Self::notices`] used
+    /// to say as two strips). Empty while the table shows another instance.
+    pub fn restart_chip_for(&self, root: &Path, cx: &App) -> Option<crate::sync_chip::Chip> {
+        if self.root.as_deref() != Some(root) {
+            return None;
+        }
+        let inst = self.table.inst.clone()?;
+        self.restart_chip(&inst, cx)
     }
 
     /// What [`Self::notices`] depends on that the store doesn't: the

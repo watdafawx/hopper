@@ -31,6 +31,8 @@ pub enum Glyph {
     Up,
     /// Two arrows: the mods differ.
     Differ,
+    /// An arrow round a circle: restart to load what changed.
+    Restart,
 }
 
 /// Which side the chip is about.
@@ -42,6 +44,8 @@ pub enum Source {
     Server,
     /// Files the pack waits for from the CurseForge website.
     Downloads,
+    /// The game or server runs with what it had when it started.
+    Restart,
 }
 
 impl Source {
@@ -254,6 +258,21 @@ pub fn download_look(state: &DownloadState) -> Look {
             d(Tone::Busy, Spin, label, "Downloading…").busy()
         }
         DownloadState::Stuck => d(Tone::Warn, Alert, "Download didn't finish".to_string(), "Failed").fixed(),
+    }
+}
+
+/// The Restart chip while the game (or the server) runs: what changed since
+/// it started loads only after a restart. `changed`: mods or packs changed
+/// under it (the chip asks for a restart); else only old files and switches
+/// wait for the game to close (a quiet "waiting"). `what` is "game" or
+/// "server". It needs nothing now, so it may fold.
+pub fn restart_look(changed: bool, what: &str) -> Look {
+    use Glyph::*;
+    let r = |tone, glyph, label: String, short: &str| Look::new(Source::Restart, tone, glyph, label, short);
+    if changed {
+        r(Tone::Busy, Restart, "Restart to load".to_string(), "Restart")
+    } else {
+        r(Tone::Quiet, Behind, format!("Waiting for the {what} to close"), "Waiting")
     }
 }
 
@@ -487,6 +506,22 @@ mod tests {
         assert!(m.fixed);
         assert_eq!(m.tone, Tone::Bad);
         assert_eq!(plan(&[false, true], 0, 99).merged, Some(Form::Icon));
+    }
+
+    #[test]
+    fn restart_words() {
+        let r = restart_look(true, "game");
+        assert_eq!((r.label.as_str(), r.short.as_str(), r.tone, r.source), ("Restart to load", "Restart", Tone::Busy, Source::Restart));
+        // It asks for nothing urgent: not busy, and it may fold.
+        assert!(!r.busy && !r.fixed && !r.strip);
+        let w = restart_look(false, "game");
+        assert_eq!((w.label.as_str(), w.tone), ("Waiting for the game to close", Tone::Quiet));
+        assert_eq!(restart_look(false, "server").label, "Waiting for the server to close");
+        // It stands alone beside the sync chips, never merged with them.
+        assert!(!r.source.is_sync());
+        // And it folds with the others when there is no room.
+        let p = plan_with(&[false], &[false], 0, 3);
+        assert_eq!((p.forms, p.extra_forms), (vec![None], vec![None]));
     }
 
     #[test]

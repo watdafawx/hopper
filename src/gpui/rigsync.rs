@@ -1058,6 +1058,45 @@ impl SyncPanel {
         Some(Chip { id: "server".into(), look, progress: None, sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions }] })
     }
 
+    /// The server page's Restart chip: mods were synced while it runs, so
+    /// they load after a restart. Same words as [`Self::restart_line`]
+    /// (which stays on the instance's Server tab).
+    pub fn restart_chip(&self, cx: &mut Context<Self>) -> Option<crate::sync_chip::Chip> {
+        use crate::sync_chip::{Action, Chip, Section};
+        let r = self.server.as_ref()?;
+        self.store.read(cx).live_sync(r)?;
+        if !self.online(cx) {
+            return None;
+        }
+        let control = self.control.read(cx);
+        let can = control.configured(cx) && control.ready();
+        let busy = control.busy().is_some();
+        let mut actions = Vec::new();
+        if can {
+            let control = self.control.clone();
+            actions.push(Action {
+                label: "Restart".into(),
+                icon: Some(IconName::RotateCcw),
+                primary: true,
+                disabled: busy,
+                run: std::rc::Rc::new(move |window, cx| {
+                    control.update(cx, |c, cx| c.request(hopper::panel::PanelAction::Restart, window, cx))
+                }),
+            });
+        }
+        let line = if can {
+            "Mods were synced while it runs. Restart the server to load them."
+        } else {
+            "Mods were synced while it runs. Restart the server in its panel to load them."
+        };
+        Some(Chip {
+            id: "restart".into(),
+            look: hopper::syncchip::restart_look(true, "server"),
+            progress: None,
+            sections: vec![Section { title: "Synced while the server runs".into(), line: line.into(), progress: None, body: None, actions }],
+        })
+    }
+
     /// Syncing while the server runs is allowed (the default; settings
     /// keep the player's choice).
     fn allow_online(&self, cx: &App) -> bool {
@@ -2047,7 +2086,7 @@ impl SyncPanel {
                 .w(rems(if lv >= 2 { 10. } else { 14. }))
                 .child(self.pair_picker(&server.root, inst.name.clone(), Some(&inst.root), cx))
         });
-        let live = self.restart_line(false, cx);
+        let live = if in_server_page { None } else { self.restart_line(false, cx) };
         let in_instance = self.in_instance;
         let store = self.store.read(cx);
         let theme = cx.theme();
