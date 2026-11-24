@@ -123,8 +123,8 @@
   const LINK_ICON = { Source: Code, Issues: Bug, Wiki: BookOpen, Discord: MessageCircle };
   // Desktop's loader colors (theme::palette).
   const LOADER_COLOR = { neoforge: 'hsl(20 75% 60%)', forge: 'hsl(215 35% 65%)', fabric: 'hsl(38 45% 70%)', quilt: 'hsl(270 55% 70%)' };
-  async function copyLink() {
-    try { await navigator.clipboard.writeText(p.url); say('Copied the link.'); } catch { say(p.url); }
+  async function copyLink(url) {
+    try { await navigator.clipboard.writeText(url); say('Copied the link.'); } catch { say(url); }
   }
 
   function reset() {
@@ -412,7 +412,7 @@
                desktop does: the same page, ready to paste. -->
           <span class="sitepair">
             <a class="btn sm {p.source}" href={p.url} target="_blank" rel="noreferrer noopener"><Brand name={p.source} />Open on {SITE[p.source]}</a>
-            <button class="btn sm {p.source} icon" title="Copy link" aria-label="Copy link" onclick={copyLink}><Copy size={13} /></button>
+            <button class="btn sm {p.source} icon" title="Copy link" aria-label="Copy link" onclick={() => copyLink(p.url)}><Copy size={13} /></button>
           </span>
           {#if packs}
             {#if p.server_files}<span class="chip running" title="The pack author's own server files"><Server size={11} />Server files</span>
@@ -420,7 +420,10 @@
           {:else if p.side === 'client'}<span class="chip starting" title="It says it runs on the client only: a server doesn't need it"><Monitor size={11} />Client only</span>{/if}
           {#each p.links as l (l.url)}
             {@const LIcon = LINK_ICON[l.label]}
-            <a class="btn sm ghost" href={l.url} title={l.url} target="_blank" rel="noreferrer noopener">{#if LIcon}<LIcon size={13} />{:else}<Brand name={l.label} />{/if}{l.label}</a>
+            <span class="sitepair">
+              <a class="btn sm" href={l.url} title={l.url} target="_blank" rel="noreferrer noopener">{#if LIcon}<LIcon size={13} />{:else}<Brand name={l.label} />{/if}{l.label}</a>
+              <button class="btn sm icon" title="Copy link" aria-label="Copy {l.label} link" onclick={() => copyLink(l.url)}><Copy size={13} /></button>
+            </span>
           {/each}
         </div>
       </div>

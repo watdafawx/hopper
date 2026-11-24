@@ -167,6 +167,44 @@ pub fn split_icon(
     h_flex().flex_none().items_center().child(lead).child(tail)
 }
 
+/// A link to a web page as one split pill: the left half opens it, the
+/// small right half copies the address. Every source link in a project's
+/// page (its site, Source / GitHub, Issues, Wiki, Discord) uses this, so
+/// they look and behave alike.
+pub fn link_pill(
+    id: impl Into<SharedString>,
+    icon: impl Into<Icon>,
+    label: impl Into<SharedString>,
+    url: impl Into<String>,
+    fg: Hsla,
+) -> Div {
+    let id: SharedString = id.into();
+    let url: String = url.into();
+    let (open_url, copy_url) = (url.clone(), url.clone());
+    let lead = Button::new(ElementId::Name(format!("link:{id}").into()))
+        .small()
+        .outline()
+        .text_color(fg)
+        .icon(icon)
+        .label(label)
+        .tooltip(url)
+        .on_click(move |_, _, cx| cx.open_url(&open_url));
+    split_icon(
+        split_lead(lead),
+        ElementId::Name(format!("copy-link:{id}").into()),
+        IconName::Copy,
+        gpui_kit::component::Size::Small,
+        fg,
+        "Copy link",
+        move |_, window, cx| {
+            crate::clip_watch::ignore(&copy_url);
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_url.clone()));
+            use gpui_kit::component::WindowExt as _;
+            window.push_notification(gpui_kit::component::notification::Notification::success("Copied the link."), cx);
+        },
+    )
+}
+
 /// A split button whose right half is a ▾ that opens `menu`: the usual
 /// action on the left, the other ways to do it behind the arrow.
 pub fn split_menu(
