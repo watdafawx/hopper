@@ -100,3 +100,23 @@ fn c1_a_jar_the_pack_now_ships_is_not_removed() {
         assert_ne!(g.value(p, &m(9)), Value::Gone, "{p} still has mod 9");
     }
 }
+
+/// A member's hand-added jar (put in the mods folder in Explorer) stays on
+/// that member's copy through the group's pack update, is shown to them as
+/// "This PC differs", and reaches nobody.
+#[test]
+fn a_members_hand_added_jar_survives_a_pack_update_and_stays_theirs() {
+    let mut g = packed();
+    g.outside("B", m(9), f(91));
+    g.settle();
+    assert_eq!(g.drift("B").len(), 1, "B sees the jar as a difference");
+    g.update_pack("A", "cf:100/8700", KEEP);
+    g.settle();
+    assert_eq!(g.value("B", &Key::Pack), Value::Text("cf:100/8700".into()));
+    assert_eq!(g.value("B", &m(9)), f(91), "B's own jar is still on B's disk");
+    for p in ["A", "C"] {
+        assert_eq!(g.value(p, &m(9)), Value::Gone, "{p} never got it");
+        assert_eq!(g.group_value(p, &m(9)), Value::Gone);
+    }
+    assert_eq!(g.drift("B").len(), 1, "it is still B's to put back or share");
+}
