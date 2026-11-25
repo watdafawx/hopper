@@ -907,6 +907,11 @@ fn judge(root: &Path, inst: Option<&crate::instances::Instance>, verdicts: &std:
                     match (same_file, was_on, a.enabled) {
                         (true, false, true) => Change::TurnedOn,
                         (true, true, false) => Change::TurnedOff,
+                        // The very same file, on as before: something took it
+                        // out and it came back (a removal that a friend's
+                        // change later undid). The entry is still the
+                        // removal, not a switch to something else.
+                        (true, was, now) if was == now => Change::Removed,
                         _ => Change::Switched,
                     }
                 }
@@ -2227,6 +2232,24 @@ mod tests {
         assert_eq!((f.change, f.now.as_deref(), f.now_site), (Change::RolledBack, Some(new_name), "GitHub"));
         // The same file under another name isn't a swap.
         note_swap(&root, &github_addon(old_name), &github_addon(&format!("{old_name}.disabled")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A removal that a friend's change later undid (the very same file is
+    /// back, on as before) is still the removal; it used to read "switched".
+    #[test]
+    fn a_removal_whose_file_came_back_unchanged_still_reads_removed() {
+        let root = instance("came-back");
+        fs::write(root.join("mods/a.jar"), b"jar").unwrap();
+        let inst = crate::instances::load(&root).expect("instance");
+        let mut f = saved_of("a.jar", "a.jar", Change::Removed);
+        if let Some(r) = f.src.as_mut() {
+            r.project_id = 5;
+            r.file_id = 9;
+        }
+        f.restore_to = "mods/a.jar".into();
+        judge(&root, Some(&inst), &Default::default(), &mut f);
+        assert_eq!(f.change, Change::Removed);
         let _ = fs::remove_dir_all(&root);
     }
 

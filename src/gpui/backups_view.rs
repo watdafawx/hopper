@@ -100,10 +100,20 @@ impl BackupsView {
             return self.reload_panel(t, cx);
         }
         let root = self.root.clone();
+        let me = self.store.read(cx).mailbox_id();
         cx.spawn(async move |this, cx| {
             let (sets, projects, copies, stems, notes) = cx
                 .background_spawn(async move {
-                    let sets = hopper::backups::history(&root);
+                    let mut sets = hopper::backups::history(&root);
+                    // A change applied for this PC's own answer is filed under
+                    // this PC's member id: that is "You", not a friend.
+                    if !me.is_empty() {
+                        for f in sets.iter_mut().flat_map(|s| s.files.iter_mut()) {
+                            if f.who.as_ref().is_some_and(|w| w.id == me) {
+                                f.who = Some(hopper::actor::Who::default());
+                            }
+                        }
+                    }
                     let projects = hopper::snapshots::projects_seen(&root);
                     let stems = crate::history_view::stems_of(&projects);
                     let notes = crate::history_view::notes_of(&sets);

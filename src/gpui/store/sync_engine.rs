@@ -46,6 +46,10 @@ struct Slot {
     applying: bool,
     /// The disk as the last tick read it.
     snap: Snapshot,
+    /// Each jar this copy has had (its name, lower case, without `.disabled`)
+    /// and the mod it is, so a History row finds the change behind it even
+    /// after the jar is gone.
+    jars: HashMap<String, Key>,
     /// Members seen in the group so far (a new one gets a checkpoint).
     known: HashSet<String>,
     /// Failures said once.
@@ -193,11 +197,12 @@ impl Store {
             let snap = local::snapshot(inst);
             let root = inst.root.clone();
             let kept = only_here_keys(inst);
+            let jars: Vec<(String, Key)> = inst.addons.iter().map(|a| (a.file_name.trim_end_matches(".disabled").to_lowercase(), local::key_of(a))).collect();
             let playing = self.running(&root).is_some();
             if !self.sync.slots.contains_key(&local_id) {
                 let engine = self.sync_open(&copy, &me, &my_name, &snap);
                 local::watch(&root);
-                let mut slot = Slot { engine, root: root.clone(), group: group.clone(), dirty: true, posting: false, applying: false, snap: snap.clone(), known: HashSet::new(), said: HashSet::new(), shrink: 0, pack_mode: None, undone: Vec::new(), newer: BTreeSet::new(), hidden: HashMap::new(), away: Vec::new() };
+                let mut slot = Slot { engine, root: root.clone(), group: group.clone(), dirty: true, posting: false, applying: false, snap: snap.clone(), jars: HashMap::new(), known: HashSet::new(), said: HashSet::new(), shrink: 0, pack_mode: None, undone: Vec::new(), newer: BTreeSet::new(), hidden: HashMap::new(), away: Vec::new() };
                 // A swap the last run stopped in the middle is finished now.
                 match apply::recover(&root) {
                     Ok(Some(report)) => slot.engine.applied(&report),
@@ -224,12 +229,22 @@ impl Store {
             let Some(slot) = self.sync.slots.get_mut(&local_id) else { continue };
             slot.group = group.clone();
             slot.snap = snap.clone();
+            slot.jars.extend(jars);
             if healthy {
                 slot.engine.touch(now);
             }
             slot.engine.game_running = playing;
             // What the player did here since the last tick.
-            for edit in local::take(&root) {
+            // Not while an apply runs: what it writes is the friend's, and the
+            // register moves only when it is done. Edits wait their turn.
+            let edits = if slot.applying { Vec::new() } else { local::take(&root) };
+            for edit in edits {
+                // The disk already matched this at the last apply: nothing
+                // here changed, so there is no change of the player's to send
+                // (a friend's removal read back as a second, silent removal).
+                if slot.engine.applied.get(&edit.key) == Some(&edit.now) {
+                    continue;
+                }
                 if kept.contains(&edit.key) {
                     slot.engine.applied.insert(edit.key.clone(), edit.now.clone());
                     continue;
@@ -1001,18 +1016,31 @@ impl Store {
 
     /// The "Why" line of a History row, only when Hopper made the change for
     /// someone. `file`: the jar's name in the row; `author`: the friend's id
-    /// (empty is this player).
-    pub fn sync_why_file(&self, root: &Path, file: &str, author: &str) -> Option<String> {
+    /// (empty is this player); `row`: what the row says happened, so an older
+    /// row of the same mod (the turn-off before an answer's turn-on) does not
+    /// borrow the answer's reason.
+    pub fn sync_why_file(&self, root: &Path, file: &str, author: &str, row: hopper::backups::Change) -> Option<String> {
+        use hopper::backups::Change as Row;
         let slot = self.sync.slots.values().find(|s| s.root == root)?;
         let author = if author.is_empty() { slot.engine.me.as_str() } else { author };
         let bare = file.trim_end_matches(".disabled");
         let is_file = |v: &Value| matches!(v, Value::File { file, .. } if file.trim_end_matches(".disabled").eq_ignore_ascii_case(bare));
+        // The jar's name is not the group's file id: find the mod it is.
+        let key = slot.jars.get(&bare.to_lowercase());
         slot.engine
             .log
             .changes
             .values()
             .map(|(c, _)| c)
-            .filter(|c| c.dot.author == author && (is_file(&c.now) || is_file(&c.was)))
+            .filter(|c| c.dot.author == author && (key.is_some_and(|k| *k == c.key) || is_file(&c.now) || is_file(&c.was)))
+            .filter(|c| match row {
+                // A removal that an answer later undid (Keep) still carries
+                // that answer: the mod is back, the row is the removal.
+                Row::Removed => matches!(c.now, Value::Gone | Value::PackRemoved) || matches!(c.why, Why::Answer { .. }),
+                Row::TurnedOff => matches!(c.now, Value::PackOff | Value::File { on: false, .. }),
+                Row::TurnedOn => matches!(c.now, Value::File { on: true, .. } | Value::PackDefault),
+                _ => true,
+            })
             .max_by_key(|c| c.lamport)
             .and_then(|c| synccore::cards::why_line(&slot.engine, c))
     }

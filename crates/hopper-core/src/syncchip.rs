@@ -253,7 +253,7 @@ pub fn group_look(state: &SyncState, now: u64) -> GroupLook {
         SyncState::NeedsYou { cards } => (
             mk(Tone::Warn, Alert, format!("Needs you · {cards}"), "Needs you").strip(),
             if *cards == 1 { "A change waits for your answer".to_string() } else { format!("{cards} changes wait for your answer") },
-            "Nothing from them lands until you answer.".to_string(),
+            "Hopper settles it when you answer.".to_string(),
             None,
         ),
         SyncState::Differs { mods } => (

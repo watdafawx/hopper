@@ -154,6 +154,12 @@ impl<'a> InstFetch<'a> {
         me
     }
 
+    /// Who a step's change is in History: the member who made it. Never
+    /// "you": a change tagged as the player's own is read back as a record.
+    fn who_of(&self, step: &Step) -> crate::actor::Who {
+        crate::actor::Who::friend(&step.name, &step.by.author, &self.group, "")
+    }
+
     /// Brings the instance's records in line with the files `apply::run`
     /// swapped: a removed mod leaves the list, a new file takes the old
     /// one's place (keeping its history), a turned-on or off one switches.
@@ -167,7 +173,7 @@ impl<'a> InstFetch<'a> {
         // player's own and came back as a record of theirs (it also settled
         // a clash silently, as a follow-up that covered both sides).
         let _scope = crate::actor::begin(&self.root, None);
-        let friend = |step: &Step| crate::actor::Who::friend(&step.name, &step.by.author, &self.group, "");
+        let friend = |step: &Step| self.who_of(step);
         let claim = |a: &Addon, who: &crate::actor::Who| crate::actor::claim(&crate::groupkey::addon_key(a), Some(&a.file_name), who);
         for step in &plan.steps {
             let Some(r) = report.results.iter().find(|r| r.key == step.key && r.by == step.by) else { continue };
@@ -178,6 +184,10 @@ impl<'a> InstFetch<'a> {
             let at = inst.addons.iter().position(|a| key_of(a) == step.key);
             match &step.to {
                 Value::Gone => {
+                    // The record may be gone already (reading the folder drops
+                    // a mod whose jar `apply::run` moved): the jar still goes
+                    // to History.
+                    self.file_in_history(step, &who);
                     if let Some(i) = at {
                         claim(&inst.addons[i], &who);
                         inst.addons.remove(i);
@@ -194,6 +204,7 @@ impl<'a> InstFetch<'a> {
                         }
                     } else if let Some(Ok(r)) = self.found.get(file) {
                         let mut new = install::addon_from(&r.project, &r.file, r.from_pack);
+                        self.file_in_history(step, &who);
                         if let Some(i) = at {
                             install::keep_history(&mut new, &inst.addons[i]);
                             claim(&inst.addons[i], &who);
@@ -254,7 +265,7 @@ impl Fetch for InstFetch<'_> {
 
     fn apply_other(&self, step: &Step) -> anyhow::Result<()> {
         let mut inst = instances::load(&self.root).ok_or_else(|| anyhow::anyhow!("the instance couldn't be read"))?;
-        let who = crate::actor::Who::friend(&step.name, &step.by.author, &self.group, "");
+        let who = self.who_of(step);
         let _scope = crate::actor::begin(&self.root, Some(who));
         match &step.key {
             Key::Mod(_) => self.pack_mod(&mut inst, step),
@@ -307,6 +318,26 @@ impl Fetch for InstFetch<'_> {
 }
 
 impl InstFetch<'_> {
+    /// The old jar a swap set aside, filed as a History entry under the
+    /// step's author: without it a friend's removal or update left nothing in
+    /// History on this PC.
+    fn file_in_history(&self, step: &Step, who: &crate::actor::Who) {
+        let Value::File { file, on } = &step.from else { return };
+        let name = format!("{}{}", self.file_name(&step.key, file), if *on { "" } else { ".disabled" });
+        let base = self.root.join(crate::sync::BACKUP_DIR);
+        let flat = base.join(super::apply::set_aside_name(&name, &step.by));
+        if !flat.is_file() {
+            return;
+        }
+        let dir = base.join(crate::time::now().to_string());
+        let dest = dir.join(&name);
+        if dest.exists() || std::fs::create_dir_all(&dir).is_err() || std::fs::rename(&flat, &dest).is_err() {
+            return;
+        }
+        crate::actor::claim("", Some(&name), who);
+        crate::backups::record(&dir, &dest, &format!("{}/{name}", super::apply::folder_of(&step.key)));
+    }
+
     /// A mod a modpack ships, turned off, removed, put back; or a jar
     /// replacing a pack mod.
     fn pack_mod(&self, inst: &mut Instance, step: &Step) -> anyhow::Result<()> {
@@ -437,6 +468,35 @@ mod tests {
         let own = super::super::local::take(&root);
         assert!(own.is_empty(), "a friend's change was read as the player's own: {own:?}");
         super::super::local::unwatch(&root);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_friends_removal_shows_in_history_under_their_name() {
+        use super::super::model::Dot;
+        let root = std::env::temp_dir().join(format!("hopper-bridge-hist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".hopper-backups")).unwrap();
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        // Reading the folder already dropped the mod's record (its jar was moved).
+        let v = serde_json::json!({"name": "T", "format": instances::FORMAT, "addons": []});
+        std::fs::write(root.join(instances::HOPPER_FILE), serde_json::to_vec(&v).unwrap()).unwrap();
+        let by = Dot { author: "mia".into(), n: 1 };
+        // What `apply::run` did before `finish`: the jar is set aside flat.
+        std::fs::write(root.join(".hopper-backups").join(super::super::apply::set_aside_name("b.jar", &by)), "b").unwrap();
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        let mut names = HashMap::new();
+        names.insert("cf:60".to_string(), "b.jar".to_string());
+        let fetch = InstFetch { root: root.clone(), job: &job, allow_sources: true, names, found: HashMap::new(), group: "g".into(), adds: Default::default() };
+        let step = Step { key: Key::Mod("cf:6".into()), from: Value::File { file: "cf:60".into(), on: true }, to: Value::Gone, by: by.clone(), name: "Mia".into(), why: Why::Player };
+        let plan = ApplyPlan { steps: vec![step.clone()], ..Default::default() };
+        let report = ApplyReport { results: vec![super::super::apply::StepResult { key: step.key, by, outcome: Outcome::Done }] };
+        fetch.finish(&plan, &report).unwrap();
+        assert!(!root.join(".hopper-backups").join("b.jar.mia-1").exists(), "the jar stayed loose, outside History");
+        let sets = crate::backups::history(&root);
+        let file = sets.iter().flat_map(|s| s.files.iter()).find(|f| f.name == "b.jar").expect("the removal is in History");
+        assert_eq!(file.who.as_ref().map(|w| w.name.as_str()), Some("Mia"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

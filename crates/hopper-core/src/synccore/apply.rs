@@ -142,6 +142,12 @@ fn safe(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect()
 }
 
+/// The name an old jar is set aside under in `.hopper-backups` by a swap:
+/// the author's dot is part of it, so two friends' swaps never collide.
+pub fn set_aside_name(file: &str, by: &Dot) -> String {
+    format!("{file}.{}-{}", safe(&by.author), by.n)
+}
+
 fn sync_dir(root: &Path) -> PathBuf {
     root.join(".hopper-sync")
 }
@@ -451,8 +457,7 @@ fn moves_of(step: &Step, shape: Shape<'_>, staged: Option<String>, fetch: &dyn F
             if let Some((a, oa)) = old {
                 let from = path(a, oa);
                 let name = from.rsplit('/').next().unwrap_or(&from).to_string();
-                let by = format!("{}-{}", safe(&step.by.author), step.by.n);
-                moves.push(Move { from, to: format!(".hopper-backups/{name}.{by}") });
+                moves.push(Move { from, to: format!(".hopper-backups/{}", set_aside_name(&name, &step.by)) });
             }
             if let (Some((b, ob)), Some(from)) = (new, staged) {
                 moves.push(Move { from, to: path(b, ob) });

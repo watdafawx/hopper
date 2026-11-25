@@ -188,17 +188,25 @@ pub fn cards(e: &Engine) -> Vec<Card> {
                 let off = other.is_some_and(|o| matches!(o.now, Value::File { on: false, .. } | Value::PackOff));
                 let by_me = winner.is_some_and(|w| w.dot.author == e.me);
                 let winner_name = if by_me { "You".to_string() } else { winner.map(|w| w.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Someone".to_string()) };
+                // The other side can be this player's own change (they were
+                // offline, a friend changed the same mod): say "You", not the
+                // player's own name.
+                let other_by_me = other.is_some_and(|o| o.dot.author == e.me);
+                let who_clash = if other_by_me { "You".to_string() } else { who.clone() };
                 if pack {
                     (
-                        format!("{who} and {winner_name} moved the pack at the same time."),
+                        format!("{who_clash} and {winner_name} moved the pack at the same time."),
                         "The newer version stays for everyone until someone answers.".to_string(),
-                        vec![btn("Keep the newer one", Some(Answer::Keep), true), btn(&format!("Use {who}'s"), Some(Answer::Take), false)],
+                        vec![
+                            btn("Keep the newer one", Some(Answer::Keep), true),
+                            btn(&if other_by_me { "Use yours".to_string() } else { format!("Use {who}'s") }, Some(Answer::Take), false),
+                        ],
                         None,
                     )
                 } else {
                     let verb = if off { "turned off" } else { "removed" };
                     (
-                        format!("{who} {verb} {MOD}."),
+                        format!("{who_clash} {verb} {MOD}."),
                         format!("{winner_name} changed it too. It stays on for everyone until someone answers."),
                         vec![btn(&format!("Keep {MOD}"), Some(Answer::Keep), true), btn(if off { "Turn it off" } else { "Remove it" }, Some(Answer::Take), false)],
                         None,
@@ -344,8 +352,26 @@ pub fn why_line(e: &Engine, c: &Change) -> Option<String> {
                 .map(|(o, _)| o)
                 .filter(|o| o.key == c.key && o.dot.author != c.dot.author && o.lamport < c.lamport)
                 .max_by_key(|o| o.lamport);
+            // This player's own earlier change of the mod, the one the answer
+            // dropped: "kept their change instead of my removal".
+            let mine = e
+                .log
+                .changes
+                .values()
+                .map(|(o, _)| o)
+                .filter(|o| o.key == c.key && o.dot.author == c.dot.author && o.dot != c.dot && o.lamport < c.lamport)
+                .max_by_key(|o| o.lamport);
             Some(match other {
+                Some(o) if o.now == c.now && mine.is_some_and(|m| m.now.is_away() && !c.now.is_away()) => {
+                    let m = mine.expect("checked above");
+                    format!("{} kept {} change instead of {} {}, when asked.", name(c), whose(o), if m.dot.author == e.me { "your own" } else { "their" }, if matches!(m.now, Value::Gone | Value::PackRemoved) { "removal" } else { "turn-off" })
+                }
                 Some(o) if o.now == c.now => format!("{} let {} change in when asked.", name(c), whose(o)),
+                // Removing after someone changed the mod is not "keeping it as it was".
+                Some(o) if matches!(c.now, Value::Gone | Value::PackRemoved) => format!("{} chose to remove it after {} change, when asked.", name(c), whose(o)),
+                Some(o) if o.now.is_away() && !c.now.is_away() => {
+                    format!("{} kept it after {} {}, when asked.", name(c), whose(o), if matches!(o.now, Value::Gone | Value::PackRemoved) { "removal" } else { "turn-off" })
+                }
                 Some(o) => format!("{} kept it as it was after {} change, when asked.", name(c), whose(o)),
                 None => format!("{} answered a question about it.", name(c)),
             })
@@ -524,6 +550,22 @@ mod tests {
     }
 
     #[test]
+    fn a_clash_over_my_own_removal_says_you_not_my_name() {
+        let mut e = Engine::new("c", "me", "Me");
+        e.applied.insert(Key::Mod("cf:1".into()), file("a.jar"));
+        e.record(Edit { key: Key::Mod("cf:1".into()), now: Value::Gone, why: Why::Player, batch: String::new() }, 0);
+        // Noah updated the same mod while this PC was offline, and wins on time.
+        let theirs = change("noah", 5, "cf:1", file("a.jar"), file("a-2.jar"), "b", 0);
+        let mut copies = std::collections::BTreeMap::new();
+        copies.insert("c".to_string(), (Body::Tail(vec![theirs]), Default::default(), String::new()));
+        e.receive(Packet { version: WIRE_VERSION, from: "noah".into(), group: "g".into(), copies }, Arrival { seq: 1, at: 10 });
+        let cards = cards(&e);
+        let clash = cards.iter().find(|c| c.risk == Risk::Clash).expect("a clash card");
+        assert!(clash.headline.starts_with("You removed "), "{}", clash.headline);
+        assert!(clash.stays.starts_with("noah changed it too."), "{}", clash.stays);
+    }
+
+    #[test]
     fn cards_come_clashes_first_then_by_kind() {
         assert!(rank(&Risk::Clash) < rank(&Risk::ManyRemovals { count: 9 }));
         assert!(rank(&Risk::ManyRemovals { count: 9 }) < rank(&Risk::PackBack));
@@ -566,7 +608,19 @@ mod tests {
         let theirs = change("noah", 2, "cf:9", file("s.jar"), Value::Gone, "x", 0);
         e.log.insert(theirs.clone(), None);
         let answer = Change { why: Why::Answer { review: 1 }, lamport: 9, dot: Dot { author: "me".into(), n: 1 }, name: "Me".into(), ..change("me", 1, "cf:9", Value::Gone, file("s.jar"), "y", 0) };
-        assert_eq!(why_line(&e, &answer).as_deref(), Some("You kept it as it was after noah's change, when asked."));
+        assert_eq!(why_line(&e, &answer).as_deref(), Some("You kept it after noah's removal, when asked."));
+        // Answering Remove, after someone changed the mod: a removal, not a keep.
+        let turned_on = change("noah", 3, "cf:8", file("t.jar"), Value::File { file: "t.jar".into(), on: false }, "z", 0);
+        e.log.insert(turned_on, None);
+        let remove = Change { why: Why::Answer { review: 2 }, lamport: 9, dot: Dot { author: "me".into(), n: 2 }, name: "Me".into(), ..change("me", 2, "cf:8", file("t.jar"), Value::Gone, "w", 0) };
+        assert_eq!(why_line(&e, &remove).as_deref(), Some("You chose to remove it after noah's change, when asked."));
+        // Keeping a friend's change over this player's own removal says so.
+        let friend_on = change("noah", 4, "cf:7", Value::File { file: "u.jar".into(), on: false }, file("u.jar"), "v", 0);
+        let my_removal = change("me", 3, "cf:7", file("u.jar"), Value::Gone, "u", 0);
+        e.log.insert(friend_on, None);
+        e.log.insert(my_removal, None);
+        let keep = Change { why: Why::Answer { review: 3 }, lamport: 9, dot: Dot { author: "me".into(), n: 4 }, name: "Me".into(), ..change("me", 4, "cf:7", Value::Gone, file("u.jar"), "t", 0) };
+        assert_eq!(why_line(&e, &keep).as_deref(), Some("You kept noah's change instead of your own removal, when asked."));
         let edit = Edit { key: Key::Mod("cf:9".into()), now: Value::Gone, why: Why::Player, batch: String::new() };
         let _ = edit;
     }

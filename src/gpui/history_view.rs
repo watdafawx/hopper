@@ -831,7 +831,7 @@ impl BackupsView {
         // Why Hopper made the change for them (an answer, a pack update, a
         // put back); a change made by hand has no such line.
         let why = (!nested)
-            .then(|| self.store.read(cx).sync_why_file(&self.root, &f.name, who.map_or("", |w| w.id.as_str())))
+            .then(|| self.store.read(cx).sync_why_file(&self.root, &f.name, who.map_or("", |w| w.id.as_str()), f.change))
             .flatten();
         row.children(lead)
             .child(
