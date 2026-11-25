@@ -19,7 +19,7 @@ use std::rc::Rc;
 
 /// What every `sy-*` name shows, for `sync_chip::PREVIEWS`.
 pub const NAMES: &[&str] = &[
-    "sy-needs", "sy-needs-one", "sy-needs-big", "sy-differs", "sy-differs-big", "sy-ood", "sy-behind", "sy-getting", "sy-game", "sy-failed", "sy-sending", "sy-held",
+    "sy-needs", "sy-needs-one", "sy-needs-big", "sy-differs", "sy-differs-big", "sy-differs-narrow", "sy-ood", "sy-behind", "sy-getting", "sy-game", "sy-failed", "sy-sending", "sy-held",
     "sy-offline", "sy-insync", "sy-notes",
 ];
 
@@ -159,7 +159,7 @@ fn state_of(name: &str) -> (SyncState, usize) {
     let cards = cards(name).len();
     match name {
         "sy-needs" | "sy-needs-one" | "sy-needs-big" => (SyncState::NeedsYou { cards }, 0),
-        "sy-differs" => (SyncState::Differs { mods: rows(false).len() }, 0),
+        "sy-differs" | "sy-differs-narrow" => (SyncState::Differs { mods: rows(false).len() }, 0),
         "sy-differs-big" => (SyncState::Differs { mods: rows(true).len() }, 0),
         "sy-ood" => (SyncState::OutOfDate { who: "Mia".into() }, 0),
         "sy-behind" => (SyncState::Behind { changes: 3, from: vec!["Mia".into()], step: BehindStep::Waiting }, 0),
@@ -194,8 +194,9 @@ pub fn chip(name: &str) -> Option<Chip> {
         }
         SyncState::Differs { .. } => {
             let rs = rows(name == "sy-differs-big");
+            let narrow = name == "sy-differs-narrow";
             Some(Rc::new(move |window, cx| {
-                let narrow = window.viewport_size().width < px(720.);
+                let narrow = narrow || crate::sync_cards::is_narrow(window);
                 crate::sync_cards::drift_view(rs.clone(), env(), narrow, window, cx)
             }))
         }

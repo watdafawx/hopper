@@ -395,9 +395,7 @@ fn sync_group_chip(store: &Entity<Store>, root: &Path, state: hopper::syncchip::
             let (st, rt) = (store.clone(), root.to_path_buf());
             Some(Rc::new(move |window, cx| {
                 let rows = st.read(cx).sync_drift_rows(&rt);
-                // The popover is 27.5 rem wide: the second button folds into
-                // a menu when the window leaves little room beside it.
-                let narrow = window.viewport_size().width < px(720.);
+                let narrow = crate::sync_cards::is_narrow(window);
                 crate::sync_cards::drift_view(rows, sync_env(&st, &rt), narrow, window, cx)
             }))
         }

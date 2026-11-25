@@ -16,6 +16,7 @@ use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::popover::Popover;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Selectable, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -409,9 +410,14 @@ fn body(sections: &[Section], width: Option<f32>, window: &mut Window, cx: &mut 
     let theme = cx.theme().clone();
     // A section with a list of its own needs more room for it.
     let width = width.unwrap_or(if sections.iter().any(|s| s.body.is_some()) { 24.0 } else { 19.5 });
+    // Many cards are taller than the window: the popover scrolls inside it.
+    let room = (window.viewport_size().height - px(120.)).max(px(240.));
     v_flex()
+        .id("sync-chip-body")
         .w(rems(width))
         .max_w(rems(width))
+        .max_h(room)
+        .overflow_y_scrollbar()
         .gap_3()
         .children(sections.iter().enumerate().map(|(i, s)| {
             v_flex()
@@ -452,7 +458,7 @@ pub fn more_pill(hidden: usize, names: String, cx: &App) -> AnyElement {
 pub const PREVIEWS: &[&str] = &[
     "g-in-sync", "g-checking", "g-updating", "g-sending", "g-behind", "g-offline", "g-failed", "g-needs", "s-in-sync", "s-differ", "s-comparing",
     "s-pushing", "s-offline", "s-blocked", "s-failed", "s-wont", "dl-waiting", "dl-working", "dl-stuck", "rs-changed", "rs-waiting", "both-ok", "both-busy", "both-needs", "both-long",
-    "sy-needs", "sy-needs-one", "sy-needs-big", "sy-differs", "sy-differs-big", "sy-ood", "sy-behind", "sy-getting", "sy-game", "sy-failed", "sy-sending", "sy-held",
+    "sy-needs", "sy-needs-one", "sy-needs-big", "sy-differs", "sy-differs-big", "sy-differs-narrow", "sy-ood", "sy-behind", "sy-getting", "sy-game", "sy-failed", "sy-sending", "sy-held",
     "sy-offline", "sy-insync", "sy-notes",
 ];
 

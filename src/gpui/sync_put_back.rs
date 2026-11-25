@@ -70,17 +70,23 @@ pub fn plan_view(plan: &UndoPlan, env: &crate::sync_cards::Env, cx: &App) -> Any
                 .child(div().min_w_0().flex_1().truncate().text_color(theme.muted_foreground).child(r.says.clone())),
         );
     }
-    if !plan.left.is_empty() {
-        let n = plan.left.len();
-        list = list.child(
-            div()
-                .mt_2()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(format!("{} left alone: someone changed {} after them.", if n == 1 { "1 mod".to_string() } else { format!("{n} mods") }, if n == 1 { "it" } else { "them" })),
-        );
-    }
     list.into_any_element()
+}
+
+/// What the plan leaves alone, in grey; outside the scrolling rows so it is
+/// always in sight.
+pub fn left_note(plan: &UndoPlan, cx: &App) -> Option<AnyElement> {
+    if plan.left.is_empty() {
+        return None;
+    }
+    let n = plan.left.len();
+    Some(
+        div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(format!("{} left alone: someone changed {} after them.", if n == 1 { "1 mod".to_string() } else { format!("{n} mods") }, if n == 1 { "it" } else { "them" }))
+            .into_any_element(),
+    )
 }
 
 /// Opens the dialog for `member`'s changes (`since`: when this PC last had
@@ -144,6 +150,9 @@ pub fn open_with(
         } else {
             div().w_full().max_h(rems(18.)).id("put-back-rows").overflow_y_scrollbar().child(plan_view(&plan, &env, cx)).into_any_element()
         });
+        if let Some(n) = left_note(&plan, cx) {
+            body = body.child(n);
+        }
         if let Some(text) = tick {
             let t = tick_state.clone();
             body = body.child(Checkbox::new("put-back-tick-box").label(text).checked(ticked).on_click(move |v: &bool, _, cx| {

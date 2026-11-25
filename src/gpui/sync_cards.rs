@@ -42,6 +42,13 @@ pub struct Env {
     pub share: Rc<dyn Fn(&DriftRow, &mut Window, &mut App)>,
 }
 
+/// The chip's popover is 27.5 rem wide (`group_pack`): when the window leaves
+/// little room around it (a big zoom, a narrow window) the second button of a
+/// "This PC differs" row folds into a menu.
+pub fn is_narrow(window: &Window) -> bool {
+    window.viewport_size().width < rems(27.5).to_pixels(window.rem_size()) + px(120.)
+}
+
 /// A name the file gives when nothing else does: "jade-1.2.jar" is "jade-1.2".
 pub fn name_of_file(file: &str) -> String {
     let f = file.trim_end_matches(".disabled");
@@ -171,7 +178,7 @@ fn card_view(card: Card, env: &Env, window: &mut Window, cx: &mut App) -> AnyEle
     }
     let mut buttons = h_flex().w_full().flex_wrap().gap_2().mt_1();
     for (ix, b) in card.buttons.iter().enumerate() {
-        buttons = buttons.child(card_button(&card, b, ix, is_ticked, others_too, env));
+        buttons = buttons.child(card_button(&card, b, ix, is_ticked, others_too, env, cx));
     }
     body = body.child(buttons);
 
@@ -190,8 +197,13 @@ fn card_view(card: Card, env: &Env, window: &mut Window, cx: &mut App) -> AnyEle
         .into_any_element()
 }
 
-fn card_button(card: &Card, b: &Btn, ix: usize, ticked: bool, others: bool, env: &Env) -> Button {
-    let label = hopper::synccore::cards::button_label(b, ticked);
+fn card_button(card: &Card, b: &Btn, ix: usize, ticked: bool, others: bool, env: &Env, cx: &App) -> Button {
+    let mut label = hopper::synccore::cards::button_label(b, ticked);
+    // "Keep {mod}": a button has no room for an icon, so it says the name.
+    if label.contains(MOD) {
+        let name = card.mods.first().map(|m| (env.info)(&m.file, cx).name).filter(|n| !n.is_empty()).unwrap_or_else(|| "it".to_string());
+        label = label.replace(MOD, &name);
+    }
     let ready = hopper::synccore::cards::button_ready(b, ticked);
     let (card2, answer, answer_fn) = (card.clone(), b.answer, env.answer.clone());
     let btn = Button::new(("card-btn", card.id as usize * 10 + ix)).small().label(label).disabled(!ready);
@@ -267,9 +279,12 @@ fn drift_row(row: DriftRow, ix: usize, env: &Env, narrow: bool, window: &mut Win
     if is_confirming {
         let (t, f, r) = (ticked.clone(), env.share.clone(), row.clone());
         out = out.child(
+            // Wraps: a long mod name makes the button too wide for the tick's line.
             h_flex()
                 .w_full()
-                .gap_3()
+                .flex_wrap()
+                .gap_x_3()
+                .gap_y_2()
                 .items_center()
                 .child(
                     Checkbox::new(("drift-tick-box", ix))
@@ -283,7 +298,6 @@ fn drift_row(row: DriftRow, ix: usize, env: &Env, narrow: bool, window: &mut Win
                             });
                         }),
                 )
-                .child(div().flex_1())
                 .child(Button::new(("drift-do", ix)).small().primary().label(share_label).disabled(!is_ticked).on_click(move |_, w, cx| f(&r, w, cx))),
         );
     }
