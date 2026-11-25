@@ -3311,8 +3311,27 @@ pub(crate) fn face(store: &Entity<Store>, mc_id: &str, name: &str, size: Rems, c
             .into_any_element();
     }
     let saved = hopper::accounts::Saved { id: mc_id.to_string(), name: name.to_string(), ..Default::default() };
+    // The picture is cached on disk by its address for good, so a friend's
+    // new skin would never show. Asking for today's copy (the day is part of
+    // the address) fetches it again once a day; yesterday's shows meanwhile.
+    let day = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400);
     let url = saved.fallback_avatar();
-    store.update(cx, |s, _| s.want_image_now(&url));
+    let fresh = format!("{url}?d={day}");
+    store.update(cx, |s, _| {
+        s.want_image_now(&url);
+        s.want_image_now(&fresh);
+    });
+    if let Some(p) = store.read(cx).image(&fresh) {
+        let theme = cx.theme();
+        return div()
+            .size(size)
+            .flex_none()
+            .rounded(theme.radius)
+            .overflow_hidden()
+            .bg(theme.muted)
+            .child(img(p.to_path_buf()).size_full().rounded(theme.radius))
+            .into_any_element();
+    }
     div().flex_none().child(crate::accounts::head(store.read(cx), &saved, size, cx)).into_any_element()
 }
 
