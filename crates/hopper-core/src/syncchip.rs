@@ -122,10 +122,230 @@ fn mods(n: usize) -> String {
     if n == 1 { "1 mod".to_string() } else { format!("{n} mods") }
 }
 
-/// The chip for a pack's copy of its group. `pulling`: Pull now (or a repair)
+// ---- The seven states of a friends group (design/sync-rewrite-ui.md) -----------------
+
+/// Where a pack stands with its friends group, worst first. [`group_look`] is
+/// the only place that words it: the chip, its popover, the Friends page row
+/// and the library dot all print what it returns, so they can't disagree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SyncState {
+    /// Changes wait for the player's answer (`cards` of them).
+    NeedsYou { cards: usize },
+    /// The mods folder differs from what the group has (`mods` of them).
+    Differs { mods: usize },
+    /// This Hopper is too old for the group (`who`'s is newer).
+    OutOfDate { who: String },
+    /// The group's changes aren't all on this PC yet.
+    Behind { changes: usize, from: Vec<String>, step: BehindStep },
+    /// This PC's own changes are on their way (`held`: kept for Push).
+    Sending { changes: usize, held: bool },
+    /// Can't reach the group (`to_send` of this PC's changes wait).
+    Offline { to_send: usize },
+    /// The copy matches (`checked`: when the group was last looked at).
+    InSync { checked: Option<u64> },
+}
+
+/// Why a copy is behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BehindStep {
+    /// Changes are being taken in right now.
+    Getting,
+    /// They are known and wait for the next try (a download, a start).
+    Waiting,
+    /// They wait for the game to close.
+    Game,
+    /// Some didn't go in; Hopper tries again.
+    Failed,
+}
+
+impl SyncState {
+    /// 0 is the worst: the first row that is true wins in the chip table.
+    pub fn rank(&self) -> u8 {
+        match self {
+            SyncState::NeedsYou { .. } => 0,
+            SyncState::Differs { .. } => 1,
+            SyncState::OutOfDate { .. } => 2,
+            SyncState::Behind { .. } => 3,
+            SyncState::Sending { .. } => 4,
+            SyncState::Offline { .. } => 5,
+            SyncState::InSync { .. } => 6,
+        }
+    }
+}
+
+/// What the screens know about a copy, to pick its [`SyncState`].
+#[derive(Clone, Debug)]
+pub struct SyncIn {
+    /// The engine's status, asked without "out of date" counting
+    /// (`Engine::status_counting(.., |_| false)`).
+    pub status: crate::synccore::Status,
+    /// The cards the player hasn't put aside.
+    pub cards: usize,
+    /// A friend's newer Hopper sends what this one can't read (their name).
+    pub too_old: Option<String>,
+    pub connected: bool,
+    /// Changes are being taken in right now.
+    pub applying: bool,
+    /// The game runs and holds changes back.
+    pub game: bool,
+    /// Changes failed and Hopper tries again.
+    pub failing: bool,
+    /// Whose changes are coming in.
+    pub from: Vec<String>,
+    /// Sends are held for Push.
+    pub push_by_hand: bool,
+    pub checked: Option<u64>,
+}
+
+/// The state of a copy: the first true row of the table, worst first.
+pub fn sync_state(i: &SyncIn) -> SyncState {
+    use crate::synccore::Status as S;
+    match &i.status {
+        S::NeedsYou(_) if i.cards > 0 => return SyncState::NeedsYou { cards: i.cards },
+        S::Differs(n) => return SyncState::Differs { mods: *n },
+        _ => {}
+    }
+    if let Some(who) = &i.too_old {
+        return SyncState::OutOfDate { who: who.clone() };
+    }
+    match &i.status {
+        S::Behind(n) => {
+            let step = if i.failing {
+                BehindStep::Failed
+            } else if i.game {
+                BehindStep::Game
+            } else if i.applying {
+                BehindStep::Getting
+            } else {
+                BehindStep::Waiting
+            };
+            SyncState::Behind { changes: *n, from: i.from.clone(), step }
+        }
+        S::Sending(n) if !i.connected => SyncState::Offline { to_send: *n },
+        S::Sending(n) => SyncState::Sending { changes: *n, held: i.push_by_hand },
+        _ if !i.connected => SyncState::Offline { to_send: 0 },
+        _ => SyncState::InSync { checked: i.checked },
+    }
+}
+
+/// What a state says, everywhere it is shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupLook {
+    pub look: Look,
+    /// The popover's heading, and the Friends page row's first line.
+    pub title: String,
+    /// The popover's line under it, and the Friends page row's second line.
+    pub line: String,
+    /// The popover's one filled button, when there is one.
+    pub button: Option<String>,
+}
+
+fn changes_n(n: usize) -> String {
+    if n == 1 { "1 change".to_string() } else { format!("{n} changes") }
+}
+
+/// The one function that words a sync state (`now`: unix seconds, for "checked
+/// 2 min ago").
+pub fn group_look(state: &SyncState, now: u64) -> GroupLook {
+    use Glyph::*;
+    let mk = |tone, glyph, label: String, short: &str| Look::new(Source::Group, tone, glyph, label, short);
+    let (look, title, line, button) = match state {
+        SyncState::NeedsYou { cards } => (
+            mk(Tone::Warn, Alert, format!("Needs you · {cards}"), "Needs you").strip(),
+            if *cards == 1 { "A change waits for your answer".to_string() } else { format!("{cards} changes wait for your answer") },
+            "Nothing from them lands until you answer.".to_string(),
+            None,
+        ),
+        SyncState::Differs { mods } => (
+            mk(Tone::Warn, Differ, format!("This PC differs · {mods}"), "Differs").strip(),
+            if *mods == 1 { "1 mod here differs from the group's".to_string() } else { format!("{mods} mods here differ from the group's") },
+            "They changed outside Hopper. Only you see this.".to_string(),
+            Some("Put all back".to_string()),
+        ),
+        SyncState::OutOfDate { who } => {
+            let who = if who.trim().is_empty() { "A friend's".to_string() } else { format!("{}'s", who.trim()) };
+            (
+                mk(Tone::Bad, Alert, "Update Hopper to sync".to_string(), "Out of date").fixed(),
+                "This Hopper is too old for the group".to_string(),
+                format!("{who} Hopper is newer. Update Hopper to keep up with the group."),
+                Some("Update Hopper".to_string()),
+            )
+        }
+        SyncState::Behind { changes, from, step } => {
+            let by = match from.as_slice() {
+                [] => String::new(),
+                [one] => format!(" from {one}"),
+                [a, b] => format!(" from {a} and {b}"),
+                many => format!(" from {} people", many.len()),
+            };
+            match step {
+                BehindStep::Getting => (
+                    mk(Tone::Busy, Spin, "Getting changes".to_string(), "Getting…").busy(),
+                    format!("Getting {}{by}", changes_n(*changes)),
+                    "They go in one after the other.".to_string(),
+                    Some("Pull now".to_string()),
+                ),
+                BehindStep::Waiting => (
+                    mk(Tone::Warn, Behind, format!("Behind · {}", changes_n(*changes)), "Behind"),
+                    format!("{} to take in{by}", changes_n(*changes)),
+                    "Hopper takes them in by itself.".to_string(),
+                    Some("Pull now".to_string()),
+                ),
+                BehindStep::Game => (
+                    mk(Tone::Warn, Behind, "Behind · close the game".to_string(), "Behind"),
+                    "Waiting for the game to close".to_string(),
+                    format!("{} land when it closes.", changes_n(*changes)),
+                    None,
+                ),
+                BehindStep::Failed => (
+                    mk(Tone::Warn, Alert, format!("Behind · {} didn't go in", changes_n(*changes)), "Behind").fixed(),
+                    format!("{} of the group's didn't go in", changes_n(*changes)),
+                    "Hopper tries again by itself.".to_string(),
+                    Some("Try again".to_string()),
+                ),
+            }
+        }
+        SyncState::Sending { changes, held: false } => (
+            mk(Tone::Busy, Up, format!("Sending {}", changes_n(*changes)), "Sending").busy(),
+            "Sending your changes".to_string(),
+            "Your friends get them in a moment.".to_string(),
+            None,
+        ),
+        SyncState::Sending { changes, held: true } => (
+            mk(Tone::Warn, Up, format!("Not sent · {}", changes_n(*changes)), "Not sent").strip(),
+            format!("{} wait for Push", changes_n(*changes)),
+            "They go out when you press Push.".to_string(),
+            Some(crate::syncmode::push_label(*changes)),
+        ),
+        SyncState::Offline { to_send } => (
+            mk(Tone::Quiet, Offline, if *to_send > 0 { format!("Offline · {to_send} to send") } else { "Offline".to_string() }, "Offline"),
+            "Can't reach your friends".to_string(),
+            if *to_send > 0 {
+                "Your changes wait here and go out when you're back online. What this PC knows may be old.".to_string()
+            } else {
+                "What this PC knows may be old.".to_string()
+            },
+            Some("Try again".to_string()),
+        ),
+        SyncState::InSync { checked } => (
+            mk(Tone::Good, Check, "In sync".to_string(), "In sync"),
+            "Your copy matches the group's".to_string(),
+            match checked {
+                Some(at) if *at > 0 && now >= *at => format!("Nothing new to take in. Checked {}.", crate::groupstatus::ago(now, *at)),
+                _ => "Nothing new to take in.".to_string(),
+            },
+            Some("Pull now".to_string()),
+        ),
+    };
+    GroupLook { look, title, line, button }
+}
+
+/// The chip for the group states that aren't a sync state (a mod the pack
+/// needs, files only the website gives, the old statuses). Every sync state
+/// is [`group_look`]'s. `pulling`: Pull now (or a repair)
 /// is running; `pull_failed`: the last Pull now said it didn't work;
 /// `left_out`: mods wait for the player's yes to their source.
-pub fn group_look(status: &Status, pulling: bool, pull_failed: bool, left_out: bool) -> Look {
+pub fn status_look(status: &Status, pulling: bool, pull_failed: bool, left_out: bool) -> Look {
     use Glyph::*;
     let g = |tone, glyph, label: &str, short: &str| Look::new(Source::Group, tone, glyph, label, short);
     if pull_failed {
@@ -553,27 +773,27 @@ mod tests {
     #[test]
     fn updating_names_whose_changes() {
         let st = Status::Updating { changes: 3, from: vec![s("Mia")] };
-        let l = group_look(&st, false, false, false);
+        let l = status_look(&st, false, false, false);
         assert_eq!(l.label, "Updating with Mia's changes");
         assert_eq!(l.short, "Updating…");
         assert!(l.busy && !l.fixed && !l.strip);
         let two = Status::Updating { changes: 0, from: vec![s("Mia"), s("Noah")] };
-        assert_eq!(group_look(&two, false, false, false).label, "Updating with Mia and Noah's changes");
+        assert_eq!(status_look(&two, false, false, false).label, "Updating with Mia and Noah's changes");
         let many = Status::Updating { changes: 0, from: vec![s("A"), s("B"), s("C")] };
-        assert_eq!(group_look(&many, false, false, false).label, "Updating with 3 people's changes");
+        assert_eq!(status_look(&many, false, false, false).label, "Updating with 3 people's changes");
         let none = Status::Updating { changes: 0, from: vec![] };
-        assert_eq!(group_look(&none, false, false, false).label, "Updating with the group's changes");
+        assert_eq!(status_look(&none, false, false, false).label, "Updating with the group's changes");
     }
 
     #[test]
     fn rest_and_busy_states() {
-        let ok = group_look(&Status::InStep { checked: None }, false, false, false);
+        let ok = status_look(&Status::InStep { checked: None }, false, false, false);
         assert_eq!((ok.tone, ok.label.as_str(), ok.busy, ok.fixed), (Tone::Good, "In sync with friends", false, false));
         assert_eq!(ok.short, "In sync");
-        let chk = group_look(&Status::Checking, false, false, false);
+        let chk = status_look(&Status::Checking, false, false, false);
         assert_eq!((chk.tone, chk.busy), (Tone::Busy, true));
         // Pull now running makes any state busy, and keeps its words.
-        let pull = group_look(&Status::InStep { checked: None }, true, false, false);
+        let pull = status_look(&Status::InStep { checked: None }, true, false, false);
         assert!(pull.busy);
         assert_eq!(pull.label, "In sync with friends");
     }
@@ -586,26 +806,26 @@ mod tests {
             Status::WaitsForYou { title: s("Pack 8.6") },
             Status::Behind { mods: 3, missing: false },
         ] {
-            let l = group_look(&st, false, false, false);
+            let l = status_look(&st, false, false, false);
             assert!(l.fixed && l.strip, "{st:?}");
         }
-        let failed = group_look(&Status::Cant { why: s("x"), again: false, mods: vec![] }, false, false, false);
+        let failed = status_look(&Status::Cant { why: s("x"), again: false, mods: vec![] }, false, false, false);
         assert!(failed.fixed && !failed.strip);
         assert_eq!((failed.tone, failed.label.as_str()), (Tone::Bad, "Sync failed"));
         // The same failure with mods waiting for a yes is a choice: it keeps its strip.
-        let choice = group_look(&Status::Cant { why: s("x"), again: false, mods: vec![] }, false, false, true);
+        let choice = status_look(&Status::Cant { why: s("x"), again: false, mods: vec![] }, false, false, true);
         assert!(choice.strip && choice.label == "Needs you");
-        let bad_pull = group_look(&Status::InStep { checked: None }, false, true, false);
+        let bad_pull = status_look(&Status::InStep { checked: None }, false, true, false);
         assert!(bad_pull.fixed && bad_pull.tone == Tone::Bad);
     }
 
     #[test]
     fn behind_offline_and_check_failed_get_no_strip() {
         for st in [Status::Offline { checked: None }, Status::CantCheck, Status::WaitsForGame { what: vec![] }] {
-            assert!(!group_look(&st, false, false, false).strip, "{st:?}");
+            assert!(!status_look(&st, false, false, false).strip, "{st:?}");
         }
-        assert_eq!(group_look(&Status::ByHand { mods: vec![s("A")] }, false, false, false).label, "1 mod to download");
-        assert_eq!(group_look(&Status::ByHand { mods: vec![s("A"), s("B")] }, false, false, false).label, "2 mods to download");
+        assert_eq!(status_look(&Status::ByHand { mods: vec![s("A")] }, false, false, false).label, "1 mod to download");
+        assert_eq!(status_look(&Status::ByHand { mods: vec![s("A"), s("B")] }, false, false, false).label, "2 mods to download");
     }
 
     #[test]
@@ -631,7 +851,7 @@ mod tests {
         // Whatever the server's name, the words are the same.
         assert_eq!(server_look(&ServerState::WontJoin, "").label, "Won't let you join");
         // Beside a quiet group chip the merged chip keeps it: it is fixed.
-        let g = group_look(&Status::InStep { checked: None }, false, false, false);
+        let g = status_look(&Status::InStep { checked: None }, false, false, false);
         let m = merged(&g, &l);
         assert!(m.fixed);
         assert_eq!(m.tone, Tone::Bad);
@@ -762,7 +982,7 @@ mod tests {
 
     #[test]
     fn merged_chip_takes_the_worse_look() {
-        let a = group_look(&Status::InStep { checked: None }, false, false, false);
+        let a = status_look(&Status::InStep { checked: None }, false, false, false);
         let b = server_look(&ServerState::Differ { mods: 2, blocked: false }, "S");
         let m = merged(&a, &b);
         assert_eq!((m.tone, m.glyph, m.label.as_str(), m.fixed), (Tone::Warn, Glyph::Differ, "Sync", false));
@@ -809,5 +1029,112 @@ mod tests {
     fn no_chips_only_plain_pills_fold() {
         let p = plan(&[], 3, 2);
         assert_eq!(p.plain_folded, 2);
+    }
+}
+
+#[cfg(test)]
+mod sync_state_tests {
+    use super::*;
+    use crate::synccore::Status as S;
+
+    fn input(status: S) -> SyncIn {
+        SyncIn {
+            status,
+            cards: 0,
+            too_old: None,
+            connected: true,
+            applying: false,
+            game: false,
+            failing: false,
+            from: vec![],
+            push_by_hand: false,
+            checked: None,
+        }
+    }
+
+    #[test]
+    fn worst_state_wins() {
+        // Needs you beats This PC differs beats Out of date beats Behind...
+        let mut i = input(S::NeedsYou(2));
+        i.cards = 2;
+        i.too_old = Some("Mia".into());
+        assert_eq!(sync_state(&i), SyncState::NeedsYou { cards: 2 });
+        assert_eq!(sync_state(&input(S::Differs(3))), SyncState::Differs { mods: 3 });
+        let mut i = input(S::Behind(4));
+        i.too_old = Some("Mia".into());
+        assert_eq!(sync_state(&i).rank(), 2);
+        let mut i = input(S::Sending(1));
+        i.connected = false;
+        assert_eq!(sync_state(&i), SyncState::Offline { to_send: 1 });
+        assert_eq!(sync_state(&input(S::InSync)).rank(), 6);
+    }
+
+    #[test]
+    fn hidden_cards_dont_hold_the_chip() {
+        // Every card put aside: the status still says NeedsYou, the chip doesn't.
+        let i = input(S::NeedsYou(1));
+        assert_eq!(sync_state(&i), SyncState::InSync { checked: None });
+    }
+
+    #[test]
+    fn behind_says_why() {
+        let mut i = input(S::Behind(2));
+        i.from = vec!["Mia".into()];
+        let at = |f: &dyn Fn(&mut SyncIn)| {
+            let mut j = i.clone();
+            f(&mut j);
+            group_look(&sync_state(&j), 0)
+        };
+        assert_eq!(at(&|j| j.applying = true).look.label, "Getting changes");
+        assert!(at(&|j| j.applying = true).look.busy);
+        assert_eq!(at(&|_| {}).look.label, "Behind · 2 changes");
+        assert_eq!(at(&|j| j.game = true).look.label, "Behind · close the game");
+        assert!(at(&|j| j.failing = true).look.fixed);
+        assert_eq!(at(&|_| {}).title, "2 changes to take in from Mia");
+    }
+
+    #[test]
+    fn no_state_says_syncing() {
+        let states = [
+            SyncState::NeedsYou { cards: 2 },
+            SyncState::Differs { mods: 1 },
+            SyncState::OutOfDate { who: "Mia".into() },
+            SyncState::Behind { changes: 1, from: vec![], step: BehindStep::Getting },
+            SyncState::Behind { changes: 1, from: vec![], step: BehindStep::Waiting },
+            SyncState::Behind { changes: 1, from: vec![], step: BehindStep::Game },
+            SyncState::Behind { changes: 1, from: vec![], step: BehindStep::Failed },
+            SyncState::Sending { changes: 3, held: false },
+            SyncState::Sending { changes: 3, held: true },
+            SyncState::Offline { to_send: 0 },
+            SyncState::Offline { to_send: 2 },
+            SyncState::InSync { checked: Some(5) },
+        ];
+        for s in &states {
+            let l = group_look(s, 100);
+            for text in [&l.look.label, &l.look.short, &l.title, &l.line] {
+                assert!(!text.to_lowercase().contains("syncing"), "{s:?}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_needs_you_and_differs_keep_the_strip() {
+        assert!(group_look(&SyncState::NeedsYou { cards: 1 }, 0).look.strip);
+        assert!(group_look(&SyncState::Differs { mods: 1 }, 0).look.strip);
+        assert!(!group_look(&SyncState::InSync { checked: None }, 0).look.strip);
+    }
+
+    #[test]
+    fn in_sync_says_when_it_checked() {
+        let l = group_look(&SyncState::InSync { checked: Some(100) }, 220);
+        assert_eq!(l.line, "Nothing new to take in. Checked 2 min ago.");
+        let l = group_look(&SyncState::InSync { checked: None }, 220);
+        assert_eq!(l.line, "Nothing new to take in.");
+    }
+
+    #[test]
+    fn friends_out_of_date_hopper_names_them() {
+        let l = group_look(&SyncState::OutOfDate { who: "Mia".into() }, 0);
+        assert_eq!(l.line, "Mia's Hopper is newer. Update Hopper to keep up with the group.");
     }
 }

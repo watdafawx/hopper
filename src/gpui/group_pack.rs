@@ -198,7 +198,7 @@ pub fn group_chip(store: &Entity<Store>, root: &Path, cx: &mut App) -> Option<cr
     let pulled_bad = pulled.as_ref().is_some_and(|(_, bad)| *bad);
     let left_out = !s.left_out_pins(root).is_empty();
     let pushing = s.pushing_at(root);
-    let look = hopper::syncchip::group_look(&status, pulling, pulled_bad, left_out);
+    let look = hopper::syncchip::status_look(&status, pulling, pulled_bad, left_out);
     if look.strip
         && let Some(notice) = group_status_bar(store, root, cx)
     {
@@ -297,7 +297,7 @@ pub fn group_status_bar(store: &Entity<Store>, root: &Path, cx: &mut App) -> Opt
     // the notice is the body of the chip's popover.
     // Files only the website gives are the Downloads chip's
     // ([`crate::downloads_chip`]).
-    if matches!(status, Status::ByHand { .. }) || !hopper::syncchip::group_look(&status, pulling, pulled_bad, !left_out.is_empty()).strip {
+    if matches!(status, Status::ByHand { .. }) || !hopper::syncchip::status_look(&status, pulling, pulled_bad, !left_out.is_empty()).strip {
         return None;
     }
     let key = hopper::settings::notice_key(&root.to_string_lossy(), "group-in-step", "in step");

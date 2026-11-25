@@ -457,7 +457,7 @@ pub const PREVIEWS: &[&str] = &[
 /// Made-up chips for a preview state, no network, no real group or server.
 pub fn preview(name: &str) -> Vec<Chip> {
     use hopper::groupstatus::Status;
-    use hopper::syncchip::{DownloadState, ServerState, Work, download_look, group_look, server_look};
+    use hopper::syncchip::{DownloadState, ServerState, Work, download_look, status_look, server_look};
     let noop: Run = Rc::new(|_, _| {});
     let make = |id: &str, look: Look, title: &str, line: &str, progress: Option<f32>, primary: &str| Chip {
         id: id.to_string().into(),
@@ -474,7 +474,7 @@ pub fn preview(name: &str) -> Vec<Chip> {
         look,
     };
     let mia = || vec!["Mia".to_string()];
-    let group = |status: Status, title: &str, line: &str, progress: Option<f32>| make("group", group_look(&status, false, false, false), title, line, progress, "Pull now");
+    let group = |status: Status, title: &str, line: &str, progress: Option<f32>| make("group", status_look(&status, false, false, false), title, line, progress, "Pull now");
     let g = |n: &str| -> Chip {
         match n {
             "in-sync" => group(Status::InStep { checked: None }, "Your copy matches the group.", "Nothing new to take in.", None),
@@ -485,7 +485,7 @@ pub fn preview(name: &str) -> Vec<Chip> {
             "offline" => group(Status::Offline { checked: None }, "Offline", "Can't reach the group. What this PC knows may be old.", None),
             "failed" => make(
                 "group",
-                group_look(&Status::Checking, false, true, false),
+                status_look(&Status::Checking, false, true, false),
                 "Couldn't take the changes in",
                 "A mod didn't download. Try again.",
                 None,
@@ -589,7 +589,7 @@ pub fn preview(name: &str) -> Vec<Chip> {
         Some(("both", "needs")) => vec![g("needs"), server(ServerState::Differ { mods: 3, blocked: false }, NAME)],
         Some(("both", _)) => {
             let mut group = g("updating");
-            group.look = group_look(
+            group.look = status_look(
                 &Status::Updating { changes: 2, from: vec!["Additional Placements Extra Long Name".into()] },
                 false,
                 false,

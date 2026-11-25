@@ -690,11 +690,24 @@ impl Engine {
     /// what waits for the player, then a mods folder that differs, then the
     /// group's changes not on disk yet, then this PC's own not acked yet.
     pub fn status(&self, disk: &Snapshot) -> Status {
-        if let Some(id) = self.outdated.iter().next() {
+        self.status_with(disk, self.reviews().len())
+    }
+
+    /// [`Engine::status`] with `waiting` cards counted: the screens pass how
+    /// many the player hasn't put aside ("Not now"), so a card put aside no
+    /// longer holds the chip at "Needs you".
+    pub fn status_with(&self, disk: &Snapshot, waiting: usize) -> Status {
+        self.status_counting(disk, waiting, |_| true)
+    }
+
+    /// [`Engine::status_with`] where only the members `counts` says yes to
+    /// can make the status "out of date": a friend whose older Hopper sends
+    /// another format is that friend's to fix, so this PC's chip skips them.
+    pub fn status_counting(&self, disk: &Snapshot, waiting: usize, counts: impl Fn(&str) -> bool) -> Status {
+        if let Some(id) = self.outdated.iter().find(|m| counts(m)) {
             let name = self.members.get(id).map_or_else(|| id.clone(), |m| m.name.clone());
             return Status::OutOfDate(name);
         }
-        let waiting = self.reviews().len();
         if waiting > 0 {
             return Status::NeedsYou(waiting);
         }
