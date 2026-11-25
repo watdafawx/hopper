@@ -2096,7 +2096,7 @@ fn pack_step(
         // Whatever the new version changes is the member's in History.
         let _scope = crate::actor::begin(root, Some(crate::actor::Who::friend(&mark.name, &mark.by, group, "")));
         let _own = crate::actor::own_all();
-        crate::modpack::update_group_pack(inst, pid, &file, job)
+        crate::modpack::update_group_pack(inst, pid, &file, &crate::synccore::PackMode::default(), job)
     };
     match updated {
         Ok(true) => {}

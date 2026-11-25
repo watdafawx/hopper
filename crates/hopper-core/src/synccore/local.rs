@@ -172,6 +172,15 @@ pub fn save_edits(old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option
     let mut out = Vec::new();
     for (key, a) in &after {
         let was = before.get(key);
+        // A lock put on or taken off is its own record.
+        if let Key::Mod(k) = key {
+            let (lock, had) = (lock_of(a), was.map_or(Value::Gone, |o| lock_of(o)));
+            if lock != had
+                && let Some(batch) = owner(a)
+            {
+                out.push(Edit { key: Key::Lock(k.clone()), now: lock, why: Why::Player, batch });
+            }
+        }
         let changed = match was {
             None => true,
             Some(o) => file_of(o) != file_of(a) || o.enabled != a.enabled,
@@ -198,7 +207,9 @@ pub fn save_edits(old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option
 
 /// A mod's key: the project it came from, with the kind of its folder.
 pub fn key_of(a: &Addon) -> Key {
-    let id = if a.project_id != 0 {
+    let id = if let Some(src) = link_source(a) {
+        super::link::key_text(src)
+    } else if a.project_id != 0 {
         format!("cf:{}", a.project_id)
     } else if !a.mr_project.is_empty() {
         format!("mr:{}", a.mr_project)
@@ -212,9 +223,17 @@ pub fn key_of(a: &Addon) -> Key {
     })
 }
 
+/// The source of a mod that comes from GitHub or a link (its project id is
+/// the source's own, or it has none), so it is named by where it lives.
+fn link_source(a: &Addon) -> Option<&crate::sources::ModSource> {
+    a.source.as_ref().filter(|_| a.project_id == 0 || crate::sources::is_src(a.project_id))
+}
+
 /// The file an addon is on, as the group names files.
 fn file_of(a: &Addon) -> String {
-    if a.project_id != 0 && a.file_id != 0 {
+    if let Some(src) = link_source(a) {
+        super::link::LinkRef::of(src, a.file_name.trim_end_matches(".disabled")).id()
+    } else if a.project_id != 0 && a.file_id != 0 {
         format!("cf:{}", a.file_id)
     } else if !a.mr_project.is_empty() && !a.mr_version.is_empty() {
         format!("mr:{}", a.mr_version)
@@ -233,7 +252,13 @@ pub fn snapshot(inst: &crate::instances::Instance) -> Snapshot {
     }
     let mut values = BTreeMap::new();
     for a in &inst.addons {
-        values.entry(key_of(a)).or_insert_with(|| value_of(a));
+        let key = key_of(a);
+        if let (Key::Mod(k), l) = (&key, lock_of(a))
+            && l != Value::Gone
+        {
+            values.entry(Key::Lock(k.clone())).or_insert(l);
+        }
+        values.entry(key).or_insert_with(|| value_of(a));
     }
     if !inst.loader.is_empty() {
         values.insert(Key::Loader, Value::Text(inst.loader.clone()));
@@ -262,6 +287,39 @@ pub fn pack_text(p: &crate::instances::PackRef) -> Option<String> {
     } else {
         None
     }
+}
+
+/// A mod's lock as the group has it: not locked is `Gone`, never offered
+/// as an update "all", one update's file locked out "v:<that file>".
+pub fn lock_of(a: &Addon) -> Value {
+    if a.locked {
+        Value::Text("all".into())
+    } else if !a.locked_version.is_empty() {
+        Value::Text(format!("v:{}", a.locked_version))
+    } else {
+        Value::Gone
+    }
+}
+
+/// Puts a lock on or takes it off (the other half of [`lock_of`]). False
+/// when the value isn't a lock.
+pub fn set_lock(a: &mut Addon, v: &Value) -> bool {
+    match v {
+        Value::Gone => {
+            a.locked = false;
+            a.locked_version.clear();
+        }
+        Value::Text(t) if t == "all" => {
+            a.locked = true;
+            a.locked_version.clear();
+        }
+        Value::Text(t) if t.starts_with("v:") => {
+            a.locked = false;
+            a.locked_version = t[2..].to_string();
+        }
+        _ => return false,
+    }
+    true
 }
 
 fn value_of(a: &Addon) -> Value {
@@ -421,6 +479,65 @@ mod tests {
         let mut link = addon(0, 0, true);
         link.file_name = "thing.jar.disabled".into();
         assert_eq!(key_of(&link), Key::Mod("src:thing.jar".into()));
+    }
+
+    fn github_mod(tag: &str) -> Addon {
+        let mut a = addon(crate::sources::src_id("github:o/r"), 5, true);
+        a.file_name = format!("tweaks-{tag}.jar");
+        a.source = Some(crate::sources::ModSource {
+            kind: crate::sources::Kind::GitHub,
+            url: "o/r".into(),
+            seen: tag.into(),
+            sha256: "cd".repeat(32),
+            ..Default::default()
+        });
+        a
+    }
+
+    #[test]
+    fn a_link_mod_is_named_by_its_source_and_its_file_carries_the_address() {
+        let (v1, v2) = (github_mod("v1"), github_mod("v2"));
+        // The key survives an update; the file id changes with the release.
+        assert_eq!(key_of(&v1), Key::Mod("src:github:o/r".into()));
+        assert_eq!(key_of(&v1), key_of(&v2));
+        let Value::File { file, on } = value_of(&v1) else { panic!("a file") };
+        assert!(on);
+        let link = crate::synccore::link::LinkRef::parse(&file).expect("a link id");
+        assert_eq!(link.download, "https://github.com/o/r/releases/download/v1/tweaks-v1.jar");
+        assert_eq!(link.sha256, "cd".repeat(32));
+        assert_ne!(file_of(&v1), file_of(&v2));
+        // Turned off (".disabled") is the same file.
+        let mut off = v1.clone();
+        off.file_name.push_str(".disabled");
+        assert_eq!(file_of(&off), file_of(&v1));
+    }
+
+    #[test]
+    fn a_lock_put_on_or_off_is_its_own_record_and_the_scan_sees_it() {
+        let (mut locked, plain) = (addon(1, 11, true), addon(1, 11, true));
+        locked.locked = true;
+        let got = save_edits(&[plain.clone()], &[locked.clone()], mine);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].key, Key::Lock("cf:1".into()));
+        assert_eq!(got[0].now, Value::Text("all".into()));
+        // The lock coming off is a record too ("Gone" is no lock).
+        let off = save_edits(&[locked.clone()], &[plain.clone()], mine);
+        assert_eq!((off[0].key.clone(), off[0].now.clone()), (Key::Lock("cf:1".into()), Value::Gone));
+        // One update's file kept out is another kind of lock.
+        let mut pinned = plain.clone();
+        pinned.locked_version = "cf:12".into();
+        assert_eq!(lock_of(&pinned), Value::Text("v:cf:12".into()));
+        // Applying puts it back the way it was made.
+        let mut a = plain;
+        assert!(set_lock(&mut a, &lock_of(&pinned)));
+        assert_eq!(a.locked_version, "cf:12");
+        assert!(!a.locked);
+        assert!(set_lock(&mut a, &Value::Text("all".into())) && a.locked && a.locked_version.is_empty());
+        assert!(set_lock(&mut a, &Value::Gone) && !a.locked);
+        assert!(!set_lock(&mut a, &Value::PackOff));
+        // A mod added already locked comes with its lock.
+        let added = save_edits(&[], &[locked], mine);
+        assert!(added.iter().any(|e| e.key == Key::Lock("cf:1".into())));
     }
 
     #[test]

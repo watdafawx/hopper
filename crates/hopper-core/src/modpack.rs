@@ -2993,12 +2993,19 @@ pub fn update_any_synced(inst: &mut Instance, pack_id: u64, file: &cf::File, job
 /// they and the pack changed, or a mod of theirs needs one the pack
 /// drops: [`crate::packdiff::UpdatePlan::needs_say`]). False: nothing was
 /// changed; the player picks in the update dialog.
-pub fn update_group_pack(inst: &mut Instance, pack_id: u64, file: &cf::File, job: &Job) -> anyhow::Result<bool> {
+pub fn update_group_pack(inst: &mut Instance, pack_id: u64, file: &cf::File, mode: &crate::synccore::PackMode, job: &Job) -> anyhow::Result<bool> {
+    use crate::synccore::ConfigMode;
     let plan = crate::packdiff::plan(inst, file, true, job)?;
-    if plan.needs_say() {
-        return Ok(false);
-    }
-    synced_with(inst, pack_id, file, &plan, job)?;
+    // The mode is what the record stated for friends: a clean update here
+    // is this PC's own and never reaches theirs unless "for everyone" was
+    // ticked. A clean update settles every conflict itself.
+    let mut o = match mode.friends {
+        ConfigMode::Clean => plan.clean_decisions_with(mode.keep_off),
+        ConfigMode::Keep if plan.needs_say() => return Ok(false),
+        ConfigMode::Keep => plan.keep_decisions(mode.keep_off),
+    };
+    o.only_here = inst.only_here.keys().cloned().collect();
+    update_any(inst, pack_id, file, Some(&o), job)?;
     Ok(true)
 }
 

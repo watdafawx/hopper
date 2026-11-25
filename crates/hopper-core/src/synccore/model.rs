@@ -83,12 +83,20 @@ pub enum ConfigMode {
 
 /// A pack update's stated handling, carried in its record so every PC
 /// applies the same thing (design §6).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackMode {
     pub here: ConfigMode,
     pub friends: ConfigMode,
     /// Pack mods a member turned off stay off for them.
     pub keep_off: bool,
+}
+
+impl Default for PackMode {
+    /// The everyday update (design §15): settings stay on every PC, and
+    /// mods a friend turned off stay off for them.
+    fn default() -> Self {
+        PackMode { here: ConfigMode::Keep, friends: ConfigMode::Keep, keep_off: true }
+    }
 }
 
 /// Why a record was made.

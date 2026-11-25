@@ -1352,6 +1352,7 @@ impl UpdatePreview {
         };
         let (store, root, file) = (v.store.clone(), v.root.clone(), plan.file.clone());
         let backup = v.backup_worlds;
+        let clean = v.clean;
         // The done toast says how many of the player's edits stayed, as
         // the summary's "pack files you changed: kept" counted them.
         let kept = if v.clean { 0 } else { v.edited_kept(plan) };
@@ -1370,6 +1371,9 @@ impl UpdatePreview {
         // The update runs in the background: Tasks, the instance's row and
         // a toast at the end follow it, so the dialog closes now.
         store.update(cx, |s, cx| {
+            if clean {
+                s.sync_note_clean_update(&root);
+            }
             s.update_pack(&root, file, Some(overrides), backup, kept);
             cx.notify();
         });
@@ -2798,6 +2802,7 @@ pub fn switch(store: Entity<Store>, root: PathBuf, file: cf::File, window: &mut 
                 Ok(p) => {
                     let overrides = p.clean_decisions();
                     store.update(cx, |s, cx| {
+                        s.sync_note_clean_update(&root);
                         s.update_pack(&root, file, Some(overrides), false, String::new());
                         cx.notify();
                     });
