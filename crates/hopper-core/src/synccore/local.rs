@@ -76,22 +76,23 @@ pub fn drift(applied: &BTreeMap<Key, Value>, disk: &Snapshot) -> Vec<Drift> {
     out
 }
 
-/// "Remove for everyone": the records that share the mods missing from this
-/// PC's folder, one batch. A file that was swapped or turned off outside
-/// Hopper has no such button (it can only be put back).
+/// "Remove for everyone" and "Add for everyone": the records that share what
+/// differs on this PC, one batch. A mod missing from the folder is removed
+/// for everyone; a mod only this PC has (added outside Hopper) is added for
+/// everyone, as the file it is here. A file that was swapped or turned off
+/// outside Hopper has no such button (it can only be put back).
 pub fn share_edits(drifts: &[Drift], batch: &str) -> Vec<Edit> {
     drifts
         .iter()
-        .filter(|d| d.found == Value::Gone && d.expected != Value::Gone)
-        .map(|d| Edit {
-            key: d.key.clone(),
-            now: if matches!(d.expected, Value::PackDefault | Value::PackOff) {
-                Value::PackRemoved
+        .filter_map(|d| {
+            let now = if d.found == Value::Gone && d.expected != Value::Gone {
+                if matches!(d.expected, Value::PackDefault | Value::PackOff) { Value::PackRemoved } else { Value::Gone }
+            } else if matches!(d.expected, Value::Gone | Value::PackRemoved) && d.found != Value::Gone {
+                d.found.clone()
             } else {
-                Value::Gone
-            },
-            why: Why::SharedDrift,
-            batch: batch.to_string(),
+                return None;
+            };
+            Some(Edit { key: d.key.clone(), now, why: Why::SharedDrift, batch: batch.to_string() })
         })
         .collect()
 }
@@ -424,6 +425,18 @@ mod tests {
         let got: Vec<(Key, Value)> = edits.iter().map(|e| (e.key.clone(), e.now.clone())).collect();
         assert_eq!(got, [(k(2), Value::Gone), (k(3), Value::PackRemoved)]);
         assert!(edits.iter().all(|e| e.why == Why::SharedDrift && e.batch == "x"));
+    }
+
+    #[test]
+    fn sharing_drift_adds_a_jar_only_this_pc_has() {
+        // Key 5 was never applied (a jar added outside Hopper); key 1 is the
+        // same file, so nothing differs there.
+        let a = applied(&[(1, on(11)), (5, Value::Gone)]);
+        let d = drift(&a, &snap(&[(1, on(11)), (5, on(51))]));
+        let edits = share_edits(&d, "x");
+        let got: Vec<(Key, Value)> = edits.iter().map(|e| (e.key.clone(), e.now.clone())).collect();
+        assert_eq!(got, [(k(5), on(51))]);
+        assert!(edits.iter().all(|e| e.why == Why::SharedDrift));
     }
 
     #[test]
