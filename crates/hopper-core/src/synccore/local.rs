@@ -230,7 +230,7 @@ fn link_source(a: &Addon) -> Option<&crate::sources::ModSource> {
 }
 
 /// The file an addon is on, as the group names files.
-fn file_of(a: &Addon) -> String {
+pub fn file_of(a: &Addon) -> String {
     if let Some(src) = link_source(a) {
         super::link::LinkRef::of(src, a.file_name.trim_end_matches(".disabled")).id()
     } else if a.project_id != 0 && a.file_id != 0 {

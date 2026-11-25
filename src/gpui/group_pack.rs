@@ -133,12 +133,34 @@ pub fn sync_env(store: &Entity<Store>, root: &Path) -> crate::sync_cards::Env {
     let (s5, r5) = (store.clone(), root.to_path_buf());
     Env {
         info: Rc::new(move |file: &str, cx: &App| {
+            use hopper::synccore::{link::LinkRef, local::file_of};
             let s = s1.read(cx);
             let bare = file.trim_end_matches(".disabled");
-            let a = s.instance(&r1).and_then(|i| i.addons.iter().find(|a| a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(bare)));
-            match a {
-                Some(a) => ModInfo { name: if a.name.is_empty() { name_of_file(file) } else { a.name.clone() }, icon: s.image(&a.icon).map(Path::to_path_buf), project: a.project_id },
-                None => ModInfo { name: name_of_file(file), icon: None, project: 0 },
+            // Cards name a mod by its file id ("link:...", "cf:123"), so look
+            // for it by id first, then by jar name, then in History (a mod
+            // this PC already took out is only there).
+            let a = s.instance(&r1).and_then(|i| {
+                i.addons.iter().find(|a| file_of(a) == bare).or_else(|| i.addons.iter().find(|a| a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(bare)))
+            });
+            let past = if a.is_none() {
+                std::fs::read_dir(r1.join(hopper::sync::BACKUP_DIR)).ok().and_then(|d| {
+                    d.flatten().find_map(|e| hopper::actor::read_records(&e.path()).into_iter().map(|r| r.addon).find(|a| file_of(a) == bare))
+                })
+            } else {
+                None
+            };
+            match a.or(past.as_ref()) {
+                Some(a) => ModInfo { name: if a.name.is_empty() { name_of_file(&a.file_name) } else { a.name.clone() }, icon: s.image(&a.icon).map(Path::to_path_buf), project: a.project_id },
+                None => {
+                    // Nothing known on this PC: a link id still carries the
+                    // jar's name; any other id gets a plain word.
+                    let name = match LinkRef::parse(bare) {
+                        Some(l) => name_of_file(&l.file_name),
+                        None if bare.starts_with("cf:") || bare.starts_with("mr:") => "a mod".to_string(),
+                        None => name_of_file(file),
+                    };
+                    ModInfo { name, icon: None, project: 0 }
+                }
             }
         }),
         peek: Rc::new(move |project, _, cx| {
