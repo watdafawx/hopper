@@ -408,6 +408,45 @@ fn add_pending_note(root: &std::path::Path, p: crate::modpack::Pending, job: &Jo
     Ok(())
 }
 
+/// For friends sync (`synccore::bridge`): downloads `f` to `dest`, checked,
+/// without touching the instance's records. A file only the website gives
+/// is queued for a by-hand download and fails with
+/// [`crate::synccore::apply::FetchError::Blocked`], so sync lists it for the
+/// player instead of trying again.
+pub(crate) fn download_staged(root: &std::path::Path, m: &cf::Mod, f: &cf::File, from_pack: bool, dest: &std::path::Path, job: &Job) -> anyhow::Result<()> {
+    use crate::synccore::apply::FetchError;
+    let folder = addon_from(m, f, from_pack).folder();
+    let url = match cf::download_url(f) {
+        Ok(u) => Some(u),
+        Err(_) if f.modrinth.is_none() && f.source.is_none() => f.sha1().and_then(|h| crate::modfetch::modrinth_mirror(&h)),
+        Err(_) => None,
+    };
+    let by_hand = || -> anyhow::Error {
+        if let Err(e) = add_pending_note(root, website_only_pending(m, f, folder, from_pack), job) {
+            log::warn!("queueing {} for a download by hand: {e:#}", f.file_name);
+        }
+        FetchError::Blocked.into()
+    };
+    let Some(url) = url else { return Err(by_hand()) };
+    if let Some(p) = dest.parent() {
+        fs::create_dir_all(p)?;
+    }
+    if let Err(e) = cf::download_checked(&url, dest, &f.expect(), Some(job), |_| {}) {
+        if f.source.is_none() && cf::cdn_refused(&url, &e) {
+            let _ = fs::remove_file(dest);
+            return Err(by_hand());
+        }
+        return Err(e);
+    }
+    if let Some(s) = &f.source
+        && let Err(e) = crate::sources::verify_download(dest, s)
+    {
+        let _ = fs::remove_file(dest);
+        return Err(e.context(format!("{} wasn't added", f.file_name)));
+    }
+    Ok(())
+}
+
 /// What an install of a project would download: the project and every
 /// required dependency the instance lacks, in install order (the project
 /// first). Resolving only reads the APIs; nothing is downloaded.

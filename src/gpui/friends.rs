@@ -24,8 +24,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use hopper::groupstatus::{self, Member, Status, Tone};
-use hopper::groupsync::Kind;
+use hopper::groupstatus::{Member, Status, Tone};
 use hopper::instances::Instance;
 use hopper::mailbox::{Event, Friend, Group, Met};
 use std::cell::RefCell;
@@ -518,7 +517,7 @@ impl FriendsPanel {
             .iter()
             .enumerate()
             .map(|(i, (key, k))| {
-                let a = inst.addons.iter().find(|a| hopper::groupsync::addon_key(a) == *key);
+                let a = inst.addons.iter().find(|a| hopper::groupkey::addon_key(a) == *key);
                 let name = a.map(|a| a.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| k.name.clone());
                 let name = if name.is_empty() { "A mod".to_string() } else { name };
                 let here = match a {
@@ -771,7 +770,7 @@ impl FriendsPanel {
                 more(top.state.note(&top.who).map(|n| format!("{}: {n}", top.name)).unwrap_or_default()),
             ),
             CopyState::Differs(text) => (IconName::Info, theme.warning, "Needs a look", more(text.clone())),
-            CopyState::Updating => (IconName::RefreshCw, theme.primary, "Syncing",format!("Getting {}'s changes for {}.", top.who, top.name)),
+            CopyState::Updating => (IconName::RefreshCw, theme.primary, "Getting changes", format!("Getting {}'s changes for {}.", top.who, top.name)),
             CopyState::UpToDate => (
                 IconName::CircleCheck,
                 theme.success,
@@ -1285,7 +1284,7 @@ impl FriendsPanel {
             _ => None,
         };
         let copy_note = shown.as_ref().filter(|_| group.is_none()).and_then(|f| f.2.note(&who));
-        let changed = shown.as_ref().and_then(|f| changed_by(s, &f.0, &s.mailbox_id()));
+        let changed = shown.as_ref().and_then(|f| changed_by(s, &f.0));
         let sub = match by {
             Some(by) if sub.is_empty() => format!("From {by}"),
             Some(by) => format!("From {by} · {}", sub[..1].to_lowercase() + &sub[1..]),
@@ -1515,7 +1514,7 @@ impl FriendsPanel {
                 let kept = s.instance(root).map_or(0, |i| i.only_here.len());
                 let sub = if kept > 0 { format!("{sub} · {kept} only on this PC") } else { sub };
                 let note = state.note(&who);
-                let changed = changed_by(s, root, &s.mailbox_id());
+                let changed = changed_by(s, root);
                 let waiting = matches!(state, CopyState::Held(_));
                 let view = cx.entity();
                 h_flex()
@@ -1760,10 +1759,10 @@ impl FriendsPanel {
         // this PC's own, for the chips.
         let (member_state, my_state): (Vec<Member>, Option<Status>) = {
             let s = self.store.read(cx);
-            let copies: Vec<&hopper::groupsync::PackCopy> = s.settings().group_copies.iter().filter(|c| c.group == g.id).collect();
+            let copies: Vec<&hopper::groupkey::PackCopy> = s.settings().group_copies.iter().filter(|c| c.group == g.id).collect();
             let states = members
                 .iter()
-                .map(|m| if m.id == me || !m.joined { Member::Unknown } else { groupstatus::member_status(&copies, &m.id) })
+                .map(|m| if m.id == me || !m.joined { Member::Unknown } else { s.sync_member_state(&g.id, &m.id) })
                 .collect();
             let mine = copies
                 .iter()
@@ -1868,12 +1867,20 @@ impl FriendsPanel {
                 .map(|(root, _)| s.group_status(root).map(|st| (st, s.group_pulling(root), s.group_pulled(root).map(|(t, _)| t.to_string()))))
                 .collect()
         };
+        // A copy kept by the sync core says how it stands in the chip's words
+        // (`syncchip::group_look`): the same as its chip and its popover.
+        let sync_lines: Vec<Option<(hopper::syncchip::GroupLook, Vec<String>)>> = {
+            let s = self.store.read(cx);
+            let t = now();
+            my_packs.iter().map(|(root, _)| s.sync_state(root, s.sync_connected()).map(|st| (hopper::syncchip::group_look(&st, t), s.sync_old_friends(root)))).collect()
+        };
         let my_rows: Vec<AnyElement> = my_packs
             .iter()
             .enumerate()
             .map(|(pi, (root, name))| {
                 let root = root.clone();
                 let state = pack_state[pi].clone();
+                let sync_line = sync_lines[pi].clone();
                 let row_id = SharedString::from(format!("gp-mine:{pi}"));
                 let pull = state.as_ref().map(|(st, pulling, _)| {
                     let b = self.pull_button(SharedString::from(format!("gp-pull:{pi}")), root.clone(), *pulling, st, cx);
@@ -1905,7 +1912,8 @@ impl FriendsPanel {
                                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(FriendsEvent::Show(root.clone())))),
                             )
                             .child(widgets::caption("Yours", cx).text_xs())
-                            .when_some(state.as_ref(), |c, (st, _, said)| c.child(status_line(st, said.as_deref(), false, cx))),
+                            .when_some(state.as_ref().filter(|_| sync_line.is_none()), |c, (st, _, said)| c.child(status_line(st, said.as_deref(), false, cx)))
+                            .when_some(sync_line.as_ref(), |c, (gl, old)| c.child(sync_status_line(gl, old, cx))),
                     )
                     .children(pull)
                     .child(
@@ -3859,48 +3867,10 @@ fn alert_of<'a>(rows: impl Iterator<Item = &'a SyncRow>, cx: &App) -> Option<Til
 
 /// Who changed a group pack last, and how: "Mia turned off 2 mods · 3 h
 /// ago". Changes this PC made aren't news, so they're skipped.
-fn changed_by(s: &Store, root: &Path, me: &str) -> Option<String> {
-    use hopper::groupsync::{LOADER_KEY, PACK_KEY, State};
-    let c = s.group_copy(root)?;
-    // What others did to a mod kept only on this PC didn't happen here.
-    let kept = s.instance(root).map(|i| &i.only_here);
-    // The loader counts while this instance is on the one the group chose
-    // (it isn't when the group moved to another kind of loader).
-    let loader = s.instance(root).map(|i| State::File { file: format!("loader:{}", i.loader), on: true });
-    let marks = || {
-        c.marks
-            .iter()
-            .filter(|(k, m)| if k.as_str() == LOADER_KEY { Some(&m.state) == loader.as_ref() } else { !kept.is_some_and(|o| o.contains_key(*k)) })
-            .map(|(k, m)| (k.as_str(), m))
-    };
-    let (key, last) = marks().filter(|(_, m)| m.by != me).max_by_key(|(_, m)| (m.at, m.seq))?;
-    // The mods that one change touched the same way (the loader and the
-    // pack version aren't mods).
-    // A mod's lock is kept under its own key, and counts as that mod.
-    let is_lock = hopper::groupsync::lock_target(key).is_some();
-    let n = marks()
-        .filter(|(k, m)| (if is_lock { hopper::groupsync::lock_target(k).is_some() } else { !k.starts_with('~') }) && m.by == last.by && m.seq == last.seq && m.kind == last.kind)
-        .count();
-    let verb = match last.kind {
-        Kind::Added => "added",
-        Kind::Removed => "took out",
-        Kind::On => "turned on",
-        Kind::Off => "turned off",
-        Kind::Updated => "updated",
-        Kind::Locked => "locked",
-        Kind::Unlocked => "unlocked",
-    };
-    let what = if key == LOADER_KEY {
-        "the loader".to_string()
-    } else if key == PACK_KEY {
-        "the pack".to_string()
-    } else if n == 1 {
-        "a mod".to_string()
-    } else {
-        format!("{n} mods")
-    };
-    let when = if last.at > 0 { format!(" · {}", ago(last.at)) } else { String::new() };
-    Some(format!("{} {verb} {what}{when}", name_or(&last.name, "Someone")))
+fn changed_by(s: &Store, root: &Path) -> Option<String> {
+    let (text, at) = s.sync_changed_by(root)?;
+    let when = if at > 0 { format!(" · {}", ago(at)) } else { String::new() };
+    Some(format!("{text}{when}"))
 }
 
 /// A warning under a pack's name: a small triangle and a short sentence.
@@ -3947,6 +3917,22 @@ fn status_line(st: &Status, said: Option<&str>, under_icon: bool, cx: &App) -> D
         .items_start()
         .when(under_icon, |d| d.pl(rems(1.625)))
         .child(widgets::chip(tone_color(st.tone(), cx)).child(st.label()))
+        .child(div().flex_1().min_w_0().text_xs().text_color(cx.theme().muted_foreground).child(text))
+}
+
+/// The line under a pack of yours kept by the sync core: its state's label
+/// as a chip, its words after it, and a friend's out-of-date Hopper (the only
+/// place besides the pack update that says so).
+fn sync_status_line(gl: &hopper::syncchip::GroupLook, old: &[String], cx: &App) -> Div {
+    let mut text = gl.line.clone();
+    for name in old {
+        let who = if name.is_empty() { "A friend's".to_string() } else { format!("{name}'s") };
+        text = format!("{text} {who} Hopper is out of date.");
+    }
+    h_flex()
+        .gap_1p5()
+        .items_start()
+        .child(widgets::chip(tone_color(gl.look.tone, cx)).child(gl.look.label.clone()))
         .child(div().flex_1().min_w_0().text_xs().text_color(cx.theme().muted_foreground).child(text))
 }
 

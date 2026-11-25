@@ -5,7 +5,7 @@
 //!
 //! Three pieces of state:
 //!
-//! - [`Configs`], kept with the group copy (`groupsync::PackCopy`) and sent
+//! - [`Configs`], kept with the group copy (`groupkey::PackCopy`) and sent
 //!   whole with every recipe: per shared mod, whether it is shared (a
 //!   latest-wins switch) and every setting someone changed since, with its
 //!   value and stamp. Because the whole state rides along, the mailbox
@@ -22,7 +22,7 @@
 //! [`tick`] only when it doesn't.
 
 use crate::configedit::{self, Edit, Entry, Value};
-use crate::groupsync::{self, Verdict};
+use crate::groupkey;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -264,7 +264,7 @@ pub struct ModCfg {
     pub set: BTreeMap<String, BTreeMap<String, Val>>,
 }
 
-/// A group pack's shared settings, by mod key (`groupsync::addon_key`).
+/// A group pack's shared settings, by mod key (`groupkey::addon_key`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Configs {
@@ -445,9 +445,18 @@ impl Taken {
     }
 }
 
+/// Whether a setting (or a mod's switch) from a member goes in here: not when
+/// it's already like that here (`same`), not when a later change of it is
+/// known (`known` is the latest number seen, `seq` this one's), and not when
+/// this PC changed it and hasn't sent that yet (`unsent`): that change goes
+/// out after this one, so it wins.
+fn takes_in(same: bool, seq: u64, known: Option<u64>, unsent: bool) -> bool {
+    !same && !known.is_some_and(|k| k > seq) && !unsent
+}
+
 /// Takes a member's state (`theirs`, from a recipe numbered `seq`) into this
 /// copy's, latest wins per mod switch and per setting (the same rule as for
-/// mods, `groupsync::decide`). A stamp of 0 is that recipe's own change,
+/// mods, [`takes_in`]). A stamp of 0 is that recipe's own change,
 /// dated with its number. This PC's own unsent change wins (it goes out
 /// later). Never-share settings are dropped whatever the sender's Hopper
 /// thought. `name_of` names a member by id.
@@ -467,7 +476,7 @@ pub fn take(state: &mut Configs, from: &str, from_name: &str, seq: u64, at: u64,
         let mine = state.mods.get(m).map(|c| c.shared.clone());
         let unsent = mine.as_ref().is_some_and(|t| t.seq == 0 && t.by == me && !t.by.is_empty());
         let same = mine.as_ref().map_or(!tc.shared.on, |t| t.on == tc.shared.on);
-        if groupsync::decide(same, tseq, mine.as_ref().map(|t| t.seq), unsent) == Verdict::Apply {
+        if takes_in(same, tseq, mine.as_ref().map(|t| t.seq), unsent) {
             let c = state.mods.entry(m.clone()).or_default();
             c.set.clear();
             c.shared = Turn { on: tc.shared.on, seq: tseq, by: tby.clone(), name: tname.clone(), at };
@@ -488,7 +497,7 @@ pub fn take(state: &mut Configs, from: &str, from_name: &str, seq: u64, at: u64,
                 let mine = c.set.get(rel).and_then(|f| f.get(k));
                 let unsent = mine.is_some_and(|x| x.seq == 0 && x.by == me);
                 let same = mine.is_some_and(|x| x.v == v.v);
-                if groupsync::decide(same, vseq, mine.map(|x| x.seq), unsent) == Verdict::Apply {
+                if takes_in(same, vseq, mine.map(|x| x.seq), unsent) {
                     c.set.entry(rel.clone()).or_default().insert(k.clone(), Val { v: v.v.clone(), seq: vseq, by: vby, name: vname.clone(), at });
                     out.vals.push((m.clone(), rel.clone(), k.clone(), vname));
                 }
@@ -791,7 +800,7 @@ pub fn mod_files(inst: &crate::instances::Instance) -> BTreeMap<String, (String,
     let mut out = BTreeMap::new();
     for a in &inst.addons {
         if let Some(rels) = by_jar.remove(&a.file_name) {
-            out.insert(groupsync::addon_key(a), (a.name.clone(), rels));
+            out.insert(groupkey::addon_key(a), (a.name.clone(), rels));
         }
     }
     out

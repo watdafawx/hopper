@@ -18,7 +18,7 @@ use gpui_kit::component::input::InputState;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::configsync::ModCfg;
-use hopper::groupsync::addon_key;
+use hopper::groupkey::addon_key;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -41,7 +41,7 @@ pub(crate) struct SharedMod {
     /// Unique among the group's shared mods: the copy's folder and the mod.
     pub id: String,
     pub root: PathBuf,
-    /// The mod's key in the group's state (`groupsync::addon_key`).
+    /// The mod's key in the group's state (`groupkey::addon_key`).
     pub key: String,
     pub name: String,
     pub icon: Option<PathBuf>,

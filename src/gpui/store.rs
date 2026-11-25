@@ -21,17 +21,17 @@ mod config_sync;
 mod disk_sync;
 mod friends;
 mod group_needs;
-mod group_verify;
 mod only_here;
 mod node_heads;
 mod panel_events;
 mod panel_slow;
 mod server_mods;
 mod server_offer;
+mod sync_engine;
 mod sync_modes;
 // Invite and SyncStatus are for the Friends screen being rebuilt on top.
 #[allow(unused_imports)]
-pub use friends::{FollowReq, FollowTarget, GroupMerged, Invite, RecipeApplied, SyncStatus, follow_pack, redeem};
+pub use friends::{FollowReq, FollowTarget, Invite, RecipeApplied, SyncStatus, follow_pack, redeem};
 pub use only_here::{LockedChange, and_list, removal_reaches};
 pub use group_needs::Ask;
 pub use server_offer::{Before, ServerOffer};
@@ -79,8 +79,6 @@ pub enum Msg {
     /// A group copy's jars were read for required mods the pack lacks.
     GroupNeeds(Box<group_needs::Scanned>),
     /// A group copy was checked against its mods folder, or made to match.
-    GroupChecked(Box<group_verify::Checked>),
-    GroupRepaired(Box<group_verify::Repair>),
     /// A server's mods were synced while it ran (when it had started):
     /// its pages offer a restart. Then as [`Msg::ServersChanged`].
     SyncedLive(PathBuf, String),
@@ -103,8 +101,8 @@ pub enum Msg {
     RecipeFailed(PathBuf, String, anyhow::Error, u64),
     /// Other group members' changes were taken into a copy of a group
     /// pack (or that failed: the copy's local id, why, the task's id).
-    GroupMerged(Box<friends::GroupMerged>),
-    GroupMergeFailed(String, anyhow::Error, u64),
+    /// Changes from the group were applied (or put back) on a group copy.
+    SyncApplied(Box<sync_engine::SyncApplied>),
     /// Shared mod settings were read and written in a group copy, or wait
     /// for its game to close (`config_sync`).
     ConfigTicked(Box<config_sync::CfgTicked>),
@@ -703,9 +701,6 @@ pub struct Store {
     push_now: HashSet<String>,
     to_push: HashMap<String, sync_modes::ToPush>,
     to_push_busy: HashSet<String>,
-    /// Group copies (local ids) taking in the changes of the members the
-    /// player pressed "Pull from" for, by those members' ids.
-    group_pull_from: HashMap<String, Vec<String>>,
     /// The last failed send the player was told about, so a retry that
     /// fails the same way doesn't say it again.
     publish_said: Option<String>,
@@ -717,9 +712,6 @@ pub struct Store {
     stale_held_at: Option<Instant>,
     /// Group packs ("from/inst") being installed to keep a group in step.
     auto_following: HashSet<String>,
-    /// Members' changes left out here that the player was told about
-    /// ("<local>|<what it says>"), so each is said once.
-    kept_said: HashSet<String>,
     /// New group packs ("from/inst") offered this run with Get / Not now,
     /// so the offer isn't shown again while it's up or after it's closed.
     pack_offered: HashSet<String>,
@@ -737,21 +729,11 @@ pub struct Store {
     /// When each file that failed to come in was last asked a name for
     /// (`hopper::leftout::key`), so a list on screen never asks in a loop.
     left_out_asked: HashMap<String, std::time::Instant>,
-    /// Group copies (local instance ids) taking in other members' changes
-    /// now, ones whose last try failed, and ones waiting for their own
-    /// change to be sent (by the `sent_seq` they waited at).
-    group_merging: HashSet<String>,
-    group_retry: HashMap<String, hopper::recipe::Retry>,
+    /// The friends sync core's engines, one per group copy.
+    sync: sync_engine::SyncCore,
     /// Until when the GitHub rate-limit notice already told the player, so
     /// each pack and retry it holds up doesn't say it again.
     github_limit_told: Option<Instant>,
-    group_held: HashMap<String, (u64, Instant)>,
-    /// Group copies (local ids) that keep members' changes aside until this
-    /// PC's own change of the same mod is out (`PackCopy::held`): how the
-    /// pack looked (`share_sig`) and the number of its last publish when
-    /// they were last looked at. They are looked at again when either
-    /// changes, which is when such a change can go in.
-    group_held_seen: HashMap<String, (Option<u64>, u64)>,
     /// Group copies (local ids) where Pull now is checking the group or
     /// taking its changes in (the value: whether the group answered), and the
     /// last answer it gave for each, with its text, whether it reads as a
@@ -760,23 +742,11 @@ pub struct Store {
     group_pulled: HashMap<String, (String, bool, Instant)>,
     /// When this PC last heard from the group's server (unix seconds).
     mailbox_checked: Option<u64>,
-    /// `--dialog group-sync`: a made-up group is shown (the value: whether it
-    /// reaches its server), and nothing goes to the real one.
-    group_preview: Option<bool>,
     /// `--dialog sync-chip`: the hero shows these made-up sync chips (a
     /// state name, see `sync_chip::preview`) instead of the real ones.
     pub sync_chip_preview: Option<String>,
-    /// Instances moved to the group's loader while their game ran: the new
-    /// loader is installed when it closes.
-    group_loader_waiting: HashSet<PathBuf>,
     /// Required mods the group copies' packs lack (`group_needs`).
     group_needs: group_needs::State,
-    /// Group copies checked against their mods folders (`group_verify`).
-    group_verify: group_verify::State,
-    /// Group copies (local ids) whose group moved the pack to a version
-    /// this PC couldn't follow yet, with when that was found and the pack
-    /// file the instance was on then (see `friends::pack_due_ready`).
-    group_pack_due: HashMap<String, friends::PackDue>,
     /// Members' copies that came before this PC's copy of the pack was
     /// set up, by sender and pack; the newest of each.
     group_strays: HashMap<(String, String), hopper::mailbox::Event>,
@@ -1116,7 +1086,6 @@ impl Store {
             instance_homes: HashMap::new(),
             stale_held_at: None,
             auto_following: HashSet::new(),
-            kept_said: HashSet::new(),
             pack_offered: HashSet::new(),
             given_up_preview: Vec::new(),
             _mailbox_watch: None,
@@ -1125,24 +1094,16 @@ impl Store {
             follow_applying: Default::default(),
             follow_retry: Default::default(),
             left_out_asked: Default::default(),
-            group_merging: Default::default(),
-            group_retry: Default::default(),
+            sync: Default::default(),
             github_limit_told: None,
-            group_held: Default::default(),
-            group_held_seen: Default::default(),
             group_pulling: Default::default(),
             group_pulled: Default::default(),
             push_now: Default::default(),
             to_push: Default::default(),
             to_push_busy: Default::default(),
-            group_pull_from: Default::default(),
             mailbox_checked: None,
-            group_preview: None,
             sync_chip_preview: None,
-            group_loader_waiting: Default::default(),
             group_needs: Default::default(),
-            group_verify: Default::default(),
-            group_pack_due: Default::default(),
             group_strays: Default::default(),
             cfg: Default::default(),
             server_files_got: Default::default(),
@@ -1605,8 +1566,6 @@ impl Store {
                 }
             }
             Msg::GroupNeeds(s) => self.on_group_needs(*s, cx),
-            Msg::GroupChecked(c) => self.on_group_checked(*c, cx),
-            Msg::GroupRepaired(r) => self.on_group_repaired(*r, cx),
             Msg::Fetch(root, pages, by) => self.fetch_pages(&root, pages, by),
             Msg::Reidentified(root) => {
                 self.handle(Msg::InstanceChanged(root.clone()), cx);
@@ -1622,8 +1581,7 @@ impl Store {
             Msg::FollowMade(f) => self.on_follow_made(*f, cx),
             Msg::RecipeApplied(r) => self.on_recipe_applied(*r, cx),
             Msg::RecipeFailed(root, code, e, job) => self.on_recipe_failed(root, code, e, job, cx),
-            Msg::GroupMerged(m) => self.on_group_merged(*m, cx),
-            Msg::GroupMergeFailed(local, e, job) => self.on_group_merge_failed(local, e, job, cx),
+            Msg::SyncApplied(a) => self.on_sync_applied(*a, cx),
             Msg::ConfigTicked(t) => self.on_config_ticked(*t, cx),
             Msg::ConfigHeld(h) => self.on_config_held(*h, cx),
             Msg::InstanceChanged(root) if server_mods::remote(&root).is_some() => self.refetch_server_mods(&root),
@@ -1639,7 +1597,6 @@ impl Store {
                 self.note_content(&root);
                 self.read_waiting(&root);
                 self.want_group_needs(&root);
-                self.want_group_verify(&root);
                 self.tidy_left_out(&root);
             }
             Msg::Disk(changes) => self.disk_changed(changes, cx),
@@ -1677,12 +1634,6 @@ impl Store {
                     // Files the game held open during an update can go now.
                     if hopper::locked::flush(&root) > 0 {
                         self.handle(Msg::InstanceChanged(root.clone()), cx);
-                    }
-                    // The loader the group moved this instance to.
-                    if self.group_loader_waiting.remove(&root)
-                        && let Some(inst) = instances::load(&root)
-                    {
-                        self.install_loader(inst);
                     }
                     // Did it crash, and which mods does the crash name? Read
                     // in the background: crash reports and logs run to MBs.
@@ -5572,7 +5523,7 @@ fn prepare_loader(
 }
 
 pub fn loader_label(loader: &str) -> String {
-    hopper::groupsync::loader_label(loader)
+    hopper::groupkey::loader_label(loader)
 }
 
 /// "12h 5m" or "40m".

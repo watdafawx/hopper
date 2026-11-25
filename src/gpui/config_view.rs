@@ -1628,7 +1628,7 @@ impl ConfigView {
         }
         let jar = self.jar.as_deref()?.trim_end_matches(".disabled");
         let a = store.instance(&self.root)?.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(jar))?;
-        self.files.iter().any(|f| hopper::configsync::file_ok(f)).then(|| hopper::groupsync::addon_key(a))
+        self.files.iter().any(|f| hopper::configsync::file_ok(f)).then(|| hopper::groupkey::addon_key(a))
     }
 
     /// The line beside a shared setting: (text, this player's own change
