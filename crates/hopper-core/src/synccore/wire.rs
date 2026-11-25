@@ -3,6 +3,7 @@
 //! One event per sender and group, cumulative (every record some member
 //! hasn't acked), so the relay keeping only the newest event loses nothing.
 
+use super::digest::StateEntry;
 use super::model::{Change, Key, MemberId, Seen};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,7 @@ pub const MAX_PART: usize = 60 * 1024;
 /// A member's state, sent with every packet: acks, and what the pack plan
 /// and the status need to know about their PC.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MemberStatus {
     pub member: MemberId,
     pub name: String,
@@ -33,6 +35,22 @@ pub struct MemberStatus {
     pub game_running: bool,
     /// Their register hash differed: send them a checkpoint.
     pub needs_full: bool,
+    /// Hash of the mods this PC has applied ([`super::digest`]). Empty from
+    /// a Hopper that doesn't send one: nothing is compared with it.
+    pub state_hash: String,
+    /// Hash of the sender's register, so a friend can tell the two PCs hold
+    /// the same records (a difference is then no one's change in flight).
+    pub reg_hash: String,
+    /// Nothing waits to land on the sender's disk (no download, retry,
+    /// game running or review pending).
+    pub settled: bool,
+    /// The sender's state hash differs from the receiver's with the records
+    /// level and both settled: send me your list of mods.
+    pub needs_state: bool,
+    /// The sender's mods, mod by mod. Only in a packet to a friend who set
+    /// `needs_state`; a hash alone is 16 bytes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub state: Vec<StateEntry>,
 }
 
 /// One copy's part of a packet.

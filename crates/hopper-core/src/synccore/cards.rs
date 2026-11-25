@@ -9,7 +9,7 @@
 //! A mod's name is not in a record (only its key and file), so the texts here
 //! carry `{mod}` where the screen puts the mod's icon and name as a link.
 
-use super::engine::{Answer, Engine, Review};
+use super::engine::{Answer, Differs, Engine, Review};
 use super::gate::Risk;
 use super::local::{Drift, Snapshot};
 use super::model::{Change, Key, Value, Why};
@@ -26,6 +26,8 @@ pub enum What {
     TurnedOff,
     TurnedOn,
     Added,
+    /// Two PCs have it differently (a "Differs" card's row).
+    Differs,
     Other,
 }
 
@@ -38,6 +40,7 @@ impl What {
             What::TurnedOff => "turned off",
             What::TurnedOn => "turned on",
             What::Added => "added",
+            What::Differs => "differs",
             What::Other => "changed",
         }
     }
@@ -71,6 +74,9 @@ pub struct CardMod {
     /// known here.
     pub file: String,
     pub what: What,
+    /// What the grey chip says instead of `what` when set ("off here, on for
+    /// Mia").
+    pub note: String,
 }
 
 /// One button of a card.
@@ -143,6 +149,7 @@ fn rank(r: &Risk) -> u8 {
         Risk::LongAway { .. } => 3,
         Risk::NewSource => 4,
         Risk::AskFirst => 5,
+        Risk::Differs => 6,
     }
 }
 
@@ -161,6 +168,11 @@ pub fn cards(e: &Engine) -> Vec<Card> {
     let many = e.limits.many_removals;
     let mut out: Vec<(u8, u64, Card)> = Vec::new();
     for r in &reviews {
+        if let Some(d) = &r.differs {
+            let others = reviews.iter().filter(|o| o.id != r.id && rank(&o.risk) == rank(&r.risk)).count();
+            out.push((rank(&r.risk), 0, differs_card(e, r, d, others)));
+            continue;
+        }
         let changes: Vec<&Change> = r.changes.iter().filter_map(|d| e.log.changes.get(d).map(|(c, _)| c)).collect();
         let who = who_name(r);
         let who_id = r.changes.first().map(|d| d.author.clone()).unwrap_or_default();
@@ -179,6 +191,7 @@ pub fn cards(e: &Engine) -> Vec<Card> {
                     _ => String::new(),
                 },
                 what: what_of(c),
+                note: String::new(),
             })
             .collect();
         let removes = changes.iter().filter(|c| matches!(c.key, Key::Mod(_)) && c.now.takes_away(&c.was)).count();
@@ -267,6 +280,8 @@ pub fn cards(e: &Engine) -> Vec<Card> {
                 vec![btn("Allow and install", Some(Answer::Take), true), btn("Not now", None, false)],
                 None,
             ),
+            // Built by `differs_card` above; its review carries no records.
+            Risk::Differs => (String::new(), String::new(), Vec::new(), None),
             Risk::AskFirst => {
                 let n = r.changes.len();
                 let take = Btn { label: "Take them".into(), answer: Some(Answer::Take), lead: true, needs_tick: big, ticked: big.then(|| format!("Remove {}", count_mods(removes))) };
@@ -282,6 +297,91 @@ pub fn cards(e: &Engine) -> Vec<Card> {
     }
     out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     out.into_iter().map(|(_, _, c)| c).collect()
+}
+
+/// "on", "off" or "not installed": how a PC has a mod, for a sentence.
+fn state_word(v: &Value) -> &'static str {
+    match v {
+        Value::File { on: true, .. } | Value::PackDefault => "on",
+        Value::File { on: false, .. } | Value::PackOff => "off",
+        _ => "not installed",
+    }
+}
+
+/// The card for one friend whose mods differ from this PC's after the first
+/// start from each disk (no record explains it). Two answers, each a record
+/// of this player's: take the friend's mods, or keep these and let everyone
+/// follow. The answer that takes fewer mods away is the filled one; one
+/// that would take more than the usual five away needs the tick.
+fn differs_card(e: &Engine, r: &Review, d: &Differs, others: usize) -> Card {
+    let who = who_name(r);
+    let many = e.limits.many_removals;
+    // Taking the friend's mods away from this PC, and keeping these away
+    // from everyone.
+    let theirs_removes = d.rows.iter().filter(|x| x.theirs.is_away() && !x.mine.is_away()).count();
+    let mine_removes = d.rows.iter().filter(|x| x.mine.is_away() && !x.theirs.is_away()).count();
+    let mods: Vec<CardMod> = d
+        .rows
+        .iter()
+        .map(|x| {
+            let file = match (&x.theirs, &x.mine, &x.key) {
+                (Value::File { file, .. }, ..) | (_, Value::File { file, .. }, _) if !file.is_empty() => file.clone(),
+                (.., Key::Mod(id)) => id.clone(),
+                _ => String::new(),
+            };
+            let (here, there) = (state_word(&x.mine), state_word(&x.theirs));
+            let note = if here == there { format!("another file than {who}'s") } else { format!("{here} here, {there} for {who}") };
+            CardMod { key: x.key.clone(), file, what: What::Differs, note }
+        })
+        .collect();
+    let headline = match d.rows.as_slice() {
+        [x] => {
+            let (here, there) = (state_word(&x.mine), state_word(&x.theirs));
+            if here == there {
+                format!("{who} has another file of {MOD} than this PC.")
+            } else {
+                let theirs = match there {
+                    "not installed" => format!("{who} doesn't have {MOD}"),
+                    s => format!("{who} has {MOD} {s}"),
+                };
+                let mine = match here {
+                    "not installed" => "this PC doesn't have it".to_string(),
+                    s => format!("this PC has it {s}"),
+                };
+                format!("{theirs}, {mine}.")
+            }
+        }
+        rows => format!("{who} and this PC differ on {}.", count_mods(rows.len())),
+    };
+    let button = |label: String, answer: Answer, lead: bool, removes: usize| {
+        let big = removes > many;
+        let ticked = big.then(|| format!("{label}, remove {}", count_mods(removes)));
+        Btn { label, answer: Some(answer), lead, needs_tick: big, ticked }
+    };
+    let take = button(format!("Use {who}'s"), Answer::Take, theirs_removes < mine_removes, theirs_removes);
+    let keep = button("Use mine".to_string(), Answer::Keep, theirs_removes >= mine_removes, mine_removes);
+    let buttons = if take.lead { vec![take, keep] } else { vec![keep, take] };
+    let tick = match (theirs_removes > many, mine_removes > many) {
+        (false, false) => None,
+        (true, false) => Some(format!("I looked at the list. Remove all {theirs_removes} from this PC too.")),
+        (false, true) => Some(format!("I looked at the list. Remove all {mine_removes} for everyone.")),
+        (true, true) => Some(format!("I looked at the list. Remove {theirs_removes} here, or {mine_removes} for everyone.")),
+    };
+    let latest = e.members.get(&d.member).map_or(0, |m| m.seen.0.values().sum());
+    Card {
+        id: r.id,
+        risk: Risk::Differs,
+        who,
+        who_id: d.member.clone(),
+        headline,
+        stays: "These PCs started out different. Nothing changes until you answer.".to_string(),
+        mods,
+        removes: theirs_removes.max(mine_removes),
+        tick,
+        others,
+        buttons,
+        latest,
+    }
 }
 
 /// A card's button as it reads now: ticked cards say how many.

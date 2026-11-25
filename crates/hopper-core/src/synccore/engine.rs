@@ -7,6 +7,7 @@
 //! phases; their methods stay `todo!()` here.
 
 use super::apply::{ApplyReport, Outcome};
+use super::digest::{self, StateEntry};
 use super::gate::{self, GateCtx, Limits, Risk, Trust};
 use super::local::{self, Drift, Snapshot};
 use super::model::{Arrival, Change, Dot, Edit, Key, MemberId, PackMode, Seen, Value, Why};
@@ -27,6 +28,16 @@ pub struct Review {
     pub who: String,
     /// The card's sentence ("Mia removed Sodium while she was away.").
     pub says: String,
+    /// Set for [`Risk::Differs`]: the mods this PC and a friend have
+    /// differently. No record is held for such a card (`changes` is empty).
+    pub differs: Option<Differs>,
+}
+
+/// What a "Differs" card is about: one friend and the mods that differ.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Differs {
+    pub member: MemberId,
+    pub rows: Vec<digest::Row>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +112,12 @@ pub struct Engine {
     pub blocked: BTreeMap<Key, Dot>,
     /// What was posted to whom (the wire outbox, `outbox` / `sent`).
     pub posting: Posting,
+    /// Mods this PC keeps only here ("Only on this PC"): never compared
+    /// with a friend's. Set by the app on each tick, so not saved.
+    pub kept_here: BTreeSet<Key>,
+    /// Each friend's list of mods, with the state hash it was sent for. Kept
+    /// apart from `members` so a status without the list doesn't drop it.
+    pub states: BTreeMap<MemberId, (String, Vec<StateEntry>)>,
 }
 
 /// What an event to one member said, to post again only on a difference.
@@ -110,6 +127,9 @@ pub struct Posted {
     pub seen: Seen,
     pub missing: Vec<Key>,
     pub needs_full: bool,
+    pub needs_state: bool,
+    /// The state hash of the list sent (empty: none went).
+    pub listed: String,
     /// Copies besides the engine's own.
     pub extra_copies: usize,
 }
@@ -257,7 +277,97 @@ impl Engine {
         let mut status = self.my_status();
         status.missing = self.missing(disk);
         status.needs_full = self.needs_full_from(to);
+        status.needs_state = self.asks_state(to);
+        // The list of mods goes only to a friend who asked for it.
+        if self.members.get(to).is_some_and(|m| m.needs_state) {
+            status.state = digest::entries(&self.applied, &self.kept_here);
+        }
         status
+    }
+
+    /// Nothing waits to land on this PC's disk: the register's values are
+    /// applied (a step in a download, a back-off, a running game or a held
+    /// record all count as waiting). Mods kept only here don't count.
+    pub fn settled(&self) -> bool {
+        let j = self.judged();
+        let holding = j.regs.iter().any(|(key, reg)| {
+            j.held.contains_key(&reg.winner.dot)
+                && !self.kept_here.contains(key)
+                && self.applied.get(key).cloned().unwrap_or_default() != reg.winner.now
+        });
+        !holding && self.lands().iter().all(|s| self.kept_here.contains(&s.key))
+    }
+
+    /// The pack version this PC has applied.
+    fn pack_text(&self) -> String {
+        match self.applied.get(&Key::Pack) {
+            Some(Value::Text(t)) => t.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// Whether `m`'s mods may be compared with this PC's: the same records
+    /// (equal register hashes, so nothing of anyone's is in flight), both
+    /// landed everything (so no download, back-off, running game or held
+    /// record explains it), the same pack version, a Hopper that sends the
+    /// digest, a friend whose changes count, and a different state hash.
+    fn comparable(&self, m: &MemberStatus, mine: &str, hash: &str, settled: bool) -> bool {
+        m.member != self.me
+            && !m.state_hash.is_empty()
+            && !m.reg_hash.is_empty()
+            && !self.outdated.contains(&m.member)
+            && self.trust.get(&m.member) != Some(&Trust::Ignore)
+            && m.settled
+            && settled
+            && m.reg_hash == hash
+            && m.pack == self.pack_text()
+            && m.state_hash != mine
+    }
+
+    /// Whether this PC needs `member`'s list of mods: they are comparable
+    /// and this PC doesn't hold the list for their current hash yet.
+    fn asks_state(&self, member: &str) -> bool {
+        let Some(m) = self.members.get(member) else { return false };
+        let mine = digest::hash(&digest::entries(&self.applied, &self.kept_here));
+        self.comparable(m, &mine, &self.hash(), self.settled())
+            && self.states.get(member).is_none_or(|(h, _)| *h != m.state_hash)
+    }
+
+    /// The "Differs" cards: one per friend whose mods differ from this
+    /// PC's with nothing in flight and nothing unlanded on either side. A
+    /// mod any record is about is never in them: its value is the group's.
+    fn differ_reviews(&self) -> Vec<Review> {
+        if self.members.is_empty() {
+            return Vec::new();
+        }
+        let mine = digest::entries(&self.applied, &self.kept_here);
+        let (mine_hash, hash, settled) = (digest::hash(&mine), self.hash(), self.settled());
+        let explained: BTreeSet<Key> = self.log.changes.values().map(|(c, _)| c.key.clone()).collect();
+        let mut out = Vec::new();
+        for (id, m) in &self.members {
+            if !self.comparable(m, &mine_hash, &hash, settled) {
+                continue;
+            }
+            let Some((h, list)) = self.states.get(id) else { continue };
+            if *h != m.state_hash {
+                continue;
+            }
+            let rows = digest::rows(&mine, list, &explained);
+            if rows.is_empty() {
+                continue;
+            }
+            let who = if m.name.trim().is_empty() { "A friend".to_string() } else { m.name.clone() };
+            out.push(Review {
+                id: card_id("differs", id, ""),
+                risk: Risk::Differs,
+                changes: Vec::new(),
+                keys: rows.iter().map(|r| r.key.clone()).collect(),
+                says: format!("{who}'s mods and this PC's differ on {}.", plural(rows.len(), "mod", "mods")),
+                who,
+                differs: Some(Differs { member: id.clone(), rows }),
+            });
+        }
+        out
     }
 
     /// A person joined the group: every packet to them carries a checkpoint
@@ -304,6 +414,8 @@ impl Engine {
                 seen: status.seen.clone(),
                 missing: status.missing.clone(),
                 needs_full: status.needs_full,
+                needs_state: status.needs_state,
+                listed: if status.state.is_empty() { String::new() } else { status.state_hash.clone() },
                 extra_copies,
             };
             let last = self.posting.last.get(r).cloned().unwrap_or_default();
@@ -311,6 +423,8 @@ impl Engine {
             let same_news = posted.seen == last.seen
                 && posted.missing == last.missing
                 && posted.needs_full == last.needs_full
+                && posted.needs_state == last.needs_state
+                && posted.listed == last.listed
                 && posted.extra_copies == last.extra_copies;
             if !new_records && !ask_now && same_news && !status_changed {
                 continue;
@@ -369,6 +483,13 @@ impl Engine {
         status: MemberStatus,
         arrival: Arrival,
     ) -> Received {
+        let mut status = status;
+        // Their list of mods is kept for the hash it came with; the status
+        // that is saved and compared stays small.
+        let list = std::mem::take(&mut status.state);
+        if !list.is_empty() && !status.state_hash.is_empty() {
+            self.states.insert(from.to_string(), (status.state_hash.clone(), list));
+        }
         let before: BTreeSet<u64> = self.reviews().iter().map(|r| r.id).collect();
         let mut got = Received::default();
         for c in changes {
@@ -411,6 +532,7 @@ impl Engine {
                 keys: vec![key.clone()],
                 who: other.name.clone(),
                 says: clash_says(reg, other),
+                differs: None,
             });
         }
         let mut groups: BTreeMap<(String, String, u8), Vec<(&Change, &Risk)>> = BTreeMap::new();
@@ -433,8 +555,10 @@ impl Engine {
                 changes: items.iter().map(|(c, _)| c.dot.clone()).collect(),
                 keys,
                 who,
+                differs: None,
             });
         }
+        out.extend(self.differ_reviews());
         out
     }
 
@@ -459,7 +583,18 @@ impl Engine {
         let batch = format!("{}-answer-{}", self.me, self.next_n());
         let mut edits = Vec::new();
         for c in picked {
-            if c.risk == Risk::Clash {
+            if let Some(d) = &c.differs {
+                // Each differing mod becomes this player's record: the
+                // friend's value (applied here by the normal plan) or this
+                // PC's own (everyone else follows it).
+                for row in &d.rows {
+                    let now = match answer {
+                        Answer::Take => row.theirs.clone(),
+                        Answer::Keep => row.mine.clone(),
+                    };
+                    edits.push((row.key.clone(), now, c.id));
+                }
+            } else if c.risk == Risk::Clash {
                 let reg = &regs[&c.keys[0]];
                 let now = match answer {
                     Answer::Take => clash_other(reg).now.clone(),
@@ -767,6 +902,9 @@ impl Engine {
                 .map(|(k, _)| k.clone())
                 .collect(),
             game_running: self.game_running,
+            state_hash: digest::hash(&digest::entries(&self.applied, &self.kept_here)),
+            reg_hash: self.hash(),
+            settled: self.settled(),
             ..MemberStatus::default()
         }
     }
@@ -960,7 +1098,7 @@ fn card_says(risk: &Risk, who: &str, n: usize) -> String {
             "{who} made {}. You asked to be asked first.",
             plural(n, "change", "changes")
         ),
-        Risk::Clash => String::new(),
+        Risk::Clash | Risk::Differs => String::new(),
     }
 }
 
@@ -988,6 +1126,7 @@ fn risk_rank(r: &Risk) -> u8 {
         Risk::OtherPack => 4,
         Risk::NewSource => 5,
         Risk::AskFirst => 6,
+        Risk::Differs => 7,
     }
 }
 

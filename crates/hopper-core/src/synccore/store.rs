@@ -7,6 +7,7 @@
 //! it is refilled from the next checkpoint a friend sends. The old group
 //! sync's saved state is never read or migrated.
 
+use super::digest::StateEntry;
 use super::engine::Engine;
 use super::gate::{Limits, Trust};
 use super::model::{Arrival, Change, Dot, Key, MemberId, Value};
@@ -38,6 +39,10 @@ struct Saved {
     told: Vec<Dot>,
     contact: u64,
     outdated: Vec<MemberId>,
+    /// Each friend's list of mods with the hash it was sent for (a file
+    /// from before this field has none).
+    #[serde(default)]
+    states: Vec<(MemberId, String, Vec<StateEntry>)>,
 }
 
 /// The engine as bytes.
@@ -57,6 +62,7 @@ pub fn encode(e: &Engine) -> Vec<u8> {
         told: e.told.iter().cloned().collect(),
         contact: e.contact,
         outdated: e.outdated.iter().cloned().collect(),
+        states: e.states.iter().map(|(m, (h, l))| (m.clone(), h.clone(), l.clone())).collect(),
     };
     serde_json::to_vec(&saved).expect("saved state is plain data")
 }
@@ -82,7 +88,9 @@ pub fn decode(bytes: &[u8], copy: &str) -> Option<Engine> {
         told: s.told.into_iter().collect(),
         contact: s.contact,
         outdated: s.outdated.into_iter().collect(),
+        states: s.states.into_iter().map(|(m, h, l)| (m, (h, l))).collect(),
         // Set by the app on each start, so not saved.
+        kept_here: BTreeSet::new(),
         game_running: false,
         edited_configs: Vec::new(),
         retry: BTreeMap::new(),

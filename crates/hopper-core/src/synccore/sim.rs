@@ -428,7 +428,9 @@ impl Group {
         self.pc_mut(who).push_pending = true;
     }
     pub fn only_here(&mut self, who: &str, key: &Key) {
-        self.pc_mut(who).only_here.insert(key.clone());
+        let pc = self.pc_mut(who);
+        pc.only_here.insert(key.clone());
+        pc.engine.kept_here.insert(key.clone());
     }
     pub fn allow_source(&mut self, who: &str, key: &Key) {
         self.pc_mut(who).engine.allow_source(key);
@@ -503,6 +505,15 @@ impl Group {
 
     // ── the PC ───────────────────────────────────────────────────────
 
+    /// This PC's first start after an upgrade: it began from its own disk
+    /// with an empty log, and `key` is `now` there (on disk and as what was
+    /// applied), whatever the friends have. No record, nothing posted.
+    pub fn diverge(&mut self, who: &str, key: Key, now: Value) {
+        let pc = self.pc_mut(who);
+        pc.put_files(&key, &now);
+        pc.disk.insert(key.clone(), now.clone());
+        pc.engine.applied.insert(key, now);
+    }
     /// A change on disk Hopper didn't make (Explorer, another launcher).
     pub fn outside(&mut self, who: &str, key: Key, now: Value) {
         self.pc_mut(who).disk.insert(key, now);
@@ -650,6 +661,10 @@ impl Group {
     }
     pub fn reviews(&self, who: &str) -> Vec<Review> {
         self.pc(who).engine.reviews()
+    }
+    /// The engine of `who`, to read (the cards, the members' statuses).
+    pub fn engine(&self, who: &str) -> &Engine {
+        &self.pc(who).engine
     }
     /// Sentences this PC was told (notes, summaries).
     pub fn notes(&self, who: &str) -> Vec<String> {

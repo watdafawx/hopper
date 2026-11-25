@@ -35,7 +35,7 @@ pub struct Drift {
 
 /// Whether a scanned value is the one that was applied. A pack mod is
 /// scanned as the file it is, so the pack's own states match their files.
-fn same(expected: &Value, found: &Value) -> bool {
+pub(crate) fn same(expected: &Value, found: &Value) -> bool {
     match (expected, found) {
         (a, b) if a == b => true,
         (Value::PackDefault, Value::File { on: true, .. }) => true,

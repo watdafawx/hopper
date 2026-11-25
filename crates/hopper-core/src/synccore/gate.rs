@@ -49,6 +49,12 @@ pub enum Risk {
     NewSource,
     /// The member is set to "Ask me first".
     AskFirst,
+    /// Not a held record: this PC and a friend's have the same records and
+    /// have both landed everything, yet their mods differ (the first start
+    /// after an upgrade began from each disk with an empty log). The gate
+    /// never returns it; `Engine::reviews` raises it from the friends'
+    /// state digests.
+    Differs,
 }
 
 /// What the gate knows besides the record.
