@@ -43,7 +43,12 @@ impl LinkRef {
         LinkRef {
             kind: src.kind,
             url: src.url.clone(),
-            seen: src.seen.clone(),
+            // A plain link's `seen` is the validator the server sent when this PC
+            // downloaded the file (an ETag), so it differs from PC to PC for the
+            // same file. The checksum names the release instead; with it in the id
+            // a PC that just installed a friend's file would read it back as a
+            // change of its own.
+            seen: if src.kind == Kind::Url { String::new() } else { src.seen.clone() },
             file_name: file_name.to_string(),
             download: download_of(src, file_name),
             sha256: src.sha256.clone(),
@@ -121,6 +126,17 @@ mod tests {
             publisher: "Owner/Repo".into(),
             ..ModSource::default()
         }
+    }
+
+    #[test]
+    fn a_plain_links_etag_is_not_part_of_its_id() {
+        let mk = |seen: &str| ModSource { kind: Kind::Url, url: "http://h/x.jar".into(), seen: seen.into(), sha256: "cd".repeat(32), ..ModSource::default() };
+        assert_eq!(LinkRef::of(&mk("\"etag-a\""), "x.jar").id(), LinkRef::of(&mk("\"etag-b\""), "x.jar").id());
+        // GitHub's tag pins the release, so it stays.
+        let (mut a, mut b) = (github(), github());
+        b.seen = "v1.3".into();
+        a.seen = "v1.2".into();
+        assert_ne!(LinkRef::of(&a, "t.jar").id(), LinkRef::of(&b, "t.jar").id());
     }
 
     #[test]
