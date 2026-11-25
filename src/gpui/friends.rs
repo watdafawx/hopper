@@ -3311,8 +3311,27 @@ pub(crate) fn face(store: &Entity<Store>, mc_id: &str, name: &str, size: Rems, c
             .into_any_element();
     }
     let saved = hopper::accounts::Saved { id: mc_id.to_string(), name: name.to_string(), ..Default::default() };
+    // Last period's head (still on disk) shows while the current one loads,
+    // so a head never flashes empty.
     let url = saved.fallback_avatar();
-    store.update(cx, |s, _| s.want_image_now(&url));
+    let before = hopper::imgcache::player_head_before(mc_id, 32);
+    store.update(cx, |s, _| {
+        s.want_image_now(&url);
+        s.want_image_now(&before);
+    });
+    if store.read(cx).image(&url).is_none() {
+        if let Some(p) = store.read(cx).image(&before) {
+            let theme = cx.theme();
+            return div()
+                .size(size)
+                .flex_none()
+                .rounded(theme.radius)
+                .overflow_hidden()
+                .bg(theme.muted)
+                .child(img(p.to_path_buf()).size_full().rounded(theme.radius))
+                .into_any_element();
+        }
+    }
     div().flex_none().child(crate::accounts::head(store.read(cx), &saved, size, cx)).into_any_element()
 }
 

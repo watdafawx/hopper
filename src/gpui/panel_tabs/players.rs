@@ -95,6 +95,10 @@ fn head_url(name: &str) -> String {
     hopper::imgcache::player_head(&q(name), 44)
 }
 
+fn head_before(name: &str) -> String {
+    hopper::imgcache::player_head_before(&q(name), 44)
+}
+
 pub struct PlayersTab {
     store: Entity<Store>,
     target: Option<Target>,
@@ -178,6 +182,10 @@ impl PlayersTab {
                     this.store.update(cx, |s, _| {
                         for u in &urls {
                             s.want_image(u);
+                        }
+                        // Last period's head shows while this one loads.
+                        for n in d.ops.iter().chain(&d.whitelist).chain(&d.banned).map(|p| &p.name).chain(d.online.iter().map(|p| &p.name)) {
+                            s.want_image(&head_before(n));
                         }
                     });
                     this.data = Load::Ready(d);
@@ -271,7 +279,7 @@ impl Render for PlayersTab {
 
         let face = |name: &str| -> AnyElement {
             let frame = div().size(rems(1.5)).flex_none().rounded(crate::theme::radius_sm()).overflow_hidden().bg(theme.muted);
-            match store.image(&head_url(name)) {
+            match store.image(&head_url(name)).or_else(|| store.image(&head_before(name))) {
                 Some(p) => frame.child(img(p.to_path_buf()).size_full().rounded(crate::theme::radius_sm())).into_any_element(),
                 None => frame.into_any_element(),
             }

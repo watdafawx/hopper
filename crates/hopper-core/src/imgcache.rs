@@ -7,11 +7,35 @@
 use std::path::{Path, PathBuf};
 
 /// A player's head from the public skin service. The cache keeps a picture
-/// by its address for good, so the address carries the day: a new skin shows
-/// within a day, and the older head stays on disk unused until pruned.
+/// by its address for good, so the address carries a 6-hour period (the
+/// service itself keeps a head that long): a new skin shows within about 6
+/// hours. [`player_head_before`] is the previous period's, still on disk to
+/// show while the new one loads.
 pub fn player_head(who: &str, size: u32) -> String {
-    let day = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400);
-    format!("https://mc-heads.net/avatar/{who}/{size}?d={day}")
+    head_in(who, size, 0)
+}
+
+/// The head [`player_head`] gave 6 hours ago.
+pub fn player_head_before(who: &str, size: u32) -> String {
+    head_in(who, size, 1)
+}
+
+fn head_in(who: &str, size: u32, back: u64) -> String {
+    let period = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 21_600);
+    format!("https://mc-heads.net/avatar/{who}/{size}?d={}", period.saturating_sub(back))
+}
+
+#[cfg(test)]
+mod head_tests {
+    use super::*;
+
+    #[test]
+    fn a_head_address_changes_each_period_and_keeps_the_player() {
+        let now = player_head("abc", 32);
+        let before = player_head_before("abc", 32);
+        assert_ne!(now, before);
+        assert!(now.starts_with("https://mc-heads.net/avatar/abc/32?d="));
+    }
 }
 
 fn dir() -> Option<PathBuf> {
