@@ -169,7 +169,15 @@ pub fn cards(e: &Engine) -> Vec<Card> {
             .filter(|c| matches!(c.key, Key::Mod(_)))
             .map(|c| CardMod {
                 key: c.key.clone(),
-                file: if file_of(&c.now).is_empty() { file_of(&c.was).to_string() } else { file_of(&c.now).to_string() },
+                // A pack's own mod turned off or removed has no file in its record
+                // (PackOff / PackRemoved), so name it by its key: the app finds the
+                // mod from that id, and the card never shows a blank row.
+                file: match (file_of(&c.now), file_of(&c.was), &c.key) {
+                    (f, _, _) if !f.is_empty() => f.to_string(),
+                    (_, f, _) if !f.is_empty() => f.to_string(),
+                    (_, _, Key::Mod(id)) => id.clone(),
+                    _ => String::new(),
+                },
                 what: what_of(c),
             })
             .collect();
@@ -521,6 +529,16 @@ mod tests {
         // The safe answer is the filled one.
         assert!(c.buttons[0].lead && !take.lead);
         assert_eq!(c.buttons[0].label, "Keep them");
+    }
+
+    #[test]
+    fn a_pack_mod_turned_off_is_named_by_its_key() {
+        // PackOff carries no file, so the card row falls back to the key id.
+        let ch: Vec<Change> = (1..=7).map(|i| change("noah", i, &format!("cf:{i}"), Value::PackDefault, Value::PackOff, "b", 100)).collect();
+        let e = engine_with(ch, 200);
+        let c = &cards(&e)[0];
+        assert_eq!(c.mods.len(), 7);
+        assert!(c.mods.iter().all(|m| m.file.starts_with("cf:")), "{:?}", c.mods);
     }
 
     #[test]
