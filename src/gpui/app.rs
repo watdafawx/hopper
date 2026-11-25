@@ -797,12 +797,13 @@ impl AppView {
                         None => this.store.update(cx, |s, cx| s.preview_given_up(root, cx)),
                     }
                 }
-                // A made-up friends group, with the first two instances as its
-                // packs: `--dialog group-sync --state left-out --page friends`.
-                "group-sync" => this.store.update(cx, |s, cx| s.preview_group_sync(&state, cx)),
                 // Made-up sync chips in the hero (group, server, both):
                 // `--dialog sync-chip --state s-differ` or `--state cycle`.
                 "sync-chip" => this.store.update(cx, |s, cx| s.preview_sync_chip(&state, cx)),
+                // The back-from-away dialog and the pack update's friends block,
+                // with made-up data (the real ones need a live group).
+                "put-back" => crate::sync_preview::open_put_back(window, cx),
+                "pack-friends" => crate::sync_preview::open_pack_friends(window, cx),
                 // After the server comparison has had time to finish.
                 "side" => cx
                     .spawn_in(window, async move |this, cx| {
@@ -1330,12 +1331,6 @@ impl AppView {
         let theme = cx.theme();
         let (muted, hover, radius) = (theme.muted_foreground, theme.list_hover, theme.radius);
         let state = self.store.read(cx).self_update().cloned();
-        // Only show the version chip in the title bar when an update is
-        // available, downloading or ready; otherwise the version lives in
-        // the ? help menu so the bar stays quiet.
-        if !matches!(state, Some(SelfUpdate::Available(_) | SelfUpdate::Installing(_) | SelfUpdate::Ready(_))) {
-            return div().into_any_element();
-        }
         // (text, colour, icon, tooltip); no colour is the plain chip.
         let (text, color, icon, tip): (String, Option<Hsla>, Option<IconName>, String) = match &state {
             Some(SelfUpdate::Available(r)) => (
@@ -1724,14 +1719,12 @@ impl AppView {
                                 // Help and about: report a problem, GitHub, Hopper versions.
                                 .child({
                                     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-                                    let store = self.store.clone();
                                     Button::new("help-menu")
                                         .ghost()
                                         .small()
                                         .icon(IconName::CircleQuestionMark)
-                                        .when(!dialog, |b| b.tooltip("Help, GitHub and Hopper version"))
+                                        .when(!dialog, |b| b.tooltip("Report a problem or open Hopper on GitHub"))
                                         .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-                                            let store = store.clone();
                                             menu.item(
                                                 PopupMenuItem::new("Report a problem")
                                                     .icon(IconName::Bug)
@@ -1744,17 +1737,6 @@ impl AppView {
                                                 PopupMenuItem::new("Hopper on GitHub")
                                                     .icon(IconName::Github)
                                                     .on_click(|_, _, cx| cx.open_url(hopper::report::REPO_URL)),
-                                            )
-                                            .separator()
-                                            .item(
-                                                PopupMenuItem::new(format!(
-                                                    "Hopper v{} — versions & updates",
-                                                    hopper::selfupdate::CURRENT
-                                                ))
-                                                .icon(IconName::Tag)
-                                                .on_click(move |_, window, cx| {
-                                                    crate::hopper_versions::open(store.clone(), window, cx)
-                                                }),
                                             )
                                         })
                                 }),

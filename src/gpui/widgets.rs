@@ -1662,6 +1662,25 @@ pub trait Clickable: InteractiveElement + Styled + Sized {
 
 impl<E: InteractiveElement + Styled> Clickable for E {}
 
+/// A person with no face to show: their initial on a tinted tile (`color`'s
+/// tint). History's rows and the sync cards use it.
+pub fn letter_tile(label: &str, color: Hsla, size: Rems, cx: &App) -> AnyElement {
+    let initial: String = label.chars().find(|c| c.is_alphanumeric()).into_iter().flat_map(char::to_uppercase).collect();
+    div()
+        .flex_none()
+        .size(size)
+        .rounded(cx.theme().radius)
+        .bg(color.opacity(alpha::TINT * 2.))
+        .text_color(crate::theme::ink(color))
+        .text_size(rems(size.0 * 0.5))
+        .font_semibold()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(initial)
+        .into_any_element()
+}
+
 /// A chip: `color` text (darkened on light themes, see `theme::chip_ink`) on a
 /// faint fill of it, no border, the small radius. gpui_kit's xsmall tag size; `.small()` still works.
 pub fn chip(color: Hsla) -> gpui_kit::component::tag::Tag {

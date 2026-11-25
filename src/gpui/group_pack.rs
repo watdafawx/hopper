@@ -1,24 +1,14 @@
-//! The group chip of the instance hero for a pack kept in step with a friends group:
-//! whether this PC's copy has what the group has, what it waits for if not,
-//! and "Pull now" (`hopper::groupstatus`, `design/group-sync-status.md`).
-//!
-//! The updates themselves run by themselves when they can
-//! (`groupsync::merge`). The notice's main button is for what only the
-//! player can do: open the update dialog for a pack version (the game
-//! closed, settings both sides changed, or a failed try), or say yes to
-//! mods from links this PC doesn't trust yet. "Pull now" is always there:
-//! it checks the group and takes everything in at once.
-//!
-//! With the sync choices of `hopper::syncmode` it also carries "Pull from
-//! Mia" (one button per member whose changes wait for the player) and
-//! "Push 3 changes" (this PC's own, held back until pressed).
+//! The group chip of the instance hero for a pack kept in step with a friends
+//! group: whether this PC's copy has what the group has, and "Pull now"
+//! (`hopper::groupstatus`, `hopper::syncchip`). The changes themselves are
+//! taken in by the sync core (`hopper::synccore`); the notice here is only
+//! for a pack that lacks a mod another one needs.
 
-use crate::incoming_sources;
 use crate::notice_slot::{self, Notice, Tier};
 use crate::store::Store;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{Disableable as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use hopper::groupstatus::Status;
 use std::path::Path;
@@ -44,126 +34,6 @@ pub fn look(status: &Status) -> (IconName, Tier) {
     }
 }
 
-/// What a row of the check says under the mod's name, in plain words.
-pub fn why_says(r: &hopper::groupverify::Row) -> String {
-    use hopper::groupverify::Why;
-    let base = match r.why {
-        Why::Missing => "The group has it. You don't.".to_string(),
-        Why::Different if r.older => "Yours is older than the group's.".to_string(),
-        Why::Different => "Yours is another version than the group's.".to_string(),
-        Why::OffHere => "Turned off here, on in the group.".to_string(),
-        Why::OnHere => "Turned on here, off in the group.".to_string(),
-        Why::LeftOut => "From a link you haven't allowed yet.".to_string(),
-        Why::OnlyHere => "Kept only on this PC. Hopper leaves it as it is.".to_string(),
-        Why::Locked => "You locked its version. Hopper leaves it as it is.".to_string(),
-    };
-    if r.why.repairable() && !r.by_name.is_empty() { format!("{base} Last changed by {}.", r.by_name) } else { base }
-}
-
-/// The list under the strip when the copy differs from the group: one row
-/// per mod with why, and its own button. Mods the player keeps come last
-/// and have none.
-fn verify_list(store: &Entity<Store>, root: &Path, v: &hopper::groupverify::Verified, busy: bool, cx: &mut App) -> AnyElement {
-    use hopper::groupverify::Why;
-    let icons: Vec<String> = v.rows.iter().filter_map(|r| store.read(cx).verify_name(&r.key).map(|n| n.2.clone())).filter(|i| !i.is_empty()).collect();
-    store.update(cx, |s, _| icons.iter().for_each(|i| s.want_image(i)));
-    let s = store.read(cx);
-    let mut list = v_flex().w_full().gap_0p5();
-    for (ix, r) in v.rows.iter().enumerate() {
-        let (name, project, icon) = s.verify_name(&r.key).cloned().unwrap_or((r.name.clone(), r.project, String::new()));
-        let name = if r.name.is_empty() { name } else { r.name.clone() };
-        let name = if name.is_empty() { "A mod".to_string() } else { name };
-        let project = if r.project != 0 { r.project } else { project };
-        let (st, rt) = (store.clone(), root.to_path_buf());
-        let link = crate::widgets::mod_link(
-            SharedString::from(format!("verify-mod:{ix}")),
-            name,
-            s.image(&icon),
-            project,
-            move |project, _, cx| {
-                let root = rt.clone();
-                st.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Peek { root, project }));
-            },
-            cx,
-        )
-        .font_semibold()
-        .into_any_element();
-        let button = r.fixable().then(|| {
-            let (st, rt, key, pin) = (store.clone(), root.to_path_buf(), r.key.clone(), r.pin.clone());
-            let action = r.why.action();
-            let left_out = r.why == Why::LeftOut;
-            let b = Button::new(("verify-fix", ix)).small().outline().label(action).disabled(busy).tooltip(match r.why {
-                Why::LeftOut => "Say yes to this source, then get the mod",
-                Why::Missing => "Gets this mod, as the group has it",
-                _ => "Makes this mod as the group has it",
-            });
-            b.on_click(move |_, window, cx| {
-                let (st, rt, key) = (st.clone(), rt.clone(), key.clone());
-                match pin.clone() {
-                    Some(pin) if left_out => {
-                        let (st2, rt2, key2) = (st.clone(), rt.clone(), key.clone());
-                        incoming_sources::gate(st, vec![pin.clone()], window, cx, move |leave_out, _, cx| {
-                            let yes: Vec<_> = if leave_out.contains(&pin) { Vec::new() } else { vec![pin.clone()] };
-                            if !yes.is_empty() {
-                                st2.update(cx, |s, cx| s.repair_group(&rt2, Some(vec![key2.clone()]), yes, cx));
-                            }
-                        });
-                    }
-                    _ => st.update(cx, |s, cx| s.repair_group(&rt, Some(vec![key]), Vec::new(), cx)),
-                }
-            })
-        });
-        list = list.child(
-            h_flex()
-                .id(("verify-row", ix))
-                .w_full()
-                .gap_2()
-                .px_1()
-                .py_1()
-                .items_center()
-                .rounded(cx.theme().radius)
-                .hover(|d| crate::widgets::row_hover(d, cx))
-                .child(h_flex().flex_none().max_w(rems(16.)).overflow_hidden().text_sm().child(link))
-                .child(div().flex_1().min_w_0().truncate().text_sm().text_color(cx.theme().muted_foreground).child(why_says(r)))
-                .children(button),
-        );
-    }
-    list.into_any_element()
-}
-
-/// "Pull from Mia": takes in that member's waiting changes. Just the name
-/// when the page is narrow.
-pub fn pull_from_button(store: &Entity<Store>, root: &Path, who: &hopper::syncmode::Parked, pulling: bool, fit: notice_slot::Fit, ix: usize) -> Button {
-    let (store, root, id) = (store.clone(), root.to_path_buf(), who.id.clone());
-    // Two people's buttons must never both read "Pull".
-    let label = if fit.narrow { who.name.clone() } else { format!("Pull from {}", who.name) };
-    notice_slot::main_button(Button::new(("group-pull-from", ix)).small(), fit)
-        .icon(IconName::Download)
-        .label(label)
-        .disabled(pulling)
-        .tooltip(format!("Takes in {}'s changes now. Other people's keep waiting", who.name))
-        .on_click(move |_, _, cx| store.update(cx, |s, cx| s.pull_group_from(&root, &id, cx)))
-}
-
-/// "Push 3 changes": sends the changes held back at `roots`. Just "Push"
-/// when narrow.
-pub fn push_button(store: &Entity<Store>, roots: Vec<std::path::PathBuf>, changes: usize, pushing: bool, fit: notice_slot::Fit, id: &'static str) -> Button {
-    let store = store.clone();
-    let label = if pushing {
-        "Pushing...".to_string()
-    } else if fit.narrow {
-        "Push".to_string()
-    } else {
-        hopper::syncmode::push_label(changes)
-    };
-    notice_slot::main_button(Button::new(id).small(), fit)
-        .icon(IconName::Upload)
-        .label(label)
-        .disabled(pushing)
-        .tooltip("Sends your changes to the people you share with")
-        .on_click(move |_, _, cx| store.update(cx, |s, cx| s.push_changes(&roots, cx)))
-}
-
 /// The "Pull now" button; icon only when the page is narrow. In step there
 /// is nothing to pull, so it reads "Check now".
 pub fn pull_button(store: &Entity<Store>, root: &Path, pulling: bool, in_step: bool, narrow: bool, id: &'static str) -> Button {
@@ -181,9 +51,9 @@ pub fn pull_button(store: &Entity<Store>, root: &Path, pulling: bool, in_step: b
 /// The sync chip of the hero for the group copy at `root`: how it stands,
 /// and in its popover what that means and what can be done. `None` when
 /// the instance isn't a group copy. The chip is the whole story for a
-/// state that needs nothing (busy, behind, offline, failed); a state that
-/// needs the player (a choice, mods to get, changes to pull or push) puts
-/// that notice ([`group_status_bar`]) in the popover, with its buttons.
+/// state that needs nothing (busy, behind, offline, failed); the one state
+/// the sync core doesn't say, a required mod the pack lacks, puts a notice
+/// ([`group_status_bar`]) in the popover, with its button.
 pub fn group_chip(store: &Entity<Store>, root: &Path, cx: &mut App) -> Option<crate::sync_chip::Chip> {
     use crate::sync_chip::{Action, Chip, Section};
     let s = store.read(cx);
@@ -192,13 +62,18 @@ pub fn group_chip(store: &Entity<Store>, root: &Path, cx: &mut App) -> Option<cr
     if matches!(status, Status::ByHand { .. }) {
         return None;
     }
+    // A copy kept by the sync core says its state with the seven of
+    // `hopper::syncchip::group_look`.
+    if !matches!(status, Status::NeedsMod { .. })
+        && let Some(state) = s.sync_state(root, s.sync_connected())
+    {
+        return Some(sync_group_chip(store, root, state, cx));
+    }
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let pulling = s.group_pulling(root) || s.group_repairing(root);
+    let pulling = s.group_pulling(root);
     let pulled = s.group_pulled(root).map(|(t, bad)| (t.to_string(), bad));
     let pulled_bad = pulled.as_ref().is_some_and(|(_, bad)| *bad);
-    let left_out = !s.left_out_pins(root).is_empty();
-    let pushing = s.pushing_at(root);
-    let look = hopper::syncchip::group_look(&status, pulling, pulled_bad, left_out);
+    let look = hopper::syncchip::status_look(&status, pulling, pulled_bad, false);
     if look.strip
         && let Some(notice) = group_status_bar(store, root, cx)
     {
@@ -226,46 +101,201 @@ pub fn group_chip(store: &Entity<Store>, root: &Path, cx: &mut App) -> Option<cr
         (_, Some((t, true))) => ("Couldn't take the changes in".to_string(), t.clone()),
         _ => (status.title(), status.detail(now)),
     };
-    let progress = None;
-    let mut actions: Vec<Action> = Vec::new();
-    fn act(actions: &mut Vec<Action>, label: String, icon: IconName, primary: bool, disabled: bool, run: crate::sync_chip::Run) {
-        actions.push(Action { label: label.into(), icon: Some(icon), primary, disabled, run });
-    }
-    let (st, rt) = (store.clone(), root.to_path_buf());
-    match &status {
-        Status::Parked { from, .. } => {
-            for (ix, who) in from.iter().take(3).enumerate() {
-                let (st, rt, id) = (st.clone(), rt.clone(), who.id.clone());
-                act(&mut actions, format!("Pull from {}", who.name), IconName::Download, ix == 0, pulling, Rc::new(move |_, cx| st.update(cx, |s, cx| s.pull_group_from(&rt, &id, cx))));
-            }
-        }
-        Status::ToPush { changes, .. } => {
-            let (st, rt, n) = (st.clone(), rt.clone(), *changes);
-            act(&mut actions, hopper::syncmode::push_label(n), IconName::Upload, true, pushing, Rc::new(move |_, cx| st.update(cx, |s, cx| s.push_changes(std::slice::from_ref(&rt), cx))));
-        }
-        Status::CantCheck | Status::Cant { .. } | Status::Offline { .. } => {
-            let (st, rt) = (st.clone(), rt.clone());
-            act(&mut actions, "Try again".into(), IconName::RefreshCw, true, pulling, Rc::new(move |_, cx| st.update(cx, |s, cx| s.recheck_group(&rt, cx))));
-        }
-        _ => {}
-    }
     // Pull now is always there; in step it only checks.
-    if !matches!(status, Status::CantCheck | Status::Cant { .. } | Status::Offline { .. }) || pulled_bad {
-        let (st, rt) = (st.clone(), rt.clone());
-        let label = if pulling { "Checking..." } else if in_step || matches!(status, Status::Parked { .. } | Status::ToPush { .. }) { "Check now" } else { "Pull now" };
-        let primary = actions.is_empty();
-        act(&mut actions, label.into(), IconName::RefreshCw, primary, pulling, Rc::new(move |_, cx| st.update(cx, |s, cx| s.pull_group_now(&rt, cx))));
-    }
+    let (st, rt) = (store.clone(), root.to_path_buf());
+    let label = if pulling { "Checking..." } else if in_step { "Check now" } else { "Pull now" };
+    let pull = Action {
+        label: label.into(),
+        icon: Some(IconName::RefreshCw),
+        primary: true,
+        disabled: pulling,
+        run: Rc::new(move |_, cx| st.update(cx, |s, cx| s.pull_group_now(&rt, cx))),
+    };
     Some(Chip {
         id: "group".into(),
         look,
-        progress,
-        sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions }],
+        progress: None,
+        sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions: vec![pull] }],
         auto_open: Vec::new(),
         width: None,
     })
 }
 
+/// The Env of the sync views for the copy at `root`: who a mod is, and what
+/// each button does in the store.
+pub fn sync_env(store: &Entity<Store>, root: &Path) -> crate::sync_cards::Env {
+    use crate::sync_cards::{Env, ModInfo, name_of_file};
+    use hopper::synccore::Answer;
+    let (s1, r1) = (store.clone(), root.to_path_buf());
+    let (s2, r2) = (store.clone(), root.to_path_buf());
+    let (s3, r3) = (store.clone(), root.to_path_buf());
+    let (s4, r4) = (store.clone(), root.to_path_buf());
+    let (s5, r5) = (store.clone(), root.to_path_buf());
+    Env {
+        info: Rc::new(move |file: &str, cx: &App| {
+            use hopper::synccore::{link::LinkRef, local::file_of};
+            let s = s1.read(cx);
+            let bare = file.trim_end_matches(".disabled");
+            // Cards name a mod by its file id ("link:...", "cf:123"), so look
+            // for it by id first, then by jar name, then in History (a mod
+            // this PC already took out is only there).
+            let a = s.instance(&r1).and_then(|i| {
+                // A Modrinth mod's card id is "mr:<version>" (groupkey), but file_of
+                // gives it a "cf:" id, so match that form too.
+                i.addons.iter().find(|a| file_of(a) == bare || (!a.mr_version.is_empty() && bare.strip_prefix("mr:") == Some(a.mr_version.as_str()))).or_else(|| i.addons.iter().find(|a| a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(bare)))
+            });
+            let past = if a.is_none() {
+                std::fs::read_dir(r1.join(hopper::sync::BACKUP_DIR)).ok().and_then(|d| {
+                    d.flatten().find_map(|e| hopper::actor::read_records(&e.path()).into_iter().map(|r| r.addon).find(|a| file_of(a) == bare))
+                })
+            } else {
+                None
+            };
+            match a.or(past.as_ref()) {
+                Some(a) => ModInfo { name: if a.name.is_empty() { name_of_file(&a.file_name) } else { a.name.clone() }, icon: s.image(&a.icon).map(Path::to_path_buf), project: a.project_id },
+                None => {
+                    // Nothing known on this PC: a link id still carries the
+                    // jar's name; any other id gets a plain word.
+                    let name = match LinkRef::parse(bare) {
+                        Some(l) => name_of_file(&l.file_name),
+                        None if bare.starts_with("cf:") || bare.starts_with("mr:") => "a mod".to_string(),
+                        None => name_of_file(file),
+                    };
+                    ModInfo { name, icon: None, project: 0 }
+                }
+            }
+        }),
+        peek: Rc::new(move |project, _, cx| {
+            let root = r2.clone();
+            s2.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Peek { root, project }));
+        }),
+        answer: Rc::new(move |card, answer: Option<Answer>, others, _, cx| {
+            let (root, card) = (r3.clone(), card.clone());
+            s3.update(cx, |s, cx| match answer {
+                Some(a) => s.sync_answer_card(&root, &card, a, others, cx),
+                None => s.sync_hide_card(&root, &card, cx),
+            });
+        }),
+        put_back: Rc::new(move |row, _, cx| {
+            let (root, key) = (r4.clone(), row.drift.key.clone());
+            s4.update(cx, |s, cx| s.sync_put_back_keys(&root, Some(vec![key]), cx));
+        }),
+        share: Rc::new(move |row, _, cx| {
+            let (root, key) = (r5.clone(), row.drift.key.clone());
+            s5.update(cx, |s, cx| s.sync_share_keys(&root, Some(vec![key]), cx));
+        }),
+    }
+}
+
+/// The chip of a copy kept by the sync core: the state's words come from
+/// `group_look`; the popover holds the cards of "Needs you", the rows of
+/// "This PC differs", the friends' notes, and the state's one button.
+fn sync_group_chip(store: &Entity<Store>, root: &Path, state: hopper::syncchip::SyncState, cx: &mut App) -> crate::sync_chip::Chip {
+    use crate::sync_chip::{Action, Chip, Section};
+    use hopper::syncchip::SyncState;
+    let s = store.read(cx);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let gl = hopper::syncchip::group_look(&state, now);
+    let pulling = s.group_pulling(root);
+    let pushing = s.pushing_at(root);
+    let notes = s.sync_away_notes(root);
+    let line = match s.group_pulled(root) {
+        Some((t, _)) => t.to_string(),
+        None => gl.line.clone(),
+    };
+    let mut actions: Vec<Action> = Vec::new();
+    let (st, rt) = (store.clone(), root.to_path_buf());
+    if let Some(label) = &gl.button {
+        let run: crate::sync_chip::Run = match &state {
+            SyncState::Differs { .. } => {
+                let (st, rt) = (st.clone(), rt.clone());
+                Rc::new(move |_, cx| st.update(cx, |s, cx| s.sync_put_back_keys(&rt, None, cx)))
+            }
+            SyncState::OutOfDate { .. } => {
+                let st = st.clone();
+                Rc::new(move |_, cx| {
+                    st.update(cx, |s, cx| {
+                        if matches!(s.self_update(), Some(crate::store::SelfUpdate::Available(_))) {
+                            s.install_self_update();
+                        } else {
+                            s.check_self_update();
+                        }
+                        cx.notify();
+                    })
+                })
+            }
+            SyncState::Sending { held: true, .. } => {
+                let (st, rt) = (st.clone(), rt.clone());
+                Rc::new(move |_, cx| st.update(cx, |s, cx| s.push_changes(std::slice::from_ref(&rt), cx)))
+            }
+            SyncState::Offline { .. } | SyncState::Behind { step: hopper::syncchip::BehindStep::Failed, .. } => {
+                let (st, rt) = (st.clone(), rt.clone());
+                Rc::new(move |_, cx| st.update(cx, |s, cx| s.recheck_group(&rt, cx)))
+            }
+            _ => {
+                let (st, rt) = (st.clone(), rt.clone());
+                Rc::new(move |_, cx| st.update(cx, |s, cx| s.pull_group_now(&rt, cx)))
+            }
+        };
+        let disabled = pulling || (matches!(state, SyncState::Sending { held: true, .. }) && pushing);
+        let label = if pulling { "Checking...".to_string() } else { label.clone() };
+        actions.push(Action { label: label.into(), icon: Some(IconName::RefreshCw), primary: true, disabled, run });
+    }
+    let body: Option<crate::sync_chip::Body> = match &state {
+        SyncState::NeedsYou { .. } => {
+            let (st, rt) = (store.clone(), root.to_path_buf());
+            Some(Rc::new(move |window, cx| {
+                let cards = st.read(cx).sync_cards(&rt);
+                crate::sync_cards::cards_view(cards, sync_env(&st, &rt), window, cx)
+            }))
+        }
+        SyncState::Differs { .. } => {
+            let (st, rt) = (store.clone(), root.to_path_buf());
+            Some(Rc::new(move |window, cx| {
+                let rows = st.read(cx).sync_drift_rows(&rt);
+                let narrow = crate::sync_cards::is_narrow(window);
+                crate::sync_cards::drift_view(rows, sync_env(&st, &rt), narrow, window, cx)
+            }))
+        }
+        _ => None,
+    };
+    let mut sections = vec![Section { title: gl.title.clone().into(), line: line.into(), progress: None, body, actions }];
+    if !notes.is_empty() {
+        let (st, rt) = (store.clone(), root.to_path_buf());
+        let count = notes.len();
+        sections.push(Section {
+            title: if count == 1 { "1 note".into() } else { format!("{count} notes").into() },
+            line: "".into(),
+            progress: None,
+            body: Some(Rc::new(move |_, cx| {
+                let mut list = v_flex().w_full().gap_1();
+                for (ix, n) in st.read(cx).sync_away_notes(&rt).into_iter().enumerate() {
+                    let (s1, r1) = (st.clone(), rt.clone());
+                    let (s2, r2, id, name, since) = (st.clone(), rt.clone(), n.id.clone(), n.name.clone(), n.since);
+                    let see: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |_, cx| {
+                        let root = r1.clone();
+                        s1.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::ShowInstance(root)));
+                    });
+                    let put: Rc<dyn Fn(&mut Window, &mut App)> =
+                        Rc::new(move |window, cx| crate::sync_put_back::open(s2.clone(), r2.clone(), id.clone(), name.clone(), since, window, cx));
+                    list = list.child(crate::sync_cards::away_row(ix, &n.name, n.changes, see, put, cx));
+                }
+                list.into_any_element()
+            })),
+            actions: Vec::new(),
+        });
+    }
+    let wide = matches!(state, SyncState::NeedsYou { .. } | SyncState::Differs { .. });
+    Chip {
+        id: "group".into(),
+        look: gl.look,
+        progress: None,
+        sections,
+        auto_open: Vec::new(),
+        // As wide as the mock's cards (440 px): mod names, a chip and buttons fit a row.
+        width: wide.then_some(27.5),
+    }
+}
 /// The line under "Same as the group": the status line without its first
 /// sentence (the title says it), or what Pull now just did, as it is.
 fn in_step_line(detail: &str, from_pull: bool) -> String {
@@ -275,84 +305,23 @@ fn in_step_line(detail: &str, from_pull: bool) -> String {
     detail.strip_prefix("Same as the group. ").unwrap_or("Nothing new to take in.").to_string()
 }
 
+/// names are links with their icons, and one button gets what is missing.
+/// Every other state is the chip's own words ([`sync_group_chip`]).
 pub fn group_status_bar(store: &Entity<Store>, root: &Path, cx: &mut App) -> Option<Notice> {
     let s = store.read(cx);
     let status = s.group_status(root)?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let due = s.group_pack_due(root).cloned();
+    let Status::NeedsMod { needs } = &status else { return None };
     let busy = s.is_busy(root);
     let pulling = s.group_pulling(root);
-    let pulled_bad = s.group_pulled(root).is_some_and(|(_, bad)| bad);
     let pulled = s.group_pulled(root).map(|(t, _)| t.to_string());
-    let left_out = s.left_out_pins(root);
-    // Read before `cx` is borrowed mutably for the mod links below.
-    let pushing = s.pushing_at(root);
-    let repairing = s.group_repairing(root);
-    let in_step = matches!(status, Status::InStep { .. });
-    // A notice only for what needs the player (a choice, mods to get). Busy,
-    // behind, offline and failed are the chip's own words ([`group_chip`]);
-    // the notice is the body of the chip's popover.
-    // Files only the website gives are the Downloads chip's
-    // ([`crate::downloads_chip`]).
-    if matches!(status, Status::ByHand { .. }) || !hopper::syncchip::group_look(&status, pulling, pulled_bad, !left_out.is_empty()).strip {
-        return None;
-    }
-    let key = hopper::settings::notice_key(&root.to_string_lossy(), "group-in-step", "in step");
     let (icon, tier) = look(&status);
     let from_pull = pulled.is_some();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let detail = pulled.unwrap_or_else(|| status.detail(now));
-    // "In step" is a word only we use: say what it means, and don't repeat it
-    // in the line under it. Mods match the group; updates are a separate thing.
-    // What Pull now just did ("Took in 2 changes ...") is kept as it is: it
-    // says what the player asked for.
-    let behind = matches!(status, Status::Behind { .. });
-    let (title, detail) = if in_step {
-        ("Your copy matches the group.".to_string(), in_step_line(&detail, from_pull))
-    } else if behind && !from_pull {
-        // The headline says it all; the list under it says which mods.
-        (detail, String::new())
-    } else if matches!(status, Status::CantCheck) && !from_pull {
-        // The sentence goes under the notice, open.
-        ("Couldn't check".to_string(), String::new())
-    } else {
-        (status.title(), detail)
-    };
-    let mut n = Notice::new("group-status", tier, title).icon(icon);
-    n = match &status {
-        // The mods it names are links with their icons.
-        Status::NeedsMod { needs } if !from_pull => n.subject_rich(detail, needs_line(store, root, needs, cx)),
-        _ => n.subject(detail),
-    };
-    // What the copy lacks, one row per mod with its own button.
-    // When the copy matches, the mods Hopper leaves alone (kept only on this
-    // PC, locked) are still listed, closed behind Details.
-    let verified = s_verified(store, root, cx).filter(|v| behind || (in_step && !v.rows.is_empty()));
-    if let Some(v) = &verified {
-        let list = n.details(verify_list(store, root, v, busy || repairing, cx));
-        n = if behind { list.open_new() } else { list };
-    }
-    if matches!(status, Status::CantCheck) && !from_pull {
-        let said = status.detail(now);
-        let muted = cx.theme().muted_foreground;
-        n = n.details(div().w_full().text_sm().text_color(muted).child(said)).open_new();
-    }
-    if in_step {
-        n = n.dismiss_key(store, key);
-    }
-    // What only the player can do.
-    let update_file = due.as_ref().and_then(|d| d.file.clone().map(|f| (f, d.action())));
-    if let Some((file, action)) = update_file {
-        let (store, root) = (store.clone(), root.to_path_buf());
-        n = n.primary(move |fit| {
-            notice_slot::main_button(Button::new("group-pack-update").small(), fit)
-                .label(action)
-                .disabled(busy)
-                .tooltip("Opens the update, where you can see what changes and pick what to keep")
-                .on_click(move |_, window, cx| crate::pack_update::open(store.clone(), root.clone(), file.clone(), window, cx))
-        });
-    } else if let Status::NeedsMod { needs } = &status
-        && needs.iter().any(|n| n.to_get())
-    {
+    let mut n = Notice::new("group-status", tier, status.title()).icon(icon);
+    // The mods it names are links with their icons.
+    n = if from_pull { n.subject(detail) } else { n.subject_rich(detail, needs_line(store, root, needs, cx)) };
+    if needs.iter().any(|n| n.to_get()) {
         // Download what the pack lacks; the group's sync then carries it to
         // everyone.
         let ids: Vec<String> = needs.iter().filter(|n| n.to_get()).map(|n| n.id.clone()).collect();
@@ -371,86 +340,11 @@ pub fn group_status_bar(store: &Entity<Store>, root: &Path, cx: &mut App) -> Opt
                     });
                 })
         });
-    } else if let Some(v) = verified.as_ref().filter(|v| !v.to_fix().is_empty()) {
-        // Exactly the rows of the list: the ones that need no yes first;
-        // when only mods from links are left, the yes.
-        let plain: Vec<String> = v.to_fix().iter().filter(|r| r.why != hopper::groupverify::Why::LeftOut).map(|r| r.key.clone()).collect();
-        let pins: Vec<hopper::sources::carry::Pin> = v.to_fix().iter().filter(|r| r.why == hopper::groupverify::Why::LeftOut).filter_map(|r| r.pin.clone()).collect();
-        let left_keys: Vec<String> = v.to_fix().iter().filter(|r| r.why == hopper::groupverify::Why::LeftOut).map(|r| r.key.clone()).collect();
-        let (store, root) = (store.clone(), root.to_path_buf());
-        n = n.primary(move |fit| {
-            if !plain.is_empty() {
-                notice_slot::main_button(Button::new("group-make-match").small(), fit)
-                    .icon(IconName::Download)
-                    .label(if repairing { "Making it match..." } else if fit.narrow { "Make match" } else { "Make my copy match" })
-                    .disabled(busy || repairing)
-                    .tooltip("Gets, updates or switches exactly the mods in this list. Nothing else changes")
-                    .on_click(move |_, _, cx| {
-                        let (store, root, plain) = (store.clone(), root.clone(), plain.clone());
-                        store.update(cx, |s, cx| s.repair_group(&root, Some(plain), Vec::new(), cx));
-                    })
-            } else {
-                notice_slot::main_button(Button::new("group-allow-get").small(), fit)
-                    .label("Allow and get it")
-                    .disabled(busy || repairing)
-                    .tooltip("Say yes to these mods' sources, then get them")
-                    .on_click(move |_, window, cx| {
-                        let (store2, root2, all, keys) = (store.clone(), root.clone(), pins.clone(), left_keys.clone());
-                        incoming_sources::gate(store.clone(), pins.clone(), window, cx, move |leave_out, _, cx| {
-                            let yes: Vec<_> = all.iter().filter(|p| !leave_out.contains(p)).cloned().collect();
-                            if !yes.is_empty() {
-                                store2.update(cx, |s, cx| s.repair_group(&root2, Some(keys.clone()), yes, cx));
-                            }
-                        });
-                    })
-            }
-        });
-    } else if matches!(status, Status::CantCheck) {
-        let (store, root) = (store.clone(), root.to_path_buf());
-        n = n.primary(move |fit| {
-            notice_slot::main_button(Button::new("group-check-again").small(), fit)
-                .icon(IconName::RefreshCw)
-                .label("Try again")
-                .tooltip("Compares your copy with the group again")
-                .on_click(move |_, _, cx| store.update(cx, |s, cx| s.recheck_group(&root, cx)))
-        });
-    } else if let Status::Parked { from, .. } = &status {
-        // One button per member whose changes wait; the first leads.
-        for (ix, who) in from.iter().take(3).enumerate() {
-            let (store, root, who) = (store.clone(), root.to_path_buf(), who.clone());
-            if ix == 0 {
-                n = n.primary(move |fit| pull_from_button(&store, &root, &who, pulling, fit, ix));
-            } else {
-                n = n.action_fit(move |fit| pull_from_button(&store, &root, &who, pulling, notice_slot::Fit { lead: false, ..fit }, ix));
-            }
-        }
-    } else if let Status::ToPush { changes, .. } = status {
-        let (store, root) = (store.clone(), root.to_path_buf());
-        n = n.primary(move |fit| push_button(&store, vec![root.clone()], changes, pushing, fit, "group-push"));
-    } else if matches!(status, Status::Cant { .. }) && !left_out.is_empty() {
-        let (store, root) = (store.clone(), root.to_path_buf());
-        n = n.primary(move |fit| {
-            notice_slot::main_button(Button::new("group-allow").small(), fit)
-                .label("Allow and install")
-                .tooltip("Say yes to these mods, then put them in")
-                .on_click(move |_, window, cx| {
-                    let (store2, root2) = (store.clone(), root.clone());
-                    incoming_sources::gate(store.clone(), left_out.clone(), window, cx, move |leave_out, _, cx| {
-                        store2.update(cx, |s, cx| s.approve_left_out(&root2, &leave_out, cx));
-                    });
-                })
-        });
     }
-    // Only the player's buttons bring the rest in: Pull now checks.
-    let nothing_to_pull = in_step || matches!(status, Status::Parked { .. } | Status::ToPush { .. });
+    // Pull now checks; the group's changes come in by themselves.
     let (store, root) = (store.clone(), root.to_path_buf());
-    n = n.action_fit(move |fit| pull_button(&store, &root, pulling, nothing_to_pull, fit.narrow, "group-pull"));
+    n = n.action_fit(move |fit| pull_button(&store, &root, pulling, false, fit.narrow, "group-pull"));
     Some(n)
-}
-
-/// The check's last answer for the copy at `root`, when it is up to date.
-fn s_verified(store: &Entity<Store>, root: &Path, cx: &mut App) -> Option<hopper::groupverify::Verified> {
-    store.read(cx).group_verified(root).cloned()
 }
 
 /// The "Missing a required mod" notice's line as elements: the mods it names

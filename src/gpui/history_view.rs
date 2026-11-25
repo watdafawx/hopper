@@ -64,22 +64,8 @@ fn set_indent(faces: bool) -> f32 {
 /// Server user): their initial on a tinted tile, yours in the primary tint,
 /// as Hopper Server's History shows them.
 fn letter_face(w: &Who, size: Rems, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let color = if w.is_you() { theme.primary } else { theme.muted_foreground };
-    let initial: String = w.label().chars().find(|c| c.is_alphanumeric()).into_iter().flat_map(char::to_uppercase).collect();
-    div()
-        .flex_none()
-        .size(size)
-        .rounded(theme.radius)
-        .bg(color.opacity(widgets::alpha::TINT * 2.))
-        .text_color(crate::theme::ink(color))
-        .text_size(rems(size.0 * 0.5))
-        .font_semibold()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(initial)
-        .into_any_element()
+    let color = if w.is_you() { cx.theme().primary } else { cx.theme().muted_foreground };
+    widgets::letter_tile(&w.label(), color, size, cx)
 }
 
 /// One person in History's filter: a tinted chip (`widgets::chip`), the
@@ -842,6 +828,11 @@ impl BackupsView {
         if let Some(g) = who.and_then(|w| self.group_name(w, cx)) {
             detail = if detail.is_empty() { format!("group {g}") } else { format!("{detail} · group {g}") };
         }
+        // Why Hopper made the change for them (an answer, a pack update, a
+        // put back); a change made by hand has no such line.
+        let why = (!nested)
+            .then(|| self.store.read(cx).sync_why_file(&self.root, &f.name, who.map_or("", |w| w.id.as_str()), f.change))
+            .flatten();
         row.children(lead)
             .child(
                 v_flex()
@@ -855,7 +846,8 @@ impl BackupsView {
                             .child(what)
                             .child(self.mod_cell(ElementId::Name(format!("hist-mod:{key}").into()), name, pid, &icon, true, cx)),
                     )
-                    .child(widgets::caption(detail, cx).text_xs().truncate()),
+                    .child(widgets::caption(detail, cx).text_xs().truncate())
+                    .children(why.map(|w| widgets::caption(w, cx).text_xs().truncate())),
             )
             .when(!nested, |r| r.child(widgets::caption(hm(when), cx).text_xs()))
             .when(file.change.undoable(), |r| {
@@ -1456,7 +1448,10 @@ pub(crate) fn undone(store: &Entity<crate::store::Store>, root: &std::path::Path
         .filter(|p| p.parent() == Some(mods.as_path()))
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .collect();
+    let files: Vec<String> = done.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
     store.update(cx, |s, cx| {
+        // A group copy records what the Undo changed as the player's Undo.
+        s.sync_note_undo(root, &files);
         s.reload_instance(root, cx);
         s.identify_jars(root, jars);
     });

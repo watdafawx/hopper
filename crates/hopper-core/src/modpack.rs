@@ -93,7 +93,7 @@ pub struct Overrides {
     pub keep_dropped: HashSet<String>,
     /// A clean update: History marks what it set aside "by Clean update".
     pub clean: bool,
-    /// Mods kept only on this PC ([`crate::groupsync::addon_key`]), for an
+    /// Mods kept only on this PC ([`crate::groupkey::addon_key`]), for an
     /// update a follow brings: left as they are, and kept out when removed.
     pub only_here: HashSet<String>,
 }
@@ -101,7 +101,7 @@ pub struct Overrides {
 impl Overrides {
     /// A mod kept only on this PC, which this update leaves alone.
     fn leaves(&self, a: &Addon) -> bool {
-        !self.only_here.is_empty() && self.only_here.contains(&crate::groupsync::addon_key(a))
+        !self.only_here.is_empty() && self.only_here.contains(&crate::groupkey::addon_key(a))
     }
 }
 
@@ -682,51 +682,6 @@ pub fn pack_project_ids(project_id: u64, file_id: u64) -> Option<HashSet<u64>> {
             None
         }
     }
-}
-
-/// What a CurseForge pack version comes with, as `grouppack::Ships`: each
-/// project its manifest lists ("p:<project>") and each jar in its
-/// overrides' mods folder ("n:<file name>"). From the cached zip when the
-/// pack was downloaded already, else read from CurseForge by range (only
-/// the manifest and the zip's list of names).
-pub(crate) fn curse_ships(file: &cf::File, _job: &Job) -> anyhow::Result<crate::grouppack::Ships> {
-    let of = |m: &PackManifest, names: &mut dyn Iterator<Item = String>| {
-        let dir = format!("{}/mods/", if m.overrides.is_empty() { "overrides" } else { m.overrides.as_str() });
-        let mut out: crate::grouppack::Ships = m.files.iter().map(|f| format!("p:{}", f.project_id)).collect();
-        for n in names {
-            if let Some(jar) = n.strip_prefix(&dir).filter(|j| !j.contains('/') && j.to_lowercase().ends_with(".jar")) {
-                out.insert(format!("n:{}", jar.to_lowercase()));
-            }
-        }
-        out
-    };
-    let cached = cache_dir().join(format!("{}.zip", file.id));
-    if cache_hit(&cached) {
-        let m = read_manifest(&cached)?;
-        let z = zip::ZipArchive::new(fs::File::open(&cached)?)?;
-        let names: Vec<String> = z.file_names().map(str::to_string).collect();
-        return Ok(of(&m, &mut names.into_iter()));
-    }
-    let url = cf::download_url(file)?;
-    let entries = crate::serverpack::remote_zip_entries(&url, file.file_length)?;
-    let e = entries.iter().find(|e| e.name == "manifest.json").context("pack has no manifest.json")?;
-    let m: PackManifest = serde_json::from_slice(&crate::serverpack::remote_zip_read(&url, e)?)?;
-    Ok(of(&m, &mut entries.iter().map(|e| e.name.clone())))
-}
-
-/// [`curse_ships`] for a Modrinth pack version: each file's project
-/// ("p:<project>", Hopper's number) and name ("n:<file name>").
-pub(crate) fn modrinth_ships(file: &cf::File, job: &Job) -> anyhow::Result<crate::grouppack::Ships> {
-    let zip = fetch_mrpack(file, job)?;
-    let index = read_mr_index(&zip)?;
-    let mut out = crate::grouppack::Ships::new();
-    for f in index.files.iter().filter(|f| f.path.starts_with("mods/")) {
-        out.insert(format!("n:{}", f.file_name().to_lowercase()));
-        if let Some(p) = f.project() {
-            out.insert(format!("p:{}", crate::modrinth::num_id(p)));
-        }
-    }
-    Ok(out)
 }
 
 /// Which of an instance's mods its modpack ships (the rest were added on
@@ -2993,12 +2948,19 @@ pub fn update_any_synced(inst: &mut Instance, pack_id: u64, file: &cf::File, job
 /// they and the pack changed, or a mod of theirs needs one the pack
 /// drops: [`crate::packdiff::UpdatePlan::needs_say`]). False: nothing was
 /// changed; the player picks in the update dialog.
-pub fn update_group_pack(inst: &mut Instance, pack_id: u64, file: &cf::File, job: &Job) -> anyhow::Result<bool> {
+pub fn update_group_pack(inst: &mut Instance, pack_id: u64, file: &cf::File, mode: &crate::synccore::PackMode, job: &Job) -> anyhow::Result<bool> {
+    use crate::synccore::ConfigMode;
     let plan = crate::packdiff::plan(inst, file, true, job)?;
-    if plan.needs_say() {
-        return Ok(false);
-    }
-    synced_with(inst, pack_id, file, &plan, job)?;
+    // The mode is what the record stated for friends: a clean update here
+    // is this PC's own and never reaches theirs unless "for everyone" was
+    // ticked. A clean update settles every conflict itself.
+    let mut o = match mode.friends {
+        ConfigMode::Clean => plan.clean_decisions_with(mode.keep_off),
+        ConfigMode::Keep if plan.needs_say() => return Ok(false),
+        ConfigMode::Keep => plan.keep_decisions(mode.keep_off),
+    };
+    o.only_here = inst.only_here.keys().cloned().collect();
+    update_any(inst, pack_id, file, Some(&o), job)?;
     Ok(true)
 }
 
@@ -4573,11 +4535,11 @@ mod override_jar_tests {
 
         // Group sync and share codes: its own key, not the pack entry's, and no
         // file entry (a code would otherwise publish it as a change).
-        assert_eq!(crate::groupsync::addon_key(&m), "p:282001");
-        assert_eq!(crate::groupsync::addon_key(&o), "n:cc-tweaked-1.120.2.jar");
+        assert_eq!(crate::groupkey::addon_key(&m), "p:282001");
+        assert_eq!(crate::groupkey::addon_key(&o), "n:cc-tweaked-1.120.2.jar");
         assert!(crate::sharecode::file_entry(&o).is_none());
         let plain = Addon { shown_as: 0, ..o.clone() };
-        assert_eq!(crate::groupsync::addon_key(&plain), crate::groupsync::addon_key(&o));
+        assert_eq!(crate::groupkey::addon_key(&plain), crate::groupkey::addon_key(&o));
         assert_eq!(crate::sharecode::file_entry(&plain), crate::sharecode::file_entry(&o));
 
         // The rows still serialize without the field when it is 0, and with it

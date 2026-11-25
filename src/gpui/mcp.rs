@@ -407,6 +407,12 @@ fn navigate(app: &mut AppView, v: &Value, window: &mut Window, cx: &mut Context<
     if s("dialog").as_deref() == Some("accounts") {
         crate::accounts::open(app.store.clone(), window, cx);
     }
+    // Made-up data for the sync dialogs (see `sync_preview`).
+    match s("dialog").as_deref() {
+        Some("put-back") => crate::sync_preview::open_put_back(window, cx),
+        Some("pack-friends") => crate::sync_preview::open_pack_friends(window, cx),
+        _ => {}
+    }
     // A preview: it never marks the setup done.
     if s("dialog").as_deref() == Some("setup") {
         crate::setup_wizard::open(app.store.clone(), cx.entity().downgrade(), true, window, cx);

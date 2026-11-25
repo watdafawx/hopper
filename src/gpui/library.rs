@@ -2147,7 +2147,7 @@ impl LibraryView {
             // The version as the tag under the pack's name says it; the
             // file's full name when none can be read from it.
             let pack_name = inst.pack.as_ref().map(|p| p.name.as_str()).unwrap_or_default();
-            let (short, full) = match hopper::grouppack::update_label(pack_name, &f) {
+            let (short, full) = match hopper::groupkey::update_label(pack_name, &f) {
                 Some(v) => (format!("Update pack to {v}"), format!("Update pack to {}", f.display_name)),
                 None => (format!("Update pack to {}", f.display_name), format!("Update pack to {}", f.display_name)),
             };

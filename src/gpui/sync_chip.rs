@@ -16,6 +16,7 @@ use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::popover::Popover;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Selectable, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -445,9 +446,14 @@ fn body(sections: &[Section], width: Option<f32>, window: &mut Window, cx: &mut 
     let theme = cx.theme().clone();
     // A section with a list of its own needs more room for it.
     let width = width.unwrap_or(if sections.iter().any(|s| s.body.is_some()) { 24.0 } else { 19.5 });
+    // Many cards are taller than the window: the popover scrolls inside it.
+    let room = (window.viewport_size().height - px(120.)).max(px(240.));
     v_flex()
+        .id("sync-chip-body")
         .w(rems(width))
         .max_w(rems(width))
+        .max_h(room)
+        .overflow_y_scrollbar()
         .gap_3()
         .children(sections.iter().enumerate().map(|(i, s)| {
             v_flex()
@@ -488,12 +494,17 @@ pub fn more_pill(hidden: usize, names: String, cx: &App) -> AnyElement {
 pub const PREVIEWS: &[&str] = &[
     "g-in-sync", "g-checking", "g-updating", "g-sending", "g-behind", "g-offline", "g-failed", "g-needs", "s-in-sync", "s-differ", "s-comparing",
     "s-pushing", "s-offline", "s-blocked", "s-failed", "s-wont", "dl-waiting", "dl-working", "dl-stuck", "rs-changed", "rs-waiting", "both-ok", "both-busy", "both-needs", "both-long", "needs-open", "needs-run",
+    "sy-needs", "sy-needs-one", "sy-needs-differs", "sy-needs-big", "sy-differs", "sy-differs-big", "sy-differs-narrow", "sy-ood", "sy-behind", "sy-getting", "sy-game", "sy-failed", "sy-sending", "sy-held",
+    "sy-offline", "sy-insync", "sy-notes",
 ];
 
 /// Made-up chips for a preview state, no network, no real group or server.
 pub fn preview(name: &str) -> Vec<Chip> {
+    if let Some(chip) = crate::sync_preview::chip(name) {
+        return vec![chip];
+    }
     use hopper::groupstatus::Status;
-    use hopper::syncchip::{DownloadState, ServerState, Work, download_look, group_look, server_look};
+    use hopper::syncchip::{DownloadState, ServerState, Work, download_look, status_look, server_look};
     let noop: Run = Rc::new(|_, _| {});
     let make = |id: &str, look: Look, title: &str, line: &str, progress: Option<f32>, primary: &str| Chip {
         id: id.to_string().into(),
@@ -510,7 +521,7 @@ pub fn preview(name: &str) -> Vec<Chip> {
         look,
     };
     let mia = || vec!["Mia".to_string()];
-    let group = |status: Status, title: &str, line: &str, progress: Option<f32>| make("group", group_look(&status, false, false, false), title, line, progress, "Pull now");
+    let group = |status: Status, title: &str, line: &str, progress: Option<f32>| make("group", status_look(&status, false, false, false), title, line, progress, "Pull now");
     let g = |n: &str| -> Chip {
         match n {
             "in-sync" => group(Status::InStep { checked: None }, "Your copy matches the group.", "Nothing new to take in.", None),
@@ -521,7 +532,7 @@ pub fn preview(name: &str) -> Vec<Chip> {
             "offline" => group(Status::Offline { checked: None }, "Offline", "Can't reach the group. What this PC knows may be old.", None),
             "failed" => make(
                 "group",
-                group_look(&Status::Checking, false, true, false),
+                status_look(&Status::Checking, false, true, false),
                 "Couldn't take the changes in",
                 "A mod didn't download. Try again.",
                 None,
@@ -635,7 +646,7 @@ pub fn preview(name: &str) -> Vec<Chip> {
         Some(("both", "needs")) => vec![g("needs"), server(ServerState::Differ { mods: 3, blocked: false }, NAME)],
         Some(("both", _)) => {
             let mut group = g("updating");
-            group.look = group_look(
+            group.look = status_look(
                 &Status::Updating { changes: 2, from: vec!["Additional Placements Extra Long Name".into()] },
                 false,
                 false,

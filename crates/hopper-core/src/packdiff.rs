@@ -498,6 +498,21 @@ impl UpdatePlan {
         o
     }
 
+    /// What a quick update that keeps this PC's settings writes: the
+    /// defaults, and with `keep_off` false the mods turned off here come
+    /// back on.
+    pub fn keep_decisions(&self, keep_off: bool) -> Overrides {
+        let mut turn_on = self.default_choices();
+        if !keep_off {
+            turn_on.extend(self.off.iter().chain(&self.still_off).map(|m| m.key.clone()));
+        }
+        let mut o = self.decisions_with(&self.default_take(), &turn_on);
+        if !keep_off {
+            o.enable.extend(self.still_off.iter().map(|m| m.project));
+        }
+        o
+    }
+
     /// A clean update's files: every pack file that differs from yours
     /// takes the pack's copy, except your own settings ([`keep_local`]).
     pub fn clean_take(&self) -> HashSet<String> {
@@ -523,10 +538,24 @@ impl UpdatePlan {
     /// files the pack doesn't ship and your own settings ([`keep_local`])
     /// stay; everything replaced goes to History first.
     pub fn clean_decisions(&self) -> Overrides {
+        self.clean_decisions_with(false)
+    }
+
+    /// [`clean_decisions`](Self::clean_decisions), but with `keep_off` the
+    /// mods turned off on this PC stay off (a friend's clean update).
+    pub fn clean_decisions_with(&self, keep_off: bool) -> Overrides {
         let take = self.clean_take();
-        let mut o = self.decisions_with(&take, &self.clean_choices());
+        let mut choices = self.clean_choices();
+        if keep_off {
+            for m in self.off.iter().chain(&self.still_off) {
+                choices.remove(&m.key);
+            }
+        }
+        let mut o = self.decisions_with(&take, &choices);
         o.clean = true;
-        o.enable.extend(self.still_off.iter().map(|m| m.project));
+        if !keep_off {
+            o.enable.extend(self.still_off.iter().map(|m| m.project));
+        }
         for f in self.files.iter().filter(|f| take.contains(&f.rel)) {
             match f.action {
                 // Your edit (or the merge of it) gives way to the pack's copy.
