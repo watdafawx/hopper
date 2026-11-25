@@ -140,7 +140,9 @@ pub fn sync_env(store: &Entity<Store>, root: &Path) -> crate::sync_cards::Env {
             // for it by id first, then by jar name, then in History (a mod
             // this PC already took out is only there).
             let a = s.instance(&r1).and_then(|i| {
-                i.addons.iter().find(|a| file_of(a) == bare).or_else(|| i.addons.iter().find(|a| a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(bare)))
+                // A Modrinth mod's card id is "mr:<version>" (groupkey), but file_of
+                // gives it a "cf:" id, so match that form too.
+                i.addons.iter().find(|a| file_of(a) == bare || (!a.mr_version.is_empty() && bare.strip_prefix("mr:") == Some(a.mr_version.as_str()))).or_else(|| i.addons.iter().find(|a| a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(bare)))
             });
             let past = if a.is_none() {
                 std::fs::read_dir(r1.join(hopper::sync::BACKUP_DIR)).ok().and_then(|d| {
