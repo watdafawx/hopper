@@ -2522,6 +2522,10 @@ impl PublishWork {
             if let Some(c) = copy.as_ref().filter(|c| c.member) {
                 let (configs, carried, too_big) = super::config_sync::payload(&c.copy.configs);
                 if configs.is_empty() {
+                    // Nothing of the copy's to send is as good as sent: left
+                    // out of `sent_ids`, the copy would read as "waiting to be
+                    // sent" for good.
+                    out.sent_ids.push(inst.id.clone());
                     if too_big {
                         out.copies.push(CopySent { local: c.copy.local.clone(), seq: 0, configs: None, too_big });
                     }
