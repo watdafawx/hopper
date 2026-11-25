@@ -1207,7 +1207,14 @@ impl Store {
     /// soon as another task on it ends or its game finishes launching.
     pub fn follow_updating(&self, root: &Path) -> bool {
         self.follow_applying.contains(root)
-            || self.follow_at(root).is_some_and(|f| f.waiting() && self.follow_error(root).is_none())
+            || self.follow_at(root).is_some_and(|f| f.waiting() && !self.kept_by_group(f) && self.follow_error(root).is_none())
+    }
+
+    /// A pack kept both ways with a group: its changes come in mod by mod
+    /// through the sync core, so the follow's newest code is never applied
+    /// by the tick and must not read as a change on its way.
+    fn kept_by_group(&self, f: &FollowedRecipe) -> bool {
+        in_group_copies(&self.settings.group_copies, f)
     }
 
     /// An instance was deleted in Hopper: what it followed stops (and a
@@ -1257,7 +1264,7 @@ impl Store {
                     || self.mailbox_recipes.iter().any(|e| f.matches(&e.from, &e.inst, &e.key));
                 ours && !self.follow_applying.contains(root)
                     // Kept both ways with a group: changes come mod by mod.
-                    && !self.settings.group_copies.iter().any(|c| c.inst == f.inst && c.local == f.local)
+                    && !self.kept_by_group(f)
                     && hopper::recipe::due(f, self.follow_retry.get(root), self.follow_busy(root), now)
                     // An instance deleted outside Hopper has nothing to update.
                     && root.is_dir()
@@ -2626,10 +2633,17 @@ fn drop_ways(r: &mut Event, revoke: &Event) -> bool {
     !r.direct && r.groups.is_empty()
 }
 
+/// Whether a group copy is kept for this follow (see `Store::kept_by_group`).
+fn in_group_copies(copies: &[PackCopy], f: &FollowedRecipe) -> bool {
+    copies.iter().any(|c| c.inst == f.inst && c.local == f.local)
+}
+
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's own `test` macro would come with it.
-    use super::{drop_ways, minutes, newest_codes_only, waiting_line};
+    use super::{drop_ways, in_group_copies, minutes, newest_codes_only, waiting_line};
+    use hopper::groupkey::PackCopy;
+    use hopper::settings::FollowedRecipe;
     use super::{FriendReads, FRIENDS_FALLBACK, FRIENDS_ON_FOCUS, FRIENDS_RETRY, FRIENDS_SAFETY};
     use hopper::mailbox::Event;
     use std::time::{Duration, Instant};
@@ -2708,6 +2722,19 @@ mod tests {
         assert!(r.due(later));
         r.start(later);
         assert!(!r.due(later + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_group_copy_never_reads_as_waiting_for_the_tick() {
+        // The group copy's follow sees the newest code (`seen`) but the tick
+        // never applies it: the sync core does, mod by mod. It must not
+        // count as "Getting changes" for good.
+        let f = FollowedRecipe { inst: "p".into(), local: "l".into(), code: "HOP-0".into(), seen: "HOP-1".into(), ..Default::default() };
+        assert!(f.waiting());
+        let copy = PackCopy { inst: "p".into(), local: "l".into(), ..Default::default() };
+        assert!(in_group_copies(&[copy.clone()], &f));
+        assert!(!in_group_copies(&[PackCopy { local: "other".into(), ..copy }], &f));
+        assert!(!in_group_copies(&[], &f));
     }
 
     #[test]
