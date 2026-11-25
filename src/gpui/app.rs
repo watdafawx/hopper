@@ -1325,12 +1325,6 @@ impl AppView {
         let theme = cx.theme();
         let (muted, hover, radius) = (theme.muted_foreground, theme.list_hover, theme.radius);
         let state = self.store.read(cx).self_update().cloned();
-        // Only show the version chip in the title bar when an update is
-        // available, downloading or ready; otherwise the version lives in
-        // the ? help menu so the bar stays quiet.
-        if !matches!(state, Some(SelfUpdate::Available(_) | SelfUpdate::Installing(_) | SelfUpdate::Ready(_))) {
-            return div().into_any_element();
-        }
         // (text, colour, icon, tooltip); no colour is the plain chip.
         let (text, color, icon, tip): (String, Option<Hsla>, Option<IconName>, String) = match &state {
             Some(SelfUpdate::Available(r)) => (
