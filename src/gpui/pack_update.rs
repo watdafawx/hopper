@@ -184,6 +184,9 @@ pub struct UpdatePreview {
     /// A clean update, like the CurseForge app: every pack mod and pack
     /// file becomes the pack's. Off: "Keep my changes" (pick per file).
     clean: bool,
+    /// "Clean for everyone" (a group copy): the friends' settings files go
+    /// back to the pack's too. Off: their changed files stay theirs.
+    clean_all: bool,
     /// The pack version updated to (instance mode), to compare again.
     file: Option<cf::File>,
     /// Instance mode: the comparison job, while it runs (the button shows
@@ -259,6 +262,7 @@ impl UpdatePreview {
             reinstall: false,
             compare: false,
             clean: false,
+            clean_all: false,
             file: None,
             plan_job: None,
             section: None,
@@ -460,7 +464,65 @@ impl UpdatePreview {
                             })),
                     ),
             )
+            .children(self.friends_block(cx))
             .into_any_element()
+    }
+
+    /// How this update treats the group's PCs, from the ticks.
+    fn pack_mode(&self) -> hopper::synccore::PackMode {
+        use hopper::synccore::ConfigMode::{Clean, Keep};
+        hopper::synccore::PackMode { here: if self.clean { Clean } else { Keep }, friends: if self.clean_all { Clean } else { Keep }, keep_off: true }
+    }
+
+    /// "Your friends": what this update does on each friend's PC, one line
+    /// each (from their last status), and the tick that makes it a clean
+    /// update for them too. Only for a copy kept in step with a group.
+    fn friends_block(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.server.is_some() {
+            return None;
+        }
+        let Some(Ok(plan)) = &self.plan else { return None };
+        let s = self.store.read(cx);
+        if !s.is_sync_copy(&self.root) {
+            return None;
+        }
+        let sp = s.sync_pack_plan(&self.root, &plan.file.display_name, self.pack_mode())?;
+        let old = s.sync_old_friends(&self.root);
+        if sp.friends.is_empty() && old.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        let (muted, surface, radius) = (theme.muted_foreground, theme.muted.opacity(widgets::alpha::HOVER), theme.radius);
+        let mut lines = v_flex().gap_1().text_sm();
+        for f in &sp.friends {
+            lines = lines.child(div().child(f.says.clone()));
+        }
+        for name in old {
+            let who = if name.is_empty() { "A friend's".to_string() } else { format!("{name}'s") };
+            lines = lines.child(div().text_color(muted).child(format!("{who} Hopper is out of date: they get this once they update Hopper.")));
+        }
+        Some(
+            v_flex()
+                .id("update-friends")
+                .gap_2()
+                .px_3()
+                .py_2()
+                .rounded(radius)
+                .bg(surface)
+                .child(div().text_sm().font_semibold().child("Your friends"))
+                .child(lines)
+                .child(
+                    gpui_kit::component::checkbox::Checkbox::new("clean-for-everyone")
+                        .label("Clean for everyone")
+                        .checked(self.clean_all)
+                        .on_change(cx.listener(|this, v: &bool, _, cx| {
+                            this.clean_all = *v;
+                            cx.notify();
+                        })),
+                )
+                .child(div().text_xs().text_color(muted).child("Their changed settings files go back to the pack's too."))
+                .into_any_element(),
+        )
     }
 
     /// A fresh plan's state: picks at their defaults, lists closed.
@@ -764,6 +826,8 @@ impl UpdatePreview {
     fn instance_footer(&self, cx: &App) -> (&'static str, AnyElement) {
         let (icon, go) = if self.reinstall {
             (IconName::RotateCcw, "Reinstall")
+        } else if self.clean_all && self.server.is_none() {
+            (IconName::Download, "Update for everyone")
         } else {
             (IconName::Download, "Update")
         };
@@ -1353,6 +1417,7 @@ impl UpdatePreview {
         let (store, root, file) = (v.store.clone(), v.root.clone(), plan.file.clone());
         let backup = v.backup_worlds;
         let clean = v.clean;
+        let mode = v.pack_mode();
         // The done toast says how many of the player's edits stayed, as
         // the summary's "pack files you changed: kept" counted them.
         let kept = if v.clean { 0 } else { v.edited_kept(plan) };
@@ -1371,8 +1436,8 @@ impl UpdatePreview {
         // The update runs in the background: Tasks, the instance's row and
         // a toast at the end follow it, so the dialog closes now.
         store.update(cx, |s, cx| {
-            if clean {
-                s.sync_note_clean_update(&root);
+            if clean || mode.friends != hopper::synccore::ConfigMode::Keep {
+                s.sync_note_pack_mode(&root, mode);
             }
             s.update_pack(&root, file, Some(overrides), backup, kept);
             cx.notify();

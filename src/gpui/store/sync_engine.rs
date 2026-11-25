@@ -946,11 +946,22 @@ impl Store {
         synccore::cards::authors(&slot.engine).into_iter().filter(|(id, _)| *id != slot.engine.me).collect()
     }
 
-    /// The "Why" line of a History row: only when Hopper made the change for
-    /// someone. `at`: the record's relay time.
-    pub fn sync_why(&self, root: &Path, key: &Key, author: &str) -> Option<String> {
+    /// The "Why" line of a History row, only when Hopper made the change for
+    /// someone. `file`: the jar's name in the row; `author`: the friend's id
+    /// (empty is this player).
+    pub fn sync_why_file(&self, root: &Path, file: &str, author: &str) -> Option<String> {
         let slot = self.sync.slots.values().find(|s| s.root == root)?;
-        slot.engine.log.changes.values().map(|(c, _)| c).filter(|c| c.key == *key && c.dot.author == author).max_by_key(|c| c.lamport).and_then(|c| synccore::cards::why_line(&slot.engine, c))
+        let author = if author.is_empty() { slot.engine.me.as_str() } else { author };
+        let bare = file.trim_end_matches(".disabled");
+        let is_file = |v: &Value| matches!(v, Value::File { file, .. } if file.trim_end_matches(".disabled").eq_ignore_ascii_case(bare));
+        slot.engine
+            .log
+            .changes
+            .values()
+            .map(|(c, _)| c)
+            .filter(|c| c.dot.author == author && (is_file(&c.now) || is_file(&c.was)))
+            .max_by_key(|c| c.lamport)
+            .and_then(|c| synccore::cards::why_line(&slot.engine, c))
     }
 
     // ---- Differences on this PC ---------------------------------------------

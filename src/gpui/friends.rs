@@ -771,7 +771,7 @@ impl FriendsPanel {
                 more(top.state.note(&top.who).map(|n| format!("{}: {n}", top.name)).unwrap_or_default()),
             ),
             CopyState::Differs(text) => (IconName::Info, theme.warning, "Needs a look", more(text.clone())),
-            CopyState::Updating => (IconName::RefreshCw, theme.primary, "Syncing",format!("Getting {}'s changes for {}.", top.who, top.name)),
+            CopyState::Updating => (IconName::RefreshCw, theme.primary, "Getting changes", format!("Getting {}'s changes for {}.", top.who, top.name)),
             CopyState::UpToDate => (
                 IconName::CircleCheck,
                 theme.success,
@@ -1868,12 +1868,20 @@ impl FriendsPanel {
                 .map(|(root, _)| s.group_status(root).map(|st| (st, s.group_pulling(root), s.group_pulled(root).map(|(t, _)| t.to_string()))))
                 .collect()
         };
+        // A copy kept by the sync core says how it stands in the chip's words
+        // (`syncchip::group_look`): the same as its chip and its popover.
+        let sync_lines: Vec<Option<(hopper::syncchip::GroupLook, Vec<String>)>> = {
+            let s = self.store.read(cx);
+            let t = now();
+            my_packs.iter().map(|(root, _)| s.sync_state(root, s.sync_connected()).map(|st| (hopper::syncchip::group_look(&st, t), s.sync_old_friends(root)))).collect()
+        };
         let my_rows: Vec<AnyElement> = my_packs
             .iter()
             .enumerate()
             .map(|(pi, (root, name))| {
                 let root = root.clone();
                 let state = pack_state[pi].clone();
+                let sync_line = sync_lines[pi].clone();
                 let row_id = SharedString::from(format!("gp-mine:{pi}"));
                 let pull = state.as_ref().map(|(st, pulling, _)| {
                     let b = self.pull_button(SharedString::from(format!("gp-pull:{pi}")), root.clone(), *pulling, st, cx);
@@ -1905,7 +1913,8 @@ impl FriendsPanel {
                                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(FriendsEvent::Show(root.clone())))),
                             )
                             .child(widgets::caption("Yours", cx).text_xs())
-                            .when_some(state.as_ref(), |c, (st, _, said)| c.child(status_line(st, said.as_deref(), false, cx))),
+                            .when_some(state.as_ref().filter(|_| sync_line.is_none()), |c, (st, _, said)| c.child(status_line(st, said.as_deref(), false, cx)))
+                            .when_some(sync_line.as_ref(), |c, (gl, old)| c.child(sync_status_line(gl, old, cx))),
                     )
                     .children(pull)
                     .child(
@@ -3947,6 +3956,22 @@ fn status_line(st: &Status, said: Option<&str>, under_icon: bool, cx: &App) -> D
         .items_start()
         .when(under_icon, |d| d.pl(rems(1.625)))
         .child(widgets::chip(tone_color(st.tone(), cx)).child(st.label()))
+        .child(div().flex_1().min_w_0().text_xs().text_color(cx.theme().muted_foreground).child(text))
+}
+
+/// The line under a pack of yours kept by the sync core: its state's label
+/// as a chip, its words after it, and a friend's out-of-date Hopper (the only
+/// place besides the pack update that says so).
+fn sync_status_line(gl: &hopper::syncchip::GroupLook, old: &[String], cx: &App) -> Div {
+    let mut text = gl.line.clone();
+    for name in old {
+        let who = if name.is_empty() { "A friend's".to_string() } else { format!("{name}'s") };
+        text = format!("{text} {who} Hopper is out of date.");
+    }
+    h_flex()
+        .gap_1p5()
+        .items_start()
+        .child(widgets::chip(tone_color(gl.look.tone, cx)).child(gl.look.label.clone()))
         .child(div().flex_1().min_w_0().text_xs().text_color(cx.theme().muted_foreground).child(text))
 }
 

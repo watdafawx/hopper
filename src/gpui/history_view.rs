@@ -828,6 +828,11 @@ impl BackupsView {
         if let Some(g) = who.and_then(|w| self.group_name(w, cx)) {
             detail = if detail.is_empty() { format!("group {g}") } else { format!("{detail} · group {g}") };
         }
+        // Why Hopper made the change for them (an answer, a pack update, a
+        // put back); a change made by hand has no such line.
+        let why = (!nested)
+            .then(|| self.store.read(cx).sync_why_file(&self.root, &f.name, who.map_or("", |w| w.id.as_str())))
+            .flatten();
         row.children(lead)
             .child(
                 v_flex()
@@ -841,7 +846,8 @@ impl BackupsView {
                             .child(what)
                             .child(self.mod_cell(ElementId::Name(format!("hist-mod:{key}").into()), name, pid, &icon, true, cx)),
                     )
-                    .child(widgets::caption(detail, cx).text_xs().truncate()),
+                    .child(widgets::caption(detail, cx).text_xs().truncate())
+                    .children(why.map(|w| widgets::caption(w, cx).text_xs().truncate())),
             )
             .when(!nested, |r| r.child(widgets::caption(hm(when), cx).text_xs()))
             .when(file.change.undoable(), |r| {
