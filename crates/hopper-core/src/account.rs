@@ -14,7 +14,7 @@ pub struct Account {
 impl Account {
     /// Face image for the account (public skin service).
     pub fn avatar(&self) -> String {
-        format!("https://mc-heads.net/avatar/{}/32", self.uuid)
+        crate::imgcache::player_head(&self.uuid, 32)
     }
 }
 

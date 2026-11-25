@@ -6,6 +6,14 @@
 
 use std::path::{Path, PathBuf};
 
+/// A player's head from the public skin service. The cache keeps a picture
+/// by its address for good, so the address carries the day: a new skin shows
+/// within a day, and the older head stays on disk unused until pruned.
+pub fn player_head(who: &str, size: u32) -> String {
+    let day = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400);
+    format!("https://mc-heads.net/avatar/{who}/{size}?d={day}")
+}
+
 fn dir() -> Option<PathBuf> {
     crate::paths::dirs().map(|d| d.cache_dir().join("images"))
 }

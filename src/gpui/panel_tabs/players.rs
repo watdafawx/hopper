@@ -92,7 +92,7 @@ fn parse(v: &Value) -> Data {
 
 /// A player's head, as the panel's web UI builds it.
 fn head_url(name: &str) -> String {
-    format!("https://mc-heads.net/avatar/{}/44", q(name))
+    hopper::imgcache::player_head(&q(name), 44)
 }
 
 pub struct PlayersTab {

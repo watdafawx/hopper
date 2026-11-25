@@ -28,7 +28,7 @@ pub struct Saved {
 impl Saved {
     /// A head from a public skin service, until the skin is known.
     pub fn fallback_avatar(&self) -> String {
-        format!("https://mc-heads.net/avatar/{}/32", self.id)
+        crate::imgcache::player_head(&self.id, 32)
     }
 }
 
