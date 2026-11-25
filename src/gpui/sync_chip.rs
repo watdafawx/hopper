@@ -458,7 +458,7 @@ pub fn more_pill(hidden: usize, names: String, cx: &App) -> AnyElement {
 pub const PREVIEWS: &[&str] = &[
     "g-in-sync", "g-checking", "g-updating", "g-sending", "g-behind", "g-offline", "g-failed", "g-needs", "s-in-sync", "s-differ", "s-comparing",
     "s-pushing", "s-offline", "s-blocked", "s-failed", "s-wont", "dl-waiting", "dl-working", "dl-stuck", "rs-changed", "rs-waiting", "both-ok", "both-busy", "both-needs", "both-long",
-    "sy-needs", "sy-needs-one", "sy-needs-big", "sy-differs", "sy-differs-big", "sy-differs-narrow", "sy-ood", "sy-behind", "sy-getting", "sy-game", "sy-failed", "sy-sending", "sy-held",
+    "sy-needs", "sy-needs-one", "sy-needs-differs", "sy-needs-big", "sy-differs", "sy-differs-big", "sy-differs-narrow", "sy-ood", "sy-behind", "sy-getting", "sy-game", "sy-failed", "sy-sending", "sy-held",
     "sy-offline", "sy-insync", "sy-notes",
 ];
 

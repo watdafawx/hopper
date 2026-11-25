@@ -78,7 +78,7 @@ fn what_color(w: What, cx: &App) -> Hsla {
     match w {
         What::Removed | What::TurnedOff => t.warning,
         What::Added | What::TurnedOn => t.success,
-        What::Updated => t.info,
+        What::Updated | What::Differs => t.info,
         What::Other => t.muted_foreground,
     }
 }
@@ -123,7 +123,7 @@ fn card_view(card: Card, env: &Env, window: &mut Window, cx: &mut App) -> AnyEle
                     .items_center()
                     .text_sm()
                     .child(h_flex().min_w_0().flex_1().child(link(env, format!("card-mod:{key}:{ix}").into(), &info, cx)))
-                    .child(widgets::chip(what_color(m.what, cx)).child(m.what.says())),
+                    .child(widgets::chip(what_color(m.what, cx)).child(if m.note.is_empty() { m.what.says().to_string() } else { m.note.clone() })),
             );
         }
         if card.mods.len() > SHOWN {

@@ -322,6 +322,8 @@ impl Store {
                 && !slot.posting
                 && !to.is_empty()
                 && self.sync.post_failed_at.is_none_or(|t| t.elapsed() >= POST_RETRY);
+            // Mods this PC keeps only here are never compared with a friend's.
+            slot.engine.kept_here = kept.clone();
             let outs = if post { slot.engine.outbox(&to, &snap, 0) } else { Vec::new() };
             let apply_now = !slot.applying && !busy && root.is_dir() && (self.sync.ticks % 4 == 0 || slot.dirty);
             let plan = if apply_now {
@@ -367,6 +369,11 @@ impl Store {
                 }
             }
             status.needs_full |= o.status.needs_full;
+            status.needs_state |= o.status.needs_state;
+            // The list goes to whoever asked; one packet reaches the whole group.
+            if status.state.is_empty() && !o.status.state.is_empty() {
+                status.state = o.status.state.clone();
+            }
         }
         let body = if full { wire::Body::Checkpoint(changes) } else { wire::Body::Tail(changes) };
         let mut copies = BTreeMap::new();

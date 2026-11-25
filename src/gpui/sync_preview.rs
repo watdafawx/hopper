@@ -19,7 +19,7 @@ use std::rc::Rc;
 
 /// What every `sy-*` name shows, for `sync_chip::PREVIEWS`.
 pub const NAMES: &[&str] = &[
-    "sy-needs", "sy-needs-one", "sy-needs-big", "sy-differs", "sy-differs-big", "sy-differs-narrow", "sy-ood", "sy-behind", "sy-getting", "sy-game", "sy-failed", "sy-sending", "sy-held",
+    "sy-needs", "sy-needs-one", "sy-needs-differs", "sy-needs-big", "sy-differs", "sy-differs-big", "sy-differs-narrow", "sy-ood", "sy-behind", "sy-getting", "sy-game", "sy-failed", "sy-sending", "sy-held",
     "sy-offline", "sy-insync", "sy-notes",
 ];
 
@@ -41,7 +41,7 @@ fn env() -> Env {
 }
 
 fn mods(n: usize, what: What) -> Vec<CardMod> {
-    JARS.iter().take(n).map(|f| CardMod { key: Key::Mod(f.to_string()), file: f.to_string(), what }).collect()
+    JARS.iter().take(n).map(|f| CardMod { key: Key::Mod(f.to_string()), file: f.to_string(), what, note: String::new() }).collect()
 }
 
 fn btn(label: &str, answer: Option<Answer>, lead: bool) -> Btn {
@@ -78,7 +78,7 @@ pub fn cards(name: &str) -> Vec<Card> {
         "Mia",
         "Mia removed {mod}.",
         "Noah updated it too. It stays on for everyone until someone answers.",
-        vec![CardMod { key: Key::Mod("jade".into()), file: "jade-1.2.jar".into(), what: What::Removed }],
+        vec![CardMod { key: Key::Mod("jade".into()), file: "jade-1.2.jar".into(), what: What::Removed, note: String::new() }],
         vec![btn("Keep {mod}", Some(Answer::Keep), true), btn("Remove it", Some(Answer::Take), false)],
     );
     let away = card(
@@ -114,11 +114,24 @@ pub fn cards(name: &str) -> Vec<Card> {
         "Noah",
         "Noah added {mod} from a link.",
         "Hopper installs from a new place only when you allow it.",
-        vec![CardMod { key: Key::Mod("tweaks".into()), file: "tweaks-1.0.jar".into(), what: What::Added }],
+        vec![CardMod { key: Key::Mod("tweaks".into()), file: "tweaks-1.0.jar".into(), what: What::Added, note: String::new() }],
         vec![btn("Allow and install", Some(Answer::Take), true), btn("Not now", None, false)],
     );
     match name {
         "sy-needs-one" => vec![clash],
+        "sy-needs-differs" => {
+            let note = |here: &str, there: &str| format!("{here} here, {there} for Alice");
+            let row = |f: &str, n: String| CardMod { key: Key::Mod(f.to_string()), file: f.to_string(), what: What::Differs, note: n };
+            vec![card(
+                8,
+                Risk::Differs,
+                "Alice",
+                "Alice and this PC differ on 3 mods.",
+                "These PCs started out different. Nothing changes until you answer.",
+                vec![row(JARS[0], note("on", "off")), row(JARS[1], note("off", "on")), row(JARS[2], note("not installed", "on"))],
+                vec![btn("Use Alice's", Some(Answer::Take), true), btn("Use mine", Some(Answer::Keep), false)],
+            )]
+        }
         "sy-needs-big" => {
             let mut a = many_removals(2, "Mia", 12);
             a.others = 1;
@@ -158,7 +171,7 @@ fn noop() -> Run {
 fn state_of(name: &str) -> (SyncState, usize) {
     let cards = cards(name).len();
     match name {
-        "sy-needs" | "sy-needs-one" | "sy-needs-big" => (SyncState::NeedsYou { cards }, 0),
+        "sy-needs" | "sy-needs-one" | "sy-needs-big" | "sy-needs-differs" => (SyncState::NeedsYou { cards }, 0),
         "sy-differs" | "sy-differs-narrow" => (SyncState::Differs { mods: rows(false).len() }, 0),
         "sy-differs-big" => (SyncState::Differs { mods: rows(true).len() }, 0),
         "sy-ood" => (SyncState::OutOfDate { who: "Mia".into() }, 0),
