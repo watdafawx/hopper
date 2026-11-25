@@ -117,7 +117,7 @@ fn card_view(card: Card, env: &Env, window: &mut Window, cx: &mut App) -> AnyEle
             let info = (env.info)(&m.file, cx);
             list = list.child(
                 h_flex()
-                    .id(("card-row", key as usize * 1000 + ix))
+                    .id(ElementId::Name(format!("card-row:{key}:{ix}").into()))
                     .w_full()
                     .gap_2()
                     .items_center()
@@ -206,7 +206,7 @@ fn card_button(card: &Card, b: &Btn, ix: usize, ticked: bool, others: bool, env:
     }
     let ready = hopper::synccore::cards::button_ready(b, ticked);
     let (card2, answer, answer_fn) = (card.clone(), b.answer, env.answer.clone());
-    let btn = Button::new(("card-btn", card.id as usize * 10 + ix)).small().label(label).disabled(!ready);
+    let btn = Button::new(ElementId::Name(format!("card-btn:{}:{ix}", card.id).into())).small().label(label).disabled(!ready);
     let btn = if b.lead { btn.primary() } else { btn.outline() };
     btn.on_click(move |_, window, cx| answer_fn(&card2, answer, others, window, cx))
 }
