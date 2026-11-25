@@ -96,8 +96,12 @@ pub fn merge(current: &Change, incoming: &Change) -> Merge {
     }
     let cur_away = current.now.takes_away(&current.was);
     let inc_away = incoming.now.takes_away(&incoming.was);
+    // A removal of a mod that was already off took nothing away by its own
+    // `was`, but against someone who turned it back on it still ends the mod
+    // for the player who did that, so it counts as a clash too.
+    let one_ends_away = current.now.is_away() != incoming.now.is_away();
     let pack_moves = current.key == Key::Pack && incoming.key == Key::Pack;
-    if cur_away != inc_away || pack_moves {
+    if cur_away != inc_away || one_ends_away || pack_moves {
         Merge::Clash
     } else {
         Merge::Newest
@@ -124,11 +128,11 @@ fn settle(records: &[&Change]) -> Register {
     let first = front[0];
     // A clash keeps the non-destructive side; otherwise the newest wins.
     let clash = front.iter().any(|c| merge(first, c) == Merge::Clash);
-    let winner = if clash && first.key != Key::Pack && first.now.takes_away(&first.was) {
+    let winner = if clash && first.key != Key::Pack && first.now.is_away() {
         front
             .iter()
             .copied()
-            .find(|c| !c.now.takes_away(&c.was))
+            .find(|c| !c.now.is_away())
             .unwrap_or(first)
     } else {
         first
@@ -316,6 +320,23 @@ mod tests {
         let r = register_of(&[a, b]);
         assert_eq!(r.winner.now, Value::Gone);
         assert!(!r.is_clash());
+    }
+
+    #[test]
+    fn delete_of_an_off_mod_against_a_turn_on_keeps_the_mod_and_asks() {
+        // Noah (away) deletes a mod that was off; Mia turned it on meanwhile.
+        // The delete takes nothing away by its own `was`, but it must not
+        // silently end Mia's newer turn-on, even with the higher clock.
+        let off = Value::File { file: "a1".into(), on: false };
+        let on = file("a1");
+        let rm = ch("noah", 1, "cf:1", off.clone(), Value::Gone, 9, &[]);
+        let turn_on = ch("mia", 1, "cf:1", off, on, 3, &[]);
+        assert_eq!(merge(&rm, &turn_on), Merge::Clash);
+        assert_eq!(merge(&turn_on, &rm), Merge::Clash);
+        let r = register_of(&[rm.clone(), turn_on.clone()]);
+        assert_eq!(r.winner, turn_on);
+        assert_eq!(r.open, vec![rm]);
+        assert!(r.is_clash());
     }
 
     #[test]
