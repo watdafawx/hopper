@@ -50,6 +50,12 @@ struct Slot {
     known: HashSet<String>,
     /// Failures said once.
     said: HashSet<String>,
+    /// How often the relay said "too much" to a post: each time halves what
+    /// this copy tries to keep there, until it goes in (`wire::fit`).
+    shrink: u32,
+    /// How the player's next pack update was made (a clean one), for its
+    /// record; none means the everyday one.
+    pack_mode: Option<PackMode>,
     /// Mods History's Undo just changed: their difference on disk is the
     /// player's Undo, not drift.
     undone: Vec<(Key, Instant)>,
@@ -149,7 +155,7 @@ impl Store {
             .group_copies
             .iter()
             .filter(|c| self.instances.iter().any(|i| i.id == c.local))
-            .map(|c| (c.local.clone(), c.inst.clone(), c.group.clone()))
+            .map(|c| (c.local.clone(), synccore::copy_id(&c.group, &c.inst), c.group.clone()))
             .collect();
         let gone: Vec<String> = self.sync.slots.keys().filter(|l| !wanted.iter().any(|(w, ..)| w == *l)).cloned().collect();
         for l in gone {
@@ -168,7 +174,7 @@ impl Store {
             if !self.sync.slots.contains_key(&local_id) {
                 let engine = self.sync_open(&copy, &me, &my_name, &snap);
                 local::watch(&root);
-                let mut slot = Slot { engine, root: root.clone(), group: group.clone(), dirty: true, posting: false, applying: false, snap: snap.clone(), known: HashSet::new(), said: HashSet::new(), undone: Vec::new() };
+                let mut slot = Slot { engine, root: root.clone(), group: group.clone(), dirty: true, posting: false, applying: false, snap: snap.clone(), known: HashSet::new(), said: HashSet::new(), shrink: 0, pack_mode: None, undone: Vec::new() };
                 // A swap the last run stopped in the middle is finished now.
                 match apply::recover(&root) {
                     Ok(Some(report)) => slot.engine.applied(&report),
@@ -221,7 +227,7 @@ impl Store {
                             slot.dirty = true;
                         }
                         Some(v) if *v != now_v => {
-                            let why = if key == Key::Pack { Why::PackUpdate { mode: PackMode::default() } } else { Why::Player };
+                            let why = if key == Key::Pack { Why::PackUpdate { mode: slot.pack_mode.take().unwrap_or_default() } } else { Why::Player };
                             slot.engine.record(Edit { key: key.clone(), now: now_v.clone(), why, batch: String::new() }, 0);
                             slot.engine.applied.insert(key, now_v);
                             slot.dirty = true;
@@ -303,6 +309,8 @@ impl Store {
     /// the same records, each takes in only what is new to them.
     fn sync_post(&mut self, local_id: &str, outs: Vec<synccore::engine::Outgoing>, cx: &mut Context<Self>) {
         let Some(mb) = self.mailbox.clone() else { return };
+        let Some(group_id) = self.sync.slots.get(local_id).map(|s| s.group.clone()) else { return };
+        let in_group = self.sync.slots.values().filter(|s| s.group == group_id).count().max(1);
         let Some(slot) = self.sync.slots.get_mut(local_id) else { return };
         let mut changes: Vec<synccore::Change> = Vec::new();
         let mut full = false;
@@ -326,12 +334,24 @@ impl Store {
         let mut copies = BTreeMap::new();
         copies.insert(slot.engine.copy.clone(), (body, status, outs[0].hash.clone()));
         let packet = wire::Packet { version: wire::WIRE_VERSION, from: slot.engine.me.clone(), group: slot.group.clone(), copies };
-        let parts = wire::encode_with(&packet, PART_BYTES);
+        // What the relay keeps per sender is capped: cut the post to this
+        // copy's share, the rest follows once the friends have acked this.
         let limits = wire::RelayLimits::default();
-        if parts.iter().any(|p| p.len() + 4 > limits.max_body) {
+        let copies = in_group << slot.shrink.min(8);
+        let Some(fitted) = wire::fit(&packet, &limits, PART_BYTES, copies) else {
             log::warn!("a sync packet of {} is too big for the relay", slot.engine.copy);
+            self.sync.post_failed_at = Some(Instant::now());
+            let text = "This group has more to share than Hopper can send at once. Remove a few mods you don't need to share, or stop sharing another pack in this group.".to_string();
+            if self.publish_said.as_deref() != Some(text.as_str()) {
+                cx.emit(StoreEvent::Notice(text.clone(), true));
+                self.publish_said = Some(text);
+            }
             return;
+        };
+        if fitted.kept < fitted.of {
+            log::info!("sending {} of {} sync records of {} now, the rest after the friends have taken these", fitted.kept, fitted.of, slot.engine.copy);
         }
+        let parts = fitted.parts;
         slot.posting = true;
         let (gid, copy, name) = (slot.group.clone(), slot.engine.copy.clone(), slot.engine.name.clone());
         let local_id = local_id.to_string();
@@ -359,6 +379,7 @@ impl Store {
                 for o in &outs {
                     slot.engine.sent(o);
                 }
+                slot.shrink = slot.shrink.saturating_sub(1);
                 slot.dirty = true;
                 Self::sync_save(slot);
                 // A Push by hand went out.
@@ -369,6 +390,13 @@ impl Store {
             Err(e) => {
                 log::warn!("sending changes to the group: {e:#}");
                 self.sync.post_failed_at = Some(Instant::now());
+                // The relay's storage caps: try again with half as much.
+                let full = e.downcast_ref::<hopper::mailbox::MailboxError>().is_some_and(|m| m.status == 409 && matches!(m.code.as_str(), "storage_full" | "group_packs_full"));
+                if full && slot.shrink < 8 {
+                    slot.shrink += 1;
+                    cx.notify();
+                    return;
+                }
                 let text = hopper::mailbox::says(&e);
                 if self.publish_said.as_deref() != Some(text.as_str()) {
                     cx.emit(StoreEvent::Notice(text.clone(), true));
@@ -529,7 +557,7 @@ impl Store {
             match &r.outcome {
                 Outcome::Done => {
                     done += 1;
-                    loader |= r.key == Key::Loader;
+                    loader |= matches!(r.key, Key::Loader | Key::Game);
                 }
                 Outcome::Failed(why) => {
                     log::warn!("a synced change didn't go in ({:?}): {why}", r.key);
@@ -763,6 +791,20 @@ impl Store {
         cx.notify();
     }
 
+    /// The player is cleaning this copy's pack update: its record says the
+    /// settings were replaced here only. Friends keep theirs unless the
+    /// player ticks "Clean for everyone" (`sync_note_pack_mode`).
+    pub fn sync_note_clean_update(&mut self, root: &Path) {
+        self.sync_note_pack_mode(root, PackMode { here: synccore::ConfigMode::Clean, friends: synccore::ConfigMode::Keep, keep_off: true });
+    }
+
+    /// Sets how the next pack update of this copy is recorded.
+    pub fn sync_note_pack_mode(&mut self, root: &Path, mode: PackMode) {
+        if let Some(slot) = self.sync.slots.values_mut().find(|s| s.root == root) {
+            slot.pack_mode = Some(mode);
+        }
+    }
+
     /// History's Undo put these files (names in the instance's folders) back
     /// or took them away: the next tick records what that changed as Undo.
     pub fn sync_note_undo(&mut self, root: &Path, files: &[String]) {
@@ -790,4 +832,21 @@ impl Store {
 
 fn failed(plan: &ApplyPlan, why: &str) -> ApplyReport {
     ApplyReport { results: plan.steps.iter().map(|s| StepResult { key: s.key.clone(), by: s.by.clone(), outcome: Outcome::Failed(why.to_string()) }).collect() }
+}
+
+#[cfg(test)]
+mod tests {
+    // Named imports: the glob would bring in gpui's own `test` attribute.
+    use super::{PREFIX, parse_inst};
+    use hopper::synccore;
+
+    #[test]
+    fn one_instance_in_two_groups_is_two_copies_with_their_own_events() {
+        let a = format!("{PREFIX}{}", synccore::copy_id("g1", "inst"));
+        let b = format!("{PREFIX}{}", synccore::copy_id("g2", "inst"));
+        assert_ne!(parse_inst(&a), parse_inst(&b));
+        // The parts of one event belong to the same copy.
+        assert_eq!(parse_inst(&format!("{a}#part-2")), parse_inst(&a));
+        assert_eq!(parse_inst("not-a-sync-event"), None);
+    }
 }

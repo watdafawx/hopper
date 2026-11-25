@@ -266,11 +266,83 @@ pub struct RelayLimits {
     pub max_body: usize,
     /// Events held per sender per recipient.
     pub max_events: usize,
+    /// Bytes one sender may keep in groups, all packs together
+    /// (`MAX_PACK_BYTES`): past it the relay answers 409 `storage_full`.
+    pub group_bytes: usize,
+    /// Keys one sender may hold in one group (`MAX_GROUP_PACKS`): every part
+    /// of every copy is one. Past it: 409 `group_packs_full`.
+    pub group_packs: usize,
+    /// What the relay counts beside a part's code (its key, name, marks).
+    pub part_overhead: usize,
 }
 
 impl Default for RelayLimits {
     fn default() -> Self {
-        RelayLimits { max_body: 64 * 1024, max_events: 150 }
+        RelayLimits { max_body: 64 * 1024, max_events: 150, group_bytes: 1024 * 1024, group_packs: 100, part_overhead: 400 }
+    }
+}
+
+/// A packet cut to what the relay's group storage takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fitted {
+    pub parts: Vec<String>,
+    /// How many records of the copy go in this post, and how many there were.
+    /// The rest are not lost: nobody has acked them, so the next packet
+    /// carries them (cumulative tails), as soon as the friend acks these.
+    pub kept: usize,
+    pub of: usize,
+}
+
+impl RelayLimits {
+    /// What the relay counts against the sender for these parts.
+    pub fn cost(&self, parts: &[String]) -> usize {
+        parts.iter().map(|p| p.len() + self.part_overhead).sum()
+    }
+}
+
+/// `packet` (one copy's records), cut by whole records until it fits what
+/// this copy may keep at the relay: its share of the sender's group bytes
+/// and of a group's keys, `copies` being how many copies this PC holds.
+/// The oldest records go first and every author's counter stays gapless
+/// (records are ordered by `lamport`, which follows each author's own
+/// counter), so an ack of the part never claims a record that was cut. A
+/// copy's records are never dropped for good: `None` says even one record
+/// doesn't fit, which is a plain message for the player, not a retry.
+pub fn fit(packet: &Packet, limits: &RelayLimits, part_bytes: usize, copies: usize) -> Option<Fitted> {
+    let copies = copies.max(1);
+    let (bytes, keys) = (limits.group_bytes / copies, (limits.group_packs / copies).max(1));
+    let fits = |parts: &[String]| {
+        parts.iter().all(|p| p.len() + 4 <= limits.max_body) && parts.len() <= keys && limits.cost(parts) <= bytes
+    };
+    let of = packet.copies.values().map(|(b, ..)| records(b).len()).max().unwrap_or(0);
+    let mut keep = of;
+    loop {
+        let mut cut = packet.clone();
+        for (body, ..) in cut.copies.values_mut() {
+            let list = records_mut(body);
+            list.sort_by(|a, b| (a.lamport, &a.dot).cmp(&(b.lamport, &b.dot)));
+            list.truncate(keep);
+        }
+        let parts = encode_with(&cut, part_bytes);
+        if fits(&parts) {
+            return Some(Fitted { parts, kept: keep, of });
+        }
+        if keep <= 1 {
+            return None;
+        }
+        keep = (keep / 2).max(1);
+    }
+}
+
+fn records(b: &Body) -> &Vec<Change> {
+    match b {
+        Body::Tail(c) | Body::Checkpoint(c) => c,
+    }
+}
+
+fn records_mut(b: &mut Body) -> &mut Vec<Change> {
+    match b {
+        Body::Tail(c) | Body::Checkpoint(c) => c,
     }
 }
 
@@ -480,6 +552,49 @@ mod tests {
             old.put(&format!("pack-{i}"), "x".into(), &limits);
         }
         assert_eq!(old.len(), 150);
+    }
+
+    #[test]
+    fn a_big_checkpoint_is_cut_to_what_the_group_storage_takes() {
+        // The relay's cap is 1 MiB; a smaller one keeps the fixture quick.
+        let limits = RelayLimits { group_bytes: 40_000, ..RelayLimits::default() };
+        let mut p = packet(1, 3000);
+        for (body, ..) in p.copies.values_mut() {
+            *body = Body::Checkpoint(records(body).clone());
+        }
+        let whole = encode_with(&p, 19_000);
+        assert!(limits.cost(&whole) > limits.group_bytes, "the fixture must be too big: {}", limits.cost(&whole));
+        let f = fit(&p, &limits, 19_000, 1).expect("some of it fits");
+        assert!(f.kept < f.of && f.kept >= 1);
+        assert!(limits.cost(&f.parts) <= limits.group_bytes);
+        assert!(f.parts.len() <= limits.group_packs);
+        // What went is a whole prefix: it reads back, and holds the oldest.
+        let back = decode(&f.parts).unwrap();
+        let got: Vec<u64> = back.copies.values().flat_map(|(b, ..)| records(b).iter().map(|c| c.lamport)).collect();
+        assert_eq!(got.len(), f.kept);
+        assert!(got.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[test]
+    fn a_copy_gets_its_share_when_a_pc_holds_many() {
+        let limits = RelayLimits::default();
+        let p = packet(1, 400);
+        let alone = fit(&p, &limits, 19_000, 1).unwrap();
+        let of_ten = fit(&p, &limits, 19_000, 10).unwrap();
+        assert!(of_ten.kept <= alone.kept);
+        assert!(limits.cost(&of_ten.parts) <= limits.group_bytes / 10);
+        assert!(of_ten.parts.len() <= limits.group_packs / 10);
+    }
+
+    #[test]
+    fn a_packet_that_fits_goes_whole_and_one_that_never_can_says_so() {
+        let limits = RelayLimits::default();
+        let small = packet(1, 5);
+        let f = fit(&small, &limits, 19_000, 1).unwrap();
+        assert_eq!((f.kept, f.of), (5, 5));
+        // A budget no single record fits.
+        let tiny = RelayLimits { group_bytes: 100, ..limits };
+        assert!(fit(&small, &tiny, 19_000, 1).is_none());
     }
 
     #[test]

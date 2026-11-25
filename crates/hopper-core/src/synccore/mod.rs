@@ -14,6 +14,7 @@ pub mod apply;
 pub mod bridge;
 pub mod engine;
 pub mod gate;
+pub mod link;
 pub mod local;
 pub mod model;
 pub mod plan;
@@ -28,3 +29,25 @@ pub use gate::{Limits, Risk, Trust};
 pub use local::{Drift, Snapshot};
 pub use model::{Arrival, Change, ConfigMode, Dot, Edit, Key, PackMode, Seen, Value, Why};
 pub use plan::{ApplyPlan, FriendPlan, PackPlan, Step, Wait};
+
+/// The id of one group copy's engine, its saved state and its events: the
+/// sharer's instance inside one group. The same instance shared into two
+/// groups is two copies, so neither takes in the other's records.
+pub fn copy_id(group: &str, inst: &str) -> String {
+    format!("{inst}@{group}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_instance_in_two_groups_is_two_copies() {
+        assert_ne!(copy_id("g1", "inst"), copy_id("g2", "inst"));
+        assert_ne!(copy_id("g1", "a"), copy_id("g1", "b"));
+        assert_eq!(copy_id("g1", "inst"), copy_id("g1", "inst"));
+        // Two groups' engines of one instance never share a state file.
+        let dir = std::path::Path::new("d");
+        assert_ne!(store::path(dir, &copy_id("g1", "inst")), store::path(dir, &copy_id("g2", "inst")));
+    }
+}
