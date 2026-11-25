@@ -96,7 +96,7 @@ pub enum Did {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Record {
     pub did: Did,
-    /// The mod's key ([`crate::groupsync::addon_key`]), to find it again.
+    /// The mod's key ([`crate::groupkey::addon_key`]), to find it again.
     pub key: String,
     /// Its entry as it was after the change.
     pub addon: Addon,
@@ -262,7 +262,7 @@ impl Drop for OwnAll {
 /// [`claim`] for an entry, as the scope's own.
 pub fn claim_addon(a: &Addon) {
     let who = SCOPES.with(|v| v.borrow().last().and_then(|s| s.default.clone())).unwrap_or_default();
-    claim(&crate::groupsync::addon_key(a), Some(&a.file_name), &who);
+    claim(&crate::groupkey::addon_key(a), Some(&a.file_name), &who);
 }
 
 /// [`claim`] by key alone, as the scope's own.
@@ -302,7 +302,7 @@ fn tag_for_addon(root: &Path, a: &Addon) -> Option<Tag> {
             return None;
         }
         let mine = |who: Who| Some(Tag { who, batch: s.batch.clone(), undo: false });
-        if let Some(w) = s.keys.get(&crate::groupsync::addon_key(a)).or_else(|| s.files.get(&base(&a.file_name))) {
+        if let Some(w) = s.keys.get(&crate::groupkey::addon_key(a)).or_else(|| s.files.get(&base(&a.file_name))) {
             return mine(w.clone());
         }
         if s.all {
@@ -340,11 +340,11 @@ pub(crate) fn recording() -> bool {
 /// turned off. A mod is the same one by key or by file name, so an entry
 /// that only got identified (bare to CurseForge) isn't "added".
 pub fn diff(old: &[Addon], new: &[Addon]) -> Vec<(Did, Addon)> {
-    let by_key: HashMap<String, &Addon> = old.iter().map(|a| (crate::groupsync::addon_key(a), a)).collect();
+    let by_key: HashMap<String, &Addon> = old.iter().map(|a| (crate::groupkey::addon_key(a), a)).collect();
     let by_file: HashMap<String, &Addon> = old.iter().map(|a| (base(&a.file_name), a)).collect();
     let mut out = Vec::new();
     for n in new {
-        let o = by_key.get(&crate::groupsync::addon_key(n)).or_else(|| by_file.get(&base(&n.file_name)));
+        let o = by_key.get(&crate::groupkey::addon_key(n)).or_else(|| by_file.get(&base(&n.file_name)));
         match o {
             None => out.push((Did::Added, n.clone())),
             Some(o) if o.enabled != n.enabled => out.push((if n.enabled { Did::On } else { Did::Off }, n.clone())),
@@ -376,7 +376,7 @@ pub(crate) fn note_save(old: Option<&Instance>, new: &Instance) {
         .into_iter()
         .filter_map(|(did, a)| {
             let t = tag_for_addon(&new.root, &a)?;
-            Some(Record { did, key: crate::groupsync::addon_key(&a), addon: a, who: t.who, batch: t.batch, note: String::new() })
+            Some(Record { did, key: crate::groupkey::addon_key(&a), addon: a, who: t.who, batch: t.batch, note: String::new() })
         })
         .collect();
     if recs.is_empty() {
@@ -409,8 +409,8 @@ fn swapped<'a>(old: &'a [Addon], new: &'a [Addon]) -> Vec<(&'a Addon, &'a Addon)
     old.iter()
         .filter(|o| gone(o))
         .filter_map(|o| {
-            let key = crate::groupsync::addon_key(o);
-            let n = new.iter().find(|n| crate::groupsync::addon_key(n) == key && !old.iter().any(|x| base(&x.file_name) == base(&n.file_name)))?;
+            let key = crate::groupkey::addon_key(o);
+            let n = new.iter().find(|n| crate::groupkey::addon_key(n) == key && !old.iter().any(|x| base(&x.file_name) == base(&n.file_name)))?;
             Some((o, n))
         })
         .collect()

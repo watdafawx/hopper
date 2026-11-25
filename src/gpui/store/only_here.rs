@@ -2,7 +2,7 @@
 //! the same as friends, and marking mods to stay out of that.
 
 use super::{Msg, Store, server_mods};
-use hopper::groupsync::addon_key;
+use hopper::groupkey::addon_key;
 use hopper::onlyhere::Kept;
 use std::collections::BTreeMap;
 use std::path::Path;

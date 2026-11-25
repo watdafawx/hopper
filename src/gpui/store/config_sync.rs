@@ -6,7 +6,7 @@
 use super::{Msg, Store, StoreEvent};
 use gpui_kit::*;
 use hopper::configsync::{self, Configs, Taken, Ticked, Waiting, Wrote1};
-use hopper::groupsync::addon_key;
+use hopper::groupkey::addon_key;
 use hopper::mailbox::Event;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -298,7 +298,7 @@ impl Store {
         }
         let copies: Vec<_> = self.settings.group_copies.iter().filter(|c| c.configs.shared().next().is_some()).cloned().collect();
         for c in copies {
-            if self.cfg.busy.contains(&c.local) || self.group_merging.contains(&c.local) {
+            if self.cfg.busy.contains(&c.local) {
                 continue;
             }
             let Some(inst) = self.instances.iter().find(|i| i.id == c.local).cloned() else { continue };

@@ -66,7 +66,7 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cf_change: Option<CfChange>,
     /// Mods kept only on this PC (see [`crate::onlyhere`]), by
-    /// [`crate::groupsync::addon_key`]: friends sync leaves them alone and
+    /// [`crate::groupkey::addon_key`]: friends sync leaves them alone and
     /// publishes them as friends last had them. Never put in a code.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub only_here: std::collections::BTreeMap<String, crate::onlyhere::Kept>,

@@ -24,8 +24,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use hopper::groupstatus::{self, Member, Status, Tone};
-use hopper::groupsync::Kind;
+use hopper::groupstatus::{Member, Status, Tone};
 use hopper::instances::Instance;
 use hopper::mailbox::{Event, Friend, Group, Met};
 use std::cell::RefCell;
@@ -518,7 +517,7 @@ impl FriendsPanel {
             .iter()
             .enumerate()
             .map(|(i, (key, k))| {
-                let a = inst.addons.iter().find(|a| hopper::groupsync::addon_key(a) == *key);
+                let a = inst.addons.iter().find(|a| hopper::groupkey::addon_key(a) == *key);
                 let name = a.map(|a| a.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| k.name.clone());
                 let name = if name.is_empty() { "A mod".to_string() } else { name };
                 let here = match a {
@@ -1285,7 +1284,7 @@ impl FriendsPanel {
             _ => None,
         };
         let copy_note = shown.as_ref().filter(|_| group.is_none()).and_then(|f| f.2.note(&who));
-        let changed = shown.as_ref().and_then(|f| changed_by(s, &f.0, &s.mailbox_id()));
+        let changed = shown.as_ref().and_then(|f| changed_by(s, &f.0));
         let sub = match by {
             Some(by) if sub.is_empty() => format!("From {by}"),
             Some(by) => format!("From {by} · {}", sub[..1].to_lowercase() + &sub[1..]),
@@ -1515,7 +1514,7 @@ impl FriendsPanel {
                 let kept = s.instance(root).map_or(0, |i| i.only_here.len());
                 let sub = if kept > 0 { format!("{sub} · {kept} only on this PC") } else { sub };
                 let note = state.note(&who);
-                let changed = changed_by(s, root, &s.mailbox_id());
+                let changed = changed_by(s, root);
                 let waiting = matches!(state, CopyState::Held(_));
                 let view = cx.entity();
                 h_flex()
@@ -1760,10 +1759,10 @@ impl FriendsPanel {
         // this PC's own, for the chips.
         let (member_state, my_state): (Vec<Member>, Option<Status>) = {
             let s = self.store.read(cx);
-            let copies: Vec<&hopper::groupsync::PackCopy> = s.settings().group_copies.iter().filter(|c| c.group == g.id).collect();
+            let copies: Vec<&hopper::groupkey::PackCopy> = s.settings().group_copies.iter().filter(|c| c.group == g.id).collect();
             let states = members
                 .iter()
-                .map(|m| if m.id == me || !m.joined { Member::Unknown } else { groupstatus::member_status(&copies, &m.id) })
+                .map(|m| if m.id == me || !m.joined { Member::Unknown } else { s.sync_member_state(&g.id, &m.id) })
                 .collect();
             let mine = copies
                 .iter()
@@ -3868,48 +3867,10 @@ fn alert_of<'a>(rows: impl Iterator<Item = &'a SyncRow>, cx: &App) -> Option<Til
 
 /// Who changed a group pack last, and how: "Mia turned off 2 mods · 3 h
 /// ago". Changes this PC made aren't news, so they're skipped.
-fn changed_by(s: &Store, root: &Path, me: &str) -> Option<String> {
-    use hopper::groupsync::{LOADER_KEY, PACK_KEY, State};
-    let c = s.group_copy(root)?;
-    // What others did to a mod kept only on this PC didn't happen here.
-    let kept = s.instance(root).map(|i| &i.only_here);
-    // The loader counts while this instance is on the one the group chose
-    // (it isn't when the group moved to another kind of loader).
-    let loader = s.instance(root).map(|i| State::File { file: format!("loader:{}", i.loader), on: true });
-    let marks = || {
-        c.marks
-            .iter()
-            .filter(|(k, m)| if k.as_str() == LOADER_KEY { Some(&m.state) == loader.as_ref() } else { !kept.is_some_and(|o| o.contains_key(*k)) })
-            .map(|(k, m)| (k.as_str(), m))
-    };
-    let (key, last) = marks().filter(|(_, m)| m.by != me).max_by_key(|(_, m)| (m.at, m.seq))?;
-    // The mods that one change touched the same way (the loader and the
-    // pack version aren't mods).
-    // A mod's lock is kept under its own key, and counts as that mod.
-    let is_lock = hopper::groupsync::lock_target(key).is_some();
-    let n = marks()
-        .filter(|(k, m)| (if is_lock { hopper::groupsync::lock_target(k).is_some() } else { !k.starts_with('~') }) && m.by == last.by && m.seq == last.seq && m.kind == last.kind)
-        .count();
-    let verb = match last.kind {
-        Kind::Added => "added",
-        Kind::Removed => "took out",
-        Kind::On => "turned on",
-        Kind::Off => "turned off",
-        Kind::Updated => "updated",
-        Kind::Locked => "locked",
-        Kind::Unlocked => "unlocked",
-    };
-    let what = if key == LOADER_KEY {
-        "the loader".to_string()
-    } else if key == PACK_KEY {
-        "the pack".to_string()
-    } else if n == 1 {
-        "a mod".to_string()
-    } else {
-        format!("{n} mods")
-    };
-    let when = if last.at > 0 { format!(" · {}", ago(last.at)) } else { String::new() };
-    Some(format!("{} {verb} {what}{when}", name_or(&last.name, "Someone")))
+fn changed_by(s: &Store, root: &Path) -> Option<String> {
+    let (text, at) = s.sync_changed_by(root)?;
+    let when = if at > 0 { format!(" · {}", ago(at)) } else { String::new() };
+    Some(format!("{text}{when}"))
 }
 
 /// A warning under a pack's name: a small triangle and a short sentence.

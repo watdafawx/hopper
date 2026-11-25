@@ -10,7 +10,7 @@ use gpui_kit::*;
 use hopper::groupstatus::Status as Chip;
 use hopper::mailbox::{Event, Kind};
 use hopper::synccore::{
-    self, Answer, ApplyPlan, Arrival, Dot, Edit, Engine, Key, PackMode, Review, Snapshot, Status, Step, Trust, Value, Why,
+    self, Answer, ApplyPlan, Arrival, Dot, Edit, Engine, Key, PackMode, Snapshot, Status, Step, Trust, Value, Why,
     apply::{self, ApplyReport, Outcome, StepResult},
     bridge, local, wire,
 };
@@ -640,6 +640,29 @@ impl Store {
         self.sync.slots.contains_key(id)
     }
 
+    /// The browser-download files at `root` that this group copy still has to
+    /// have by hand: the ones the group wants (its copy of the mod is the
+    /// file waiting, or the pack's own), not what the player keeps only here
+    /// or the group removed.
+    pub(super) fn sync_group_pending(&self, root: &Path) -> Vec<hopper::modpack::Pending> {
+        let Some(slot) = self.sync.slots.values().find(|s| s.root == root) else { return Vec::new() };
+        let Some(inst) = self.instance(root) else { return Vec::new() };
+        self.pending(root)
+            .iter()
+            .filter(|p| {
+                if p.project_id == 0 || inst.only_here.contains_key(&format!("p:{}", p.project_id)) {
+                    return false;
+                }
+                match slot.engine.value(&Key::Mod(format!("cf:{}", p.project_id))) {
+                    Value::File { file, .. } => p.file_id != 0 && file == format!("cf:{}", p.file_id),
+                    Value::Gone | Value::PackRemoved => false,
+                    _ => p.addon.as_ref().is_some_and(|a| a.from_pack),
+                }
+            })
+            .cloned()
+            .collect()
+    }
+
     /// The ids of the copies that hold changes back for Push.
     pub(super) fn sync_copy_ids(&self) -> impl Iterator<Item = &String> {
         self.sync.slots.keys().filter(|id| self.sync_held(id).is_some())
@@ -713,28 +736,6 @@ impl Store {
         })
     }
 
-    /// The reviews of the copy at `root`: changes that wait for the player.
-    pub fn sync_reviews(&self, root: &Path) -> Vec<Review> {
-        self.sync.slots.values().find(|s| s.root == root).map(|s| s.engine.reviews()).unwrap_or_default()
-    }
-
-    /// The player's answer to a card: let the change land, or keep what is here.
-    pub fn answer_sync_review(&mut self, root: &Path, review: u64, answer: Answer, cx: &mut Context<Self>) {
-        let Some(slot) = self.sync.slots.values_mut().find(|s| s.root == root) else { return };
-        if answer == Answer::Take {
-            for r in slot.engine.reviews().into_iter().filter(|r| r.id == review && r.risk == synccore::Risk::NewSource) {
-                for k in &r.keys {
-                    slot.engine.allow_source(k);
-                }
-            }
-        }
-        slot.engine.answer(review, answer, false);
-        slot.dirty = true;
-        Self::sync_save(slot);
-        self.sync_tick(cx);
-        cx.notify();
-    }
-
     /// "Pull from Mia": answers every card of hers with yes.
     pub(super) fn sync_take_from(&mut self, root: &Path, who: &str, cx: &mut Context<Self>) {
         let Some(slot) = self.sync.slots.values_mut().find(|s| s.root == root) else { return };
@@ -774,6 +775,71 @@ impl Store {
             (_, Value::File { .. } | Value::PackDefault) => format!("Updated by {who}"),
             _ => return None,
         })
+    }
+
+    /// Whether `member`'s PC has taken in what this PC's copies of the
+    /// group's packs hold, as far as their last status says: Unknown until
+    /// one came, else how many changes it hasn't taken in yet.
+    pub fn sync_member_state(&self, group: &str, member: &str) -> hopper::groupstatus::Member {
+        use hopper::groupstatus::Member;
+        let mut known = false;
+        let mut behind = 0;
+        for slot in self.sync.slots.values().filter(|s| s.group == group) {
+            let Some(m) = slot.engine.members.get(member) else { continue };
+            known = true;
+            behind += slot.engine.log.changes.keys().filter(|d| !m.seen.covers(d)).count();
+        }
+        match (known, behind) {
+            (false, _) => Member::Unknown,
+            (true, 0) => Member::InStep,
+            (true, n) => Member::Behind { changes: n },
+        }
+    }
+
+    /// Who changed the group pack last, and how: ("Mia turned off 2 mods",
+    /// when in unix seconds). Their latest change that still stands counts,
+    /// with the others of its batch the same way. Changes this PC made aren't
+    /// news, and neither is what others did to a mod kept only on this PC.
+    pub fn sync_changed_by(&self, root: &Path) -> Option<(String, u64)> {
+        let slot = self.sync.slots.values().find(|s| s.root == root)?;
+        let inst = self.instance(root)?;
+        let kept = only_here_keys(inst);
+        let eng = &slot.engine;
+        let verb = |c: &synccore::Change| -> &'static str {
+            match (&c.key, &c.was, &c.now) {
+                (Key::Lock(_), _, Value::Gone) => "unlocked",
+                (Key::Lock(_), _, _) => "locked",
+                (Key::Loader, _, _) => "changed",
+                (Key::Pack | Key::Game, _, _) => "updated",
+                (_, _, Value::Gone | Value::PackRemoved) => "took out",
+                (_, _, Value::PackOff | Value::File { on: false, .. }) => "turned off",
+                (_, Value::PackOff | Value::File { on: false, .. }, Value::PackDefault | Value::File { on: true, .. }) => "turned on",
+                (_, Value::Gone, Value::File { .. }) => "added",
+                _ => "updated",
+            }
+        };
+        // The changes that still stand: the register's winners.
+        let standing: Vec<(&synccore::Change, u64)> = eng
+            .log
+            .changes
+            .values()
+            .filter(|(c, _)| c.dot.author != eng.me && !c.name.is_empty() && !kept.contains(&c.key))
+            .filter(|(c, _)| eng.last_change(&c.key).is_some_and(|w| w.dot == c.dot))
+            .map(|(c, a)| (c, a.map_or(0, |a| a.at)))
+            .collect();
+        let (last, at) = standing.iter().max_by_key(|(c, at)| (*at, c.lamport)).copied()?;
+        let v = verb(last);
+        let n = standing
+            .iter()
+            .filter(|(c, _)| matches!(c.key, Key::Mod(_) | Key::Lock(_)) && c.dot.author == last.dot.author && c.batch == last.batch && verb(c) == v)
+            .count();
+        let what = match &last.key {
+            Key::Loader => "the loader".to_string(),
+            Key::Pack | Key::Game => "the pack".to_string(),
+            _ if n == 1 => "a mod".to_string(),
+            _ => format!("{n} mods"),
+        };
+        Some((format!("{} {v} {what}", last.name), at))
     }
 
     /// Who locked the mod last (a lock record's author), when it wasn't this PC.
@@ -954,12 +1020,7 @@ impl Store {
     // ---- Differences on this PC ---------------------------------------------
 
     /// "Make my copy match": the mods folder goes back to what was applied
-    /// (`keys`: only these). Nothing is sent.
-    pub(super) fn sync_put_back(&mut self, root: &Path, keys: Option<Vec<String>>, cx: &mut Context<Self>) {
-        self.sync_put_back_keys(root, keys.map(|k| k.into_iter().map(Key::Mod).collect()), cx);
-    }
-
-    /// [`Self::sync_put_back`] for any keys (a row of "This PC differs").
+    /// (`keys`: only these; a row of "This PC differs"). Nothing is sent.
     pub fn sync_put_back_keys(&mut self, root: &Path, keys: Option<Vec<Key>>, cx: &mut Context<Self>) {
         let Some((local_id, slot)) = self.sync.slots.iter().find(|(_, s)| s.root == root) else { return };
         let local_id = local_id.clone();

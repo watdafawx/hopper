@@ -148,9 +148,9 @@ pub struct Event {
     /// followed it).
     pub pack_from: String,
     /// Recipe of a group pack kept both ways: when each mod got the way
-    /// the code has it ([`crate::groupsync::Stamp`]). Empty from an older
+    /// the code has it ([`crate::groupkey::Stamp`]). Empty from an older
     /// Hopper or mailbox.
-    pub marks: std::collections::BTreeMap<String, crate::groupsync::Stamp>,
+    pub marks: std::collections::BTreeMap<String, crate::groupkey::Stamp>,
     /// Recipe of a group pack: the group's shared mod settings
     /// ([`crate::configsync::encode`]). Empty when none are shared, or from
     /// an older Hopper or mailbox.
@@ -634,7 +634,7 @@ impl Mailbox {
         name: &str,
         code: &str,
         left_out: &[String],
-        marks: &std::collections::BTreeMap<String, crate::groupsync::Stamp>,
+        marks: &std::collections::BTreeMap<String, crate::groupkey::Stamp>,
     ) -> anyhow::Result<Sent> {
         self.publish_with(to, groups, inst, key, name, code, left_out, marks, "")
     }
@@ -651,7 +651,7 @@ impl Mailbox {
         name: &str,
         code: &str,
         left_out: &[String],
-        marks: &std::collections::BTreeMap<String, crate::groupsync::Stamp>,
+        marks: &std::collections::BTreeMap<String, crate::groupkey::Stamp>,
         configs: &str,
     ) -> anyhow::Result<Sent> {
         if !self.has_groups()? {
@@ -1419,8 +1419,8 @@ mod tests {
             m.accept_group(&g.id).unwrap();
         }
         let copy = |m: &Mailbox, code: &str| {
-            let marks = [("p:1".to_string(), crate::groupsync::Stamp { seq: 0, by: id(m) })].into_iter().collect();
-            m.publish_to(&[], &[g.id.clone()], "pack-1", crate::groupsync::COPY_KEY, "ATM", code, &[], &marks).unwrap()
+            let marks = [("p:1".to_string(), crate::groupkey::Stamp { seq: 0, by: id(m) })].into_iter().collect();
+            m.publish_to(&[], &[g.id.clone()], "pack-1", crate::groupkey::COPY_KEY, "ATM", code, &[], &marks).unwrap()
         };
         let got = |m: &Mailbox, from: &Mailbox| -> Vec<Event> {
             let (_, evs) = m.events(0, 0).unwrap();

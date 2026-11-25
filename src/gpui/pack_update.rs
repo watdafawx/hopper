@@ -2584,7 +2584,7 @@ impl Render for UpdatePreview {
                         i.only_here
                             .iter()
                             .map(|(k, kept)| {
-                                i.addons.iter().find(|a| hopper::groupsync::addon_key(a) == *k).map_or_else(|| kept.name.clone(), |a| a.name.clone())
+                                i.addons.iter().find(|a| hopper::groupkey::addon_key(a) == *k).map_or_else(|| kept.name.clone(), |a| a.name.clone())
                             })
                             .filter(|n| !n.is_empty())
                             .collect()

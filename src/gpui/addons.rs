@@ -647,7 +647,7 @@ pub(crate) fn confirm_sync_again(store: Entity<Store>, root: PathBuf, keys: Vec<
         let mut names: Vec<String> = Vec::new();
         for k in &keys {
             let Some(kept) = inst.only_here.get(k) else { continue };
-            let a = inst.addons.iter().find(|a| hopper::groupsync::addon_key(a) == *k);
+            let a = inst.addons.iter().find(|a| hopper::groupkey::addon_key(a) == *k);
             let name = a.map(|a| a.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| kept.name.clone());
             let name = if name.is_empty() { "A mod".to_string() } else { name };
             if let Some(does) = hopper::onlyhere::sync_again_does(a, kept.theirs.as_ref()) {
@@ -2262,7 +2262,7 @@ impl AddonsView {
         let keys: Vec<String> = {
             let s = self.store.read(cx);
             let Some(inst) = s.instance(&root) else { return };
-            files.iter().filter_map(|f| inst.addon_by_file(f)).map(hopper::groupsync::addon_key).collect()
+            files.iter().filter_map(|f| inst.addon_by_file(f)).map(hopper::groupkey::addon_key).collect()
         };
         confirm_sync_again(self.store.clone(), root, keys, window, cx);
     }
@@ -5190,7 +5190,7 @@ Change version", a.file_name).into()
         }
         // Marks live in the store; the table's copy can be a step behind.
         let store = self.store.read(cx);
-        let marked = |a: &Addon| store.instance(&inst.root).unwrap_or(inst).only_here.contains_key(&hopper::groupsync::addon_key(a));
+        let marked = |a: &Addon| store.instance(&inst.root).unwrap_or(inst).only_here.contains_key(&hopper::groupkey::addon_key(a));
         let client: Vec<&Addon> = inst
             .addons
             .iter()
@@ -5618,7 +5618,7 @@ Change version", a.file_name).into()
                             .icon(IconName::Users)
                             .on_click(move |_, _, cx| {
                                 if shared {
-                                    let key = store.read(cx).instance(&root).and_then(|i| i.addons.iter().find(|a| a.file_name == file)).map(hopper::groupsync::addon_key);
+                                    let key = store.read(cx).instance(&root).and_then(|i| i.addons.iter().find(|a| a.file_name == file)).map(hopper::groupkey::addon_key);
                                     if let Some(k) = key {
                                         store.update(cx, |s, cx| s.set_settings_shared(&root, &k, false, cx));
                                     }

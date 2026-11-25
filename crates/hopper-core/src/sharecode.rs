@@ -74,7 +74,7 @@ pub enum Entry {
     Source { pin: crate::sources::carry::Pin, enabled: bool },
     /// A mod's lock on the sender's PC ([`Addon::locked`] and
     /// [`Addon::locked_version`]): `key` is the mod's
-    /// [`crate::groupsync::addon_key`]. Only a group keeps locks the same
+    /// [`crate::groupkey::addon_key`]. Only a group keeps locks the same
     /// (see `groupsync`); a plain follow or a new install leaves them out,
     /// a lock stays one player's choice there. Carried in the code's
     /// "sources" list as a line older Hopper skips (see [`LOCK_TAG`]).
@@ -624,7 +624,7 @@ fn lock_entries(inst: &Instance, pack_project: u64) -> Vec<Entry> {
         .filter(|a| a.locked || !a.locked_version.is_empty())
         .filter(|a| a.class_id != cf::CLASS_MODPACKS && !(pack_project != 0 && a.project_id == pack_project))
         .filter(|a| !crate::onlyhere::is_kept(inst, a))
-        .map(|a| Entry::Lock { key: crate::groupsync::addon_key(a), version: a.locked_version.clone(), locked: a.locked })
+        .map(|a| Entry::Lock { key: crate::groupkey::addon_key(a), version: a.locked_version.clone(), locked: a.locked })
         .collect()
 }
 
@@ -812,7 +812,7 @@ pub fn on_disk(inst: &Instance, e: &Entry) -> bool {
         }
         Entry::Source { pin, .. } => {
             let key = format!("s:{}#{}", pin.source.url, pin.source.pattern);
-            crate::groupsync::pinned_here(inst, crate::groupsync::find_addon(inst, &key), pin).is_some()
+            crate::groupkey::pinned_here(inst, crate::groupkey::find_addon(inst, &key), pin).is_some()
         }
         Entry::Remove(_) | Entry::Off(_) | Entry::Lock { .. } => true,
     }
@@ -1059,7 +1059,7 @@ pub fn apply_existing(inst: &mut Instance, share: &Share, prev: Option<&Share>, 
             // pack applies again on every change, with all its GitHub mods
             // in it). Only a switch off is made; one that is off here and on
             // in the code is `back_on`'s, below.
-            if let Some(i) = crate::groupsync::pinned_here(inst, crate::groupsync::find_addon(inst, &key), pin) {
+            if let Some(i) = crate::groupkey::pinned_here(inst, crate::groupkey::find_addon(inst, &key), pin) {
                 if !*enabled && inst.addons[i].enabled {
                     crate::actor::claim_key(&key);
                     if let Err(e) = crate::install::set_enabled_later(inst, i, false) {
@@ -1128,7 +1128,7 @@ enum Who {
 }
 
 impl Who {
-    /// The same mod's [`crate::groupsync::addon_key`].
+    /// The same mod's [`crate::groupkey::addon_key`].
     fn key(&self) -> String {
         match self {
             Who::Project(p) => format!("p:{p}"),

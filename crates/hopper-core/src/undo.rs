@@ -283,7 +283,7 @@ fn undo_record(inst: &mut Instance, f: &Saved, did: crate::actor::Did, key: &str
     let at = inst
         .addons
         .iter()
-        .position(|a| crate::groupsync::addon_key(a) == key)
+        .position(|a| crate::groupkey::addon_key(a) == key)
         .or_else(|| inst.addons.iter().position(|a| a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(&f.name)));
     match (did, at) {
         (Did::Added, Some(i)) => crate::install::remove(inst, i)?,

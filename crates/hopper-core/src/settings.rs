@@ -229,7 +229,7 @@ pub struct Settings {
     /// Group packs kept the same as the group, both ways (see
     /// [`crate::groupsync`]).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub group_copies: Vec<crate::groupsync::PackCopy>,
+    pub group_copies: Vec<crate::groupkey::PackCopy>,
     /// "Share my changes: When I press Push": packs already shared keep
     /// their changes on this PC until the player sends them
     /// (`crate::syncmode`). Off: they go out right away.

@@ -255,7 +255,7 @@ impl Fetch for InstFetch<'_> {
                 // Only the version of one kind of loader is followed: another
                 // kind brings other mods and settings, so the player decides.
                 if !inst.loader.is_empty() && loader_kind(l) != loader_kind(&inst.loader) {
-                    anyhow::bail!("{} switched to {}. Hopper doesn't follow a change of loader, so this copy stays on {}.", step.name, crate::groupsync::loader_label(l), crate::groupsync::loader_label(&inst.loader));
+                    anyhow::bail!("{} switched to {}. Hopper doesn't follow a change of loader, so this copy stays on {}.", step.name, crate::groupkey::loader_label(l), crate::groupkey::loader_label(&inst.loader));
                 }
                 if inst.loader == *l {
                     return Ok(());
@@ -317,7 +317,7 @@ impl InstFetch<'_> {
             },
             (_, Value::PackDefault) => {
                 let project = project_of(&step.key).ok_or_else(|| anyhow::anyhow!("not a mod Hopper can look up"))?;
-                if crate::groupsync::put_back_pack_default(inst, project, self.job)? {
+                if crate::groupkey::put_back_pack_default(inst, project, self.job)? {
                     Ok(())
                 } else {
                     anyhow::bail!("the modpack's own file of {} isn't known here", step.name)

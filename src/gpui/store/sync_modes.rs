@@ -4,9 +4,9 @@
 //! the relay; they decide what this PC takes in by itself and when its own
 //! changes go out.
 
-use super::{Store, StoreEvent};
+use super::Store;
 use gpui_kit::*;
-use hopper::groupsync::PackCopy;
+use hopper::groupkey::PackCopy;
 use hopper::mailbox::Event;
 use hopper::settings::PublishTo;
 use hopper::syncmode::{self, Pending};
@@ -36,7 +36,6 @@ impl Store {
             .find(|f| f.id == id)
             .map(|f| f.name.clone())
             .filter(|n| !n.is_empty())
-            .or_else(|| c.got.get(&id).or_else(|| c.waiting.get(&id)).map(|g| g.name.clone()).filter(|n| !n.is_empty()))
             .unwrap_or_else(|| "the group's maker".to_string());
         Some((id, name))
     }
@@ -48,16 +47,6 @@ impl Store {
         let Some(c) = self.settings.group_copies.iter().find(|c| c.inst == inst) else { return true };
         let only = self.only_from(c);
         syncmode::takes(only.as_ref().map(|(id, _)| id.as_str()), from)
-            || self.group_pull_from.get(&c.local).is_some_and(|p| p.iter().any(|p| p == from))
-    }
-
-    /// The copy as a merge should see it: the codes of the members this PC
-    /// takes in by itself, and of those the player is pulling from now.
-    /// The others stay waiting in the stored copy.
-    pub(super) fn merge_view(&self, c: &PackCopy) -> PackCopy {
-        let only = self.only_from(c);
-        let pull = self.group_pull_from.get(&c.local).cloned().unwrap_or_default();
-        syncmode::for_merge(c, only.as_ref().map(|(id, _)| id.as_str()), &pull)
     }
 
     /// The group's "Take changes from" for this PC: whether it is set to
@@ -107,25 +96,17 @@ impl Store {
     /// as Pull now does. The others' stay waiting.
     pub fn pull_group_from(&mut self, root: &Path, who: &str, cx: &mut Context<Self>) {
         let Some(c) = self.group_copy(root).cloned() else { return };
-        if self.group_preview.is_none() && self.is_sync_copy(root) {
-            self.sync_take_from(root, who, cx);
+        if !self.is_sync_copy(root) {
             return;
         }
-        if self.group_pulling.contains_key(&c.local) || self.group_merging.contains(&c.local) {
-            return;
-        }
-        self.group_pull_from.insert(c.local.clone(), vec![who.to_string()]);
-        // Their shared settings waited with their code.
+        // Their shared settings waited with their changes.
         let theirs = self.mailbox_recipes.iter().filter(|e| e.from == who && e.inst == c.inst && !e.configs.is_empty()).max_by_key(|e| e.seq).cloned();
-        if let Some(e) = theirs {
+        let carried = self.group_strays.get(&(who.to_string(), c.inst.clone())).cloned();
+        for e in theirs.into_iter().chain(carried) {
             let taken = self.take_configs(&e);
             self.say_taken(taken, cx);
         }
-        self.pull_group_now(root, cx);
-        // Pull now didn't start (no friends service): nothing to keep.
-        if !self.group_pulling.contains_key(&c.local) && !self.group_merging.contains(&c.local) {
-            self.group_pull_from.remove(&c.local);
-        }
+        self.sync_take_from(root, who, cx);
     }
 
     // ---- Share my changes --------------------------------------------------
@@ -167,8 +148,7 @@ impl Store {
             return false;
         }
         let sent = &self.settings.mailbox_sent;
-        let copy = self.settings.group_copies.iter().find(|c| c.local == id);
-        let before = copy.is_some_and(|c| !c.sent.is_empty()) || sent.iter().any(|s| s.inst == id);
+        let before = sent.iter().any(|s| s.inst == id);
         let new_target = to.is_some_and(|p| {
             p.to.iter().any(|f| !sent.iter().any(|s| s.inst == id && s.group.is_empty() && s.friend == *f))
                 || p.groups.iter().any(|g| !sent.iter().any(|s| s.inst == id && s.group == *g))
@@ -178,14 +158,13 @@ impl Store {
 
     /// The last code that went out for the pack `id`.
     fn sent_code(&self, id: &str) -> Option<String> {
-        let copy = self.settings.group_copies.iter().find(|c| c.local == id).map(|c| c.sent.clone()).filter(|s| !s.is_empty());
-        copy.or_else(|| self.settings.pushed_codes.get(id).cloned())
+        self.settings.pushed_codes.get(id).cloned()
     }
 
     /// Works out, off the UI thread, what each held-back pack has to send
     /// once its look changes. Runs on the publish tick.
     pub(super) fn refresh_to_push(&mut self, cx: &mut Context<Self>) {
-        if !self.settings.push_by_hand || self.group_preview.is_some() {
+        if !self.settings.push_by_hand {
             return;
         }
         let ids: Vec<String> = self.sent_ids().into_iter().filter(|id| !self.sync_has_copy(id)).collect();
@@ -202,16 +181,15 @@ impl Store {
             }
             let Some(inst) = self.instances.iter().find(|i| i.id == id).cloned() else { continue };
             let sent = self.sent_code(&id);
-            let copy = self.settings.group_copies.iter().find(|c| c.local == id);
-            let marks = copy.map(|c| c.marks.clone()).unwrap_or_default();
             // A shared setting changed here rides along with the pack.
+            let copy = self.settings.group_copies.iter().find(|c| c.local == id);
             let configs = copy.is_some_and(|c| c.configs.unsent(&self.mailbox_id()));
             self.to_push_busy.insert(id.clone());
             changed = true;
             let task = cx.background_spawn(async move {
                 let jobs = hopper::jobs::Jobs::new(Arc::new(|| {}));
                 let j = jobs.start_quiet(format!("Looking at {}", inst.name));
-                let r = syncmode::pending(&inst, sent.as_deref(), &marks, &j);
+                let r = syncmode::pending(&inst, sent.as_deref(), &j);
                 j.finish(&Ok::<(), anyhow::Error>(()));
                 r
             });
@@ -245,13 +223,6 @@ impl Store {
         if changed {
             cx.notify();
         }
-    }
-
-    /// How many changes the pack at `root` holds back for Push (Some(0):
-    /// some, but can't tell how many), or None when nothing waits.
-    pub fn to_push_at(&self, root: &Path) -> Option<usize> {
-        let id = &self.instance(root)?.id;
-        self.to_push_of(id)
     }
 
     fn to_push_of(&self, id: &str) -> Option<usize> {
@@ -289,14 +260,6 @@ impl Store {
     /// out on the next publish, a second or less away.
     pub fn push_changes(&mut self, roots: &[std::path::PathBuf], cx: &mut Context<Self>) {
         let ids: Vec<String> = roots.iter().filter_map(|r| self.instance(r)).map(|i| i.id.clone()).filter(|id| !id.is_empty()).collect();
-        if self.group_preview.is_some() {
-            for id in &ids {
-                self.to_push.remove(id);
-            }
-            cx.emit(StoreEvent::Notice("Your changes went to the group.".to_string(), false));
-            cx.notify();
-            return;
-        }
         self.push_now.extend(ids);
         self.mailbox_sig = 0;
         cx.notify();
@@ -314,17 +277,6 @@ impl Store {
         self.push_now.retain(|id| live.contains(id));
         if !self.push_now.is_empty() && !failed {
             self.mailbox_sig = 0;
-        }
-    }
-
-    /// `--dialog group-sync --state to-push`: the made-up packs hold
-    /// changes back (`changes` for each, by instance id).
-    pub(super) fn preview_to_push(&mut self, held: &[(String, usize)]) {
-        self.to_push.clear();
-        self.push_now.clear();
-        for (id, n) in held {
-            let sig = self.share_sig(id).unwrap_or_default();
-            self.to_push.insert(id.clone(), ToPush { sig, pending: Pending { changes: *n, any: true } });
         }
     }
 }

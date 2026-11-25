@@ -185,7 +185,7 @@ pub fn apply_to(
     if let Some(n) = note {
         job.note(n);
     }
-    // Same reason as groupsync::merge: nothing else changes the mods while
+    // Same reason as groupkey::merge: nothing else changes the mods while
     // this copy is the one being applied and saved.
     let _edit = crate::instances::edit_lock(root);
     let mut inst = crate::instances::load(root)
@@ -252,7 +252,7 @@ pub struct AppliedCode {
 /// The code a group pack's follow keeps as applied, after [`apply_to`] (or
 /// the install of a new follow): only what landed. An apply notes a file it
 /// couldn't put in and goes on, but the group copy starts from this code
-/// (`groupsync::reconcile`) and works out what's new from it, so a file
+/// (`groupkey::reconcile`) and works out what's new from it, so a file
 /// named in it that never came in would never be fetched again, with every
 /// screen saying the copy is in step. Left out of it, the file shows as an
 /// added mod the next time the sender's code is read, and goes in then.
