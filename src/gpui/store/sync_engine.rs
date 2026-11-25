@@ -686,7 +686,8 @@ impl Store {
     /// How many of its own changes the copy holds back for Push.
     pub(super) fn sync_held(&self, id: &str) -> Option<usize> {
         let s = self.sync.slots.get(id)?;
-        match s.engine.status(&s.snap) {
+        // A friend's older Hopper is theirs to fix: it doesn't hide what this copy holds back.
+        match s.engine.status_counting(&s.snap, s.engine.reviews().len(), |m| s.newer.contains(m)) {
             Status::Sending(n) if self.settings.push_by_hand && !self.push_now.contains(id) => Some(n),
             _ => None,
         }
@@ -696,13 +697,15 @@ impl Store {
     /// words the screens already have.
     pub(super) fn sync_chip(&self, root: &Path, connected: bool) -> Option<Chip> {
         let (local_id, slot) = self.sync.slots.iter().find(|(_, s)| s.root == root)?;
-        let status = slot.engine.status(&slot.snap);
+        // Only a friend whose Hopper is newer than this one can make this PC's state "out of date";
+        // a friend with an older Hopper shows on their own row and the pack update's lines.
+        let status = slot.engine.status_counting(&slot.snap, slot.engine.reviews().len(), |m| slot.newer.contains(m));
         let by_hand: Vec<String> = self.group_pending(root).into_iter().map(|p| p.name).collect();
         let playing = self.running(root).is_some();
         let checked = self.mailbox_checked;
         if let Status::OutOfDate(who) = &status {
             let who = if who.is_empty() { "A friend".to_string() } else { who.clone() };
-            return Some(Chip::Cant { why: format!("{who}'s Hopper is older and sends changes this one can't read. They need to update Hopper."), again: false, mods: Vec::new() });
+            return Some(Chip::Cant { why: format!("{who}'s Hopper is newer and sends changes this one can't read. Update Hopper to keep up with the group."), again: false, mods: Vec::new() });
         }
         if !connected {
             return Some(Chip::Offline { checked });
@@ -800,6 +803,10 @@ impl Store {
         let mut known = false;
         let mut behind = 0;
         for slot in self.sync.slots.values().filter(|s| s.group == group) {
+            // Their older Hopper's packets are refused, so "behind" would mislead: say why.
+            if slot.engine.outdated.contains(member) && !slot.newer.contains(member) {
+                return Member::OutOfDate;
+            }
             let Some(m) = slot.engine.members.get(member) else { continue };
             known = true;
             behind += slot.engine.log.changes.keys().filter(|d| !m.seen.covers(d)).count();

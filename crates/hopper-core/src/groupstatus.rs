@@ -357,6 +357,9 @@ pub enum Member {
     /// `changes` changes the group made (mods, the pack version, the loader)
     /// their last message doesn't have yet.
     Behind { changes: usize },
+    /// Their Hopper is older than this one and sends what this one can't read
+    /// (the group's changes reach them once they update Hopper).
+    OutOfDate,
 }
 
 impl Member {
@@ -366,6 +369,7 @@ impl Member {
             Member::InStep => "Same as group".to_string(),
             Member::Behind { changes: 1 } => "Behind by 1".to_string(),
             Member::Behind { changes } => format!("Behind by {changes}"),
+            Member::OutOfDate => "Out of date".to_string(),
         }
     }
 
@@ -373,7 +377,7 @@ impl Member {
         match self {
             Member::Unknown => Tone::Quiet,
             Member::InStep => Tone::Good,
-            Member::Behind { .. } => Tone::Warn,
+            Member::Behind { .. } | Member::OutOfDate => Tone::Warn,
         }
     }
 
@@ -383,6 +387,7 @@ impl Member {
         match self {
             Member::Unknown => format!("Hopper hasn't heard from {name}'s copy of this pack yet, so it can't tell whether it is in step."),
             Member::InStep => format!("{name}'s copy has the group's latest changes."),
+            Member::OutOfDate => format!("{name}'s Hopper is older than yours, so it can't read the group's changes. They get them once they update Hopper."),
             Member::Behind { changes } => {
                 let n = if *changes == 1 { "1 change".to_string() } else { format!("{changes} changes") };
                 format!("{name}'s copy is missing {n} the group made. They may be offline, or waiting for the game to close.")
@@ -514,5 +519,13 @@ mod tests {
         assert_eq!(a.then_says(), "Then Mia's version of Sodium goes in.");
         let b = After { mods: vec!["Sodium".into(), "Lithium".into()], by: vec!["Mia".into(), "Noah".into()], versions: false };
         assert_eq!(b.waiting_says(), "Waiting for your changes to Sodium and Lithium to be shared, then Mia and Noah's changes go in.");
+    }
+
+    #[test]
+    fn a_friend_with_an_older_hopper_reads_out_of_date_not_behind() {
+        assert_eq!(Member::OutOfDate.label(), "Out of date");
+        assert_eq!(Member::OutOfDate.tone(), Tone::Warn);
+        let d = Member::OutOfDate.detail("Mia");
+        assert!(d.contains("Mia's Hopper") && d.contains("update Hopper"), "{d}");
     }
 }
