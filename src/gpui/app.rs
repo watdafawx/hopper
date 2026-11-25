@@ -1713,14 +1713,12 @@ impl AppView {
                                 // Help and about: report a problem, GitHub, Hopper versions.
                                 .child({
                                     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-                                    let store = self.store.clone();
                                     Button::new("help-menu")
                                         .ghost()
                                         .small()
                                         .icon(IconName::CircleQuestionMark)
-                                        .when(!dialog, |b| b.tooltip("Help, GitHub and Hopper version"))
+                                        .when(!dialog, |b| b.tooltip("Report a problem or open Hopper on GitHub"))
                                         .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-                                            let store = store.clone();
                                             menu.item(
                                                 PopupMenuItem::new("Report a problem")
                                                     .icon(IconName::Bug)
@@ -1733,17 +1731,6 @@ impl AppView {
                                                 PopupMenuItem::new("Hopper on GitHub")
                                                     .icon(IconName::Github)
                                                     .on_click(|_, _, cx| cx.open_url(hopper::report::REPO_URL)),
-                                            )
-                                            .separator()
-                                            .item(
-                                                PopupMenuItem::new(format!(
-                                                    "Hopper v{} — versions & updates",
-                                                    hopper::selfupdate::CURRENT
-                                                ))
-                                                .icon(IconName::Tag)
-                                                .on_click(move |_, window, cx| {
-                                                    crate::hopper_versions::open(store.clone(), window, cx)
-                                                }),
                                             )
                                         })
                                 }),
