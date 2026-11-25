@@ -514,6 +514,28 @@ impl Store {
         cx.notify();
     }
 
+    /// A member's copy event sent the old way: a real recipe code where this
+    /// build sends only the settings carrier. Their Hopper is older than the
+    /// sync core and can't read the group's changes, so their row says "Out
+    /// of date" (the event was dropped without a word before, and the row
+    /// read "Not heard from yet" for good).
+    pub(super) fn sync_legacy_copy(&mut self, e: &Event, cx: &mut Context<Self>) {
+        let mut said = false;
+        for slot in self.sync.slots.values_mut() {
+            if !e.groups.contains(&slot.group) || slot.engine.copy != synccore::copy_id(&slot.group, &e.inst) {
+                continue;
+            }
+            slot.newer.remove(&e.from);
+            slot.engine.note_out_of_date(&e.from);
+            slot.dirty = true;
+            Self::sync_save(slot);
+            said = true;
+        }
+        if said {
+            cx.notify();
+        }
+    }
+
     /// Pull now: reads everyone's latest events from the relay and takes
     /// them in. Says what it found when done.
     pub(super) fn sync_pull(&mut self, root: &Path, cx: &mut Context<Self>) {

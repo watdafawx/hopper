@@ -1445,6 +1445,9 @@ impl Store {
         if e.from == self.mailbox_id() {
             return;
         }
+        if e.code != CARRIER_CODE {
+            self.sync_legacy_copy(&e, cx);
+        }
         if !self.settings.group_copies.iter().any(|c| c.inst == e.inst) {
             let k = (e.from.clone(), e.inst.clone());
             if self.group_strays.get(&k).is_none_or(|x| x.seq < e.seq) {
