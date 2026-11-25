@@ -161,17 +161,25 @@ impl<'a> InstFetch<'a> {
     pub fn finish(&self, plan: &ApplyPlan, report: &ApplyReport) -> anyhow::Result<()> {
         let Some(mut inst) = instances::load(&self.root) else { return Ok(()) };
         let mut changed = false;
+        // One scope for the whole pass, which stays open over the save below:
+        // the save reads who each changed mod belongs to. A scope per step
+        // ended before the save, so every friend's change was read as this
+        // player's own and came back as a record of theirs (it also settled
+        // a clash silently, as a follow-up that covered both sides).
+        let _scope = crate::actor::begin(&self.root, None);
+        let friend = |step: &Step| crate::actor::Who::friend(&step.name, &step.by.author, &self.group, "");
+        let claim = |a: &Addon, who: &crate::actor::Who| crate::actor::claim(&crate::groupkey::addon_key(a), Some(&a.file_name), who);
         for step in &plan.steps {
             let Some(r) = report.results.iter().find(|r| r.key == step.key && r.by == step.by) else { continue };
             if r.outcome != Outcome::Done || !matches!(step.key, Key::Mod(_)) || !is_jar_step(step) {
                 continue;
             }
-            let who = crate::actor::Who::friend(&step.name, &step.by.author, &self.group, "");
-            let _scope = crate::actor::begin(&self.root, Some(who));
+            let who = friend(step);
             let at = inst.addons.iter().position(|a| key_of(a) == step.key);
             match &step.to {
                 Value::Gone => {
                     if let Some(i) = at {
+                        claim(&inst.addons[i], &who);
                         inst.addons.remove(i);
                         changed = true;
                     }
@@ -181,17 +189,18 @@ impl<'a> InstFetch<'a> {
                     if same {
                         if let Some(i) = at {
                             inst.addons[i].enabled = *on;
-                            crate::actor::claim_addon(&inst.addons[i]);
+                            claim(&inst.addons[i], &who);
                             changed = true;
                         }
                     } else if let Some(Ok(r)) = self.found.get(file) {
                         let mut new = install::addon_from(&r.project, &r.file, r.from_pack);
                         if let Some(i) = at {
                             install::keep_history(&mut new, &inst.addons[i]);
+                            claim(&inst.addons[i], &who);
                             inst.addons.remove(i);
                         }
                         new.enabled = *on;
-                        crate::actor::claim_addon(&new);
+                        claim(&new, &who);
                         inst.addons.push(new);
                         changed = true;
                     }
@@ -206,12 +215,12 @@ impl<'a> InstFetch<'a> {
             if !done {
                 continue;
             }
-            let who = crate::actor::Who::friend(&step.name, &step.by.author, &self.group, "");
-            let _scope = crate::actor::begin(&self.root, Some(who));
+            let who = friend(step);
             let key = Key::Mod(k.clone());
             if let Some(a) = inst.addons.iter_mut().find(|a| key_of(a) == key)
                 && super::local::set_lock(a, &step.to)
             {
+                claim(a, &who);
                 changed = true;
             }
         }
@@ -391,6 +400,44 @@ mod tests {
         assert_eq!(file_number("a.jar"), None);
         assert_eq!(parse_pack("cf:100/8600"), Some((100, 8600)));
         assert_eq!(parse_pack("zip"), None);
+    }
+
+    /// A friend's change that `finish` writes into the instance must not
+    /// come back as a record of this player's own (live pass #3: every apply
+    /// made a "Bob" record, and one of them settled a clash in silence).
+    #[test]
+    fn a_friends_change_written_by_finish_makes_no_record_of_yours() {
+        use super::super::model::Dot;
+        crate::actor::record_in_tests();
+        let root = std::env::temp_dir().join(format!("hopper-bridge-finish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        std::fs::write(root.join("mods/a.jar"), "a").unwrap();
+        std::fs::write(root.join("mods/b.jar"), "b").unwrap();
+        let v = serde_json::json!({"name": "T", "format": instances::FORMAT, "addons": [
+            {"project_id": 5, "file_name": "a.jar", "name": "A", "enabled": true},
+            {"project_id": 6, "file_name": "b.jar", "name": "B", "enabled": true}
+        ]});
+        std::fs::write(root.join(instances::HOPPER_FILE), serde_json::to_vec(&v).unwrap()).unwrap();
+        super::super::local::watch(&root);
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        let fetch = InstFetch { root: root.clone(), job: &job, allow_sources: true, names: HashMap::new(), found: HashMap::new(), group: "g".into(), adds: Default::default() };
+        let by = Dot { author: "mia".into(), n: 1 };
+        let step = |key: &str, from: Value, to: Value| Step { key: Key::Mod(key.into()), from, to, by: by.clone(), name: "Mia".into(), why: Why::Player };
+        let on = |f: &str| Value::File { file: f.into(), on: true };
+        let off = |f: &str| Value::File { file: f.into(), on: false };
+        // Mia turned a off and removed b.
+        let plan = ApplyPlan { steps: vec![step("cf:5", on("cf:50"), off("cf:50")), step("cf:6", on("cf:60"), Value::Gone)], ..Default::default() };
+        let report = ApplyReport { results: plan.steps.iter().map(|s| super::super::apply::StepResult { key: s.key.clone(), by: s.by.clone(), outcome: Outcome::Done }).collect() };
+        fetch.finish(&plan, &report).unwrap();
+        let inst = instances::load(&root).unwrap();
+        assert_eq!(inst.addons.len(), 1);
+        assert!(!inst.addons[0].enabled);
+        let own = super::super::local::take(&root);
+        assert!(own.is_empty(), "a friend's change was read as the player's own: {own:?}");
+        super::super::local::unwatch(&root);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
