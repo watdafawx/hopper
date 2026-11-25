@@ -542,6 +542,25 @@ mod tests {
     }
 
     #[test]
+    fn a_jar_deleted_outside_hopper_is_not_a_removal_of_yours() {
+        record_in_tests();
+        let root = instance("outside");
+        crate::synccore::local::watch(&root);
+        fs::remove_file(root.join("mods/b.jar")).unwrap();
+        // Loading forgets the missing jar, without a record for a group.
+        let inst = crate::instances::load(&root).unwrap();
+        assert!(!inst.addons.iter().any(|a| a.file_name == "b.jar"));
+        assert!(crate::synccore::local::take(&root).is_empty());
+        // A removal in Hopper still is one.
+        let mut inst = inst;
+        inst.addons.clear();
+        inst.save().unwrap();
+        assert_eq!(crate::synccore::local::take(&root).len(), 1);
+        crate::synccore::local::unwatch(&root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn old_tags_and_records_without_who_still_read() {
         let r: Record = serde_json::from_str(r#"{"did":"Added","key":"p:1","addon":{"file_name":"a.jar"}}"#).unwrap();
         assert!(r.who.is_you() && r.batch.is_empty());

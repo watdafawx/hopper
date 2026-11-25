@@ -1097,6 +1097,10 @@ pub fn load(root: &Path) -> Option<Instance> {
     // recorded them as the player's, or as a stranger's re-upload).
     let claimed = crate::time::timed(&format!("{}: checking the pack's own jars", root.display()), || crate::modpack::claim_shipped_jars(&mut inst));
     if inst.addons.len() != before || claimed {
+        // Jars that vanished outside Hopper are not this player's removal:
+        // quiet, so a friend group never hears of it as a change to send. The
+        // folder differing from the group shows as "This PC differs" instead.
+        let _quiet = (!gone.is_empty()).then(|| crate::actor::quiet(root));
         let _ = inst.save();
     }
     // Teach the id registry this instance's Modrinth projects and versions.
