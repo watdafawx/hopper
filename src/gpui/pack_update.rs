@@ -491,38 +491,13 @@ impl UpdatePreview {
         if sp.friends.is_empty() && old.is_empty() {
             return None;
         }
-        let theme = cx.theme();
-        let (muted, surface, radius) = (theme.muted_foreground, theme.muted.opacity(widgets::alpha::HOVER), theme.radius);
-        let mut lines = v_flex().gap_1().text_sm();
-        for f in &sp.friends {
-            lines = lines.child(div().child(f.says.clone()));
-        }
-        for name in old {
-            let who = if name.is_empty() { "A friend's".to_string() } else { format!("{name}'s") };
-            lines = lines.child(div().text_color(muted).child(format!("{who} Hopper is out of date: they get this once they update Hopper.")));
-        }
-        Some(
-            v_flex()
-                .id("update-friends")
-                .gap_2()
-                .px_3()
-                .py_2()
-                .rounded(radius)
-                .bg(surface)
-                .child(div().text_sm().font_semibold().child("Your friends"))
-                .child(lines)
-                .child(
-                    gpui_kit::component::checkbox::Checkbox::new("clean-for-everyone")
-                        .label("Clean for everyone")
-                        .checked(self.clean_all)
-                        .on_change(cx.listener(|this, v: &bool, _, cx| {
-                            this.clean_all = *v;
-                            cx.notify();
-                        })),
-                )
-                .child(div().text_xs().text_color(muted).child("Their changed settings files go back to the pack's too."))
-                .into_any_element(),
-        )
+        let says: Vec<String> = sp.friends.iter().map(|f| f.says.clone()).collect();
+        let checked = self.clean_all;
+        let on = cx.listener(|this, v: &bool, _, cx| {
+            this.clean_all = *v;
+            cx.notify();
+        });
+        Some(friends_view(says, old, checked, on, cx))
     }
 
     /// A fresh plan's state: picks at their defaults, lists closed.
@@ -3037,3 +3012,30 @@ fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: 
     });
 }
 
+/// The "Your friends" block of a pack update: what it does on each friend's
+/// PC, one line each, and the tick that makes it a clean update for them too.
+/// Shared with the dialog preview (`--dialog pack-friends`).
+pub fn friends_view(says: Vec<String>, old: Vec<String>, clean_all: bool, on_change: impl Fn(&bool, &mut Window, &mut App) + 'static, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (muted, surface, radius) = (theme.muted_foreground, theme.muted.opacity(widgets::alpha::HOVER), theme.radius);
+    let mut lines = v_flex().gap_1().text_sm();
+    for line in says {
+        lines = lines.child(div().child(line));
+    }
+    for name in old {
+        let who = if name.is_empty() { "A friend's".to_string() } else { format!("{name}'s") };
+        lines = lines.child(div().text_color(muted).child(format!("{who} Hopper is out of date: they get this once they update Hopper.")));
+    }
+    v_flex()
+        .id("update-friends")
+        .gap_2()
+        .px_3()
+        .py_2()
+        .rounded(radius)
+        .bg(surface)
+        .child(div().text_sm().font_semibold().child("Your friends"))
+        .child(lines)
+        .child(gpui_kit::component::checkbox::Checkbox::new("clean-for-everyone").label("Clean for everyone").checked(clean_all).on_change(on_change))
+        .child(div().text_xs().text_color(muted).child("Their changed settings files go back to the pack's too."))
+        .into_any_element()
+}

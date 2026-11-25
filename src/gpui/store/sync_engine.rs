@@ -904,13 +904,6 @@ impl Store {
         self.sync.slots.values().find(|s| s.root == root).map(|s| s.away.clone()).unwrap_or_default()
     }
 
-    pub fn sync_dismiss_away(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {
-        if let Some(slot) = self.sync.slots.values_mut().find(|s| s.root == root) {
-            slot.away.retain(|a| a.id != id);
-        }
-        cx.notify();
-    }
-
     /// What putting back `member`'s changes since `since` would do, in words.
     pub fn sync_undo_plan(&self, root: &Path, member: &str, since: u64) -> synccore::cards::UndoPlan {
         match self.sync.slots.values().find(|s| s.root == root) {
@@ -938,12 +931,6 @@ impl Store {
     pub fn sync_pack_plan(&self, root: &Path, version: &str, mode: PackMode) -> Option<synccore::PackPlan> {
         let slot = self.sync.slots.values().find(|s| s.root == root)?;
         Some(slot.engine.pack_plan(version, mode))
-    }
-
-    /// People (id, name) with records in the log, for the "Put back" dialog.
-    pub fn sync_people(&self, root: &Path) -> Vec<(String, String)> {
-        let Some(slot) = self.sync.slots.values().find(|s| s.root == root) else { return Vec::new() };
-        synccore::cards::authors(&slot.engine).into_iter().filter(|(id, _)| *id != slot.engine.me).collect()
     }
 
     /// The "Why" line of a History row, only when Hopper made the change for

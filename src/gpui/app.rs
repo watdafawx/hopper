@@ -803,6 +803,10 @@ impl AppView {
                 // Made-up sync chips in the hero (group, server, both):
                 // `--dialog sync-chip --state s-differ` or `--state cycle`.
                 "sync-chip" => this.store.update(cx, |s, cx| s.preview_sync_chip(&state, cx)),
+                // The back-from-away dialog and the pack update's friends block,
+                // with made-up data (the real ones need a live group).
+                "put-back" => crate::sync_preview::open_put_back(window, cx),
+                "pack-friends" => crate::sync_preview::open_pack_friends(window, cx),
                 // After the server comparison has had time to finish.
                 "side" => cx
                     .spawn_in(window, async move |this, cx| {

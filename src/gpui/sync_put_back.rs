@@ -9,10 +9,11 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use hopper::synccore::cards::{UndoPlan, undo_button};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 /// How far back "Put back" can reach.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,17 +86,38 @@ pub fn plan_view(plan: &UndoPlan, env: &crate::sync_cards::Env, cx: &App) -> Any
 /// Opens the dialog for `member`'s changes (`since`: when this PC last had
 /// contact before them, for "Since you were away").
 pub fn open(store: Entity<Store>, root: PathBuf, member: String, name: String, away_since: u64, window: &mut Window, cx: &mut App) {
+    let (s1, r1, m1) = (store.clone(), root.clone(), member.clone());
+    let plan_of: Rc<dyn Fn(Span, &App) -> UndoPlan> = Rc::new(move |span, cx| s1.read(cx).sync_undo_plan(&r1, &m1, span.since(unix_now(), away_since)));
+    let (s2, r2) = (store.clone(), root.clone());
+    let env_of: Rc<dyn Fn() -> crate::sync_cards::Env> = Rc::new(move || crate::group_pack::sync_env(&s2, &r2));
+    let (s3, r3, m3) = (store, root, member.clone());
+    let go: Rc<dyn Fn(Span, &mut App)> = Rc::new(move |span, cx| {
+        s3.update(cx, |s, cx| s.sync_undo_member(&r3, &m3, span.since(unix_now(), away_since), cx));
+    });
+    open_with(member, name, plan_of, env_of, go, window, cx);
+}
+
+/// The dialog itself: `plan_of` says what a span would do, `go` does it. The
+/// preview (`--dialog put-back`) feeds it made-up plans.
+pub fn open_with(
+    member: String,
+    name: String,
+    plan_of: Rc<dyn Fn(Span, &App) -> UndoPlan>,
+    env_of: Rc<dyn Fn() -> crate::sync_cards::Env>,
+    go: Rc<dyn Fn(Span, &mut App)>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let many = hopper::synccore::Limits::default().many_removals;
     window.open_dialog(cx, move |dialog, window, cx| {
         let span_state = window.use_keyed_state(ElementId::Name(format!("put-back-span:{member}").into()), cx, |_, _| 1usize);
         let tick_state = window.use_keyed_state(ElementId::Name(format!("put-back-tick:{member}").into()), cx, |_, _| false);
         let (span_ix, ticked) = (*span_state.read(cx), *tick_state.read(cx));
         let span = Span::ALL[span_ix.min(2)];
-        let now = unix_now();
-        let plan = store.read(cx).sync_undo_plan(&root, &member, span.since(now, away_since));
+        let plan = plan_of(span, cx);
         let (label, tick) = undo_button(plan.rows.len(), plan.removes, many);
         let ready = !plan.rows.is_empty() && (tick.is_none() || ticked);
-        let env = crate::group_pack::sync_env(&store, &root);
+        let env = env_of();
         let theme = cx.theme().clone();
 
         let seg = Segmented::new("put-back-span")
@@ -132,7 +154,7 @@ pub fn open(store: Entity<Store>, root: PathBuf, member: String, name: String, a
                 });
             }));
         }
-        let (st, rt, mid) = (store.clone(), root.clone(), member.clone());
+        let run = go.clone();
         let go = Button::new("put-back-go").primary().label(label).disabled(!ready);
         dialog
             .title(format!("Put back {name}'s changes"))
@@ -144,8 +166,7 @@ pub fn open(store: Entity<Store>, root: PathBuf, member: String, name: String, a
                 if !ready {
                     return false;
                 }
-                let (st, rt, mid) = (st.clone(), rt.clone(), mid.clone());
-                st.update(cx, |s, cx| s.sync_undo_member(&rt, &mid, span.since(unix_now(), away_since), cx));
+                run(span, cx);
                 window.close_dialog(cx);
                 true
             })
