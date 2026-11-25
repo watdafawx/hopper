@@ -334,7 +334,7 @@ pub fn group_look(state: &SyncState, now: u64) -> GroupLook {
                 Some(at) if *at > 0 && now >= *at => format!("Nothing new to take in. Checked {}.", crate::groupstatus::ago(now, *at)),
                 _ => "Nothing new to take in.".to_string(),
             },
-            Some("Pull now".to_string()),
+            Some("Check now".to_string()),
         ),
     };
     GroupLook { look, title, line, button }

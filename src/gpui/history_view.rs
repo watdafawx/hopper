@@ -64,22 +64,8 @@ fn set_indent(faces: bool) -> f32 {
 /// Server user): their initial on a tinted tile, yours in the primary tint,
 /// as Hopper Server's History shows them.
 fn letter_face(w: &Who, size: Rems, cx: &App) -> AnyElement {
-    let theme = cx.theme();
-    let color = if w.is_you() { theme.primary } else { theme.muted_foreground };
-    let initial: String = w.label().chars().find(|c| c.is_alphanumeric()).into_iter().flat_map(char::to_uppercase).collect();
-    div()
-        .flex_none()
-        .size(size)
-        .rounded(theme.radius)
-        .bg(color.opacity(widgets::alpha::TINT * 2.))
-        .text_color(crate::theme::ink(color))
-        .text_size(rems(size.0 * 0.5))
-        .font_semibold()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(initial)
-        .into_any_element()
+    let color = if w.is_you() { cx.theme().primary } else { cx.theme().muted_foreground };
+    widgets::letter_tile(&w.label(), color, size, cx)
 }
 
 /// One person in History's filter: a tinted chip (`widgets::chip`), the

@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 pub const MOD: &str = "{mod}";
 
 /// What one record did to one mod, for a row of a card.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum What {
     Updated,
     Removed,

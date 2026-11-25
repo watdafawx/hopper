@@ -59,7 +59,30 @@ struct Slot {
     /// Mods History's Undo just changed: their difference on disk is the
     /// player's Undo, not drift.
     undone: Vec<(Key, Instant)>,
+    /// Members whose newer Hopper sends what this one can't read (a subset of
+    /// `engine.outdated`; the rest are friends whose Hopper is older).
+    newer: BTreeSet<String>,
+    /// Cards the player put aside ("Not now"), by card id: the highest record
+    /// number they held. A card shows again when its friend sends more, and
+    /// on the next start (this is not saved).
+    hidden: HashMap<u64, u64>,
+    /// "While you were away" notes, one per friend, until the player is done.
+    away: Vec<AwayNote>,
 }
+
+/// What one friend changed while this PC was away.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AwayNote {
+    pub id: String,
+    pub name: String,
+    pub changes: usize,
+    /// Relay time of this PC's last contact before them: "Since you were away".
+    pub since: u64,
+}
+
+/// How long this PC must have been out of contact for what arrives to be a
+/// "while you were away" note (the same 24 hours as a friend's away card).
+const AWAY_SECS: u64 = 86_400;
 
 #[derive(Default)]
 pub struct SyncCore {
@@ -174,7 +197,7 @@ impl Store {
             if !self.sync.slots.contains_key(&local_id) {
                 let engine = self.sync_open(&copy, &me, &my_name, &snap);
                 local::watch(&root);
-                let mut slot = Slot { engine, root: root.clone(), group: group.clone(), dirty: true, posting: false, applying: false, snap: snap.clone(), known: HashSet::new(), said: HashSet::new(), shrink: 0, pack_mode: None, undone: Vec::new() };
+                let mut slot = Slot { engine, root: root.clone(), group: group.clone(), dirty: true, posting: false, applying: false, snap: snap.clone(), known: HashSet::new(), said: HashSet::new(), shrink: 0, pack_mode: None, undone: Vec::new(), newer: BTreeSet::new(), hidden: HashMap::new(), away: Vec::new() };
                 // A swap the last run stopped in the middle is finished now.
                 match apply::recover(&root) {
                     Ok(Some(report)) => slot.engine.applied(&report),
@@ -426,8 +449,15 @@ impl Store {
         let packet = match asm.push(part) {
             Ok(Some(p)) => p,
             Ok(None) => return,
-            Err(wire::WireError::OutOfDate { .. }) => {
+            Err(wire::WireError::OutOfDate { version }) => {
                 if let Some(slot) = self.sync.by_copy(&copy) {
+                    // Newer than this Hopper reads: this one must update. Older:
+                    // the friend must (their Friends row says so).
+                    if version > wire::WIRE_VERSION {
+                        slot.newer.insert(e.from.clone());
+                    } else {
+                        slot.newer.remove(&e.from);
+                    }
                     slot.engine.note_out_of_date(&e.from);
                     slot.dirty = true;
                     Self::sync_save(slot);
@@ -445,7 +475,21 @@ impl Store {
         if packet.from == mb_id {
             return;
         }
+        // Out of contact for a day or more: what arrives now is a note for
+        // the player, per friend, with a way to put it back.
+        let before = slot.engine.contact;
         let got = slot.engine.receive(packet, Arrival { seq: e.seq, at: e.at });
+        slot.newer.retain(|m| slot.engine.outdated.contains(m));
+        if before > 0 && e.at > before + AWAY_SECS {
+            let people = synccore::cards::authors(&slot.engine);
+            for (name, n) in &got.by_author {
+                let Some((id, _)) = people.iter().find(|(_, shown)| shown == name) else { continue };
+                match slot.away.iter_mut().find(|a| a.id == *id) {
+                    Some(a) => a.changes += n,
+                    None => slot.away.push(AwayNote { id: id.clone(), name: name.clone(), changes: *n, since: before }),
+                }
+            }
+        }
         slot.dirty = true;
         Self::sync_save(slot);
         let notes = got.notes;
@@ -743,11 +787,182 @@ impl Store {
         (a.locked || !a.locked_version.is_empty()).then(|| format!("Locked by {}", c.name))
     }
 
+    // ---- The seven states, the cards and the notes ---------------------------
+
+    /// Where the copy at `root` stands, for the one function that words it
+    /// ([`hopper::syncchip::group_look`]). A friend's out-of-date Hopper is not
+    /// in it (that is their Friends row's and the pack update's line); this
+    /// Hopper being too old is.
+    pub fn sync_state(&self, root: &Path, connected: bool) -> Option<hopper::syncchip::SyncState> {
+        use hopper::syncchip::{SyncIn, sync_state};
+        let (local_id, slot) = self.sync.slots.iter().find(|(_, s)| s.root == root)?;
+        let cards = self.sync_cards(root).len();
+        let waiting = slot.engine.plan();
+        let retry = waiting.waits.iter().any(|(_, w)| matches!(w, synccore::Wait::Retry { .. }));
+        let mut from: Vec<String> = waiting.steps.iter().map(|s| s.name.clone()).filter(|n| !n.is_empty()).collect();
+        from.sort();
+        from.dedup();
+        let too_old = slot.newer.iter().find(|m| slot.engine.outdated.contains(*m)).map(|m| self.sync_member_name(m));
+        Some(sync_state(&SyncIn {
+            // Hidden cards don't hold the chip at "Needs you"; every
+            // friend's out-of-date Hopper is left out here too.
+            status: slot.engine.status_counting(&slot.snap, cards, |_| false),
+            cards,
+            too_old,
+            connected,
+            applying: slot.applying || self.group_pulling(root),
+            game: self.running(root).is_some() && slot.engine.game_running,
+            failing: retry || self.group_pulled(root).is_some_and(|(_, bad)| bad),
+            from,
+            push_by_hand: self.settings.push_by_hand && !self.push_now.contains(local_id),
+            checked: self.mailbox_checked,
+        }))
+    }
+
+    /// The friends service answers (the chip says Offline when it doesn't).
+    pub fn sync_connected(&self) -> bool {
+        matches!(self.sync_status(), super::friends::SyncStatus::Ok)
+    }
+
+    fn sync_member_name(&self, id: &str) -> String {
+        self.mailbox_friends().iter().find(|f| f.id == id).map(|f| f.name.clone()).filter(|n| !n.is_empty()).unwrap_or_default()
+    }
+
+    /// The friends whose Hopper is older than this one (they can't send what
+    /// this one reads, or read what it sends): for their Friends row and the
+    /// pack update's lines.
+    pub fn sync_old_friends(&self, root: &Path) -> Vec<String> {
+        let Some(slot) = self.sync.slots.values().find(|s| s.root == root) else { return Vec::new() };
+        slot.engine.outdated.iter().filter(|m| !slot.newer.contains(*m)).map(|m| self.sync_member_name(m)).collect()
+    }
+
+    /// The "Needs you" cards of the copy, without the ones put aside.
+    pub fn sync_cards(&self, root: &Path) -> Vec<synccore::cards::Card> {
+        let Some(slot) = self.sync.slots.values().find(|s| s.root == root) else { return Vec::new() };
+        synccore::cards::cards(&slot.engine).into_iter().filter(|c| slot.hidden.get(&c.id).is_none_or(|latest| c.latest > *latest)).collect()
+    }
+
+    /// "Not now" / "Stay here": the card goes until its friend sends more.
+    pub fn sync_hide_card(&mut self, root: &Path, card: &synccore::cards::Card, cx: &mut Context<Self>) {
+        if let Some(slot) = self.sync.slots.values_mut().find(|s| s.root == root) {
+            slot.hidden.insert(card.id, card.latest);
+        }
+        cx.notify();
+    }
+
+    /// The card's answer, and the same answer for the other cards of its kind
+    /// when `others` is set ("Do the same for the other 3").
+    pub fn sync_answer_card(&mut self, root: &Path, card: &synccore::cards::Card, answer: Answer, others: bool, cx: &mut Context<Self>) {
+        let Some(slot) = self.sync.slots.values_mut().find(|s| s.root == root) else { return };
+        let mut ids = vec![card.id];
+        if others {
+            let rank = card.risk.clone();
+            ids.extend(slot.engine.reviews().into_iter().filter(|r| r.id != card.id && r.risk == rank).map(|r| r.id));
+        }
+        for id in ids {
+            if answer == Answer::Take {
+                for r in slot.engine.reviews().into_iter().filter(|r| r.id == id && r.risk == synccore::Risk::NewSource) {
+                    for k in &r.keys {
+                        slot.engine.allow_source(k);
+                    }
+                }
+            }
+            slot.engine.answer(id, answer, false);
+        }
+        slot.dirty = true;
+        Self::sync_save(slot);
+        self.sync_tick(cx);
+        cx.notify();
+    }
+
+    /// The rows of "This PC differs": mods Hopper keeps only here are not in it.
+    pub fn sync_drift_rows(&self, root: &Path) -> Vec<synccore::cards::DriftRow> {
+        let Some(slot) = self.sync.slots.values().find(|s| s.root == root) else { return Vec::new() };
+        let kept = self.instance(root).map(only_here_keys).unwrap_or_default();
+        synccore::cards::drift_rows(&slot.engine, &slot.snap).into_iter().filter(|r| !kept.contains(&r.drift.key)).collect()
+    }
+
+    /// Remove (or add) these mods for everyone: their differences become this
+    /// player's changes, once. `keys`: only these mods; none is all of them.
+    pub fn sync_share_keys(&mut self, root: &Path, keys: Option<Vec<Key>>, cx: &mut Context<Self>) {
+        let Some(slot) = self.sync.slots.values_mut().find(|s| s.root == root) else { return };
+        let drifts: Vec<_> = slot.engine.drift(&slot.snap).into_iter().filter(|d| keys.as_ref().is_none_or(|k| k.contains(&d.key))).collect();
+        let batch = format!("{}:drift:{}", slot.engine.me, unix_now());
+        for e in local::share_edits(&drifts, &batch) {
+            let (key, now) = (e.key.clone(), e.now.clone());
+            slot.engine.record(e, 0);
+            slot.engine.applied.insert(key, now);
+        }
+        slot.dirty = true;
+        Self::sync_save(slot);
+        self.sync_tick(cx);
+        cx.notify();
+    }
+
+    /// "While you were away" notes of the copy.
+    pub fn sync_away_notes(&self, root: &Path) -> Vec<AwayNote> {
+        self.sync.slots.values().find(|s| s.root == root).map(|s| s.away.clone()).unwrap_or_default()
+    }
+
+    pub fn sync_dismiss_away(&mut self, root: &Path, id: &str, cx: &mut Context<Self>) {
+        if let Some(slot) = self.sync.slots.values_mut().find(|s| s.root == root) {
+            slot.away.retain(|a| a.id != id);
+        }
+        cx.notify();
+    }
+
+    /// What putting back `member`'s changes since `since` would do, in words.
+    pub fn sync_undo_plan(&self, root: &Path, member: &str, since: u64) -> synccore::cards::UndoPlan {
+        match self.sync.slots.values().find(|s| s.root == root) {
+            Some(slot) => synccore::cards::undo_plan(&slot.engine, member, since),
+            None => synccore::cards::UndoPlan { rows: Vec::new(), left: Vec::new(), removes: 0 },
+        }
+    }
+
+    /// "Put back": the changes `member` made since `since` become one batch of
+    /// this player's Undo records, which every PC follows.
+    pub fn sync_undo_member(&mut self, root: &Path, member: &str, since: u64, cx: &mut Context<Self>) {
+        let Some(slot) = self.sync.slots.values_mut().find(|s| s.root == root) else { return };
+        for e in slot.engine.undo_member(member, since) {
+            slot.engine.record(e, 0);
+        }
+        slot.away.retain(|a| a.id != member);
+        slot.dirty = true;
+        Self::sync_save(slot);
+        self.sync_tick(cx);
+        cx.notify();
+    }
+
+    /// What a pack update to `version` does on each PC, for the update dialog
+    /// (`mode`: what the player ticked).
+    pub fn sync_pack_plan(&self, root: &Path, version: &str, mode: PackMode) -> Option<synccore::PackPlan> {
+        let slot = self.sync.slots.values().find(|s| s.root == root)?;
+        Some(slot.engine.pack_plan(version, mode))
+    }
+
+    /// People (id, name) with records in the log, for the "Put back" dialog.
+    pub fn sync_people(&self, root: &Path) -> Vec<(String, String)> {
+        let Some(slot) = self.sync.slots.values().find(|s| s.root == root) else { return Vec::new() };
+        synccore::cards::authors(&slot.engine).into_iter().filter(|(id, _)| *id != slot.engine.me).collect()
+    }
+
+    /// The "Why" line of a History row: only when Hopper made the change for
+    /// someone. `at`: the record's relay time.
+    pub fn sync_why(&self, root: &Path, key: &Key, author: &str) -> Option<String> {
+        let slot = self.sync.slots.values().find(|s| s.root == root)?;
+        slot.engine.log.changes.values().map(|(c, _)| c).filter(|c| c.key == *key && c.dot.author == author).max_by_key(|c| c.lamport).and_then(|c| synccore::cards::why_line(&slot.engine, c))
+    }
+
     // ---- Differences on this PC ---------------------------------------------
 
     /// "Make my copy match": the mods folder goes back to what was applied
     /// (`keys`: only these). Nothing is sent.
     pub(super) fn sync_put_back(&mut self, root: &Path, keys: Option<Vec<String>>, cx: &mut Context<Self>) {
+        self.sync_put_back_keys(root, keys.map(|k| k.into_iter().map(Key::Mod).collect()), cx);
+    }
+
+    /// [`Self::sync_put_back`] for any keys (a row of "This PC differs").
+    pub fn sync_put_back_keys(&mut self, root: &Path, keys: Option<Vec<Key>>, cx: &mut Context<Self>) {
         let Some((local_id, slot)) = self.sync.slots.iter().find(|(_, s)| s.root == root) else { return };
         let local_id = local_id.clone();
         let drifts = slot.engine.drift(&slot.snap);
@@ -757,9 +972,7 @@ impl Store {
             if kept.contains(&d.key) {
                 continue;
             }
-            if let (Some(keys), Key::Mod(k)) = (&keys, &d.key)
-                && !keys.iter().any(|x| x == k)
-            {
+            if keys.as_ref().is_some_and(|keys| !keys.contains(&d.key)) {
                 continue;
             }
             let (from, to) = (d.found, d.expected);

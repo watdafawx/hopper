@@ -192,6 +192,13 @@ pub fn group_chip(store: &Entity<Store>, root: &Path, cx: &mut App) -> Option<cr
     if matches!(status, Status::ByHand { .. }) {
         return None;
     }
+    // A copy kept by the sync core says its state with the seven of
+    // `hopper::syncchip::group_look`; the old statuses are for the rest.
+    if !matches!(status, Status::NeedsMod { .. })
+        && let Some(state) = s.sync_state(root, s.sync_connected())
+    {
+        return Some(sync_group_chip(store, root, state, cx));
+    }
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let pulling = s.group_pulling(root) || s.group_repairing(root);
     let pulled = s.group_pulled(root).map(|(t, bad)| (t.to_string(), bad));
@@ -264,6 +271,174 @@ pub fn group_chip(store: &Entity<Store>, root: &Path, cx: &mut App) -> Option<cr
         auto_open: Vec::new(),
         width: None,
     })
+}
+
+/// The Env of the sync views for the copy at `root`: who a mod is, and what
+/// each button does in the store.
+pub fn sync_env(store: &Entity<Store>, root: &Path) -> crate::sync_cards::Env {
+    use crate::sync_cards::{Env, ModInfo, name_of_file};
+    use hopper::synccore::Answer;
+    let (s1, r1) = (store.clone(), root.to_path_buf());
+    let (s2, r2) = (store.clone(), root.to_path_buf());
+    let (s3, r3) = (store.clone(), root.to_path_buf());
+    let (s4, r4) = (store.clone(), root.to_path_buf());
+    let (s5, r5) = (store.clone(), root.to_path_buf());
+    Env {
+        info: Rc::new(move |file: &str, cx: &App| {
+            let s = s1.read(cx);
+            let bare = file.trim_end_matches(".disabled");
+            let a = s.instance(&r1).and_then(|i| i.addons.iter().find(|a| a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(bare)));
+            match a {
+                Some(a) => ModInfo { name: if a.name.is_empty() { name_of_file(file) } else { a.name.clone() }, icon: s.image(&a.icon).map(Path::to_path_buf), project: a.project_id },
+                None => ModInfo { name: name_of_file(file), icon: None, project: 0 },
+            }
+        }),
+        peek: Rc::new(move |project, _, cx| {
+            let root = r2.clone();
+            s2.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Peek { root, project }));
+        }),
+        answer: Rc::new(move |card, answer: Option<Answer>, others, _, cx| {
+            let (root, card) = (r3.clone(), card.clone());
+            s3.update(cx, |s, cx| match answer {
+                Some(a) => s.sync_answer_card(&root, &card, a, others, cx),
+                None => s.sync_hide_card(&root, &card, cx),
+            });
+        }),
+        put_back: Rc::new(move |row, _, cx| {
+            let (root, key) = (r4.clone(), row.drift.key.clone());
+            s4.update(cx, |s, cx| s.sync_put_back_keys(&root, Some(vec![key]), cx));
+        }),
+        share: Rc::new(move |row, _, cx| {
+            let (root, key) = (r5.clone(), row.drift.key.clone());
+            s5.update(cx, |s, cx| s.sync_share_keys(&root, Some(vec![key]), cx));
+        }),
+    }
+}
+
+/// The chip of a copy kept by the sync core: the state's words come from
+/// `group_look`; the popover holds the cards of "Needs you", the rows of
+/// "This PC differs", the friends' notes, and the state's one button.
+fn sync_group_chip(store: &Entity<Store>, root: &Path, state: hopper::syncchip::SyncState, cx: &mut App) -> crate::sync_chip::Chip {
+    use crate::sync_chip::{Action, Chip, Section};
+    use hopper::syncchip::SyncState;
+    let s = store.read(cx);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let gl = hopper::syncchip::group_look(&state, now);
+    let pulling = s.group_pulling(root) || s.group_repairing(root);
+    let pushing = s.pushing_at(root);
+    let due = s.group_pack_due(root).and_then(|d| d.file.clone().map(|f| (f, d.action())));
+    let busy = s.is_busy(root);
+    let notes = s.sync_away_notes(root);
+    let line = match s.group_pulled(root) {
+        Some((t, _)) => t.to_string(),
+        None => gl.line.clone(),
+    };
+    let mut actions: Vec<Action> = Vec::new();
+    let (st, rt) = (store.clone(), root.to_path_buf());
+    if let Some(label) = &gl.button {
+        let run: crate::sync_chip::Run = match &state {
+            SyncState::Differs { .. } => {
+                let (st, rt) = (st.clone(), rt.clone());
+                Rc::new(move |_, cx| st.update(cx, |s, cx| s.sync_put_back_keys(&rt, None, cx)))
+            }
+            SyncState::OutOfDate { .. } => {
+                let st = st.clone();
+                Rc::new(move |_, cx| {
+                    st.update(cx, |s, cx| {
+                        if matches!(s.self_update(), Some(crate::store::SelfUpdate::Available(_))) {
+                            s.install_self_update();
+                        } else {
+                            s.check_self_update();
+                        }
+                        cx.notify();
+                    })
+                })
+            }
+            SyncState::Sending { held: true, .. } => {
+                let (st, rt) = (st.clone(), rt.clone());
+                Rc::new(move |_, cx| st.update(cx, |s, cx| s.push_changes(std::slice::from_ref(&rt), cx)))
+            }
+            SyncState::Offline { .. } | SyncState::Behind { step: hopper::syncchip::BehindStep::Failed, .. } => {
+                let (st, rt) = (st.clone(), rt.clone());
+                Rc::new(move |_, cx| st.update(cx, |s, cx| s.recheck_group(&rt, cx)))
+            }
+            _ => {
+                let (st, rt) = (st.clone(), rt.clone());
+                Rc::new(move |_, cx| st.update(cx, |s, cx| s.pull_group_now(&rt, cx)))
+            }
+        };
+        let disabled = pulling || (matches!(state, SyncState::Sending { held: true, .. }) && pushing);
+        let label = if pulling { "Checking...".to_string() } else { label.clone() };
+        actions.push(Action { label: label.into(), icon: Some(IconName::RefreshCw), primary: true, disabled, run });
+    }
+    // A pack version waits: the dialog shows what it does on every PC.
+    if let Some((file, action)) = due {
+        let (st, rt) = (store.clone(), root.to_path_buf());
+        let primary = actions.is_empty();
+        actions.push(Action {
+            label: action.into(),
+            icon: Some(IconName::Download),
+            primary,
+            disabled: busy,
+            run: Rc::new(move |window, cx| crate::pack_update::open(st.clone(), rt.clone(), file.clone(), window, cx)),
+        });
+    }
+    let body: Option<crate::sync_chip::Body> = match &state {
+        SyncState::NeedsYou { .. } => {
+            let (st, rt) = (store.clone(), root.to_path_buf());
+            Some(Rc::new(move |window, cx| {
+                let cards = st.read(cx).sync_cards(&rt);
+                crate::sync_cards::cards_view(cards, sync_env(&st, &rt), window, cx)
+            }))
+        }
+        SyncState::Differs { .. } => {
+            let (st, rt) = (store.clone(), root.to_path_buf());
+            Some(Rc::new(move |window, cx| {
+                let rows = st.read(cx).sync_drift_rows(&rt);
+                // The popover is 27.5 rem wide: the second button folds into
+                // a menu when the window leaves little room beside it.
+                let narrow = window.viewport_size().width < px(720.);
+                crate::sync_cards::drift_view(rows, sync_env(&st, &rt), narrow, window, cx)
+            }))
+        }
+        _ => None,
+    };
+    let mut sections = vec![Section { title: gl.title.clone().into(), line: line.into(), progress: None, body, actions }];
+    if !notes.is_empty() {
+        let (st, rt) = (store.clone(), root.to_path_buf());
+        let count = notes.len();
+        sections.push(Section {
+            title: if count == 1 { "1 note".into() } else { format!("{count} notes").into() },
+            line: "".into(),
+            progress: None,
+            body: Some(Rc::new(move |_, cx| {
+                let mut list = v_flex().w_full().gap_1();
+                for (ix, n) in st.read(cx).sync_away_notes(&rt).into_iter().enumerate() {
+                    let (s1, r1) = (st.clone(), rt.clone());
+                    let (s2, r2, id, name, since) = (st.clone(), rt.clone(), n.id.clone(), n.name.clone(), n.since);
+                    let see: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |_, cx| {
+                        let root = r1.clone();
+                        s1.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::ShowInstance(root)));
+                    });
+                    let put: Rc<dyn Fn(&mut Window, &mut App)> =
+                        Rc::new(move |window, cx| crate::sync_put_back::open(s2.clone(), r2.clone(), id.clone(), name.clone(), since, window, cx));
+                    list = list.child(crate::sync_cards::away_row(ix, &n.name, n.changes, see, put, cx));
+                }
+                list.into_any_element()
+            })),
+            actions: Vec::new(),
+        });
+    }
+    let wide = matches!(state, SyncState::NeedsYou { .. } | SyncState::Differs { .. });
+    Chip {
+        id: "group".into(),
+        look: gl.look,
+        progress: None,
+        sections,
+        auto_open: Vec::new(),
+        // As wide as the mock's cards (440 px): mod names, a chip and buttons fit a row.
+        width: wide.then_some(27.5),
+    }
 }
 
 /// The line under "Same as the group": the status line without its first
