@@ -231,6 +231,16 @@ fn sync_group_chip(store: &Entity<Store>, root: &Path, state: hopper::syncchip::
                 let (st, rt) = (st.clone(), rt.clone());
                 Rc::new(move |_, cx| st.update(cx, |s, cx| s.push_changes(std::slice::from_ref(&rt), cx)))
             }
+            // Changes the service hasn't taken: post them now, even if the last
+            // answer was an error.
+            SyncState::NotSent { .. } => {
+                let st = st.clone();
+                Rc::new(move |_, cx| st.update(cx, |s, cx| s.sync_send_now(cx)))
+            }
+            SyncState::Offline { to_send } if *to_send > 0 => {
+                let st = st.clone();
+                Rc::new(move |_, cx| st.update(cx, |s, cx| s.sync_send_now(cx)))
+            }
             SyncState::Offline { .. } | SyncState::Behind { step: hopper::syncchip::BehindStep::Failed, .. } => {
                 let (st, rt) = (st.clone(), rt.clone());
                 Rc::new(move |_, cx| st.update(cx, |s, cx| s.recheck_group(&rt, cx)))
@@ -240,8 +250,10 @@ fn sync_group_chip(store: &Entity<Store>, root: &Path, state: hopper::syncchip::
                 Rc::new(move |_, cx| st.update(cx, |s, cx| s.pull_group_now(&rt, cx)))
             }
         };
-        let disabled = pulling || (matches!(state, SyncState::Sending { held: true, .. }) && pushing);
-        let label = if pulling { "Checking...".to_string() } else { label.clone() };
+        // Sending isn't a pull: its button stays "Send now" while one runs.
+        let sends = matches!(state, SyncState::NotSent { .. } | SyncState::Offline { to_send: 1.. });
+        let disabled = (pulling && !sends) || (matches!(state, SyncState::Sending { held: true, .. }) && pushing);
+        let label = if pulling && !sends { "Checking...".to_string() } else { label.clone() };
         actions.push(Action { label: label.into(), icon: Some(IconName::RefreshCw), primary: true, disabled, run });
     }
     let body: Option<crate::sync_chip::Body> = match &state {

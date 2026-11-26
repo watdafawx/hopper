@@ -143,7 +143,11 @@ pub enum SyncState {
     WaitingForUpdate { who: Vec<String> },
     /// This PC's own changes are on their way (`held`: kept for Push).
     Sending { changes: usize, held: bool },
-    /// Can't reach the group (`to_send` of this PC's changes wait).
+    /// This PC's own changes have not reached the friends service yet, and it
+    /// can be reached: they are going out now (`changes` of them).
+    NotSent { changes: usize },
+    /// Can't reach the group (`to_send` of this PC's changes have not gone
+    /// out; none when everything was sent and only the answers are missing).
     Offline { to_send: usize },
     /// The copy matches (`checked`: when the group was last looked at).
     InSync { checked: Option<u64> },
@@ -171,7 +175,7 @@ impl SyncState {
             SyncState::OutOfDate { .. } => 2,
             SyncState::Behind { .. } => 3,
             SyncState::WaitingForUpdate { .. } => 4,
-            SyncState::Sending { .. } => 5,
+            SyncState::Sending { .. } | SyncState::NotSent { .. } => 5,
             SyncState::Offline { .. } => 6,
             SyncState::InSync { .. } => 7,
         }
@@ -197,6 +201,10 @@ pub struct SyncIn {
     /// "Sending" stays true.
     pub current_unacked: bool,
     pub connected: bool,
+    /// How many of this PC's own changes the friends service has not taken
+    /// yet (`Engine::unsent`), whether it is offline, mid-send or waiting for
+    /// its turn. Zero: all went out (friends may still have to take them in).
+    pub unsent: usize,
     /// Changes are being taken in right now.
     pub applying: bool,
     /// The game runs and holds changes back.
@@ -234,7 +242,11 @@ pub fn sync_state(i: &SyncIn) -> SyncState {
             };
             SyncState::Behind { changes: *n, from: i.from.clone(), step }
         }
-        S::Sending(n) if !i.connected => SyncState::Offline { to_send: *n },
+        // Held for Push, the count is what waits for the button; otherwise
+        // only what hasn't gone out is "to send" (what went out and waits for
+        // a friend's answer is not).
+        S::Sending(n) if !i.connected => SyncState::Offline { to_send: if i.push_by_hand { *n } else { i.unsent } },
+        S::Sending(_) if !i.push_by_hand && i.unsent > 0 => SyncState::NotSent { changes: i.unsent },
         // Held for Push is the player's to press, whoever is old. Otherwise,
         // when nobody who could still ack is on a current Hopper, nothing is
         // in flight: say what it waits for.
@@ -282,7 +294,7 @@ fn old_friends(who: &[String]) -> (String, bool) {
     (text, plural)
 }
 
-fn changes_n(n: usize) -> String {
+pub fn changes_n(n: usize) -> String {
     if n == 1 { "1 change".to_string() } else { format!("{n} changes") }
 }
 
@@ -372,14 +384,22 @@ pub fn group_look(state: &SyncState, now: u64) -> GroupLook {
             "They go out when you press Push.".to_string(),
             Some(crate::syncmode::push_label(*changes)),
         ),
-        SyncState::Offline { to_send } => (
-            mk(Tone::Quiet, Offline, if *to_send > 0 { format!("Offline · {to_send} to send") } else { "Offline".to_string() }, "Offline"),
+        SyncState::NotSent { changes } => (
+            mk(Tone::Busy, Up, format!("Sending {}", changes_n(*changes)), "Sending").busy(),
+            format!("{} not sent yet", changes_n(*changes)),
+            "Hopper is sending them to your friends now.".to_string(),
+            Some("Send now".to_string()),
+        ),
+        SyncState::Offline { to_send } if *to_send > 0 => (
+            mk(Tone::Warn, Offline, format!("{} not sent yet", changes_n(*to_send)), "Not sent"),
+            format!("{} not sent yet", changes_n(*to_send)),
+            "Can't reach your friends. They're saved on this PC and go out by themselves when you're back online.".to_string(),
+            Some("Send now".to_string()),
+        ),
+        SyncState::Offline { .. } => (
+            mk(Tone::Quiet, Offline, "Offline".to_string(), "Offline"),
             "Can't reach your friends".to_string(),
-            if *to_send > 0 {
-                "Your changes wait here and go out when you're back online. What this PC knows may be old.".to_string()
-            } else {
-                "What this PC knows may be old.".to_string()
-            },
+            "What this PC knows may be old.".to_string(),
             Some("Try again".to_string()),
         ),
         SyncState::InSync { checked } => (
@@ -1100,6 +1120,7 @@ mod sync_state_tests {
             friends_old: vec![],
             current_unacked: false,
             connected: true,
+            unsent: 0,
             applying: false,
             game: false,
             failing: false,
@@ -1122,6 +1143,7 @@ mod sync_state_tests {
         assert_eq!(sync_state(&i).rank(), 2);
         let mut i = input(S::Sending(1));
         i.connected = false;
+        i.unsent = 1;
         assert_eq!(sync_state(&i), SyncState::Offline { to_send: 1 });
         assert_eq!(sync_state(&input(S::InSync)).rank(), 7);
     }
@@ -1164,6 +1186,7 @@ mod sync_state_tests {
             SyncState::WaitingForUpdate { who: vec![] },
             SyncState::Sending { changes: 3, held: false },
             SyncState::Sending { changes: 3, held: true },
+            SyncState::NotSent { changes: 2 },
             SyncState::Offline { to_send: 0 },
             SyncState::Offline { to_send: 2 },
             SyncState::InSync { checked: Some(5) },
@@ -1239,7 +1262,53 @@ mod sync_state_tests {
     fn offline_beats_waiting_for_update() {
         let mut i = old(&["Alice"]);
         i.connected = false;
+        i.unsent = 4;
         assert_eq!(sync_state(&i), SyncState::Offline { to_send: 4 });
+    }
+
+    #[test]
+    fn changes_the_service_has_not_taken_are_not_sent_yet() {
+        // Connected, something still to go out: going out now.
+        let mut i = input(S::Sending(3));
+        i.unsent = 2;
+        assert_eq!(sync_state(&i), SyncState::NotSent { changes: 2 });
+        // Everything went out, only friends' answers are missing: Sending.
+        i.unsent = 0;
+        assert_eq!(sync_state(&i), SyncState::Sending { changes: 3, held: false });
+        // Not connected: the same count, offline.
+        i.unsent = 2;
+        i.connected = false;
+        assert_eq!(sync_state(&i), SyncState::Offline { to_send: 2 });
+        // Offline with everything already sent: nothing to send.
+        i.unsent = 0;
+        assert_eq!(sync_state(&i), SyncState::Offline { to_send: 0 });
+        // Held for Push: the Push state, not "going out now".
+        let mut i = input(S::Sending(3));
+        i.unsent = 3;
+        i.push_by_hand = true;
+        assert_eq!(sync_state(&i), SyncState::Sending { changes: 3, held: true });
+    }
+
+    #[test]
+    fn not_sent_yet_says_why_and_offers_send_now() {
+        let l = group_look(&SyncState::NotSent { changes: 2 }, 0);
+        assert_eq!(l.title, "2 changes not sent yet");
+        assert_eq!(l.look.label, "Sending 2 changes");
+        assert!(l.look.busy);
+        assert_eq!(l.look.tone, Tone::Busy);
+        assert_eq!(l.button.as_deref(), Some("Send now"));
+        let l = group_look(&SyncState::Offline { to_send: 1 }, 0);
+        assert_eq!(l.title, "1 change not sent yet");
+        assert_eq!(l.look.label, "1 change not sent yet");
+        assert_eq!(l.look.tone, Tone::Warn);
+        assert!(!l.look.busy);
+        assert_eq!(l.button.as_deref(), Some("Send now"));
+        assert_eq!(l.line, "Can't reach your friends. They're saved on this PC and go out by themselves when you're back online.");
+        // Offline with nothing waiting stays the quiet state.
+        let l = group_look(&SyncState::Offline { to_send: 0 }, 0);
+        assert_eq!(l.look.tone, Tone::Quiet);
+        assert_eq!(l.look.label, "Offline");
+        assert_eq!(l.button.as_deref(), Some("Try again"));
     }
 
     #[test]

@@ -565,7 +565,7 @@ pub const PREVIEWS: &[&str] = &[
     "g-in-sync", "g-checking", "g-updating", "g-sending", "g-behind", "g-offline", "g-failed", "g-needs", "s-in-sync", "s-differ", "s-comparing",
     "s-pushing", "s-offline", "s-blocked", "s-failed", "s-wont", "dl-waiting", "dl-working", "dl-stuck", "rs-changed", "rs-waiting", "both-ok", "both-busy", "both-needs", "both-long", "needs-open", "needs-run",
     "sy-needs", "sy-needs-one", "sy-needs-differs", "sy-needs-big", "sy-differs", "sy-differs-big", "sy-differs-narrow", "sy-ood", "sy-behind", "sy-getting", "sy-game", "sy-failed", "sy-sending", "sy-waiting-update", "sy-held",
-    "sy-offline", "sy-insync", "sy-notes",
+    "sy-not-sent", "sy-offline", "sy-insync", "sy-notes",
 ];
 
 /// Made-up chips for a preview state, no network, no real group or server.
