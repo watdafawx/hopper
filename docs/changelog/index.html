@@ -140,6 +140,13 @@ footer a:hover{color:var(--fg)}
     <p class="lede">For each release: what it did before, what it does now, pictures of both, and how it was checked, including what was not. Newest first. Plain release notes are on <a href="https://github.com/watdafawx/hopper/releases">GitHub</a>.</p>
     <div class="legend"><span class="tag ok">seen on screen</span><span class="tag warn">partly checked</span><span class="tag bad">gap found</span></div>
   </header>
+<section class="rel" id="v0-93-4"><div class="relhead"><h2>Hopper 0.93.4</h2><span class="when">26 Nov 2026</span></div><article class="cl">
+      <h3>"Waiting for friends to update" instead of "Sending" for good</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Desktop.</dd><dt>Before</dt><dd>When friends were still on an older Hopper, the group chip said "Sending 4 changes · Your friends get them in a moment" with no end.</dd><dt>After</dt><dd>The chip says "Waiting for friends to update", and its popover names who is on an older Hopper. Your changes are saved and reach them once they update. A friend on a current Hopper who has not confirmed still shows "Sending".</dd></dl>
+      <ul class="files"><li>crates/hopper-core/src/syncchip.rs</li><li>crates/hopper-core/src/synccore/engine.rs</li><li>src/gpui/store/sync_engine.rs</li></ul>
+      <div><span class="tag ok">seen on screen</span><ul class="tested"><li>Preview state on rig: chip label on one line (17 px and 18 px of space either side), popover text inside its box. The chip label's contrast is 4.13:1, a little under 4.5:1.</li></ul></div>
+      <div><span class="tag warn">partly checked</span><ul class="tested"><li>Not measured in a light theme or a narrow window, and not seen with real friends on an older Hopper. No change card.</li></ul></div>
+    </article></section>
 <section class="rel" id="v0-93-3"><div class="relhead"><h2>Hopper 0.93.3</h2><span class="when">26 Nov 2026</span></div><article class="cl">
       <h3>"This PC differs" names a CurseForge mod you turned off outside Hopper</h3>
       <dl class="ft"><dt>Apps</dt><dd>Desktop.</dd><dt>Before</dt><dd>A pack mod turned off outside Hopper showed as a blank row with a cube icon and "turned off outside Hopper".</dd><dt>After</dt><dd>The row shows the mod's name and icon, for example "Iron Chests · turned off outside Hopper".</dd></dl>
