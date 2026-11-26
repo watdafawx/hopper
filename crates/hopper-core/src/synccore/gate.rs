@@ -181,7 +181,7 @@ pub fn moves_back(x: &Change, update: &Change) -> bool {
 /// A move of a mod that stays on to another file: a newer CurseForge file,
 /// or another file of any kind (Modrinth versions and links have no order to
 /// read), or off the pack's own file.
-fn is_update(from: &Value, to: &Value) -> bool {
+pub(crate) fn is_update(from: &Value, to: &Value) -> bool {
     let cf = |f: &str| f.strip_prefix("cf:").and_then(|n| n.parse::<u64>().ok());
     match (from, to) {
         (Value::File { file: a, on: true }, Value::File { file: b, on: true }) if a != b => match (cf(a), cf(b)) {

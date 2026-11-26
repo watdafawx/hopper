@@ -63,6 +63,21 @@ fn link(env: &Env, id: SharedString, info: &ModInfo, cx: &App) -> AnyElement {
     widgets::mod_link(id, info.name.clone(), info.icon.as_deref(), info.project, move |p, w, cx| peek(p, w, cx), cx).font_semibold().into_any_element()
 }
 
+/// A card's mod as the screen shows it: by the file the card names, and when
+/// this PC knows no mod by that file, by the mod's key (a friend's file this PC
+/// no longer has still belongs to a mod it has), so a row never reads "a mod"
+/// for a mod that is in the list.
+fn mod_info(env: &Env, m: &CardMod, cx: &App) -> ModInfo {
+    let info = (env.info)(&m.file, cx);
+    match &m.key {
+        hopper::synccore::Key::Mod(id) if info.project == 0 && *id != m.file => {
+            let by_key = (env.info)(id, cx);
+            if by_key.project != 0 { by_key } else { info }
+        }
+        _ => info,
+    }
+}
+
 /// How many mod rows a card shows before "and N more".
 const SHOWN: usize = 4;
 
@@ -97,7 +112,7 @@ fn card_view(card: Card, env: &Env, window: &mut Window, cx: &mut App) -> AnyEle
     let show_all = *expanded.read(cx);
 
     // The headline, with the mod's icon and name where the text says {mod}.
-    let first = card.mods.first().map(|m| (env.info)(&m.file, cx));
+    let first = card.mods.first().map(|m| mod_info(env, m, cx));
     let mut head = h_flex().min_w_0().flex_wrap().items_center().text_sm();
     let (before, after) = card.headline.split_once(MOD).map_or((card.headline.as_str(), ""), |(a, b)| (a, b));
     head = head.child(div().child(before.to_string()));
@@ -117,7 +132,7 @@ fn card_view(card: Card, env: &Env, window: &mut Window, cx: &mut App) -> AnyEle
         let rows: Vec<&CardMod> = if show_all { card.mods.iter().collect() } else { card.mods.iter().take(SHOWN).collect() };
         let mut list = v_flex().w_full().gap_0p5().mt_1();
         for (ix, m) in rows.iter().enumerate() {
-            let info = (env.info)(&m.file, cx);
+            let info = mod_info(env, m, cx);
             list = list.child(
                 h_flex()
                     .id(ElementId::Name(format!("card-row:{key}:{ix}").into()))
@@ -204,7 +219,7 @@ fn card_button(card: &Card, b: &Btn, ix: usize, ticked: bool, others: bool, env:
     let mut label = hopper::synccore::cards::button_label(b, ticked);
     // "Keep {mod}": a button has no room for an icon, so it says the name.
     if label.contains(MOD) {
-        let name = card.mods.first().map(|m| (env.info)(&m.file, cx).name).filter(|n| !n.is_empty()).unwrap_or_else(|| "it".to_string());
+        let name = card.mods.first().map(|m| mod_info(env, m, cx).name).filter(|n| !n.is_empty()).unwrap_or_else(|| "it".to_string());
         label = label.replace(MOD, &name);
     }
     let ready = hopper::synccore::cards::button_ready(b, ticked);

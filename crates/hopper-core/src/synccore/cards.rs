@@ -185,14 +185,19 @@ pub fn cards(e: &Engine) -> Vec<Card> {
                 // A pack's own mod turned off or removed has no file in its record
                 // (PackOff / PackRemoved), so name it by its key: the app finds the
                 // mod from that id, and the card never shows a blank row.
+                //
+                // A put-back is named by the file this PC has (the friend's `was`):
+                // the file they put it back to is the old one, which this PC no
+                // longer has, so a lookup by it found no mod and the card said "a mod".
                 file: match (file_of(&c.now), file_of(&c.was), &c.key) {
+                    (_, f, _) if r.risk == Risk::MovedBack && !f.is_empty() => f.to_string(),
                     (f, _, _) if !f.is_empty() => f.to_string(),
                     (_, f, _) if !f.is_empty() => f.to_string(),
                     (_, _, Key::Mod(id)) => id.clone(),
                     _ => String::new(),
                 },
                 what: what_of(c),
-                note: String::new(),
+                note: if r.risk == Risk::MovedBack { "put back".to_string() } else { String::new() },
             })
             .collect();
         let removes = changes.iter().filter(|c| matches!(c.key, Key::Mod(_)) && c.now.takes_away(&c.was)).count();
@@ -525,6 +530,11 @@ pub fn why_line_with(e: &Engine, c: &Change, now_file: Option<&str>) -> Option<S
                 .filter(|o| o.key == c.key && o.dot.author == c.dot.author && o.dot != c.dot && o.lamport < c.lamport)
                 .max_by_key(|o| o.lamport);
             Some(match other {
+                // "Move back too" on a friend's put-back: the same file as theirs,
+                // from an update of this PC's.
+                Some(o) if o.now == c.now && o.why == Why::Player && super::gate::is_update(&c.now, &c.was) => {
+                    format!("{} moved it back too, as {} did, when asked.", name(c), name(o))
+                }
                 Some(o) if o.now == c.now && mine.is_some_and(|m| m.now.is_away() && !c.now.is_away()) => {
                     let m = mine.expect("checked above");
                     format!("{} kept {} change instead of {} {}, when asked.", name(c), whose(o), if m.dot.author == e.me { "your own" } else { "their" }, if matches!(m.now, Value::Gone | Value::PackRemoved) { "removal" } else { "turn-off" })

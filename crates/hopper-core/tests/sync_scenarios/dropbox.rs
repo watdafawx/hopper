@@ -181,3 +181,119 @@ fn dropbox_a_long_away_friends_old_state_stays_stale() {
     }
     assert!(g.reviews("A").is_empty());
 }
+
+/// B put mod 1 back after A's update of it. The card names the mod (by the
+/// file this PC has, not the old one B put it back to), says "1 mod", and
+/// shows the mod's key so the app can find it by that too.
+#[test]
+fn dropbox_a_put_back_card_names_its_one_mod() {
+    let mut g = pack_group();
+    g.edit("A", m(1), f(12));
+    g.settle();
+    g.edit("B", m(1), Value::PackDefault);
+    g.settle();
+    let r = g.reviews("A");
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0].says, "B put 1 mod back to an older version.");
+    let cards = hopper_core::synccore::cards::cards(g.engine("A"));
+    assert_eq!(cards.len(), 1);
+    let c = &cards[0];
+    assert_eq!(c.headline, format!("B put {} back to an older version.", hopper_core::synccore::cards::MOD));
+    assert_eq!(c.mods.len(), 1);
+    assert_eq!(c.mods[0].key, m(1));
+    assert_eq!(c.mods[0].file, "cf:12", "named by the file this PC has");
+    assert_eq!(c.mods[0].note, "put back");
+    let labels: Vec<&str> = c.buttons.iter().map(|b| b.label.as_str()).collect();
+    assert_eq!(labels, ["Keep the update", "Move back too"]);
+}
+
+/// B put three mods back one by one (each from the mods tab is an action of
+/// its own): one card, "3 mods", the three names, and "Do the same for the
+/// other N" is for cards of other friends, not for B's own.
+#[test]
+fn dropbox_put_backs_made_one_by_one_are_one_card_with_every_name() {
+    let mut g = pack_group();
+    g.edits("A", &(1..=3).map(|n| (m(n), f(n * 10 + 2))).collect::<Vec<_>>());
+    g.settle();
+    for n in 1..=3 {
+        g.edit("B", m(n), Value::PackDefault);
+    }
+    g.settle();
+    for p in ["A", "C"] {
+        let r = g.reviews(p);
+        assert_eq!(r.len(), 1, "{p}: {r:?}");
+        assert_eq!(r[0].says, "B put 3 mods back to older versions.");
+        let cards = hopper_core::synccore::cards::cards(g.engine(p));
+        assert_eq!(cards.len(), 1);
+        let c = &cards[0];
+        assert_eq!(c.headline, "B put 3 mods back to older versions.");
+        assert_eq!(c.others, 0);
+        let files: Vec<&str> = c.mods.iter().map(|x| x.file.as_str()).collect();
+        assert_eq!(files, ["cf:12", "cf:22", "cf:32"], "{p}: every row has a file this PC knows");
+        let labels: Vec<&str> = c.buttons.iter().map(|b| b.label.as_str()).collect();
+        assert_eq!(labels, ["Keep the updates", "Move back too"]);
+    }
+    // A later put-back by B joins the same card.
+    g.edit("A", m(4), f(42));
+    g.settle();
+    g.edit("B", m(4), Value::PackDefault);
+    g.settle();
+    let r = g.reviews("A");
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0].keys.len(), 4);
+}
+
+/// "Move back too" is the player's own answer: A's History says A moved the
+/// mods back (a record of A's with the reason "moved it back too, as B did"),
+/// not that B rolled them back, and an Undo of it is still possible. It moves
+/// the group, like "Keep the updates" does.
+#[test]
+fn dropbox_moving_back_too_is_the_players_own_answer() {
+    let mut g = pack_group();
+    g.edits("A", &(1..=3).map(|n| (m(n), f(n * 10 + 2))).collect::<Vec<_>>());
+    g.settle();
+    g.edits("B", &(1..=3).map(|n| (m(n), Value::PackDefault)).collect::<Vec<_>>());
+    g.settle();
+    let id = g.reviews("A")[0].id;
+    g.answer("A", id, Answer::Take, false);
+    g.settle();
+    for n in 1..=3 {
+        assert_eq!(g.value("A", &m(n)), Value::PackDefault, "mod {n} moved back on A");
+        let last = g.engine("A").last_change(&m(n)).cloned().unwrap();
+        assert_eq!(last.dot.author, "A", "the move back is A's own record, not B's");
+        assert_eq!(last.name, "A");
+        assert!(matches!(last.why, hopper_core::synccore::Why::Answer { review } if review == id), "{:?}", last.why);
+        assert_eq!(
+            hopper_core::synccore::cards::why_line(g.engine("A"), &last).as_deref(),
+            Some("You moved it back too, as B did, when asked.")
+        );
+    }
+    assert!(g.reviews("A").is_empty());
+    assert!(g.history("A").iter().rev().take(3).all(|h| h.by == "A"), "{:?}", g.history("A"));
+    // The group follows the answer.
+    assert_eq!(g.value("C", &m(1)), Value::PackDefault);
+    assert!(g.reviews("C").is_empty(), "{:?}", g.reviews("C"));
+    // Undo of it puts the update back, as for any record.
+    g.history_undo("A", &m(1), f(12));
+    g.settle();
+    assert_eq!(g.value("A", &m(1)), f(12));
+}
+
+/// "Keep the updates" writes records that restore what this PC has, and never
+/// a roll back: no row of A's History moves a mod to an older file.
+#[test]
+fn dropbox_keeping_the_updates_rolls_nothing_back() {
+    let mut g = pack_group();
+    g.edits("A", &(1..=3).map(|n| (m(n), f(n * 10 + 2))).collect::<Vec<_>>());
+    g.settle();
+    g.edits("B", &(1..=3).map(|n| (m(n), Value::PackDefault)).collect::<Vec<_>>());
+    g.settle();
+    let id = g.reviews("A")[0].id;
+    g.answer("A", id, Answer::Keep, false);
+    g.settle();
+    for n in 1..=3 {
+        assert_eq!(g.value("A", &m(n)), f(n * 10 + 2));
+        let last = g.engine("A").last_change(&m(n)).cloned().unwrap();
+        assert_eq!((last.was.clone(), last.now.clone()), (f(n * 10 + 2), f(n * 10 + 2)), "a kept row changes nothing");
+    }
+}

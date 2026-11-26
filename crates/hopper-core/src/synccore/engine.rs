@@ -543,8 +543,12 @@ impl Engine {
         let mut groups: BTreeMap<(String, String, u8), Vec<(&Change, &Risk)>> = BTreeMap::new();
         for (dot, risks) in &j.held {
             let (c, _) = &self.log.changes[dot];
+            // A friend's put-backs are one card however many actions made them
+            // (each mod put back from the mods tab is a batch of its own): the
+            // player answers "QuietCarrot put 3 mods back", not three times.
+            let batch = if risks[0] == Risk::MovedBack { String::new() } else { c.batch.clone() };
             groups
-                .entry((dot.author.clone(), c.batch.clone(), risk_rank(&risks[0])))
+                .entry((dot.author.clone(), batch, risk_rank(&risks[0])))
                 .or_default()
                 .push((c, &risks[0]));
         }
@@ -606,6 +610,18 @@ impl Engine {
                     Answer::Keep => reg.winner.now.clone(),
                 };
                 edits.push((c.keys[0].clone(), now, c.id));
+            } else if answer == Answer::Take && c.risk == Risk::MovedBack {
+                // "Move back too" is this player's own, deliberate move: a record
+                // of theirs that puts each mod where the friend did, so History
+                // names the player (with the reason) and not the friend, and Undo
+                // puts the update back. Like "Keep", it settles the group.
+                for dot in &c.changes {
+                    let (key, now) = {
+                        let (ch, _) = &self.log.changes[dot];
+                        (ch.key.clone(), ch.now.clone())
+                    };
+                    edits.push((key, now, c.id));
+                }
             } else if answer == Answer::Take {
                 self.taken.extend(c.changes.iter().cloned());
             } else {
@@ -1156,10 +1172,8 @@ fn card_says(risk: &Risk, who: &str, n: usize) -> String {
             "{who} made {}. You asked to be asked first.",
             plural(n, "change", "changes")
         ),
-        Risk::MovedBack => format!(
-            "{who} put {} back to an older version.",
-            plural(n, "mod", "mods")
-        ),
+        Risk::MovedBack if n == 1 => format!("{who} put 1 mod back to an older version."),
+        Risk::MovedBack => format!("{who} put {n} mods back to older versions."),
         Risk::Clash | Risk::Differs => String::new(),
     }
 }
