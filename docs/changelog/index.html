@@ -140,6 +140,12 @@ footer a:hover{color:var(--fg)}
     <p class="lede">For each release: what it did before, what it does now, pictures of both, and how it was checked, including what was not. Newest first. Plain release notes are on <a href="https://github.com/watdafawx/hopper/releases">GitHub</a>.</p>
     <div class="legend"><span class="tag ok">seen on screen</span><span class="tag warn">partly checked</span><span class="tag bad">gap found</span></div>
   </header>
+<section class="rel" id="v0-93-2"><div class="relhead"><h2>Hopper 0.93.2</h2><span class="when">26 Nov 2026</span></div><article class="cl">
+      <h3>The "whose copy to use" card names each mod</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Desktop.</dd><dt>Before</dt><dd>When two PCs' mods differ, the card said "a mod · off here, on for Alice" for every row.</dd><dt>After</dt><dd>Each row names the mod and shows its icon: "Entity Culling · off here, on for Alice".</dd></dl>
+      <ul class="files"><li>crates/hopper-core/src/synccore/local.rs</li><li>src/gpui/group_pack.rs</li></ul>
+      <div><span class="tag ok">seen on screen</span><ul class="tested"><li>Two apps on rig with a real Modrinth pack and 3 differing mods: both cards listed Better Mount HUD, Entity Culling and Polytone by name. No CurseForge mod was seen (a unit test covers it), and nothing was measured.</li></ul></div>
+    </article></section>
 <section class="rel" id="v0-93-1"><div class="relhead"><h2>Hopper 0.93.1</h2><span class="when">26 Nov 2026</span></div><article class="cl">
       <h3>A player's new skin shows in the Friends panel and the server Players tab</h3>
       <dl class="ft"><dt>Apps</dt><dd>Desktop. The Hopper Server web page already showed new skins.</dd><dt>Before</dt><dd>A friend who changed their skin kept the old head in the Friends panel, and in a server's Players tab, for good.</dd><dt>After</dt><dd>Heads refresh about every 6 hours (the skin service keeps a head that long itself). The old head stays visible while the new one loads.</dd></dl>
