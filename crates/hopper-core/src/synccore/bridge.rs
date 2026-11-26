@@ -273,6 +273,16 @@ impl Fetch for InstFetch<'_> {
         let mut inst = instances::load(&self.root).ok_or_else(|| anyhow::anyhow!("the instance couldn't be read"))?;
         let who = self.who_of(step);
         let _scope = crate::actor::begin(&self.root, Some(who));
+        // Everything the installers change for this step is the friend's. A
+        // scope alone reads any mod it doesn't claim as "yours, made
+        // meanwhile", so the installer's save came back as this player's own
+        // record (user report 2026-11-26: a friend's apply of five FTB mod
+        // updates wrote five records of theirs putting the mods back to the
+        // pack's file, which then rolled the update back for everyone; and
+        // putting a pack mod back to the pack's file wrote a record of the
+        // old file under this player's name). The instance is read afresh
+        // above, so the save holds only this step's change.
+        let _all = crate::actor::own_all();
         match &step.key {
             Key::Mod(_) => self.pack_mod(&mut inst, step),
             Key::Pack => self.pack(&mut inst, step),
@@ -478,6 +488,44 @@ mod tests {
         assert!(!inst.addons[0].enabled);
         let own = super::super::local::take(&root);
         assert!(own.is_empty(), "a friend's change was read as the player's own: {own:?}");
+        super::super::local::unwatch(&root);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The installers' saves in a friend's step are the friend's, never this
+    /// player's own (user report 2026-11-26: applying a friend's update of
+    /// five pack mods wrote five records of the receiving player's, which
+    /// rolled the update back for the whole group). A lock and a pack mod
+    /// turned off go through the same scope as a pack mod's new file and need
+    /// no download.
+    #[test]
+    fn a_friends_step_run_by_the_installers_makes_no_record_of_yours() {
+        use super::super::model::Dot;
+        crate::actor::record_in_tests();
+        let root = std::env::temp_dir().join(format!("hopper-bridge-other-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        std::fs::write(root.join("mods/a.jar"), "a").unwrap();
+        std::fs::write(root.join("mods/b.jar"), "b").unwrap();
+        let v = serde_json::json!({"name": "T", "format": instances::FORMAT, "addons": [
+            {"project_id": 5, "file_id": 50, "file_name": "a.jar", "name": "A", "enabled": true, "from_pack": true},
+            {"project_id": 6, "file_id": 60, "file_name": "b.jar", "name": "B", "enabled": true}
+        ]});
+        std::fs::write(root.join(instances::HOPPER_FILE), serde_json::to_vec(&v).unwrap()).unwrap();
+        super::super::local::watch(&root);
+        let _ = super::super::local::take(&root);
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        let fetch = InstFetch { root: root.clone(), job: &job, allow_sources: true, names: HashMap::new(), set_aside: HashMap::new(), found: HashMap::new(), group: "g".into(), adds: Default::default() };
+        let by = Dot { author: "mia".into(), n: 1 };
+        let step = |key: Key, from: Value, to: Value| Step { key, from, to, by: by.clone(), name: "Mia".into(), why: Why::Player };
+        fetch.apply_other(&step(Key::Mod("cf:5".into()), Value::PackDefault, Value::PackOff)).unwrap();
+        fetch.apply_other(&step(Key::Lock("cf:6".into()), Value::Gone, Value::Text("all".into()))).unwrap();
+        let inst = instances::load(&root).unwrap();
+        assert!(!inst.addons.iter().find(|a| a.project_id == 5).unwrap().enabled, "the pack mod was turned off");
+        assert!(inst.addons.iter().find(|a| a.project_id == 6).unwrap().locked, "the lock is on");
+        let own = super::super::local::take(&root);
+        assert!(own.is_empty(), "a friend's step was read as the player's own: {own:?}");
         super::super::local::unwatch(&root);
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -27,6 +27,7 @@ mod away;
 mod clashes;
 mod disk;
 mod diverge;
+mod dropbox;
 mod everyday;
 mod membership;
 mod packs;

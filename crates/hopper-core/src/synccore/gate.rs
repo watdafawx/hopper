@@ -3,7 +3,7 @@
 //! All times are relay seconds (`Arrival::at`, `Change::online_at`); the
 //! local clock is never read, so a PC with a wrong clock gates the same.
 
-use super::model::{Arrival, Change, Key, MemberId, Value};
+use super::model::{Arrival, Change, Key, MemberId, Value, Why};
 use super::register::Register;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,6 +49,12 @@ pub enum Risk {
     NewSource,
     /// The member is set to "Ask me first".
     AskFirst,
+    /// A friend put a mod back to the file it had before someone else's
+    /// update of it, after taking that update in: "QuietCarrot put FTB
+    /// Quests back to an older version". Landing it by itself rolled the
+    /// update back on every PC (user report 2026-11-26). An undo from
+    /// History says so in as many words and lands as before.
+    MovedBack,
     /// Not a held record: this PC and a friend's have the same records and
     /// have both landed everything, yet their mods differ (the first start
     /// after an upgrade began from each disk with an empty log). The gate
@@ -155,6 +161,36 @@ fn removals_in_batch(change: &Change, ctx: &GateCtx) -> usize {
 /// "shader:" or "rp:".
 pub(crate) fn is_link_source(key: &str) -> bool {
     key.starts_with("src:") || key.split(':').skip(1).any(|p| p == "src")
+}
+
+/// Whether `x` puts a mod back to what it had before `update`, another
+/// member's update that `x`'s author had taken in ([`Risk::MovedBack`]).
+/// Only a plain change counts: an undo from History, an answer to a card and
+/// "Use mine for everyone" say what they do in as many words.
+pub fn moves_back(x: &Change, update: &Change) -> bool {
+    matches!(x.key, Key::Mod(_))
+        && x.key == update.key
+        && x.why == Why::Player
+        && x.dot.author != update.dot.author
+        && x.seen.covers(&update.dot)
+        && x.now == update.was
+        && x.was == update.now
+        && is_update(&update.was, &update.now)
+}
+
+/// A move of a mod that stays on to another file: a newer CurseForge file,
+/// or another file of any kind (Modrinth versions and links have no order to
+/// read), or off the pack's own file.
+fn is_update(from: &Value, to: &Value) -> bool {
+    let cf = |f: &str| f.strip_prefix("cf:").and_then(|n| n.parse::<u64>().ok());
+    match (from, to) {
+        (Value::File { file: a, on: true }, Value::File { file: b, on: true }) if a != b => match (cf(a), cf(b)) {
+            (Some(a), Some(b)) => b > a,
+            _ => true,
+        },
+        (Value::PackDefault, Value::File { on: true, .. }) => true,
+        _ => false,
+    }
 }
 
 enum PackMove {

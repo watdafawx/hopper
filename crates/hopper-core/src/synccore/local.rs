@@ -177,18 +177,55 @@ fn with_watched<R>(f: impl FnOnce(&mut BTreeMap<String, Vec<Edit>>) -> R) -> R {
     f(&mut g)
 }
 
+/// The queue of a watched root on disk, `<instance>/.hopper-sync/edits.json`.
+/// The app turns the queue into records twice a second, but a change saved
+/// just before Hopper closes (the last mod of an "Update all") was only in
+/// memory and never became a record: the friends never got it, and the next
+/// start saw nothing of the player's to send. The file keeps it until then.
+fn queue_path(root: &Path) -> std::path::PathBuf {
+    root.join(".hopper-sync").join("edits.json")
+}
+
+fn save_queue(root: &Path, q: &[Edit]) {
+    let path = queue_path(root);
+    if q.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let Ok(bytes) = serde_json::to_vec(q) else { return };
+    let tmp = path.with_extension("json.tmp");
+    let saved = path.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok())
+        && std::fs::write(&tmp, bytes).is_ok()
+        && std::fs::rename(&tmp, &path).is_ok();
+    if !saved {
+        log::warn!("the sync edits of {} couldn't be kept on disk", root.display());
+    }
+}
+
 /// The app calls this for an instance that is a group copy: from now on
-/// what the player does there queues edits.
+/// what the player does there queues edits. Edits the last run queued and
+/// didn't record yet come back first.
 pub fn watch(root: &Path) {
     with_watched(|w| {
-        w.entry(norm(root)).or_default();
+        let q = w.entry(norm(root)).or_default();
+        if q.is_empty()
+            && let Ok(bytes) = std::fs::read(queue_path(root))
+        {
+            match serde_json::from_slice::<Vec<Edit>>(&bytes) {
+                Ok(saved) => *q = saved,
+                Err(e) => log::warn!("the saved sync edits of {} couldn't be read: {e}", root.display()),
+            }
+        }
     });
 }
 
+/// Not a group copy any more: its queue goes, on disk too, so a copy shared
+/// again later doesn't send what was meant for the old group.
 pub fn unwatch(root: &Path) {
     with_watched(|w| {
         w.remove(&norm(root));
     });
+    let _ = std::fs::remove_file(queue_path(root));
 }
 
 /// Queues one change as this player's, for a watched root. Anything else
@@ -197,13 +234,29 @@ pub fn note(root: &Path, edit: Edit) {
     with_watched(|w| {
         if let Some(q) = w.get_mut(&norm(root)) {
             q.push(edit);
+            save_queue(root, q);
         }
     });
 }
 
 /// Takes the queued edits for the app to hand to `Engine::record`.
 pub fn take(root: &Path) -> Vec<Edit> {
-    with_watched(|w| w.get_mut(&norm(root)).map(std::mem::take).unwrap_or_default())
+    with_watched(|w| {
+        let Some(q) = w.get_mut(&norm(root)) else { return Vec::new() };
+        let out = std::mem::take(q);
+        if !out.is_empty() {
+            save_queue(root, &[]);
+        }
+        out
+    })
+}
+
+/// Hopper closed: the in-memory queue is gone, the file stays (tests).
+#[cfg(test)]
+fn forget_in_memory(root: &Path) {
+    with_watched(|w| {
+        w.remove(&norm(root));
+    });
 }
 
 /// The hook `actor::note_save` calls when an instance at `root` is saved:
@@ -772,5 +825,32 @@ mod tests {
         unwatch(&root);
         note(&root, edit);
         assert!(take(&root).is_empty());
+    }
+
+    /// A change saved just before Hopper closes still becomes a record on the
+    /// next start (user report 2026-11-26: the player updated mods and closed
+    /// Hopper before the group had them).
+    #[test]
+    fn queued_edits_survive_closing_hopper() {
+        let root = std::env::temp_dir().join(format!("hopper-local-queue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        watch(&root);
+        let edit = Edit { key: k(1), now: on(12), why: Why::Player, batch: "b".into() };
+        note(&root, edit.clone());
+        forget_in_memory(&root);
+        watch(&root);
+        assert_eq!(take(&root), vec![edit.clone()], "the queue came back from disk");
+        assert!(!queue_path(&root).exists(), "taken edits leave the disk");
+        forget_in_memory(&root);
+        watch(&root);
+        assert!(take(&root).is_empty(), "nothing is recorded twice");
+        // A copy that stops being shared drops what it had queued.
+        note(&root, edit);
+        unwatch(&root);
+        watch(&root);
+        assert!(take(&root).is_empty());
+        unwatch(&root);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

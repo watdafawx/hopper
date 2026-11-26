@@ -75,7 +75,7 @@ each current record `c` of the same key:
 | Follow-up | `x.seen` covers `c.dot` | `x` replaces `c` |
 | Stale | `c.seen` covers `x.dot` | `x` kept in the log (History), changes nothing |
 | Same | `x.now == c.now` | both kept as one value, no question |
-| Concurrent, both keep the mod (update vs update, on vs update, add vs add) | neither covers the other | higher `(lamport, author)` wins on every PC; the loser's author is told ("Mia changed this too; hers is kept") |
+| Concurrent, both keep the mod (update vs update, on vs update, add vs add) | neither covers the other | the newer CurseForge file wins (file ids rise in upload order), then higher `(lamport, author)`, on every PC; so a friend coming back with an older file never rolls a newer one back. The loser's author is told ("Mia changed this too; hers is kept") |
 | Concurrent, one removes or turns off, the other keeps or updates | neither covers the other | **clash: ask and keep.** Every PC provisionally keeps the non-destructive side (the update), and a review card asks. The first answer from anyone is a new record whose `seen` covers both, so it is a follow-up everywhere and the clash closes for the whole group. |
 | Concurrent pack moves (two versions) | neither covers the other | clash: keep the newer version, ask |
 
@@ -103,6 +103,7 @@ Held, each as one review card per author and batch:
 | Many removals | more than 5 removals or turn-offs in one batch from one author | "Noah removed 12 mods at once. [See them] [Remove them] [Keep them]" |
 | Pack back | `Pack` moves to an older version | "Mia moved the pack back to 8.4. [Move back too] [Stay on 8.6]" |
 | Other pack | `Pack` moves to another project | "Mia switched to another pack. [Get it as a new instance] [Stay here]" |
+| Moved back | a friend's follow-up puts a mod back exactly to what it was before someone else's update (`gate::moves_back`) | "Mia put 5 mods back to older versions. [Keep the updates] [Move back too]" |
 | New source | `File` from GitHub or a link this PC hasn't allowed | existing "Allow and install" |
 | Trust | the member is set to "Ask me first" | every record from them |
 
@@ -136,7 +137,12 @@ Held, each as one review card per author and batch:
   "Remove for everyone" makes a `SharedDrift` record; "Put them back" is an
   apply plan from the register.
 - Applying a friend's record writes History in the friend's name and
-  moves `applied`, so it never echoes back as this PC's change.
+  moves `applied`, so it never echoes back as this PC's change. The
+  installers run inside `actor::own_all`, so a save they make (a pack mod
+  put back to the pack's file, a lock) is never read as the player's own.
+- The edit queue is kept in `.hopper-sync/edits.json` until the engine
+  takes it, so a change made just before Hopper closes still becomes a
+  record on the next start.
 
 ## 6. Pack update plan before Update (`plan.rs`)
 

@@ -1024,11 +1024,24 @@ impl Engine {
             batch: &[],
             allowed_sources: &allowed,
         };
-        let mut held = BTreeMap::new();
+        let mut held: BTreeMap<Dot, Vec<Risk>> = BTreeMap::new();
         for h in gate::held(&items, &ctx) {
             let risks: Vec<Risk> = h.risks.into_iter().filter(|r| *r != Risk::Clash).collect();
             if !risks.is_empty() {
                 held.insert(h.dot, risks);
+            }
+        }
+        // A friend's plain change that puts back someone's update it had
+        // taken in waits too: it is a follow-up, so it would land by itself
+        // and roll the update back on every PC.
+        let mut by_key: BTreeMap<&Key, Vec<&Change>> = BTreeMap::new();
+        for (c, _) in self.log.changes.values() {
+            by_key.entry(&c.key).or_default().push(c);
+        }
+        for (c, _) in &items {
+            let back = by_key.get(&c.key).is_some_and(|rs| rs.iter().any(|r| gate::moves_back(c, r)));
+            if back {
+                held.entry(c.dot.clone()).or_default().push(Risk::MovedBack);
             }
         }
         Judged { regs, held }
@@ -1122,6 +1135,10 @@ fn card_says(risk: &Risk, who: &str, n: usize) -> String {
             "{who} made {}. You asked to be asked first.",
             plural(n, "change", "changes")
         ),
+        Risk::MovedBack => format!(
+            "{who} put {} back to an older version.",
+            plural(n, "mod", "mods")
+        ),
         Risk::Clash | Risk::Differs => String::new(),
     }
 }
@@ -1151,6 +1168,7 @@ fn risk_rank(r: &Risk) -> u8 {
         Risk::NewSource => 5,
         Risk::AskFirst => 6,
         Risk::Differs => 7,
+        Risk::MovedBack => 8,
     }
 }
 

@@ -6,7 +6,7 @@
 //! and picks the winner from those by a fixed order. So every PC that holds
 //! the same records agrees, whatever order the relay delivered them in.
 
-use super::model::{Arrival, Change, Dot, Key};
+use super::model::{Arrival, Change, Dot, Key, Value};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -108,11 +108,28 @@ pub fn merge(current: &Change, incoming: &Change) -> Merge {
     }
 }
 
-/// The order concurrent records are ranked in: higher lamport, then the
-/// author's id, then the counter (so two records of one author can never
-/// tie). Greater wins.
+/// The order concurrent records are ranked in: the newer CurseForge file
+/// first, then higher lamport, then the author's id, then the counter (so
+/// two records of one author can never tie). Greater wins.
+///
+/// The file comes first so that a friend who comes back with an older file
+/// of a mod, made before they saw someone's newer one, never rolls the newer
+/// one back (user report 2026-11-26: the higher member id won a tie and five
+/// FTB mods went back a version). CurseForge numbers files in upload order,
+/// so for one mod in one instance the higher id is the later release. Other
+/// values (Modrinth versions, the pack's own file) have no such order and
+/// rank 0, so between them the old order stands. It is a function of the
+/// records alone, so every PC still picks the same winner.
 fn rank(a: &Change, b: &Change) -> Ordering {
-    (a.lamport, &a.dot.author, a.dot.n).cmp(&(b.lamport, &b.dot.author, b.dot.n))
+    (cf_file(&a.now), a.lamport, &a.dot.author, a.dot.n).cmp(&(cf_file(&b.now), b.lamport, &b.dot.author, b.dot.n))
+}
+
+/// A CurseForge file's id, 0 for anything else.
+fn cf_file(v: &Value) -> u64 {
+    match v {
+        Value::File { file, .. } => file.strip_prefix("cf:").and_then(|n| n.parse().ok()).unwrap_or(0),
+        _ => 0,
+    }
 }
 
 /// One key's register from all its records (at least one).
