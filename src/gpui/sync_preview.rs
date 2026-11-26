@@ -19,7 +19,7 @@ use std::rc::Rc;
 
 /// What every `sy-*` name shows, for `sync_chip::PREVIEWS`.
 pub const NAMES: &[&str] = &[
-    "sy-needs", "sy-needs-one", "sy-needs-differs", "sy-needs-big", "sy-differs", "sy-differs-big", "sy-differs-narrow", "sy-ood", "sy-behind", "sy-getting", "sy-game", "sy-failed", "sy-sending", "sy-held",
+    "sy-needs", "sy-needs-one", "sy-needs-differs", "sy-needs-big", "sy-differs", "sy-differs-big", "sy-differs-narrow", "sy-ood", "sy-behind", "sy-getting", "sy-game", "sy-failed", "sy-sending", "sy-waiting-update", "sy-held",
     "sy-offline", "sy-insync", "sy-notes",
 ];
 
@@ -180,6 +180,7 @@ fn state_of(name: &str) -> (SyncState, usize) {
         "sy-game" => (SyncState::Behind { changes: 3, from: vec!["Mia".into()], step: BehindStep::Game }, 0),
         "sy-failed" => (SyncState::Behind { changes: 2, from: vec!["Mia".into()], step: BehindStep::Failed }, 0),
         "sy-sending" => (SyncState::Sending { changes: 2, held: false }, 0),
+        "sy-waiting-update" => (SyncState::WaitingForUpdate { who: vec!["Alice".into(), "Bob".into(), "Cara".into()] }, 0),
         "sy-held" => (SyncState::Sending { changes: 2, held: true }, 0),
         "sy-offline" => (SyncState::Offline { to_send: 2 }, 0),
         "sy-notes" => (SyncState::InSync { checked: None }, 2),

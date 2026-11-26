@@ -868,6 +868,14 @@ impl Engine {
         Status::InSync
     }
 
+    /// Whether `member` has taken in every change this PC made, as far as
+    /// their last status says. A member never heard from, or whose Hopper is
+    /// older (its packets are refused), has not.
+    pub fn acked_by(&self, member: &str) -> bool {
+        !self.outdated.contains(member)
+            && self.members.get(member).is_some_and(|m| self.log.changes.keys().filter(|d| d.author == self.me).all(|d| m.seen.covers(d)))
+    }
+
     pub fn members(&self) -> Vec<MemberStatus> {
         self.members.values().cloned().collect()
     }
@@ -1581,6 +1589,23 @@ mod tests {
         send(&a, &mut b, T0);
         a.ingest("b", vec![], b.my_status(), Arrival { seq: 2, at: T0 });
         assert_eq!(a.status(&disk_of(&a)), Status::InSync);
+    }
+
+    #[test]
+    fn acked_by_means_a_current_friend_took_every_change_in() {
+        let mut a = pc("a");
+        act(&mut a, edit(mk(1), file(12)), T0);
+        // Never heard from: not acked. A friend whose Hopper is older: never.
+        assert!(!a.acked_by("b"));
+        a.note_out_of_date("c");
+        assert!(!a.acked_by("c"));
+        let mut b = pc("b");
+        send(&a, &mut b, T0);
+        a.ingest("b", vec![], b.my_status(), Arrival { seq: 2, at: T0 });
+        assert!(a.acked_by("b"));
+        // A newer change of this PC's isn't taken in yet.
+        act(&mut a, edit(mk(1), file(13)), T0);
+        assert!(!a.acked_by("b"));
     }
 
     #[test]

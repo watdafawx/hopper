@@ -920,12 +920,26 @@ impl Store {
         from.sort();
         from.dedup();
         let too_old = slot.newer.iter().find(|m| slot.engine.outdated.contains(*m)).map(|m| self.sync_member_name(m));
+        // Who could still take this PC's changes in: friends of the group on an
+        // older Hopper never will; a current one that hasn't acked yet may.
+        let me = self.mailbox_id();
+        let (mut friends_old, mut current_unacked) = (Vec::new(), false);
+        let others = self.mailbox_groups().iter().find(|g| g.id == slot.group).map(|g| g.members.as_slice()).unwrap_or_default();
+        for m in others.iter().filter(|m| m.joined && m.id != me && !slot.newer.contains(&m.id)) {
+            if slot.engine.outdated.contains(&m.id) {
+                friends_old.push(if m.name.is_empty() { self.sync_member_name(&m.id) } else { m.name.clone() });
+            } else if !slot.engine.acked_by(&m.id) {
+                current_unacked = true;
+            }
+        }
         Some(sync_state(&SyncIn {
             // Hidden cards don't hold the chip at "Needs you"; every
             // friend's out-of-date Hopper is left out here too.
             status: slot.engine.status_counting(&slot.snap, cards, |_| false),
             cards,
             too_old,
+            friends_old,
+            current_unacked,
             connected,
             applying: slot.applying || self.group_pulling(root),
             game: self.running(root).is_some() && slot.engine.game_running,

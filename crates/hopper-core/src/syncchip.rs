@@ -137,6 +137,10 @@ pub enum SyncState {
     OutOfDate { who: String },
     /// The group's changes aren't all on this PC yet.
     Behind { changes: usize, from: Vec<String>, step: BehindStep },
+    /// This PC's own changes are saved, but everyone who could still take them
+    /// in is on an older Hopper (`who`: their names, blank when unknown). Nothing
+    /// is in flight; it waits for them to update.
+    WaitingForUpdate { who: Vec<String> },
     /// This PC's own changes are on their way (`held`: kept for Push).
     Sending { changes: usize, held: bool },
     /// Can't reach the group (`to_send` of this PC's changes wait).
@@ -166,9 +170,10 @@ impl SyncState {
             SyncState::Differs { .. } => 1,
             SyncState::OutOfDate { .. } => 2,
             SyncState::Behind { .. } => 3,
-            SyncState::Sending { .. } => 4,
-            SyncState::Offline { .. } => 5,
-            SyncState::InSync { .. } => 6,
+            SyncState::WaitingForUpdate { .. } => 4,
+            SyncState::Sending { .. } => 5,
+            SyncState::Offline { .. } => 6,
+            SyncState::InSync { .. } => 7,
         }
     }
 }
@@ -183,6 +188,14 @@ pub struct SyncIn {
     pub cards: usize,
     /// A friend's newer Hopper sends what this one can't read (their name).
     pub too_old: Option<String>,
+    /// Names of the group's friends whose Hopper is older (it can't read what
+    /// this one sends, so they never take this PC's changes in). Blank for a
+    /// friend with no name yet.
+    pub friends_old: Vec<String>,
+    /// A friend on a current Hopper hasn't taken in all of this PC's changes
+    /// yet (or hasn't been heard from): the changes can still be acked, so
+    /// "Sending" stays true.
+    pub current_unacked: bool,
     pub connected: bool,
     /// Changes are being taken in right now.
     pub applying: bool,
@@ -222,6 +235,12 @@ pub fn sync_state(i: &SyncIn) -> SyncState {
             SyncState::Behind { changes: *n, from: i.from.clone(), step }
         }
         S::Sending(n) if !i.connected => SyncState::Offline { to_send: *n },
+        // Held for Push is the player's to press, whoever is old. Otherwise,
+        // when nobody who could still ack is on a current Hopper, nothing is
+        // in flight: say what it waits for.
+        S::Sending(_) if !i.push_by_hand && !i.friends_old.is_empty() && !i.current_unacked => {
+            SyncState::WaitingForUpdate { who: i.friends_old.clone() }
+        }
         S::Sending(n) => SyncState::Sending { changes: *n, held: i.push_by_hand },
         _ if !i.connected => SyncState::Offline { to_send: 0 },
         _ => SyncState::InSync { checked: i.checked },
@@ -238,6 +257,29 @@ pub struct GroupLook {
     pub line: String,
     /// The popover's one filled button, when there is one.
     pub button: Option<String>,
+}
+
+/// The friends on an older Hopper, in a sentence's subject, and whether it
+/// takes "are": "Alice", "Alice and Bob", "Alice, Bob and Cara"; "A friend"
+/// when none has a name, and "Alice and 2 more" when only some do.
+fn old_friends(who: &[String]) -> (String, bool) {
+    let named: Vec<&str> = who.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let unnamed = who.len() - named.len();
+    let mut items: Vec<String> = named.iter().map(|s| s.to_string()).collect();
+    if unnamed > 0 {
+        items.push(match (named.is_empty(), unnamed) {
+            (true, 1) => "A friend".to_string(),
+            (true, n) => format!("{n} friends"),
+            (false, n) => format!("{n} more"),
+        });
+    }
+    let plural = who.len() > 1;
+    let text = match items.as_slice() {
+        [] => "A friend".to_string(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    };
+    (text, plural)
 }
 
 fn changes_n(n: usize) -> String {
@@ -304,6 +346,19 @@ pub fn group_look(state: &SyncState, now: u64) -> GroupLook {
                     Some("Try again".to_string()),
                 ),
             }
+        }
+        SyncState::WaitingForUpdate { who } => {
+            let (names, plural) = old_friends(who);
+            (
+                // Quiet and still: nothing is in flight, so no spinner.
+                mk(Tone::Quiet, Behind, "Waiting for friends to update".to_string(), "Waiting"),
+                "Friends need to update Hopper".to_string(),
+                format!(
+                    "{names} {} on an older Hopper. Your changes are saved and reach them once they update.",
+                    if plural { "are" } else { "is" },
+                ),
+                None,
+            )
         }
         SyncState::Sending { changes, held: false } => (
             mk(Tone::Busy, Up, format!("Sending {}", changes_n(*changes)), "Sending").busy(),
@@ -1042,6 +1097,8 @@ mod sync_state_tests {
             status,
             cards: 0,
             too_old: None,
+            friends_old: vec![],
+            current_unacked: false,
             connected: true,
             applying: false,
             game: false,
@@ -1066,7 +1123,7 @@ mod sync_state_tests {
         let mut i = input(S::Sending(1));
         i.connected = false;
         assert_eq!(sync_state(&i), SyncState::Offline { to_send: 1 });
-        assert_eq!(sync_state(&input(S::InSync)).rank(), 6);
+        assert_eq!(sync_state(&input(S::InSync)).rank(), 7);
     }
 
     #[test]
@@ -1103,6 +1160,8 @@ mod sync_state_tests {
             SyncState::Behind { changes: 1, from: vec![], step: BehindStep::Waiting },
             SyncState::Behind { changes: 1, from: vec![], step: BehindStep::Game },
             SyncState::Behind { changes: 1, from: vec![], step: BehindStep::Failed },
+            SyncState::WaitingForUpdate { who: vec!["Mia".into()] },
+            SyncState::WaitingForUpdate { who: vec![] },
             SyncState::Sending { changes: 3, held: false },
             SyncState::Sending { changes: 3, held: true },
             SyncState::Offline { to_send: 0 },
@@ -1130,6 +1189,78 @@ mod sync_state_tests {
         assert_eq!(l.line, "Nothing new to take in. Checked 2 min ago.");
         let l = group_look(&SyncState::InSync { checked: None }, 220);
         assert_eq!(l.line, "Nothing new to take in.");
+    }
+
+    fn old(names: &[&str]) -> SyncIn {
+        let mut i = input(S::Sending(4));
+        i.friends_old = names.iter().map(|n| n.to_string()).collect();
+        i
+    }
+
+    #[test]
+    fn all_friends_on_an_older_hopper_wait_for_them() {
+        let st = sync_state(&old(&["Alice", "Bob", "Cara"]));
+        assert_eq!(st, SyncState::WaitingForUpdate { who: vec!["Alice".into(), "Bob".into(), "Cara".into()] });
+        // Between Behind and Sending in the table.
+        assert!(st.rank() > SyncState::Behind { changes: 1, from: vec![], step: BehindStep::Waiting }.rank());
+        assert!(st.rank() < SyncState::Sending { changes: 1, held: false }.rank());
+        let l = group_look(&st, 0);
+        assert_eq!(l.look.label, "Waiting for friends to update");
+        assert_eq!(l.title, "Friends need to update Hopper");
+        assert_eq!(l.line, "Alice, Bob and Cara are on an older Hopper. Your changes are saved and reach them once they update.");
+        // Nothing is in flight: no spinner, a quiet tone, nothing the player must do.
+        assert_eq!(l.look.tone, Tone::Quiet);
+        assert!(!l.look.busy && !l.look.fixed && !l.look.strip);
+        assert_eq!(l.button, None);
+    }
+
+    #[test]
+    fn waiting_for_update_words_count_the_friends() {
+        let line = |who: &[&str]| {
+            let who = who.iter().map(|n| n.to_string()).collect();
+            group_look(&SyncState::WaitingForUpdate { who }, 0).line
+        };
+        assert_eq!(line(&["Alice"]), "Alice is on an older Hopper. Your changes are saved and reach them once they update.");
+        assert_eq!(line(&["Alice", "Bob"]), "Alice and Bob are on an older Hopper. Your changes are saved and reach them once they update.");
+        // No name known yet.
+        assert_eq!(line(&[""]), "A friend is on an older Hopper. Your changes are saved and reach them once they update.");
+        assert_eq!(line(&["", ""]), "2 friends are on an older Hopper. Your changes are saved and reach them once they update.");
+        assert_eq!(line(&["Alice", ""]), "Alice and 1 more are on an older Hopper. Your changes are saved and reach them once they update.");
+    }
+
+    #[test]
+    fn a_current_friend_who_has_not_acked_keeps_sending() {
+        let mut i = old(&["Alice"]);
+        i.current_unacked = true;
+        assert_eq!(sync_state(&i), SyncState::Sending { changes: 4, held: false });
+    }
+
+    #[test]
+    fn offline_beats_waiting_for_update() {
+        let mut i = old(&["Alice"]);
+        i.connected = false;
+        assert_eq!(sync_state(&i), SyncState::Offline { to_send: 4 });
+    }
+
+    #[test]
+    fn no_old_friends_known_stays_sending() {
+        assert_eq!(sync_state(&old(&[])), SyncState::Sending { changes: 4, held: false });
+    }
+
+    #[test]
+    fn changes_held_for_push_stay_not_sent() {
+        let mut i = old(&["Alice"]);
+        i.push_by_hand = true;
+        assert_eq!(sync_state(&i), SyncState::Sending { changes: 4, held: true });
+    }
+
+    #[test]
+    fn old_friends_who_are_not_the_cause_do_not_nag() {
+        // The rest acked everything: the engine says in sync, and the older
+        // friend doesn't change that.
+        let mut i = input(S::InSync);
+        i.friends_old = vec!["Alice".into()];
+        assert_eq!(sync_state(&i), SyncState::InSync { checked: None });
     }
 
     #[test]
