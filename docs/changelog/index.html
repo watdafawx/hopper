@@ -140,6 +140,13 @@ footer a:hover{color:var(--fg)}
     <p class="lede">For each release: what it did before, what it does now, pictures of both, and how it was checked, including what was not. Newest first. Plain release notes are on <a href="https://github.com/watdafawx/hopper/releases">GitHub</a>.</p>
     <div class="legend"><span class="tag ok">seen on screen</span><span class="tag warn">partly checked</span><span class="tag bad">gap found</span></div>
   </header>
+<section class="rel" id="v0-93-7"><div class="relhead"><h2>Hopper 0.93.7</h2><span class="when">26 Nov 2026</span></div><article class="cl">
+      <h3>History names the mod, keeps reasons after a restart; no tip over the sync card</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Desktop.</dd><dt>Before</dt><dd>A friend's removal or rollback showed the jar file name in History. Lines like "Bob went back to 1.4.8" vanished after restarting Hopper. Hovering the sync chip with its card open showed a tip on top of the card heading.</dd><dt>After</dt><dd>History names the mod and where it came from, the reason lines stay, and the chip shows no hover tip while its card is open.</dd></dl>
+      <ul class="files"><li>crates/hopper-core/src/synccore/bridge.rs</li><li>crates/hopper-core/src/synccore/store.rs</li><li>src/gpui/sync_chip.rs</li></ul>
+      <div><span class="tag ok">seen on screen</span><ul class="tested"><li>Two apps on rig: Bob removed BetterGrassify, Alice's History read "Bob removed BetterGrassify · CurseForge", unchanged after restarting Alice. With the "This PC differs" card open the chip showed no tip; with it closed the tip showed.</li></ul></div>
+      <div><span class="tag warn">partly checked</span><ul class="tested"><li>Reason lines surviving a restart are covered by unit tests only. The tip fix was judged by eye, not measured.</li></ul></div>
+    </article></section>
 <section class="rel" id="v0-93-6"><div class="relhead"><h2>Hopper 0.93.6</h2><span class="when">26 Nov 2026</span></div><article class="cl">
       <h3>Pack-mod updates and Modrinth-only mods reach your friends</h3>
       <dl class="ft"><dt>Apps</dt><dd>Desktop.</dd><dt>Before</dt><dd>Updating a mod that comes with the modpack, or undoing that update, stayed on your PC. A Modrinth mod only you added could fail on a friend's PC and leave them on "Behind".</dd><dt>After</dt><dd>Both travel as normal changes: friends' History says who did it and their disk follows.</dd><dt>Good to know</dt><dd>A Modrinth mod added with an older Hopper and not yet on friends' PCs may need removing and adding again.</dd></dl>
