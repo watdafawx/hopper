@@ -140,6 +140,13 @@ footer a:hover{color:var(--fg)}
     <p class="lede">For each release: what it did before, what it does now, pictures of both, and how it was checked, including what was not. Newest first. Plain release notes are on <a href="https://github.com/watdafawx/hopper/releases">GitHub</a>.</p>
     <div class="legend"><span class="tag ok">seen on screen</span><span class="tag warn">partly checked</span><span class="tag bad">gap found</span></div>
   </header>
+<section class="rel" id="v0-93-3"><div class="relhead"><h2>Hopper 0.93.3</h2><span class="when">26 Nov 2026</span></div><article class="cl">
+      <h3>"This PC differs" names a CurseForge mod you turned off outside Hopper</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Desktop.</dd><dt>Before</dt><dd>A pack mod turned off outside Hopper showed as a blank row with a cube icon and "turned off outside Hopper".</dd><dt>After</dt><dd>The row shows the mod's name and icon, for example "Iron Chests · turned off outside Hopper".</dd></dl>
+      <ul class="files"><li>crates/hopper-core/src/synccore/cards.rs</li></ul>
+      <div><span class="tag ok">seen on screen</span><ul class="tested"><li>Two apps on rig with a CurseForge pack: three mods turned off outside Hopper on Bob's PC showed by name and icon in the "This PC differs" list.</li></ul></div>
+      <div><span class="tag warn">partly checked</span><ul class="tested"><li>The "Needs you" card for a CurseForge mod ("Name · off here, on for Alice") was not produced, and Alice's side was not checked. No change card was written.</li></ul></div>
+    </article></section>
 <section class="rel" id="v0-93-2"><div class="relhead"><h2>Hopper 0.93.2</h2><span class="when">26 Nov 2026</span></div><article class="cl">
       <h3>The "whose copy to use" card names each mod</h3>
       <dl class="ft"><dt>Apps</dt><dd>Desktop.</dd><dt>Before</dt><dd>When two PCs' mods differ, the card said "a mod · off here, on for Alice" for every row.</dd><dt>After</dt><dd>Each row names the mod and shows its icon: "Entity Culling · off here, on for Alice".</dd></dl>
