@@ -803,6 +803,8 @@ impl AppView {
                 // The back-from-away dialog and the pack update's friends block,
                 // with made-up data (the real ones need a live group).
                 "put-back" => crate::sync_preview::open_put_back(window, cx),
+                // Closing with group changes the friends service hasn't taken.
+                "leave-unsent" => crate::send_before_leave::open_preview(state == "also", window, cx),
                 "pack-friends" => crate::sync_preview::open_pack_friends(window, cx),
                 // After the server comparison has had time to finish.
                 "side" => cx
@@ -1870,7 +1872,10 @@ fn quit_ok(window: &mut Window, cx: &mut App) -> bool {
     let store = app.read(cx).store.clone();
     let tasks = store.read(cx).jobs().snapshot().iter().filter(|j| !j.done).count();
     let servers = store.read(cx).local_panel().all().iter().filter(|s| s.state().is_alive()).count();
-    if tasks == 0 && servers == 0 {
+    // Pick up what the player changed in the last half second, so it counts.
+    store.update(cx, |s, cx| s.sync_tick(cx));
+    let unsent: usize = store.read(cx).sync_unsent().iter().map(|(_, n)| n).sum();
+    if tasks == 0 && servers == 0 && unsent == 0 {
         return true;
     }
     let mut what = Vec::new();
@@ -1884,6 +1889,35 @@ fn quit_ok(window: &mut Window, cx: &mut App) -> bool {
         ));
     }
     let text = what.join("; ") + ".";
+    if unsent > 0 {
+        // Changes this PC hasn't handed to the friends service: offer to send
+        // them first. The same dialog says what else the close ends.
+        let also = (!what.is_empty()).then(|| {
+            let mut t = text.clone();
+            t.replace_range(..1, &t[..1].to_uppercase());
+            t
+        });
+        crate::send_before_leave::open(
+            crate::send_before_leave::Leaving {
+                unsent: {
+                    let store = store.clone();
+                    std::rc::Rc::new(move |cx| store.read(cx).sync_unsent().iter().map(|(_, n)| n).sum())
+                },
+                send: {
+                    let store = store.clone();
+                    std::rc::Rc::new(move |cx| store.update(cx, |s, cx| s.sync_send_now(cx)))
+                },
+                close: {
+                    let store = store.clone();
+                    std::rc::Rc::new(move |cx| quit_now(&store, cx))
+                },
+                also,
+            },
+            window,
+            cx,
+        );
+        return false;
+    }
     window.open_alert_dialog(cx, move |alert, _, _| {
         let store = store.clone();
         alert
@@ -1896,18 +1930,23 @@ fn quit_ok(window: &mut Window, cx: &mut App) -> bool {
                     .show_cancel(true),
             )
             .on_ok(move |_, _, cx| {
-                store.update(cx, |s, _| s.stop_scheduler());
-                let local = store.read(cx).local_panel();
-                // Stop the servers off the UI thread, then quit.
-                cx.spawn(async move |cx| {
-                    cx.background_spawn(async move { local.stop_all() }).await;
-                    cx.update(|cx| cx.quit());
-                })
-                .detach();
+                quit_now(&store, cx);
                 true
             })
     });
     false
+}
+
+/// Ends Hopper: stops the scheduler, stops the servers hosted here (off the
+/// UI thread, saving their worlds), then quits.
+fn quit_now(store: &Entity<Store>, cx: &mut App) {
+    store.update(cx, |s, _| s.stop_scheduler());
+    let local = store.read(cx).local_panel();
+    cx.spawn(async move |cx| {
+        cx.background_spawn(async move { local.stop_all() }).await;
+        cx.update(|cx| cx.quit());
+    })
+    .detach();
 }
 
 #[cfg(test)]

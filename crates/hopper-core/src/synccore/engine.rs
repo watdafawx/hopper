@@ -935,6 +935,27 @@ impl Engine {
             .collect()
     }
 
+    /// How many of this PC's own records the relay has not taken yet, for
+    /// the friends in `to`: not acked by one of them, and not in what was
+    /// last posted to them (`sent`). Read-only, for "N changes not sent
+    /// yet" and the close dialog. Counted from this run's posts, so after a
+    /// restart everything a friend hasn't acked counts until it is posted
+    /// again (the outbox is rebuilt from the saved log, nothing is lost).
+    pub fn unsent(&self, to: &[String]) -> usize {
+        let mut dots: BTreeSet<&Dot> = BTreeSet::new();
+        for r in to.iter().filter(|r| **r != self.me) {
+            let acked = self.members.get(r).map(|s| &s.seen);
+            let posted = self.posting.last.get(r).map(|p| &p.dots);
+            for d in self.log.changes.keys().filter(|d| d.author == self.me) {
+                if acked.is_some_and(|a| a.covers(d)) || posted.is_some_and(|p| p.contains(d)) {
+                    continue;
+                }
+                dots.insert(d);
+            }
+        }
+        dots.len()
+    }
+
     /// The winning record (and open clash records) of every key: what a
     /// new member is sent first.
     pub fn checkpoint(&self) -> Vec<Change> {
@@ -1887,6 +1908,49 @@ mod tests {
         assert_eq!(a.outbox(&names(&["B"]), &snap, 0).len(), 1);
         // Not marked sent: the next round builds it again.
         assert_eq!(a.outbox(&names(&["B"]), &snap, 0).len(), 1);
+    }
+
+    #[test]
+    fn unsent_counts_what_the_relay_has_not_taken() {
+        let mut a = pc("A");
+        // Nobody to send to: nothing is unsent.
+        act(&mut a, edit(mk(1), file(12)), T0);
+        assert_eq!(a.unsent(&[]), 0);
+        assert_eq!(a.unsent(&names(&["A"])), 0);
+        // Two records, built but not taken by the relay.
+        act(&mut a, edit(mk(2), file(22)), T0);
+        let snap = disk(&a);
+        assert_eq!(a.outbox(&names(&["B"]), &snap, 0).len(), 1);
+        assert_eq!(a.unsent(&names(&["B"])), 2);
+        // The relay took it: sent, even though B hasn't acked yet.
+        post(&mut a, &["B"]);
+        assert_eq!(a.unsent(&names(&["B"])), 0);
+        assert!(!a.acked_by("B"));
+        // A newer record is unsent again, the older two are not.
+        act(&mut a, edit(mk(3), file(32)), T0);
+        assert_eq!(a.unsent(&names(&["B"])), 1);
+        // A friend who acks everything has nothing unsent, even with no post.
+        let mut acked = a.my_status();
+        acked.member = "C".into();
+        a.members.insert("C".into(), acked);
+        assert_eq!(a.unsent(&names(&["C"])), 0);
+        // Two friends: D never got anything, so all three count, once each.
+        assert_eq!(a.unsent(&names(&["B", "D"])), 3);
+    }
+
+    #[test]
+    fn unsent_survives_a_restart_from_the_saved_log() {
+        let mut a = pc("A");
+        act(&mut a, edit(mk(1), file(12)), T0);
+        act(&mut a, edit(mk(2), file(22)), T0);
+        // Never posted (offline), then the app closes and starts again.
+        let bytes = super::super::store::encode(&a);
+        let mut b = super::super::store::decode(&bytes, "pack").expect("saved state reads back");
+        assert_eq!(b.unsent(&names(&["B"])), 2);
+        // The first post after the restart carries both records.
+        let out = post(&mut b, &["B"]);
+        assert!(matches!(&out[0].body, Body::Tail(c) if c.len() == 2));
+        assert_eq!(b.unsent(&names(&["B"])), 0);
     }
 
     #[test]

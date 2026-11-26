@@ -66,6 +66,7 @@ mod downloads_chip;
 mod sync_cards;
 mod sync_chip;
 mod sync_preview;
+mod send_before_leave;
 mod sync_put_back;
 mod pack_lookup;
 mod pack_where;

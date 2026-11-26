@@ -72,6 +72,12 @@ struct Slot {
     hidden: HashMap<u64, u64>,
     /// "While you were away" notes, one per friend, until the player is done.
     away: Vec<AwayNote>,
+    /// How many of this PC's own changes the friends service has not taken
+    /// yet (`Engine::unsent`), as of the last tick or post. Read by the chip
+    /// and by the close dialog.
+    unsent: usize,
+    /// The friends this copy posts to, as the last tick saw them.
+    to: Vec<String>,
 }
 
 /// What one friend changed while this PC was away.
@@ -96,6 +102,9 @@ pub struct SyncCore {
     early: Vec<Event>,
     post_failed_at: Option<Instant>,
     ticks: u64,
+    /// "Send now": the next tick posts even while the service looked down,
+    /// and without waiting out the back-off of a failed post.
+    force: bool,
 }
 
 impl SyncCore {
@@ -179,7 +188,7 @@ impl Store {
 
     /// Twice a second: sets up engines for the group copies, takes in what the
     /// player did, posts, and applies. Cheap when nothing changed.
-    pub(super) fn sync_tick(&mut self, cx: &mut Context<Self>) {
+    pub fn sync_tick(&mut self, cx: &mut Context<Self>) {
         self.sync.ticks += 1;
         let Some(mb) = self.mailbox.clone() else { return };
         let (me, my_name) = (mb.account().id.clone(), mb.account().name.clone());
@@ -201,6 +210,9 @@ impl Store {
             }
         }
         let healthy = self.mailbox_error.is_none();
+        // Send now tries even when the last answer was an error: a post that
+        // goes through is the proof the service is back.
+        let force = std::mem::take(&mut self.sync.force);
         let now = unix_now();
         for (local_id, copy, group) in wanted {
             let Some(inst) = self.instances.iter().find(|i| i.id == local_id) else { continue };
@@ -213,7 +225,7 @@ impl Store {
                 let engine = self.sync_open(&copy, &me, &my_name, &snap);
                 local::watch(&root);
                 let jars = Self::sync_dir().map(|dir| synccore::store::load_jars(&dir, &copy)).unwrap_or_default();
-                let mut slot = Slot { engine, root: root.clone(), group: group.clone(), dirty: true, posting: false, applying: false, snap: snap.clone(), jars, jars_dirty: false, known: HashSet::new(), said: HashSet::new(), shrink: 0, pack_mode: None, newer: BTreeSet::new(), hidden: HashMap::new(), away: Vec::new() };
+                let mut slot = Slot { engine, root: root.clone(), group: group.clone(), dirty: true, posting: false, applying: false, snap: snap.clone(), jars, jars_dirty: false, known: HashSet::new(), said: HashSet::new(), shrink: 0, pack_mode: None, newer: BTreeSet::new(), hidden: HashMap::new(), away: Vec::new(), unsent: 0, to: Vec::new() };
                 // A swap the last run stopped in the middle is finished now.
                 match apply::recover(&root) {
                     Ok(Some(report)) => slot.engine.applied(&report),
@@ -317,7 +329,7 @@ impl Store {
             }
             // Post what the group hasn't got.
             let to: Vec<String> = members.iter().map(|(id, _)| id.clone()).collect();
-            let post = healthy
+            let post = (healthy || force)
                 && !push_wait
                 && !slot.posting
                 && !to.is_empty()
@@ -325,6 +337,8 @@ impl Store {
             // Mods this PC keeps only here are never compared with a friend's.
             slot.engine.kept_here = kept.clone();
             let outs = if post { slot.engine.outbox(&to, &snap, 0) } else { Vec::new() };
+            slot.unsent = slot.engine.unsent(&to);
+            slot.to = to;
             let apply_now = !slot.applying && !busy && root.is_dir() && (self.sync.ticks % 4 == 0 || slot.dirty);
             let plan = if apply_now {
                 let mut p = slot.engine.plan();
@@ -424,6 +438,7 @@ impl Store {
                 for o in &outs {
                     slot.engine.sent(o);
                 }
+                slot.unsent = slot.engine.unsent(&slot.to);
                 slot.shrink = slot.shrink.saturating_sub(1);
                 slot.dirty = true;
                 Self::sync_save(slot);
@@ -431,6 +446,8 @@ impl Store {
                 self.push_now.remove(local_id);
                 self.to_push.remove(local_id);
                 self.publish_said = None;
+                // It went through, so the service is there.
+                self.mailbox_error = None;
             }
             Err(e) => {
                 log::warn!("sending changes to the group: {e:#}");
@@ -941,6 +958,7 @@ impl Store {
             friends_old,
             current_unacked,
             connected,
+            unsent: slot.unsent,
             applying: slot.applying || self.group_pulling(root),
             game: self.running(root).is_some() && slot.engine.game_running,
             failing: retry || self.group_pulled(root).is_some_and(|(_, bad)| bad),
@@ -948,6 +966,33 @@ impl Store {
             push_by_hand: self.settings.push_by_hand && !self.push_now.contains(local_id),
             checked: self.mailbox_checked,
         }))
+    }
+
+    /// This PC's own group changes the friends service has not taken yet,
+    /// per pack (its name, how many). Changes held back for Push are not in
+    /// it: the player decides when those go. Empty when friends sync is off.
+    pub fn sync_unsent(&self) -> Vec<(String, usize)> {
+        if self.mailbox.is_none() || !self.settings.peer_sync {
+            return Vec::new();
+        }
+        let mut out: Vec<(String, usize)> = self
+            .sync
+            .slots
+            .iter()
+            .filter(|(id, s)| s.unsent > 0 && !(self.settings.push_by_hand && !self.push_now.contains(*id)))
+            .map(|(id, s)| (self.instances.iter().find(|i| &i.id == id).map(|i| i.name.clone()).unwrap_or_default(), s.unsent))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// "Send now": posts what hasn't gone out, at once, whatever the last
+    /// answer of the service was.
+    pub fn sync_send_now(&mut self, cx: &mut Context<Self>) {
+        self.sync.post_failed_at = None;
+        self.sync.force = true;
+        self.sync_tick(cx);
+        cx.notify();
     }
 
     /// The friends service answers (the chip says Offline when it doesn't).
