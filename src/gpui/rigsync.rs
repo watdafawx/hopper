@@ -341,6 +341,9 @@ pub struct SyncPanel {
     /// it ended with: comparing again for each read the panel once more
     /// per echo.
     echo_until: Option<std::time::Instant>,
+    /// The paired pack's mod files as of the last store change (0: not seen
+    /// yet), to tell a mod the player added from the sync's echo.
+    seen_pack: u64,
     /// Hopper Server asked to slow down (429): the last list stays and it
     /// is compared again by itself at this time.
     slowed: Option<std::time::Instant>,
@@ -376,13 +379,19 @@ impl SyncPanel {
             cx.observe(&store, |this, _, cx| {
                 // The server or the pack's mods changed elsewhere: compare again.
                 let rev = this.compare_key(cx);
+                // The echo is the server's own change events. A mod the
+                // player adds to the pack right after a sync is no echo: it
+                // gets its comparison at once.
+                let pack = this.pack_key(cx);
+                let pack_moved = this.seen_pack != 0 && pack != this.seen_pack;
+                this.seen_pack = pack;
                 if rev != this.seen_rev {
                     this.seen_rev = rev;
                     // Mid-sync each copied jar changes the server: the sync
                     // compares once when it ends, not once per jar.
                     if this.syncing(cx) {
                         this.rescan_held = true;
-                    } else if !this.echo_until.is_some_and(|t| std::time::Instant::now() < t) {
+                    } else if pack_moved || !this.echo_until.is_some_and(|t| std::time::Instant::now() < t) {
                         this.rescan(cx);
                     }
                 } else if this.rescan_held && !this.syncing(cx) {
@@ -491,6 +500,7 @@ impl SyncPanel {
             failed: HashMap::new(),
             rescan_held: false,
             echo_until: None,
+            seen_pack: 0,
             slowed: None,
             _slow_task: None,
             diff_next: None,
@@ -711,6 +721,20 @@ impl SyncPanel {
 
     /// What the comparison depends on in the store: the server's revision and
     /// the paired pack's mod files.
+    fn pack_key(&self, cx: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let store = self.store.read(cx);
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let inst = self.server.as_ref().and_then(|r| store.server(r)).and_then(|s| store.paired(s));
+        if let Some(inst) = inst {
+            for a in &inst.addons {
+                (&a.file_name, a.enabled, a.file_id).hash(&mut h);
+            }
+        }
+        // Never 0: that means "not seen yet".
+        h.finish() | 1
+    }
+
     fn compare_key(&self, cx: &App) -> u64 {
         use std::hash::{Hash, Hasher};
         let store = self.store.read(cx);
