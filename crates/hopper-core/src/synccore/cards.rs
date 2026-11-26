@@ -146,10 +146,11 @@ fn rank(r: &Risk) -> u8 {
         Risk::Clash => 0,
         Risk::ManyRemovals { .. } => 1,
         Risk::PackBack | Risk::OtherPack => 2,
-        Risk::LongAway { .. } => 3,
-        Risk::NewSource => 4,
-        Risk::AskFirst => 5,
-        Risk::Differs => 6,
+        Risk::MovedBack => 3,
+        Risk::LongAway { .. } => 4,
+        Risk::NewSource => 5,
+        Risk::AskFirst => 6,
+        Risk::Differs => 7,
     }
 }
 
@@ -255,6 +256,15 @@ pub fn cards(e: &Engine) -> Vec<Card> {
                     },
                     "Moving back changes mods here. History can undo it.".to_string(),
                     vec![btn(&stay, None, true), btn("Move back too", Some(Answer::Take), false)],
+                    None,
+                )
+            }
+            Risk::MovedBack => {
+                let one = mods.len() == 1;
+                (
+                    if one { format!("{who} put {MOD} back to an older version.") } else { format!("{who} put {} back to older versions.", count_mods(mods.len())) },
+                    if one { "The update stays on this PC until you answer.".to_string() } else { "The updates stay on this PC until you answer.".to_string() },
+                    vec![btn(if one { "Keep the update" } else { "Keep the updates" }, Some(Answer::Keep), true), btn("Move back too", Some(Answer::Take), false)],
                     None,
                 )
             }
