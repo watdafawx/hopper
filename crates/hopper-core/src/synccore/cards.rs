@@ -403,7 +403,9 @@ pub fn button_ready(b: &Btn, ticked: bool) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DriftRow {
     pub drift: Drift,
-    /// The jar's file name, for a mod Hopper has no name for.
+    /// The jar's file name, or the mod's key ("cf:<project>") when a pack's
+    /// mod is simply on or off and no file is named: the app looks the mod
+    /// up by either, so its name and icon show.
     pub file: String,
     /// "missing from the mods folder".
     pub reason: String,
@@ -423,7 +425,12 @@ pub fn drift_rows(e: &Engine, disk: &Snapshot) -> Vec<DriftRow> {
 pub fn drift_row(d: Drift) -> DriftRow {
     let file = match (&d.found, &d.expected) {
         (Value::File { file, .. }, _) | (_, Value::File { file, .. }) => file.clone(),
-        _ => String::new(),
+        // A pack's mod turned off here is `PackOff`/`PackDefault`, with no file
+        // in either value: the key still says which mod it is.
+        _ => match &d.key {
+            Key::Mod(k) => k.clone(),
+            _ => String::new(),
+        },
     };
     let (reason, short, added) = match (&d.expected, &d.found) {
         (Value::Gone | Value::PackRemoved, _) => ("added outside Hopper, only here".to_string(), "added", true),
@@ -711,6 +718,16 @@ mod tests {
         assert_eq!((added.put_back, added.share, added.file.as_str()), ("Take it out", "Add for everyone", "j.jar"));
         assert_eq!(share_label(&added, "Jade"), "Add Jade for everyone");
         assert_eq!(share_label(&gone, "Jade"), "Remove Jade for everyone");
+    }
+
+    #[test]
+    fn a_pack_mod_turned_off_here_names_itself_by_its_key() {
+        // A pack's mod is `PackDefault` / `PackOff` (no file in either), so the
+        // row used to carry no name at all; the key lets the app find the mod.
+        let off = drift_row(Drift { key: Key::Mod("cf:1076278".into()), expected: Value::PackDefault, found: Value::PackOff });
+        assert_eq!((off.short, off.file.as_str()), ("turned off", "cf:1076278"));
+        let loader = drift_row(Drift { key: Key::Loader, expected: Value::Text("a".into()), found: Value::Text("b".into()) });
+        assert_eq!(loader.file, "");
     }
 
     #[test]
