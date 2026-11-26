@@ -140,6 +140,17 @@ footer a:hover{color:var(--fg)}
     <p class="lede">For each release: what it did before, what it does now, pictures of both, and how it was checked, including what was not. Newest first. Plain release notes are on <a href="https://github.com/watdafawx/hopper/releases">GitHub</a>.</p>
     <div class="legend"><span class="tag ok">seen on screen</span><span class="tag warn">partly checked</span><span class="tag bad">gap found</span></div>
   </header>
+<section class="rel" id="v0-94-0"><div class="relhead"><h2>Hopper 0.94.0 + Hopper Server 0.82.0</h2><span class="when">26 Nov 2026</span></div><article class="cl">
+      <h3>Notices sit at the bottom of the page</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Desktop and Hopper Server.</dd><dt>Before</dt><dd>Problems opened in a popover that covered mod rows, and its detail text could print over its buttons.</dd><dt>After</dt><dd>Each notice is a strip docked under the list. Rows never move or get covered. Problems open in place, buttons wrap in a narrow window, and the hero chips jump to their notice.</dd></dl>
+      <div><span class="tag ok">seen on screen</span><ul class="tested"><li>Row 1 stayed at the same height with and without a notice (646 px desktop, 287.7 px web). Chip clicks scrolled to and flashed the strip.</li></ul></div>
+      <div><span class="tag warn">partly checked</span><ul class="tested"><li>Desktop narrow was tested zoomed (the window cannot go below 960 pt). Light theme and the desktop server page were not checked.</li></ul></div>
+    </article><article class="cl">
+      <h3>Update a server pack's own mods</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Hopper Server web UI and desktop server Mods tab.</dd><dt>Before</dt><dd>Mods that come from the pack could not be updated on their own.</dd><dt>After</dt><dd>A "Newer than the pack ships" filter lists them. Update one, confirm, and it shows in History with Undo. "Update all" still leaves them alone.</dd></dl>
+      <div><span class="tag ok">seen on screen</span><ul class="tested"><li>Update and undo ran on a scratch server in both apps; the toolbar fit at every width from 620 to 1600 px.</li></ul></div>
+      <div><span class="tag warn">partly checked</span><ul class="tested"><li>The sync chip was not checked. The pack diff still calls a downgrade "Updated".</li></ul></div>
+    </article></section>
 <section class="rel" id="v0-93-8"><div class="relhead"><h2>Hopper 0.93.8</h2><span class="when">26 Nov 2026</span></div><article class="cl">
       <h3>A crash notice no longer covers the What's new window</h3>
       <dl class="ft"><dt>Apps</dt><dd>Desktop.</dd><dt>Before</dt><dd>After an update, the "The server crashed" card from the hero chip could draw on top of the What's new window.</dd><dt>After</dt><dd>Chip cards stay closed while a window is open and come back when you close it.</dd></dl>
