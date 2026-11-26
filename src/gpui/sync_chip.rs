@@ -425,6 +425,8 @@ impl RenderOnce for ChipEl {
             return Trigger { id: ElementId::Name(id), look: chip.look.clone(), form, progress: chip.progress, selected: false, open: false, click: Some(click) }
                 .into_any_element();
         }
+        let auto = window.use_keyed_state(ElementId::Name(format!("sync-chip-auto:{}", chip.id).into()), cx, |_, _| Auto::default());
+        let for_body = auto.clone();
         let pop = Popover::new(SharedString::from(format!("sync-chip-pop:{}", chip.id)))
             .anchor(Anchor::TopLeft)
             .appearance(true)
@@ -437,8 +439,7 @@ impl RenderOnce for ChipEl {
                 open: false,
                 click: None,
             })
-            .content(move |_, window, cx| body(&sections, width, window, cx));
-        let auto = window.use_keyed_state(ElementId::Name(format!("sync-chip-auto:{}", chip.id).into()), cx, |_, _| Auto::default());
+            .content(move |_, window, cx| body(&sections, width, &for_body, window, cx));
         if take_request(&chip.id) {
             auto.update(cx, |a, _| {
                 a.open = true;
@@ -446,7 +447,16 @@ impl RenderOnce for ChipEl {
             });
         }
         if chip.auto_open.is_empty() && !auto.read(cx).controlled {
-            return pop.into_any_element();
+            // A plain chip. The popover paints in a layer above dialogs, so
+            // one left open sat over the confirm dialog its own button opened.
+            // Keep its state here so a dialog can close it.
+            let modal = widgets::press_is_modal(window, cx);
+            if modal && auto.read(cx).open {
+                auto.update(cx, |a, _| a.open = false);
+            }
+            let open = auto.read(cx).open && !modal;
+            let a2 = auto.clone();
+            return pop.open(open).on_open_change(move |o, _, cx| a2.update(cx, |a, _| a.open = *o)).into_any_element();
         }
         let other = OPENED.with(|o| o.borrow().as_ref().filter(|(id, at)| *id != *chip.id && at.elapsed() < std::time::Duration::from_secs(2)).map(|(id, _)| id.clone()));
         // A dialog covers the window, so a notice must not open over it (its
@@ -484,7 +494,7 @@ impl RenderOnce for ChipEl {
 
 /// The popover's content: one block per side, each with its line, its
 /// optional bar and its buttons (one filled at most).
-fn body(sections: &[Section], width: Option<f32>, window: &mut Window, cx: &mut App) -> AnyElement {
+fn body(sections: &[Section], width: Option<f32>, auto: &Entity<Auto>, window: &mut Window, cx: &mut App) -> AnyElement {
     let theme = cx.theme().clone();
     // A section with a list of its own needs more room for it.
     let width = width.unwrap_or(if sections.iter().any(|s| s.body.is_some()) { 24.0 } else { 19.5 });
@@ -514,9 +524,27 @@ fn body(sections: &[Section], width: Option<f32>, window: &mut Window, cx: &mut 
                 .when(!s.actions.is_empty(), |c| {
                     c.child(h_flex().flex_wrap().gap_2().pt_1().children(s.actions.iter().enumerate().map(|(j, a)| {
                         let run = a.run.clone();
+                        let auto = auto.clone();
                         let b = Button::new(("sync-chip-action", i * 8 + j)).small().label(a.label.clone()).disabled(a.disabled);
                         let b = if a.primary { b.primary() } else { b.outline() };
-                        b.when_some(a.icon, |b, ic| b.icon(ic)).on_click(move |_, w, cx| run(w, cx))
+                        b.when_some(a.icon, |b, ic| b.icon(ic)).on_click(move |_, w, cx| {
+                            run(w, cx);
+                            // An action that opens a dialog (a confirm, a
+                            // choice) closes the popover: it paints above the
+                            // dialog's backdrop and would cover it. The dialog
+                            // may open a beat later, so look again once drawn.
+                            let close = {
+                                let auto = auto.clone();
+                                move |w: &mut Window, cx: &mut App| {
+                                    if widgets::press_is_modal(w, cx) && auto.read(cx).open {
+                                        auto.update(cx, |a, _| a.open = false);
+                                        w.refresh();
+                                    }
+                                }
+                            };
+                            close(w, cx);
+                            w.defer(cx, close);
+                        })
                     })))
                 })
         }))
@@ -597,7 +625,15 @@ pub fn preview(name: &str) -> Vec<Chip> {
             ServerState::Failed => ("Couldn't compare".to_string(), "The server didn't answer the way Hopper expected."),
         };
         let progress = matches!(state, ServerState::Working(_)).then_some(0.4);
-        make("server", look, &title, line, progress, "Sync to server")
+        let mut chip = make("server", look, &title, line, progress, "Sync to server");
+        // The real button asks first, in a dialog; the preview does too, so
+        // the popover's layering over a dialog can be checked on screen.
+        chip.sections[0].actions[0].run = Rc::new(|window, cx| {
+            window.open_alert_dialog(cx, |alert, _, _| {
+                alert.title("Sync 3 mods to the server?").description("Preview only: nothing is sent.").confirm().ok_text("Sync to server")
+            });
+        });
+        chip
     };
     const NAME: &str = "Skyblock Server";
     const LONG: &str = "All the Mods 10 - To the Sky Survival";
