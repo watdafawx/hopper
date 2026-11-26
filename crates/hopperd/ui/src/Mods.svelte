@@ -915,7 +915,7 @@
         {#each rail as r, i (r.k)}
           {#if r.tog && !rail[i - 1]?.tog}<span class="sep"></span>{/if}
           <button class="si" class:tog={r.tog} style:--bw={String(r.n ?? 0).length} aria-pressed={r.on} aria-label="{r.label}, {r.n}" data-tip="{r.label} · {r.n}" onclick={() => railPick(r.k)}>
-            <span class="ico"><r.icon size={14} />{#if r.k === 'updates' && r.n && !r.on}<span class="bdg"><i>{r.n}</i></span>{/if}</span><span class="lbw"><span>{r.label}<span class="ct">{r.n}</span></span></span>
+            <span class="ico"><r.icon size={14} />{#if r.k === 'updates' && r.n && !r.on}<span class="bdg"><i>{r.n}</i></span>{/if}</span><span class="lbw"><span><span class="rl">{r.label}</span><span class="ct">{r.n}</span></span></span>
           </button>
         {/each}
       </div>
@@ -1150,14 +1150,31 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   /* "Pack mods can update separately (N)": full, then its short form, then
      gone (the filter keeps the count), as desktop's bar gives way. */
   .pkn .pk-short { display: none; }
-  @container mbar (max-width: 900px) {
-    .toolbar :global(.lb) { display: none; }
+  /* The label is the one thing in the bar that may shorten: when a long pack
+     version still doesn't fit, it ends in "…" instead of pushing Sort and
+     Profiles off the card. The search's big shrink factor narrows it to its
+     minimum first. */
+  .toolbar .find { flex-shrink: 10000; }
+  .toolbar .upd { flex: 0 1 auto; min-width: 0; }
+  .toolbar .pkn { min-width: 0; flex: 0 1 auto; overflow: hidden; }
+  .pkn .pk-full, .pkn .pk-short { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  @container mbar (max-width: 1180px) {
     .pkn .pk-full { display: none; }
     .pkn .pk-short { display: inline; }
   }
+  /* The chosen filter keeps its icon and count; a long name ("Newer than
+     the pack ships") would push the sort button off the card. */
+  @container mbar (max-width: 1000px) {
+    .toolbar .fr .rl { display: none; }
+  }
+  @container mbar (max-width: 900px) {
+    .toolbar :global(.lb) { display: none; }
+  }
+  @container mbar (max-width: 720px) {
+    .toolbar .pkn { display: none; }
+  }
   @container mbar (max-width: 640px) {
     .toolbar .vr { display: none; }
-    .toolbar .pkn { display: none; }
   }
   @container mbar (max-width: 560px) {
     .toolbar .find { min-width: 64px; }
