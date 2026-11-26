@@ -17,7 +17,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Selectable, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Selectable, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::groupstatus::Tone;
@@ -366,6 +366,23 @@ pub fn dismiss_auto(window: &mut Window, cx: &mut App) -> bool {
     true
 }
 
+thread_local! {
+    /// A notice popover is waiting for the open dialog to close, and whether a
+    /// dialog was up when the window last asked.
+    static HELD_BY_DIALOG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DIALOG_WAS_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Called every frame by the window. When the dialog that held a notice
+/// popover back closes, redraws the chips: their view may be cached and would
+/// not notice by itself, so the popover would stay hidden.
+pub fn dialog_state(dialog: bool, window: &mut Window) {
+    let was = DIALOG_WAS_UP.replace(dialog);
+    if was && !dialog && HELD_BY_DIALOG.get() {
+        window.refresh();
+    }
+}
+
 /// Marks the keys as shown and says whether any of them was new.
 fn first_sight(chip: &str, keys: &[SharedString]) -> bool {
     SEEN.with(|s| {
@@ -415,7 +432,11 @@ impl RenderOnce for ChipEl {
             return pop.into_any_element();
         }
         let other = OPENED.with(|o| o.borrow().as_ref().filter(|(id, at)| *id != *chip.id && at.elapsed() < std::time::Duration::from_secs(2)).map(|(id, _)| id.clone()));
-        if !chip.auto_open.is_empty() && first_sight(&chip.id, &chip.auto_open) && may_open(&chip.id, other.as_deref()) {
+        // A dialog covers the window, so a notice must not open over it (its
+        // popover paints above the dialog layer). Not marking it seen keeps
+        // it for when the dialog closes.
+        let dialog = window.has_active_dialog(cx);
+        if !dialog && !chip.auto_open.is_empty() && first_sight(&chip.id, &chip.auto_open) && may_open(&chip.id, other.as_deref()) {
             // One automatic popover at a time: close the other one, however
             // long ago it drew (a higher-ranked chip takes over).
             if OPENED.with(|o| o.borrow().as_ref().is_some_and(|(id, _)| *id != *chip.id)) {
@@ -428,7 +449,11 @@ impl RenderOnce for ChipEl {
                 window.defer(cx, move |window, cx| prev.focus(window, cx));
             }
         }
-        let open = auto.read(cx).open;
+        // One that is already open hides while a dialog is up and comes back
+        // when it closes.
+        let shown = auto.read(cx).open;
+        HELD_BY_DIALOG.set(dialog && (shown || !chip.auto_open.is_empty()));
+        let open = shown && !dialog;
         hold(&chip.id, open, &auto);
         let (a2, me) = (auto.clone(), chip.id.clone());
         pop.open(open)

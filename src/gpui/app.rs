@@ -1454,6 +1454,7 @@ impl AppView {
     fn title_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         // No tooltips under an open dialog: GPUI can leave one stuck over it.
         let dialog = window.has_active_dialog(cx);
+        crate::sync_chip::dialog_state(dialog, window);
         // Who plays: the Microsoft sign-in when Hopper launches directly,
         // else the launcher's account.
         let store = self.store.read(cx);
