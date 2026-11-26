@@ -381,16 +381,26 @@ pub(crate) fn note_save(old: Option<&Instance>, new: &Instance) {
     }
     let Some(old) = old else { return };
     note_swaps(&old.addons, &new.addons, &new.root);
+    let pack_still = old.pack == new.pack;
     // A group copy also keeps what the player did as sync records; a friend's
     // sync (another `Who`) stays out of it. History's Undo is the player's
     // too, and travels as an undo so friends follow it.
     match undo_batch(&new.root) {
-        Some(batch) => {
-            crate::synccore::local::note_save_as(&new.root, &old.addons, &new.addons, |_| Some(batch.clone()), crate::synccore::Why::undo_of_last())
-        }
-        None => crate::synccore::local::note_save(&new.root, &old.addons, &new.addons, |a| {
-            tag_for_addon(&new.root, a).filter(|t| t.who.is_you()).map(|t| t.batch)
-        }),
+        Some(batch) => crate::synccore::local::note_save_as(
+            &new.root,
+            &old.addons,
+            &new.addons,
+            |_| Some(batch.clone()),
+            crate::synccore::Why::undo_of_last(),
+            pack_still,
+        ),
+        None => crate::synccore::local::note_save(
+            &new.root,
+            &old.addons,
+            &new.addons,
+            |a| tag_for_addon(&new.root, a).filter(|t| t.who.is_you()).map(|t| t.batch),
+            pack_still,
+        ),
     }
     let changes = diff(&old.addons, &new.addons);
     if changes.is_empty() {

@@ -161,7 +161,7 @@ struct Pc {
 
 impl Pc {
     fn snapshot(&self) -> Snapshot {
-        Snapshot { values: self.disk.clone(), unreadable: self.unreadable }
+        Snapshot { values: self.disk.clone(), unreadable: self.unreadable, ..Default::default() }
     }
 
     /// The register hash of everything this PC holds.

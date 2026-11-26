@@ -1613,12 +1613,12 @@ mod tests {
     }
 
     fn snap(items: &[(u64, Value)]) -> Snapshot {
-        Snapshot { values: items.iter().map(|(n, v)| (mk(*n), v.clone())).collect(), unreadable: false }
+        Snapshot { values: items.iter().map(|(n, v)| (mk(*n), v.clone())).collect(), unreadable: false, ..Default::default() }
     }
 
     /// The disk of a PC after `settle`: its applied values.
     fn disk_of(e: &Engine) -> Snapshot {
-        Snapshot { values: e.applied.clone(), unreadable: false }
+        Snapshot { values: e.applied.clone(), unreadable: false, ..Default::default() }
     }
 
     #[test]
@@ -1637,7 +1637,7 @@ mod tests {
         // The disk differs: the chip says so, whatever was meant.
         assert_eq!(a.status(&snap(&[(1, file(11)), (3, file(31))])), Status::Differs(1));
         // An unreadable instance is not "differs" (and not drift).
-        let unreadable = Snapshot { values: BTreeMap::new(), unreadable: true };
+        let unreadable = Snapshot { values: BTreeMap::new(), unreadable: true, ..Default::default() };
         assert_eq!(a.status(&unreadable), Status::InSync);
         // Its own change not acked yet.
         act(&mut a, edit(mk(1), file(12)), T0);
@@ -1706,7 +1706,7 @@ mod tests {
         assert_eq!(a.missing(&disk), [mk(7)]);
         settle(&mut a);
         assert!(a.missing(&disk_of(&a)).is_empty());
-        let unreadable = Snapshot { values: BTreeMap::new(), unreadable: true };
+        let unreadable = Snapshot { values: BTreeMap::new(), unreadable: true, ..Default::default() };
         assert!(a.missing(&unreadable).is_empty());
     }
 
@@ -1839,7 +1839,7 @@ mod tests {
     }
 
     fn disk(e: &Engine) -> Snapshot {
-        Snapshot { values: e.applied.clone(), unreadable: false }
+        Snapshot { values: e.applied.clone(), unreadable: false, ..Default::default() }
     }
 
     fn names(list: &[&str]) -> Vec<String> {

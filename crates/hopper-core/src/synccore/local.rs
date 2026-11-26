@@ -23,6 +23,10 @@ pub struct Snapshot {
     pub values: BTreeMap<Key, Value>,
     /// The instance couldn't be read: nothing is drift, nothing is sent.
     pub unreadable: bool,
+    /// Keys and files this PC's mods had before Modrinth mods were named by
+    /// their Modrinth ids, to what they are now, so what was applied under the
+    /// old text isn't read as a mod gone plus a jar nobody asked for.
+    pub legacy: BTreeMap<String, String>,
 }
 
 /// One key where the disk differs from what this PC last applied.
@@ -58,6 +62,27 @@ pub fn drift(applied: &BTreeMap<Key, Value>, disk: &Snapshot) -> Vec<Drift> {
     if disk.unreadable {
         return Vec::new();
     }
+    let renamed;
+    let applied = if disk.legacy.is_empty() {
+        applied
+    } else {
+        let name = |t: &str| disk.legacy.get(t).cloned().unwrap_or_else(|| t.to_string());
+        renamed = applied
+            .iter()
+            .map(|(k, v)| {
+                let k = match k {
+                    Key::Mod(t) => Key::Mod(name(t)),
+                    other => other.clone(),
+                };
+                let v = match v {
+                    Value::File { file, on } => Value::File { file: name(file), on: *on },
+                    other => other.clone(),
+                };
+                (k, v)
+            })
+            .collect::<BTreeMap<_, _>>();
+        &renamed
+    };
     let mut keys: Vec<&Key> = applied.keys().chain(disk.values.keys()).collect();
     keys.sort();
     keys.dedup();
@@ -186,17 +211,17 @@ pub fn take(root: &Path) -> Vec<Edit> {
 /// added, turned on or off, another file, removed). `owner` says whose an
 /// addon's change is: `Some(batch)` for the player's own, `None` for a
 /// friend's sync or Undo, which never make records here.
-pub fn note_save(root: &Path, old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option<String>) {
-    note_save_as(root, old, new, owner, Why::Player);
+pub fn note_save(root: &Path, old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option<String>, swap_pack_files: bool) {
+    note_save_as(root, old, new, owner, Why::Player, swap_pack_files);
 }
 
 /// [`note_save`] with the reason the edits carry: History's Undo saves with
 /// [`Why::undo_of_last`], so the change travels as an undo.
-pub fn note_save_as(root: &Path, old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option<String>, why: Why) {
+pub fn note_save_as(root: &Path, old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option<String>, why: Why, swap_pack_files: bool) {
     if !with_watched(|w| w.contains_key(&norm(root))) {
         return;
     }
-    for edit in save_edits_as(old, new, owner, why) {
+    for edit in save_edits_in(old, new, owner, why, swap_pack_files) {
         note(root, edit);
     }
 }
@@ -209,6 +234,14 @@ pub fn save_edits(old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option
 /// [`save_edits`] with the reason the mod edits carry. A lock put on or
 /// off is always the player's own (Undo puts a file back, not a lock).
 pub fn save_edits_as(old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option<String>, why: Why) -> Vec<Edit> {
+    save_edits_in(old, new, owner, why, false)
+}
+
+/// [`save_edits_as`]; with `swap_pack_files`, a modpack's mod that is now on
+/// another file (the player updated it, or Undo put it back) is that file's
+/// change, not "the pack's own" again, so friends follow it. Off while the
+/// pack itself moved: that saves every mod's file and is one pack record.
+pub fn save_edits_in(old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option<String>, why: Why, swap_pack_files: bool) -> Vec<Edit> {
     let mut before: BTreeMap<Key, &Addon> = BTreeMap::new();
     for a in old {
         before.entry(key_of(a)).or_insert(a);
@@ -237,7 +270,8 @@ pub fn save_edits_as(old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Opt
             continue;
         }
         if let Some(batch) = owner(a) {
-            let now = value_of(a);
+            let swapped = swap_pack_files && a.from_pack && was.is_some_and(|o| file_of(o) != file_of(a));
+            let now = if swapped { Value::File { file: file_of(a), on: a.enabled } } else { value_of(a) };
             out.push(Edit { key: key.clone(), now, why: why.clone(), batch });
         }
     }
@@ -257,7 +291,7 @@ pub fn save_edits_as(old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Opt
 pub fn key_of(a: &Addon) -> Key {
     let id = if let Some(src) = link_source(a) {
         super::link::key_text(src)
-    } else if a.project_id != 0 {
+    } else if a.project_id != 0 && !(crate::modrinth::is_mr(a.project_id) && !a.mr_project.is_empty()) {
         format!("cf:{}", a.project_id)
     } else if !a.mr_project.is_empty() {
         format!("mr:{}", a.mr_project)
@@ -294,9 +328,9 @@ pub fn addon_for_id<'a>(addons: &'a [Addon], id: &str) -> Option<&'a Addon> {
 pub fn file_of(a: &Addon) -> String {
     if let Some(src) = link_source(a) {
         super::link::LinkRef::of(src, a.file_name.trim_end_matches(".disabled")).id()
-    } else if a.project_id != 0 && a.file_id != 0 {
+    } else if a.project_id != 0 && a.file_id != 0 && !(crate::modrinth::is_mr(a.file_id) && !a.mr_version.is_empty()) {
         format!("cf:{}", a.file_id)
-    } else if !a.mr_project.is_empty() && !a.mr_version.is_empty() {
+    } else if !a.mr_version.is_empty() && (!a.mr_project.is_empty() || crate::modrinth::is_mr(a.file_id)) {
         format!("mr:{}", a.mr_version)
     } else {
         a.file_name.trim_end_matches(".disabled").to_string()
@@ -309,11 +343,13 @@ pub fn file_of(a: &Addon) -> String {
 /// app reads the instance, this only turns it into values.
 pub fn snapshot(inst: &crate::instances::Instance) -> Snapshot {
     if inst.unreadable.is_some() {
-        return Snapshot { values: BTreeMap::new(), unreadable: true };
+        return Snapshot { values: BTreeMap::new(), unreadable: true, ..Default::default() };
     }
     let mut values = BTreeMap::new();
+    let mut legacy = BTreeMap::new();
     for a in &inst.addons {
         let key = key_of(a);
+        legacy_texts(a, &key, &mut legacy);
         if let (Key::Mod(k), l) = (&key, lock_of(a))
             && l != Value::Gone
         {
@@ -335,7 +371,24 @@ pub fn snapshot(inst: &crate::instances::Instance) -> Snapshot {
         }
         None => {}
     }
-    Snapshot { values, unreadable: false }
+    Snapshot { values, unreadable: false, legacy }
+}
+
+/// What a Modrinth mod's key and file were called before they carried the
+/// Modrinth ids (a hash number written as a CurseForge id nobody else can
+/// read back), against what they are now.
+fn legacy_texts(a: &Addon, key: &Key, out: &mut BTreeMap<String, String>) {
+    use crate::modrinth::is_mr;
+    if let Key::Mod(now) = key
+        && is_mr(a.project_id)
+        && !a.mr_project.is_empty()
+    {
+        let prefix = now.strip_suffix(&format!("mr:{}", a.mr_project)).unwrap_or_default();
+        out.insert(format!("{prefix}cf:{}", a.project_id), now.clone());
+    }
+    if is_mr(a.file_id) && !a.mr_version.is_empty() && !file_of(a).starts_with("cf:") {
+        out.insert(format!("cf:{}", a.file_id), file_of(a));
+    }
 }
 
 /// A pack version as the group names it: "cf:<project>/<file>" or
@@ -411,7 +464,7 @@ mod tests {
     }
 
     fn snap(items: &[(u64, Value)]) -> Snapshot {
-        Snapshot { values: applied(items), unreadable: false }
+        Snapshot { values: applied(items), unreadable: false, ..Default::default() }
     }
 
     fn addon(project: u64, file: u64, enabled: bool) -> Addon {
@@ -484,7 +537,7 @@ mod tests {
     #[test]
     fn an_unreadable_instance_has_no_drift() {
         let a = applied(&[(1, on(11))]);
-        let disk = Snapshot { values: BTreeMap::new(), unreadable: true };
+        let disk = Snapshot { values: BTreeMap::new(), unreadable: true, ..Default::default() };
         assert!(drift(&a, &disk).is_empty());
     }
 
@@ -597,6 +650,41 @@ mod tests {
     }
 
     #[test]
+    fn a_modrinth_mod_is_named_by_its_modrinth_ids_and_old_records_still_match() {
+        use crate::modrinth::num_id;
+        let mut m = addon(0, 0, true);
+        m.project_id = num_id("projAAAA");
+        m.file_id = num_id("verBBBB");
+        m.mr_project = "projAAAA".into();
+        m.mr_version = "verBBBB".into();
+        assert_eq!(key_of(&m), Key::Mod("mr:projAAAA".into()));
+        assert_eq!(file_of(&m), "mr:verBBBB");
+        // A friend's PC reads those ids back; the hash text it never could.
+        assert_eq!(super::super::bridge::project_of(&key_of(&m)).and_then(|n| crate::modrinth::real_id(n).ok()).as_deref(), Some("projAAAA"));
+        let mut legacy = BTreeMap::new();
+        legacy_texts(&m, &key_of(&m), &mut legacy);
+        let old = BTreeMap::from([(Key::Mod(format!("cf:{}", m.project_id)), Value::File { file: format!("cf:{}", m.file_id), on: true })]);
+        let disk = Snapshot { values: BTreeMap::from([(key_of(&m), value_of(&m))]), unreadable: false, legacy };
+        assert!(drift(&old, &disk).is_empty());
+    }
+
+    #[test]
+    fn a_pack_mod_on_another_file_is_that_files_change() {
+        let mut shipped = addon(1, 11, true);
+        shipped.from_pack = true;
+        let mut newer = shipped.clone();
+        newer.file_id = 13;
+        let got = save_edits_in(&[shipped.clone()], &[newer.clone()], mine, Why::Player, true);
+        assert_eq!(got[0].now, Value::File { file: "cf:13".into(), on: true });
+        // Undo puts the old file back: that travels too.
+        let got = save_edits_in(&[newer.clone()], &[shipped.clone()], mine, Why::Player, true);
+        assert_eq!(got[0].now, Value::File { file: "cf:11".into(), on: true });
+        // While the pack itself moves, every mod's file changes: not one each.
+        let got = save_edits_in(&[shipped], &[newer], mine, Why::Player, false);
+        assert_eq!(got[0].now, Value::PackDefault);
+    }
+
+    #[test]
     fn addons_outside_mods_carry_their_folder() {
         let mut shader = addon(5, 51, true);
         shader.class_id = crate::cf::CLASS_SHADERS;
@@ -673,8 +761,8 @@ mod tests {
         let edit = Edit { key: k(1), now: on(12), why: Why::Player, batch: String::new() };
         note(&root, edit.clone());
         note(&other, edit.clone());
-        note_save(&root, &[addon(1, 11, true)], &[addon(1, 13, true)], mine);
-        note_save(&other, &[addon(1, 11, true)], &[addon(1, 13, true)], mine);
+        note_save(&root, &[addon(1, 11, true)], &[addon(1, 13, true)], mine, false);
+        note_save(&other, &[addon(1, 11, true)], &[addon(1, 13, true)], mine, false);
         let got = take(&root);
         assert_eq!(got.len(), 2);
         assert_eq!(got[0], edit);
