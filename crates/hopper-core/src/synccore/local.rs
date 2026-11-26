@@ -230,6 +230,19 @@ fn link_source(a: &Addon) -> Option<&crate::sources::ModSource> {
     a.source.as_ref().filter(|_| a.project_id == 0 || crate::sources::is_src(a.project_id))
 }
 
+/// The addon a card's mod id ("cf:<file>", "mr:<version>", a link id, a jar
+/// name) or a key's text ("cf:<project>", "mr:<project>") points at. Cards
+/// carry either form: a row whose value is gone has only the key's text.
+pub fn addon_for_id<'a>(addons: &'a [Addon], id: &str) -> Option<&'a Addon> {
+    let bare = id.trim_end_matches(".disabled");
+    addons
+        .iter()
+        .find(|a| file_of(a) == bare)
+        .or_else(|| addons.iter().find(|a| matches!(key_of(a), Key::Mod(k) if k == bare)))
+        .or_else(|| addons.iter().find(|a| !a.mr_version.is_empty() && bare.strip_prefix("mr:") == Some(a.mr_version.as_str())))
+        .or_else(|| addons.iter().find(|a| a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(bare)))
+}
+
 /// The file an addon is on, as the group names files.
 pub fn file_of(a: &Addon) -> String {
     if let Some(src) = link_source(a) {
@@ -362,6 +375,27 @@ mod tests {
             enabled,
             ..Addon::default()
         }
+    }
+
+    #[test]
+    fn a_card_id_finds_its_mod_by_file_or_by_project() {
+        let mr = Addon {
+            name: "Sodium".into(),
+            mr_project: "AANobbMI".into(),
+            mr_version: "xJZxADzI".into(),
+            file_name: "sodium.jar.disabled".into(),
+            ..Addon::default()
+        };
+        let cf = addon(7, 70, true);
+        let all = vec![mr, cf];
+        // File id, project key, jar name: every form a card carries.
+        for id in ["mr:xJZxADzI", "mr:AANobbMI", "sodium.jar"] {
+            assert_eq!(addon_for_id(&all, id).map(|a| a.name.as_str()), Some("Sodium"), "{id}");
+        }
+        for id in ["cf:70", "cf:7"] {
+            assert_eq!(addon_for_id(&all, id).map(|a| a.project_id), Some(7), "{id}");
+        }
+        assert!(addon_for_id(&all, "mr:nope").is_none());
     }
 
     fn mine(_: &Addon) -> Option<String> {
