@@ -1540,10 +1540,24 @@ pub fn update_pack(root: &Path, old: &Path, m: &cf::Mod, file: &cf::File, job: &
 pub fn pack_version_label(file_name: &str) -> String {
     let stem = file_name
         .strip_suffix(".zip")
+        .or_else(|| file_name.strip_suffix(".mrpack"))
         .or_else(|| file_name.strip_suffix(".jar"))
         .unwrap_or(file_name);
     // The TNP "8-1.78.1" fix lives in `short_version`, shared with mod jars.
     crate::scan::short_version(&format!("{stem}.jar"))
+}
+
+/// The version to name in "pack vX is out", from a Hopper Server's
+/// `/pack/check` reply: the newest one for the server's own Minecraft
+/// version (a pack for another game version is no update for its mods),
+/// else the newest of all. Nothing when the pack has no newer version.
+pub fn newer_pack_label(check: &serde_json::Value) -> Option<String> {
+    let newer = check["newer"].as_array()?;
+    let mc = check["pack"]["current"]["mc_version"].as_str().unwrap_or_default();
+    let n = newer.iter().find(|n| !mc.is_empty() && n["mc_version"].as_str() == Some(mc)).or_else(|| newer.first())?;
+    let file = n["file_name"].as_str().unwrap_or_default();
+    let label = if file.is_empty() { n["name"].as_str()?.to_string() } else { pack_version_label(file) };
+    (!label.is_empty()).then_some(label)
 }
 
 #[cfg(test)]
@@ -1561,9 +1575,26 @@ mod pack_version_label_tests {
             ("Create-Live-1.5.zip", "1.5"),
             ("RLCraft-v2.9.3.zip", "v2.9.3"),
             ("Abibliophobia-3.1.0.zip", "3.1.0"),
+            ("Server Optimization 1.21.11-2.1.mrpack", "2.1"),
         ] {
             assert_eq!(pack_version_label(file), want, "{file}");
         }
+    }
+
+    // A Modrinth pack lists newer versions for every game version, newest
+    // first: the label names the one for the server's own.
+    #[test]
+    fn newer_pack_label_prefers_the_servers_game_version() {
+        use super::newer_pack_label;
+        let v = |mc: &str, file: &str| serde_json::json!({"mc_version": mc, "file_name": file, "name": ""});
+        let check = serde_json::json!({
+            "pack": {"current": {"mc_version": "1.21.11"}},
+            "newer": [v("26.3", "Server Optimization 26.3-1.0.mrpack"), v("1.21.11", "Server Optimization 1.21.11-2.1.mrpack")],
+        });
+        assert_eq!(newer_pack_label(&check).as_deref(), Some("2.1"));
+        let other = serde_json::json!({"pack": {"current": {"mc_version": "1.20.1"}}, "newer": [v("26.3", "ATM10-8.6.zip")]});
+        assert_eq!(newer_pack_label(&other).as_deref(), Some("8.6"));
+        assert_eq!(newer_pack_label(&serde_json::json!({"newer": []})), None);
     }
 }
 

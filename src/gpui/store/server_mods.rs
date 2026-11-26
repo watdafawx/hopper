@@ -140,10 +140,7 @@ pub struct RemoteUpdates {
 /// failed: the label then just doesn't name one.
 fn pack_newer_remote(c: &Client, r: &Remote) -> Option<String> {
     let v = c.get(&Client::server_path(&r.id, "/pack/check")).ok()?;
-    let n = v["newer"].as_array()?.first()?;
-    let file = n["file_name"].as_str().unwrap_or_default();
-    let label = if file.is_empty() { n["name"].as_str()?.to_string() } else { hopper::instance_ops::pack_version_label(file) };
-    (!label.is_empty()).then_some(label)
+    hopper::instance_ops::newer_pack_label(&v)
 }
 
 fn updates_remote(r: &Remote, force: bool) -> anyhow::Result<RemoteUpdates> {

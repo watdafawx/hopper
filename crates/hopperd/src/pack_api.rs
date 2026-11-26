@@ -163,16 +163,12 @@ fn cached(id: &str, link: &PackLink) -> Option<Value> {
     (file == &link.file && now_secs().saturating_sub(*at) < ttl).then(|| v.clone())
 }
 
-/// The pack's newest version ("8.6", read from its file name as desktop
-/// reads it) when the last pack check found one newer than the server's.
-/// From the kept check only: the Mods list never waits for the sites.
+/// The pack's newer version ("8.6", picked and worded as desktop does) when
+/// the last pack check found one newer than the server's. From the kept
+/// check only: the Mods list never waits for the sites.
 pub(crate) fn newer_label(e: &Entry) -> Option<String> {
     let link = pack_of(&e.root)?;
-    let v = cached(&e.id, &link)?;
-    let n = v["newer"].as_array()?.first()?;
-    let file = n["file_name"].as_str().unwrap_or_default();
-    let label = if file.is_empty() { n["name"].as_str()?.to_string() } else { hopper_core::instance_ops::pack_version_label(file) };
-    (!label.is_empty()).then_some(label)
+    hopper_core::instance_ops::newer_pack_label(&cached(&e.id, &link)?)
 }
 
 fn keep(id: &str, link: &PackLink, v: &Value) {
