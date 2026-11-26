@@ -1,6 +1,6 @@
 [package]
 name = "hopperd"
-version = "0.81.1"
+version = "0.82.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
