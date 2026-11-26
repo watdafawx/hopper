@@ -456,6 +456,18 @@ pub fn share_label(row: &DriftRow, name: &str) -> String {
 
 // ---- History's Why ---------------------------------------------------------------
 
+/// Is `c` the change that a History row of one file swapped for another
+/// made? `old` and `new` are the group's file ids of the row's two jars (None
+/// when this copy never had that jar). A change of one file to another that
+/// does not fit them belongs to another row of the same mod, so it must not
+/// lend its reason (an Undo's "went back to", "Use mine for everyone") to an
+/// older update. With neither file known nothing fits. Changes that are not a
+/// file for a file (pack defaults, removals) say nothing here.
+pub fn swaps_files(c: &Change, old: Option<&str>, new: Option<&str>) -> bool {
+    let (Value::File { file: was, .. }, Value::File { file: now, .. }) = (&c.was, &c.now) else { return true };
+    (old.is_some() || new.is_some()) && old.is_none_or(|o| o == was) && new.is_none_or(|n| n == now)
+}
+
 /// The reason line under a History row, only when Hopper made the change for
 /// someone (an answer, a pack update, a put back, a missing file); a change
 /// the player made by hand has none. `None` for those.
@@ -763,6 +775,28 @@ mod tests {
         // Use mine for everyone says so.
         let mine = Change { why: Why::SharedDrift, ..change("bob", 3, "cf:1", file("cf:12"), file("cf:11"), "c", 0) };
         assert_eq!(why_line(&e, &mine).as_deref(), Some("bob had another version of it and chose Use mine for everyone."));
+    }
+
+    #[test]
+    fn an_older_update_does_not_borrow_a_later_undos_line() {
+        // 11 -> 12 (update), 12 -> 11 (undo), 11 -> 13 (use mine): each History
+        // row of the mod fits only its own change.
+        let update = change("bob", 1, "cf:1", file("cf:11"), file("cf:12"), "a", 0);
+        let undo = change("bob", 2, "cf:1", file("cf:12"), file("cf:11"), "b", 0);
+        let mine = change("bob", 3, "cf:1", file("cf:11"), file("cf:13"), "c", 0);
+        let fits = |c: &Change, old: Option<&str>, new: Option<&str>| swaps_files(c, old, new);
+        // The update row: jar of 11 became jar of 12.
+        assert!(fits(&update, Some("cf:11"), Some("cf:12")));
+        assert!(!fits(&undo, Some("cf:11"), Some("cf:12")));
+        assert!(!fits(&mine, Some("cf:11"), Some("cf:12")));
+        // The roll back row: 12 -> 11 is the undo alone.
+        assert!(fits(&undo, Some("cf:12"), Some("cf:11")));
+        assert!(!fits(&update, Some("cf:12"), Some("cf:11")));
+        // One end known is enough; neither known fits no swap.
+        assert!(fits(&mine, None, Some("cf:13")) && !fits(&undo, None, Some("cf:13")));
+        assert!(!fits(&update, None, None));
+        // A change that is not a file for a file is not this filter's business.
+        assert!(swaps_files(&change("bob", 4, "cf:1", Value::PackDefault, Value::PackOff, "d", 0), Some("cf:11"), None));
     }
 
     #[test]

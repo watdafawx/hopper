@@ -47,9 +47,9 @@ struct Slot {
     /// The disk as the last tick read it.
     snap: Snapshot,
     /// Each jar this copy has had (its name, lower case, without `.disabled`)
-    /// and the mod it is, so a History row finds the change behind it even
-    /// after the jar is gone.
-    jars: HashMap<String, Key>,
+    /// with the mod it is and the group's file id for it, so a History row
+    /// finds the change behind it even after the jar is gone.
+    jars: HashMap<String, (Key, String)>,
     /// Members seen in the group so far (a new one gets a checkpoint).
     known: HashSet<String>,
     /// Failures said once.
@@ -194,7 +194,7 @@ impl Store {
             let snap = local::snapshot(inst);
             let root = inst.root.clone();
             let kept = only_here_keys(inst);
-            let jars: Vec<(String, Key)> = inst.addons.iter().map(|a| (a.file_name.trim_end_matches(".disabled").to_lowercase(), local::key_of(a))).collect();
+            let jars: Vec<(String, (Key, String))> = inst.addons.iter().map(|a| (a.file_name.trim_end_matches(".disabled").to_lowercase(), (local::key_of(a), local::file_of(a)))).collect();
             let playing = self.running(&root).is_some();
             if !self.sync.slots.contains_key(&local_id) {
                 let engine = self.sync_open(&copy, &me, &my_name, &snap);
@@ -1079,13 +1079,21 @@ impl Store {
         let bare = file.trim_end_matches(".disabled");
         let is_file = |v: &Value| matches!(v, Value::File { file, .. } if file.trim_end_matches(".disabled").eq_ignore_ascii_case(bare));
         // The jar's name is not the group's file id: find the mod it is.
-        let key = slot.jars.get(&bare.to_lowercase());
+        let key = slot.jars.get(&bare.to_lowercase()).map(|(k, _)| k);
+        // A row that swaps one file for another (an update, a roll back) is
+        // one change of the mod, not any later one: the files it names tell
+        // which, and an Undo or "Use mine" of the same mod must not lend it
+        // its line. A jar this copy never had gives no file, and so no line.
+        let file_id = |j: &str| slot.jars.get(&j.trim_end_matches(".disabled").to_lowercase()).map(|(_, f)| f.as_str());
+        let swaps = matches!(row, Row::Updated | Row::RolledBack | Row::Switched);
+        let (old_file, new_file) = (file_id(file), now.and_then(file_id));
         slot.engine
             .log
             .changes
             .values()
             .map(|(c, _)| c)
             .filter(|c| c.dot.author == author && (key.is_some_and(|k| *k == c.key) || is_file(&c.now) || is_file(&c.was)))
+            .filter(|c| !swaps || synccore::cards::swaps_files(c, old_file, new_file))
             .filter(|c| match row {
                 // A removal that an answer later undid (Keep) still carries
                 // that answer: the mod is back, the row is the removal.
