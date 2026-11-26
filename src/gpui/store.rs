@@ -4108,12 +4108,15 @@ impl Store {
     }
 
     /// Newer files of mods the server's pack ships, still waiting: each
-    /// one's old jar is still the one installed. Empty off a Hopper Server.
+    /// one's old jar is still the one installed, and not locked (updates
+    /// ignored). Empty off a Hopper Server.
     pub fn pack_offers(&self, root: &Path) -> Vec<&Update> {
         let Some((list, _)) = self.pack_offers.get(root) else { return Vec::new() };
         let Some(inst) = self.instance(root) else { return Vec::new() };
         let base = |f: &str| f.trim_end_matches(".disabled").to_lowercase();
-        list.iter().filter(|u| inst.addons.iter().any(|a| a.project_id == u.project_id && base(&a.file_name) == base(&u.from))).collect()
+        list.iter()
+            .filter(|u| inst.addons.iter().any(|a| a.project_id == u.project_id && !a.locked && base(&a.file_name) == base(&u.from)))
+            .collect()
     }
 
     /// The server's pack has a newer version than the server runs: its

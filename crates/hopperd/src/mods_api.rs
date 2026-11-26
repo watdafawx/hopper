@@ -443,6 +443,9 @@ async fn list(
         Ok(json!({
             "game_version": inst.game_version, "loader": inst.loader,
             "pack": inst.pack.as_ref().map(|p| p.name.clone()),
+            // The pack's newer version, for "Pack mods can update separately
+            // (N) · pack v8.6 is out"; none while the pack is current.
+            "pack_newer": crate::pack_api::newer_label(&e),
             "curseforge": cf::api_key().is_some(),
             "categories_pending": cats_pending,
             "sides_pending": sides_pending,

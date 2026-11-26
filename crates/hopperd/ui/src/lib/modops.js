@@ -188,8 +188,12 @@ export const problems = (u) => [
   ...(u?.breaks || []).map((b) => `stops ${b.name} loading (it needs ${b.needs})`),
 ];
 
-/** The offered file is one the user keeps out (desktop's version lock). */
-export const versionLocked = (m) => !!(m.update && m.locked_version && m.locked_version === m.update.file);
+/** The offered file (an update, or a pack mod's own) is one the user keeps
+ * out (desktop's version lock). */
+export const versionLocked = (m) => {
+  const u = m.update || m.pack_update;
+  return !!(u && m.locked_version && m.locked_version === u.file);
+};
 
 /**
  * Desktop's list search: every word is in a field, or (3+ letters) its
