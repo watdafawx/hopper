@@ -236,7 +236,7 @@ pub fn chip(name: &str) -> Option<Chip> {
         });
     }
     let wide = matches!(state, SyncState::NeedsYou { .. } | SyncState::Differs { .. });
-    Some(Chip { id: "group".into(), look: gl.look, progress: None, sections, auto_open: Vec::new(), width: wide.then_some(27.5) })
+    Some(Chip { id: "group".into(), look: gl.look, progress: None, sections, auto_open: Vec::new(), width: wide.then_some(27.5), on_click: None })
 }
 
 /// `--dialog put-back`: Mia's changes put back, with a plan for each span:

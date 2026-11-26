@@ -1,7 +1,8 @@
-// The "Needs you" chip's list for one page: each <Notice> on the page (in any
-// component under it, on any tab) puts itself here, and the chip
-// (`needsChip`, listed by <NoticeList>) shows them. A page makes its own
-// with `provideNotices()`.
+// The notices of one page: each <Notice> on the page (in any component under
+// it, on any tab) puts itself here. A server page docks them under its
+// content (<NoticeDock>) and sums them up in the hero's chips (`needsChip`,
+// `runChip`); the panel Overview lists them in its chip's popover
+// (<NoticeList>). A page makes its own with `provideNotices()`.
 import { getContext, setContext, untrack } from 'svelte';
 import { order } from './noticeorder.js';
 import { attentionLook, runLook } from './syncchip.js';
@@ -46,25 +47,48 @@ export function ordered(notices, run = false) {
   return order(all).map((i) => all[i]);
 }
 
+/** Every notice of the page, run state's problems included, in the order the dock
+ * (<NoticeDock>) shows them: what stops play first. */
+export function docked(notices) {
+  const all = Object.values(notices.items).sort((a, b) => a.at - b.at);
+  return order(all).map((i) => all[i]);
+}
+
+// The strip a chip or a row marker asked the dock to show: the page's key, the notice's id (the
+// first strip when it has none), whether to open its details, and a request number so the dock acts
+// on each request once.
+export const flashed = $state({ key: '', id: '', open: false, n: 0 });
+export function flash(key, id = '', open = false) {
+  flashed.key = key;
+  flashed.id = id;
+  flashed.open = open;
+  flashed.n += 1;
+}
+// `page|notice@since` of problems that stop play whose details already opened by themselves in the
+// dock. It outlives the dock, so leaving the page and coming back doesn't open them again.
+export const stopSeen = new Set();
+
 /** The "Needs you" entry for <SyncChip>'s `chips`, or null when the page has no notice. `key` names
- * the page (the server), so a problem that stops play opens the popover once per server. `body` is
- * the popover's snippet (<NoticeList>). */
-export function needsChip(notices, key, body) {
+ * the page (the server). With a `body` (the popover's snippet, <NoticeList>: the panel Overview) a
+ * click opens that list, and a problem that stops play opens it once; without one the notices are in
+ * the page's <NoticeDock> and a click flashes the first strip there. */
+export function needsChip(notices, key, body = null) {
   const list = ordered(notices);
   const look = attentionLook(list.map((n) => n.tier), list[0]?.title || '');
   if (!look) return null;
+  if (!body) return { id: `needs:${key}`, look, title: '', line: '', actions: [], onclick: () => flash(key, list[0].id) };
   return { id: `needs:${key}`, look, title: '', line: '', actions: [], body, wide: true, autoOpen: list.filter((n) => n.tier === 'stop').map((n) => n.id) };
 }
 
-/** The run state's chip for <SyncChip>'s `chips`: red "Crashed" or "Looks stuck · N min", the notice
- * in its popover (`body`). Null when the server has no such problem. A new report (its `since`) opens
- * the popover once more. */
-export function runChip(notices, key, body) {
+/** The run state's chip for <SyncChip>'s `chips`: red "Crashed" or "Looks stuck · N min". Its notice
+ * is a strip in the page's <NoticeDock>; a click flashes it. Null when the server has no such
+ * problem. */
+export function runChip(notices, key) {
   const list = ordered(notices, true);
   if (!list.length) return null;
   const crashed = list.find((n) => n.run === 'crashed');
   const problem = crashed ? { kind: 'crashed' } : { kind: 'stuck', minutes: list[0].minutes ?? null };
-  return { id: `run:${key}`, look: runLook(problem), title: '', line: '', actions: [], body, wide: true, autoOpen: list.map((n) => `${n.id}@${n.since}`) };
+  return { id: `run:${key}`, look: runLook(problem), title: '', line: '', actions: [], onclick: () => flash(key, list[0].id) };
 }
 
 // Notices closed in this browser, by key: they come back when the key does

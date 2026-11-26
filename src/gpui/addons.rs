@@ -5280,17 +5280,20 @@ Change version", a.file_name).into()
 
     /// What stops play about this mod, or differs from the paired server, as a
     /// marker beside its name: "Needs X", "Stops loading", "Not on <server>".
-    /// A click opens the popover of the chip that lists it.
+    /// A click shows what lists it: the notice's strip in the page's dock
+    /// (flashed, its details open), or the server chip's popover.
     fn problem_marker(&self, file_name: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         use hopper::groupstatus::Tone;
         use hopper::syncchip::RowProblem;
         let root = self.root.as_ref()?;
         let bare = file_name.trim_end_matches(".disabled");
-        let (problem, chip_id) = match self.row_stop(file_name) {
-            // The page's own "Needs you" chip, as the instance page or the server page names it.
+        // `Ok`: the page's dock and the notice in it; `Err`: a chip to open.
+        let (problem, target): (RowProblem, Result<(String, &'static str), String>) = match self.row_stop(file_name) {
+            // The page's own notice, in the dock as the instance page or the server page keys it.
             Some(p) => {
                 let page = if self.store.read(cx).instance(root).is_some() { "instance" } else { "server" };
-                (p, format!("needs-{page}:{}", root.display()))
+                let notice = if matches!(p, RowProblem::Needs(_)) { "missing" } else { "blockers" };
+                (p, Ok((format!("{page}:{}", root.display()), notice)))
             }
             None => {
                 let s = self.store.read(cx);
@@ -5301,7 +5304,7 @@ Change version", a.file_name).into()
                     .find(|p| Some(&p.server_root) == shown.as_ref())
                     .filter(|p| p.add.iter().any(|d| d.client.as_ref().is_some_and(|c| c.file_name.eq_ignore_ascii_case(bare))))
                     .map(|p| p.server.clone());
-                (RowProblem::NotOnServer(lacks?), "server".to_string())
+                (RowProblem::NotOnServer(lacks?), Err("server".to_string()))
             }
         };
         let theme = cx.theme();
@@ -5323,7 +5326,10 @@ Change version", a.file_name).into()
                 .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
                 .on_click(cx.listener(move |_, _, window, cx| {
                     cx.stop_propagation();
-                    crate::sync_chip::request_open(&chip_id);
+                    match &target {
+                        Ok((dock, notice)) => crate::notice_slot::flash(dock, Some(notice), true, cx),
+                        Err(chip_id) => crate::sync_chip::request_open(chip_id),
+                    }
                     window.refresh();
                 }))
                 .child(widgets::chip(color).child(label))

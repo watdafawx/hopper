@@ -1,7 +1,8 @@
 <script>
-  // One notice for the page's "Needs you" chip (its list is <NoticeList>).
-  // It shows nothing where it is written: it puts itself in the page's list
-  // while it is mounted. `tier`: 'stop' (stops play; can't be closed),
+  // One notice of the page: a strip in its dock (<NoticeDock>), summed up in
+  // the hero's "Needs you" chip (the panel Overview: listed in the chip's
+  // popover, <NoticeList>). It shows nothing where it is written: it puts
+  // itself in the page's list while it is mounted. `tier`: 'stop' (stops play; can't be closed),
   // 'choice' (needs a choice) or 'info'. Snippets get `fit` ({ narrow, lead };
   // the list's is never lead): `primary` is the main button (use
   // `mainClass(fit)`), `actions` the other buttons (under the row's Details),

@@ -983,17 +983,12 @@ impl SyncPanel {
         self.rescan(cx);
     }
 
-    /// The paired server's crash as a red chip in the instance's hero, next
-    /// to the run state pill, with the crash notice (what stopped it, roll
-    /// back, See why) in its popover. `None` when it didn't crash.
-    pub fn crash_chip(&mut self, root: &std::path::Path, cx: &mut Context<Self>) -> Option<crate::sync_chip::Chip> {
+    /// The paired server's crash notice (what stopped it, roll back, See
+    /// why), for the instance page's notice dock and its red chip next to the
+    /// run state pill. Empty when it didn't crash.
+    pub fn crash_notices(&mut self, root: &std::path::Path, cx: &mut Context<Self>) -> Vec<crate::notice_slot::Notice> {
         self.strip.update(cx, |st, cx| st.show(root.to_path_buf(), cx));
-        let notices: Vec<crate::notice_slot::Notice> = self.strip.update(cx, |st, cx| st.notice(cx)).into_iter().collect();
-        let view = cx.entity().downgrade();
-        let producer: crate::notice_slot::Producer = std::rc::Rc::new(move |_, cx| {
-            view.update(cx, |p, cx| p.strip.update(cx, |st, cx| st.notice(cx)).into_iter().collect()).unwrap_or_default()
-        });
-        crate::notice_slot::run_chip(&format!("server:{}", root.display()), hopper::syncchip::RunProblem::ServerCrashed, notices, producer)
+        self.strip.update(cx, |st, cx| st.notice(cx)).into_iter().collect()
     }
 
     /// The hero's sync chip for the pair: the instance's with its server
@@ -1068,7 +1063,7 @@ impl SyncPanel {
                 run: std::rc::Rc::new(move |_, cx| v.update(cx, |p, cx| p.rescan(cx))),
             });
         }
-        Some(Chip { id: "server".into(), look, progress: None, sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions }], auto_open: Vec::new(), width: None })
+        Some(Chip { id: "server".into(), look, progress: None, sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions }], auto_open: Vec::new(), width: None, on_click: None })
     }
 
     /// The server page's Restart chip: mods were synced while it runs, so
@@ -1109,6 +1104,7 @@ impl SyncPanel {
             sections: vec![Section { title: "Synced while the server runs".into(), line: line.into(), progress: None, body: None, actions }],
             auto_open: Vec::new(),
             width: None,
+            on_click: None,
         })
     }
 

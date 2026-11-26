@@ -72,6 +72,9 @@ pub struct Chip {
     pub auto_open: Vec<SharedString>,
     /// The popover's width in rem, when the default doesn't fit its content.
     pub width: Option<f32>,
+    /// A chip that stands for strips in the page's notice dock
+    /// (`notice_slot::chip`): a click runs this instead of opening a popover.
+    pub on_click: Option<Run>,
 }
 
 impl Chip {
@@ -85,6 +88,7 @@ impl Chip {
             sections: a.sections.iter().chain(b.sections.iter()).cloned().collect(),
             auto_open: Vec::new(),
             width: None,
+            on_click: None,
         }
     }
 }
@@ -186,6 +190,8 @@ struct Trigger {
     progress: Option<f32>,
     selected: bool,
     open: bool,
+    /// Its own click, for a chip without a popover.
+    click: Option<Run>,
 }
 
 impl Selectable for Trigger {
@@ -267,6 +273,7 @@ impl RenderOnce for Trigger {
             // tooltip sat on top of it for as long as the cursor stayed on the
             // chip. Every chip state goes through this trigger.
             .when(!open, |d| d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)))
+            .when_some(self.click, |d, f| d.on_click(move |_, w, cx| f(w, cx)))
     }
 }
 
@@ -413,6 +420,11 @@ impl RenderOnce for ChipEl {
         let sections = chip.sections.clone();
         let id = SharedString::from(format!("sync-chip:{}", chip.id));
         let width = chip.width;
+        // A summary of strips in the notice dock: a plain button, no popover.
+        if let Some(click) = chip.on_click.clone() {
+            return Trigger { id: ElementId::Name(id), look: chip.look.clone(), form, progress: chip.progress, selected: false, open: false, click: Some(click) }
+                .into_any_element();
+        }
         let pop = Popover::new(SharedString::from(format!("sync-chip-pop:{}", chip.id)))
             .anchor(Anchor::TopLeft)
             .appearance(true)
@@ -423,6 +435,7 @@ impl RenderOnce for ChipEl {
                 progress: chip.progress,
                 selected: false,
                 open: false,
+                click: None,
             })
             .content(move |_, window, cx| body(&sections, width, window, cx));
         let auto = window.use_keyed_state(ElementId::Name(format!("sync-chip-auto:{}", chip.id).into()), cx, |_, _| Auto::default());
@@ -540,6 +553,7 @@ pub fn preview(name: &str) -> Vec<Chip> {
         progress,
         auto_open: Vec::new(),
         width: None,
+        on_click: None,
         sections: vec![Section {
             title: title.to_string().into(),
             line: line.to_string().into(),

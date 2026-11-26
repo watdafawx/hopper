@@ -45,7 +45,7 @@
   import ShareLog from './ShareLog.svelte';
   import PackUpdate from './PackUpdate.svelte';
   import MovedBanner from './MovedBanner.svelte';
-  import NoticeList from './lib/NoticeList.svelte';
+  import NoticeDock from './lib/NoticeDock.svelte';
   import SyncChip from './lib/SyncChip.svelte';
   import { previewChips } from './lib/syncchipPreview.js';
   import { restartLook } from './lib/syncchip.js';
@@ -152,9 +152,11 @@
         }
       : null,
   );
-  const needs = $derived(needsChip(notices, id, needsList));
+  // The page's notices are strips docked under the tab's content; the chips sum them up and a
+  // click flashes the strip.
+  const needs = $derived(needsChip(notices, id));
   // A start that looks stuck, or a crash: the chip right after the state pill.
-  const run = $derived(runChip(notices, id, runList));
+  const run = $derived(runChip(notices, id));
   const headChips = $derived([...(run ? [run] : []), ...syncChips, ...(needs ? [needs] : []), ...(restartChip ? [restartChip] : [])]);
   // The relay setup dialog (this panel's own servers, owner only).
   let relaySetup = $state(false);
@@ -292,9 +294,6 @@
     leave(panel);
   });
 </script>
-
-{#snippet needsList()}<NoticeList {notices} />{/snippet}
-{#snippet runList()}<NoticeList {notices} run />{/snippet}
 
 {#if !s}
   <div class="pad muted">{feed.servers.length ? 'No server with that id.' : panel && panel.state !== 'ok' ? `Can't reach ${panel.name} right now.` : 'Loading…'}</div>
@@ -440,6 +439,8 @@
     {/if}
   </div>
   {/if}
+  <!-- Under the content, never over it: the list above only gets shorter while a notice is up. -->
+  <NoticeDock {notices} key={id} />
 {/if}
 
 {#if playerMenu && s}

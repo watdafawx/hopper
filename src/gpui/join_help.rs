@@ -574,6 +574,7 @@ pub fn into_chip<V: 'static>(
         sections: Vec::new(),
         auto_open: Vec::new(),
         width: None,
+        on_click: None,
     });
     if wont && !chip.look.busy {
         chip.look = server_look(&ServerState::WontJoin, &p.server);

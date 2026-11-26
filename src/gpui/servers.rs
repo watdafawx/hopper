@@ -2062,9 +2062,8 @@ impl ServersView {
     }
 
     /// The chip beside the run state pill: red "Crashed" or "Looks stuck ·
-    /// N min", the notice's buttons in its popover.
-    fn run_chip(&self, root: &std::path::Path, cx: &mut Context<Self>) -> Option<crate::sync_chip::Chip> {
-        let notices = self.run_notices(root, cx);
+    /// N min"; its notice's buttons are on its strip in the dock.
+    fn run_chip(&self, root: &std::path::Path, notices: &[crate::notice_slot::Notice], cx: &mut Context<Self>) -> Option<crate::sync_chip::Chip> {
         let crashed = notices.iter().any(|n| n.id == "srv-crash");
         let minutes = {
             let fresh = self.control.read(cx).stats_of(root).cloned();
@@ -2072,10 +2071,8 @@ impl ServersView {
             stats.and_then(|s| s.stuck).and_then(|r| hopper::syncchip::stuck_minutes(&r.headline))
         };
         let problem = if crashed { hopper::syncchip::RunProblem::Crashed } else { hopper::syncchip::RunProblem::Stuck { minutes } };
-        let (view, id) = (cx.entity().downgrade(), root.to_path_buf());
-        let producer: crate::notice_slot::Producer =
-            std::rc::Rc::new(move |_, cx| view.update(cx, |this, cx| this.run_notices(&id, cx)).unwrap_or_default());
-        crate::notice_slot::run_chip(&format!("server:{}", root.display()), problem, notices, producer)
+        let key = format!("server:{}", root.display());
+        crate::notice_slot::run_chip(&key, &key, problem, notices)
     }
 
     /// Every other notice the server has, for its "Needs you" chip (and again
@@ -2102,18 +2099,21 @@ impl ServersView {
         } else {
             Vec::new()
         };
-        // Every notice the server has that no other chip says, after the
-        // sync chip: "Needs you" (see `page_notices`).
+        // The page's notices are strips docked under the tab's content. Every
+        // notice the server has that no other chip says is summed up after
+        // the sync chip in "Needs you" (see `page_notices`); the run state's
+        // problem comes first, the chip after its pill. A click on either
+        // flashes its strip.
         let mut chips = chips;
+        let mut dock = None;
         if self.store.read(cx).sync_chip_preview.is_none() {
-            let notices = self.page_notices(&s.root, cx);
-            let (view, root) = (cx.entity().downgrade(), s.root.clone());
-            let producer: crate::notice_slot::Producer =
-                std::rc::Rc::new(move |_, cx| view.update(cx, |this, cx| this.page_notices(&root, cx)).unwrap_or_default());
+            let dock_key = format!("server:{}", s.root.display());
+            let run_notices = self.run_notices(&s.root, cx);
+            let page_notices = self.page_notices(&s.root, cx);
             let at = chips.iter().take_while(|c| c.look.source.is_sync()).count();
-            chips.splice(at..at, crate::notice_slot::chip(&format!("server:{}", s.root.display()), notices, producer));
-            // The run state's problem comes first: the chip after its pill.
-            chips.splice(0..0, self.run_chip(&s.root, cx));
+            chips.splice(at..at, crate::notice_slot::chip(&dock_key, &page_notices));
+            chips.splice(0..0, self.run_chip(&s.root, &run_notices, cx));
+            dock = crate::notice_slot::dock(&dock_key, run_notices.into_iter().chain(page_notices).collect(), window, cx);
         }
         // The paired pack's page, for the Overview.
         let pack_id = self
@@ -2685,7 +2685,8 @@ impl ServersView {
             .when(self.tab == TAB_SYNC, |c| {
                 c.child(div().flex_1().min_h_0().child(self.sync.clone()))
             });
-        v_flex().size_full().child(header).child(body).into_any_element()
+        // The notices under the content, never over it.
+        v_flex().size_full().child(header).child(body).children(dock).into_any_element()
     }
 }
 

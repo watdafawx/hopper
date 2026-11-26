@@ -1,9 +1,11 @@
 //! The notices of an instance's or a server's page (a load problem, a choice
 //! the player has to make, a tip). They look the same everywhere and never
-//! push the page off the screen: they live in the hero's chips. [`chip`] is
-//! the "Needs you" chip, its popover the list grouped by how much they
-//! matter; [`run_chip`] is the run state's problem (a start that looks
-//! stuck, a crash) next to its pill.
+//! move the page: they are docked at the bottom edge of its content
+//! ([`dock`]), under the list, so the hero, the tabs, the toolbar and the
+//! list's first row stay where they are. The hero keeps a summary: [`chip`]
+//! is the "Needs you" chip, [`run_chip`] the run state's problem (a start
+//! that looks stuck, a crash) next to its pill; clicking either flashes its
+//! strip in the dock.
 //!
 //! A page builds its notices as [`Notice`]s. They are ordered by [`order`]:
 //! problems that stop the game first, then the ones that need a choice, then
@@ -246,58 +248,320 @@ pub fn group(tiers: &[Tier]) -> Vec<(Tier, Vec<usize>)> {
         .collect()
 }
 
-/// The "Needs you" chip for the hero: every notice the page has that no
-/// other chip says, in one popover (grouped Stops play / Needs a choice /
-/// For your information, Details open in place, ✕ where there is one). `None`
-/// when there are none. `id` names the page ("instance", "server") so each
-/// keeps its own open details. A problem that stops play makes the chip red,
-/// it never folds, and its popover opens once by itself.
-///
-/// `notices` only say what the chip looks like; the popover asks `producer`
-/// for fresh ones whenever it draws.
-pub fn chip(id: &str, notices: Vec<Notice>, producer: Producer) -> Option<crate::sync_chip::Chip> {
-    use crate::sync_chip::{Chip, Section};
+/// The "Needs you" chip for the hero: a summary of the notices in the page's
+/// dock ([`dock`]) that no other chip says. `None` when there are none.
+/// `dock_key` names the page's dock ("instance:<root>", "server:<root>"). A
+/// problem that stops play makes the chip red and it never folds. Clicking it
+/// scrolls the dock to the notice it names and flashes it: it opens nothing
+/// over the page.
+pub fn chip(dock_key: &str, notices: &[Notice]) -> Option<crate::sync_chip::Chip> {
     let keys: Vec<(Tier, i64)> = notices.iter().map(|n| (n.tier, n.since)).collect();
     let ix = order(&keys);
     let needs: Vec<_> = ix.iter().map(|&i| need(notices[i].tier)).collect();
     let look = hopper::syncchip::attention_look(&needs, ix.first().map_or("", |&i| notices[i].title.as_ref()))?;
-    // Every problem that stops play opens the popover once, each on its own.
-    let stops: Vec<SharedString> = ix.iter().filter(|&&i| notices[i].tier == Tier::Stop).map(|&i| notices[i].id.clone()).collect();
-    let key: SharedString = id.to_string().into();
-    let body: crate::sync_chip::Body = Rc::new(move |window, cx| list(&key, &producer, true, window, cx));
-    Some(Chip {
-        id: format!("needs-{id}").into(),
-        look,
-        progress: None,
-        sections: vec![Section { title: "".into(), line: "".into(), progress: None, body: Some(body), actions: Vec::new() }],
-        auto_open: stops,
-        width: Some(32.),
-    })
+    let first = ix.first().map(|&i| notices[i].id.clone());
+    Some(summary_chip(format!("needs-{dock_key}"), look, dock_key, first))
 }
 
 /// The chip beside the run state pill while the game or server has a problem
-/// (its start looks stuck, or it crashed): red, never folds, and its popover
-/// opens once by itself each time a new problem shows. `notices` are the
-/// problem's own (Restart, See why, Wait); the popover asks `producer` for
-/// fresh ones whenever it draws. `None` when there is no problem.
-pub fn run_chip(id: &str, problem: hopper::syncchip::RunProblem, notices: Vec<Notice>, producer: Producer) -> Option<crate::sync_chip::Chip> {
-    use crate::sync_chip::{Chip, Section};
+/// (its start looks stuck, or it crashed): red and never folds. Its notices
+/// (Restart, See why, Wait) are strips in the page's dock like every other;
+/// the chip says what it is and a click brings its strip into view. `chip_key`
+/// tells this chip from another run chip on the same page (the instance's own
+/// stuck start and its paired server's crash). `None` when there is no problem.
+pub fn run_chip(dock_key: &str, chip_key: &str, problem: hopper::syncchip::RunProblem, notices: &[Notice]) -> Option<crate::sync_chip::Chip> {
+    let first = notices.first()?.id.clone();
+    Some(summary_chip(format!("run-{chip_key}"), hopper::syncchip::run_look(&problem), dock_key, Some(first)))
+}
+
+/// A hero chip that stands for strips in the dock: no popover, a click
+/// flashes the strip.
+fn summary_chip(id: String, look: hopper::syncchip::Look, dock_key: &str, notice: Option<SharedString>) -> crate::sync_chip::Chip {
+    let dock_key = dock_key.to_string();
+    crate::sync_chip::Chip {
+        id: id.into(),
+        look,
+        progress: None,
+        sections: Vec::new(),
+        auto_open: Vec::new(),
+        width: None,
+        on_click: Some(Rc::new(move |_, cx| flash(&dock_key, notice.as_deref(), false, cx))),
+    }
+}
+
+/// The strip a chip or a row marker asked the dock to show: (dock key, notice
+/// id or the first one, open its details, request number). The number lets the
+/// dock act on each request once. It lives in an entity, not a plain static:
+/// the dock reads it while it draws, so a request redraws the page's cached
+/// view (a window refresh alone reuses the cached picture).
+#[derive(Default)]
+struct FlashAsk {
+    ask: Option<(String, Option<SharedString>, bool, u64)>,
+    count: u64,
+}
+
+fn flash_ask(cx: &mut App) -> Entity<FlashAsk> {
+    if let Some(e) = FLASH.with(|f| f.borrow().clone()) {
+        return e;
+    }
+    let e = cx.new(|_| FlashAsk::default());
+    FLASH.with(|f| *f.borrow_mut() = Some(e.clone()));
+    e
+}
+
+thread_local! {
+    static FLASH: std::cell::RefCell<Option<Entity<FlashAsk>>> = const { std::cell::RefCell::new(None) };
+    /// Every `dock|notice@since` of a problem that stops play whose details
+    /// already opened by themselves. It outlives the dock's own state (dropped
+    /// when the player visits another page), so coming back doesn't open them
+    /// a second time.
+    static STOP_SEEN: std::cell::RefCell<HashSet<String>> = std::cell::RefCell::new(HashSet::new());
+}
+
+/// Asks the dock keyed `dock_key` to scroll to the notice `notice` (the first
+/// one when `None` or when it has no such notice) and flash it; `open` also
+/// opens its details.
+pub fn flash(dock_key: &str, notice: Option<&str>, open: bool, cx: &mut App) {
+    let want = (dock_key.to_string(), notice.map(|s| SharedString::from(s.to_string())), open);
+    flash_ask(cx).update(cx, |f, cx| {
+        f.count += 1;
+        f.ask = Some((want.0, want.1, want.2, f.count));
+        cx.notify();
+    });
+}
+
+/// The dock's own state: open details, the strip asked for and its scroll.
+#[derive(Default)]
+struct DockState {
+    slot: SlotState,
+    scroll: ScrollHandle,
+    /// The last flash request this dock acted on.
+    done: u64,
+    /// The strip flashing now, with its request number (it keys the
+    /// animation, so every click flashes again).
+    flashing: Option<(SharedString, u64)>,
+}
+
+/// How long a strip flashes after its chip is clicked.
+const FLASH_MS: u64 = 1400;
+
+/// The page's notices docked at the bottom edge of its content, under the
+/// scrolling list: one strip each, ordered by [`order`] (what stops play
+/// first). Nothing above it moves when a notice comes or goes; only the list's
+/// bottom edge gets shorter. A strip says its title and main button on one
+/// line; its other buttons and details open under it (the dock grows upward).
+/// A problem that stops play opens its details by itself once. `None` when the
+/// page has no notice.
+pub fn dock(dock_key: &str, notices: Vec<Notice>, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
     if notices.is_empty() {
         return None;
     }
-    // A stuck start that comes back after "Wait" is a new problem: it opens
-    // again, once.
-    let auto_open: Vec<SharedString> = notices.iter().map(|n| format!("{}@{}", n.id, n.since).into()).collect();
-    let key: SharedString = format!("run:{id}").into();
-    let body: crate::sync_chip::Body = Rc::new(move |window, cx| list(&key, &producer, false, window, cx));
-    Some(Chip {
-        id: format!("run-{id}").into(),
-        look: hopper::syncchip::run_look(&problem),
-        progress: None,
-        sections: vec![Section { title: "".into(), line: "".into(), progress: None, body: Some(body), actions: Vec::new() }],
-        auto_open,
-        width: Some(38.),
-    })
+    let state = window.use_keyed_state(ElementId::Name(format!("notice-dock:{dock_key}").into()), cx, |_, _| DockState::default());
+    let keys: Vec<(Tier, i64)> = notices.iter().map(|n| (n.tier, n.since)).collect();
+    let mut slots: Vec<Option<Notice>> = notices.into_iter().map(Some).collect();
+    let sorted: Vec<Notice> = order(&keys).into_iter().filter_map(|i| slots[i].take()).collect();
+    // Details that open by themselves, once each: a list the player needs to
+    // see (`open_new`), and every problem that stops play.
+    for n in &sorted {
+        if n.details.is_none() && n.actions.is_empty() {
+            continue;
+        }
+        let fresh = if n.tier == Tier::Stop {
+            STOP_SEEN.with(|s| s.borrow_mut().insert(format!("{dock_key}|{}@{}", n.id, n.since)))
+        } else {
+            n.open_new && !state.read(cx).slot.seen.contains(&n.id)
+        };
+        if fresh {
+            let id = n.id.clone();
+            state.update(cx, |s, _| {
+                s.slot.seen.insert(id.clone());
+                s.slot.open.insert(id);
+            });
+        }
+    }
+    // A chip or a row marker asked for one of these strips.
+    let ask = flash_ask(cx).read(cx).ask.clone().filter(|(k, _, _, n)| k == dock_key && *n != state.read(cx).done);
+    if let Some((_, want, open, n)) = ask {
+        let at = want.as_ref().and_then(|w| sorted.iter().position(|x| x.id == *w)).unwrap_or(0);
+        let id = sorted[at].id.clone();
+        state.update(cx, |s, _| {
+            s.done = n;
+            s.flashing = Some((id.clone(), n));
+            if open {
+                s.slot.open.insert(id);
+            }
+            s.scroll.scroll_to_item(at);
+        });
+    }
+    let theme = cx.theme().clone();
+    let narrow = window.viewport_size().width < px(1000.);
+    let (open, flashing, scroll) = {
+        let s = state.read(cx);
+        (s.slot.open.clone(), s.flashing.clone(), s.scroll.clone())
+    };
+    // The region's one filled button: the first strip's main action.
+    let lead = sorted.iter().position(|n| n.primary.is_some());
+    let strips: Vec<AnyElement> = sorted
+        .into_iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let fit = Fit { narrow, lead: Some(i) == lead };
+            let flash = flashing.as_ref().filter(|(id, _)| *id == n.id).map(|(_, g)| *g);
+            strip(n, fit, &state, &open, flash, cx)
+        })
+        .collect();
+    // The dock never takes more than about half the page: past that it
+    // scrolls inside itself.
+    let room = (window.viewport_size().height * 0.45).max(px(160.));
+    Some(
+        div()
+            .id(SharedString::from(format!("notice-dock:{dock_key}")))
+            .flex_none()
+            .w_full()
+            .max_h(room)
+            .overflow_y_scroll()
+            .track_scroll(&scroll)
+            .border_t_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .px_3()
+            .py_2()
+            .child(v_flex().w_full().gap_1p5().children(strips))
+            .into_any_element(),
+    )
+}
+
+/// One strip of the dock: its colour bar (red: stops play, amber: the rest),
+/// the title and subject on one line, the main button, and the chevron and ✕;
+/// its other buttons and details open under it. In a narrow page the sentence
+/// keeps its width and the button wraps under it.
+fn strip(n: Notice, fit: Fit, state: &Entity<DockState>, open: &HashSet<SharedString>, flash: Option<u64>, cx: &mut App) -> AnyElement {
+    let theme = cx.theme().clone();
+    let color = match n.tier {
+        Tier::Stop => theme.danger,
+        _ => theme.warning,
+    };
+    let id = n.id.clone();
+    let actions: Vec<AnyElement> = n.actions.into_iter().map(|a| a(Fit { narrow: fit.narrow, lead: false })).collect();
+    let has_more = n.details.is_some() || !actions.is_empty();
+    let is_open = has_more && open.contains(&id);
+    let toggle_btn = has_more.then(|| {
+        let (state, id2) = (state.clone(), id.clone());
+        Button::new(SharedString::from(format!("notice-details:{id}")))
+            .xsmall()
+            .ghost()
+            // The details open upward-looking from the dock: the chevron says
+            // which way the strip grows.
+            .icon(if is_open { IconName::ChevronDown } else { IconName::ChevronUp })
+            .tooltip(if is_open { "Hide details" } else { "Details" })
+            .on_click(move |_, _, cx| {
+                state.update(cx, |s, cx| {
+                    if !s.slot.open.remove(&id2) {
+                        s.slot.open.insert(id2.clone());
+                    }
+                    cx.notify();
+                })
+            })
+    });
+    let close = n.dismiss.filter(|_| n.tier != Tier::Stop).map(|f| {
+        Button::new(SharedString::from(format!("notice-hide:{id}")))
+            .xsmall()
+            .ghost()
+            .icon(IconName::X)
+            .tooltip("Hide this notice")
+            .on_click(move |_, window, cx| f(window, cx))
+    });
+    let tip: SharedString = match &n.subject {
+        Some(s) => format!("{}. {s}", n.title).into(),
+        None => n.title.clone(),
+    };
+    // Narrow, the subject goes (it's in the tooltip) so the title keeps its room.
+    let subject = n.subject.clone().filter(|_| !fit.narrow);
+    let rich = n.rich;
+    let line = h_flex()
+        .id(SharedString::from(format!("notice-line:{id}")))
+        .flex_1()
+        .min_w(rems(12.))
+        .h(rems(1.75))
+        .overflow_hidden()
+        .gap_1p5()
+        .items_center()
+        .whitespace_nowrap()
+        .text_sm()
+        .when_some(n.icon, |l, ic| l.child(gpui_kit::component::Icon::new(ic).size(px(14.)).flex_none().text_color(color)))
+        .child(div().min_w_0().font_semibold().truncate().child(n.title.clone()))
+        .when_some(subject, |l, s| {
+            l.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .truncate()
+                    .text_color(theme.muted_foreground)
+                    .map(|d| match rich {
+                        Some(r) => d.child(r),
+                        None => d.child(s),
+                    }),
+            )
+        })
+        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx));
+    let head = h_flex()
+        .w_full()
+        .gap_1()
+        .items_start()
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .flex_wrap()
+                .gap_x_3()
+                .gap_y_1()
+                .items_center()
+                .child(line)
+                .children(n.primary.map(|p| h_flex().flex_none().child(p(fit)))),
+        )
+        .children(toggle_btn.map(|b| div().flex_none().pt(px(2.)).child(b)))
+        .children(close.map(|b| div().flex_none().pt(px(2.)).child(b)));
+    let base = theme.secondary;
+    let body = v_flex()
+        .id(SharedString::from(format!("notice-strip:{id}")))
+        .relative()
+        .w_full()
+        .gap_2()
+        .pl(px(14.))
+        .pr_1p5()
+        .py_1()
+        .rounded(theme.radius)
+        .bg(base)
+        .overflow_hidden()
+        .child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(color))
+        .child(head)
+        .when(is_open, |c| {
+            c.child(
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .pb_1()
+                    .pr_1p5()
+                    .when(!actions.is_empty(), |c| c.child(h_flex().flex_wrap().gap_1().children(actions)))
+                    .children(n.details),
+            )
+        });
+    match flash {
+        // The chip asked for this strip: a tint of its colour that swells
+        // and fades.
+        Some(g) => body
+            .with_animation(
+                ElementId::Name(format!("notice-flash:{id}:{g}").into()),
+                Animation::new(std::time::Duration::from_millis(FLASH_MS)).with_easing(ease_in_out),
+                move |el, t| {
+                    let pulse = if t < 0.5 { t * 2. } else { (1. - t) * 2. };
+                    el.bg(base.blend(color.opacity(0.35 * pulse)))
+                },
+            )
+            .into_any_element(),
+        None => body.into_any_element(),
+    }
 }
 
 /// The popover body of a chip that owns one page notice (the group chip): its

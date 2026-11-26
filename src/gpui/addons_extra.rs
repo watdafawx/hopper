@@ -1949,7 +1949,7 @@ impl AddonsView {
                 )],
             });
         }
-        Some(Chip { id: "restart".into(), look: hopper::syncchip::restart_look(changed, "game"), progress: None, sections, auto_open: Vec::new(), width: None })
+        Some(Chip { id: "restart".into(), look: hopper::syncchip::restart_look(changed, "game"), progress: None, sections, auto_open: Vec::new(), width: None, on_click: None })
     }
 
     /// Named sets of disabled mods to switch between.

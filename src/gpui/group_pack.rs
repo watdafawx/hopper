@@ -92,6 +92,7 @@ pub fn group_chip(store: &Entity<Store>, root: &Path, cx: &mut App) -> Option<cr
             auto_open,
             // As wide as the "Needs you" list: the rows hold mod names and a button.
             width: Some(32.),
+            on_click: None,
         });
     }
     let in_step = matches!(status, Status::InStep { .. });
@@ -118,6 +119,7 @@ pub fn group_chip(store: &Entity<Store>, root: &Path, cx: &mut App) -> Option<cr
         sections: vec![Section { title: title.into(), line: line.into(), progress: None, body: None, actions: vec![pull] }],
         auto_open: Vec::new(),
         width: None,
+        on_click: None,
     })
 }
 
@@ -295,6 +297,7 @@ fn sync_group_chip(store: &Entity<Store>, root: &Path, state: hopper::syncchip::
         auto_open: Vec::new(),
         // As wide as the mock's cards (440 px): mod names, a chip and buttons fit a row.
         width: wide.then_some(27.5),
+        on_click: None,
     }
 }
 /// The line under "Same as the group": the status line without its first

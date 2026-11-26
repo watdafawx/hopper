@@ -4,6 +4,48 @@ Instance and server pages, Hopper desktop and Hopper Server's web UI.
 Mock: [design/mocks/notices.html](mocks/notices.html), published as a Design
 Artifact (one artboard per option): https://claude.ai/artifact/Ttvp249CVG9Kmo9XycCKAT
 
+## Now: notices docked at the bottom (0.94)
+
+Approved mock: https://claude.ai/artifact/4GbhKb8rGiUeSxiVwyhCcP (Main, Narrow,
+Open). It replaces the "Needs you" popover and the run state chip's popover
+described under "The system (A)" below; the rest of that section (the group,
+server, Downloads and Restart chips with their popovers) is unchanged.
+
+- **Where.** The page's notices sit in a dock at the bottom edge of the page
+  content, under the tab's scrolling list (`notice_slot::dock`, web
+  `lib/NoticeDock.svelte`, both mounted by the page: `library.rs` and
+  `servers.rs`, web `ServerPage.svelte`). The hero, the tabs, the toolbar and
+  the list's first row never move and nothing is covered: only the list's
+  bottom edge gets shorter while a notice is up. The dock is at most 45% of the
+  window high and scrolls inside itself past that.
+- **What goes in it.** The run state's problems (`stuck`, `srv-stuck`,
+  `srv-crash`, and on an instance page the paired server's `sync-crash`) and
+  every notice that was in "Needs you". Ordered as before (`notice_slot::order`,
+  web `noticeorder.js`): what stops play first, then choices, then the rest.
+- **A strip.** One per notice: a 3 px colour bar on the left (red: stops play,
+  amber: everything else), the title and, when there is room, the subject on
+  one line (full text in the tooltip), the main button (the dock's first one
+  filled, the rest outlined), then a chevron when it has more buttons or
+  details, and ✕ only when it can be hidden (never on what stops play). The
+  chevron opens the details under the strip, so the dock grows upward. Detail
+  rows use `widgets::detail_row`: narrow, the sentence keeps its width and its
+  buttons wrap under it. Narrow (window under 1000 px, web dock under 640 px)
+  the subject goes and the main button wraps under the title.
+- **Stops play.** A problem that stops play opens its details by itself once
+  per notice and report (`id@since`, remembered for the session so leaving
+  the page and coming back doesn't open it again). Nothing floats, so there is
+  no dialog to wait for.
+- **The hero chips stay as a summary.** "Needs you" (red with its dot while
+  something stops play) and the run state chip ("Looks stuck · 4 min",
+  "Crashed") have no popover any more: a click scrolls the dock to the strip and
+  flashes it (a tint of its colour that swells and fades, 1.4 s). A row marker
+  ("Needs X", "Stops loading") does the same and also opens the strip's
+  details. Ids, hidden keys and wording are unchanged.
+- **Not in the dock.** The group chip's notice (`group-status`), pre-join in
+  the server chip, Downloads and Restart keep their chips and popovers (one
+  that opens by itself still waits while a dialog is up). The panel Overview (a dashboard, not a
+  server page) keeps its "Needs you" popover.
+
 ## Problem
 
 Every notice an instance or server page has goes through one slot above the

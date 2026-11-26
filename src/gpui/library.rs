@@ -3085,27 +3085,24 @@ impl LibraryView {
         // The pre-join check (the server would turn the pack away, or has
         // other mods) is part of that chip: red, and its list in the popover.
         let server_chip = crate::join_help::into_chip(&self.store, &inst.root, server_chip, cx);
-        // Every notice the instance has that no other chip says: the "Needs
-        // you" chip, its list in the popover (asked for again whenever it
-        // draws, so its buttons are current).
-        let needs = {
-            let notices = self.page_notices(&inst.root, cx);
-            let (view, root) = (cx.entity().downgrade(), inst.root.clone());
-            let producer: notice_slot::Producer =
-                std::rc::Rc::new(move |_, cx| view.update(cx, |this, cx| this.page_notices(&root, cx)).unwrap_or_default());
-            notice_slot::chip(&format!("instance:{}", inst.root.display()), notices, producer)
-        };
-        // A start that looks stuck: the chip after the run state pill.
+        // The page's notices are strips docked under the tab's content; the
+        // hero says what they are in a chip each, a click on it flashes its
+        // strip. A start that looks stuck and the paired server's crash have
+        // their chip after the run state pill; every other notice the
+        // instance has that no other chip says is in "Needs you".
+        let dock_key = format!("instance:{}", inst.root.display());
+        let run_notices = self.run_notices(&inst.root, cx);
         let run = {
-            let notices = self.run_notices(&inst.root, cx);
             let minutes = self.store.read(cx).stuck(&inst.root).and_then(|r| hopper::syncchip::stuck_minutes(&r.headline));
-            let (view, root) = (cx.entity().downgrade(), inst.root.clone());
-            let producer: notice_slot::Producer =
-                std::rc::Rc::new(move |_, cx| view.update(cx, |this, cx| this.run_notices(&root, cx)).unwrap_or_default());
-            notice_slot::run_chip(&format!("instance:{}", inst.root.display()), hopper::syncchip::RunProblem::Stuck { minutes }, notices, producer)
+            notice_slot::run_chip(&dock_key, &dock_key, hopper::syncchip::RunProblem::Stuck { minutes }, &run_notices)
         };
-        // The paired server's crash: the same chip, for the server.
-        let server_crash = paired_root.and_then(|root| self.server.update(cx, |p, cx| p.crash_chip(&root, cx)));
+        let crash_notices = paired_root.as_ref().map(|root| self.server.update(cx, |p, cx| p.crash_notices(root, cx))).unwrap_or_default();
+        let server_crash = paired_root.as_ref().and_then(|root| {
+            notice_slot::run_chip(&dock_key, &format!("server:{}", root.display()), hopper::syncchip::RunProblem::ServerCrashed, &crash_notices)
+        });
+        let page_notices = self.page_notices(&inst.root, cx);
+        let needs = notice_slot::chip(&dock_key, &page_notices);
+        let dock = notice_slot::dock(&dock_key, run_notices.into_iter().chain(crash_notices).chain(page_notices).collect(), window, cx);
         let made_up = self.store.read(cx).sync_chip_preview.clone();
         self.sync_chips = match made_up {
             Some(name) => crate::sync_chip::preview(name.strip_suffix("+run").unwrap_or(&name)),
@@ -3150,6 +3147,9 @@ impl LibraryView {
                         div().flex_1().min_w_0().size_full().child(body),
                     )),
             )
+            // Under the content, never over it: the list above only gets
+            // shorter while a notice is up.
+            .children(dock)
             .into_any_element()
     }
 }

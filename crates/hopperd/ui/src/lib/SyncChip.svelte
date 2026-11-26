@@ -10,7 +10,8 @@
   // chips: [{ look, title, line, actions: [{ label, primary, disabled, run }], progress }]. The
   // Restart and "Needs you" chips stand alone beside the sync chips ([syncchip.js] `standsAlone`).
   // A chip may bring its own popover body (`body`, a snippet; `wide` for a list) and `autoOpen`
-  // keys: its popover opens by itself the first time one of them is seen in this browser tab.
+  // keys: its popover opens by itself the first time one of them is seen in this browser tab. A chip
+  // with `onclick` (a summary of the page's notice dock) has no popover: a click runs it.
   let { chips = [], room = 0 } = $props();
 
   const ICON = { check: CircleCheck, spin: LoaderCircle, behind: Clock, offline: CircleOff, alert: CircleAlert, down: Download, up: Upload, differ: ArrowLeftRight, restart: RotateCcw, note: Info, stuck: Clock };
@@ -69,8 +70,9 @@
   <span class="synchips">
     {#each shown as x (x.key)}
       {@const Icon = ICON[x.look.glyph]}
+      {@const own = x.sections.length === 1 ? x.sections[0].onclick : null}
       <span class="schip-wrap">
-        <button class="schip {x.look.tone}" class:icon={x.form === 'icon'} title={tip(x)} aria-haspopup="dialog" aria-expanded={open === x.key} aria-label={tip(x)} onclick={(e) => (e.stopPropagation(), (open = open === x.key ? null : x.key))}>
+        <button class="schip {x.look.tone}" class:icon={x.form === 'icon'} title={tip(x)} aria-haspopup={own ? undefined : 'dialog'} aria-expanded={own ? undefined : open === x.key} aria-label={tip(x)} onclick={(e) => (e.stopPropagation(), own ? (own(), (open = null)) : (open = open === x.key ? null : x.key))}>
           <span class="si" class:spin={x.look.busy}><Icon size={13} /></span>{#if text(x)}<span class="st">{text(x)}</span>{/if}
           {#if x.look.busy}<i class="sbar"></i>{/if}
         </button>
