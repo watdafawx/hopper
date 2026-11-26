@@ -468,6 +468,20 @@ pub fn swaps_files(c: &Change, old: Option<&str>, new: Option<&str>) -> bool {
     (old.is_some() || new.is_some()) && old.is_none_or(|o| o == was) && new.is_none_or(|n| n == now)
 }
 
+/// The change behind a History row, out of the author's changes of its mod.
+/// A row that swaps one file for another keeps only the changes that fit its
+/// files ([`swaps_files`]); when only one end of the swap is known and more
+/// than one change fits it (an update undone, then done again), nothing is
+/// chosen rather than a neighbour's line. Otherwise the latest wins.
+pub fn row_change<'a>(found: Vec<&'a Change>, swaps: bool, old: Option<&str>, new: Option<&str>) -> Option<&'a Change> {
+    let found: Vec<&Change> = found.into_iter().filter(|c| !swaps || swaps_files(c, old, new)).collect();
+    let files = found.iter().filter(|c| matches!((&c.was, &c.now), (Value::File { .. }, Value::File { .. }))).count();
+    if swaps && (old.is_none() || new.is_none()) && files > 1 {
+        return None;
+    }
+    found.into_iter().max_by_key(|c| c.lamport)
+}
+
 /// The reason line under a History row, only when Hopper made the change for
 /// someone (an answer, a pack update, a put back, a missing file); a change
 /// the player made by hand has none. `None` for those.
@@ -797,6 +811,27 @@ mod tests {
         assert!(!fits(&update, None, None));
         // A change that is not a file for a file is not this filter's business.
         assert!(swaps_files(&change("bob", 4, "cf:1", Value::PackDefault, Value::PackOff, "d", 0), Some("cf:11"), None));
+    }
+
+    #[test]
+    fn a_row_with_one_known_file_picks_nothing_when_two_changes_fit() {
+        // 11 -> 12 (update), 12 -> 11 (undo), 11 -> 13 (use mine), 12 -> 13 (undo again).
+        let update = change("bob", 1, "cf:1", file("cf:11"), file("cf:12"), "a", 0);
+        let undo = change("bob", 2, "cf:1", file("cf:12"), file("cf:11"), "b", 0);
+        let mine = change("bob", 3, "cf:1", file("cf:11"), file("cf:13"), "c", 0);
+        let undo2 = change("bob", 4, "cf:1", file("cf:12"), file("cf:13"), "d", 0);
+        let all = || vec![&update, &undo, &mine, &undo2];
+        let lamport = |c: Option<&Change>| c.map(|c| c.lamport);
+        // Both ends known: exactly its own change.
+        assert_eq!(lamport(row_change(all(), true, Some("cf:11"), Some("cf:13"))), Some(3));
+        assert_eq!(lamport(row_change(all(), true, Some("cf:12"), Some("cf:13"))), Some(4));
+        // One end known and two fit (both end on 13): no line rather than the wrong one.
+        assert_eq!(lamport(row_change(all(), true, None, Some("cf:13"))), None);
+        assert_eq!(lamport(row_change(all(), true, Some("cf:11"), None)), None);
+        // One end known and one fits: that one.
+        assert_eq!(lamport(row_change(vec![&update, &undo], true, None, Some("cf:12"))), Some(1));
+        // A row that is not a swap takes the latest, as before.
+        assert_eq!(lamport(row_change(all(), false, None, None)), Some(4));
     }
 
     #[test]

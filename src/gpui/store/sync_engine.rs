@@ -1079,7 +1079,9 @@ impl Store {
         let bare = file.trim_end_matches(".disabled");
         let is_file = |v: &Value| matches!(v, Value::File { file, .. } if file.trim_end_matches(".disabled").eq_ignore_ascii_case(bare));
         // The jar's name is not the group's file id: find the mod it is.
-        let key = slot.jars.get(&bare.to_lowercase()).map(|(k, _)| k);
+        // The row's jar may be gone and never seen by this run: the jar that
+        // replaced it is the same mod.
+        let key = slot.jars.get(&bare.to_lowercase()).or_else(|| now.and_then(|n| slot.jars.get(&n.trim_end_matches(".disabled").to_lowercase()))).map(|(k, _)| k);
         // A row that swaps one file for another (an update, a roll back) is
         // one change of the mod, not any later one: the files it names tell
         // which, and an Undo or "Use mine" of the same mod must not lend it
@@ -1087,13 +1089,13 @@ impl Store {
         let file_id = |j: &str| slot.jars.get(&j.trim_end_matches(".disabled").to_lowercase()).map(|(_, f)| f.as_str());
         let swaps = matches!(row, Row::Updated | Row::RolledBack | Row::Switched);
         let (old_file, new_file) = (file_id(file), now.and_then(file_id));
-        slot.engine
+        let found: Vec<&synccore::Change> = slot
+            .engine
             .log
             .changes
             .values()
             .map(|(c, _)| c)
             .filter(|c| c.dot.author == author && (key.is_some_and(|k| *k == c.key) || is_file(&c.now) || is_file(&c.was)))
-            .filter(|c| !swaps || synccore::cards::swaps_files(c, old_file, new_file))
             .filter(|c| match row {
                 // A removal that an answer later undid (Keep) still carries
                 // that answer: the mod is back, the row is the removal.
@@ -1102,8 +1104,8 @@ impl Store {
                 Row::TurnedOn => matches!(c.now, Value::File { on: true, .. } | Value::PackDefault),
                 _ => true,
             })
-            .max_by_key(|c| c.lamport)
-            .and_then(|c| synccore::cards::why_line_with(&slot.engine, c, now))
+            .collect();
+        synccore::cards::row_change(found, swaps, old_file, new_file).and_then(|c| synccore::cards::why_line_with(&slot.engine, c, now))
     }
 
     // ---- Differences on this PC ---------------------------------------------
