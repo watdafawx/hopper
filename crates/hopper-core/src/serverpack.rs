@@ -90,6 +90,16 @@ pub struct Annotation {
     pub note: Option<String>,
 }
 
+/// A side the scan of the jar left open or only guessed. Reading the jar
+/// calls a mod "client" when its `displayTest` is `IGNORE_ALL_VERSION` or
+/// `IGNORE_SERVER_VERSION` (`scan::read_mods_toml`), but server-side mods
+/// use those too, so that "client" gives way to a site saying the server
+/// needs the mod (Async Locator Refined: "Server" on CurseForge, and a
+/// `displayTest`, so it was kept off the server as client-only).
+fn weak_side(side: &str) -> bool {
+    matches!(side, "" | "client")
+}
+
 /// Fills CurseForge identity from the instance and marks the pack mods the
 /// author keeps off servers. Authoritative signal: the pack's own server pack.
 /// Fallback: the mod's "Client"-only tag on CurseForge. Mods the user added
@@ -155,7 +165,7 @@ fn annotate_with(
     let asks = |a: &crate::instances::Addon| !a.from_pack || (matcher.is_none() && a.env.is_empty());
     let unknown: Vec<std::path::PathBuf> = mods
         .iter()
-        .filter(|m| m.side.is_empty() && inst.addon_by_file(&m.file_name).is_none_or(asks))
+        .filter(|m| weak_side(&m.side) && inst.addon_by_file(&m.file_name).is_none_or(asks))
         .map(|m| inst.mods_dir().join(&m.file_name))
         .collect();
     // Sides from the authors' tags (Modrinth's, CurseForge's), sometimes
@@ -164,8 +174,11 @@ fn annotate_with(
     let mut guessed: HashMap<String, (String, &str)> = HashMap::new();
     let sides = sides_of(&unknown);
     for m in mods.iter_mut() {
-        if m.side.is_empty()
+        // A jar's own "client" is only a guess: only a site saying the
+        // server needs it overrides that.
+        if weak_side(&m.side)
             && let Some(s) = sides.get(&m.file_name)
+            && (m.side.is_empty() || matches!(s.as_str(), "server" | "both"))
         {
             if inst.addon_by_file(&m.file_name).is_some() {
                 guessed.insert(m.file_name.clone(), (s.clone(), "Client-only on Modrinth"));
@@ -238,7 +251,7 @@ fn annotate_with(
         }
         // The site says the server needs it: that outranks the built-in
         // client-only list. A "client" tag stays a won't-sync (below).
-        if m.side.is_empty() && matches!(a.env.as_str(), "both" | "server") {
+        if weak_side(&m.side) && matches!(a.env.as_str(), "both" | "server") {
             m.side = a.env.clone();
         }
         if let Some((side, why)) = guessed.remove(&m.file_name) {
@@ -731,6 +744,73 @@ mod tests {
         let mut mods = fresh();
         annotate_with(&mut mods, &inst, &HashSet::new(), &gone, &modrinth, &no_slugs, &|_| None);
         assert!(mods.iter().all(|m| m.wont_sync.is_none()));
+    }
+
+    /// Async Locator Refined: CurseForge's file says "Server", and the jar
+    /// has a `displayTest`, which the scan reads as client-only. The mod the
+    /// player added must still be a row to Add (and show in the chip), not
+    /// one kept off the server.
+    #[test]
+    fn a_server_only_mod_the_player_added_is_one_to_sync() {
+        use crate::instances::{Addon, Instance, PackRef};
+        use crate::model::{DiffStatus, ModInfo};
+        use crate::rigsync::{Group, diff_mods, join_check, to_add};
+        let mut inst = Instance::default();
+        inst.pack = Some(PackRef { project_id: 1, file_id: 2, server_pack_file_id: 3, ..Default::default() });
+        let addon = |id: u64, file: &str, env: &str| Addon {
+            project_id: id,
+            file_name: file.into(),
+            from_pack: false,
+            enabled: true,
+            env: env.into(),
+            class_id: cf::CLASS_MODS,
+            ..Default::default()
+        };
+        inst.addons = vec![
+            addon(30, "async-locator-refined.jar", "server"),
+            addon(31, "mr-says-server.jar", ""),
+            addon(32, "really-client.jar", ""),
+            addon(33, "cf-says-client.jar", "client"),
+        ];
+        // As the scan hands them over: every jar has a displayTest.
+        let fresh = || -> Vec<ModInfo> {
+            ["async-locator-refined.jar", "mr-says-server.jar", "really-client.jar", "cf-says-client.jar"]
+                .map(|f| ModInfo { file_name: f.into(), side: "client".into(), ..Default::default() })
+                .to_vec()
+        };
+        let pack = |_: &PackRef| -> anyhow::Result<ServerPackSet> { Ok(ServerPackSet { jars: ["other.jar".to_string()].into(), ..Default::default() }) };
+        let modrinth = |paths: &[PathBuf]| -> HashMap<String, String> {
+            paths
+                .iter()
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .filter_map(|n| match n.as_str() {
+                    "mr-says-server.jar" => Some((n, "server".to_string())),
+                    "really-client.jar" | "cf-says-client.jar" => Some((n, "client".to_string())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let no_slugs = |_: &[(String, String)]| HashMap::new();
+        let no_jar = |_: &std::path::Path| -> Option<String> { None };
+        let mut mods = fresh();
+        annotate_with(&mut mods, &inst, &HashSet::new(), &pack, &modrinth, &no_slugs, &no_jar);
+        let diff = diff_mods(&mods, &[]);
+        let group = |file: &str| diff.iter().find(|d| d.client.as_ref().is_some_and(|c| c.file_name == file)).map(Group::of);
+        // The site that says the server needs it outranks the jar's guess.
+        assert_eq!(mods[0].side, "server");
+        assert_eq!(group("async-locator-refined.jar"), Some(Group::Add));
+        assert_eq!(mods[1].side, "server");
+        assert_eq!(group("mr-says-server.jar"), Some(Group::Add));
+        // Nobody says otherwise, or a site says client: it stays off the server.
+        assert_eq!(group("really-client.jar"), Some(Group::KeptOff));
+        assert_eq!(group("cf-says-client.jar"), Some(Group::KeptOff));
+        // What the chip, the panel's count and "Add to server" are worked out from.
+        assert!(diff.iter().filter(|d| d.status == DiffStatus::OnlyClient).count() == 4);
+        let check = join_check(&diff, &HashSet::new(), None, None);
+        assert_eq!(check.only_pack.len(), 2, "{check:?}");
+        assert!(check.only_pack.iter().any(|n| n.contains("async-locator-refined")), "{check:?}");
+        let add: Vec<String> = to_add(&diff, &HashSet::new()).iter().filter_map(|d| d.client.as_ref().map(|c| c.file_name.clone())).collect();
+        assert_eq!(add, ["async-locator-refined.jar", "mr-says-server.jar"]);
     }
 
     #[test]
