@@ -480,7 +480,7 @@ All under `/api/v1`. Browsers use the session cookie and must send
 | `POST /auth/password` `{current, new}` | your own password |
 | `GET` / `POST /users` `{name, password, role, servers}`, `PUT` / `DELETE /users/{id}`, `POST /users/{id}/reset-2fa` | people (owner); roles `admin`, `operator`, `viewer` |
 | `GET` / `POST /webhooks` `{name, url, events, servers}`, `PUT` / `DELETE /webhooks/{id}`, `POST /webhooks/{id}/test` | webhooks (owner) |
-| `GET /servers/{id}/mods/list`, `PUT .../mods/meta`, `POST .../mods/identify` (job), `.../toggle` `{file, enabled}`, `.../remove` `{file}`, `GET .../mods/search?q=&source=`, `POST .../mods/install` `{project_id}` (job), `GET .../mods/updates`, `POST .../mods/update` `{project_ids}` (job) | the server as an instance |
+| `GET /servers/{id}/mods/list`, `PUT .../mods/meta`, `POST .../mods/identify` (job), `.../toggle` `{file, enabled}`, `.../remove` `{file}`, `GET .../mods/search?q=&source=`, `POST .../mods/install` `{project_id}` (job), `GET .../mods/updates` (`?pack=1` adds the pack's own mods, marked `pack`), `POST .../mods/update` `{project_ids, pack?}` (job; `pack: true` updates one pack mod, named alone) | the server as an instance |
 | `PUT /settings/curseforge` `{key}` | CurseForge key (owner) |
 | `GET /fs/{id}/history?path=`, `GET /fs/{id}/diff?path=&version=` | earlier versions, line diff against now |
 | `GET /fs/{id}/search?q=&path=[&regex=1]` → `{hits: [{path, line, text}], more}` | text in files and names |

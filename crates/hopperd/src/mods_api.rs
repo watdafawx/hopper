@@ -5,8 +5,9 @@
 //!
 //! Pack mods stay with the pack: jars that were there when the server was
 //! first identified (on a server made from a server pack) are marked as the
-//! pack's and only change through "Update from server pack". Single-mod
-//! updates are for mods added on top.
+//! pack's: Update all and the update count are for mods added on top, and
+//! a pack mod updates only when the owner asks for that one mod (the
+//! server then differs from players' copies until the pack catches up).
 
 use crate::api::{ApiResult, bad, not_found, require};
 use crate::servers::Entry;
@@ -393,7 +394,10 @@ async fn list(
                 "src_trusted": a.source.as_ref().map(hopper_core::sources::trusted), "src_publisher": a.source.as_ref().map(|s| s.publisher.clone()),
                 "from_pack": no_list || pack_mod(&pack, a), "page": a.page, "author": a.author,
                 "locked": a.locked, "file_id": id_str(a.file_id), "release_type": a.release_type,
-                "update": ups.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).cloned(),
+                // A mod the pack ships gets its offer as `pack_update`
+                // (its row's own Update), never `update` (Update all).
+                "update": ups.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).filter(|u| !pack_offer(u)).cloned(),
+                "pack_update": ups.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).filter(|u| pack_offer(u)).cloned(),
                 "date_added": a.date_added, "file_date": a.file_date,
                 "categories": cats.get(&a.file_name.to_lowercase()).cloned().unwrap_or_default(),
                 "requires": a.requires.iter().map(|r| id_str(*r)).collect::<Vec<_>>(),
@@ -803,23 +807,49 @@ async fn for_ids(
 }
 
 /// A mod the paired pack ships: the pack sets its version (updating it
-/// alone would leave the server out of step with players' copies), so it
-/// gets no update of its own; a pack update brings it. Without the pack's
-/// list, the marks Hopper made.
+/// alone leaves the server out of step with players' copies), so Update
+/// all never touches it and it isn't counted with the other updates; only
+/// the owner asking for that one mod updates it. Without the pack's list,
+/// the marks Hopper made.
 fn pack_mod(pack: &Option<PackMods>, a: &Addon) -> bool {
     pack.as_ref().map_or(a.from_pack, |p| p.has(a))
 }
 
+/// An offer from the last check for a mod the pack ships.
+pub(crate) fn pack_offer(u: &Value) -> bool {
+    u["pack"].as_bool() == Some(true)
+}
+
+/// The last check's offers without the pack's own mods: the ones Update
+/// all, Browse and a crash card's "Update X" may act on.
+pub(crate) fn own_updates(id: &str) -> Option<Vec<Value>> {
+    cached_updates(id).map(|mut v| {
+        v.retain(|u| !pack_offer(u));
+        v
+    })
+}
+
 /// The updates worth offering, each with the entry it was checked for
-/// (by file: a mod can be in twice): mods added on top of the pack whose
-/// jar isn't already the offered file.
-fn offered<'a>(inst: &'a Instance, pack: &Option<PackMods>, ups: &'a [install::Update]) -> Vec<(&'a install::Update, &'a Addon)> {
+/// (by file: a mod can be in twice) and whether the pack ships it: every
+/// mod whose jar isn't already the offered file.
+fn offered<'a>(inst: &'a Instance, pack: &Option<PackMods>, ups: &'a [install::Update]) -> Vec<(&'a install::Update, &'a Addon, bool)> {
     ups.iter()
         .filter_map(|u| {
             let a = inst.addons.iter().find(|a| a.file_name == u.from).or_else(|| inst.addons.iter().find(|a| a.project_id == u.project_id))?;
-            (!pack_mod(pack, a) && !u.same_file()).then_some((u, a))
+            (!u.same_file()).then_some((u, a, pack_mod(pack, a)))
         })
         .collect()
+}
+
+/// The pack's own mods asked for by an update request: only one, named on
+/// its own with `pack: true`, so Update all (any list of ids) never
+/// changes one.
+fn pack_allowed(b: &UpdateBody) -> anyhow::Result<Option<u64>> {
+    if !b.pack {
+        return Ok(None);
+    }
+    anyhow::ensure!(b.project_ids.len() == 1, "Mods the pack ships update one at a time.");
+    Ok(b.project_ids.first().copied())
 }
 
 async fn updates(
@@ -831,6 +861,10 @@ async fn updates(
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
     let force = q.get("force").is_some_and(|f| f == "1");
+    // `pack=1`: the pack's own mods too, marked `pack`. A client that
+    // doesn't ask (an older desktop) gets the list it always had, so its
+    // counts and Update all stay as they were.
+    let with_pack = q.get("pack").is_some_and(|f| f == "1");
     if !force && let Some(v) = cached_updates(&id) {
         let known = archived_cache().get(&id).filter(|(at, _)| now_secs().saturating_sub(*at) < UPDATES_FOR).map(|(_, a)| a.clone());
         let archived = match known {
@@ -845,6 +879,7 @@ async fn updates(
                 a
             }
         };
+        let v = shown_offers(v, with_pack);
         return Ok(Json(json!({ "updates": v, "archived": archived, "cached": true, "curseforge": cf::api_key().is_some(), "github_paused": hopper_core::sources::http::pause().map(|p| p.paused_note()) })));
     }
     let (v, archived) = blocking(move || {
@@ -860,7 +895,7 @@ async fn updates(
         let mut names: HashMap<u64, Option<String>> = HashMap::new();
         let list = offered(&inst, &pack, &ups)
             .into_iter()
-            .map(|(u, a)| {
+            .map(|(u, a, pack)| {
                 let (from, to) = u.versions();
                 let risk = install::Risk::of(u);
                 let (mut issues, missing) = install::load_problems(&inst, &u.file);
@@ -894,6 +929,9 @@ async fn updates(
                     // From GitHub or a link: its file changed under the same
                     // release. Shown, never installed by Update all.
                     "changed": u.file.source.as_ref().is_some_and(|s| s.changed),
+                    // The pack ships this mod: offered on its own row only,
+                    // never in Update all or the update count.
+                    "pack": pack,
                 })
             })
             .collect::<Vec<_>>();
@@ -902,13 +940,54 @@ async fn updates(
     .await?;
     keep_updates(&id, v.clone());
     archived_cache().insert(id.clone(), (now_secs(), archived.clone()));
+    let v = shown_offers(v, with_pack);
     Ok(Json(json!({ "updates": v, "archived": archived, "cached": false, "curseforge": cf::api_key().is_some(), "github_paused": hopper_core::sources::http::pause().map(|p| p.paused_note()) })))
+}
+
+/// Whether an update request may change this entry: a mod added on top,
+/// or the one pack mod the owner named on its own.
+fn may_change(pack: &Option<PackMods>, a: &Addon, allow_pack: Option<u64>) -> bool {
+    !pack_mod(pack, a) || allow_pack == Some(a.project_id)
+}
+
+/// The asked-for mods an update request changes, each with the entry it's
+/// for and the file the last check offered (`None`: not in that check, so
+/// it's checked again). The pack's own mods are left out unless allowed.
+fn wanted<'a>(
+    inst: &'a Instance,
+    pack: &Option<PackMods>,
+    cached: &[Value],
+    ids: &[u64],
+    allow_pack: Option<u64>,
+) -> Vec<(u64, &'a Addon, Option<u64>)> {
+    ids.iter()
+        .filter_map(|pid| {
+            let offer = cached.iter().find(|u| u["project_id"].as_str() == Some(id_str(*pid).as_str()));
+            let a = offer
+                .and_then(|u| u["from_file"].as_str())
+                .and_then(|f| inst.addons.iter().find(|a| a.file_name == f))
+                .or_else(|| inst.addons.iter().find(|a| a.project_id == *pid))?;
+            may_change(pack, a, allow_pack).then(|| (*pid, a, offer.and_then(|u| u["file_id"].as_str()?.parse::<u64>().ok())))
+        })
+        .collect()
+}
+
+/// The offers a reply shows: the pack's own mods only when asked for.
+fn shown_offers(mut v: Vec<Value>, with_pack: bool) -> Vec<Value> {
+    if !with_pack {
+        v.retain(|u| !pack_offer(u));
+    }
+    v
 }
 
 #[derive(Deserialize)]
 struct UpdateBody {
     #[serde(deserialize_with = "de_ids")]
     project_ids: Vec<u64>,
+    /// The owner asked for this one mod the pack ships (its row's Update,
+    /// after the "server will differ" confirm). Only with exactly one id.
+    #[serde(default)]
+    pack: bool,
 }
 
 async fn update(
@@ -919,6 +998,7 @@ async fn update(
     Json(b): Json<UpdateBody>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
+    let allow_pack = pack_allowed(&b).map_err(|e| bad(format!("{e:#}")))?;
     let sid = id.clone();
     let by = changer(&app, &headers, &method);
     let job = crate::pack_api::spawn(&app, format!("Updating {}'s mods", e.name), move |job| {
@@ -931,21 +1011,17 @@ async fn update(
         let cached = cached_updates(&sid).unwrap_or_default();
         let mut ups: Vec<install::Update> = Vec::new();
         let mut unknown = Vec::new();
-        for pid in &b.project_ids {
-            let offer = cached.iter().find(|u| u["project_id"].as_str() == Some(id_str(*pid).as_str()));
-            let a = offer
-                .and_then(|u| u["from_file"].as_str())
-                .and_then(|f| inst.addons.iter().find(|a| a.file_name == f))
-                .or_else(|| inst.addons.iter().find(|a| a.project_id == *pid));
-            let Some(a) = a.filter(|a| !pack_mod(&pack, a)) else { continue };
-            match offer.and_then(|u| u["file_id"].as_str()?.parse::<u64>().ok()).and_then(|f| hopper_core::source::file(*pid, f).ok()) {
-                Some(file) => ups.push(install::Update { project_id: *pid, name: a.name.clone(), from: a.file_name.clone(), file }),
-                None => unknown.push(*pid),
+        for (pid, a, file_id) in wanted(&inst, &pack, &cached, &b.project_ids, allow_pack) {
+            match file_id.and_then(|f| hopper_core::source::file(pid, f).ok()) {
+                Some(file) => ups.push(install::Update { project_id: pid, name: a.name.clone(), from: a.file_name.clone(), file }),
+                None => unknown.push(pid),
             }
         }
         if !unknown.is_empty() {
             ups.extend(install::check_updates(&inst, hopper_core::sources::Check::Auto)?.into_iter().filter(|u| {
-                unknown.contains(&u.project_id) && !u.same_file() && inst.addons.iter().any(|a| a.file_name == u.from && !pack_mod(&pack, a))
+                unknown.contains(&u.project_id)
+                    && !u.same_file()
+                    && inst.addons.iter().any(|a| a.file_name == u.from && may_change(&pack, a, allow_pack))
             }));
         }
         // Website-only files go to the download list (not here).
@@ -1051,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn only_mods_added_on_top_of_the_pack_get_updates() {
+    fn pack_mods_are_offered_marked_as_the_packs() {
         use hopper_core::cf::File;
         use hopper_core::install::Update;
         use hopper_core::instances::{Addon, Instance};
@@ -1065,24 +1141,80 @@ mod tests {
             // Hopper's note of the file is old, the jar isn't.
             up(4, "same-3.0.jar", "same-3.0.jar"),
         ];
-        let ids = |o: Vec<(&Update, &Addon)>| o.iter().map(|(u, _)| u.project_id).collect::<Vec<_>>();
+        let ids = |o: Vec<(&Update, &Addon, bool)>| o.iter().map(|(u, _, pack)| (u.project_id, *pack)).collect::<Vec<_>>();
         // A server made from a server pack: nothing marked, the manifest lists 1 and 2.
         let mut inst = Instance {
             addons: vec![a(1, "pack-1.0.jar", false), a(2, "pack2-2.0.jar", false), a(3, "mine-1.0.jar", false), a(4, "same-3.0.jar", false)],
             ..Default::default()
         };
-        assert_eq!(ids(super::offered(&inst, &Some(PackMods::Listed([1, 2].into_iter().collect())), &ups)), [3]);
+        assert_eq!(ids(super::offered(&inst, &Some(PackMods::Listed([1, 2].into_iter().collect())), &ups)), [(1, true), (2, true), (3, false)]);
         // A pack mod switched to another version is still the pack's.
         let switched = Instance { addons: vec![a(1, "pack-0.9.jar", false)], ..Default::default() };
         let ups_sw = [up(1, "pack-0.9.jar", "pack-1.1.jar")];
-        assert!(super::offered(&switched, &Some(PackMods::Listed([1].into_iter().collect())), &ups_sw).is_empty());
+        assert_eq!(ids(super::offered(&switched, &Some(PackMods::Listed([1].into_iter().collect())), &ups_sw)), [(1, true)]);
         // Marked when Hopper installed the pack.
         inst.addons[0].from_pack = true;
         inst.addons[1].from_pack = true;
-        assert_eq!(ids(super::offered(&inst, &Some(PackMods::Marked), &ups)), [3]);
+        assert_eq!(ids(super::offered(&inst, &Some(PackMods::Marked), &ups)), [(1, true), (2, true), (3, false)]);
         // No pack list and no marks: every mod is the player's.
         inst.addons[0].from_pack = false;
         inst.addons[1].from_pack = false;
-        assert_eq!(ids(super::offered(&inst, &None, &ups)), [1, 2, 3]);
+        assert_eq!(ids(super::offered(&inst, &None, &ups)), [(1, false), (2, false), (3, false)]);
+    }
+
+    /// The last check as the panel keeps it: mods 1 and 2 are the pack's.
+    fn checked() -> (hopper_core::instances::Instance, Option<hopper_core::modpack::PackMods>, Vec<serde_json::Value>) {
+        use hopper_core::instances::{Addon, Instance};
+        use hopper_core::modpack::PackMods;
+        let a = |id: u64, f: &str| Addon { project_id: id, file_name: f.into(), ..Default::default() };
+        let inst = Instance { addons: vec![a(1, "pack-1.0.jar"), a(2, "pack2-2.0.jar"), a(3, "mine-1.0.jar")], ..Default::default() };
+        let pack = Some(PackMods::Listed([1, 2].into_iter().collect()));
+        let offer = |id: u64, from: &str, pack: bool| serde_json::json!({ "project_id": id.to_string(), "from_file": from, "file_id": (id * 10).to_string(), "pack": pack });
+        (inst, pack, vec![offer(1, "pack-1.0.jar", true), offer(2, "pack2-2.0.jar", true), offer(3, "mine-1.0.jar", false)])
+    }
+
+    fn body(ids: &[u64], pack: bool) -> super::UpdateBody {
+        super::UpdateBody { project_ids: ids.to_vec(), pack }
+    }
+
+    fn picked(b: &super::UpdateBody) -> Vec<(u64, Option<u64>)> {
+        let (inst, pack, cached) = checked();
+        let allow = super::pack_allowed(b).unwrap();
+        super::wanted(&inst, &pack, &cached, &b.project_ids, allow).into_iter().map(|(p, _, f)| (p, f)).collect()
+    }
+
+    #[test]
+    fn update_all_never_touches_pack_mods() {
+        // What Update all sends: every offered id, the pack's too.
+        assert_eq!(picked(&body(&[1, 2, 3], false)), [(3, Some(30))]);
+        // A pack mod named on its own without `pack` is still left alone.
+        assert!(picked(&body(&[1], false)).is_empty());
+        // `pack` with several ids is refused, so it can't become Update all.
+        assert!(super::pack_allowed(&body(&[1, 3], true)).is_err());
+        assert!(super::pack_allowed(&body(&[1, 2], true)).is_err());
+        assert!(super::pack_allowed(&body(&[], true)).is_err());
+    }
+
+    #[test]
+    fn one_pack_mod_updates_when_asked_for_on_its_own() {
+        assert_eq!(picked(&body(&[1], true)), [(1, Some(10))]);
+        // A mod added on top updates the same either way.
+        assert_eq!(picked(&body(&[3], true)), [(3, Some(30))]);
+        // Only the named one: the other pack mod stays the pack's.
+        let (inst, pack, _) = checked();
+        let a2 = &inst.addons[1];
+        assert!(!super::may_change(&pack, a2, Some(1)));
+        assert!(super::may_change(&pack, a2, Some(2)));
+        // A body from an older client (no `pack`) reads as false.
+        let old: super::UpdateBody = serde_json::from_str(r#"{"project_ids":["1","3"]}"#).unwrap();
+        assert!(!old.pack);
+    }
+
+    #[test]
+    fn older_clients_get_no_pack_offers() {
+        let (_, _, cached) = checked();
+        let ids = |v: Vec<serde_json::Value>| v.iter().map(|u| u["project_id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(super::shown_offers(cached.clone(), false)), ["3"]);
+        assert_eq!(ids(super::shown_offers(cached, true)), ["1", "2", "3"]);
     }
 }
