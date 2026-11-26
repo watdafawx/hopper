@@ -1,7 +1,7 @@
 //! Undo: one History row, or one friend's changes at once (design §9).
 
 use super::*;
-use hopper_core::synccore::Value;
+use hopper_core::synccore::{Key, Status, Value, Why, cards};
 
 /// Covers W15. A removes mod 2; B undoes it from History. Mod 2 is back on
 /// every PC, named B, and a later change by C still reaches A.
@@ -84,4 +84,65 @@ fn c3_an_undo_followed_by_another_change_still_arrives() {
     g.settle();
     assert_eq!(g.value("A", &m(1)), f(11));
     assert_eq!(g.value("B", &m(2)), f(22));
+}
+
+/// Two friends. A updates mod 1; B undoes that update from History (the
+/// app's save only knows "undo"). It travels like any change: A goes back
+/// to B's file with no card, and A's History says B put it back, as an
+/// undo of A's own update. B's PC never reads as differing.
+#[test]
+fn a_history_undo_of_an_update_reaches_the_friend() {
+    let mut g = Group::with(&["A", "B"], &base());
+    g.edit("A", m(1), f(12));
+    g.settle();
+    assert_eq!(g.value("B", &m(1)), f(12));
+    g.history_undo("B", &m(1), f(11));
+    g.settle();
+    assert_eq!(g.value("A", &m(1)), f(11));
+    assert!(g.reviews("A").is_empty());
+    assert_eq!(g.status("B"), Status::InSync);
+    assert_eq!(g.status("A"), Status::InSync);
+    let last = g.engine("A").last_change(&m(1)).cloned().unwrap();
+    assert_eq!(last.name, "B");
+    assert!(matches!(&last.why, Why::Undo { of } if of.author == "A"));
+    assert_eq!(cards::why_line(g.engine("A"), &last).as_deref(), Some("B went back to the earlier version."));
+    assert_eq!(g.history("A").last().map(|h| h.says.clone()).as_deref(), Some("Put back by B"));
+}
+
+/// The same for a mod from a GitHub link ("src:" key): A already has the
+/// link's mod, so B going back to its older file is not a new source to
+/// allow; it lands on A.
+#[test]
+fn a_history_undo_of_a_link_mod_lands_without_asking() {
+    let key = Key::Mod("src:github:fox/tweaks".into());
+    let file = |n: u64| Value::File { file: format!("link:{n}"), on: true };
+    let mut mods = base();
+    mods.push((key.clone(), file(142)));
+    let mut g = Group::with(&["A", "B"], &mods);
+    g.edit("A", key.clone(), file(143));
+    g.settle();
+    assert_eq!(g.value("B", &key), file(143));
+    g.history_undo("B", &key, file(142));
+    g.settle();
+    assert!(g.reviews("A").is_empty(), "{:?}", g.reviews("A"));
+    assert_eq!(g.value("A", &key), file(142));
+}
+
+/// B swapped mod 2 for an older file outside the sync (it reads "This PC
+/// differs"). "Use mine for everyone" makes B's file the group's: A gets it,
+/// B is in step, and A's History says why.
+#[test]
+fn use_mine_for_everyone_turns_another_file_into_the_groups() {
+    let mut g = Group::with(&["A", "B"], &base());
+    g.outside("B", m(2), f(20));
+    g.settle();
+    assert_eq!(g.status("B"), Status::Differs(1));
+    assert_eq!(g.value("A", &m(2)), f(21));
+    g.use_mine("B");
+    g.settle();
+    assert_eq!(g.value("A", &m(2)), f(20));
+    assert_eq!(g.status("B"), Status::InSync);
+    assert_eq!(g.status("A"), Status::InSync);
+    let last = g.engine("A").last_change(&m(2)).cloned().unwrap();
+    assert_eq!(cards::why_line(g.engine("A"), &last).as_deref(), Some("B had another version of it and chose Use mine for everyone."));
 }

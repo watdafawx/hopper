@@ -400,6 +400,13 @@ impl Group {
             pc.make(key, &last.was, Why::Undo { of: last.dot }, &batch, at);
         }
     }
+    /// History's Undo as the app makes it: the instance's save only knows
+    /// "undo" and what the mod is now; the engine finds what it undoes.
+    pub fn history_undo(&mut self, who: &str, key: &Key, back_to: Value) {
+        let at = self.contact(who);
+        let batch = self.new_batch(who);
+        self.pc_mut(who).make(key, &back_to, Why::undo_of_last(), &batch, at);
+    }
     /// "Put back `member`'s changes" since relay time `since`.
     pub fn undo_member(&mut self, who: &str, member: &str, since: u64) {
         let at = self.contact(who);
@@ -452,6 +459,17 @@ impl Group {
         let pc = self.pc_mut(who);
         let drifts = pc.engine.drift(&pc.snapshot());
         for e in local::share_edits(&drifts, &batch) {
+            pc.make(&e.key, &e.now, e.why, &e.batch, at);
+        }
+    }
+    /// "Use mine for everyone": the other files on this PC's disk become this
+    /// player's changes.
+    pub fn use_mine(&mut self, who: &str) {
+        let at = self.contact(who);
+        let batch = self.new_batch(who);
+        let pc = self.pc_mut(who);
+        let drifts = pc.engine.drift(&pc.snapshot());
+        for e in local::mine_edits(&drifts, &batch) {
             pc.make(&e.key, &e.now, e.why, &e.batch, at);
         }
     }

@@ -153,7 +153,7 @@ fn removals_in_batch(change: &Change, ctx: &GateCtx) -> usize {
 
 /// GitHub files ("src:<file>"), with or without a folder prefix such as
 /// "shader:" or "rp:".
-fn is_link_source(key: &str) -> bool {
+pub(crate) fn is_link_source(key: &str) -> bool {
     key.starts_with("src:") || key.split(':').skip(1).any(|p| p == "src")
 }
 

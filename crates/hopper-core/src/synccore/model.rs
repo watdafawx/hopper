@@ -114,6 +114,16 @@ pub enum Why {
     SharedDrift,
 }
 
+impl Why {
+    /// History's Undo, as the instance's save sees it: what it undoes is the
+    /// last record of the key, which only the engine knows, so
+    /// `Engine::record` fills it in (an undo of nothing recorded is the
+    /// player's own change).
+    pub fn undo_of_last() -> Why {
+        Why::Undo { of: Dot { author: String::new(), n: 0 } }
+    }
+}
+
 /// One change, as it travels (design §2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Change {

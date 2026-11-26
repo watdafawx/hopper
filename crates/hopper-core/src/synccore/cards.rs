@@ -415,6 +415,10 @@ pub struct DriftRow {
     pub added: bool,
     pub put_back: &'static str,
     pub share: &'static str,
+    /// "Use mine for everyone": only for a mod that is here as another file
+    /// than the group's (an update undone outside the sync, a version put in
+    /// by hand). Its file becomes everyone's.
+    pub mine: Option<&'static str>,
 }
 
 /// The rows of the copy's differences, in the order of the mods' keys.
@@ -440,7 +444,8 @@ pub fn drift_row(d: Drift) -> DriftRow {
         (Value::File { .. }, Value::File { .. }) => ("another file here than the group's".to_string(), "other file", false),
         _ => ("differs from the group's".to_string(), "differs", false),
     };
-    DriftRow { file, reason, short, added, put_back: if added { "Take it out" } else { "Put back" }, share: if added { "Add for everyone" } else { "Remove for everyone" }, drift: d }
+    let mine = super::local::other_file(&d).then_some("Use mine for everyone");
+    DriftRow { file, reason, short, added, put_back: if added { "Take it out" } else { "Put back" }, share: if added { "Add for everyone" } else { "Remove for everyone" }, mine, drift: d }
 }
 
 /// "Remove Jade for everyone" / "Add it for everyone", the row's second
@@ -455,6 +460,13 @@ pub fn share_label(row: &DriftRow, name: &str) -> String {
 /// someone (an answer, a pack update, a put back, a missing file); a change
 /// the player made by hand has none. `None` for those.
 pub fn why_line(e: &Engine, c: &Change) -> Option<String> {
+    why_line_with(e, c, None)
+}
+
+/// [`why_line`] with the name of the file the row's mod is on now (History
+/// knows it; a CurseForge or Modrinth record only has the file's id), so an
+/// undone update can say the version it went back to.
+pub fn why_line_with(e: &Engine, c: &Change, now_file: Option<&str>) -> Option<String> {
     let name = |ch: &Change| if ch.dot.author == e.me { "You".to_string() } else if ch.name.is_empty() { "Someone".to_string() } else { ch.name.clone() };
     let whose = |ch: &Change| if ch.dot.author == e.me { "your".to_string() } else { format!("{}'s", name(ch)) };
     match &c.why {
@@ -497,11 +509,24 @@ pub fn why_line(e: &Engine, c: &Change) -> Option<String> {
         }),
         Why::Undo { of } => {
             let of = e.log.changes.get(of).map(|(o, _)| o);
+            // An update undone: say the version it went back to.
+            if let (Value::File { file: was, .. }, Value::File { file: now, on: true }) = (&c.was, &c.now)
+                && was != now
+            {
+                let named = now_file.map(str::to_string).or_else(|| super::link::LinkRef::parse(now).map(|l| l.file_name));
+                return Some(match named.map(|f| crate::undo::version_of(&f)).filter(|v| !v.is_empty()) {
+                    Some(v) => format!("{} went back to {v}.", name(c)),
+                    None => format!("{} went back to the earlier version.", name(c)),
+                });
+            }
             Some(match of {
                 Some(o) if o.dot.author == c.dot.author => "It undoes an earlier change of the same person.".to_string(),
                 Some(o) => format!("It undoes {} change.", whose(o)),
                 None => "It undoes an earlier change.".to_string(),
             })
+        }
+        Why::SharedDrift if matches!((&c.was, &c.now), (Value::File { .. }, Value::File { on: true, .. })) => {
+            Some(format!("{} had another version of it and chose Use mine for everyone.", name(c)))
         }
         Why::SharedDrift => Some(if matches!(c.now, Value::Gone | Value::PackRemoved) {
             format!("It was missing from {} mods folder, and {} chose Remove for everyone.", whose(c), name(c))
@@ -718,6 +743,26 @@ mod tests {
         assert_eq!((added.put_back, added.share, added.file.as_str()), ("Take it out", "Add for everyone", "j.jar"));
         assert_eq!(share_label(&added, "Jade"), "Add Jade for everyone");
         assert_eq!(share_label(&gone, "Jade"), "Remove Jade for everyone");
+        // Only another file that is on gets "Use mine for everyone".
+        let other = drift_row(Drift { key: Key::Mod("cf:3".into()), expected: file("c-2.jar"), found: file("c-1.jar") });
+        assert_eq!((other.short, other.put_back, other.share, other.mine), ("other file", "Put back", "Remove for everyone", Some("Use mine for everyone")));
+        assert_eq!((gone.mine, off.mine, added.mine), (None, None, None));
+    }
+
+    #[test]
+    fn an_undone_update_says_the_version_it_went_back_to() {
+        let e = Engine::new("c", "me", "Me");
+        let undo = Change { why: Why::Undo { of: Dot { author: "me".into(), n: 1 } }, ..change("bob", 2, "cf:1", file("cf:12"), file("cf:11"), "b", 0) };
+        assert_eq!(why_line_with(&e, &undo, Some("foxs-tweaks-1.42.1.jar")).as_deref(), Some("bob went back to 1.42.1."));
+        assert_eq!(why_line(&e, &undo).as_deref(), Some("bob went back to the earlier version."));
+        // A link mod's record carries its file's name.
+        let src = crate::sources::ModSource { kind: crate::sources::Kind::GitHub, url: "fox/tweaks".into(), seen: "v1.42.1".into(), ..Default::default() };
+        let link = super::super::link::LinkRef::of(&src, "foxs-tweaks-1.42.1.jar").id();
+        let undo = Change { now: Value::File { file: link, on: true }, ..undo };
+        assert_eq!(why_line(&e, &undo).as_deref(), Some("bob went back to 1.42.1."));
+        // Use mine for everyone says so.
+        let mine = Change { why: Why::SharedDrift, ..change("bob", 3, "cf:1", file("cf:12"), file("cf:11"), "c", 0) };
+        assert_eq!(why_line(&e, &mine).as_deref(), Some("bob had another version of it and chose Use mine for everyone."));
     }
 
     #[test]

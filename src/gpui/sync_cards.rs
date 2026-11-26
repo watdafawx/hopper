@@ -40,6 +40,9 @@ pub struct Env {
     /// A row of "This PC differs": put it back, or share it with everyone.
     pub put_back: Rc<dyn Fn(&DriftRow, &mut Window, &mut App)>,
     pub share: Rc<dyn Fn(&DriftRow, &mut Window, &mut App)>,
+    /// "Use mine for everyone": this PC's other file of the mod becomes the
+    /// group's.
+    pub use_mine: Rc<dyn Fn(&DriftRow, &mut Window, &mut App)>,
 }
 
 /// The chip's popover is 27.5 rem wide (`group_pack`): when the window leaves
@@ -262,19 +265,22 @@ fn drift_row(row: DriftRow, ix: usize, env: &Env, narrow: bool, window: &mut Win
         let open = open_confirm.clone();
         Button::new(("drift-share", ix)).small().ghost().label(row.share).on_click(move |_, _, cx| open(cx)).into_any_element()
     };
-    let head = h_flex()
-        .w_full()
-        .gap_2()
-        .items_center()
-        .child(
-            v_flex()
-                .min_w_0()
-                .flex_1()
-                .child(h_flex().min_w_0().text_sm().child(link(env, format!("drift-mod:{ix}").into(), &info, cx)))
-                .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(row.reason.clone())),
-        )
-        .child(put)
-        .child(share);
+    let what = v_flex()
+        .min_w_0()
+        .flex_1()
+        .child(h_flex().min_w_0().text_sm().child(link(env, format!("drift-mod:{ix}").into(), &info, cx)))
+        .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(row.reason.clone()));
+    // Another file than the group's has a third answer, "Use mine for
+    // everyone": three buttons don't fit beside the name, so they get a line
+    // of their own under it.
+    let head = match row.mine {
+        Some(label) => {
+            let (f, r) = (env.use_mine.clone(), row.clone());
+            let mine = Button::new(("drift-mine", ix)).small().outline().label(label).on_click(move |_, w, cx| f(&r, w, cx));
+            v_flex().w_full().gap_2().child(h_flex().w_full().child(what)).child(h_flex().w_full().gap_2().items_center().child(put).child(mine).child(share))
+        }
+        None => v_flex().w_full().child(h_flex().w_full().gap_2().items_center().child(what).child(put).child(share)),
+    };
     let mut out = v_flex().id(("drift-row", ix)).w_full().p_2().gap_2().rounded(theme.radius).hover(|d| widgets::row_hover(d, cx)).child(head);
     if is_confirming {
         let (t, f, r) = (ticked.clone(), env.share.clone(), row.clone());

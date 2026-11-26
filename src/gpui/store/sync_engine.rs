@@ -60,9 +60,6 @@ struct Slot {
     /// How the player's next pack update was made (a clean one), for its
     /// record; none means the everyday one.
     pack_mode: Option<PackMode>,
-    /// Mods History's Undo just changed: their difference on disk is the
-    /// player's Undo, not drift.
-    undone: Vec<(Key, Instant)>,
     /// Members whose newer Hopper sends what this one can't read (a subset of
     /// `engine.outdated`; the rest are friends whose Hopper is older).
     newer: BTreeSet<String>,
@@ -202,7 +199,7 @@ impl Store {
             if !self.sync.slots.contains_key(&local_id) {
                 let engine = self.sync_open(&copy, &me, &my_name, &snap);
                 local::watch(&root);
-                let mut slot = Slot { engine, root: root.clone(), group: group.clone(), dirty: true, posting: false, applying: false, snap: snap.clone(), jars: HashMap::new(), known: HashSet::new(), said: HashSet::new(), shrink: 0, pack_mode: None, undone: Vec::new(), newer: BTreeSet::new(), hidden: HashMap::new(), away: Vec::new() };
+                let mut slot = Slot { engine, root: root.clone(), group: group.clone(), dirty: true, posting: false, applying: false, snap: snap.clone(), jars: HashMap::new(), known: HashSet::new(), said: HashSet::new(), shrink: 0, pack_mode: None, newer: BTreeSet::new(), hidden: HashMap::new(), away: Vec::new() };
                 // A swap the last run stopped in the middle is finished now.
                 match apply::recover(&root) {
                     Ok(Some(report)) => slot.engine.applied(&report),
@@ -272,22 +269,6 @@ impl Store {
                         }
                         Some(_) => {}
                     }
-                }
-            }
-            // History's Undo: the files came back, so the change is the
-            // player's own, made as an Undo of the one it undoes.
-            if !slot.undone.is_empty() {
-                slot.undone.retain(|(_, t)| t.elapsed() < Duration::from_secs(30));
-                for d in slot.engine.drift(&snap) {
-                    let Some(i) = slot.undone.iter().position(|(k, _)| *k == d.key) else { continue };
-                    slot.undone.remove(i);
-                    if kept.contains(&d.key) {
-                        continue;
-                    }
-                    let why = slot.engine.last_change(&d.key).map_or(Why::Player, |c| Why::Undo { of: c.dot.clone() });
-                    slot.engine.record(Edit { key: d.key.clone(), now: d.found.clone(), why, batch: String::new() }, 0);
-                    slot.engine.applied.insert(d.key, d.found);
-                    slot.dirty = true;
                 }
             }
             // "Take changes from": the others wait for the player's yes.
@@ -1014,12 +995,34 @@ impl Store {
     }
 
     /// Remove (or add) these mods for everyone: their differences become this
-    /// player's changes, once. `keys`: only these mods; none is all of them.
+    /// player's changes, once. `keys`: only these mods (a row's button, which
+    /// removes whatever differs about the mod); none is all of them (only
+    /// what is missing or added here).
     pub fn sync_share_keys(&mut self, root: &Path, keys: Option<Vec<Key>>, cx: &mut Context<Self>) {
         let Some(slot) = self.sync.slots.values_mut().find(|s| s.root == root) else { return };
         let drifts: Vec<_> = slot.engine.drift(&slot.snap).into_iter().filter(|d| keys.as_ref().is_none_or(|k| k.contains(&d.key))).collect();
         let batch = format!("{}:drift:{}", slot.engine.me, unix_now());
-        for e in local::share_edits(&drifts, &batch) {
+        let edits = if keys.is_some() { local::row_edits(&drifts, &batch) } else { local::share_edits(&drifts, &batch) };
+        for e in edits {
+            let (key, now) = (e.key.clone(), e.now.clone());
+            slot.engine.record(e, 0);
+            slot.engine.applied.insert(key, now);
+        }
+        slot.dirty = true;
+        Self::sync_save(slot);
+        self.sync_tick(cx);
+        cx.notify();
+    }
+
+    /// "Use mine for everyone": the file this PC has of these mods, another
+    /// one than the group's, becomes this player's change, so every PC gets
+    /// it (a friend who never allowed a link's mod is asked first, as for
+    /// "Add for everyone").
+    pub fn sync_use_mine_keys(&mut self, root: &Path, keys: Vec<Key>, cx: &mut Context<Self>) {
+        let Some(slot) = self.sync.slots.values_mut().find(|s| s.root == root) else { return };
+        let drifts: Vec<_> = slot.engine.drift(&slot.snap).into_iter().filter(|d| keys.contains(&d.key)).collect();
+        let batch = format!("{}:mine:{}", slot.engine.me, unix_now());
+        for e in local::mine_edits(&drifts, &batch) {
             let (key, now) = (e.key.clone(), e.now.clone());
             slot.engine.record(e, 0);
             slot.engine.applied.insert(key, now);
@@ -1069,7 +1072,7 @@ impl Store {
     /// (empty is this player); `row`: what the row says happened, so an older
     /// row of the same mod (the turn-off before an answer's turn-on) does not
     /// borrow the answer's reason.
-    pub fn sync_why_file(&self, root: &Path, file: &str, author: &str, row: hopper::backups::Change) -> Option<String> {
+    pub fn sync_why_file(&self, root: &Path, file: &str, now: Option<&str>, author: &str, row: hopper::backups::Change) -> Option<String> {
         use hopper::backups::Change as Row;
         let slot = self.sync.slots.values().find(|s| s.root == root)?;
         let author = if author.is_empty() { slot.engine.me.as_str() } else { author };
@@ -1092,7 +1095,7 @@ impl Store {
                 _ => true,
             })
             .max_by_key(|c| c.lamport)
-            .and_then(|c| synccore::cards::why_line(&slot.engine, c))
+            .and_then(|c| synccore::cards::why_line_with(&slot.engine, c, now))
     }
 
     // ---- Differences on this PC ---------------------------------------------
@@ -1152,21 +1155,6 @@ impl Store {
     pub fn sync_note_pack_mode(&mut self, root: &Path, mode: PackMode) {
         if let Some(slot) = self.sync.slots.values_mut().find(|s| s.root == root) {
             slot.pack_mode = Some(mode);
-        }
-    }
-
-    /// History's Undo put these files (names in the instance's folders) back
-    /// or took them away: the next tick records what that changed as Undo.
-    pub fn sync_note_undo(&mut self, root: &Path, files: &[String]) {
-        let Some(inst) = self.instances.iter().find(|i| i.root == root) else { return };
-        let keys: Vec<Key> = inst
-            .addons
-            .iter()
-            .filter(|a| files.iter().any(|f| f.trim_end_matches(".disabled").eq_ignore_ascii_case(a.file_name.trim_end_matches(".disabled"))))
-            .map(local::key_of)
-            .collect();
-        if let Some(slot) = self.sync.slots.values_mut().find(|s| s.root == root) {
-            slot.undone.extend(keys.into_iter().map(|k| (k, Instant::now())));
         }
     }
 

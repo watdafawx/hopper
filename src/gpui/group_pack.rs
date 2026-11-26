@@ -131,6 +131,7 @@ pub fn sync_env(store: &Entity<Store>, root: &Path) -> crate::sync_cards::Env {
     let (s3, r3) = (store.clone(), root.to_path_buf());
     let (s4, r4) = (store.clone(), root.to_path_buf());
     let (s5, r5) = (store.clone(), root.to_path_buf());
+    let (s6, r6) = (store.clone(), root.to_path_buf());
     Env {
         info: Rc::new(move |file: &str, cx: &App| {
             use hopper::synccore::{link::LinkRef, local::{addon_for_id, file_of}};
@@ -179,6 +180,10 @@ pub fn sync_env(store: &Entity<Store>, root: &Path) -> crate::sync_cards::Env {
         share: Rc::new(move |row, _, cx| {
             let (root, key) = (r5.clone(), row.drift.key.clone());
             s5.update(cx, |s, cx| s.sync_share_keys(&root, Some(vec![key]), cx));
+        }),
+        use_mine: Rc::new(move |row, _, cx| {
+            let (root, key) = (r6.clone(), row.drift.key.clone());
+            s6.update(cx, |s, cx| s.sync_use_mine_keys(&root, vec![key], cx));
         }),
     }
 }

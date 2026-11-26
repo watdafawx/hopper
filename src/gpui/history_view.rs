@@ -831,7 +831,7 @@ impl BackupsView {
         // Why Hopper made the change for them (an answer, a pack update, a
         // put back); a change made by hand has no such line.
         let why = (!nested)
-            .then(|| self.store.read(cx).sync_why_file(&self.root, &f.name, who.map_or("", |w| w.id.as_str()), f.change))
+            .then(|| self.store.read(cx).sync_why_file(&self.root, &f.name, f.now.as_deref(), who.map_or("", |w| w.id.as_str()), f.change))
             .flatten();
         row.children(lead)
             .child(
@@ -1448,10 +1448,9 @@ pub(crate) fn undone(store: &Entity<crate::store::Store>, root: &std::path::Path
         .filter(|p| p.parent() == Some(mods.as_path()))
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .collect();
-    let files: Vec<String> = done.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
     store.update(cx, |s, cx| {
-        // A group copy records what the Undo changed as the player's Undo.
-        s.sync_note_undo(root, &files);
+        // A group copy already queued what the Undo changed as the player's
+        // undo, when the instance was saved (`actor::undoing`).
         s.reload_instance(root, cx);
         s.identify_jars(root, jars);
     });

@@ -37,6 +37,7 @@ fn env() -> Env {
         answer: Rc::new(|_, _, _, _, _| {}),
         put_back: Rc::new(|_, _, _| {}),
         share: Rc::new(|_, _, _| {}),
+        use_mine: Rc::new(|_, _, _| {}),
     }
 }
 
@@ -154,6 +155,8 @@ pub fn rows(big: bool) -> Vec<DriftRow> {
         d("create", fil("create-6.0.4.jar", true), fil("create-6.0.4.jar", false)),
         d("sodium", fil("sodium-0.5.jar", true), fil("sodium-0.6.jar", true)),
         d("tweaks", Value::Gone, fil("tweaks-1.0.jar", true)),
+        // The longest name, as another file: the three buttons under it.
+        d("long", fil(LONG, true), fil("Additional-Placements-Extra-Long-Mod-Name-Reloaded-Edition-1.20.1-forge-4.1.0.jar", true)),
     ];
     if big {
         for (i, f) in JARS.iter().enumerate().skip(4) {

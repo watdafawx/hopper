@@ -163,6 +163,9 @@ struct Scope {
     all: bool,
     /// Undo: nothing it does becomes a record.
     quiet: bool,
+    /// History's Undo (not a new instance's first mods): what it changes in
+    /// a group copy is still the player's change to share, as an undo.
+    undo: bool,
 }
 
 thread_local! {
@@ -206,18 +209,33 @@ fn push(s: Scope) -> Guard {
 /// sets aside are `who`'s when claimed, else `who` (when given) as the
 /// sync's own.
 pub fn begin(root: &Path, who: Option<Who>) -> Guard {
-    push(Scope { root: norm(root), batch: new_batch(), default: who, keys: HashMap::new(), files: HashMap::new(), all: false, quiet: false })
+    push(Scope { root: norm(root), batch: new_batch(), default: who, keys: HashMap::new(), files: HashMap::new(), all: false, quiet: false, undo: false })
 }
 
 /// One action of `who` (you, a panel user) that changes many mods: one
 /// History row for all of it.
 pub fn batch(root: &Path, who: Who) -> Guard {
-    push(Scope { root: norm(root), batch: new_batch(), default: Some(who), keys: HashMap::new(), files: HashMap::new(), all: true, quiet: false })
+    push(Scope { root: norm(root), batch: new_batch(), default: Some(who), keys: HashMap::new(), files: HashMap::new(), all: true, quiet: false, undo: false })
 }
 
-/// Undo's own changes on `root`: not recorded again.
+/// Changes on `root` that are nobody's to note (a new instance's first
+/// mods, jars that vanished outside Hopper): not recorded.
 pub fn quiet(root: &Path) -> Guard {
-    push(Scope { root: norm(root), batch: String::new(), default: None, keys: HashMap::new(), files: HashMap::new(), all: false, quiet: true })
+    push(Scope { root: norm(root), batch: String::new(), default: None, keys: HashMap::new(), files: HashMap::new(), all: false, quiet: true, undo: false })
+}
+
+/// History's Undo on `root`: History notes nothing new for it, but in a
+/// group copy what it puts back is the player's own change, shared as an
+/// undo. It used to stay out of the sync, so friends never followed an
+/// undo and this PC read as differing from the group.
+pub fn undoing(root: &Path) -> Guard {
+    push(Scope { root: norm(root), batch: new_batch(), default: None, keys: HashMap::new(), files: HashMap::new(), all: false, quiet: true, undo: true })
+}
+
+/// The batch of the Undo running on `root` on this thread, if one is.
+fn undo_batch(root: &Path) -> Option<String> {
+    let r = norm(root);
+    SCOPES.with(|v| v.borrow().iter().rev().find(|s| s.root == r).filter(|s| s.undo).map(|s| s.batch.clone()))
 }
 
 /// Marks a mod (by key, and its file when known) as changed by `who` in
@@ -364,10 +382,16 @@ pub(crate) fn note_save(old: Option<&Instance>, new: &Instance) {
     let Some(old) = old else { return };
     note_swaps(&old.addons, &new.addons, &new.root);
     // A group copy also keeps what the player did as sync records; a friend's
-    // sync and Undo (no tag) stay out of it.
-    crate::synccore::local::note_save(&new.root, &old.addons, &new.addons, |a| {
-        tag_for_addon(&new.root, a).filter(|t| t.who.is_you()).map(|t| t.batch)
-    });
+    // sync (another `Who`) stays out of it. History's Undo is the player's
+    // too, and travels as an undo so friends follow it.
+    match undo_batch(&new.root) {
+        Some(batch) => {
+            crate::synccore::local::note_save_as(&new.root, &old.addons, &new.addons, |_| Some(batch.clone()), crate::synccore::Why::undo_of_last())
+        }
+        None => crate::synccore::local::note_save(&new.root, &old.addons, &new.addons, |a| {
+            tag_for_addon(&new.root, a).filter(|t| t.who.is_you()).map(|t| t.batch)
+        }),
+    }
     let changes = diff(&old.addons, &new.addons);
     if changes.is_empty() {
         return;
@@ -556,6 +580,39 @@ mod tests {
         inst.addons.clear();
         inst.save().unwrap();
         assert_eq!(crate::synccore::local::take(&root).len(), 1);
+        crate::synccore::local::unwatch(&root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_undo_in_a_group_copy_is_the_players_change_to_share() {
+        record_in_tests();
+        let root = instance("undo-shares");
+        crate::synccore::local::watch(&root);
+        let mut inst = crate::instances::load(&root).unwrap();
+        {
+            // History's Undo puts an older file of A back.
+            let _u = undoing(&root);
+            fs::write(root.join("mods/a-old.jar"), "a").unwrap();
+            inst.addons[0].file_name = "a-old.jar".into();
+            inst.addons[0].file_id = 9;
+            inst.save().unwrap();
+            // It notes nothing new in History's own records.
+            assert_eq!(tag_for_addon(&root, &inst.addons[0]), None);
+        }
+        let edits = crate::synccore::local::take(&root);
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        assert_eq!(edits[0].key, crate::synccore::Key::Mod("cf:5".into()));
+        assert_eq!(edits[0].now, crate::synccore::Value::File { file: "cf:9".into(), on: true });
+        assert_eq!(edits[0].why, crate::synccore::Why::undo_of_last());
+        assert!(!edits[0].batch.is_empty());
+        // A quiet change (a new instance's first mods) still shares nothing.
+        {
+            let _q = quiet(&root);
+            inst.addons[1].enabled = false;
+            inst.save().unwrap();
+        }
+        assert!(crate::synccore::local::take(&root).is_empty());
         crate::synccore::local::unwatch(&root);
         let _ = fs::remove_dir_all(&root);
     }

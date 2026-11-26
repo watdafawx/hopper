@@ -80,7 +80,8 @@ pub fn drift(applied: &BTreeMap<Key, Value>, disk: &Snapshot) -> Vec<Drift> {
 /// differs on this PC, one batch. A mod missing from the folder is removed
 /// for everyone; a mod only this PC has (added outside Hopper) is added for
 /// everyone, as the file it is here. A file that was swapped or turned off
-/// outside Hopper has no such button (it can only be put back).
+/// outside Hopper is left out here; its own row has [`row_edits`] and, for
+/// another file, [`mine_edits`].
 pub fn share_edits(drifts: &[Drift], batch: &str) -> Vec<Edit> {
     drifts
         .iter()
@@ -92,6 +93,40 @@ pub fn share_edits(drifts: &[Drift], batch: &str) -> Vec<Edit> {
             } else {
                 return None;
             };
+            Some(Edit { key: d.key.clone(), now, why: Why::SharedDrift, batch: batch.to_string() })
+        })
+        .collect()
+}
+
+/// "Use mine for everyone": a mod whose file here is another one than the
+/// group's (an older or newer version put in outside Hopper, or one this PC
+/// kept) becomes this player's change to that file, one batch. Mods that
+/// are missing, added or only turned on or off here have no such button.
+pub fn mine_edits(drifts: &[Drift], batch: &str) -> Vec<Edit> {
+    drifts
+        .iter()
+        .filter(|d| other_file(d))
+        .map(|d| Edit { key: d.key.clone(), now: d.found.clone(), why: Why::SharedDrift, batch: batch.to_string() })
+        .collect()
+}
+
+/// A mod that is here, on, as another file than the one applied.
+pub fn other_file(d: &Drift) -> bool {
+    matches!((&d.expected, &d.found), (Value::File { file: a, .. }, Value::File { file: b, on: true }) if a != b)
+}
+
+/// "Remove for everyone" on one row of "This PC differs": the mod goes from
+/// everyone's PC, whatever differs about it here (missing, another file,
+/// turned on or off). A mod only this PC has is added instead, as
+/// [`share_edits`] does.
+pub fn row_edits(drifts: &[Drift], batch: &str) -> Vec<Edit> {
+    drifts
+        .iter()
+        .filter_map(|d| {
+            if matches!(d.expected, Value::Gone | Value::PackRemoved) {
+                return share_edits(std::slice::from_ref(d), batch).pop();
+            }
+            let now = if matches!(d.expected, Value::PackDefault | Value::PackOff) { Value::PackRemoved } else { Value::Gone };
             Some(Edit { key: d.key.clone(), now, why: Why::SharedDrift, batch: batch.to_string() })
         })
         .collect()
@@ -152,16 +187,28 @@ pub fn take(root: &Path) -> Vec<Edit> {
 /// addon's change is: `Some(batch)` for the player's own, `None` for a
 /// friend's sync or Undo, which never make records here.
 pub fn note_save(root: &Path, old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option<String>) {
+    note_save_as(root, old, new, owner, Why::Player);
+}
+
+/// [`note_save`] with the reason the edits carry: History's Undo saves with
+/// [`Why::undo_of_last`], so the change travels as an undo.
+pub fn note_save_as(root: &Path, old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option<String>, why: Why) {
     if !with_watched(|w| w.contains_key(&norm(root))) {
         return;
     }
-    for edit in save_edits(old, new, owner) {
+    for edit in save_edits_as(old, new, owner, why) {
         note(root, edit);
     }
 }
 
 /// [`note_save`]'s pure part.
 pub fn save_edits(old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option<String>) -> Vec<Edit> {
+    save_edits_as(old, new, owner, Why::Player)
+}
+
+/// [`save_edits`] with the reason the mod edits carry. A lock put on or
+/// off is always the player's own (Undo puts a file back, not a lock).
+pub fn save_edits_as(old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option<String>, why: Why) -> Vec<Edit> {
     let mut before: BTreeMap<Key, &Addon> = BTreeMap::new();
     for a in old {
         before.entry(key_of(a)).or_insert(a);
@@ -191,7 +238,7 @@ pub fn save_edits(old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option
         }
         if let Some(batch) = owner(a) {
             let now = value_of(a);
-            out.push(Edit { key: key.clone(), now, why: Why::Player, batch });
+            out.push(Edit { key: key.clone(), now, why: why.clone(), batch });
         }
     }
     for (key, o) in &before {
@@ -200,7 +247,7 @@ pub fn save_edits(old: &[Addon], new: &[Addon], owner: impl Fn(&Addon) -> Option
         }
         if let Some(batch) = owner(o) {
             let now = if o.from_pack { Value::PackRemoved } else { Value::Gone };
-            out.push(Edit { key: key.clone(), now, why: Why::Player, batch });
+            out.push(Edit { key: key.clone(), now, why: why.clone(), batch });
         }
     }
     out
@@ -471,6 +518,37 @@ mod tests {
         let got: Vec<(Key, Value)> = edits.iter().map(|e| (e.key.clone(), e.now.clone())).collect();
         assert_eq!(got, [(k(5), on(51))]);
         assert!(edits.iter().all(|e| e.why == Why::SharedDrift));
+    }
+
+    #[test]
+    fn use_mine_shares_only_another_file_that_is_on() {
+        // 1 another file, 2 missing, 3 turned off, 4 added here, 5 another
+        // file but off, 6 a pack mod as the pack ships it.
+        let a = applied(&[(1, on(11)), (2, on(21)), (3, on(31)), (4, Value::Gone), (5, on(51)), (6, Value::PackDefault)]);
+        let d = drift(&a, &snap(&[(1, on(12)), (3, off(31)), (4, on(41)), (5, off(52)), (6, on(61))]));
+        let edits = mine_edits(&d, "x");
+        let got: Vec<(Key, Value)> = edits.iter().map(|e| (e.key.clone(), e.now.clone())).collect();
+        assert_eq!(got, [(k(1), on(12))]);
+        assert!(edits.iter().all(|e| e.why == Why::SharedDrift && e.batch == "x"));
+    }
+
+    #[test]
+    fn remove_for_everyone_on_a_row_removes_whatever_differs() {
+        let a = applied(&[(1, on(11)), (2, on(21)), (3, Value::PackDefault), (4, Value::Gone)]);
+        let d = drift(&a, &snap(&[(1, on(12)), (3, Value::PackOff), (4, on(41))]));
+        let got: Vec<(Key, Value)> = row_edits(&d, "x").into_iter().map(|e| (e.key, e.now)).collect();
+        // Another file and a missing one go; a pack mod is removed as the
+        // pack's; a jar only here is added, as "Add for everyone" does.
+        assert_eq!(got, [(k(1), Value::Gone), (k(2), Value::Gone), (k(3), Value::PackRemoved), (k(4), on(41))]);
+    }
+
+    #[test]
+    fn an_undo_save_makes_undo_edits() {
+        let old = vec![addon(1, 12, true)];
+        let new = vec![addon(1, 11, true)];
+        let got = save_edits_as(&old, &new, mine, Why::undo_of_last());
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].key.clone(), got[0].now.clone(), got[0].why.clone()), (k(1), on(11), Why::undo_of_last()));
     }
 
     #[test]

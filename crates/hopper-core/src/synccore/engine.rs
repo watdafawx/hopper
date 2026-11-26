@@ -209,6 +209,11 @@ impl Engine {
         let was = self.applied.get(&edit.key).cloned().unwrap_or_default();
         let dot = Dot { author: self.me.clone(), n };
         let batch = if edit.batch.is_empty() { format!("{}:{n}", self.me) } else { edit.batch };
+        // An undo from History names the record it undoes: the key's last.
+        let why = match edit.why {
+            w if w == Why::undo_of_last() => self.last_change(&edit.key).map_or(Why::Player, |c| Why::Undo { of: c.dot.clone() }),
+            w => w,
+        };
         let change = Change {
             dot: dot.clone(),
             key: edit.key,
@@ -219,7 +224,7 @@ impl Engine {
             seen: self.seen(),
             online_at: if online_at == 0 { self.contact } else { online_at },
             batch,
-            why: edit.why,
+            why,
         };
         self.log.insert(change, None);
         dot
@@ -1001,12 +1006,23 @@ impl Engine {
             seen_by_gate.online_at = self.gate_online_at(c, arrival);
             items.push((seen_by_gate, *arrival));
         }
+        // A link mod this PC already has a file of comes from a source that is
+        // on this PC already (the key names the source): a friend's update or
+        // undo of it is not a new source to allow.
+        let mut allowed = self.allowed_sources.clone();
+        for (k, v) in &self.applied {
+            if let (Key::Mod(m), Value::File { .. }) = (k, v)
+                && gate::is_link_source(m)
+            {
+                allowed.insert(m.clone());
+            }
+        }
         let ctx = GateCtx {
             limits: self.limits,
             trust: &self.trust,
             registers: &regs,
             batch: &[],
-            allowed_sources: &self.allowed_sources,
+            allowed_sources: &allowed,
         };
         let mut held = BTreeMap::new();
         for h in gate::held(&items, &ctx) {
@@ -1468,6 +1484,48 @@ mod tests {
         b.allow_source(&key);
         assert!(b.reviews().is_empty());
         assert_eq!(b.lands().len(), 1);
+    }
+
+    #[test]
+    fn a_history_undo_names_the_record_it_undoes() {
+        let (mut a, mut b) = (pc("a"), pc("b"));
+        let up = act(&mut a, edit(mk(1), file(12)), T0);
+        send(&a, &mut b, T0);
+        settle(&mut b);
+        // B undoes A's update from History: the save only knows "undo".
+        b.record(Edit { why: Why::undo_of_last(), ..edit(mk(1), file(11)) }, T0);
+        let last = b.last_change(&mk(1)).unwrap();
+        assert_eq!(last.why, Why::Undo { of: up });
+        assert_eq!((last.was.clone(), last.now.clone()), (file(12), file(11)));
+        // A takes it like any change: no card, it lands.
+        send(&b, &mut a, T0 + 1);
+        assert!(a.reviews().is_empty());
+        assert_eq!(a.lands().len(), 1);
+        assert_eq!(a.value(&mk(1)), file(11));
+        // An undo of something no record names is the player's own change.
+        b.record(Edit { why: Why::undo_of_last(), ..edit(mk(5), file(52)) }, T0);
+        assert_eq!(b.last_change(&mk(5)).unwrap().why, Why::Player);
+    }
+
+    #[test]
+    fn a_link_mod_this_pc_has_needs_no_allowing_for_its_next_file() {
+        let (mut a, mut b) = (pc("a"), pc("b"));
+        let key = Key::Mod("src:github:fox/tweaks".into());
+        let v = |f: &str| Value::File { file: f.into(), on: true };
+        // A added the mod; B allowed it and took it.
+        act(&mut a, edit(key.clone(), v("link:143")), T0);
+        send(&a, &mut b, T0);
+        b.allow_source(&key);
+        settle(&mut b);
+        // B goes back to the older file; A takes it without a card.
+        b.record(Edit { why: Why::undo_of_last(), ..edit(key.clone(), v("link:142")) }, T0);
+        send(&b, &mut a, T0 + 1);
+        assert!(a.reviews().is_empty(), "{:?}", a.reviews());
+        assert_eq!(a.lands().len(), 1);
+        // A third PC that never allowed the link is still asked.
+        let mut c = pc("c");
+        send(&b, &mut c, T0 + 1);
+        assert!(c.reviews().iter().any(|r| r.risk == Risk::NewSource));
     }
 
     #[test]

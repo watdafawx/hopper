@@ -235,7 +235,7 @@ pub fn undo(inst: &mut Instance, f: &Saved) -> anyhow::Result<PathBuf> {
         return undo_record(inst, f, *did, key);
     }
     // Putting it back isn't a new change for History to note.
-    let _quiet = crate::actor::quiet(&inst.root);
+    let _quiet = crate::actor::undoing(&inst.root);
     let dest = inst.root.join(&f.restore_to);
     let jar = f.restore_to.to_lowercase().trim_end_matches(".disabled").ends_with(".jar");
     match (&f.src, jar) {
@@ -279,7 +279,7 @@ fn undo_record(inst: &mut Instance, f: &Saved, did: crate::actor::Did, key: &str
     if matches!(did, Did::Restored | Did::BackupRemoved) {
         anyhow::bail!("Backup restores and removals can't be undone from History; the copy is kept under .hopper-backups.");
     }
-    let _quiet = crate::actor::quiet(&inst.root);
+    let _quiet = crate::actor::undoing(&inst.root);
     let at = inst
         .addons
         .iter()
