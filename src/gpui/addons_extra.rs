@@ -660,9 +660,9 @@ impl AddonsView {
                     addon.and_then(|a| self.store.read(cx).image(&a.icon)).map(std::path::Path::to_path_buf),
                 );
                 let view = cx.entity();
-                h_flex()
-                    .gap_3()
-                    .text_sm()
+                let text = v_flex()
+                    .min_w_0()
+                    .gap_0p5()
                     .child(
                         widgets::mod_link(
                             SharedString::from(format!("dup:{}", d.files[0])),
@@ -679,24 +679,21 @@ impl AddonsView {
                             format!("{} {}  ·  remove {}", if loads { "loads" } else { "keep" }, d.files[0], older.join(", ")),
                             cx,
                         )
-                        .flex_1()
-                        .text_xs(),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("keep-newest:{}", d.files[0])))
-                            .xsmall()
-                            .outline()
-                            .label(if loads { "Remove other copy" } else { "Keep newest" })
-                            .tooltip(if loads {
-                                "Remove the copy that doesn't load (undo from History)"
-                            } else {
-                                "Remove the older jars (undo from History)"
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.remove(older.clone(), what.clone(), window, cx)
-                            })),
-                    )
-                    .into_any_element()
+                        .text_xs()
+                        .whitespace_normal(),
+                    );
+                let keep = Button::new(SharedString::from(format!("keep-newest:{}", d.files[0])))
+                    .xsmall()
+                    .outline()
+                    .label(if loads { "Remove other copy" } else { "Keep newest" })
+                    .tooltip(if loads {
+                        "Remove the copy that doesn't load (undo from History)"
+                    } else {
+                        "Remove the older jars (undo from History)"
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| this.remove(older.clone(), what.clone(), window, cx)))
+                    .into_any_element();
+                widgets::detail_row(text, vec![keep]).into_any_element()
             })
             .collect()
     }
@@ -1525,20 +1522,15 @@ impl AddonsView {
                 })
                 .when(!parts.tail.is_empty(), |r| r.child(widgets::caption(parts.tail.clone(), cx)));
             rows.push(
-                h_flex()
-                    .gap_4()
-                    .items_start()
-                    .text_sm()
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_0p5()
-                            .child(sentence)
-                            .when(!why.is_empty(), |c| c.child(widgets::caption(why.join(" · "), cx).text_xs())),
-                    )
-                    .child(h_flex().flex_none().gap_2().children(actions))
-                    .into_any_element(),
+                widgets::detail_row(
+                    v_flex()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(sentence)
+                        .when(!why.is_empty(), |c| c.child(widgets::caption(why.join(" · "), cx).text_xs().whitespace_normal())),
+                    actions,
+                )
+                .into_any_element(),
             );
         }
         let loader_note = blockers
@@ -1819,20 +1811,11 @@ impl AddonsView {
                 .on_click(cx.listener(move |this, _, window, cx| this.turn_off_jar(&file, window, cx)))
                 .into_any_element(),
         );
-        h_flex()
-            .gap_4()
-            .items_start()
-            .text_sm()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .child(sentence)
-                    .child(widgets::caption(why, cx).text_xs().whitespace_normal()),
-            )
-            .child(h_flex().flex_none().gap_2().children(actions))
-            .into_any_element()
+        widgets::detail_row(
+            v_flex().min_w_0().gap_0p5().child(sentence).child(widgets::caption(why, cx).text_xs().whitespace_normal()),
+            actions,
+        )
+        .into_any_element()
     }
 
     fn enable_provider(&mut self, file: &str, window: &mut Window, cx: &mut Context<Self>) {

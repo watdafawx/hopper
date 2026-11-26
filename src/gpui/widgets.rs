@@ -465,6 +465,21 @@ pub mod alpha {
     pub const LINE: f32 = 0.30;
 }
 
+/// One row of a notice's details: the sentence on the left, its buttons on
+/// the right. The sentence keeps a readable width: in a narrow card (the
+/// chip popover) the buttons wrap under it instead of squeezing it until the
+/// text paints over them.
+pub fn detail_row(text: impl IntoElement, actions: Vec<AnyElement>) -> Div {
+    h_flex()
+        .flex_wrap()
+        .gap_x_4()
+        .gap_y_1()
+        .items_start()
+        .text_sm()
+        .child(div().flex_1().min_w(rems(14.)).child(text))
+        .child(h_flex().flex_wrap().gap_2().children(actions))
+}
+
 /// A centered empty state: icon, a title, and an optional line saying
 /// what to do next. Add the action button with `.child(...)`.
 pub fn empty_state(icon: IconName, title: impl Into<SharedString>, body: Option<SharedString>, cx: &App) -> Div {
