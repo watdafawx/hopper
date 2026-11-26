@@ -312,7 +312,11 @@ pub(crate) fn ids_for(root: &Path, path: &Path) -> Option<Cand> {
     }
     let inst = crate::instances::load(root)?;
     let a = inst.addons.iter().find(|a| a.project_id != 0 && a.file_id != 0 && a.file_name.eq_ignore_ascii_case(base))?;
-    Some(Cand {
+    Some(cand_of(a))
+}
+
+fn cand_of(a: &crate::instances::Addon) -> Cand {
+    Cand {
         project_id: a.project_id,
         file_id: a.file_id,
         file_name: a.file_name.clone(),
@@ -321,7 +325,19 @@ pub(crate) fn ids_for(root: &Path, path: &Path) -> Option<Cand> {
         mr_project: a.mr_project.clone(),
         name: a.name.clone(),
         addon: Some(a.clone()),
-    })
+    }
+}
+
+/// Notes beside the jar `dest`, already set aside, which mod it was (`a`, the
+/// entry as it was before): History then names the mod and its source instead
+/// of the file. For a caller that moved the jar itself and can't read the
+/// entry from the instance any more (a friend's removal or update, where
+/// the entry is gone by the time the jar is filed). A mod the sites don't know
+/// stays a file name.
+pub fn note_addon(dest: &Path, a: &crate::instances::Addon) {
+    if a.project_id != 0 && a.file_id != 0 {
+        note_ids(dest, &cand_of(a), false);
+    }
 }
 
 /// Notes beside the copy `dest` which file it was, so History still says

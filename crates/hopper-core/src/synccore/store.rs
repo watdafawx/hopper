@@ -138,6 +138,58 @@ pub fn save(data: &Path, engine: &Engine) -> anyhow::Result<()> {
     crate::instances::write_atomic(&p, &encode(engine))
 }
 
+// ---- The jar memory ---------------------------------------------------------------
+
+/// Each jar a copy has had (its name, lower case, without `.disabled`) with
+/// the mod it is and the group's file id for it. History's reason lines
+/// ("Bob went back to 1.4.8", "Bob chose Use mine for everyone") find the
+/// change behind a row through it, also for a jar that is gone. Kept beside
+/// the engine's file so it survives a restart.
+pub type Jars = BTreeMap<String, (Key, String)>;
+
+/// The most jars the memory keeps; it is pruned to this when saved.
+pub const JARS_MAX: usize = 4000;
+
+/// `<data>/sync/<copy>.jars.json`.
+pub fn jars_path(data: &Path, copy: &str) -> PathBuf {
+    let p = path(data, copy);
+    p.with_file_name(format!("{}.jars.json", p.file_stem().unwrap_or_default().to_string_lossy()))
+}
+
+/// The saved memory of `copy`; empty when there is none or the file is no
+/// good (it only improves History's wording, so it is never an error).
+pub fn load_jars(data: &Path, copy: &str) -> Jars {
+    std::fs::read(jars_path(data, copy))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Vec<(String, Key, String)>>(&b).ok())
+        .map(|v| v.into_iter().map(|(jar, key, file)| (jar, (key, file))).collect())
+        .unwrap_or_default()
+}
+
+/// What of `jars` is worth keeping: a jar of a mod the log has a change of
+/// (the only ones a reason line looks up), at most [`JARS_MAX`] of them. The
+/// rest are re-read from the instance on every start anyway.
+pub fn prune_jars(jars: &mut Jars, engine: &Engine) {
+    let keys: BTreeSet<&Key> = engine.log.changes.values().map(|(c, _)| &c.key).collect();
+    jars.retain(|_, (key, _)| keys.contains(key));
+    while jars.len() > JARS_MAX {
+        let Some(first) = jars.keys().next().cloned() else { break };
+        jars.remove(&first);
+    }
+}
+
+/// Saves the pruned memory of the engine's copy (atomic, like [`save`]).
+pub fn save_jars(data: &Path, engine: &Engine, jars: &Jars) -> anyhow::Result<()> {
+    let mut jars = jars.clone();
+    prune_jars(&mut jars, engine);
+    let p = jars_path(data, &engine.copy);
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let list: Vec<(&String, &Key, &String)> = jars.iter().map(|(j, (k, f))| (j, k, f)).collect();
+    crate::instances::write_atomic(&p, &serde_json::to_vec(&list)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +284,56 @@ mod tests {
         assert_eq!(names, ["pack-1.json"]);
         assert_eq!(load(&d, "pack-1").unwrap().unwrap(), e);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_jar_memory_survives_a_restart() {
+        let d = scratch("jars");
+        let e = busy();
+        let mut jars = Jars::new();
+        jars.insert("a-1.jar".into(), (key(1), "cf:11".into()));
+        jars.insert("a-2.jar".into(), (key(1), "cf:12".into()));
+        // A mod the log has no change of is not kept: it is re-read on start.
+        jars.insert("quiet.jar".into(), (key(99), "cf:990".into()));
+        save_jars(&d, &e, &jars).unwrap();
+        let back = load_jars(&d, "pack-1");
+        assert_eq!(back.len(), 2);
+        assert_eq!(back.get("a-1.jar"), Some(&(key(1), "cf:11".to_string())));
+        assert!(!back.contains_key("quiet.jar"));
+        // Beside the engine's file, which doesn't read it as a copy's state.
+        assert_eq!(jars_path(&d, "pack-1").file_name().unwrap().to_string_lossy(), "pack-1.jars.json");
+        save(&d, &e).unwrap();
+        assert_eq!(load(&d, "pack-1").unwrap().unwrap(), e);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_missing_or_damaged_jar_memory_reads_as_empty() {
+        let d = scratch("jars-bad");
+        assert!(load_jars(&d, "pack-1").is_empty());
+        let p = jars_path(&d, "pack-1");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"[[\"a.jar\",{\"Mod\":\"cf:1\"},\"cf").unwrap();
+        assert!(load_jars(&d, "pack-1").is_empty());
+        std::fs::write(&p, b"{\"not\":\"a list\"}").unwrap();
+        assert!(load_jars(&d, "pack-1").is_empty());
+        // The next save replaces it.
+        let mut jars = Jars::new();
+        jars.insert("a.jar".into(), (key(1), "cf:11".into()));
+        save_jars(&d, &busy(), &jars).unwrap();
+        assert_eq!(load_jars(&d, "pack-1").len(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_jar_memory_stays_small() {
+        let e = busy();
+        let mut jars = Jars::new();
+        for i in 0..JARS_MAX + 500 {
+            jars.insert(format!("jar-{i:05}.jar"), (key(1), format!("cf:{i}")));
+        }
+        prune_jars(&mut jars, &e);
+        assert_eq!(jars.len(), JARS_MAX);
     }
 
     #[test]

@@ -226,7 +226,8 @@ impl RenderOnce for Trigger {
         } else {
             icon.into_any_element()
         };
-        let tint = if self.open { 0.26 } else { widgets::alpha::TINT };
+        let open = self.open;
+        let tint = if open { 0.26 } else { widgets::alpha::TINT };
         let busy = self.look.busy;
         let progress = self.progress.filter(|_| busy);
         div()
@@ -262,7 +263,10 @@ impl RenderOnce for Trigger {
                         .bg(color),
                 )
             })
-            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+            // Not while the popover is open: its heading says the same, and the
+            // tooltip sat on top of it for as long as the cursor stayed on the
+            // chip. Every chip state goes through this trigger.
+            .when(!open, |d| d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)))
     }
 }
 

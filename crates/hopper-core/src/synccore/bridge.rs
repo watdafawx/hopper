@@ -41,6 +41,10 @@ pub struct InstFetch<'a> {
     allow_sources: bool,
     /// The file's name on disk, by the group's file id.
     names: HashMap<String, String>,
+    /// The entry of each file the plan sets aside, as the instance had it
+    /// before the swap: the jar's History row names the mod from it (the entry
+    /// itself is gone from the instance by the time the jar is filed).
+    set_aside: HashMap<String, Addon>,
     found: HashMap<String, Result<Resolved, String>>,
     /// The group the steps come from, for History.
     group: String,
@@ -116,6 +120,7 @@ impl<'a> InstFetch<'a> {
             job,
             allow_sources,
             names: HashMap::new(),
+            set_aside: HashMap::new(),
             found: HashMap::new(),
             group: group.to_string(),
             adds: plan.steps.iter().filter(|s| matches!(s.to, Value::File { .. })).filter_map(|s| if let Key::Mod(k) = &s.key { Some(k.clone()) } else { None }).collect(),
@@ -125,6 +130,7 @@ impl<'a> InstFetch<'a> {
                 && let Some(a) = inst.addons.iter().find(|a| key_of(a) == s.key)
             {
                 me.names.insert(file.clone(), base_name(&a.file_name));
+                me.set_aside.insert(file.clone(), a.clone());
             }
             let Value::File { file, .. } = &s.to else { continue };
             if me.found.contains_key(file) {
@@ -336,6 +342,11 @@ impl InstFetch<'_> {
         }
         crate::actor::claim("", Some(&name), who);
         crate::backups::record(&dir, &dest, &format!("{}/{name}", super::apply::folder_of(&step.key)));
+        // Without this the row reads as a bare file ("Bob removed
+        // appleskin-fabric-mc26.2-3.0.10.jar, no download source").
+        if let Some(a) = self.set_aside.get(file) {
+            crate::backups::note_addon(&dest, a);
+        }
     }
 
     /// A mod a modpack ships, turned off, removed, put back; or a jar
@@ -453,7 +464,7 @@ mod tests {
         super::super::local::watch(&root);
         let jobs = crate::jobs::Jobs::default();
         let job = jobs.start("t");
-        let fetch = InstFetch { root: root.clone(), job: &job, allow_sources: true, names: HashMap::new(), found: HashMap::new(), group: "g".into(), adds: Default::default() };
+        let fetch = InstFetch { root: root.clone(), job: &job, allow_sources: true, names: HashMap::new(), set_aside: HashMap::new(), found: HashMap::new(), group: "g".into(), adds: Default::default() };
         let by = Dot { author: "mia".into(), n: 1 };
         let step = |key: &str, from: Value, to: Value| Step { key: Key::Mod(key.into()), from, to, by: by.clone(), name: "Mia".into(), why: Why::Player };
         let on = |f: &str| Value::File { file: f.into(), on: true };
@@ -488,7 +499,7 @@ mod tests {
         let job = jobs.start("t");
         let mut names = HashMap::new();
         names.insert("cf:60".to_string(), "b.jar".to_string());
-        let fetch = InstFetch { root: root.clone(), job: &job, allow_sources: true, names, found: HashMap::new(), group: "g".into(), adds: Default::default() };
+        let fetch = InstFetch { root: root.clone(), job: &job, allow_sources: true, names, set_aside: HashMap::new(), found: HashMap::new(), group: "g".into(), adds: Default::default() };
         let step = Step { key: Key::Mod("cf:6".into()), from: Value::File { file: "cf:60".into(), on: true }, to: Value::Gone, by: by.clone(), name: "Mia".into(), why: Why::Player };
         let plan = ApplyPlan { steps: vec![step.clone()], ..Default::default() };
         let report = ApplyReport { results: vec![super::super::apply::StepResult { key: step.key, by, outcome: Outcome::Done }] };
@@ -497,6 +508,40 @@ mod tests {
         let sets = crate::backups::history(&root);
         let file = sets.iter().flat_map(|s| s.files.iter()).find(|f| f.name == "b.jar").expect("the removal is in History");
         assert_eq!(file.who.as_ref().map(|w| w.name.as_str()), Some("Mia"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The row of a friend's removal or roll back names the mod and its site,
+    /// like the row of an add does, not only the jar (seen: "Bob removed
+    /// appleskin-fabric-mc26.2-3.0.10.jar · No download source").
+    #[test]
+    fn a_friends_removal_in_history_names_the_mod() {
+        use super::super::model::Dot;
+        let root = std::env::temp_dir().join(format!("hopper-bridge-hist-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".hopper-backups")).unwrap();
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        let v = serde_json::json!({"name": "T", "format": instances::FORMAT, "addons": []});
+        std::fs::write(root.join(instances::HOPPER_FILE), serde_json::to_vec(&v).unwrap()).unwrap();
+        let by = Dot { author: "bob".into(), n: 1 };
+        std::fs::write(root.join(".hopper-backups").join(super::super::apply::set_aside_name("appleskin-fabric-mc26.2-3.0.10.jar", &by)), "x").unwrap();
+        let jobs = crate::jobs::Jobs::default();
+        let job = jobs.start("t");
+        let jar = Addon { project_id: 7, file_id: 70, file_name: "appleskin-fabric-mc26.2-3.0.10.jar".into(), name: "AppleSkin".into(), mr_version: "AAAA".into(), enabled: true, ..Default::default() };
+        let (mut names, mut set_aside) = (HashMap::new(), HashMap::new());
+        names.insert("mr:AAAA".to_string(), jar.file_name.clone());
+        set_aside.insert("mr:AAAA".to_string(), jar);
+        let fetch = InstFetch { root: root.clone(), job: &job, allow_sources: true, names, set_aside, found: HashMap::new(), group: "g".into(), adds: Default::default() };
+        let step = Step { key: Key::Mod("mr:7".into()), from: Value::File { file: "mr:AAAA".into(), on: true }, to: Value::Gone, by: by.clone(), name: "Bob".into(), why: Why::Player };
+        let plan = ApplyPlan { steps: vec![step.clone()], ..Default::default() };
+        let report = ApplyReport { results: vec![super::super::apply::StepResult { key: step.key, by, outcome: Outcome::Done }] };
+        fetch.finish(&plan, &report).unwrap();
+        let sets = crate::backups::history(&root);
+        let file = sets.iter().flat_map(|s| s.files.iter()).find(|f| f.name == "appleskin-fabric-mc26.2-3.0.10.jar").expect("the removal is in History");
+        assert_eq!(file.title(), "AppleSkin");
+        assert_eq!(file.site(), "Modrinth");
+        assert!(!file.detail().contains("No download source"), "{}", file.detail());
+        assert_eq!(file.who.as_ref().map(|w| w.name.as_str()), Some("Bob"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

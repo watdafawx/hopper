@@ -48,8 +48,11 @@ struct Slot {
     snap: Snapshot,
     /// Each jar this copy has had (its name, lower case, without `.disabled`)
     /// with the mod it is and the group's file id for it, so a History row
-    /// finds the change behind it even after the jar is gone.
-    jars: HashMap<String, (Key, String)>,
+    /// finds the change behind it even after the jar is gone. Kept beside the
+    /// engine's file, so the reason lines are still there after a restart.
+    jars: synccore::store::Jars,
+    /// The memory has something the saved file doesn't.
+    jars_dirty: bool,
     /// Members seen in the group so far (a new one gets a checkpoint).
     known: HashSet<String>,
     /// Failures said once.
@@ -151,6 +154,16 @@ impl Store {
     }
 
     fn sync_save(slot: &mut Slot) {
+        // Also when the engine changed: a new record makes the jars of its mod
+        // worth keeping (the file holds only those of mods with a change).
+        if slot.jars_dirty || slot.dirty {
+            slot.jars_dirty = false;
+            if let Some(dir) = Self::sync_dir()
+                && let Err(e) = synccore::store::save_jars(&dir, &slot.engine, &slot.jars)
+            {
+                log::warn!("saving the jar memory of {}: {e:#}", slot.engine.copy);
+            }
+        }
         if !slot.dirty {
             return;
         }
@@ -199,7 +212,8 @@ impl Store {
             if !self.sync.slots.contains_key(&local_id) {
                 let engine = self.sync_open(&copy, &me, &my_name, &snap);
                 local::watch(&root);
-                let mut slot = Slot { engine, root: root.clone(), group: group.clone(), dirty: true, posting: false, applying: false, snap: snap.clone(), jars: HashMap::new(), known: HashSet::new(), said: HashSet::new(), shrink: 0, pack_mode: None, newer: BTreeSet::new(), hidden: HashMap::new(), away: Vec::new() };
+                let jars = Self::sync_dir().map(|dir| synccore::store::load_jars(&dir, &copy)).unwrap_or_default();
+                let mut slot = Slot { engine, root: root.clone(), group: group.clone(), dirty: true, posting: false, applying: false, snap: snap.clone(), jars, jars_dirty: false, known: HashSet::new(), said: HashSet::new(), shrink: 0, pack_mode: None, newer: BTreeSet::new(), hidden: HashMap::new(), away: Vec::new() };
                 // A swap the last run stopped in the middle is finished now.
                 match apply::recover(&root) {
                     Ok(Some(report)) => slot.engine.applied(&report),
@@ -226,7 +240,12 @@ impl Store {
             let Some(slot) = self.sync.slots.get_mut(&local_id) else { continue };
             slot.group = group.clone();
             slot.snap = snap.clone();
-            slot.jars.extend(jars);
+            for (jar, v) in jars {
+                if slot.jars.get(&jar) != Some(&v) {
+                    slot.jars.insert(jar, v);
+                    slot.jars_dirty = true;
+                }
+            }
             if healthy {
                 slot.engine.touch(now);
             }
