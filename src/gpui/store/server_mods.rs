@@ -124,12 +124,32 @@ fn read_reply(root: &Path, v: &Value) -> anyhow::Result<Fetched> {
 }
 
 /// The panel's update offers as Hopper's own, with the files they'd break
-/// and the mods whose installed file the author archived.
-type RemoteUpdates = (Vec<Update>, HashSet<u64>, HashMap<u64, Vec<(String, String)>>);
+/// and the mods whose installed file the author archived. The offers for
+/// mods the pack ships come apart: they update one at a time, never with
+/// Update all, and `pack_newer` is the pack's newer version when there is one.
+pub struct RemoteUpdates {
+    pub list: Vec<Update>,
+    pub pack: Vec<Update>,
+    pub archived: HashSet<u64>,
+    pub breaks: HashMap<u64, Vec<(String, String)>>,
+    pub pack_newer: Option<String>,
+}
+
+/// The pack's newest version when the panel's pack check found one newer
+/// than the server's ("8.6"). Nothing when there's no pack or the check
+/// failed: the label then just doesn't name one.
+fn pack_newer_remote(c: &Client, r: &Remote) -> Option<String> {
+    let v = c.get(&Client::server_path(&r.id, "/pack/check")).ok()?;
+    let n = v["newer"].as_array()?.first()?;
+    let file = n["file_name"].as_str().unwrap_or_default();
+    let label = if file.is_empty() { n["name"].as_str()?.to_string() } else { hopper::instance_ops::pack_version_label(file) };
+    (!label.is_empty()).then_some(label)
+}
 
 fn updates_remote(r: &Remote, force: bool) -> anyhow::Result<RemoteUpdates> {
     let c = Client::for_remote(r)?;
-    let v = c.get(&Client::server_path(&r.id, if force { "/mods/updates?force=1" } else { "/mods/updates" }))?;
+    // `pack=1`: the pack's own mods too, each marked `pack`.
+    let v = c.get(&Client::server_path(&r.id, if force { "/mods/updates?force=1&pack=1" } else { "/mods/updates?pack=1" }))?;
     let id = |v: &Value| match v {
         Value::String(s) => s.parse().unwrap_or(0),
         Value::Number(n) => n.as_u64().unwrap_or(0),
@@ -137,6 +157,7 @@ fn updates_remote(r: &Remote, force: bool) -> anyhow::Result<RemoteUpdates> {
     };
     let s = |v: &Value| v.as_str().unwrap_or_default().to_string();
     let mut list = Vec::new();
+    let mut pack = Vec::new();
     let mut breaks = HashMap::new();
     for u in v["updates"].as_array().into_iter().flatten() {
         let pid = id(&u["project_id"]);
@@ -152,7 +173,7 @@ fn updates_remote(r: &Remote, force: bool) -> anyhow::Result<RemoteUpdates> {
         if !b.is_empty() {
             breaks.insert(pid, b);
         }
-        list.push(Update {
+        let up = Update {
             project_id: pid,
             name: s(&u["name"]),
             from: s(&u["from_file"]),
@@ -164,10 +185,13 @@ fn updates_remote(r: &Remote, force: bool) -> anyhow::Result<RemoteUpdates> {
                 release_type: u["release_type"].as_u64().unwrap_or(1) as u32,
                 ..Default::default()
             },
-        });
+        };
+        if u["pack"].as_bool() == Some(true) { pack.push(up) } else { list.push(up) }
     }
     let archived = v["archived"].as_array().into_iter().flatten().map(id).filter(|&i| i != 0).collect();
-    Ok((list, archived, breaks))
+    // Only asked when a pack mod has a newer file: the label names it then.
+    let pack_newer = if pack.is_empty() { None } else { pack_newer_remote(&c, r) };
+    Ok(RemoteUpdates { list, pack, archived, breaks, pack_newer })
 }
 
 impl Store {
@@ -381,9 +405,30 @@ impl Store {
         state.begin();
         let root = root.to_path_buf();
         self.spawn(move || match updates_remote(&r, force) {
-            Ok((list, archived, breaks)) => Msg::RemoteUpdates(root, list, archived, breaks),
+            Ok(u) => Msg::RemoteUpdates(root, Box::new(u)),
             Err(e) => Msg::Updates { root, result: Err(format!("{e:#}")), prev },
         });
+    }
+
+    /// One mod the server's pack ships, updated on its own after the owner
+    /// confirmed the server will differ from players' copies. The panel
+    /// records it in History like any update.
+    pub fn run_remote_pack_update(&self, root: &Path, u: Update) {
+        let name = self.instance(root).map(|i| i.name.clone()).unwrap_or_default();
+        let pid = u.project_id;
+        self.remote_job(
+            root,
+            format!("Updating {} on {name}", u.name),
+            "/mods/update",
+            json!({ "project_ids": [pid.to_string()], "pack": true }),
+            move |root, v| {
+                let done = v["updated_ids"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|i| i.as_str().and_then(|s| s.parse().ok()).or(i.as_u64())).collect())
+                    .unwrap_or_default();
+                Msg::Updated(root, done, Vec::new(), None)
+            },
+        );
     }
 
     /// Update buttons on a Hopper Server: the panel downloads them. The
@@ -766,7 +811,7 @@ impl Store {
                 l.remove(&file.to_lowercase());
             }
             match updates_remote(&r, true) {
-                Ok((list, archived, breaks)) => Msg::RemoteUpdates(root, list, archived, breaks),
+                Ok(u) => Msg::RemoteUpdates(root, Box::new(u)),
                 Err(e) => Msg::Updates { root, result: Err(format!("{e:#}")), prev },
             }
         });
