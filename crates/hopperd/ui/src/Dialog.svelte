@@ -25,8 +25,12 @@
     };
   });
 
+  // A tick box the yes waits for (confirmGate).
+  const gated = $derived(!!dialog.check?.required && !dialog.check.value);
+
   function submit(e) {
     e.preventDefault();
+    if (gated) return;
     answer(dialog.input ? dialog.input.value : dialog.check ? { ticked: dialog.check.value } : true);
   }
 
@@ -67,6 +71,7 @@
     <form class="f" onsubmit={submit}>
       <h3>{dialog.title}</h3>
       {#if dialog.body}<p class="small subtle">{dialog.body}</p>{/if}
+      {#if dialog.note}<p class="tiny muted">{dialog.note}</p>{/if}
       {#if dialog.check}
         <label class="row small"><input type="checkbox" bind:checked={dialog.check.value} />{dialog.check.label}</label>
       {/if}
@@ -76,7 +81,7 @@
       <div class="row end">
         <button type="button" class="btn" onclick={cancel}>Cancel</button>
         {#if dialog.alt}<button type="button" class="btn" onclick={() => answer('alt')}>{dialog.alt}</button>{/if}
-        <button class="btn" class:pri={!dialog.danger} class:danger={dialog.danger} bind:this={okBtn}>{dialog.ok}</button>
+        <button class="btn" class:pri={!dialog.danger} class:danger={dialog.danger} disabled={gated} bind:this={okBtn}>{dialog.check?.value && dialog.okTicked ? dialog.okTicked : dialog.ok}</button>
       </div>
     </form>
     </div>

@@ -190,7 +190,7 @@ pub(crate) struct Have {
 impl Have {
     pub(crate) fn of(app: &App, who: &Who, q: &HashMap<String, String>) -> ApiResult<Option<Have>> {
         Ok(target_of(app, who, q)?.map(|(e, inst)| {
-            let ups = crate::mods_api::cached_updates(&e.id)
+            let ups = crate::mods_api::own_updates(&e.id)
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|u| u["project_id"].as_str()?.parse().ok())

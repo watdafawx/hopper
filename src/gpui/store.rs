@@ -197,9 +197,9 @@ pub enum Msg {
     ServerModsKept(PathBuf, Option<Box<server_mods::Fetched>>),
     /// A change on a Hopper Server failed: why (the list is fetched again).
     RemoteFailed(PathBuf, String),
-    /// A Hopper Server's update offers: the list, archived files, and what
-    /// each update would break.
-    RemoteUpdates(PathBuf, Vec<Update>, std::collections::HashSet<u64>, HashMap<u64, Vec<(String, String)>>),
+    /// A Hopper Server's update offers: the list, the pack's own mods apart,
+    /// archived files, and what each update would break.
+    RemoteUpdates(PathBuf, Box<server_mods::RemoteUpdates>),
 }
 
 impl Msg {
@@ -568,6 +568,9 @@ pub struct Store {
     /// Per instance, the mods each update would stop loading (see
     /// [`Store::update_breaks`]).
     breaks: HashMap<PathBuf, HashMap<u64, Vec<(String, String)>>>,
+    /// Per Hopper Server, newer files of mods its pack ships (offered one
+    /// at a time, never with Update all) and the pack's newer version.
+    pack_offers: HashMap<PathBuf, (Vec<Update>, Option<String>)>,
     archived: HashMap<PathBuf, std::collections::HashSet<u64>>,
     /// Per instance or server folder, the mods an older version would fix
     /// (by jar), as of the mods folder's modified time; folders being read.
@@ -1009,6 +1012,7 @@ impl Store {
             cats_pending: Default::default(),
             updates: HashMap::new(),
             breaks: HashMap::new(),
+            pack_offers: HashMap::new(),
             archived: HashMap::new(),
             reverts: HashMap::new(),
             reverts_pending: HashSet::new(),
@@ -1548,6 +1552,9 @@ impl Store {
                 if let Some(u) = self.updates.get_mut(&root) {
                     u.drop_projects(&done);
                 }
+                if let Some((p, _)) = self.pack_offers.get_mut(&root) {
+                    p.retain(|u| !done.contains(&u.project_id));
+                }
                 self.handle(Msg::InstanceChanged(root.clone()), cx);
                 self.save_updates(&root);
                 // Website-only files: the download window gets them, as the
@@ -1967,9 +1974,11 @@ impl Store {
             Msg::ServerMods(root, res) => self.server_mods_arrived(root, res),
             Msg::ServerModsKept(root, f) => self.server_mods_kept(root, f),
             Msg::RemoteFailed(root, why) => self.remote_failed(root, why, cx),
-            Msg::RemoteUpdates(root, list, archived, breaks) => {
+            Msg::RemoteUpdates(root, u) => {
+                let server_mods::RemoteUpdates { list, pack, archived, breaks, pack_newer } = *u;
                 self.archived.insert(root.clone(), archived);
                 self.breaks.insert(root.clone(), breaks);
+                self.pack_offers.insert(root.clone(), (pack, pack_newer));
                 let state = self.updates.entry(root.clone()).or_default();
                 state.finish(Ok(list));
                 if let Some(inst) = self.server_insts.iter().find(|i| i.root == root) {
@@ -4096,6 +4105,24 @@ impl Store {
     /// last update check; false until it has run).
     pub fn archived(&self, root: &Path) -> Option<&std::collections::HashSet<u64>> {
         self.archived.get(root)
+    }
+
+    /// Newer files of mods the server's pack ships, still waiting: each
+    /// one's old jar is still the one installed, and not locked (updates
+    /// ignored). Empty off a Hopper Server.
+    pub fn pack_offers(&self, root: &Path) -> Vec<&Update> {
+        let Some((list, _)) = self.pack_offers.get(root) else { return Vec::new() };
+        let Some(inst) = self.instance(root) else { return Vec::new() };
+        let base = |f: &str| f.trim_end_matches(".disabled").to_lowercase();
+        list.iter()
+            .filter(|u| inst.addons.iter().any(|a| a.project_id == u.project_id && !a.locked && base(&a.file_name) == base(&u.from)))
+            .collect()
+    }
+
+    /// The server's pack has a newer version than the server runs: its
+    /// version ("8.6"), as the panel's pack check found it.
+    pub fn pack_newer(&self, root: &Path) -> Option<&str> {
+        self.pack_offers.get(root)?.1.as_deref()
     }
 
     /// The mods `project`'s offered update would stop loading: (mod, the

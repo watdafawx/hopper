@@ -40,7 +40,8 @@
   import { showSourcesHint } from './lib/sourcehint.js';
   import { api, post, here } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
-  import { ask, confirmIt } from './lib/dialog.svelte.js';
+  import { ask, confirmIt, confirmGate } from './lib/dialog.svelte.js';
+  import { packModsLabel, packUpdateNote } from './lib/packmods.js';
   import { followJob } from './lib/jobs.js';
   import {
     setOn, removeMods, problems, setLocked, resetConfig, switchSource, setVersionLock, configFiles, versionLocked, wordsMatch, ago, dateOf,
@@ -202,12 +203,18 @@
   const yours = (m) => hasPack && m.source && !m.from_pack;
   const isArchived = (m) => archived.has(m.project_id) && !done.has(m.project_id);
   const pending = (m) => !!m.update && !m.locked && !done.has(m.project_id);
+  // A newer file of a mod the pack ships: its row's own Update only (after a
+  // confirm), never Update all or the Updates count.
+  const packUp = (m) => !pending(m) && !!m.pack_update && !m.locked && !done.has(m.project_id);
+  // How many, over the whole list (as desktop's bar counts them).
+  const nPack = $derived(mods.filter(packUp).length);
   // Settings not at the default their config file states (the Configs index).
   const cfgChanged = (m) => cfg.sid === sid && (modForFile(m.file)?.changed || 0) > 0;
   const base0 = $derived(mods.filter((m) => !onlyYours || !hasPack || yours(m)));
   const counts = $derived({
     all: base0.length,
     updates: base0.filter(pending).length,
+    pack: base0.filter(packUp).length,
     off: base0.filter((m) => !m.enabled).length,
     archived: base0.filter(isArchived).length,
     client: base0.filter((m) => m.side === 'client').length,
@@ -216,7 +223,7 @@
     yours: mods.filter(yours).length,
   });
   // Desktop's All / Updates / Off, then the server's own two when any.
-  const CHIPS = [['all', 'All', Layers], ['updates', 'Updates', CircleArrowUp], ['off', 'Disabled', CircleOff], ['archived', 'Archived', Archive], ['client', 'Client-only', Monitor], ['unknown', 'Unknown', Info]];
+  const CHIPS = [['all', 'All', Layers], ['updates', 'Updates', CircleArrowUp], ['pack', 'Newer than the pack ships', Package], ['off', 'Disabled', CircleOff], ['archived', 'Archived', Archive], ['client', 'Client-only', Monitor], ['unknown', 'Unknown', Info]];
   // The rail: the picks (what is listed) that apply, then the toggles that combine with the pick.
   const rail = $derived([
     ...CHIPS.filter(([k]) => k === 'all' || k === 'updates' || k === 'off' || counts[k] || chip === k).map(([k, label, icon]) => ({ k, label, icon, n: k === 'all' ? mods.length : counts[k], tog: false, on: chip === k })),
@@ -238,7 +245,7 @@
     e.preventDefault();
   }
   const fits = {
-    all: () => true, updates: pending, off: (m) => !m.enabled, archived: isArchived,
+    all: () => true, updates: pending, pack: packUp, off: (m) => !m.enabled, archived: isArchived,
     client: (m) => m.side === 'client', unknown: isUnknown,
   };
   // The orders the list can take, named as their column headers are.
@@ -417,9 +424,24 @@
     }
   }
 
-  async function applyUpdates(ids) {
+  /** One mod the pack ships, updated alone once the owner ticked that the
+   * server will differ from players' copies (the same words as desktop). */
+  async function updatePackMod(m) {
+    const u = m.pack_update;
+    const ok = await confirmGate(`Update ${m.name} on the server only?`, {
+      body: packUpdateNote(u.from),
+      note: "It's recorded in the server's History, where you can undo it.",
+      check: 'Let the server differ from the pack',
+      ok: 'Tick the box to update',
+      okTicked: `Update ${m.name} to ${u.to}`,
+    });
+    if (ok) applyUpdates([m.project_id], true);
+  }
+
+  async function applyUpdates(ids, pack = false) {
     updating = new Set([...updating, ...ids]);
-    const r = await run(ids.length === 1 ? 'Updating a server mod' : `Updating ${ids.length} server mods`, 'update', { project_ids: ids });
+    // `pack`: one mod the pack ships, named alone (the panel refuses more).
+    const r = await run(ids.length === 1 ? 'Updating a server mod' : `Updating ${ids.length} server mods`, 'update', pack ? { project_ids: ids, pack: true } : { project_ids: ids });
     updating = new Set([...updating].filter((i) => !ids.includes(i)));
     if (r) {
       const n = r.updated.length;
@@ -482,11 +504,12 @@
   function updateOne(m, e) {
     if (clickSwallowed()) return;
     if (versionLocked(m) && !e?.shiftKey) return say('This version is locked: Shift+click Update to install it anyway.');
+    if (packUp(m)) return updatePackMod(m);
     applyUpdates([m.project_id]);
   }
 
   async function lockVersion(m, lock) {
-    if (await setVersionLock(base, m, lock ? m.update.file : null)) await load();
+    if (await setVersionLock(base, m, lock ? (m.update || m.pack_update).file : null)) await load();
   }
 
   async function editConfig(m) {
@@ -863,7 +886,7 @@
     <span class="sp"></span>
     {#if data}
       <button class="chip meta" title={/^(neoforge|forge|fabric|quilt)/i.test(data.loader || '') ? 'Loader versions and changelog' : 'Minecraft version and loader: change'} onclick={() => (/^(neoforge|forge|fabric|quilt)/i.test(data.loader || '') ? (loaderOpen = true) : editMeta())}><Settings2 size={11} />{data.game_version || 'version?'} · {data.loader || 'loader?'}</button>
-      {#if data.pack}<span class="chip acc" title="Pack mods update through Update from server pack">{data.pack}</span>{/if}
+      {#if data.pack}<span class="chip acc" title="Pack mods update through Update from server pack, or one at a time from their row">{data.pack}</span>{/if}
     {/if}
   </nav>
 
@@ -881,7 +904,8 @@
         <!-- The last check's results stay up while a new one runs; with results on screen the refresh button spins instead, so nothing moves. -->
         <!-- Update all and the check button are one split button; with nothing to update the check button stands alone. -->
         {#if pendingUpdates.length}<span class="usplit"><button class="btn sm pri" disabled={!!busy} title="Review {pendingUpdates.length === 1 ? '1 update' : `${pendingUpdates.length} updates`}, then update" onclick={() => (reviewing = pendingUpdates)}><Download size={13} /><span class="lb">Update all (</span>{pendingUpdates.length}<span class="lb">)</span></button><button class="btn sm pri icon" disabled={checking} aria-label="Check for updates" title={checking ? 'Checking for updates' : `Check for updates${checkedAgo ? ` · checked ${checkedAgo}` : ''}`} onclick={() => checkUpdates(true)}><span class:spin={checking} class="rf"><RefreshCw size={13} /></span></button></span>
-        {:else}{#if updates && !checking}<span class="small okt row lb"><CircleCheck size={14} />Up to date</span>{/if}
+        {:else}{#if updates && !checking && nPack}<!-- Only the pack's own mods have newer files: not "Up to date", and a click lists them. --><button class="btn sm ghost pkn" title="These mods come with the pack. Update one on its own from its row; the pack's players keep the pack's version." onclick={() => (chip = 'pack')}><Package size={13} /><span class="pk-full">{packModsLabel(nPack, data?.pack_newer)}</span><span class="pk-short">{packModsLabel(nPack, null, true)}</span></button>
+        {:else if updates && !checking}<span class="small okt row lb"><CircleCheck size={14} />Up to date</span>{/if}
         <button class="btn sm ghost icon" disabled={checking} aria-label="Check for updates" title={checking ? 'Checking for updates' : `Check for updates${checkedAgo ? ` · checked ${checkedAgo}` : ''}`} onclick={() => checkUpdates(true)}><span class:spin={checking} class="rf"><RefreshCw size={13} /></span></button>{/if}
         {#if checking && !pendingUpdates.length}<span class="small muted row"><span class="spinner blue"></span>Checking for updates</span>{/if}
       </span>
@@ -891,7 +915,7 @@
         {#each rail as r, i (r.k)}
           {#if r.tog && !rail[i - 1]?.tog}<span class="sep"></span>{/if}
           <button class="si" class:tog={r.tog} style:--bw={String(r.n ?? 0).length} aria-pressed={r.on} aria-label="{r.label}, {r.n}" data-tip="{r.label} · {r.n}" onclick={() => railPick(r.k)}>
-            <span class="ico"><r.icon size={14} />{#if r.k === 'updates' && r.n && !r.on}<span class="bdg"><i>{r.n}</i></span>{/if}</span><span class="lbw"><span>{r.label}<span class="ct">{r.n}</span></span></span>
+            <span class="ico"><r.icon size={14} />{#if r.k === 'updates' && r.n && !r.on}<span class="bdg"><i>{r.n}</i></span>{/if}</span><span class="lbw"><span><span class="rl">{r.label}</span><span class="ct">{r.n}</span></span></span>
           </button>
         {/each}
       </div>
@@ -931,7 +955,8 @@
         <div class="win" style:transform="translateY({win.a * ROW}px)">
         {#each visible as m, vi (m.file)}
           {@const ix = win.a + vi}
-          {@const up = pending(m) ? m.update : null}
+          {@const up = pending(m) ? m.update : packUp(m) ? m.pack_update : null}
+          {@const po = packUp(m)}
           {@const vl = versionLocked(m)}
           {@const breaking = !!problems(up).length && !vl}
           {@const brk = up?.breaks || []}
@@ -989,7 +1014,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
                 {#if isArchived(m)}<span class="archw" title="The author archived this version. Update to get the newer one."><TriangleAlert size={14} /></span>{/if}
                 <div class="splitb" class:warnb={breaking} class:lockb={vl}>
                   <button class="lead" class:lit={swSweep === 'action' && swept('mods', ix)} disabled={updating.has(m.project_id) || !!busy}
-                    title={vl ? `${up.to} is locked: you keep ${up.from}.\nShift+click to update anyway, or click the lock tag to unlock.` : breaking ? `${up.from}  →  ${up.file}\nThis stops the server loading: ${problems(up).join('; ')}` : !m.enabled ? `${up.from}  →  ${up.file}\nIt stays disabled after updating: turn it on in the On column.` : `${up.from}  →  ${up.file}`}
+                    title={vl ? `${up.to} is locked: you keep ${up.from}.\nShift+click to update anyway, or click the lock tag to unlock.` : breaking ? `${up.from}  →  ${up.file}\nThis stops the server loading: ${problems(up).join('; ')}` : !m.enabled ? `${up.from}  →  ${up.file}\nIt stays disabled after updating: turn it on in the On column.` : po ? `${up.from}  →  ${up.file}\nThe pack ships this mod: updating it here makes the server differ from players' copies.` : `${up.from}  →  ${up.file}`}
                     onpointerdown={(e) => sweepable(m) && updateDown(e, m, ix)} onclick={(e) => updateOne(m, e)}>{#if updating.has(m.project_id)}<span class="spinner"></span>Updating{:else}{#if vl}<Lock size={12} />{:else if breaking}<TriangleAlert size={12} />{:else}<Download size={12} />{/if}Update{/if}</button>
                   <button onclick={() => (versionsFor = m)}>What changed</button>
                 </div>
@@ -1012,7 +1037,10 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
           <div class="skels">{#each [0, 1, 2, 3, 4, 5] as i (i)}<div class="skel"><i></i></div>{/each}</div>
         {:else if !shown.length}
           {@const filtered = !!filter.trim() || chip !== 'all' || onlyCfg || (onlyYours && hasPack)}
-          {#if chip === 'updates' && !filter.trim() && !(onlyYours && hasPack)}
+          {#if chip === 'updates' && !filter.trim() && !(onlyYours && hasPack) && nPack}
+            <!-- Only the pack's own mods have newer files: say so, and list them. -->
+            <div class="empty-state"><span class="es-ic"><CircleCheck size={20} /></span><b>Your mods are up to date</b><p>Some mods the pack ships have newer files. They update one at a time.</p><button class="btn sm" onclick={() => (chip = 'pack')}>Newer than the pack ships ({nPack})</button></div>
+          {:else if chip === 'updates' && !filter.trim() && !(onlyYours && hasPack)}
             <div class="empty-state"><span class="es-ic"><CircleCheck size={20} /></span><b>All up to date</b><p>Every item here is on its newest version.</p><button class="btn sm" onclick={() => (chip = 'all')}>Show all</button></div>
           {:else if filtered}
             <div class="empty-state"><span class="es-ic"><Search size={20} /></span><b>Nothing matches</b><p>No item here fits the search and filters.</p><button class="btn sm" onclick={clearFilters}>Clear search and filters</button></div>
@@ -1040,7 +1068,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
 
 {#if menu}
   {@const m = menu.m}
-  {@const mup = pending(m) ? m.update : null}
+  {@const mup = pending(m) ? m.update : packUp(m) ? m.pack_update : null}
   {@const mvl = versionLocked(m)}
   <div class="ctx popover menu" style:left="{menu.x}px" style:top="{menu.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
     {#if foldUp && mup}<button class="menu-item" disabled={updating.has(m.project_id) || !!busy} onclick={(e) => act((m) => updateOne(m, e))}><Download size={13} /><span class="ell">Update to {mup.to}</span></button><div class="menu-sep"></div>{/if}
@@ -1119,8 +1147,31 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .toolbar { gap: 6px 10px; flex-wrap: nowrap; min-width: 0; container: mbar / inline-size; }
   .toolbar > :global(*) { flex: none; }
   .toolbar .find { flex: 0 1 224px; min-width: 90px; }
+  /* "Pack mods can update separately (N)": full, then its short form, then
+     gone (the filter keeps the count), as desktop's bar gives way. */
+  .pkn .pk-short { display: none; }
+  /* The label is the one thing in the bar that may shorten: when a long pack
+     version still doesn't fit, it ends in "…" instead of pushing Sort and
+     Profiles off the card. The search's big shrink factor narrows it to its
+     minimum first. */
+  .toolbar .find { flex-shrink: 10000; }
+  .toolbar .upd { flex: 0 1 auto; min-width: 0; }
+  .toolbar .pkn { min-width: 0; flex: 0 1 auto; overflow: hidden; }
+  .pkn .pk-full, .pkn .pk-short { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  @container mbar (max-width: 1180px) {
+    .pkn .pk-full { display: none; }
+    .pkn .pk-short { display: inline; }
+  }
+  /* The chosen filter keeps its icon and count; a long name ("Newer than
+     the pack ships") would push the sort button off the card. */
+  @container mbar (max-width: 1000px) {
+    .toolbar .fr .rl { display: none; }
+  }
   @container mbar (max-width: 900px) {
     .toolbar :global(.lb) { display: none; }
+  }
+  @container mbar (max-width: 720px) {
+    .toolbar .pkn { display: none; }
   }
   @container mbar (max-width: 640px) {
     .toolbar .vr { display: none; }

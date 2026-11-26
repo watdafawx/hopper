@@ -163,6 +163,14 @@ fn cached(id: &str, link: &PackLink) -> Option<Value> {
     (file == &link.file && now_secs().saturating_sub(*at) < ttl).then(|| v.clone())
 }
 
+/// The pack's newer version ("8.6", picked and worded as desktop does) when
+/// the last pack check found one newer than the server's. From the kept
+/// check only: the Mods list never waits for the sites.
+pub(crate) fn newer_label(e: &Entry) -> Option<String> {
+    let link = pack_of(&e.root)?;
+    hopper_core::instance_ops::newer_pack_label(&cached(&e.id, &link)?)
+}
+
 fn keep(id: &str, link: &PackLink, v: &Value) {
     CHECKS.lock().unwrap().get_or_insert_with(HashMap::new).insert(id.to_string(), (now_secs(), link.file.clone(), v.clone()));
 }

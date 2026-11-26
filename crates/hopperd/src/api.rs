@@ -945,7 +945,7 @@ async fn crash(
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
     let root = e.root.clone();
     // The last update check: an "Update X" step shows only while a newer X is out.
-    let ups: Option<std::collections::HashSet<u64>> = crate::mods_api::cached_updates(&id)
+    let ups: Option<std::collections::HashSet<u64>> = crate::mods_api::own_updates(&id)
         .map(|v| v.iter().filter_map(|u| u["project_id"].as_str()?.parse().ok()).collect());
     let c = tokio::task::spawn_blocking(move || {
         let mut c = hopper_core::crashdetect::server(&root)?;

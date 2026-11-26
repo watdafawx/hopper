@@ -34,6 +34,8 @@ use std::rc::Rc;
 enum Show {
     All,
     Updates,
+    /// On a Hopper Server: mods the pack ships with a newer file out.
+    PackNewer,
     Disabled,
     /// Packs: In game (resource packs) or In worlds (data packs).
     InGame,
@@ -463,6 +465,10 @@ pub(crate) struct Table {
     pub(crate) inst: Option<Rc<Instance>>,
     /// Pending updates of this tab's class (see [`Offers`]).
     pub(crate) updates: Rc<Offers>,
+    /// On a Hopper Server: newer files of mods the pack ships. Each row's
+    /// own Update offers them (after a confirm); they're never in
+    /// `updates`, so Update all and the counts leave them out.
+    pub(crate) pack_ups: Rc<Offers>,
     /// Projects whose installed file the author archived.
     pub(crate) archived: Rc<HashSet<u64>>,
     /// Lower-case resource pack files switched on in game.
@@ -530,6 +536,10 @@ fn fingerprint(store: &Store, root: &Path, class: u32) -> Option<u64> {
             }
         }
     }
+    for u in store.pack_offers(root) {
+        (u.project_id, u.file.id).hash(&mut h);
+    }
+    store.pack_newer(root).hash(&mut h);
     if let Some(s) = store.archived(root) {
         let mut ids: Vec<&u64> = s.iter().collect();
         ids.sort();
@@ -552,6 +562,50 @@ fn fingerprint(store: &Store, root: &Path, class: u32) -> Option<u64> {
 
 /// How many rows of `class` the table lists: an old copy left off beside
 /// the one that's on is one row (see [`Table::extra`]).
+/// The pack-mod update confirm's body: what changes, and the tick box that
+/// lets its button go.
+struct PackUpdateAsk {
+    note: String,
+    ticked: bool,
+}
+
+impl Render for PackUpdateAsk {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        v_flex()
+            .gap_3()
+            .child(div().text_sm().child(self.note.clone()))
+            .child(div().text_xs().text_color(muted).child("It's recorded in the server's History, where you can undo it."))
+            .child(
+                gpui_kit::component::checkbox::Checkbox::new("pack-up-tick")
+                    .label("Let the server differ from the pack")
+                    .checked(self.ticked)
+                    .on_change(cx.listener(|this, v: &bool, _, cx| {
+                        this.ticked = *v;
+                        cx.notify();
+                    })),
+            )
+    }
+}
+
+/// Said in place of "Up to date" on a Hopper Server when only mods the pack
+/// ships have newer files; names the pack's newer version only when the
+/// pack really has one.
+fn pack_mods_label(n: usize, pack_newer: Option<&str>) -> String {
+    match pack_newer.filter(|v| !v.is_empty()) {
+        Some(v) => {
+            let v = if v.starts_with(|c: char| c.is_ascii_digit()) { format!("v{v}") } else { v.to_string() };
+            format!("Pack mods can update separately ({n}) · pack {v} is out")
+        }
+        None => format!("Pack mods can update separately ({n})"),
+    }
+}
+
+/// The confirm's sentence before one of the pack's own mods updates alone.
+fn pack_update_note(ships: &str) -> String {
+    format!("The pack ships {ships}. Players on the pack keep {ships}; the server will differ until the pack updates.")
+}
+
 pub(crate) fn shown_count(inst: &Instance, class: u32) -> usize {
     let n = inst.addons.iter().filter(|a| in_class(a, class)).count();
     if class != cf::CLASS_MODS {
@@ -1387,11 +1441,17 @@ impl AddonsView {
                 _ => false,
             }
         });
+        let pack_ups = if class == cf::CLASS_MODS {
+            Offers::by_project(self.store.read(cx).pack_offers(&root).into_iter().map(|u| (u.project_id, u.clone())).collect())
+        } else {
+            Offers::default()
+        };
         self.table = Table {
             extra: Rc::new(extra),
             sig,
             inst: Some(Rc::new(inst)),
             updates: Rc::new(updates),
+            pack_ups: Rc::new(pack_ups),
             archived: Rc::new(archived),
             active_rp: Rc::new(active_rp),
             shader,
@@ -1824,6 +1884,7 @@ impl AddonsView {
             .filter(|(_, a)| !self.cfg_changed_only || self.cfg_index.as_ref().is_some_and(|i| i.mod_changed(a.file_name.trim_end_matches(".disabled")) > 0))
             .filter(|(_, a)| match self.show {
                 Show::Updates => updates.contains(a),
+                Show::PackNewer => self.table.pack_ups.contains(a),
                 Show::Disabled => !self.row_on(a),
                 Show::InGame => matches!(
                     self.where_group(&a.file_name),
@@ -2727,6 +2788,48 @@ impl AddonsView {
         cx.notify();
     }
 
+    /// One mod the server's pack ships, updated alone: says the server will
+    /// differ from players' copies, and the button only goes once that's
+    /// ticked (no typing). The panel records it in History, so it can be undone.
+    fn confirm_pack_update(&mut self, u: Update, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let name = self
+            .table
+            .inst
+            .as_ref()
+            .and_then(|i| i.addons.iter().find(|a| a.project_id == u.project_id))
+            .map_or(u.name.clone(), |a| a.name.clone());
+        let (ships, to) = u.versions();
+        let form = cx.new(|_| PackUpdateAsk { note: pack_update_note(&ships), ticked: false });
+        let store = self.store.clone();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let ticked = form.read(cx).ticked;
+            let (f, store, root, u) = (form.clone(), store.clone(), root.clone(), u.clone());
+            dialog
+                .title(format!("Update {name} on the server only?"))
+                .w(rems(30.).to_pixels(window.rem_size()))
+                .margin_top(rems(crate::widgets::DIALOG_TOP).to_pixels(window.rem_size()))
+                .child(form.clone())
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().child(Button::new("pack-up-cancel").outline().label("Cancel")))
+                        .child(DialogAction::new().child(
+                            Button::new("pack-up-ok")
+                                .primary()
+                                .disabled(!ticked)
+                                .label(if ticked { format!("Update {name} to {to}") } else { "Tick the box to update".to_string() }),
+                        )),
+                )
+                .on_ok(move |_, _, cx| {
+                    if !f.read(cx).ticked {
+                        return false;
+                    }
+                    store.read(cx).run_remote_pack_update(&root, u.clone());
+                    true
+                })
+        });
+    }
+
     /// Update all, reviewed first: the updates grouped by how big a jump
     /// they are, each one skippable.
     fn review_updates(&mut self, all: Vec<Update>, window: &mut Window, cx: &mut Context<Self>) {
@@ -3062,6 +3165,8 @@ impl AddonsView {
             .filter(|a| self.class == cf::CLASS_MODS || row_files.insert(hopper::pack_where::row_key(&a.file_name)))
             .collect();
         let n_up = shown_rows.iter().filter(|a| updates.contains(a)).count();
+        // Mods the pack ships with a newer file (a Hopper Server's only).
+        let n_pack = shown_rows.iter().filter(|a| self.table.pack_ups.contains(a) && !self.recent.contains_key(&a.project_id)).count();
         let n_off = of_class().filter(|a| !self.row_on(a)).count();
         let n_added = of_class().filter(|a| !a.from_pack).count();
         // Packs filter by where they count; the rest by Updates / Disabled.
@@ -3085,6 +3190,11 @@ impl AddonsView {
             rail.push(RailItem::show(Show::Updates, "Updates", IconName::CircleArrowUp, Some(n_up)).badged());
         } else {
             rail.push(RailItem::show(Show::Updates, "Updates", IconName::CircleArrowUp, Some(n_up)).badged());
+            // Apart from Updates: these update one at a time, never with
+            // Update all, so they don't add to its count.
+            if n_pack > 0 || self.show == Show::PackNewer {
+                rail.push(RailItem::show(Show::PackNewer, "Newer than the pack ships", IconName::Package, Some(n_pack)));
+            }
             rail.push(RailItem::show(Show::Disabled, "Disabled", IconName::CircleOff, Some(n_off)));
         }
         // Only offered when something here is archived (or is being viewed).
@@ -3226,7 +3336,7 @@ impl AddonsView {
                 .cleanable(true),
         ).into_any_element();
         let root = inst.root.clone();
-        let key = widgets::fit_key([format!("{}{}{}{}", self.class, n_up, hint, (self.show == Show::All) as u8).as_str()]);
+        let key = widgets::fit_key([format!("{}{}{}{}{}", self.class, n_up, hint, (self.show == Show::All) as u8, n_pack).as_str()]);
         let bar = h_flex()
             .w_full()
             .gap_3()
@@ -3331,6 +3441,26 @@ impl AddonsView {
                         .flex_none()
                         .gap_2()
                         .child(match listed {
+                            // Only the pack's own mods have newer files: not
+                            // "Up to date", and a click lists them.
+                            true if !quiet && lv < 2 && n_pack > 0 => {
+                                let label = if lv == 0 {
+                                    pack_mods_label(n_pack, self.store.read(cx).pack_newer(&inst.root))
+                                } else {
+                                    format!("Pack mods can update ({n_pack})")
+                                };
+                                Button::new("pack-newer")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Package)
+                                    .label(label)
+                                    .tooltip("These mods come with the pack. Update one on its own from its row; the pack's players keep the pack's version.")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show = Show::PackNewer;
+                                        cx.notify();
+                                    }))
+                                    .into_any_element()
+                            }
                             true if !quiet && lv < 2 => h_flex()
                                 .gap_1p5()
                                 .text_sm()
@@ -3815,7 +3945,7 @@ impl AddonsView {
                         new,
                         rank: self.table.rank.get(i).copied(),
                     };
-                    self.addon_row(a, updates.get(a), flags, cx)
+                    self.addon_row(a, updates.get(a).or_else(|| self.table.pack_ups.get(a)), flags, cx)
                 }
                 Row::Section(title, hint) => self.section_row(title, hint, cx),
                 Row::Group(g, n) => self.group_row(g, *n, cx),
@@ -4474,6 +4604,9 @@ Details").into()),
         // Updated: this row's own file changed, not another copy's.
         let done = self.just_updated(a, !global);
         let breaking = (!breaks.is_empty() || needs.is_some()) && !vlocked;
+        // A newer file of a mod the pack ships (a Hopper Server's): its own
+        // Update only, after a confirm.
+        let pack_only = update.is_some() && !self.table.updates.contains(a) && self.table.pack_ups.contains(a);
         // A drag across switches or Update buttons: what letting go does.
         let sweep = self.pick.sweeping();
         let swept = self.swept.contains(&file);
@@ -4521,7 +4654,11 @@ Details").into()),
                     }),
             )
         }).when_some(update.cloned().filter(|_| !done), |c, u| {
-            let tip = format!("{}  →  {}", u.from, u.file.file_name);
+            let tip = if pack_only {
+                format!("{}  →  {}\nThe pack ships this mod: updating it here makes the server differ from players' copies.", u.from, u.file.file_name)
+            } else {
+                format!("{}  →  {}", u.from, u.file.file_name)
+            };
             let (pid, file) = (u.project_id, u.file.clone());
             let view = cx.entity();
             let f_sweep = a.file_name.clone();
@@ -4541,8 +4678,9 @@ Details").into()),
                     format!("{}. Click to open the download window again", v.detail())
                 }
             }));
-            // Drag-updates pass over a locked or breaking update.
-            let sweepable = can_run && !vlocked && breaks.is_empty();
+            // Drag-updates pass over a locked or breaking update, and over
+            // the pack's own mods (each asks first).
+            let sweepable = can_run && !vlocked && breaks.is_empty() && !pack_only;
             let split = widgets::split(
                 // Pressed and dragged across rows: their Update buttons too.
                 drag_pick::handle(div().id(id("update-sweep")).flex_1().flex(), cx, move |this, _, cx| {
@@ -4626,6 +4764,11 @@ It stays disabled after updating: turn it on in the On column.")
                                         Notification::info("This version is locked: Shift+click Update to install it anyway."),
                                         cx,
                                     );
+                                    return;
+                                }
+                                // One the pack ships: asked first, then on its own.
+                                if pack_only {
+                                    this.confirm_pack_update(u.clone(), window, cx);
                                     return;
                                 }
                                 this.settle.clicked();
@@ -6651,7 +6794,26 @@ impl Render for AddonsView {
             let filtered = !(self.query.is_empty() && self.show == Show::All && !self.added_only && !self.cfg_changed_only);
             // Only the Updates filter on, and nothing to update.
             let up_to_date = self.show == Show::Updates && self.query.is_empty() && !self.added_only;
-            let state = if up_to_date {
+            // Only the pack's own mods have newer files: say so, and list them.
+            let n_pack = self.table.pack_ups.by_pid.len();
+            let state = if up_to_date && n_pack > 0 {
+                widgets::empty_state(
+                    IconName::CircleCheck,
+                    "Your mods are up to date",
+                    Some("Some mods the pack ships have newer files. They update one at a time.".into()),
+                    cx,
+                )
+                .child(
+                    Button::new("empty-pack-newer")
+                        .small()
+                        .outline()
+                        .label(format!("Newer than the pack ships ({n_pack})"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show = Show::PackNewer;
+                            cx.notify();
+                        })),
+                )
+            } else if up_to_date {
                 widgets::empty_state(
                     IconName::CircleCheck,
                     "All up to date",
@@ -6771,6 +6933,18 @@ impl Render for AddonsView {
 #[cfg(test)]
 mod tests {
     use super::{find_backup, Rail, Show};
+
+    #[test]
+    fn pack_mods_label_names_a_newer_pack_only_when_there_is_one() {
+        assert_eq!(super::pack_mods_label(3, Some("8.6")), "Pack mods can update separately (3) · pack v8.6 is out");
+        assert_eq!(super::pack_mods_label(1, Some("v2.9.3")), "Pack mods can update separately (1) · pack v2.9.3 is out");
+        assert_eq!(super::pack_mods_label(2, None), "Pack mods can update separately (2)");
+        assert_eq!(super::pack_mods_label(2, Some("")), "Pack mods can update separately (2)");
+        assert_eq!(
+            super::pack_update_note("1.2"),
+            "The pack ships 1.2. Players on the pack keep 1.2; the server will differ until the pack updates."
+        );
+    }
 
     #[test]
     fn rail_pick_keeps_toggles_and_toggle_keeps_pick() {

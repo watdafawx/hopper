@@ -2,13 +2,16 @@
 // choose() for two answers (like "Turn off all 3" / "Only Create"),
 // confirmTick() for yes/no with one tick box (like "Back up first").
 
-export const dialog = $state({ open: false, title: '', body: '', input: null, check: null, ok: 'OK', alt: '', danger: false });
+// confirmGate() for a yes that needs its tick box first (the button's
+// wording changes once ticked; never typing a name).
+
+export const dialog = $state({ open: false, title: '', body: '', note: '', input: null, check: null, ok: 'OK', okTicked: '', alt: '', danger: false });
 
 let settle = null;
 
 function show(opts) {
   if (settle) settle(null);
-  Object.assign(dialog, { open: true, body: '', input: null, check: null, ok: 'OK', alt: '', danger: false }, opts);
+  Object.assign(dialog, { open: true, body: '', note: '', input: null, check: null, ok: 'OK', okTicked: '', alt: '', danger: false }, opts);
   return new Promise((resolve) => (settle = resolve));
 }
 
@@ -28,6 +31,14 @@ export async function confirmTick(title, { body = '', ok = 'OK', danger = false,
   // No label: a plain yes / no (the tick doesn't apply).
   const r = await show({ title, body, ok, danger, check: check ? { label: check, value: ticked } : null });
   return r === true ? { ticked: false } : r && typeof r === 'object' ? r : null;
+}
+
+/** Asks yes or no where yes waits for the tick box (`check`): `ok` is the
+ * button's wording until it's ticked (it can't be pressed), `okTicked`
+ * after. `note`: a quieter second line. Resolves to true or false. */
+export async function confirmGate(title, { body = '', note = '', check, ok, okTicked, danger = false }) {
+  const r = await show({ title, body, note, ok, okTicked, danger, check: { label: check, value: false, required: true } });
+  return !!(r && typeof r === 'object' && r.ticked);
 }
 
 /** Asks with two answers besides Cancel; resolves to 'ok', 'alt' or null. */
