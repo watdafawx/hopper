@@ -3395,7 +3395,7 @@ impl BrowseView {
             .into_any_element()
     }
 
-    /// Opens the changelog of the file Install would pick for the target:
+    /// Opens Versions and changelogs for a browse card's newest compatible file:
     /// the hover's plan already has it, else it's looked up now.
     fn open_changelog(&mut self, m: &cf::Mod, window: &mut Window, cx: &mut Context<Self>) {
         let Some(inst) = self.target(cx) else { return };
@@ -3404,17 +3404,51 @@ impl BrowseView {
             _ => None,
         });
         let (store, root) = (self.store.clone(), inst.root.clone());
-        let head = (m.name.clone(), m.icon().unwrap_or_default().to_string());
+        let is_pack = hopper::browse::is_modpack(m, self.class);
+        let class = m.class_id.unwrap_or(self.class);
+        let all_files = match self.file_lists.get(&m.id) {
+            Some(Load::Ready(files)) => files.clone(),
+            _ => Vec::new(),
+        };
+        let view = cx.entity();
+        let m_install = m.clone();
+        let on_install: std::sync::Arc<dyn Fn(cf::File, &mut Window, &mut App) + Send + Sync> =
+            std::sync::Arc::new(move |f, window, cx| {
+                view.update(cx, |this, cx| this.install(m_install.clone(), Some(f), window, cx));
+            });
         if let Some(f) = ready {
-            return crate::versions::open_file(store, Some(root), f, Some(head), window, cx);
+            return crate::versions::open_browse(
+                store,
+                Some(root),
+                m,
+                f,
+                all_files,
+                class,
+                is_pack,
+                Some(on_install),
+                window,
+                cx,
+            );
         }
-        let (id, class) = (m.id, Some(m.class_id.unwrap_or(self.class)));
+        let m_owned = m.clone();
+        let id = m.id;
         cx.spawn_in(window, async move |this, cx| {
             let r = cx
-                .background_spawn(async move { hopper::install::best_file(id, class, &inst) })
+                .background_spawn(async move { hopper::install::best_file(id, Some(class), &inst) })
                 .await;
             this.update_in(cx, |_, window, cx| match r {
-                Ok(Some(f)) => crate::versions::open_file(store, Some(root), f, Some(head), window, cx),
+                Ok(Some(f)) => crate::versions::open_browse(
+                    store,
+                    Some(root),
+                    &m_owned,
+                    f,
+                    all_files,
+                    class,
+                    is_pack,
+                    Some(on_install),
+                    window,
+                    cx,
+                ),
                 Ok(None) => window.push_notification(
                     Notification::error("There's no file for this Minecraft version and loader."),
                     cx,
@@ -4133,7 +4167,19 @@ impl BrowseView {
                 };
                 // The newest file that would update the installed one gets
                 // the filled button; other newer ones say Update outlined.
-                let newest = target.and_then(|t| self.newest_update(m, t)).map(|f| f.id);
+                let newest_file = target.and_then(|t| self.newest_update(m, t)).cloned();
+                let newest = newest_file.as_ref().map(|f| f.id);
+                let installed_pack = is_pack
+                    && target
+                        .as_ref()
+                        .and_then(|t| t.pack.as_ref())
+                        .is_some_and(|p| p.project_id == m.id);
+                let installed_in_target = installed_pack || (!is_pack && installed.is_some());
+                let pack_upd = installed_pack
+                    .then(|| target.and_then(|t| self.store.read(cx).pack_update(t).cloned()))
+                    .flatten();
+                let browse_class = m.class_id.unwrap_or(self.class);
+                let view_for_log = cx.entity();
                 let files = v_flex()
                     .gap_0p5()
                     .children(all_files.iter().take(40).map(|f| {
@@ -4149,10 +4195,51 @@ impl BrowseView {
                         let (m1, f1) = (m.clone(), f.clone());
                         let (store, log_root, log_file) =
                             (self.store.clone(), target.as_ref().map(|t| t.root.clone()), f.clone());
-                        let log_head = (m.name.clone(), m.icon().unwrap_or_default().to_string());
                         let log_id = ElementId::Name(format!("log:{}", f.id).into());
-                        let open_log = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            crate::versions::open_file(store.clone(), log_root.clone(), log_file.clone(), Some(log_head.clone()), window, cx)
+                        let open_log: Box<dyn Fn(&ClickEvent, &mut Window, &mut App)> = if installed_in_target
+                            && let Some(root) = log_root.clone()
+                        {
+                            let pid = m.id;
+                            let upd = if installed_pack { pack_upd.clone() } else { newest_file.clone() };
+                            Box::new(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                crate::versions::open_for_file(
+                                    store.clone(),
+                                    root.clone(),
+                                    pid,
+                                    installed_pack,
+                                    upd.clone(),
+                                    log_file.clone(),
+                                    window,
+                                    cx,
+                                )
+                            })
+                        } else {
+                            let m_log = m.clone();
+                            let all_log = all_files.clone();
+                            let on_install: Option<std::sync::Arc<dyn Fn(cf::File, &mut Window, &mut App) + Send + Sync>> =
+                                can.then(|| {
+                                    let view = view_for_log.clone();
+                                    let m_inst = m.clone();
+                                    let f: std::sync::Arc<dyn Fn(cf::File, &mut Window, &mut App) + Send + Sync> =
+                                        std::sync::Arc::new(move |file: cf::File, window: &mut Window, cx: &mut App| {
+                                            view.update(cx, |this, cx| this.install(m_inst.clone(), Some(file), window, cx));
+                                        });
+                                    f
+                                });
+                            Box::new(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                crate::versions::open_browse(
+                                    store.clone(),
+                                    log_root.clone(),
+                                    &m_log,
+                                    log_file.clone(),
+                                    all_log.clone(),
+                                    browse_class,
+                                    is_pack,
+                                    on_install.clone(),
+                                    window,
+                                    cx,
+                                )
+                            })
                         };
                         let action: AnyElement = if installed_file == Some(f.id) {
                             widgets::split(

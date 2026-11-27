@@ -25,7 +25,9 @@ use crate::widgets::{DIALOG_TOP, dialog_room};
 
 pub struct VersionsView {
     store: Entity<Store>,
-    root: PathBuf,
+    /// The instance this mod or pack belongs to, or the target instance when
+    /// opened from Browse / Mod Peek.
+    root: Option<PathBuf>,
     project_id: u64,
     pack: bool,
     name: String,
@@ -36,6 +38,12 @@ pub struct VersionsView {
     locked: bool,
     /// The pending update's file name.
     to: Option<String>,
+    /// A specific file the user clicked Changelog on (e.g. in Mod Peek's Files
+    /// tab): expanded automatically if it's in "Other versions".
+    focus: Option<cf::File>,
+    /// Custom install handler for uninstalled browse items (resolves deps,
+    /// handles modpacks, etc.).
+    on_install: Option<std::sync::Arc<dyn Fn(cf::File, &mut Window, &mut App) + Send + Sync>>,
     entries: Option<Result<Vec<(ChangelogEntry, SharedString)>, String>>,
     all: Vec<cf::File>,
     /// Changelogs of other versions, opened on demand.
@@ -61,7 +69,10 @@ struct ServerMode {
 
 impl VersionsView {
     fn load(&mut self, update: Option<cf::File>, cx: &mut Context<Self>) {
-        let Some(inst) = self.store.read(cx).instance(&self.root).cloned() else {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let Some(inst) = self.store.read(cx).instance(&root).cloned() else {
             return;
         };
         let (pid, installed, pack) = (self.project_id, self.installed_file, self.pack);
@@ -103,18 +114,97 @@ impl VersionsView {
                     }
                     r
                 });
+                let mut open_focus: Option<cf::File> = None;
                 this.entries = Some(match r {
                     Ok((entries, mut all)) => {
                         // Server packs are separate downloads, not versions.
                         all.retain(|f| f.is_server_pack != Some(true));
-                        if !pack {
-                            let (root, files) = (this.root.clone(), all.clone());
+                        if !pack
+                            && let Some(root) = this.root.clone()
+                        {
+                            let files = all.clone();
                             this.store.update(cx, |s, cx| {
                                 if s.note_update(&root, &files, pid) {
                                     cx.notify();
                                 }
                             });
                         }
+                        if let Some(focus) = this.focus.take() {
+                            let in_entries = entries.iter().any(|e| e.name == focus.display_name);
+                            if !in_entries {
+                                let target = match all.iter().find(|f| f.id == focus.id) {
+                                    Some(f) => f.clone(),
+                                    None => {
+                                        all.push(focus.clone());
+                                        focus
+                                    }
+                                };
+                                open_focus = Some(target);
+                            }
+                        }
+                        this.all = all;
+                        Ok(entries
+                            .into_iter()
+                            .map(|e| {
+                                let md = hopper::richtext::to_markdown(&e.blocks).into();
+                                (e, md)
+                            })
+                            .collect())
+                    }
+                    Err(e) => Err(format!("{e:#}")),
+                });
+                if let Some(f) = open_focus {
+                    this.open_other(f, cx);
+                } else {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Loads one focused file's changelog and the project's version list for a
+    /// mod or pack that isn't installed in an instance.
+    fn load_browse(&mut self, file: cf::File, all_files: Vec<cf::File>, class: u32, cx: &mut Context<Self>) {
+        let inst = self.root.as_ref().and_then(|r| self.store.read(cx).instance(r).cloned());
+        let (pid, pack) = (self.project_id, self.pack);
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    let blocks = hopper::source::changelog(&file)?;
+                    let mut all = if !all_files.is_empty() {
+                        all_files
+                    } else if let Some(inst) = &inst {
+                        let loader = if !pack && class == cf::CLASS_MODS {
+                            hopper::install::loader_of(inst)
+                        } else {
+                            cf::Loader::Any
+                        };
+                        hopper::source::files_checked(pid, &inst.game_version, loader, hopper::sources::Check::Manual)
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    all.retain(|f| f.is_server_pack != Some(true));
+                    if !all.iter().any(|f| f.id == file.id) {
+                        all.insert(0, file.clone());
+                    }
+                    let entry = ChangelogEntry {
+                        name: file.display_name.clone(),
+                        date: file.file_date.clone(),
+                        release: file.release_name(),
+                        blocks,
+                        earlier: String::new(),
+                        earlier_count: 0,
+                        installed: false,
+                    };
+                    anyhow::Ok((vec![entry], all))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.entries = Some(match r {
+                    Ok((entries, all)) => {
                         this.all = all;
                         Ok(entries
                             .into_iter()
@@ -162,7 +252,13 @@ impl VersionsView {
 
     fn install(view: &Entity<Self>, file: cf::File, window: &mut Window, cx: &mut App) {
         let v = view.read(cx);
-        let (store, root, pack) = (v.store.clone(), v.root.clone(), v.pack);
+        if let Some(cb) = v.on_install.clone() {
+            window.close_dialog(cx);
+            cb(file, window, cx);
+            return;
+        }
+        let Some(root) = v.root.clone() else { return };
+        let (store, pack) = (v.store.clone(), v.pack);
         let (project_id, name, from) = (v.project_id, v.name.clone(), v.from.clone());
         if let Some(m) = v.server.clone() {
             // The server pack dialog shows what changes, then updates.
@@ -200,8 +296,11 @@ impl VersionsView {
 
     /// The settings key for Clean update or Keep my changes: the server's
     /// own choice in server mode.
-    fn mode_root(&self) -> &Path {
-        self.server.as_ref().map_or(&self.root, |m| m.info.root.as_path())
+    fn mode_root(&self) -> Option<&Path> {
+        self.server
+            .as_ref()
+            .map(|m| m.info.root.as_path())
+            .or(self.root.as_deref())
     }
 
     /// The collapsed "Earlier versions (N)" row of a card, with the cut text
@@ -242,15 +341,19 @@ impl VersionsView {
 
     /// What a card with no changelog needs to compare its version's files.
     fn files_ctx(&self, f: &cf::File, cx: &App) -> files_changes::Ctx {
-        let installed = self.store.read(cx).instance(&self.root).and_then(|inst| {
-            inst.addons.iter().find(|a| a.project_id == self.project_id).map(|a| (a.file_id, inst.addon_path(a)))
+        let installed = self.root.as_ref().and_then(|root| {
+            let inst = self.store.read(cx).instance(root)?;
+            inst.addons
+                .iter()
+                .find(|a| a.project_id == self.project_id)
+                .map(|a| (a.file_id, inst.addon_path(a)))
         });
         files_changes::Ctx {
             store: self.store.clone(),
             project_id: self.project_id,
             file: f.clone(),
             all: self.all.clone(),
-            root: Some(self.root.clone()),
+            root: self.root.clone(),
             installed,
         }
     }
@@ -267,7 +370,16 @@ impl VersionsView {
 
     fn changelog(&self, id: ElementId, md: SharedString, cx: &App) -> AnyElement {
         let (store, root) = (self.store.clone(), self.root.clone());
-        changelog_view(id, md, &self.store, move |url, window, cx| open_link(&store, &root, url, window, cx), cx)
+        changelog_view(
+            id,
+            md,
+            &self.store,
+            move |url, window, cx| match &root {
+                Some(root) => open_link(&store, root, url, window, cx),
+                None => cx.open_url(url),
+            },
+            cx,
+        )
     }
 }
 
@@ -374,18 +486,20 @@ impl Render for VersionsView {
         let store = self.store.read(cx);
         let theme = cx.theme();
         let icon = store.image(&self.icon).map(Path::to_path_buf);
+        let installed_mode = self.installed_file != 0;
         let line = match (&self.server, &self.to) {
             (Some(_), _) if self.entries.is_none() => "Reading the server's version".to_string(),
             (Some(m), _) if !m.known => format!("Your instance: {} · the server's version isn't recorded", self.from),
             (Some(_), Some(to)) => format!("On the server: {}  →  {to}", self.from),
             (Some(_), None) => format!("On the server: {}", self.from),
+            (None, _) if !installed_mode => self.from.clone(),
             (None, Some(to)) => format!("{}  →  {to}", self.from),
             (None, None) => format!("Installed: {}", self.from),
         };
         // The name wraps rather than cut off; the file line may truncate.
         let header = mod_header(icon.as_deref(), self.name.clone(), line, cx);
-        let lock_note = self.locked.then(|| {
-            let (store, root, file) = (self.store.clone(), self.root.clone(), self.from.clone());
+        let lock_note = (self.locked && self.root.is_some()).then(|| {
+            let (store, root, file) = (self.store.clone(), self.root.clone().unwrap(), self.from.clone());
             h_flex()
                 .gap_2()
                 .px_3()
@@ -435,27 +549,54 @@ impl Render for VersionsView {
                 // are only in "Other versions"; count them too.
                 // Which files are newer: not by file id, which only orders
                 // CurseForge files (a GitHub file's id is a hash).
-                let have = match self.store.read(cx).instance(&self.root) {
-                    Some(inst) => Age::installed(inst, self.project_id, self.installed_file, &self.all),
-                    None => Age::of_id_in(self.installed_file, &self.all),
+                let have = if installed_mode {
+                    match self.root.as_ref().and_then(|r| self.store.read(cx).instance(r)) {
+                        Some(inst) => Age::installed(inst, self.project_id, self.installed_file, &self.all),
+                        None => Age::of_id_in(self.installed_file, &self.all),
+                    }
+                } else {
+                    Age::of_id(0)
                 };
-                let newer_others: Vec<&cf::File> = self
-                    .all
-                    .iter()
-                    .filter(|f| f.age().newer_than(&have) && !shown.contains(f.display_name.as_str()))
-                    .collect();
-                let behind = entries.iter().filter(|(e, _)| !e.installed).count() + newer_others.len();
-                let status = match behind {
-                    0 => "Up to date".to_string(),
-                    1 => "1 version behind".to_string(),
-                    n => format!("{n} versions behind · newest first"),
+                let newer_others: Vec<&cf::File> = if installed_mode {
+                    self.all
+                        .iter()
+                        .filter(|f| f.age().newer_than(&have) && !shown.contains(f.display_name.as_str()))
+                        .collect()
+                } else {
+                    Vec::new()
                 };
-                let latest = self
-                    .all
-                    .iter()
-                    .find(|f| Some(&f.file_name) == self.to.as_ref())
-                    .or_else(|| hopper::file_age::newest(newer_others.iter().copied()))
-                    .cloned();
+                let behind = if installed_mode {
+                    entries.iter().filter(|(e, _)| !e.installed).count() + newer_others.len()
+                } else {
+                    0
+                };
+                let status = if !installed_mode {
+                    match self.all.len() {
+                        1 => "1 version".to_string(),
+                        n => format!("{n} versions"),
+                    }
+                } else {
+                    match behind {
+                        0 => "Up to date".to_string(),
+                        1 => "1 version behind".to_string(),
+                        n => format!("{n} versions behind · newest first"),
+                    }
+                };
+                let can_install = installed_mode || self.on_install.is_some();
+                let latest = if installed_mode {
+                    self.all
+                        .iter()
+                        .find(|f| Some(&f.file_name) == self.to.as_ref())
+                        .or_else(|| hopper::file_age::newest(newer_others.iter().copied()))
+                        .cloned()
+                } else if self.on_install.is_some() {
+                    entries
+                        .first()
+                        .and_then(|(e, _)| self.all.iter().find(|f| f.display_name == e.name))
+                        .cloned()
+                } else {
+                    None
+                };
                 let others: Vec<cf::File> = self
                     .all
                     .iter()
@@ -491,14 +632,18 @@ impl Render for VersionsView {
                             .when_some(block, |b, t| b.tooltip(t))
                             .on_click(move |_, window, cx| VersionsView::install(&view, f.clone(), window, cx))
                     });
-                    // Named by what it does: these are all newer than the
-                    // installed version.
-                    let action = file.clone().filter(|_| !e.installed).map(|f| {
+                    // Named by what it does: newer than installed updates;
+                    // uninstalled browse installs.
+                    let action = file.clone().filter(|_| !e.installed && can_install).map(|f| {
                         let b = Button::new(SharedString::from(format!("install:{}", f.id)))
                             .small()
                             .icon(IconName::Download)
-                            .label(format!("Update to {}", version_label(&f)));
-                        // The one filled button is the header's "Update to".
+                            .label(if installed_mode {
+                                format!("Update to {}", version_label(&f))
+                            } else {
+                                format!("Install {}", version_label(&f))
+                            });
+                        // The one filled button is the header's "Update to" / "Install".
                         b.outline()
                             .disabled(locked || block.is_some())
                             .when_some(block, |b, t| b.tooltip(t))
@@ -530,9 +675,13 @@ impl Render for VersionsView {
                                 .child(div().flex_1())
                                 .children(action)
                                 .children(reinstall)
-                                .when(e.installed && !pack, |r| {
-                                    let (store, root, pid, from) =
-                                        (self.store.clone(), self.root.clone(), self.project_id, self.from.clone());
+                                .when(e.installed && !pack && self.root.is_some(), |r| {
+                                    let (store, root, pid, from) = (
+                                        self.store.clone(),
+                                        self.root.clone().unwrap(),
+                                        self.project_id,
+                                        self.from.clone(),
+                                    );
                                     let (s2, r2, f2) = (store.clone(), root.clone(), from.clone());
                                     r.child(
                                         Button::new("edit-config")
@@ -581,9 +730,11 @@ impl Render for VersionsView {
                             c.child(self.earlier_row(e.name.clone(), &t, cx))
                         })
                 });
-                let clean = self.store.read(cx).settings().clean_update(self.mode_root());
+                let clean = self
+                    .mode_root()
+                    .is_some_and(|r| self.store.read(cx).settings().clean_update(r));
                 let other_cards = others.into_iter().map(|f| {
-                    let older = have.newer_than(&f.age());
+                    let older = installed_mode && have.newer_than(&f.age());
                     let open = self.others.get(&f.id);
                     let view = cx.entity();
                     let block = self.server_block(&f, cx);
@@ -653,10 +804,10 @@ impl Render for VersionsView {
                                 )
                                 .child(widgets::caption(hopper::time::relative(&f.file_date), cx).text_xs().flex_none())
                                 // A server always shows the preview first.
-                                .when(self.pack && clean && !server_mode, |r| {
+                                .when(self.pack && installed_mode && clean && !server_mode && self.root.is_some(), |r| {
                                     // A clean update skips the preview; this
                                     // is the way to it for one switch.
-                                    let (store, root, f3) = (self.store.clone(), self.root.clone(), f.clone());
+                                    let (store, root, f3) = (self.store.clone(), self.root.clone().unwrap(), f.clone());
                                     r.child(
                                         Button::new(SharedString::from(format!("other-compare:{}", f.id)))
                                             .xsmall()
@@ -672,22 +823,26 @@ impl Render for VersionsView {
                                             }),
                                     )
                                 })
-                                .child(
-                                    Button::new(SharedString::from(format!("other-install:{}", f.id)))
-                                        .xsmall()
-                                        .outline()
-                                        .flex_none()
-                                        .label(if older {
-                                            format!("Roll back to {}", version_label(&f))
-                                        } else {
-                                            format!("Update to {}", version_label(&f))
-                                        })
-                                        .disabled(locked || block.is_some())
-                                        .when_some(block, |b, t| b.tooltip(t))
-                                        .on_click(move |_, window, cx| {
-                                            VersionsView::install(&view, f2.clone(), window, cx)
-                                        }),
-                                ),
+                                .when(can_install, |r| {
+                                    r.child(
+                                        Button::new(SharedString::from(format!("other-install:{}", f.id)))
+                                            .xsmall()
+                                            .outline()
+                                            .flex_none()
+                                            .label(if !installed_mode {
+                                                format!("Install {}", version_label(&f))
+                                            } else if older {
+                                                format!("Roll back to {}", version_label(&f))
+                                            } else {
+                                                format!("Update to {}", version_label(&f))
+                                            })
+                                            .disabled(locked || block.is_some())
+                                            .when_some(block, |b, t| b.tooltip(t))
+                                            .on_click(move |_, window, cx| {
+                                                VersionsView::install(&view, f2.clone(), window, cx)
+                                            }),
+                                    )
+                                }),
                         )
                         .children(body)
                 });
@@ -702,24 +857,25 @@ impl Render for VersionsView {
                 let latest_has_server = latest.as_ref().is_some_and(|f| f.has_server_files());
                 // Packs: how Update and Roll back treat your changes,
                 // remembered for this instance.
-                let mode = self.pack.then(|| {
-                    let key = self.mode_root().to_string_lossy().to_string();
-                    crate::pack_update::mode_tabs("pack-mode", clean)
-                        .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                            let key = key.clone();
-                            this.store.update(cx, |s, cx| {
-                                s.update_settings(
-                                    |st| {
-                                        st.pack_update_clean.insert(key, *ix == 0);
-                                    },
-                                    cx,
-                                )
-                            });
-                            cx.notify();
-                        }))
-                });
-                let mode_note = self
-                    .pack
+                let mode = (self.pack && installed_mode)
+                    .then(|| self.mode_root().map(|r| r.to_string_lossy().to_string()))
+                    .flatten()
+                    .map(|key| {
+                        crate::pack_update::mode_tabs("pack-mode", clean)
+                            .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                                let key = key.clone();
+                                this.store.update(cx, |s, cx| {
+                                    s.update_settings(
+                                        |st| {
+                                            st.pack_update_clean.insert(key, *ix == 0);
+                                        },
+                                        cx,
+                                    )
+                                });
+                                cx.notify();
+                            }))
+                    });
+                let mode_note = (self.pack && installed_mode)
                     .then(|| widgets::fine_print(crate::pack_update::mode_note_for(clean, server_mode), cx));
                 v_flex()
                     .gap_3()
@@ -732,7 +888,13 @@ impl Render for VersionsView {
                                 div()
                                     .text_sm()
                                     .font_medium()
-                                    .text_color(if behind == 0 { theme.success } else { crate::theme::ink(theme.primary) })
+                                    .text_color(if !installed_mode {
+                                        theme.muted_foreground
+                                    } else if behind == 0 {
+                                        theme.success
+                                    } else {
+                                        crate::theme::ink(theme.primary)
+                                    })
                                     .child(status),
                             )
                             .when(self.pack && behind > 0 && latest_has_server, |r| {
@@ -749,7 +911,11 @@ impl Render for VersionsView {
                                         .small()
                                         .primary()
                                         .icon(IconName::Download)
-                                        .label(format!("Update to {}", version_label(&f)))
+                                        .label(if installed_mode {
+                                            format!("Update to {}", version_label(&f))
+                                        } else {
+                                            format!("Install {}", version_label(&f))
+                                        })
                                         .disabled(locked || block.is_some())
                                         .when_some(block, |b, t| b.tooltip(t))
                                         .on_click(move |_, window, cx| {
@@ -849,7 +1015,78 @@ pub fn open(
     window: &mut Window,
     cx: &mut App,
 ) {
-    show(store, root, project_id, pack, update, None, window, cx)
+    show(store, root, project_id, pack, update, None, None, window, cx)
+}
+
+/// Opens versions and changelogs for an installed project, auto-expanding
+/// `focus` if it's an older version in "Other versions".
+#[allow(clippy::too_many_arguments)]
+pub fn open_for_file(
+    store: Entity<Store>,
+    root: PathBuf,
+    project_id: u64,
+    pack: bool,
+    update: Option<cf::File>,
+    focus: cf::File,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    show(store, root, project_id, pack, update, Some(focus), None, window, cx)
+}
+
+/// Opens versions and changelogs for a mod or pack that isn't installed in an
+/// instance (from Browse or Mod Peek), showing `file` expanded at the top and
+/// the rest of the project's versions under "Other versions".
+#[allow(clippy::too_many_arguments)]
+pub fn open_browse(
+    store: Entity<Store>,
+    root: Option<PathBuf>,
+    m: &cf::Mod,
+    file: cf::File,
+    all_files: Vec<cf::File>,
+    class: u32,
+    pack: bool,
+    on_install: Option<std::sync::Arc<dyn Fn(cf::File, &mut Window, &mut App) + Send + Sync>>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let icon = m.icon().unwrap_or_default().to_string();
+    store.update(cx, |s, _| s.want_image(&icon));
+    let name = m.name.clone();
+    let project_id = m.id;
+    let from = file.file_name.clone();
+    let tick = store.read(cx).tr_tick().clone();
+    let view = cx.new(|cx| {
+        cx.observe(&tick, |_, _, cx| cx.notify()).detach();
+        let mut v = VersionsView {
+            store,
+            root,
+            project_id,
+            pack,
+            name,
+            icon,
+            from,
+            installed_file: 0,
+            locked: false,
+            to: None,
+            focus: None,
+            on_install,
+            entries: None,
+            all: Vec::new(),
+            others: HashMap::new(),
+            earlier_open: Default::default(),
+            server: None,
+        };
+        v.load_browse(file, all_files, class, cx);
+        v
+    });
+    window.open_dialog(cx, move |dialog, window, _| {
+        dialog
+            .title("Versions and changelogs")
+            .w(rems(46.).to_pixels(window.rem_size()))
+            .margin_top(rems(DIALOG_TOP).to_pixels(window.rem_size()))
+            .child(view.clone())
+    });
 }
 
 /// Opens the versions and changelogs of the modpack `server` is paired
@@ -868,7 +1105,7 @@ pub fn open_server(store: Entity<Store>, server: ServerInfo, window: &mut Window
         inst: inst.clone(),
         known: false,
     };
-    show(store, inst.root, pid, true, update, Some(mode), window, cx)
+    show(store, inst.root, pid, true, update, None, Some(mode), window, cx)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -878,6 +1115,7 @@ fn show(
     project_id: u64,
     pack: bool,
     update: Option<cf::File>,
+    focus: Option<cf::File>,
     server: Option<ServerMode>,
     window: &mut Window,
     cx: &mut App,
@@ -911,7 +1149,7 @@ fn show(
         }
         let mut v = VersionsView {
             store,
-            root,
+            root: Some(root),
             project_id,
             pack,
             name,
@@ -920,6 +1158,8 @@ fn show(
             installed_file,
             locked,
             to,
+            focus,
+            on_install: None,
             entries: None,
             all: Vec::new(),
             others: HashMap::new(),
