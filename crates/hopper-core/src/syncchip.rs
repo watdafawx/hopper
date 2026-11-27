@@ -372,10 +372,13 @@ pub fn group_look(state: &SyncState, now: u64) -> GroupLook {
                 None,
             )
         }
+        // Already taken by the friends service (unsent == 0); only waiting for
+        // friends to open Hopper and ack them. Quiet and still: nothing is in
+        // flight, so safe to close Hopper or go offline.
         SyncState::Sending { changes, held: false } => (
-            mk(Tone::Busy, Up, format!("Sending {}", changes_n(*changes)), "Sending").busy(),
-            "Sending your changes".to_string(),
-            "Your friends get them in a moment.".to_string(),
+            mk(Tone::Quiet, Check, format!("{} sent", changes_n(*changes)), "Sent"),
+            format!("{} sent", changes_n(*changes)),
+            "Saved for your friends. They get them next time they open Hopper.".to_string(),
             None,
         ),
         SyncState::Sending { changes, held: true } => (
@@ -1272,9 +1275,19 @@ mod sync_state_tests {
         let mut i = input(S::Sending(3));
         i.unsent = 2;
         assert_eq!(sync_state(&i), SyncState::NotSent { changes: 2 });
-        // Everything went out, only friends' answers are missing: Sending.
+        // Everything went out, only friends' answers are missing: quiet "Sent",
+        // not busy "Sending".
         i.unsent = 0;
-        assert_eq!(sync_state(&i), SyncState::Sending { changes: 3, held: false });
+        let sent = sync_state(&i);
+        assert_eq!(sent, SyncState::Sending { changes: 3, held: false });
+        let l = group_look(&sent, 0);
+        assert_eq!(l.look.label, "3 changes sent");
+        assert_eq!(l.look.short, "Sent");
+        assert_eq!(l.look.tone, Tone::Quiet);
+        assert!(!l.look.busy);
+        assert_eq!(l.title, "3 changes sent");
+        assert_eq!(l.line, "Saved for your friends. They get them next time they open Hopper.");
+        assert_eq!(l.button, None);
         // Not connected: the same count, offline.
         i.unsent = 2;
         i.connected = false;
