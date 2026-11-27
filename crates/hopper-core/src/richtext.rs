@@ -208,6 +208,10 @@ struct Parser {
     /// being read: its text is dropped and its link becomes the video.
     spans: u32,
     embed_removed: Option<u32>,
+    /// Open `<div>`s, innermost last: `true` for a decorative side column.
+    divs: Vec<bool>,
+    /// How many open `<div>`s are side columns: their pictures are dropped.
+    side: u32,
 }
 
 impl Parser {
@@ -319,7 +323,7 @@ impl Parser {
     }
 
     fn image(&mut self, url: String, alt: String, width: Option<u32>, height: Option<u32>) {
-        if self.skip > 0 || self.embed_removed.is_some() {
+        if self.skip > 0 || self.embed_removed.is_some() || self.side > 0 {
             return;
         }
         let alt = collapse_ws(&alt).trim().to_string();
@@ -392,7 +396,30 @@ impl Parser {
                     self.text(" ");
                 }
             }
-            ("p" | "div" | "blockquote" | "center", false) => {
+            ("div", false) => {
+                // Pages lay a frame out as narrow floated columns of border
+                // pictures around the text. Flattened, those pile up as a
+                // wall of strips, so their pictures are left out.
+                let side = attr(body, "style").is_some_and(|st| is_side_column(&st));
+                self.divs.push(side);
+                if side {
+                    self.side += 1;
+                }
+                if self.in_row() {
+                    self.text(" ");
+                } else {
+                    self.start(Kind::Para);
+                }
+            }
+            ("div", true) => {
+                if self.divs.pop() == Some(true) {
+                    self.side = self.side.saturating_sub(1);
+                }
+                if !self.in_row() {
+                    self.flush();
+                }
+            }
+            ("p" | "blockquote" | "center", false) => {
                 if self.in_row() {
                     self.text(" ");
                 } else {
@@ -400,7 +427,7 @@ impl Parser {
                     self.start(Kind::Para);
                 }
             }
-            ("p" | "div" | "blockquote" | "center", true) => {
+            ("p" | "blockquote" | "center", true) => {
                 if !self.in_row() {
                     self.flush();
                 }
@@ -527,6 +554,21 @@ impl Parser {
             _ => {}
         }
     }
+}
+
+/// A floated column no wider than an eighth of the page: the border strips
+/// of a framed description (`float:left;width:7%`), not content.
+fn is_side_column(style: &str) -> bool {
+    let lower = style.to_ascii_lowercase().replace(' ', "");
+    if !(lower.contains("float:left") || lower.contains("float:right")) {
+        return false;
+    }
+    lower
+        .split(';')
+        .find_map(|d| d.strip_prefix("width:"))
+        .and_then(|w| w.strip_suffix('%'))
+        .and_then(|w| w.parse::<f32>().ok())
+        .is_some_and(|w| w > 0. && w <= 12.)
 }
 
 /// `font-size: 20px` in a style attribute, in pixels (pt scaled).
@@ -2018,6 +2060,20 @@ mod tests {
         assert_eq!(b[1].link, None);
         // A lone image stays in the Markdown.
         assert!(matches!(&segs[2], super::Segment::Markdown(m) if m.contains("3.png") && m.contains("End")));
+    }
+
+    /// Automobility (CurseForge): the text sits between two floated 7%
+    /// columns of stacked border strips. The strips are decoration; flattened
+    /// they were a wall of tall images beside the text.
+    #[test]
+    fn floated_side_columns_of_border_strips_are_dropped() {
+        let html = "<div><div style=\"float:left;width:7%\"><img src=\"https://x/b.png\" width=\"56\" height=\"230\" style=\"display:block;width:100%;object-fit:fill\"><img src=\"https://x/b.png\" width=\"56\" height=\"230\"></div><div style=\"float:left;width:86%\"><p>About</p><img src=\"https://x/hero.png\" width=\"900\"></div><div style=\"float:left;width:7%\"><img src=\"https://x/b.png\" width=\"56\" height=\"230\"></div></div><p>After</p>";
+        let imgs = images(&parse(html));
+        assert_eq!(imgs.len(), 1, "{imgs:?}");
+        assert!(imgs[0].contains("hero.png"));
+        assert!(!is_side_column("float:left;width:50%"));
+        assert!(is_side_column("float: right; width: 7%"));
+        assert!(!is_side_column("width:7%"));
     }
 
     /// Trimmed from Snappy Blocks' description: a 2x2 table of screenshots.
