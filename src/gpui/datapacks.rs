@@ -792,6 +792,13 @@ impl AddonsView {
                 self.rp_order = Rc::new(order);
                 self.table.rows_for = None;
                 self.ensure_rows();
+                // The Where list's places (ranks, group order) come from
+                // options.txt, which no pack folder's time reflects: read
+                // them again or the table keeps the old order until a
+                // folder changes.
+                if self.where_mode() && !self.remote {
+                    self.apply_where(cx);
+                }
                 cx.notify();
                 if let Some(msg) = msg {
                     self.undo_toast(
