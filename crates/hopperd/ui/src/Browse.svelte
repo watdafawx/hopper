@@ -61,7 +61,13 @@
   let query = $state('');
   let mc = $state('');
   let loader = $state('');
-  let sort = $state(store('browse.sort') || 'popularity');
+  let sort = $state((() => {
+    const s = store('browse.sort') || 'popularity';
+    const src = store('browse.source') || 'both';
+    return s === 'name' && src !== 'curseforge' ? 'popularity' : s;
+  })());
+  // Modrinth's API has no alphabetical sort, so Name only appears on CurseForge.
+  const shownSorts = $derived(source === 'curseforge' ? SORTS : SORTS.filter(([k]) => k !== 'name'));
   let category = $state(null); // { name, cf, mr }
   let mcVersions = $state([]);
   let cats = $state({}); // type → { curseforge, modrinth, both }
@@ -297,6 +303,9 @@
     if (s === source) return;
     source = s;
     store('browse.source', s);
+    if (s !== 'curseforge' && sort === 'name') {
+      sort = 'popularity';
+    }
     // Keep the category when the other site has one of the same name.
     if (category) {
       const name = category.name.toLowerCase();
@@ -503,7 +512,7 @@
         <span class="small subtle">{loading && !results.length ? 'Searching…' : `${total >= 10000 ? '10,000+' : total.toLocaleString()} ${total === 1 ? T.one : T.many}`}{#if !both}<span class="muted">{' on '}</span><span class={source}>{SITE[source]}</span>{/if}{filterText ? ` · ${filterText}` : ''}</span>
         <span class="sp"></span>
         <div class="sorts"><span class="lbl">Sort</span>
-          {#each SORTS as [k, label, Icon] (k)}<button class:on={sort === k} title={label} onclick={() => setSort(k)}><Icon size={13} /><span class="sl">{label}</span></button>{/each}
+          {#each shownSorts as [k, label, Icon] (k)}<button class:on={sort === k} title={label} onclick={() => setSort(k)}><Icon size={13} /><span class="sl">{label}</span></button>{/each}
         </div>
       </div>
       {#if type === 'mods' && target?.pack_source && !both && source !== target.pack_source}

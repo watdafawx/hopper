@@ -144,6 +144,20 @@ impl SortField {
     pub fn from_key(key: &str) -> Option<SortField> {
         Self::ALL.into_iter().find(|f| f.key() == key)
     }
+
+    /// Modrinth's search API has no alphabetical sort.
+    pub fn supported_on_modrinth(self) -> bool {
+        self != SortField::Name
+    }
+
+    /// Falls back to Popularity when the chosen sort isn't available on Modrinth.
+    pub fn for_source(self, modrinth: bool) -> SortField {
+        if modrinth && !self.supported_on_modrinth() {
+            SortField::Popularity
+        } else {
+            self
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1912,5 +1926,19 @@ mod server_files_tests {
         };
         assert!(mr(true).has_server_files());
         assert!(!mr(false).has_server_files());
+    }
+
+    #[test]
+    fn sort_field_modrinth_support() {
+        for f in SortField::ALL {
+            assert_eq!(f.for_source(false), f);
+            if f == SortField::Name {
+                assert!(!f.supported_on_modrinth());
+                assert_eq!(f.for_source(true), SortField::Popularity);
+            } else {
+                assert!(f.supported_on_modrinth());
+                assert_eq!(f.for_source(true), f);
+            }
+        }
     }
 }

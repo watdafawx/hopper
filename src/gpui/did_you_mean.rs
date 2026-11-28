@@ -33,11 +33,11 @@ pub(super) struct Suggest {
 }
 
 impl BrowseView {
-    /// After a new first page arrives: lift close names (only for the
-    /// "best first" sorts; a chosen order like Name or Updated stays) and
-    /// work out a suggestion.
+    /// After a new first page arrives: lift close names (only for
+    /// Popularity and Featured; explicit orders like Downloads, Name or
+    /// Updated stay) and work out a suggestion.
     pub(super) fn fuzzy_results(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.sort, SortField::Popularity | SortField::Featured | SortField::TotalDownloads) {
+        if matches!(self.sort, SortField::Popularity | SortField::Featured) {
             namematch::rerank(&self.text, &mut self.results, |m| (m.name.as_str(), m.slug.as_str()));
         }
         self.refresh_suggestion(cx);

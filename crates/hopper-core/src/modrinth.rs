@@ -521,13 +521,7 @@ pub fn search(s: &cf::Search) -> anyhow::Result<(Vec<cf::Mod>, cf::Pagination)> 
     if let Some(name) = s.category.and_then(|c| real_id(c).ok()) {
         facets.push(vec![format!("categories:{name}")]);
     }
-    let index = match s.sort {
-        cf::SortField::TotalDownloads => "downloads",
-        cf::SortField::LastUpdated => "updated",
-        cf::SortField::Released => "newest",
-        cf::SortField::Popularity => "follows",
-        _ => "relevance",
-    };
+    let index = search_index(s.sort);
     let q = [
         ("query", s.text.trim().to_string()),
         ("facets", serde_json::to_string(&facets)?),
@@ -577,6 +571,18 @@ pub fn search(s: &cf::Search) -> anyhow::Result<(Vec<cf::Mod>, cf::Pagination)> 
             total_count: r.total_hits,
         },
     ))
+}
+
+/// Maps a Browse sort to Modrinth's `/search` `index` parameter.
+/// Modrinth has no alphabetical sort (UI hides `Name` on Modrinth); fallback is `relevance`.
+fn search_index(sort: cf::SortField) -> &'static str {
+    match sort {
+        cf::SortField::TotalDownloads => "downloads",
+        cf::SortField::LastUpdated => "updated",
+        cf::SortField::Released => "newest",
+        cf::SortField::Popularity => "follows",
+        cf::SortField::Featured | cf::SortField::Name => "relevance",
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -1178,6 +1184,16 @@ mod side_tests {
         assert!(same_title("AppleSkin", "appleskin"));
         assert!(!same_title("JEI", "Just Enough Items"));
         assert!(!same_title("Waystones", "Fabric Waystones Port"));
+    }
+
+    #[test]
+    fn search_index_maps_every_sort() {
+        assert_eq!(search_index(cf::SortField::Popularity), "follows");
+        assert_eq!(search_index(cf::SortField::Featured), "relevance");
+        assert_eq!(search_index(cf::SortField::TotalDownloads), "downloads");
+        assert_eq!(search_index(cf::SortField::LastUpdated), "updated");
+        assert_eq!(search_index(cf::SortField::Released), "newest");
+        assert_eq!(search_index(cf::SortField::Name), "relevance");
     }
 
     #[test]

@@ -242,7 +242,7 @@ async fn search(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
             l => Loader::from_loader_id(l),
         },
         category: None,
-        sort: SortField::from_key(&arg(&q, "sort")).unwrap_or(SortField::Popularity),
+        sort: SortField::from_key(&arg(&q, "sort")).unwrap_or(SortField::Popularity).for_source(use_mr),
         index: page * cf::PAGE_SIZE,
     };
     let cat_cf: Option<u64> = arg(&q, "cat_cf").parse().ok();

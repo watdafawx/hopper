@@ -589,7 +589,7 @@ impl BrowseView {
                 _ => {}
             }),
         ];
-        let sort = start_sort(store.read(cx).settings());
+        let sort = start_sort(store.read(cx).settings()).for_source(modrinth);
         Self {
             install_tick: None,
             store,
@@ -694,6 +694,7 @@ impl BrowseView {
             return;
         }
         self.modrinth = modrinth;
+        self.sort = self.sort.for_source(modrinth);
         self.category = None;
         self.search
             .update(cx, |s, cx| s.set_placeholder(placeholder(modrinth), window, cx));
@@ -777,7 +778,7 @@ impl BrowseView {
         match self.memory.remove(&class) {
             Some(m) => {
                 self.text = m.text.clone();
-                self.sort = m.sort;
+                self.sort = m.sort.for_source(self.modrinth);
                 self.category = m.category;
                 self.game_version = m.game_version.clone();
                 self.loader = m.loader;
@@ -1233,7 +1234,7 @@ impl BrowseView {
         self.category = None;
         self.game_version.clear();
         self.loader = Loader::Any;
-        self.sort = start_sort(self.store.read(cx).settings());
+        self.sort = start_sort(self.store.read(cx).settings()).for_source(self.modrinth);
         self.dest = None;
         self.selected = None;
         self.link_file = None;
@@ -1463,7 +1464,7 @@ impl BrowseView {
                 Loader::Any
             },
             category: self.category,
-            sort: self.sort,
+            sort: self.sort.for_source(self.modrinth),
             index: 0,
         }
     }
@@ -1743,6 +1744,7 @@ impl BrowseView {
             return;
         }
         self.modrinth = modrinth;
+        self.sort = self.sort.for_source(modrinth);
         self.source_ui = true;
         if !self.peek {
             self.store
@@ -3926,10 +3928,13 @@ impl BrowseView {
         let (muted, fg, hover, track, radius) =
             (theme.muted_foreground, theme.foreground, theme.list_hover, theme.muted, theme.radius);
         let color = site_color(self.modrinth);
+        let active = self.sort.for_source(self.modrinth);
         let buttons: Vec<AnyElement> = SortField::ALL
             .iter()
-            .map(|&f| {
-                let on = f == self.sort;
+            .copied()
+            .filter(|f| !self.modrinth || f.supported_on_modrinth())
+            .map(|f| {
+                let on = f == active;
                 let icon = match f {
                     SortField::Popularity => IconName::Flame,
                     SortField::Featured => IconName::Star,
