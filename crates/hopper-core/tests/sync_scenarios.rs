@@ -399,3 +399,64 @@ fn s19_a_group_member_who_rejoins_gets_the_latest_again() {
     let e = pcs[1].latest_from(&pcs[0]).expect("B is handed A's pack again");
     assert_eq!(e.code, code);
 }
+
+/// A settings file no mod owns, shared by A, reaches B through the real
+/// mailbox and is written into B's copy of the file. A mod's own settings
+/// travel the same way in the same run, so the two are checked together.
+#[test]
+#[ignore = "starts relay/hopper_mailbox.py; run with --ignored"]
+fn shared_settings_of_a_loose_file_and_a_mod_reach_the_other_pc() {
+    use hopper::configsync as cs;
+    use std::collections::BTreeMap;
+    let relay = Relay::start();
+    let (gid, mut pcs) = group_of(&relay, &["A", "B"]);
+    let base = std::env::temp_dir().join(format!("hopper-cfg-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (rel_loose, rel_mod) = ("config/flywheel-client.toml", "config/jei-client.toml");
+    let text = "[general]\n\tmaxColumns = 9\n\tbackend = \"default\"\n";
+    let (da, db) = (base.join("a"), base.join("b"));
+    for d in [&da, &db] {
+        std::fs::create_dir_all(d.join("config")).unwrap();
+        std::fs::write(d.join(rel_loose), text).unwrap();
+        std::fs::write(d.join(rel_mod), text).unwrap();
+    }
+    let (kl, km) = (cs::file_key(rel_loose), "p:1".to_string());
+    let files: BTreeMap<String, (String, Vec<String>)> = BTreeMap::from([
+        (kl.clone(), ("flywheel-client.toml".to_string(), vec![rel_loose.to_string()])),
+        (km.clone(), ("JEI".to_string(), vec![rel_mod.to_string()])),
+    ]);
+    // Both share both; each PC takes its first snapshot.
+    let turned = |me: &str| {
+        let mut s = cs::Configs::default();
+        for k in [&kl, &km] {
+            s.turn(k, true, me);
+        }
+        s
+    };
+    let (mut sa, mut sb) = (turned("a"), turned("b"));
+    cs::tick(&da, &sa, &files, "a", &gid).unwrap();
+    cs::tick(&db, &sb, &files, "b", &gid).unwrap();
+    // A changes both files and sends what its tick found, as the app does.
+    for rel in [rel_loose, rel_mod] {
+        std::fs::write(da.join(rel), text.replace("maxColumns = 9", "maxColumns = 12")).unwrap();
+    }
+    let t = cs::tick(&da, &sa, &files, "a", &gid).unwrap();
+    assert_eq!(t.own.len(), 2, "{:?}", t.own);
+    sa.own(&t.own, "a");
+    let wire = cs::encode(&sa).unwrap();
+    pcs[0].mb.publish_with(&[], std::slice::from_ref(&gid), PACK, "A-folder", "Test pack", &share_code(7), &[], &Default::default(), &wire).unwrap();
+    // B reads the feed and takes what came with the newest pack code.
+    pcs[1].read().unwrap();
+    let e = pcs[1].latest_from(&pcs[0]).expect("B is handed A's pack");
+    assert!(!e.configs.is_empty(), "the mailbox kept the settings");
+    let theirs = cs::decode(&e.configs).expect("settings decode");
+    assert!(theirs.is_shared(&kl) && theirs.is_shared(&km));
+    cs::take(&mut sb, &pcs[0].id(), "A", e.seq, 1, &theirs, "b", |_| "A".into());
+    let t = cs::tick(&db, &sb, &files, "b", &gid).unwrap();
+    assert_eq!(t.wrote.len(), 2, "{:?}", t.wrote);
+    let want = text.replace("maxColumns = 9", "maxColumns = 12");
+    for rel in [rel_loose, rel_mod] {
+        assert_eq!(std::fs::read_to_string(db.join(rel)).unwrap(), want, "{rel}");
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}

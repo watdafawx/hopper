@@ -91,6 +91,9 @@ impl Store {
 
     /// A mod's name in the instance at `root`, by key.
     pub fn mod_name_of(&self, root: &Path, m: &str) -> String {
+        if let Some(rel) = configsync::key_file(m) {
+            return rel.rsplit('/').next().unwrap_or(rel).to_string();
+        }
         self.instance(root).and_then(|i| i.addons.iter().find(|a| addon_key(a) == m)).map(|a| a.name.clone()).unwrap_or_else(|| "this mod".into())
     }
 
@@ -100,6 +103,12 @@ impl Store {
         let Some(c) = self.group_configs(root) else { return false };
         let jar = jar.trim_end_matches(".disabled");
         self.instance(root).and_then(|i| i.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(jar))).is_some_and(|a| c.is_shared(&addon_key(a)))
+    }
+
+    /// Whether a settings file no mod owns (`rel`, like `config/x.toml`) is
+    /// shared with the group.
+    pub fn settings_shared_file(&self, root: &Path, rel: &str) -> bool {
+        self.group_configs(root).is_some_and(|c| c.is_shared(&configsync::file_key(rel)))
     }
 
     /// Whether Keep mine is on for mod `m` at `root`.

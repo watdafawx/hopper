@@ -78,6 +78,8 @@ pub enum ConfigViewEvent {
     OpenInTab,
     /// Saved or discarded: counts changed.
     Changed,
+    /// A file no mod owned was matched to the mod with this key.
+    Matched(String),
 }
 
 impl EventEmitter<ConfigViewEvent> for ConfigView {}
@@ -286,6 +288,9 @@ pub struct ConfigView {
     pub jar: Option<String>,
     /// The share switch was clicked: its confirm line shows.
     confirm_share: bool,
+    /// "Match to a mod" is open: the mods to pick from show under the title.
+    matching: bool,
+    match_input: Entity<InputState>,
     _mark: Option<RangeDecorationCollection>,
     _subs: Vec<Subscription>,
 }
@@ -306,7 +311,13 @@ impl ConfigView {
         let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true).searchable(true).soft_wrap(false));
         let search = cx.new(|cx| InputState::new(window, cx).clean_on_escape().placeholder(if title.is_empty() { "Search settings".to_string() } else { format!("Search {title}'s settings") }));
         let edit_input = cx.new(|cx| InputState::new(window, cx));
+        let match_input = cx.new(|cx| InputState::new(window, cx).clean_on_escape().placeholder("Search your mods"));
         let subs = vec![
+            cx.subscribe_in(&match_input, window, |_, _, e: &InputEvent, _, cx| {
+                if let InputEvent::Change = e {
+                    cx.notify();
+                }
+            }),
             // Friends' shared settings went into these files: show them,
             // unless the player is in the middle of editing that file.
             cx.subscribe_in(&store, window, |this, _, e: &StoreEvent, window, cx| {
@@ -386,6 +397,8 @@ impl ConfigView {
             saving: false,
             jar: None,
             confirm_share: false,
+            matching: false,
+            match_input,
             _mark: None,
             _subs: subs,
         };
@@ -1626,7 +1639,14 @@ impl ConfigView {
         if self.on_panel().is_some() || self.server.is_some() || !store.settings_sharing() || store.group_copy(&self.root).is_none() {
             return None;
         }
-        let jar = self.jar.as_deref()?.trim_end_matches(".disabled");
+        // A file no mod owns is shared on its own, by its path.
+        let Some(jar) = self.jar.as_deref() else {
+            return match self.files.as_slice() {
+                [rel] if hopper::configsync::file_ok(rel) => Some(hopper::configsync::file_key(rel)),
+                _ => None,
+            };
+        };
+        let jar = jar.trim_end_matches(".disabled");
         let a = store.instance(&self.root)?.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(jar))?;
         self.files.iter().any(|f| hopper::configsync::file_ok(f)).then(|| hopper::groupkey::addon_key(a))
     }
@@ -1650,6 +1670,72 @@ impl ConfigView {
             // value on this PC isn't the friend's.
             let theirs = e.value.parse_like(&v.v).is_ok_and(|t| hopper::configedit::same(&e.value, &t));
             Some((if theirs { format!("Changed by {who}") } else { format!("{who} changed this, you kept yours") }, false))
+        }
+    }
+
+    /// The mods of this instance that can own the open file, filtered by the
+    /// search box, each one click from matching it.
+    fn match_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let q = self.match_input.read(cx).value().to_lowercase();
+        let mods: Vec<(String, String, Option<PathBuf>)> = {
+            let store = self.store.read(cx);
+            store
+                .instance(&self.root)
+                .map(|i| {
+                    i.addons
+                        .iter()
+                        .filter(|a| a.class_id == hopper::cf::CLASS_MODS || a.file_name.to_lowercase().ends_with(".jar"))
+                        .filter(|a| q.is_empty() || a.name.to_lowercase().contains(&q))
+                        .take(8)
+                        .map(|a| (a.file_name.trim_end_matches(".disabled").to_string(), a.name.clone(), store.image(&a.icon).map(Path::to_path_buf)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let rel = self.files.first().cloned().unwrap_or_default();
+        let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+        let mut list = v_flex().gap_0p5();
+        for (i, (key, mod_name, icon)) in mods.into_iter().enumerate() {
+            let (rel, key2, mod2) = (rel.clone(), key.clone(), mod_name.clone());
+            list = list.child(
+                h_flex()
+                    .id(SharedString::from(format!("cfg-match-{i}")))
+                    .gap_2()
+                    .px_2()
+                    .h(rems(2.))
+                    .rounded(theme.radius)
+                    .text_sm()
+                    .clickable(cx)
+                    .hover(|s| widgets::row_hover(s, cx))
+                    .child(widgets::thumb(icon.as_deref(), rems(1.25), cx))
+                    .child(div().flex_1().min_w_0().truncate().child(mod_name))
+                    .on_click(cx.listener(move |this, _, window, cx| this.match_to(&rel, &key2, &mod2, window, cx))),
+            );
+        }
+        v_flex()
+            .gap_1p5()
+            .p_2()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .child(div().text_xs().text_color(theme.muted_foreground).whitespace_normal().child(format!("Pick the mod {name} belongs to. It then shows with that mod, and shares like its other settings.")))
+            .child(widgets::search_input(&self.match_input).small().cleanable(true))
+            .child(list)
+            .into_any_element()
+    }
+
+    /// Matches the open file to a mod by hand.
+    fn match_to(&mut self, rel: &str, key: &str, mod_name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match hopper::configowner::set_manual(&self.root, rel, Some(key)) {
+            Ok(()) => {
+                invalidate(&self.root, cx);
+                window.push_notification(Notification::success(format!("{} now shows with {mod_name}.", rel.rsplit('/').next().unwrap_or(rel))), cx);
+                self.matching = false;
+                cx.emit(ConfigViewEvent::Matched(key.to_string()));
+                cx.notify();
+            }
+            Err(e) => window.push_notification(Notification::error(format!("Couldn't match it. {e:#}")), cx),
         }
     }
 
@@ -1956,6 +2042,8 @@ impl Render for ConfigView {
         let narrow = self.host == Host::Panel;
         let search = (!self.text_view && readable).then(|| widgets::search_input(&self.search).small().cleanable(true));
         let share = self.share_bar(cx);
+        let can_match = self.host == Host::Tab && self.jar.is_none() && self.server.is_none() && self.files.len() == 1;
+        let match_panel = if can_match && self.matching { self.match_panel(cx) } else { div().into_any_element() };
         // Saved or discarded: the notice has nothing left to say.
         if self.unsaved() == 0 {
             self.notice = false;
@@ -1990,6 +2078,12 @@ impl Render for ConfigView {
                                 .child(widgets::thumb(self.icon.as_deref(), rems(1.75), cx))
                                 .child(div().text_base().font_semibold().truncate().child(self.title.clone()))
                                 .child(div().flex_1())
+                                .when(can_match, |d| {
+                                    d.child(Button::new("cfg-match").outline().small().icon(IconName::Link).label("Match to a mod…").on_click(cx.listener(|this, _, _, cx| {
+                                        this.matching = !this.matching;
+                                        cx.notify();
+                                    })))
+                                })
                                 .when(!on_panel, |d| {
                                     d.child(Button::new("cfg-outside").ghost().small().icon(IconName::ExternalLink).label("Open in my editor").on_click({
                                         let p = path.clone();
@@ -1998,6 +2092,7 @@ impl Render for ConfigView {
                                 }),
                         )
                     })
+                    .when(can_match && self.matching, |d| d.child(match_panel))
                     .children(share)
                     .when(!files.is_empty(), |d| d.child(chips))
                     .child(h_flex().gap_3().child(tabs).child(div().flex_1()).when(!narrow, |d| d.children(search.map(|s| div().w(rems(if self.host == Host::Tab { 20. } else { 16. })).child(s))))),
@@ -2076,7 +2171,7 @@ impl InstIndex {
     }
 
     fn build(root: &Path, mods: Vec<(String, PathBuf, String)>) -> InstIndex {
-        let owners = hopper::configowner::Owners::new(hopper::configowner::of_jars(mods));
+        let owners = hopper::configowner::Owners::new(hopper::configowner::of_jars(mods)).with_manual(hopper::configowner::load_manual(root));
         let files = hopper::configindex::index(root, &owners);
         let rels: Vec<String> = files.iter().map(|f| f.rel.clone()).collect();
         let (mut changed, mut settings) = (HashMap::new(), HashMap::new());

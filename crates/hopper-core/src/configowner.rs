@@ -205,6 +205,30 @@ pub struct Owners {
     by_name: HashMap<String, usize>,
     /// Ids long enough to match as a prefix, longest first.
     prefixes: Vec<(String, usize)>,
+    /// Files the player matched to a mod by hand, by path, to the mod's key.
+    manual: HashMap<String, String>,
+}
+
+/// Where an instance keeps the files its player matched to a mod by hand.
+pub const MANUAL_FILE: &str = ".hopper-config-owners.json";
+
+/// The files at `root` the player matched to a mod by hand: path -> mod key.
+pub fn load_manual(root: &Path) -> HashMap<String, String> {
+    std::fs::read(root.join(MANUAL_FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// Matches `rel` to the mod `key` by hand (None: takes the match back, so
+/// the name rules decide again).
+pub fn set_manual(root: &Path, rel: &str, key: Option<&str>) -> anyhow::Result<()> {
+    let mut m = load_manual(root);
+    match key {
+        Some(k) => m.insert(rel.to_string(), k.to_string()),
+        None => m.remove(rel),
+    };
+    let tmp = root.join(format!("{MANUAL_FILE}.tmp"));
+    std::fs::write(&tmp, serde_json::to_vec(&m)?)?;
+    std::fs::rename(&tmp, root.join(MANUAL_FILE))?;
+    Ok(())
 }
 
 impl Owners {
@@ -227,15 +251,25 @@ impl Owners {
             }
         }
         prefixes.sort_by_key(|(s, _)| std::cmp::Reverse(s.len()));
-        Owners { mods, by_id, by_name, prefixes }
+        Owners { mods, by_id, by_name, prefixes, manual: HashMap::new() }
     }
 
     pub fn mods(&self) -> &[ModRef] {
         &self.mods
     }
 
+    /// With the files the player matched by hand ([`load_manual`]): they
+    /// win over the name rules.
+    pub fn with_manual(mut self, manual: HashMap<String, String>) -> Owners {
+        self.manual = manual;
+        self
+    }
+
     /// The mod `rel` belongs to, if one matches.
     pub fn owner(&self, rel: &str) -> Option<&ModRef> {
+        if let Some(m) = self.manual.get(rel).and_then(|k| self.mods.iter().find(|m| m.key == *k)) {
+            return Some(m);
+        }
         let s = stem(rel);
         if s.len() < 3 {
             return None;
@@ -281,5 +315,27 @@ mod tests {
         assert_eq!(k("config/mekanismtools.toml"), Some("mek.jar"));
         assert_eq!(k("config/async.toml"), None);
         assert_eq!(stem("config/bhmenu-client.toml"), "bhmenu");
+    }
+
+    #[test]
+    fn a_file_matched_by_hand_wins_over_the_name_rules() {
+        let dir = std::env::temp_dir().join(format!("hopper-owner-manual-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mods = || vec![m("flywheel.jar", &["flywheel"], "Flywheel"), m("create.jar", &["create"], "Create")];
+        let plain = Owners::new(mods());
+        assert!(plain.owner("config/engine-client.toml").is_none());
+        set_manual(&dir, "config/engine-client.toml", Some("create.jar")).unwrap();
+        let by_hand = Owners::new(mods()).with_manual(load_manual(&dir));
+        assert_eq!(by_hand.owner("config/engine-client.toml").map(|m| m.key.as_str()), Some("create.jar"));
+        // A file the name rules already match can be moved to another mod too.
+        set_manual(&dir, "config/flywheel-client.toml", Some("create.jar")).unwrap();
+        let by_hand = Owners::new(mods()).with_manual(load_manual(&dir));
+        assert_eq!(by_hand.owner("config/flywheel-client.toml").map(|m| m.key.as_str()), Some("create.jar"));
+        // Taking the match back leaves the name rules to decide.
+        set_manual(&dir, "config/flywheel-client.toml", None).unwrap();
+        let by_hand = Owners::new(mods()).with_manual(load_manual(&dir));
+        assert_eq!(by_hand.owner("config/flywheel-client.toml").map(|m| m.key.as_str()), Some("flywheel.jar"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

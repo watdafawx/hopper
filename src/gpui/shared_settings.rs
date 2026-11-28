@@ -67,9 +67,11 @@ pub(crate) fn shared_mods(s: &Store, gid: &str) -> Vec<SharedMod> {
         let Some(inst) = s.instances().iter().find(|i| i.id == c.local) else { continue };
         for (m, mc) in c.configs.shared() {
             let a = inst.addons.iter().find(|a| addon_key(a) == *m);
-            let (name, icon, project) = match a {
-                Some(a) => (a.name.clone(), s.image(&a.icon).map(|p| p.to_path_buf()), a.project_id),
-                None => ("A mod you don't have".to_string(), None, 0),
+            let (name, icon, project) = match (a, hopper::configsync::key_file(m)) {
+                (Some(a), _) => (a.name.clone(), s.image(&a.icon).map(|p| p.to_path_buf()), a.project_id),
+                // A settings file no mod owns is named by its file.
+                (None, Some(rel)) => (rel.rsplit('/').next().unwrap_or(rel).to_string(), None, 0),
+                (None, None) => ("A mod you don't have".to_string(), None, 0),
             };
             out.push(SharedMod {
                 id: format!("{}\u{1f}{m}", inst.root.display()),

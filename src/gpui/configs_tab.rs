@@ -87,6 +87,7 @@ impl ConfigPanel {
             ConfigViewEvent::Close => cx.emit(ConfigPanelEvent::Close),
             ConfigViewEvent::OpenInTab => cx.emit(ConfigPanelEvent::OpenInTab(k.clone())),
             ConfigViewEvent::Changed => cx.notify(),
+            ConfigViewEvent::Matched(_) => {}
         });
         // The right-hand dock's spec, like the mod page and Friends: one
         // width for all three, and a drag on any of them moves the others.
@@ -153,6 +154,8 @@ pub struct ConfigsTab {
     others_open: bool,
     search_serial: u64,
     picked: Option<Pick>,
+    /// A mod to open once the index has it (a file was just matched to it).
+    open_after_index: Option<String>,
     /// Open views by entry, so edits survive picking another mod.
     views: HashMap<Pick, Entity<ConfigView>>,
     /// The compare with the linked server, when it's on.
@@ -237,6 +240,7 @@ impl ConfigsTab {
             others_open: false,
             search_serial: 0,
             picked: None,
+            open_after_index: None,
             views: HashMap::new(),
             compare: None,
             compare_on: false,
@@ -351,6 +355,11 @@ impl ConfigsTab {
         if idx.is_some() {
             self.index = idx;
             self.ver += 1;
+            if let Some(k) = self.open_after_index.take() {
+                let p = Pick::Mod(k);
+                self.views.remove(&p);
+                self.picked = Some(p);
+            }
             if !self.query.trim().is_empty() {
                 self.run_search(cx);
             }
@@ -470,11 +479,22 @@ impl ConfigsTab {
             }
             v
         });
-        let sub = cx.subscribe(&view, |this, _, e: &ConfigViewEvent, cx| {
-            if let ConfigViewEvent::Changed = e {
+        let file_pick = p.clone();
+        let sub = cx.subscribe(&view, move |this, _, e: &ConfigViewEvent, cx| match e {
+            ConfigViewEvent::Changed => {
                 this.ver += 1;
                 cx.notify();
             }
+            // The file now belongs to a mod: its entry leaves "Not matched"
+            // once the index is read again, and opens under the mod.
+            ConfigViewEvent::Matched(k) => {
+                this.views.remove(&file_pick);
+                this.picked = None;
+                this.open_after_index = Some(k.clone());
+                this.ver += 1;
+                this.refresh_index(cx);
+            }
+            _ => {}
         });
         self._subs.push(sub);
         self.views.insert(p.clone(), view.clone());
@@ -790,7 +810,10 @@ impl ConfigsTab {
             _ => format!("{} files", files.len()),
         };
         let selected = self.picked.as_ref() == Some(p);
-        let shared = matches!(p, Pick::Mod(k) if self.store.read(cx).settings_shared_jar(&root, k));
+        let shared = match p {
+            Pick::Mod(k) => self.store.read(cx).settings_shared_jar(&root, k),
+            Pick::File(r) => self.store.read(cx).settings_shared_file(&root, r),
+        };
         let pick = p.clone();
         let row = h_flex()
             .id(SharedString::from(format!("cfg-mod:{}{p:?}", if other { "o:" } else { "" })))

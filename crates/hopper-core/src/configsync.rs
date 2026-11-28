@@ -788,13 +788,16 @@ pub fn mod_files(inst: &crate::instances::Instance) -> BTreeMap<String, (String,
     let mods_dir = inst.root.join("mods");
     let jars: Vec<(String, std::path::PathBuf, String)> =
         inst.addons.iter().map(|a| (a.file_name.clone(), mods_dir.join(&a.file_name), a.name.clone())).filter(|(_, p, _)| p.is_file()).collect();
-    let owners = crate::configowner::Owners::new(crate::configowner::of_jars(jars));
+    let owners = crate::configowner::Owners::new(crate::configowner::of_jars(jars)).with_manual(crate::configowner::load_manual(&inst.root));
     let mut by_jar: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut loose: Vec<String> = Vec::new();
     for f in crate::configindex::index(&inst.root, &owners) {
-        if let Some(o) = f.owner
-            && file_ok(&f.rel)
-        {
-            by_jar.entry(o).or_default().push(f.rel);
+        if !file_ok(&f.rel) {
+            continue;
+        }
+        match f.owner {
+            Some(o) => by_jar.entry(o).or_default().push(f.rel),
+            None => loose.push(f.rel),
         }
     }
     let mut out = BTreeMap::new();
@@ -803,7 +806,22 @@ pub fn mod_files(inst: &crate::instances::Instance) -> BTreeMap<String, (String,
             out.insert(groupkey::addon_key(a), (a.name.clone(), rels));
         }
     }
+    // Files no mod claims are shared one by one, each as its own entry.
+    for rel in loose {
+        let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+        out.insert(file_key(&rel), (name, vec![rel]));
+    }
     out
+}
+
+/// The key a settings file no mod owns is shared under (`f:config/x.toml`).
+pub fn file_key(rel: &str) -> String {
+    format!("f:{rel}")
+}
+
+/// The file a [`file_key`] names.
+pub fn key_file(m: &str) -> Option<&str> {
+    m.strip_prefix("f:")
 }
 
 /// The pack's own copy of `rels` (the pack zip in Hopper's cache), parsed;
@@ -1332,6 +1350,43 @@ mod tests {
                 ("general/maxColumns".into(), "16".into(), "Mia".into()),
             ]
         );
+    }
+
+    /// A file no mod owns travels under its own key: one PC's change goes
+    /// through the wire format and lands in the other PC's file.
+    #[test]
+    fn a_file_no_mod_owns_is_shared_between_two_pcs() {
+        let base = std::env::temp_dir().join(format!("hopper-configsync-loose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let rel = "config/flywheel-client.toml";
+        let key = file_key(rel);
+        assert_eq!(key_file(&key), Some(rel));
+        assert_eq!(key_file("p:1"), None);
+        let dirs: Vec<std::path::PathBuf> = ["a", "b"].iter().map(|n| base.join(n)).collect();
+        for d in &dirs {
+            std::fs::create_dir_all(d.join("config")).unwrap();
+            std::fs::write(d.join(rel), TOML).unwrap();
+        }
+        let files = BTreeMap::from([(key.clone(), ("flywheel-client.toml".to_string(), vec![rel.to_string()]))]);
+        let (mut sa, mut sb) = (st(&[(key.as_str(), &[])]), st(&[(key.as_str(), &[])]));
+        // Both PCs take their first snapshot.
+        for (d, s, me) in [(&dirs[0], &sa, "a"), (&dirs[1], &sb, "b")] {
+            let t = tick(d, s, &files, me, "g").unwrap();
+            assert!(t.own.is_empty() && t.wrote.is_empty());
+        }
+        // PC a changes maxColumns (not fov: that one is personal and never goes); its tick finds the change.
+        std::fs::write(dirs[0].join(rel), TOML.replace("maxColumns = 9", "maxColumns = 12")).unwrap();
+        let t = tick(&dirs[0], &sa, &files, "a", "g").unwrap();
+        assert_eq!(t.own.len(), 1, "{:?}", t.own);
+        sa.own(&t.own, "a");
+        // Over the wire to PC b.
+        let theirs = decode(&encode(&sa).unwrap()).unwrap();
+        assert!(theirs.is_shared(&key));
+        take(&mut sb, "a", "Ann", 5, 5, &theirs, "b", |_| "Ann".into());
+        let t = tick(&dirs[1], &sb, &files, "b", "g").unwrap();
+        assert_eq!(t.wrote.iter().map(|w| (w.m.as_str(), w.n, w.who.as_str())).collect::<Vec<_>>(), [(key.as_str(), 1, "Ann")]);
+        assert_eq!(std::fs::read_to_string(dirs[1].join(rel)).unwrap(), TOML.replace("maxColumns = 9", "maxColumns = 12"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
